@@ -2,7 +2,7 @@ use omnifs_sdk::prelude::*;
 use rc_zip_sync::ReadZip;
 use serde::Deserialize;
 
-use crate::http_ext::GithubHttpExt;
+use crate::http_ext::{GithubHttpExt, github_check_status};
 use crate::types::{OwnerName, RepoId, RepoName};
 use crate::{Result, State};
 
@@ -76,10 +76,11 @@ impl ActionHandlers {
         run_id: u64,
     ) -> Result<FileContent> {
         let repo_id = RepoId::new(&owner, &repo);
-        let body = cx
+        let resp = cx
             .github_get(format!("/repos/{repo_id}/actions/runs/{run_id}/logs"))
-            .send_body()
+            .send()
             .await?;
+        let body = github_check_status(resp)?.into_body();
         Ok(FileContent::bytes(unzip_logs(&body)))
     }
 }

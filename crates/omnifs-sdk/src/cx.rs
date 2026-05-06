@@ -219,9 +219,9 @@ mod tests {
         let state = Rc::new(RefCell::new(()));
         let cx = Cx::new(1, state);
 
-        let f1 = cx.http().get("https://a.example/").send_body();
-        let f2 = cx.http().get("https://b.example/").send_body();
-        let f3 = cx.http().get("https://c.example/").send_body();
+        let f1 = cx.http().get("https://a.example/").send();
+        let f2 = cx.http().get("https://b.example/").send();
+        let f3 = cx.http().get("https://c.example/").send();
 
         let mut combined = Box::pin(join_all([f1, f2, f3]));
         let waker = Waker::noop();
@@ -242,7 +242,10 @@ mod tests {
         let Poll::Ready(results) = combined.as_mut().poll(&mut ctx) else {
             panic!("expected ready after delivery");
         };
-        let bodies: Vec<Vec<u8>> = results.into_iter().map(|r| r.unwrap()).collect();
+        let bodies: Vec<Vec<u8>> = results
+            .into_iter()
+            .map(|r| r.unwrap().into_body())
+            .collect();
         assert_eq!(bodies, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
