@@ -119,7 +119,7 @@ impl FuseFs {
             mount_name: registry.root_mount_name().unwrap_or("").to_string(),
             path: String::new(),
             kind: EntryKind::Directory,
-            size: 0,
+            size: None,
             backing_path: None,
         };
         inodes.insert(ROOT_INO, root_entry);
@@ -288,10 +288,28 @@ impl FuseFs {
         }
     }
 
-    fn attr_for_kind(&self, ino: u64, kind: EntryKind, size: u64) -> FileAttr {
+    fn attr_for_kind(&self, ino: u64, kind: EntryKind, size: Option<u64>) -> FileAttr {
         match kind {
             EntryKind::Directory => self.dir_attr(ino),
             EntryKind::File => self.file_attr(ino, size),
+        }
+    }
+
+    /// Update an inode whose size was previously unknown with the byte
+    /// length learned from a successful read, then ask the kernel to
+    /// drop its cached attrs so the next stat reflects the real size.
+    /// A no-op when the size was already known.
+    fn resolve_unknown_size(&self, ino: u64, mount_name: &str, content_len: usize) {
+        let Some(mut entry) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        if entry.size.is_some() {
+            return;
+        }
+        entry.size = Some(u64::try_from(content_len).unwrap_or(u64::MAX));
+        drop(entry);
+        if let Some(runtime) = self.runtime_for_mount(mount_name) {
+            runtime.notify_inval_inode(ino);
         }
     }
 
@@ -419,7 +437,7 @@ impl FuseFs {
                     mount_name,
                     child_path,
                     EntryKind::Directory,
-                    0,
+                    None,
                     real_root,
                 );
                 Ok(self.dir_attr(ino))
@@ -433,7 +451,7 @@ impl FuseFs {
                     "received Lookup entry"
                 );
 
-                let size = entry.target.size.unwrap_or(0);
+                let size: Option<u64> = entry.target.size.into();
                 let kind = entry.target.kind;
                 let ino = self.get_or_alloc_ino(mount_name, child_path, kind, size);
                 let kind_cache = cache::EntryKindCache::from(kind);
@@ -526,8 +544,13 @@ impl FuseFs {
             } else {
                 format!("{path}/{fname_str}")
             };
-            let child_ino =
-                self.get_or_alloc_ino_backing(mount_name, &child_path, kind, meta.len(), child_rp);
+            let child_ino = self.get_or_alloc_ino_backing(
+                mount_name,
+                &child_path,
+                kind,
+                Some(meta.len()),
+                child_rp,
+            );
             snapshot.push((child_ino, fname_str.to_string(), kind));
         }
         Ok(snapshot)
@@ -631,7 +654,7 @@ impl FuseFs {
                     } else {
                         format!("{path}/{}", e.name)
                     };
-                    let size = e.size.unwrap_or(0);
+                    let size: Option<u64> = e.size.into();
                     let child_ino = self.get_or_alloc_ino(mount_name, &child_path, e.kind, size);
                     snapshot.push((child_ino, e.name.clone(), e.kind));
                     dirent_records.push(cache::DirentRecord {
@@ -694,7 +717,7 @@ impl Filesystem for FuseFs {
         // Synthetic root (no root_mount): mount points are children.
         if parent.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
             if self.registry.get(name_str).is_some() {
-                let ino = self.get_or_alloc_ino(name_str, "", EntryKind::Directory, 0);
+                let ino = self.get_or_alloc_ino(name_str, "", EntryKind::Directory, None);
                 reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
                 return;
             }
@@ -731,7 +754,7 @@ impl Filesystem for FuseFs {
                         &mount_name,
                         &child_path,
                         kind,
-                        meta.len(),
+                        Some(meta.len()),
                         child_rp,
                     );
                     reply.entry(&TTL, &self.attr_from_metadata(ino, &meta), Generation(0));
@@ -822,7 +845,7 @@ impl Filesystem for FuseFs {
             let mounts = self.registry.mounts();
             let mut entries = Vec::new();
             for m in mounts {
-                let child_ino = self.get_or_alloc_ino(&m, "", EntryKind::Directory, 0);
+                let child_ino = self.get_or_alloc_ino(&m, "", EntryKind::Directory, None);
                 entries.push((child_ino, m, EntryKind::Directory));
             }
             self.dir_snapshots.insert(fh, entries);
@@ -1017,6 +1040,7 @@ impl Filesystem for FuseFs {
                     rt.cache_put(&path, RecordKind::File, &file_record);
                 }
                 self.l0_put(&mount_name, ino.0, RecordKind::File, None, file_record);
+                self.resolve_unknown_size(ino.0, &mount_name, data.len());
                 reply.data(data_slice(&data, offset, size));
                 self.file_cache.insert(fh.0, data);
             },
@@ -1041,10 +1065,19 @@ impl Filesystem for FuseFs {
         }
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let _trace = FuseTrace::new("open", String::new());
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _trace = FuseTrace::new("open", format!("ino={}", ino.0));
         let fh = self.alloc_fh();
-        reply.opened(FuseFileHandle(fh), FopenFlags::empty());
+        // When the file's size is unknown, open with direct_io so the
+        // kernel does not cap reads at `st_size = 0`. Reads pass through
+        // verbatim and a short read signals EOF; the host invalidates
+        // the inode after the first read so subsequent stats reflect
+        // the real length.
+        let flags = match self.inodes.get(&ino.0) {
+            Some(entry) if entry.size.is_none() => FopenFlags::FOPEN_DIRECT_IO,
+            _ => FopenFlags::empty(),
+        };
+        reply.opened(FuseFileHandle(fh), flags);
     }
 
     fn release(

@@ -6,16 +6,35 @@
 use crate::omnifs::provider::types as wit_types;
 use std::num::NonZeroU64;
 
-pub(crate) const DEFAULT_PROJECTED_FILE_SIZE: NonZeroU64 = match NonZeroU64::new(4096) {
-    Some(size) => size,
-    None => unreachable!(),
-};
+/// Size signal for a file entry.
+///
+/// `Unknown` is the honest answer when the provider has not computed a
+/// byte length: the host opens the file with `direct_io` so the kernel
+/// does not cap reads, reports `st_size = 0` until the first successful
+/// read resolves the real length, then notifies the kernel so subsequent
+/// stats reflect truth. `Exact(n)` is reported directly and bounds reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    Unknown,
+    Exact(NonZeroU64),
+}
 
-fn size_from_content_len(len: usize) -> NonZeroU64 {
-    u64::try_from(len)
-        .ok()
-        .and_then(NonZeroU64::new)
-        .unwrap_or(DEFAULT_PROJECTED_FILE_SIZE)
+impl Size {
+    pub fn from_content_len(len: usize) -> Self {
+        u64::try_from(len)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .map_or(Self::Unknown, Self::Exact)
+    }
+}
+
+impl From<Size> for wit_types::EntrySize {
+    fn from(size: Size) -> Self {
+        match size {
+            Size::Unknown => Self::Unknown,
+            Size::Exact(n) => Self::Exact(n.get()),
+        }
+    }
 }
 
 /// The kind of a filesystem entry.
@@ -63,7 +82,7 @@ impl From<ProjectedFile> for wit_types::ProjectedFile {
 pub struct Entry {
     pub(crate) name: String,
     pub(crate) kind: EntryKind,
-    pub(crate) size: Option<NonZeroU64>,
+    pub(crate) size: Size,
     pub(crate) projected_files: Vec<ProjectedFile>,
 }
 
@@ -72,23 +91,23 @@ impl Entry {
         Self {
             name: name.into(),
             kind: EntryKind::Directory,
-            size: None,
+            size: Size::Unknown,
             projected_files: Vec::new(),
         }
     }
 
-    pub fn file(name: impl Into<String>, size: NonZeroU64) -> Self {
+    pub fn file(name: impl Into<String>, size: Size) -> Self {
         Self {
             name: name.into(),
             kind: EntryKind::File,
-            size: Some(size),
+            size,
             projected_files: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn with_size(mut self, size: NonZeroU64) -> Self {
-        self.size = Some(size);
+    pub fn with_size(mut self, size: Size) -> Self {
+        self.size = size;
         self
     }
 
@@ -96,7 +115,7 @@ impl Entry {
     pub fn projected(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         let bytes = bytes.into();
         if matches!(self.kind, EntryKind::File) {
-            self.size = Some(size_from_content_len(bytes.len()));
+            self.size = Size::from_content_len(bytes.len());
         }
         if !bytes.is_empty() {
             let name = self.name.clone();
@@ -120,7 +139,7 @@ impl Entry {
         self.kind
     }
 
-    pub fn size(&self) -> Option<NonZeroU64> {
+    pub fn size(&self) -> Size {
         self.size
     }
 
@@ -137,7 +156,7 @@ impl From<Entry> for wit_types::DirEntry {
                 EntryKind::Directory => wit_types::EntryKind::Directory,
                 EntryKind::File => wit_types::EntryKind::File,
             },
-            size: entry.size.map(NonZeroU64::get),
+            size: entry.size.into(),
             projected_files: if entry.projected_files.is_empty() {
                 None
             } else {
@@ -159,7 +178,7 @@ pub enum Preload {
     Entry {
         path: String,
         kind: EntryKind,
-        size: Option<NonZeroU64>,
+        size: Size,
     },
 }
 
@@ -171,7 +190,7 @@ impl Preload {
         }
     }
 
-    pub fn entry(path: impl Into<String>, kind: EntryKind, size: Option<NonZeroU64>) -> Self {
+    pub fn entry(path: impl Into<String>, kind: EntryKind, size: Size) -> Self {
         Self::Entry {
             path: path.into(),
             kind,
@@ -202,7 +221,7 @@ impl From<Preload> for wit_types::PreloadItem {
                     EntryKind::Directory => wit_types::EntryKind::Directory,
                     EntryKind::File => wit_types::EntryKind::File,
                 },
-                size: size.map(NonZeroU64::get),
+                size: size.into(),
             }),
         }
     }
@@ -335,7 +354,7 @@ impl Lookup {
     pub fn file(name: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         let name = name.into();
         let content = content.into();
-        let size = size_from_content_len(content.len());
+        let size = Size::from_content_len(content.len());
         let mut sibling_files = Vec::new();
         if !content.is_empty() {
             sibling_files.push(ProjectedFile::new(&name, content));

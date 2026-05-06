@@ -151,7 +151,7 @@ impl CalloutRuntime {
                 DirentRecord {
                     name: entry.name.clone(),
                     kind: EntryKindCache::from(entry.kind),
-                    size: entry.size.unwrap_or(0),
+                    size: entry.size.into(),
                 },
             );
         }
@@ -161,7 +161,7 @@ impl CalloutRuntime {
                 .or_insert_with(|| DirentRecord {
                     name: pf.name.clone(),
                     kind: EntryKindCache::File,
-                    size: u64::try_from(pf.content.len()).unwrap_or(u64::MAX),
+                    size: Some(u64::try_from(pf.content.len()).unwrap_or(u64::MAX)),
                 });
         }
         let dirents_payload = DirentsPayload {
@@ -184,7 +184,7 @@ impl CalloutRuntime {
             };
 
             let kind_cache = EntryKindCache::from(entry.kind);
-            let size = entry.size.unwrap_or(0);
+            let size: Option<u64> = entry.size.into();
 
             let lookup = LookupPayload::Positive {
                 kind: kind_cache,

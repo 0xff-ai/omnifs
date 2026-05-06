@@ -1,11 +1,11 @@
 //! Single-import module for providers: `use omnifs_sdk::prelude::*;`
 
-pub use crate::browse::{EntryKind, EventOutcome};
+pub use crate::browse::{EntryKind, EventOutcome, Size};
 pub use crate::cx::Cx;
 pub use crate::cx::join_all;
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::handler::{
-    Cursor, DirCx, DirIntent, FileContent, FileStat, PageStatus, Projection, SubtreeRef,
+    Cursor, DirCx, DirIntent, FileContent, PageStatus, Projection, SubtreeRef,
 };
 pub use crate::helpers::err;
 pub use crate::init::Init;

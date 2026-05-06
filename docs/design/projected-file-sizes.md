@@ -1,7 +1,7 @@
 # Projected file sizes: honest stat, direct_io, and lazy resolution
 
-Status: draft, for review
-Scope: `wit/provider.wit`, host FUSE layer, SDK projection API, providers
+Status: implemented on `design/projected-file-sizes`
+Scope: `wit/provider.wit`, host FUSE layer + cache schema, SDK projection API, providers
 Branch: design/projected-file-sizes
 
 ## Problem
@@ -102,53 +102,43 @@ the kernel via `fuse_lowlevel_notify_inval_inode`, so the next
 
 ### SDK API
 
-Replace `Projection::file(name)` and `file_with_stat(name, stat)` with
-an explicit `Size` type:
+`Size` lives in `crates/omnifs-sdk/src/browse.rs` (re-exported through
+the prelude):
 
 ```rust
-// crates/omnifs-sdk/src/handler.rs
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Size {
-    /// The provider knows the exact byte length of this file. Stat
-    /// reports it directly; reads terminate when the kernel reaches
-    /// it.
-    Exact(NonZeroU64),
-
-    /// The provider does not know the size cheaply. The host opens
-    /// the file with `direct_io`, reports `st_size = 0` until a read
-    /// resolves the real length, and updates the kernel inode after
-    /// the first successful read.
     Unknown,
+    Exact(NonZeroU64),
 }
 
-impl Projection {
-    pub fn file(&mut self, name: impl Into<String>, size: Size) { ... }
-
-    pub fn file_with_content(&mut self, name: impl Into<String>, bytes: impl Into<Vec<u8>>) { ... }
+impl Size {
+    pub fn from_content_len(len: usize) -> Self { ... }
 }
 ```
 
-`file_with_content` keeps its current semantics (size derived from
-`bytes.len()`) and is the right call when the projection materializes
-small payloads inline.
+`Projection` exposes three ways to declare a file:
+
+- `projection.file(name)` — size unknown until read (the common case
+  for upstream blobs like PDFs and tarballs).
+- `projection.file_with_size(name, Size::Exact(n))` — size known up
+  front, no bytes inline (used when an API returns a byte count
+  alongside metadata).
+- `projection.file_with_content(name, bytes)` — projection
+  materializes the payload inline; size is derived from `bytes.len()`
+  and used directly.
 
 The placeholder constant `DEFAULT_FILE_SIZE_BYTES` and
-`FileStat::placeholder` go away. `FileStat` collapses to a single
-`Exact` variant or merges into `Size`.
+`FileStat::placeholder` are gone; `FileStat` is removed entirely.
+Static-shape entries auto-derived from `#[file]` declarations report
+`Size::Unknown` so the host opens them with direct_io until the read
+resolves the real length.
 
-The macro layer (`#[file]`, `#[dir]`) gains an attribute argument so
-exact handlers can declare a size at registration time when it is
-known statically:
-
-```rust
-#[omnifs_sdk::file("metadata.json", size = "exact")]  // size derived from returned bytes
-#[omnifs_sdk::file("paper.pdf", size = "unknown")]    // direct_io, lazy resolution
-```
-
-Default for `#[file]` is `unknown`, since that is the conservative
-choice; handlers that return materialized bytes opt into `exact` (and
-the SDK will assert the returned bytes are non-empty at runtime).
+No macro change. The earlier sketch added `size = "exact" | "unknown"`
+to `#[file]`, but the macro fires at registration time and cannot see
+the eventual byte length, so the argument would have been
+load-bearing only as a default for the auto-derived static shape.
+Always picking `Unknown` for that case is simpler and equally honest.
 
 ### WIT changes
 
@@ -178,55 +168,47 @@ record dir-entry {
 
 `preloaded-entry.size` follows the same shape.
 
-The `projected-file` record (used inside `dir-entry.projected-files`)
-gains an explicit size field for the case where the provider has
-already materialized the bytes:
-
-```wit
-record projected-file {
-    name: string,
-    content: list<u8>,
-    // size is derived from content.len() at the host boundary; no
-    // explicit field needed.
-}
-```
+`projected-file` is unchanged: when the provider materializes bytes
+inline, the host derives the size from `content.len()` at the WIT
+boundary; no explicit field is needed.
 
 ### Host FUSE layer
 
-Three changes in `crates/host/src/fuse/`:
+Three changes in `crates/host/src/fuse/` and `crates/host/src/runtime/`:
 
-1. **Open flag.** When the inode's known size is `Unknown`, the
-   `open` reply sets `FOPEN_DIRECT_IO`. When the size is `Exact`,
-   open uses default flags (page cache enabled).
-2. **Stat reporting.** `attr_for_kind` takes the projected size state
-   directly. `Unknown` reports `st_size = 0`. `Exact(n)` reports
-   `st_size = n`.
-3. **Lazy size resolution.** After a read completes for an
-   `Unknown`-sized file, the host updates the inode's cached size to
-   the real bytes length (from the projection cache) and calls
-   `fuse_lowlevel_notify_inval_inode(ino, 0, 0)` so the kernel
-   re-fetches attrs on next access. The notification is best-effort;
-   if it fails (kernel disconnect, fuser API gap), reads still work.
+1. **Open flag.** `FuseFs::open` sets `FopenFlags::FOPEN_DIRECT_IO`
+   when the inode's `size` is `None`. When it is `Some(n)`, open uses
+   default flags (page cache enabled).
+2. **Stat reporting.** `attr_for_kind` takes `Option<u64>` directly.
+   `None` reports `st_size = 0`. `Some(n)` reports `st_size = n`.
+3. **Lazy size resolution.** After `OpResult::Read` returns content,
+   `FuseFs::resolve_unknown_size` updates the inode's cached size
+   (when previously `None`) and calls
+   `CalloutRuntime::notify_inval_inode`, which forwards to
+   `fuser::Notifier::inval_inode(ino, 0, 0)`. fuser 0.17 exposes the
+   notifier method directly; no version bump needed. Best-effort: if
+   the notifier is gone (mount tearing down), reads still succeed.
 
-The notification step is the only nontrivial new machinery. fuser
-exposes `Notifier::inval_inode` on recent versions; if the version
-omnifs uses does not, the work item is to bump fuser or send a manual
-FUSE_NOTIFY_INVAL_INODE message.
+The cache schema bumps from version 2 to version 3 because
+`LookupPayload`, `AttrPayload`, and `DirentRecord` now serialize
+`size: Option<u64>` instead of a `u64` sentinel. The host's
+`From<wit_types::EntrySize> for Option<u64>` impl bridges WIT to
+cache types.
 
 ### Provider migrations
 
-Per provider, the audit is mechanical:
-
-- **arxiv**: `paper.pdf` and `source.tar.gz` use `Size::Unknown`.
-  `metadata.json`, `links.json`, `authors.txt`, `comment.txt`,
-  `selector.txt` use `file_with_content` (size derived from bytes).
-- **github**: file content reads where the API returns
-  `content.size` should pass `Size::Exact`. Releases assets
-  (downloaded blobs) use `Size::Unknown` on the projection and rely
-  on direct_io.
-- **dns**: all current files are eagerly materialized; no change
-  needed.
-- **test**: irrelevant to size handling.
+The current `Projection::file(name)` keeps its meaning ("declare a
+file with no inline content") and now reports `Size::Unknown`.
+Existing call sites compile unchanged; the host opens those files
+with direct_io. Future providers can opt into `file_with_size(name,
+Size::Exact(n))` when an upstream API hands them a byte count
+cheaply (for example github's `content.size` for blob reads). The
+arxiv branch (#34, not yet merged) will adopt this once it lands;
+its `paper.pdf` and `source.tar.gz` stay on the default
+`Size::Unknown` path, while `metadata.json`, `links.json`,
+`authors.txt`, `comment.txt`, and `selector.txt` already use
+`file_with_content` and now report exact sizes derived from their
+bytes.
 
 ### macOS / macFUSE
 
@@ -236,45 +218,23 @@ files is not guaranteed across macFUSE versions; tools that mmap
 projected files (which is rare for the providers in tree) may need
 to fall back to read. This is documented; no code mitigation.
 
-## Migration plan
+## Open questions and follow-ups
 
-1. Land WIT change for `entry-size` variant with a feature gate or
-   versioned interface bump if any external consumer exists. (omnifs
-   has none today, so a single atomic change is fine.)
-2. Update host runtime to consume the new variant and to set
-   `FOPEN_DIRECT_IO` for `Unknown` files.
-3. Update SDK to expose `Size::{Exact, Unknown}` and rewrite the
-   `Projection::file*` surface. Drop `DEFAULT_FILE_SIZE_BYTES` and
-   `FileStat::placeholder`.
-4. Update macros to accept `size = "exact" | "unknown"` and default
-   to `unknown` for `#[file]`.
-5. Sweep the three in-tree providers for the right size declaration
-   per file.
-6. Add a host-level test that opens an `Unknown` file, reads to the
-   end, asserts a subsequent `stat` reports the real size.
-7. Add a host-level test that opens an `Exact` file with mismatched
-   real length and asserts the read is capped at the declared size
-   (current behavior preserved for the `Exact` path).
-
-Each step is independently reviewable. Steps 1-3 can land together;
-4-5 follow; 6-7 close the loop.
-
-## Open questions
-
-- **Inode invalidation API**: confirm fuser version exposes
-  `Notifier::inval_inode` (or equivalent). If not, decide between a
-  fuser bump or a manual notify message.
 - **Concurrent reads on the same `Unknown` file**: if two reads race
-  and both complete, both will issue inode invalidation. Idempotent;
-  no correctness issue, but worth verifying the kernel handles
-  redundant invalidations gracefully (it does on Linux; verify on
-  macFUSE).
+  and both complete, both call `notify_inval_inode`. Idempotent on
+  Linux. Worth verifying on macFUSE under load.
 - **Direct_io and FUSE writeback cache**: irrelevant today (omnifs is
-  read-only for the file surface), but if mutations land via the
+  read-only for the file surface). If mutations land via the
   filesystem path, the writeback story for direct_io files needs its
   own treatment.
 - **Exact size lying**: if a provider declares `Size::Exact(n)` and
-  the actual bytes differ, the host should detect at read time. A
-  debug-build assertion is cheap; a release-build truncation matches
-  current kernel-cap behavior. Decision: assert in debug, document
-  the contract, no runtime check in release.
+  the actual bytes differ, the kernel caps the read at `n` (current
+  behavior). A debug-build assertion would catch this in tests; not
+  added yet.
+- **Coverage tests**: the integration suite exercises the unknown →
+  read → updated-size path end-to-end through the existing
+  `runtime_test.rs` cases. A targeted test that asserts
+  `notify_inval_inode` fires (and that a subsequent stat sees the
+  real size) would close the loop on the lazy-resolution leg
+  specifically; currently that depends on FUSE wiring that is hard
+  to exercise outside an actual mount.

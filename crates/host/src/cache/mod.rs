@@ -5,7 +5,7 @@
 //! eviction is driven purely by capacity and explicit invalidation
 //! (via `delete_prefix` or provider-driven cache-invalidate effects).
 
-pub const SCHEMA_VERSION: u8 = 2;
+pub const SCHEMA_VERSION: u8 = 3;
 
 /// L0 sizing constants.
 pub const L0_MAX_WEIGHT: u64 = 32 * 1024 * 1024; // 32 MiB per provider instance
@@ -93,7 +93,12 @@ impl CacheRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LookupPayload {
-    Positive { kind: EntryKindCache, size: u64 },
+    Positive {
+        kind: EntryKindCache,
+        /// `None`: stat reports 0 and the file opens with `direct_io`
+        /// until a read resolves the real length.
+        size: Option<u64>,
+    },
     Negative,
 }
 
@@ -110,7 +115,7 @@ impl LookupPayload {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttrPayload {
     pub kind: EntryKindCache,
-    pub size: u64,
+    pub size: Option<u64>,
 }
 
 impl AttrPayload {
@@ -127,7 +132,7 @@ impl AttrPayload {
 pub struct DirentRecord {
     pub name: String,
     pub kind: EntryKindCache,
-    pub size: u64,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
