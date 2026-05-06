@@ -147,37 +147,63 @@ impl From<Entry> for wit_types::DirEntry {
     }
 }
 
-/// A file content payload the provider has already fetched, to be cached
-/// by the host so a later read of `path` is served without a provider
-/// round trip. Carried on listings and on lookup/read terminals.
+/// A payload the provider has already fetched, to be cached by the host
+/// so a later lookup or read of `path` is served without a provider
+/// round trip. Carried on listings and on lookup terminals.
 #[derive(Clone, Debug)]
-pub struct Preload {
-    pub(crate) path: String,
-    pub(crate) content: Vec<u8>,
+pub enum Preload {
+    File {
+        path: String,
+        content: Vec<u8>,
+    },
+    Entry {
+        path: String,
+        kind: EntryKind,
+        size: Option<NonZeroU64>,
+    },
 }
 
 impl Preload {
-    pub fn new(path: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
-        Self {
+    pub fn file(path: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        Self::File {
             path: path.into(),
             content: content.into(),
         }
     }
 
-    pub fn path(&self) -> &str {
-        &self.path
+    pub fn entry(path: impl Into<String>, kind: EntryKind, size: Option<NonZeroU64>) -> Self {
+        Self::Entry {
+            path: path.into(),
+            kind,
+            size,
+        }
     }
 
-    pub fn content(&self) -> &[u8] {
-        &self.content
+    pub fn path(&self) -> &str {
+        match self {
+            Self::File { path, .. } | Self::Entry { path, .. } => path,
+        }
+    }
+
+    fn is_cacheable(&self) -> bool {
+        !self.path().is_empty()
     }
 }
 
-impl From<Preload> for wit_types::PreloadedFile {
-    fn from(file: Preload) -> Self {
-        Self {
-            path: file.path,
-            content: file.content,
+impl From<Preload> for wit_types::PreloadItem {
+    fn from(preload: Preload) -> Self {
+        match preload {
+            Preload::File { path, content } => {
+                Self::File(wit_types::PreloadedFile { path, content })
+            },
+            Preload::Entry { path, kind, size } => Self::Entry(wit_types::PreloadedEntry {
+                path,
+                kind: match kind {
+                    EntryKind::Directory => wit_types::EntryKind::Directory,
+                    EntryKind::File => wit_types::EntryKind::File,
+                },
+                size: size.map(NonZeroU64::get),
+            }),
         }
     }
 }
@@ -226,7 +252,7 @@ impl Listing {
     #[must_use]
     pub fn with_preload<I: IntoIterator<Item = Preload>>(mut self, files: I) -> Self {
         self.preload
-            .extend(files.into_iter().filter(|file| !file.content.is_empty()));
+            .extend(files.into_iter().filter(Preload::is_cacheable));
         self
     }
 
@@ -360,7 +386,7 @@ impl Lookup {
             Self::Entry(mut entry) => {
                 entry
                     .preload
-                    .extend(files.into_iter().filter(|file| !file.content.is_empty()));
+                    .extend(files.into_iter().filter(Preload::is_cacheable));
                 Self::Entry(entry)
             },
             other => other,

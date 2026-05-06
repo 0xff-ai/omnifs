@@ -13,6 +13,25 @@ use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+fn preload_path(preload: &omnifs_host::omnifs::provider::types::PreloadItem) -> &str {
+    match preload {
+        omnifs_host::omnifs::provider::types::PreloadItem::File(file) => file.path.as_str(),
+        omnifs_host::omnifs::provider::types::PreloadItem::Entry(entry) => entry.path.as_str(),
+    }
+}
+
+fn preload_file_content<'a>(
+    preloads: &'a [omnifs_host::omnifs::provider::types::PreloadItem],
+    path: &str,
+) -> Option<&'a [u8]> {
+    preloads.iter().find_map(|preload| match preload {
+        omnifs_host::omnifs::provider::types::PreloadItem::File(file) if file.path == path => {
+            Some(file.content.as_slice())
+        },
+        _ => None,
+    })
+}
+
 fn seed_github_repo_cache(harness: &support::RuntimeHarness, owner: &str, repo: &str) {
     let cache_path = harness
         .clone_dir
@@ -734,7 +753,7 @@ async fn github_provider_routes_namespace_and_numeric_paths() {
 }
 
 #[test]
-fn github_issue_list_preloads_projected_files_from_search_results() {
+fn github_issue_list_preloads_projected_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
@@ -747,8 +766,10 @@ fn github_issue_list_preloads_projected_files_from_search_results() {
         panic!("expected fetch effect, got {:?}", response.callouts);
     };
     assert!(
-        fetch.url.contains("/search/issues?"),
-        "unexpected issue list URL: {}",
+        fetch.url.ends_with(
+            "/search/issues?q=repo:octocat/Hello-World+state:open&sort=created&order=desc&per_page=100"
+        ),
+        "unexpected issues list URL: {}",
         fetch.url
     );
 
@@ -758,13 +779,22 @@ fn github_issue_list_preloads_projected_files_from_search_results() {
             status: 200,
             headers: Vec::new(),
             body: br#"{
-                "items":[
+                "total_count": 2,
+                "items": [
+                    {
+                        "number":6,
+                        "title":"PR title",
+                        "body":null,
+                        "state":"open",
+                        "user":null,
+                        "pull_request":{"url":"https://api.github.test/pulls/6"}
+                    },
                     {
                         "number":7,
                         "title":"Issue title",
                         "body":"Issue body",
                         "state":"open",
-                        "user":{"login":"octocat"}
+                        "user":null
                     }
                 ]
             }"#
@@ -780,19 +810,34 @@ fn github_issue_list_preloads_projected_files_from_search_results() {
     );
     match response.terminal {
         Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing
-                .preload
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect();
+            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
             assert_eq!(
                 preload_paths,
                 vec![
+                    "octocat/Hello-World/_prs/_open/6",
+                    "octocat/Hello-World/_prs/_open/6/title",
+                    "octocat/Hello-World/_prs/_open/6/body",
+                    "octocat/Hello-World/_prs/_open/6/state",
+                    "octocat/Hello-World/_prs/_open/6/user",
+                    "octocat/Hello-World/_prs/_open/6/comments",
+                    "octocat/Hello-World/_prs/_open/6/diff",
                     "octocat/Hello-World/_issues/_open/7/title",
                     "octocat/Hello-World/_issues/_open/7/body",
                     "octocat/Hello-World/_issues/_open/7/state",
                     "octocat/Hello-World/_issues/_open/7/user",
                 ]
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/body"),
+                Some(&[][..])
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/user"),
+                Some(&[][..])
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_issues/_open/7/user"),
+                Some(&[][..])
             );
             let names: Vec<&str> = listing
                 .entries
@@ -806,7 +851,144 @@ fn github_issue_list_preloads_projected_files_from_search_results() {
 }
 
 #[test]
-fn github_pr_list_preloads_projected_files_from_search_results() {
+fn github_issue_list_scans_past_pr_only_pages() {
+    use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
+
+    let mut session = GithubProviderSession::new();
+    let response = session.list_children(42, "octocat/Hello-World/_issues/_all");
+    let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
+        panic!("expected first issues fetch, got {:?}", response.callouts);
+    };
+    assert!(fetch.url.ends_with(
+        "/search/issues?q=repo:octocat/Hello-World&sort=created&order=desc&per_page=100"
+    ));
+
+    let response = session.resume(
+        42,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "total_count": 150,
+                "items": [
+                    {
+                        "number":6,
+                        "title":"Recent PR",
+                        "body":"PR body",
+                        "state":"open",
+                        "user":{"login":"hubot"},
+                        "pull_request":{"url":"https://api.github.test/pulls/6"}
+                    }
+                ]
+            }"#
+            .to_vec(),
+        })],
+    );
+    let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
+        panic!(
+            "expected second issues page fetch, got {:?}",
+            response.callouts
+        );
+    };
+    assert!(
+        fetch.url.ends_with(
+            "/repos/octocat/Hello-World/issues?state=all&sort=created&direction=desc&per_page=100&page=2"
+        ),
+        "unexpected REST page URL: {}",
+        fetch.url
+    );
+
+    let response = session.resume(
+        42,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {
+                    "number":7,
+                    "title":"Older issue",
+                    "body":"Issue body",
+                    "state":"open",
+                    "user":{"login":"octocat"}
+                }
+            ]"#
+            .to_vec(),
+        })],
+    );
+    match response.terminal {
+        Some(OpResult::List(ListResult::Entries(listing))) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["7"]);
+            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
+            assert!(preload_paths.contains(&"octocat/Hello-World/_prs/_all/6"));
+            assert!(preload_paths.contains(&"octocat/Hello-World/_issues/_all/7/title"));
+            assert!(listing.exhaustive);
+        },
+        other => panic!("expected issue listing terminal, got {other:?}"),
+    }
+}
+
+#[test]
+fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
+    use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
+
+    let mut session = GithubProviderSession::new();
+    let response = session.list_children(43, "octocat/Hello-World/_issues/_all");
+    let [Callout::Fetch(_)] = response.callouts.as_slice() else {
+        panic!("expected first issues fetch, got {:?}", response.callouts);
+    };
+
+    let response = session.resume(
+        43,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "total_count": 150,
+                "items": [
+                    {"number":11,"title":"Search-only","body":"a","state":"open","user":{"login":"o"}},
+                    {"number":10,"title":"Boundary","body":"b","state":"open","user":{"login":"o"}}
+                ]
+            }"#
+            .to_vec(),
+        })],
+    );
+    let [Callout::Fetch(_)] = response.callouts.as_slice() else {
+        panic!("expected REST page-2 fetch, got {:?}", response.callouts);
+    };
+
+    let response = session.resume(
+        43,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"[
+                {"number":10,"title":"Boundary","body":"b","state":"open","user":{"login":"o"}},
+                {"number":9,"title":"REST-only","body":"c","state":"open","user":{"login":"o"}}
+            ]"#
+            .to_vec(),
+        })],
+    );
+    match response.terminal {
+        Some(OpResult::List(ListResult::Entries(listing))) => {
+            let mut names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            names.sort_unstable();
+            assert_eq!(names, vec!["10", "11", "9"]);
+        },
+        other => panic!("expected deduped issue listing, got {other:?}"),
+    }
+}
+
+#[test]
+fn github_pr_list_preloads_projected_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
@@ -819,7 +1001,9 @@ fn github_pr_list_preloads_projected_files_from_search_results() {
         panic!("expected fetch effect, got {:?}", response.callouts);
     };
     assert!(
-        fetch.url.contains("/search/issues?"),
+        fetch.url.ends_with(
+            "/search/issues?q=repo:octocat/Hello-World+is:pr+state:open&sort=created&order=desc&per_page=100"
+        ),
         "unexpected PR list URL: {}",
         fetch.url
     );
@@ -830,7 +1014,8 @@ fn github_pr_list_preloads_projected_files_from_search_results() {
             status: 200,
             headers: Vec::new(),
             body: br#"{
-                "items":[
+                "total_count": 1,
+                "items": [
                     {
                         "number":7,
                         "title":"PR title",
@@ -851,11 +1036,7 @@ fn github_pr_list_preloads_projected_files_from_search_results() {
     );
     match response.terminal {
         Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing
-                .preload
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect();
+            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
             assert_eq!(
                 preload_paths,
                 vec![
@@ -922,11 +1103,7 @@ fn github_action_run_list_preloads_projected_files() {
     );
     match response.terminal {
         Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing
-                .preload
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect();
+            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
             assert_eq!(
                 preload_paths,
                 vec![
@@ -1762,7 +1939,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn github_provider_paginates_issue_and_pr_search_results() {
+fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     use omnifs_host::omnifs::provider::types::{
         Callout, CalloutResult, Header, HttpRequest, HttpResponse,
     };
@@ -1783,106 +1960,138 @@ fn github_provider_paginates_issue_and_pr_search_results() {
         request.clone()
     }
 
-    fn search_page(first_number: u64) -> Vec<CalloutResult> {
+    fn page_items(first_number: u64) -> String {
+        (first_number..first_number + 100)
+            .map(|number| {
+                format!(
+                    r#"{{
+                        "number": {number},
+                        "title": "page item",
+                        "body": "text",
+                        "state": "open",
+                        "user": {{"login": "octocat"}}
+                    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn search_page(total_count: u64, first_number: u64) -> CalloutResult {
         let body = format!(
-            r#"{{
-                "total_count": 150,
-                "items": [{{
-                    "number": {first_number},
-                    "title": "page item",
-                    "body": "text",
-                    "state": "open",
-                    "user": {{"login": "octocat"}}
-                }}]
-            }}"#
+            r#"{{"total_count":{total_count},"items":[{}]}}"#,
+            page_items(first_number)
         );
-        vec![CalloutResult::HttpResponse(HttpResponse {
+        CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: body.into_bytes(),
+        })
+    }
+
+    fn rest_page(first_number: u64) -> CalloutResult {
+        let body = format!("[{}]", page_items(first_number));
+        CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: vec![Header {
                 name: "etag".to_string(),
                 value: "\"page\"".to_string(),
             }],
             body: body.into_bytes(),
-        })]
+        })
     }
 
-    struct Case {
-        kind: &'static str,
-        path: &'static str,
-        expected_query: &'static str,
-        page_one_number: u64,
-        page_two_number: u64,
+    fn assert_page_fetches(callouts: &[Callout], expected: std::ops::RangeInclusive<u64>) {
+        let expected_pages: Vec<u64> = expected.collect();
+        assert_eq!(callouts.len(), expected_pages.len());
+        for (callout, page) in callouts.iter().zip(expected_pages) {
+            let page_suffix = format!("&page={page}");
+            let page_middle = format!("{page_suffix}&");
+            assert!(
+                matches!(callout, Callout::Fetch(req)
+                    if req.url.ends_with(&page_suffix) || req.url.contains(&page_middle)),
+                "expected page {page} fetch, got {callout:?}"
+            );
+        }
     }
-
-    let cases = [
-        Case {
-            kind: "issue",
-            path: "octocat/Hello-World/_issues/_all",
-            expected_query: "/search/issues?q=repo:octocat/Hello-World+is:issue",
-            page_one_number: 1,
-            page_two_number: 101,
-        },
-        Case {
-            kind: "pr",
-            path: "octocat/Hello-World/_prs/_all",
-            expected_query: "/search/issues?q=repo:octocat/Hello-World+is:pr",
-            page_one_number: 7,
-            page_two_number: 107,
-        },
-    ];
 
     let mut session = GithubProviderSession::new();
-    for (index, case) in cases.iter().enumerate() {
-        let id = 20 + index as u64;
-        let first = expect_fetch(session.list_children(id, case.path));
-        assert!(
-            first.url.contains(case.expected_query),
-            "{kind}: unexpected first-page URL {url}",
-            kind = case.kind,
-            url = first.url,
-        );
 
-        let second = expect_fetch(session.resume(id, search_page(case.page_one_number)));
-        assert!(
-            second.url.contains("&page=2"),
-            "{kind}: expected second-page URL, got {url}",
-            kind = case.kind,
-            url = second.url,
-        );
+    let first_issue_page =
+        expect_fetch(session.list_children(20, "octocat/Hello-World/_issues/_all"));
+    assert!(
+        first_issue_page.url.ends_with(
+            "/search/issues?q=repo:octocat/Hello-World&sort=created&order=desc&per_page=100"
+        ),
+        "unexpected issue list URL: {}",
+        first_issue_page.url
+    );
+    let issue_parallel = session.resume(20, vec![search_page(1500, 1)]);
+    let ProviderReturn {
+        terminal: None,
+        callouts,
+    } = &issue_parallel
+    else {
+        panic!("expected parallel issue page fetches, got {issue_parallel:?}");
+    };
+    assert_page_fetches(callouts, 2..=10);
+    let issue_pages = (2..=10).map(|page| rest_page(page * 100)).collect();
+    let final_response = session.resume(20, issue_pages);
+    match final_response {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert!(names.contains(&"1"));
+            assert!(names.contains(&"200"));
+            assert!(names.contains(&"1099"));
+            assert!(
+                !listing.exhaustive,
+                "issue listing should remain partial after hitting the search-API page cap"
+            );
+        },
+        other => panic!("expected paginated issue listing, got {other:?}"),
+    }
 
-        let final_response = session.resume(id, search_page(case.page_two_number));
-        assert!(
-            final_response.callouts.is_empty(),
-            "{}: terminal listing should carry no callouts, got {:?}",
-            case.kind,
-            final_response.callouts
-        );
-
-        match final_response {
-            ProviderReturn {
-                terminal: Some(OpResult::List(ListResult::Entries(listing))),
-                ..
-            } => {
-                let names: Vec<&str> = listing
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name.as_str())
-                    .collect();
-                let want_first = case.page_one_number.to_string();
-                let want_second = case.page_two_number.to_string();
-                assert!(
-                    names.contains(&want_first.as_str()),
-                    "{kind}: missing {want_first} in {names:?}",
-                    kind = case.kind,
-                );
-                assert!(
-                    names.contains(&want_second.as_str()),
-                    "{kind}: missing {want_second} in {names:?}",
-                    kind = case.kind,
-                );
-            },
-            other => panic!("{}: expected paginated listing, got {other:?}", case.kind),
-        }
+    let first_pr_page = expect_fetch(session.list_children(21, "octocat/Hello-World/_prs/_all"));
+    assert!(first_pr_page.url.ends_with(
+        "/search/issues?q=repo:octocat/Hello-World+is:pr&sort=created&order=desc&per_page=100"
+    ));
+    let pr_parallel = session.resume(21, vec![search_page(1500, 7)]);
+    let ProviderReturn {
+        terminal: None,
+        callouts,
+    } = &pr_parallel
+    else {
+        panic!("expected parallel PR page fetches, got {pr_parallel:?}");
+    };
+    assert_page_fetches(callouts, 2..=10);
+    let pr_pages = (2..=10).map(|page| rest_page(page * 100 + 7)).collect();
+    let final_response = session.resume(21, pr_pages);
+    match final_response {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert!(names.contains(&"7"));
+            assert!(names.contains(&"207"));
+            assert!(names.contains(&"1106"));
+            assert!(
+                !listing.exhaustive,
+                "PR listing should remain partial after hitting the search-API page cap"
+            );
+        },
+        other => panic!("expected paginated PR listing, got {other:?}"),
     }
 }
 
@@ -2248,45 +2457,33 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
         assert_eq!(error.kind, ErrorKind::Denied);
     }
 
-    enum UrlCheck {
-        Contains(&'static str),
-        EndsWith(&'static str),
-    }
-
     let cases = [
         (
             "issues",
             "octocat/Hello-World/_issues/_all",
-            UrlCheck::Contains("/search/issues?q=repo:octocat/Hello-World+is:issue"),
+            "/search/issues?q=repo:octocat/Hello-World&sort=created&order=desc&per_page=100",
         ),
         (
             "prs",
             "octocat/Hello-World/_prs/_all",
-            UrlCheck::Contains("/search/issues?q=repo:octocat/Hello-World+is:pr"),
+            "/search/issues?q=repo:octocat/Hello-World+is:pr&sort=created&order=desc&per_page=100",
         ),
         (
             "actions",
             "octocat/Hello-World/_actions/runs",
-            UrlCheck::EndsWith("/repos/octocat/Hello-World/actions/runs?per_page=30"),
+            "/repos/octocat/Hello-World/actions/runs?per_page=30",
         ),
     ];
 
     let mut session = GithubProviderSession::new();
-    for (index, (kind, path, check)) in cases.into_iter().enumerate() {
+    for (index, (kind, path, suffix)) in cases.into_iter().enumerate() {
         let id = 50 + index as u64;
         let fetch = expect_fetch(session.list_children(id, path));
-        match check {
-            UrlCheck::Contains(needle) => assert!(
-                fetch.url.contains(needle),
-                "{kind}: unexpected URL {}",
-                fetch.url
-            ),
-            UrlCheck::EndsWith(suffix) => assert!(
-                fetch.url.ends_with(suffix),
-                "{kind}: unexpected URL {}",
-                fetch.url
-            ),
-        }
+        assert!(
+            fetch.url.ends_with(suffix),
+            "{kind}: unexpected URL {}",
+            fetch.url
+        );
         expect_denied(session.resume(id, denied_page()));
     }
 }

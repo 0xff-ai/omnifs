@@ -102,8 +102,27 @@ async fn test_list_preloads_nested_files_into_cache() {
         .runtime
         .cache_get("hello/bundle/body", RecordKind::File)
         .expect("bundle body should be preloaded");
+    let empty = harness
+        .runtime
+        .cache_get("hello/bundle/empty", RecordKind::File)
+        .expect("bundle empty file should be preloaded");
+    let bundle_dirents = harness
+        .runtime
+        .cache_get("hello/bundle", RecordKind::Dirents)
+        .expect("bundle dirents should be preloaded");
     assert_eq!(title.payload, b"title".to_vec());
     assert_eq!(body.payload, b"body".to_vec());
+    assert!(empty.payload.is_empty());
+    let dirents = DirentsPayload::deserialize(&bundle_dirents.payload)
+        .expect("bundle dirents payload should deserialize");
+    let mut entry_names: Vec<_> = dirents
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entry_names.sort_unstable();
+    assert_eq!(entry_names, vec!["body", "empty", "title"]);
+    assert!(!dirents.exhaustive);
 }
 
 #[tokio::test]

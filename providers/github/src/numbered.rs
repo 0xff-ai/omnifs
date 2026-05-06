@@ -1,13 +1,35 @@
+use hashbrown::HashSet;
 use omnifs_sdk::Cx;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::http_ext::GithubHttpExt;
-use crate::types::{OwnerName, RepoName, StateFilter};
+use crate::types::{OwnerName, RepoName, StateFilter, User};
 use crate::{Result, State};
 
 pub(crate) const COMMENT_PAGE_SIZE: u64 = 100;
+
+const PAGE_SIZE: u64 = 100;
+const SEARCH_RESULT_CAP: u64 = 1000;
+
+/// Listable resources that share GitHub's issue-shaped JSON: real issues
+/// and pull requests. The associated constants pick which Search query
+/// qualifier and REST resource path apply to `T`, keeping URL choice
+/// bound to the type used to deserialize the response.
+pub(crate) trait Listable: DeserializeOwned {
+    /// Extra qualifier appended to the Search `q=repo:owner/repo`
+    /// expression (e.g. `+is:pr`). Empty for resources that include
+    /// every issue and PR.
+    const SEARCH_QUALIFIER: &'static str;
+    /// REST resource segment under `/repos/{owner}/{repo}/` used for
+    /// pages 2..N.
+    const REST_RESOURCE: &'static str;
+    /// Stable identity used to dedupe at the search/REST seam. Items
+    /// created or deleted between calls can shift REST's offset by one
+    /// and re-emit (or drop) the boundary item.
+    fn id(&self) -> u64;
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(bound(deserialize = "T: Deserialize<'de>"))]
@@ -18,9 +40,22 @@ struct SearchResults<T> {
     items: Vec<T>,
 }
 
-pub(crate) struct SearchPage<T> {
+pub(crate) struct ListPage<T> {
     pub(crate) items: Vec<T>,
     pub(crate) exhaustive: bool,
+}
+
+impl<T> ListPage<T> {
+    pub(crate) fn apply_status(&self, projection: &mut Projection) {
+        if self.exhaustive {
+            projection.page(PageStatus::Exhaustive);
+        } else {
+            // List handlers don't honor resume tokens, but the SDK only
+            // models partial listings via `More(_)`. Use an opaque
+            // sentinel so the cursor can't masquerade as a page number.
+            projection.page(PageStatus::More(Cursor::Opaque("capped".into())));
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -34,43 +69,73 @@ pub(crate) struct CommentUser {
     pub(crate) login: String,
 }
 
-pub(crate) async fn search<T>(
+/// Search supplies `total_count` so we can size the rest of the work
+/// without parsing Link headers; REST handles pages 2..N in parallel.
+/// Capped at the Search API's 1000-item ceiling.
+pub(crate) async fn list_hybrid<T: Listable>(
     cx: &Cx<State>,
     owner: &OwnerName,
     repo: &RepoName,
-    kind: &str,
     filter: StateFilter,
-) -> Result<SearchPage<T>>
-where
-    T: DeserializeOwned,
-{
-    let state_clause = match filter {
+) -> Result<ListPage<T>> {
+    let search_state_clause = match filter {
         StateFilter::Open => "+state:open",
         StateFilter::All => "",
     };
-    let query = format!("repo:{owner}/{repo}+is:{kind}{state_clause}");
-    let base_path = format!("/search/issues?q={query}&sort=created&order=desc&per_page=100");
+    let rest_state = match filter {
+        StateFilter::Open => "open",
+        StateFilter::All => "all",
+    };
+    let qualifier = T::SEARCH_QUALIFIER;
+    let resource = T::REST_RESOURCE;
+    let search_path = format!(
+        "/search/issues?q=repo:{owner}/{repo}{qualifier}{search_state_clause}\
+         &sort=created&order=desc&per_page={PAGE_SIZE}"
+    );
+    let rest_path = format!(
+        "/repos/{owner}/{repo}/{resource}\
+         ?state={rest_state}&sort=created&direction=desc&per_page={PAGE_SIZE}"
+    );
 
-    let first_page: SearchResults<T> = cx.github_json(&base_path).await?;
-
-    let capped_total = first_page.total_count.min(1000);
-    let page_count = capped_total.div_ceil(100);
-    let mut items = first_page.items;
+    let first: SearchResults<T> = cx.github_json(&search_path).await?;
+    let capped_total = first.total_count.min(SEARCH_RESULT_CAP);
+    let page_count = capped_total.div_ceil(PAGE_SIZE);
+    let mut items = first.items;
+    items.reserve((capped_total as usize).saturating_sub(items.len()));
 
     if page_count > 1 {
         let rest_requests = (2..=page_count)
-            .map(|page| cx.github_json::<SearchResults<T>>(format!("{base_path}&page={page}")));
-        let pages = join_all(rest_requests).await;
-        for page in pages {
-            let page_results = page?;
-            items.extend(page_results.items);
+            .map(|page| cx.github_json::<Vec<T>>(format!("{rest_path}&page={page}")));
+        for page in join_all(rest_requests).await {
+            items.extend(page?);
         }
+        let mut seen = HashSet::with_capacity(items.len());
+        items.retain(|item| seen.insert(item.id()));
     }
 
-    Ok(SearchPage {
+    Ok(ListPage {
         items,
-        exhaustive: first_page.total_count <= 1000,
+        exhaustive: first.total_count <= SEARCH_RESULT_CAP,
     })
+}
+
+/// Preload the four projected files every numbered resource exposes.
+/// `base` must end in `/` so callers can append the file name.
+pub(crate) fn preload_common_fields(
+    projection: &mut Projection,
+    base: &str,
+    title: String,
+    body: Option<String>,
+    state: String,
+    user: Option<User>,
+) {
+    projection.preload(format!("{base}title"), title);
+    projection.preload(format!("{base}body"), body.unwrap_or_default());
+    projection.preload(format!("{base}state"), state);
+    projection.preload(
+        format!("{base}user"),
+        user.map(|u| u.login).unwrap_or_default(),
+    );
 }
 
 pub(crate) async fn comments_projection(

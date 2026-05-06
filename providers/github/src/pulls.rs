@@ -2,7 +2,7 @@ use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 
 use crate::http_ext::GithubHttpExt;
-use crate::numbered;
+use crate::numbered::{self, Listable};
 use crate::types::{OwnerName, RepoId, RepoName, StateFilter, User};
 use crate::{Result, State};
 
@@ -11,8 +11,17 @@ struct Pull {
     number: u64,
     title: String,
     body: Option<String>,
-    state: Option<String>,
+    state: String,
     user: Option<User>,
+}
+
+impl Listable for Pull {
+    const SEARCH_QUALIFIER: &'static str = "+is:pr";
+    const REST_RESOURCE: &'static str = "pulls";
+
+    fn id(&self) -> u64 {
+        self.number
+    }
 }
 
 pub struct PullHandlers;
@@ -78,21 +87,21 @@ async fn pr_list(
     repo: &RepoName,
     filter: StateFilter,
 ) -> Result<Projection> {
-    let page = numbered::search::<Pull>(cx, owner, repo, "pr", filter).await?;
+    let page = numbered::list_hybrid::<Pull>(cx, owner, repo, filter).await?;
     let mut projection = Projection::new();
+    page.apply_status(&mut projection);
     for pr in page.items {
-        let base = format!("{owner}/{repo}/_prs/{}/{}/", filter.as_ref(), pr.number);
-        projection.preload(format!("{base}title"), pr.title);
-        projection.preload(format!("{base}body"), pr.body.unwrap_or_default());
-        projection.preload(format!("{base}state"), pr.state.unwrap_or_default());
-        projection.preload(
-            format!("{base}user"),
-            pr.user.map(|u| u.login).unwrap_or_default(),
+        let number = pr.number;
+        let base = format!("{owner}/{repo}/_prs/{}/{number}/", filter.as_ref());
+        numbered::preload_common_fields(
+            &mut projection,
+            &base,
+            pr.title,
+            pr.body,
+            pr.state,
+            pr.user,
         );
-        projection.dir(pr.number.to_string());
-    }
-    if page.exhaustive {
-        projection.page(PageStatus::Exhaustive);
+        projection.dir(number.to_string());
     }
     Ok(projection)
 }
@@ -110,7 +119,7 @@ async fn pr_projection(
     let mut projection = Projection::new();
     projection.file_with_content("title", pr.title);
     projection.file_with_content("body", pr.body.unwrap_or_default());
-    projection.file_with_content("state", pr.state.unwrap_or_default());
+    projection.file_with_content("state", pr.state);
     projection.file_with_content("user", pr.user.map(|u| u.login).unwrap_or_default());
     projection.page(PageStatus::Exhaustive);
     Ok(projection)

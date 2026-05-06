@@ -1,6 +1,6 @@
 use crate::browse::{
-    Entry as BrowseEntry, List as BrowseList, Listing as BrowseListing, Lookup as BrowseLookup,
-    Preload as BrowsePreload, ProjectedFile,
+    Entry as BrowseEntry, EntryKind as BrowseEntryKind, List as BrowseList,
+    Listing as BrowseListing, Lookup as BrowseLookup, Preload as BrowsePreload, ProjectedFile,
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -140,15 +140,15 @@ impl Projection {
 
     /// Hand file content to the host so a later read of `path` can be
     /// served without another provider round trip. Accumulates into the
-    /// `preload` field of the eventual `dir-listing`. Empty paths or
-    /// content are dropped silently.
+    /// `preload` field of the eventual `dir-listing`. Empty paths are
+    /// dropped silently. Empty content is preserved as a valid file.
     pub fn preload(&mut self, path: impl Into<String>, content: impl Into<Vec<u8>>) {
         let path = path.into();
         let content = content.into();
-        if path.is_empty() || content.is_empty() {
+        if path.is_empty() {
             return;
         }
-        self.preload.push(BrowsePreload::new(path, content));
+        self.preload.push(BrowsePreload::file(path, content));
     }
 
     /// Hand a batch of file contents to the host so later reads of each
@@ -162,6 +162,32 @@ impl Projection {
         for (path, content) in files {
             self.preload(path, content);
         }
+    }
+
+    /// Hand entry metadata to the host so a later lookup of `path` can
+    /// be served without another provider round trip.
+    ///
+    /// If the same preload batch also contains direct children under
+    /// this directory entry, the host may materialize a partial cached
+    /// listing from those children. A directory preload by itself does
+    /// not cache an empty listing.
+    pub fn preload_entry(
+        &mut self,
+        path: impl Into<String>,
+        kind: BrowseEntryKind,
+        size: Option<NonZeroU64>,
+    ) {
+        let path = path.into();
+        if path.is_empty() {
+            return;
+        }
+        self.preload.push(BrowsePreload::entry(path, kind, size));
+    }
+
+    /// Hand directory metadata to the host so a later lookup of `path`
+    /// can be served without another provider round trip.
+    pub fn preload_dir(&mut self, path: impl Into<String>) {
+        self.preload_entry(path, BrowseEntryKind::Directory, None);
     }
 
     pub fn into_error(self) -> Option<String> {
