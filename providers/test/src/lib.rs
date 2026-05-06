@@ -66,9 +66,11 @@ mod hello_handlers {
                 DirIntent::Lookup { .. } => Ok(hello_listing()),
                 DirIntent::List { .. } => {
                     let mut projection = hello_listing();
+                    projection.preload_dir("hello/bundle");
                     projection.preload_many([
                         ("hello/bundle/title", b"title".to_vec()),
                         ("hello/bundle/body", b"body".to_vec()),
+                        ("hello/bundle/empty", Vec::new()),
                     ]);
                     Ok(projection)
                 },

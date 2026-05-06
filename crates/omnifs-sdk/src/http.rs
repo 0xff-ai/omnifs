@@ -124,6 +124,26 @@ impl<'cx, S> Request<'cx, S> {
             },
         )
     }
+
+    /// Send the request and return the raw HTTP response regardless of
+    /// status code. Transport-level callout errors are still converted
+    /// to provider errors.
+    pub fn send_raw(self) -> CalloutFuture<'cx, S, HttpResponse> {
+        CalloutFuture::new(
+            self.cx,
+            Callout::Fetch(HttpRequest {
+                method: self.method,
+                url: self.url,
+                headers: self.headers,
+                body: self.body,
+            }),
+            |result| match result {
+                CalloutResult::HttpResponse(resp) => Ok(resp),
+                CalloutResult::CalloutError(e) => Err(ProviderError::from_callout_error(&e)),
+                _ => Err(ProviderError::internal("unexpected callout result type")),
+            },
+        )
+    }
 }
 
 /// Future that yields a single callout and resolves with a typed result.

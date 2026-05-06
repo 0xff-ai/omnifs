@@ -35,6 +35,7 @@ use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm
 #[cfg(target_os = "linux")]
 use fuser::Notifier;
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
@@ -302,13 +303,83 @@ impl CalloutRuntime {
         }
     }
 
-    pub(super) fn apply_preloads(&self, files: &[wit_types::PreloadedFile]) {
-        if files.is_empty() {
+    fn push_preloaded_entry(
+        batch: &mut Vec<(String, RecordKind, CacheRecord)>,
+        entry: &wit_types::PreloadedEntry,
+    ) {
+        use cache::{AttrPayload, EntryKindCache, LookupPayload};
+
+        let kind = EntryKindCache::from(entry.kind);
+        let size = entry.size.unwrap_or(0);
+        let lookup = LookupPayload::Positive { kind, size };
+        if let Some(payload) = lookup.serialize() {
+            batch.push((
+                entry.path.clone(),
+                RecordKind::Lookup,
+                CacheRecord::new(RecordKind::Lookup, payload),
+            ));
+        }
+
+        let attr = AttrPayload { kind, size };
+        if let Some(payload) = attr.serialize() {
+            batch.push((
+                entry.path.clone(),
+                RecordKind::Attr,
+                CacheRecord::new(RecordKind::Attr, payload),
+            ));
+        }
+    }
+
+    pub(super) fn apply_preloads(&self, items: &[wit_types::PreloadItem]) {
+        use cache::{DirentRecord, DirentsPayload, EntryKindCache};
+
+        if items.is_empty() {
             return;
         }
         let mut batch = Vec::new();
-        for file in files {
-            Self::push_projected_file(&mut batch, &file.path, &file.content);
+        let mut child_records: BTreeMap<String, BTreeMap<String, DirentRecord>> = BTreeMap::new();
+        let mut preloaded_dirs = Vec::new();
+        for item in items {
+            match item {
+                wit_types::PreloadItem::File(file) => {
+                    Self::push_projected_file(&mut batch, &file.path, &file.content);
+                    Self::record_preload_child(
+                        &mut child_records,
+                        &file.path,
+                        EntryKindCache::File,
+                        u64::try_from(file.content.len()).unwrap_or(u64::MAX),
+                    );
+                },
+                wit_types::PreloadItem::Entry(entry) => {
+                    Self::push_preloaded_entry(&mut batch, entry);
+                    let kind = EntryKindCache::from(entry.kind);
+                    if matches!(kind, EntryKindCache::Directory) {
+                        preloaded_dirs.push(entry.path.clone());
+                    }
+                    Self::record_preload_child(
+                        &mut child_records,
+                        &entry.path,
+                        kind,
+                        entry.size.unwrap_or(0),
+                    );
+                },
+            }
+        }
+        for path in preloaded_dirs {
+            let Some(children) = child_records.remove(&path) else {
+                continue;
+            };
+            let dirents = DirentsPayload {
+                entries: children.into_values().collect(),
+                exhaustive: false,
+            };
+            if let Some(payload) = dirents.serialize() {
+                batch.push((
+                    path,
+                    RecordKind::Dirents,
+                    CacheRecord::new(RecordKind::Dirents, payload),
+                ));
+            }
         }
 
         if !batch.is_empty() {
@@ -316,10 +387,32 @@ impl CalloutRuntime {
                 target: "omnifs_cache",
                 kind = "preload",
                 count = batch.len(),
-                "caching preloaded files"
+                "caching preloads"
             );
             self.cache_put_batch(&batch);
         }
+    }
+
+    fn record_preload_child(
+        child_records: &mut BTreeMap<String, BTreeMap<String, cache::DirentRecord>>,
+        path: &str,
+        kind: cache::EntryKindCache,
+        size: u64,
+    ) {
+        let Some((parent, name)) = path.rsplit_once('/') else {
+            return;
+        };
+        if parent.is_empty() || name.is_empty() {
+            return;
+        }
+        child_records.entry(parent.to_string()).or_default().insert(
+            name.to_string(),
+            cache::DirentRecord {
+                name: name.to_string(),
+                kind,
+                size,
+            },
+        );
     }
 
     pub(super) fn apply_event_outcome(&self, outcome: &wit_types::EventOutcome) {

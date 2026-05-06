@@ -132,7 +132,7 @@ interface types {
         /// when a directory lookup hits a dir handler that staged
         /// preloads for its children, those preloads flow out with
         /// the lookup terminal rather than being dropped.
-        preload: list<preloaded-file>,
+        preload: list<preload-item>,
     }
 
     /// List terminal. `subtree(tree-ref)` lets `list-children` return a
@@ -204,12 +204,26 @@ interface types {
     }
 
     /// File content the provider hands to the host so that a later read
-    /// of `path` can be served without another provider round trip. Used
-    /// to fan out adjacent data from an upstream payload the handler has
-    /// already fetched.
+    /// of provider-relative `path` can be served without another provider
+    /// round trip. Used to fan out adjacent data from an upstream payload
+    /// the handler has already fetched.
     record preloaded-file {
         path: string,
         content: list<u8>,
+    }
+
+    /// Entry metadata the provider hands to the host so that a later
+    /// lookup of provider-relative `path` can be served without another
+    /// provider round trip.
+    record preloaded-entry {
+        path: string,
+        kind: entry-kind,
+        size: option<u64>,
+    }
+
+    variant preload-item {
+        file(preloaded-file),
+        entry(preloaded-entry),
     }
 
     record log-entry {
@@ -258,12 +272,12 @@ interface types {
         /// them to deny lookups.
         exhaustive: bool,
 
-        /// Content the provider already has in hand for named paths under
-        /// or adjacent to this listing. The host caches these so a later
-        /// read of each path is served without another provider round
-        /// trip. Consumed at the response boundary; the cached listing
-        /// carries an empty preload list.
-        preload: list<preloaded-file>,
+        /// Content or entry metadata the provider already has in hand
+        /// for any path under this provider. The host caches these so a
+        /// later lookup or read of each path is served without another
+        /// provider round trip. Consumed at the response boundary; the
+        /// cached listing carries an empty preload list.
+        preload: list<preload-item>,
     }
 
     record dir-entry {
