@@ -48,6 +48,12 @@ pub enum PathSegment {
         name: String,
         prefix: Option<String>,
     },
+    /// Rest-capture segment. Matches zero or more trailing segments and
+    /// decodes to the joined remainder (no leading or trailing slash).
+    /// Must appear only as the final segment of a pattern.
+    Rest {
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +61,8 @@ pub struct PathPattern {
     segments: Vec<PathSegment>,
     literal_count: usize,
     prefix_capture_count: usize,
+    /// True when the final segment is a `PathSegment::Rest`.
+    has_rest: bool,
     specificity: Vec<(u8, usize)>,
 }
 
@@ -85,6 +93,7 @@ impl PathPattern {
                 segments: Vec::new(),
                 literal_count: 0,
                 prefix_capture_count: 0,
+                has_rest: false,
                 specificity: Vec::new(),
             });
         }
@@ -92,14 +101,31 @@ impl PathPattern {
             return Err(pattern_error(format!("invalid path template {template:?}")));
         }
 
-        let mut segments = Vec::new();
+        let raw_segments: Vec<&str> = template.split('/').skip(1).collect();
+        let mut segments = Vec::with_capacity(raw_segments.len());
         let mut literal_count = 0usize;
         let mut prefix_capture_count = 0usize;
-        for raw in template.split('/').skip(1) {
+        let mut has_rest = false;
+        let total = raw_segments.len();
+        for (index, raw) in raw_segments.into_iter().enumerate() {
             if raw.starts_with("{*") {
-                return Err(pattern_error(format!(
-                    "rest captures are not supported in {raw:?}"
-                )));
+                if !raw.ends_with('}') || raw.len() < 4 {
+                    return Err(pattern_error(format!(
+                        "invalid rest-capture segment {raw:?}"
+                    )));
+                }
+                if index != total - 1 {
+                    return Err(pattern_error(format!(
+                        "rest-capture segment {raw:?} must be the last segment of the pattern"
+                    )));
+                }
+                let name = &raw[2..raw.len() - 1];
+                validate_capture_name(name)?;
+                segments.push(PathSegment::Rest {
+                    name: name.to_string(),
+                });
+                has_rest = true;
+                continue;
             }
             if raw.starts_with('{') && raw.ends_with('}') {
                 let name = &raw[1..raw.len() - 1];
@@ -138,6 +164,7 @@ impl PathPattern {
             segments,
             literal_count,
             prefix_capture_count,
+            has_rest,
             specificity,
         })
     }
@@ -147,9 +174,21 @@ impl PathPattern {
         &self.segments
     }
 
+    /// Returns `true` if this pattern ends with a `PathSegment::Rest`.
     #[must_use]
-    pub fn precedence_key(&self) -> (usize, usize, usize) {
+    pub fn has_rest(&self) -> bool {
+        self.has_rest
+    }
+
+    /// Precedence ordering (higher wins): exact > prefix-capture >
+    /// bare-capture > rest-capture. The leading `is_not_rest` bit pushes
+    /// rest-capture patterns below every non-rest pattern regardless of
+    /// other counts, so narrow handlers keep winning where they overlap.
+    #[must_use]
+    pub fn precedence_key(&self) -> (u8, usize, usize, usize) {
+        let is_not_rest = u8::from(!self.has_rest);
         (
+            is_not_rest,
             self.literal_count,
             self.prefix_capture_count,
             self.segments.len(),
@@ -158,25 +197,39 @@ impl PathPattern {
 
     #[must_use]
     pub fn matches_path(&self, path: &str) -> bool {
-        let segments = split_absolute_path(path).ok();
-        segments.is_some_and(|segments| {
+        let Ok(segments) = split_absolute_path(path) else {
+            return false;
+        };
+        if self.has_rest {
+            let fixed = self.fixed_prefix_len();
+            segments.len() >= fixed && self.matches_prefix_segments(&segments[..fixed])
+        } else {
             segments.len() == self.segments.len() && self.matches_prefix_segments(&segments)
-        })
+        }
     }
 
     #[must_use]
     pub fn matches_parent_path(&self, path: &str) -> bool {
-        let segments = split_absolute_path(path).ok();
-        segments.is_some_and(|segments| {
+        let Ok(segments) = split_absolute_path(path) else {
+            return false;
+        };
+        if self.has_rest {
+            // A rest pattern describes descendants at arbitrary depth below
+            // its fixed prefix, so any parent under that prefix could host
+            // one of its children. Match whenever the parent sits at or
+            // below the fixed prefix and shares it.
+            let fixed = self.fixed_prefix_len();
+            segments.len() >= fixed && self.matches_prefix_segments(&segments[..fixed])
+        } else {
             segments.len() + 1 == self.segments.len() && self.matches_prefix_segments(&segments)
-        })
+        }
     }
 
     #[must_use]
     pub fn static_child(&self) -> Option<&str> {
         match self.segments.last()? {
             PathSegment::Literal(name) => Some(name),
-            PathSegment::Capture { .. } => None,
+            PathSegment::Capture { .. } | PathSegment::Rest { .. } => None,
         }
     }
 
@@ -193,10 +246,20 @@ impl PathPattern {
     #[must_use]
     pub fn concrete_path_for(&self, concrete_path: &str) -> Option<String> {
         let segments = split_absolute_path(concrete_path).ok()?;
-        if self.segments.len() > segments.len() || !self.matches_prefix_segments(&segments) {
-            return None;
+        if self.has_rest {
+            let fixed = self.fixed_prefix_len();
+            if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
+                return None;
+            }
+            // Rest patterns consume everything beyond the fixed prefix, so
+            // the matched concrete path is the full input.
+            Some(join_absolute_path(&segments))
+        } else {
+            if self.segments.len() > segments.len() || !self.matches_prefix_segments(&segments) {
+                return None;
+            }
+            Some(join_absolute_path(&segments[..self.segments.len()]))
         }
-        Some(join_absolute_path(&segments[..self.segments.len()]))
     }
 
     #[must_use]
@@ -210,6 +273,17 @@ impl PathPattern {
         self.segments.len()
     }
 
+    /// Number of leading fixed (non-rest) segments. For non-rest patterns
+    /// this equals `pattern_len()`.
+    #[must_use]
+    pub fn fixed_prefix_len(&self) -> usize {
+        if self.has_rest {
+            self.segments.len() - 1
+        } else {
+            self.segments.len()
+        }
+    }
+
     #[must_use]
     pub fn specificity(&self) -> &[(u8, usize)] {
         &self.specificity
@@ -217,13 +291,48 @@ impl PathPattern {
 
     #[must_use]
     pub fn is_ambiguous_with(&self, other: &Self) -> bool {
-        self.precedence_key() == other.precedence_key()
-            && self.segments.len() == other.segments.len()
-            && self
-                .segments
-                .iter()
-                .zip(other.segments.iter())
-                .all(|(left, right)| segments_overlap(left, right))
+        match (self.has_rest, other.has_rest) {
+            // Two rest patterns collide only when their fixed prefixes are
+            // indistinguishable (same length and overlapping segment-by-
+            // segment). The rest names themselves don't matter.
+            (true, true) => {
+                self.fixed_prefix_len() == other.fixed_prefix_len()
+                    && self
+                        .segments
+                        .iter()
+                        .take(self.fixed_prefix_len())
+                        .zip(other.segments.iter().take(other.fixed_prefix_len()))
+                        .all(|(left, right)| segments_overlap(left, right))
+            },
+            // A rest pattern never collides with a non-rest pattern: the
+            // non-rest pattern wins by precedence wherever they overlap.
+            (true, false) | (false, true) => false,
+            (false, false) => {
+                self.precedence_key() == other.precedence_key()
+                    && self.segments.len() == other.segments.len()
+                    && self
+                        .segments
+                        .iter()
+                        .zip(other.segments.iter())
+                        .all(|(left, right)| segments_overlap(left, right))
+            },
+        }
+    }
+
+    /// Decode the rest portion of `path` relative to this pattern, joined
+    /// with `/` and with no leading or trailing slash. Returns `None` when
+    /// the pattern has no rest segment or `path` doesn't match.
+    #[must_use]
+    pub fn rest_of(&self, path: &str) -> Option<String> {
+        if !self.has_rest {
+            return None;
+        }
+        let segments = split_absolute_path(path).ok()?;
+        let fixed = self.fixed_prefix_len();
+        if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
+            return None;
+        }
+        Some(segments[fixed..].join("/"))
     }
 
     fn matches_prefix_segments(&self, concrete: &[&str]) -> bool {
@@ -240,6 +349,9 @@ impl PathPattern {
                 } => actual
                     .strip_prefix(prefix)
                     .is_some_and(|rest| !rest.is_empty()),
+                // Rest segments are only consulted past the fixed prefix;
+                // callers never pass a rest segment to this helper.
+                PathSegment::Rest { .. } => true,
             })
     }
 }
@@ -381,7 +493,10 @@ fn segment_specificity(segment: &PathSegment) -> (u8, usize) {
             prefix: Some(prefix),
             ..
         } => (1, prefix.len()),
-        PathSegment::Capture { prefix: None, .. } => (0, 0),
+        // Bare captures and rest captures both sit at the bottom of the
+        // per-segment specificity ladder. The coarser exact > prefix >
+        // bare > rest ordering is enforced via `precedence_key`.
+        PathSegment::Capture { prefix: None, .. } | PathSegment::Rest { .. } => (0, 0),
     }
 }
 
@@ -393,10 +508,20 @@ fn segment_signature(segment: &PathSegment) -> String {
             ..
         } => format!("p:{prefix}"),
         PathSegment::Capture { prefix: None, .. } => "c".to_string(),
+        PathSegment::Rest { .. } => "r".to_string(),
     }
 }
 
 fn segments_overlap(left: &PathSegment, right: &PathSegment) -> bool {
+    // Rest segments never appear inside the fixed prefix
+    // (`PathPattern::parse` only allows them in the last position and
+    // `is_ambiguous_with` handles rest/non-rest at the whole-pattern level),
+    // so hitting one here means a caller misused this helper. Fold the
+    // defensive fallback into a single arm that conservatively reports
+    // overlap whenever either side is a rest segment.
+    if matches!(left, PathSegment::Rest { .. }) || matches!(right, PathSegment::Rest { .. }) {
+        return true;
+    }
     match (left, right) {
         (PathSegment::Literal(left), PathSegment::Literal(right)) => left == right,
         (
@@ -432,6 +557,7 @@ fn segments_overlap(left: &PathSegment, right: &PathSegment) -> bool {
                 ..
             },
         ) => left.starts_with(right) || right.starts_with(left),
+        (PathSegment::Rest { .. }, _) | (_, PathSegment::Rest { .. }) => unreachable!(),
     }
 }
 
@@ -523,5 +649,90 @@ mod tests {
         );
         assert_eq!(resolver.concrete_path_for("/@"), None);
         assert!(literal.specificity() > capture.specificity());
+    }
+
+    #[test]
+    fn rest_capture_parse_accepts_trailing_rest_only() {
+        let pat = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        assert!(pat.has_rest());
+        assert_eq!(pat.fixed_prefix_len(), 2);
+        match pat.segments().last().unwrap() {
+            PathSegment::Rest { name } => assert_eq!(name, "path"),
+            other => panic!("expected rest segment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rest_capture_parse_rejects_non_trailing_and_duplicate() {
+        assert!(PathPattern::parse("/{*a}/after").is_err());
+        assert!(PathPattern::parse("/{*a}/{*b}").is_err());
+        assert!(PathPattern::parse("/_ipfs/{*}").is_err());
+        assert!(PathPattern::parse("/_ipfs/{*0bad}").is_err());
+    }
+
+    #[test]
+    fn rest_capture_matches_zero_or_more_trailing_segments() {
+        let pat = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        assert!(pat.matches_path("/_ipfs/Qm123"));
+        assert!(pat.matches_path("/_ipfs/Qm123/a"));
+        assert!(pat.matches_path("/_ipfs/Qm123/a/b/c"));
+        assert!(!pat.matches_path("/_ipfs"));
+        assert!(!pat.matches_path("/other/Qm123"));
+
+        assert_eq!(pat.rest_of("/_ipfs/Qm123"), Some(String::new()));
+        assert_eq!(pat.rest_of("/_ipfs/Qm123/a"), Some("a".to_string()));
+        assert_eq!(pat.rest_of("/_ipfs/Qm123/a/b/c"), Some("a/b/c".to_string()));
+    }
+
+    #[test]
+    fn rest_capture_parent_path_matches_dynamic_depth() {
+        let pat = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        assert!(pat.matches_parent_path("/_ipfs/Qm123"));
+        assert!(pat.matches_parent_path("/_ipfs/Qm123/a/b"));
+        assert!(!pat.matches_parent_path("/other/Qm123"));
+        assert!(!pat.matches_parent_path("/_ipfs"));
+    }
+
+    #[test]
+    fn rest_capture_has_no_static_child_and_lowest_precedence() {
+        let rest = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        let bare = PathPattern::parse("/_ipfs/{cid}/{leaf}").unwrap();
+        let prefix = PathPattern::parse("/_ipfs/{cid}/v{version}").unwrap();
+        let exact = PathPattern::parse("/_ipfs/{cid}/versions").unwrap();
+
+        assert!(rest.static_child().is_none());
+        assert!(exact.precedence_key() > prefix.precedence_key());
+        assert!(prefix.precedence_key() > bare.precedence_key());
+        assert!(bare.precedence_key() > rest.precedence_key());
+    }
+
+    #[test]
+    fn rest_capture_concrete_path_is_whole_input() {
+        let pat = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        assert_eq!(
+            pat.concrete_path_for("/_ipfs/Qm123/a/b"),
+            Some("/_ipfs/Qm123/a/b".to_string())
+        );
+        assert_eq!(
+            pat.concrete_path_for("/_ipfs/Qm123"),
+            Some("/_ipfs/Qm123".to_string())
+        );
+        assert_eq!(pat.concrete_path_for("/_ipfs"), None);
+    }
+
+    #[test]
+    fn rest_capture_ambiguity_rules() {
+        let rest_a = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
+        let rest_b = PathPattern::parse("/_ipfs/{cid}/{*tail}").unwrap();
+        let bare = PathPattern::parse("/_ipfs/{cid}/{leaf}").unwrap();
+        let exact = PathPattern::parse("/_ipfs/{cid}/versions").unwrap();
+        let other_rest = PathPattern::parse("/_other/{id}/{*rest}").unwrap();
+
+        assert!(rest_a.is_ambiguous_with(&rest_b));
+        assert!(rest_b.is_ambiguous_with(&rest_a));
+        assert!(!rest_a.is_ambiguous_with(&bare));
+        assert!(!bare.is_ambiguous_with(&rest_a));
+        assert!(!rest_a.is_ambiguous_with(&exact));
+        assert!(!rest_a.is_ambiguous_with(&other_rest));
     }
 }

@@ -64,6 +64,20 @@ mod extras_handlers {
     }
 }
 
+mod rest_handlers {
+    use super::*;
+
+    pub struct RestHandlers;
+
+    #[omnifs_sdk::handlers]
+    impl RestHandlers {
+        #[omnifs_sdk::file("/root/{a}/{*rest}")]
+        async fn rest_file(_cx: &Cx<State>, a: String, rest: String) -> Result<FileContent> {
+            Ok(FileContent::bytes(format!("a={a} rest={rest}\n")))
+        }
+    }
+}
+
 #[omnifs_sdk::provider(mounts(
     crate::root_handlers::RootHandlers,
     crate::hello_handlers::HelloHandlers,
@@ -102,6 +116,7 @@ async fn registry_uses_path_first_handlers() {
     root_handlers::RootHandlers::mount(&mut registry);
     hello_handlers::HelloHandlers::mount(&mut registry);
     extras_handlers::ExtrasHandlers::mount(&mut registry);
+    rest_handlers::RestHandlers::mount(&mut registry);
     registry.validate().unwrap();
 
     let cx = Cx::new(7, Rc::new(RefCell::new(State)));
@@ -133,6 +148,14 @@ async fn registry_uses_path_first_handlers() {
 
     let checkout_lookup = registry.lookup_child(&cx, "/", "checkout").await.unwrap();
     assert!(matches!(checkout_lookup, Lookup::Subtree(42)));
+
+    // Rest-capture dispatch: multi-segment tails decode to the joined string.
+    let rest_empty = registry.read_file(&cx, "/root/alpha").await.unwrap();
+    assert_eq!(rest_empty.content(), b"a=alpha rest=\n");
+    let rest_one = registry.read_file(&cx, "/root/alpha/beta").await.unwrap();
+    assert_eq!(rest_one.content(), b"a=alpha rest=beta\n");
+    let rest_deep = registry.read_file(&cx, "/root/alpha/b/c/d").await.unwrap();
+    assert_eq!(rest_deep.content(), b"a=alpha rest=b/c/d\n");
 }
 
 fn parse_unit(path: &str) -> Option<Box<dyn std::any::Any>> {
@@ -163,4 +186,100 @@ fn registry_rejects_ambiguous_dir_routes() {
 
     let error = registry.validate().unwrap_err();
     assert!(error.message().contains("ambiguous dir handlers"));
+}
+
+fn parse_path_only(path: &str) -> Option<Box<dyn std::any::Any>> {
+    if path.is_empty() {
+        None
+    } else {
+        Some(Box::new(path.to_string()))
+    }
+}
+
+fn call_file_echo<'a>(
+    _cx: &'a Cx<State>,
+    path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+    Box::pin(async move {
+        let path = *path.downcast::<String>().expect("file path mismatch");
+        Ok(FileContent::bytes(path.into_bytes()))
+    })
+}
+
+#[test]
+fn registry_rejects_two_rest_patterns_at_same_prefix() {
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_file("/ipfs/{cid}/{*path}", parse_path_only, call_file_echo)
+        .unwrap();
+    registry
+        .add_file("/ipfs/{cid}/{*tail}", parse_path_only, call_file_echo)
+        .unwrap();
+
+    let error = registry.validate().unwrap_err();
+    assert!(error.message().contains("ambiguous file handlers"));
+}
+
+#[test]
+fn registry_accepts_rest_alongside_exact_and_prefix() {
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_file("/ipfs/{cid}/versions", parse_path_only, call_file_echo)
+        .unwrap();
+    registry
+        .add_file("/ipfs/{cid}/v{version}", parse_path_only, call_file_echo)
+        .unwrap();
+    registry
+        .add_file("/ipfs/{cid}/{*path}", parse_path_only, call_file_echo)
+        .unwrap();
+    registry.validate().unwrap();
+}
+
+fn call_exact<'a>(
+    _cx: &'a Cx<State>,
+    _path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+    Box::pin(async { Ok(FileContent::bytes(b"exact".to_vec())) })
+}
+
+fn call_prefix<'a>(
+    _cx: &'a Cx<State>,
+    _path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+    Box::pin(async { Ok(FileContent::bytes(b"prefix".to_vec())) })
+}
+
+fn call_rest<'a>(
+    _cx: &'a Cx<State>,
+    _path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+    Box::pin(async { Ok(FileContent::bytes(b"rest".to_vec())) })
+}
+
+#[tokio::test]
+async fn registry_prefers_exact_and_prefix_over_rest() {
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_file("/_ipfs/{cid}/versions", parse_path_only, call_exact)
+        .unwrap();
+    registry
+        .add_file("/_ipfs/{cid}/v{version}", parse_path_only, call_prefix)
+        .unwrap();
+    registry
+        .add_file("/_ipfs/{cid}/{*path}", parse_path_only, call_rest)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(9, Rc::new(RefCell::new(State)));
+    let exact = registry
+        .read_file(&cx, "/_ipfs/Qm123/versions")
+        .await
+        .unwrap();
+    assert_eq!(exact.content(), b"exact");
+    let prefix = registry.read_file(&cx, "/_ipfs/Qm123/v1").await.unwrap();
+    assert_eq!(prefix.content(), b"prefix");
+    let rest = registry.read_file(&cx, "/_ipfs/Qm123/a/b/c").await.unwrap();
+    assert_eq!(rest.content(), b"rest");
+    let rest_empty = registry.read_file(&cx, "/_ipfs/Qm123").await.unwrap();
+    assert_eq!(rest_empty.content(), b"rest");
 }

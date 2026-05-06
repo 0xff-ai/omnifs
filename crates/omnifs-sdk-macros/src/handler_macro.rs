@@ -122,8 +122,16 @@ pub fn expand_handler_items(
     let pattern = PathPattern::parse(&template.value())
         .map_err(|error| syn::Error::new(template.span(), error.message()))?;
     let template_captures = capture_names(pattern.segments());
+    let rest_captures: BTreeSet<String> = pattern
+        .segments()
+        .iter()
+        .filter_map(|segment| match segment {
+            PathSegment::Rest { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
 
-    validate_capture_alignment(&captures, &template_captures, &template)?;
+    validate_capture_alignment(&captures, &template_captures, &template, &rest_captures)?;
 
     let path_struct = path_struct_name(fn_name);
     let register_name = format_ident!("__omnifs_mount_{}", fn_name);
@@ -543,6 +551,7 @@ fn validate_capture_alignment(
     sig_captures: &[(String, Type)],
     template_captures: &[String],
     template: &LitStr,
+    rest_captures: &BTreeSet<String>,
 ) -> syn::Result<()> {
     let sig_names: BTreeSet<_> = sig_captures.iter().map(|(n, _)| n.clone()).collect();
     if sig_names.len() != sig_captures.len() {
@@ -560,11 +569,19 @@ fn validate_capture_alignment(
             ));
         }
     }
-    for (name, _) in sig_captures {
+    for (name, ty) in sig_captures {
         if !tpl_names.contains(name) {
             return Err(syn::Error::new(
                 template.span(),
                 format!("parameter `{name}` does not match any capture in the template"),
+            ));
+        }
+        if rest_captures.contains(name) && !is_string_type(ty) {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!(
+                    "rest capture `{{*{name}}}` must decode to `String` because it joins multiple segments"
+                ),
             ));
         }
     }
@@ -576,7 +593,7 @@ fn capture_names(segments: &[PathSegment]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     for segment in segments {
         let name = match segment {
-            PathSegment::Capture { name, .. } => name,
+            PathSegment::Capture { name, .. } | PathSegment::Rest { name } => name,
             PathSegment::Literal(_) => continue,
         };
         if seen.insert(name.clone()) {
@@ -584,6 +601,19 @@ fn capture_names(segments: &[PathSegment]) -> Vec<String> {
         }
     }
     names
+}
+
+fn is_string_type(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    if tp.qself.is_some() {
+        return false;
+    }
+    let Some(segment) = tp.path.segments.last() else {
+        return false;
+    };
+    segment.ident == "String" && matches!(segment.arguments, PathArguments::None)
 }
 
 fn parse_statements(
@@ -601,14 +631,25 @@ fn parse_statements(
         );
     }
 
+    let has_rest = matches!(segments.last(), Some(PathSegment::Rest { .. }));
     let mut stmts = Vec::new();
     let len = segments.len();
-    stmts.push(quote! {
-        let __omnifs_segments: Vec<&str> = __omnifs_path.trim_start_matches('/').split('/').collect();
-        if __omnifs_segments.len() != #len {
-            return None;
-        }
-    });
+    if has_rest {
+        let fixed = len - 1;
+        stmts.push(quote! {
+            let __omnifs_segments: Vec<&str> = __omnifs_path.trim_start_matches('/').split('/').collect();
+            if __omnifs_segments.len() < #fixed {
+                return None;
+            }
+        });
+    } else {
+        stmts.push(quote! {
+            let __omnifs_segments: Vec<&str> = __omnifs_path.trim_start_matches('/').split('/').collect();
+            if __omnifs_segments.len() != #len {
+                return None;
+            }
+        });
+    }
 
     for (index, segment) in segments.iter().enumerate() {
         match segment {
@@ -635,6 +676,15 @@ fn parse_statements(
                         .strip_prefix(#prefix)?
                         .parse()
                         .ok()?;
+                });
+            },
+            PathSegment::Rest { name } => {
+                // Join the trailing segments with '/'. An empty tail yields
+                // an empty string, which is the contract documented on the
+                // rest segment in omnifs-mount-schema.
+                let ident = format_ident!("{name}");
+                stmts.push(quote! {
+                    let #ident: String = __omnifs_segments[#index..].join("/");
                 });
             },
         }
