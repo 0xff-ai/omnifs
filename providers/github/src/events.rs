@@ -1,5 +1,5 @@
+use http::Response;
 use omnifs_sdk::Cx;
-use omnifs_sdk::omnifs::provider::types::HttpResponse;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 
@@ -17,7 +17,7 @@ struct GithubEvent {
 
 struct TickOutcome {
     repo_id: RepoId,
-    response: Result<HttpResponse>,
+    response: Result<Response<Vec<u8>>>,
 }
 
 pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<EventOutcome> {
@@ -52,18 +52,19 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<EventOutcome> {
         let Ok(response) = tick.response else {
             continue;
         };
-        if response.status == 304 || response.status >= 400 {
+        let status = response.status().as_u16();
+        if status == 304 || status >= 400 {
             continue;
         }
         if let Some(etag) = response
-            .headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("etag"))
-            .map(|h| h.value.clone())
+            .headers()
+            .get(http::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
         {
             etag_updates.push((tick.repo_id.clone(), etag));
         }
-        let Ok(events) = parse_model::<Vec<GithubEvent>>(&response.body) else {
+        let Ok(events) = parse_model::<Vec<GithubEvent>>(response.body()) else {
             continue;
         };
         for event in events {

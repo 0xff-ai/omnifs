@@ -1,7 +1,7 @@
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 
-use crate::http_ext::GithubHttpExt;
+use crate::http_ext::{GithubHttpExt, github_check_status};
 use crate::numbered::{self, Listable};
 use crate::types::{OwnerName, RepoId, RepoName, StateFilter, User};
 use crate::{Result, State};
@@ -141,10 +141,10 @@ async fn pr_diff_file(
     number: u64,
 ) -> Result<FileContent> {
     let repo_id = RepoId::new(owner, repo);
-    let diff = cx
+    let resp = cx
         .github_get(format!("/repos/{repo_id}/pulls/{number}"))
         .header("Accept", "application/vnd.github.diff")
-        .send_body()
+        .send()
         .await?;
-    Ok(FileContent::bytes(diff))
+    Ok(FileContent::bytes(github_check_status(resp)?.into_body()))
 }

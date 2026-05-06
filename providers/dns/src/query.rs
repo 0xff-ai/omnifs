@@ -1,4 +1,5 @@
 use omnifs_sdk::Cx;
+use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
 use std::fmt::Write;
 
@@ -24,8 +25,8 @@ pub(crate) async fn read_reverse_bytes(
 ) -> Result<Vec<u8>> {
     let resolver_name = resolver.map(ResolverName::as_ref);
     let url = cx.state(|s| doh::reverse_query_url(&s.resolvers, resolver_name, ip))?;
-    let body = cx.dns_message_get(url).send_body().await?;
-    let (records, _) = doh::parse_response(&body)?;
+    let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
+    let (records, _) = doh::parse_response(resp.body())?;
     Ok(format_records(&records).into_bytes())
 }
 
@@ -46,8 +47,8 @@ pub(crate) async fn read_record_bytes(
             let resolver_name = resolver.map(ResolverName::as_ref);
             let url = cx
                 .state(|s| doh::query_url(&s.resolvers, resolver_name, &domain_str, record_type))?;
-            let body = cx.dns_message_get(url).send_body().await?;
-            let (records, _) = doh::parse_response(&body)?;
+            let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
+            let (records, _) = doh::parse_response(resp.body())?;
             Ok(format_records(&records).into_bytes())
         },
     }
@@ -68,19 +69,18 @@ pub(crate) async fn query_all(
     for record_type in RecordType::common() {
         let url =
             cx.state(|s| doh::query_url(&s.resolvers, resolver_ref, &domain_str, *record_type))?;
-        requests.push(cx.dns_message_get(url).send_body());
+        requests.push(cx.dns_message_get(url).send());
     }
 
-    let bodies = join_all(requests).await;
+    let responses = join_all(requests).await;
 
     let mut all_records = Vec::new();
     let mut first_error = None;
     let mut had_success = false;
-    for body in bodies {
-        let result = match body {
-            Ok(bytes) => doh::parse_response(&bytes),
-            Err(response) => Err(response),
-        };
+    for response in responses {
+        let result = response
+            .and_then(ResponseExt::error_for_status)
+            .and_then(|resp| doh::parse_response(resp.body()));
         match result {
             Ok((records, _)) => {
                 had_success = true;
@@ -121,8 +121,8 @@ pub(crate) async fn query_raw(
     let resolver_ref = resolver.map(ResolverName::as_ref);
     let url =
         cx.state(|s| doh::query_url(&s.resolvers, resolver_ref, &domain_str, RecordType::A))?;
-    let body = cx.dns_message_get(url).send_body().await?;
-    let (records, _) = doh::parse_response(&body)?;
+    let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
+    let (records, _) = doh::parse_response(resp.body())?;
 
     let mut out = String::new();
     let _ = writeln!(out, ";; QUESTION SECTION:");
