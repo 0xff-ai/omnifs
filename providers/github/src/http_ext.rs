@@ -1,7 +1,7 @@
 use http::{Response, StatusCode};
 use omnifs_sdk::Cx;
 use omnifs_sdk::error::ProviderError;
-use omnifs_sdk::http::Request;
+use omnifs_sdk::http::{Request, ResponseExt};
 use serde::de::DeserializeOwned;
 
 use crate::Result;
@@ -46,17 +46,13 @@ impl GithubHttpExt for Cx<State> {
 /// or abuse-detection bodies) from generic 4xx/5xx so callers can retry
 /// rate-limited responses.
 pub(crate) fn github_check_status(resp: Response<Vec<u8>>) -> Result<Response<Vec<u8>>> {
-    let status = resp.status();
-    if !status.is_client_error() && !status.is_server_error() {
-        return Ok(resp);
-    }
     if is_rate_limited(&resp) {
         return Err(ProviderError::rate_limited(format!(
             "HTTP {}",
-            status.as_u16()
+            resp.status().as_u16()
         )));
     }
-    Err(ProviderError::from_http_status(status.as_u16()))
+    resp.error_for_status()
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {

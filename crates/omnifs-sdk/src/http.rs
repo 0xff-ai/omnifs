@@ -1,10 +1,8 @@
 //! HTTP callout result extraction and typed async HTTP builders.
 //!
-//! Construction uses a chainable builder; the final `send()` returns
-//! `http::Response<Vec<u8>>`. Default 4xx/5xx mapping is opt-in via the
-//! `ResponseExt::error_for_status` helper, leaving providers free to
-//! apply custom error mapping (rate-limit detection, retry hints) by
-//! inspecting the response directly.
+//! `send()` returns `http::Response<Vec<u8>>`; use
+//! `ResponseExt::error_for_status` for default 4xx/5xx mapping or
+//! inspect the response directly for custom handling.
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -144,10 +142,13 @@ fn header_map_to_wit(map: &HeaderMap) -> Vec<Header> {
     map.iter()
         .map(|(name, value)| Header {
             name: name.as_str().to_string(),
-            // HeaderValue is opaque bytes; non-visible-ASCII is rejected
-            // by `try_from(&str)` at insert time, so to_str cannot fail
-            // for any value that came in through this builder.
-            value: value.to_str().unwrap_or("").to_string(),
+            // HeaderValue is opaque bytes; `try_from(&str)` at insert
+            // time rejects non-visible-ASCII, so any value reaching
+            // this point is a valid &str by builder invariant.
+            value: value
+                .to_str()
+                .expect("HeaderValue inserted via builder is visible ASCII")
+                .to_string(),
         })
         .collect()
 }
@@ -156,6 +157,8 @@ fn wit_response_to_http(resp: HttpResponse) -> Result<Response<Vec<u8>>> {
     let status = StatusCode::from_u16(resp.status)
         .map_err(|e| ProviderError::internal(format!("invalid response status: {e}")))?;
     let mut builder = Response::builder().status(status);
+    // Drop malformed headers from the host rather than fail the whole
+    // response; status and body are the load-bearing fields.
     for hdr in &resp.headers {
         let (Ok(name), Ok(value)) = (
             HeaderName::try_from(&hdr.name),
@@ -170,35 +173,42 @@ fn wit_response_to_http(resp: HttpResponse) -> Result<Response<Vec<u8>>> {
         .map_err(|e| ProviderError::internal(format!("response builder: {e}")))
 }
 
-/// Default mapping from HTTP status to `ProviderError`. Providers that
-/// need custom mapping (rate-limit detection, retry signals from a body)
-/// should inspect the response directly instead.
+/// Default 4xx/5xx mapping to `ProviderError`.
 pub trait ResponseExt: Sized {
     fn error_for_status(self) -> Result<Self>;
+    /// Same check as `error_for_status` without consuming the response.
+    /// Use when custom mapping (rate-limit detection, retry signals)
+    /// needs to inspect the body or headers on the error path.
+    fn error_for_status_ref(&self) -> Result<()>;
 }
 
 impl ResponseExt for Response<Vec<u8>> {
     fn error_for_status(self) -> Result<Self> {
+        self.error_for_status_ref()?;
+        Ok(self)
+    }
+
+    fn error_for_status_ref(&self) -> Result<()> {
         let status = self.status();
         if status.is_client_error() || status.is_server_error() {
             Err(ProviderError::from_http_status(status.as_u16()))
         } else {
-            Ok(self)
+            Ok(())
         }
     }
 }
 
-/// Future that yields a single callout and resolves with a typed result.
-pub struct CalloutFuture<'cx, S, T> {
-    cx: &'cx Cx<S>,
-    callout: Option<Callout>,
-    extract: fn(CalloutResult) -> Result<T>,
-    ready: Option<Result<T>>,
+pub enum CalloutFuture<'cx, S, T> {
+    Pending {
+        cx: &'cx Cx<S>,
+        callout: Option<Callout>,
+        extract: fn(CalloutResult) -> Result<T>,
+    },
+    Ready(Option<Result<T>>),
 }
 
-// CalloutFuture has no self-referential or pin-projected state; all
-// fields are independently Unpin and we hold pin only for Future
-// signature compatibility.
+// No self-referential state; pinned only for Future signature
+// compatibility.
 impl<S, T> Unpin for CalloutFuture<'_, S, T> {}
 
 impl<'cx, S, T> CalloutFuture<'cx, S, T> {
@@ -207,21 +217,15 @@ impl<'cx, S, T> CalloutFuture<'cx, S, T> {
         callout: Callout,
         extract: fn(CalloutResult) -> Result<T>,
     ) -> Self {
-        Self {
+        Self::Pending {
             cx,
             callout: Some(callout),
             extract,
-            ready: None,
         }
     }
 
-    pub(crate) fn ready_error(cx: &'cx Cx<S>, error: ProviderError) -> Self {
-        Self {
-            cx,
-            callout: None,
-            extract: |_| unreachable!("ready future should not run extract"),
-            ready: Some(Err(error)),
-        }
+    pub(crate) fn ready_error(_cx: &'cx Cx<S>, error: ProviderError) -> Self {
+        Self::Ready(Some(Err(error)))
     }
 }
 
@@ -229,21 +233,26 @@ impl<S, T> Future for CalloutFuture<'_, S, T> {
     type Output = Result<T>;
 
     fn poll(mut self: Pin<&mut Self>, _ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(ready) = self.ready.take() {
-            return Poll::Ready(ready);
+        match &mut *self {
+            Self::Ready(slot) => match slot.take() {
+                Some(result) => Poll::Ready(result),
+                None => Poll::Pending,
+            },
+            Self::Pending {
+                cx,
+                callout,
+                extract,
+            } => {
+                if let Some(callout) = callout.take() {
+                    cx.push_yielded(callout);
+                    return Poll::Pending;
+                }
+                if let Some(result) = cx.pop_delivered() {
+                    return Poll::Ready(extract(result));
+                }
+                Poll::Pending
+            },
         }
-
-        if let Some(callout) = self.callout.take() {
-            self.cx.push_yielded(callout);
-            return Poll::Pending;
-        }
-
-        if let Some(result) = self.cx.pop_delivered() {
-            let extract = self.extract;
-            return Poll::Ready(extract(result));
-        }
-
-        Poll::Pending
     }
 }
 
@@ -430,6 +439,70 @@ mod tests {
         assert!(
             cx.take_yielded_callouts().is_empty(),
             "no callout should be issued when builder failed"
+        );
+    }
+
+    #[test]
+    fn invalid_header_value_surfaces_at_send() {
+        let state = Rc::new(RefCell::new(()));
+        let cx = Cx::new(1, state);
+
+        let mut fut = Box::pin(
+            cx.http()
+                .get("https://example.test/api")
+                .header("X-Bad", "value\nwith newline")
+                .send(),
+        );
+
+        assert!(matches!(drive_once(&mut fut), Poll::Ready(Err(_))));
+        assert!(cx.take_yielded_callouts().is_empty());
+    }
+
+    #[test]
+    fn json_serialization_failure_surfaces_at_send() {
+        struct AlwaysFails;
+        impl serde::Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("nope"))
+            }
+        }
+
+        let state = Rc::new(RefCell::new(()));
+        let cx = Cx::new(1, state);
+
+        let mut fut = Box::pin(
+            cx.http()
+                .post("https://example.test/api")
+                .json(&AlwaysFails)
+                .send(),
+        );
+
+        assert!(matches!(drive_once(&mut fut), Poll::Ready(Err(_))));
+        assert!(cx.take_yielded_callouts().is_empty());
+    }
+
+    #[test]
+    fn first_sticky_error_wins() {
+        let state = Rc::new(RefCell::new(()));
+        let cx = Cx::new(1, state);
+
+        let mut fut = Box::pin(
+            cx.http()
+                .post("https://example.test/api")
+                .header("invalid name with space", "v")
+                .header("X-Bad", "value\nwith newline")
+                .send(),
+        );
+
+        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
+            panic!("expected immediate error");
+        };
+        assert!(
+            error.to_string().contains("invalid header name"),
+            "expected first failure (header name), got {error}"
         );
     }
 }
