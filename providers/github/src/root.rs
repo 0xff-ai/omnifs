@@ -12,9 +12,7 @@ impl RootHandlers {
     fn root(_cx: &DirCx<'_, State>) -> Result<Projection> {
         // Root is not enumerable: GitHub has no "list all visible owners"
         // call the provider could back this with. Users navigate by path.
-        let mut projection = Projection::new();
-        projection.page(PageStatus::Exhaustive);
-        Ok(projection)
+        Ok(Projection::new())
     }
 
     #[dir("/{owner}")]

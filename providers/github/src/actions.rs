@@ -19,10 +19,10 @@ struct WorkflowRunsResponse {
     workflow_runs: Vec<Run>,
 }
 
-pub struct ActionsHandlers;
+pub struct ActionHandlers;
 
 #[handlers]
-impl ActionsHandlers {
+impl ActionHandlers {
     #[dir("/{owner}/{repo}/_actions/runs")]
     async fn runs(cx: &DirCx<'_, State>, owner: OwnerName, repo: RepoName) -> Result<Projection> {
         let repo_id = RepoId::new(&owner, &repo);

@@ -7,7 +7,7 @@ use crate::types::{OwnerName, RepoId, RepoName, StateFilter, User};
 use crate::{Result, State};
 
 #[derive(Clone, Debug, Deserialize)]
-struct Pr {
+struct Pull {
     number: u64,
     title: String,
     body: Option<String>,
@@ -15,66 +15,40 @@ struct Pr {
     user: Option<User>,
 }
 
-pub struct PullsHandlers;
+pub struct PullHandlers;
 
 #[handlers]
-impl PullsHandlers {
-    #[dir("/{owner}/{repo}/_prs/_open")]
-    async fn pr_list_open(
+impl PullHandlers {
+    #[dir("/{owner}/{repo}/_prs/{filter}")]
+    async fn pull_list_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        filter: StateFilter,
     ) -> Result<Projection> {
-        pr_list(cx, &owner, &repo, StateFilter::Open).await
+        pr_list(cx, &owner, &repo, filter).await
     }
 
-    #[dir("/{owner}/{repo}/_prs/_all")]
-    async fn pr_list_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-    ) -> Result<Projection> {
-        pr_list(cx, &owner, &repo, StateFilter::All).await
-    }
-
-    #[dir("/{owner}/{repo}/_prs/_open/{number}")]
+    #[dir("/{owner}/{repo}/_prs/{filter}/{number}")]
     async fn pr_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        _filter: StateFilter,
         number: u64,
     ) -> Result<Projection> {
         pr_projection(cx, &owner, &repo, number).await
     }
 
-    #[dir("/{owner}/{repo}/_prs/_all/{number}")]
-    async fn pr_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-        number: u64,
-    ) -> Result<Projection> {
-        pr_projection(cx, &owner, &repo, number).await
-    }
-
-    #[dir("/{owner}/{repo}/_prs/_open/{number}/comments")]
+    #[dir("/{owner}/{repo}/_prs/{filter}/{number}/comments")]
     async fn pr_comments_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        _filter: StateFilter,
         number: u64,
     ) -> Result<Projection> {
-        pr_comments_projection(cx, &owner, &repo, number, cx.intent()).await
-    }
-
-    #[dir("/{owner}/{repo}/_prs/_all/{number}/comments")]
-    async fn pr_comments_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-        number: u64,
-    ) -> Result<Projection> {
-        pr_comments_projection(cx, &owner, &repo, number, cx.intent()).await
+        pr_comments_projection(cx, &owner, &repo, number).await
     }
 
     #[file("/{owner}/{repo}/_prs/_open/{number}/diff")]
@@ -104,7 +78,7 @@ async fn pr_list(
     repo: &RepoName,
     filter: StateFilter,
 ) -> Result<Projection> {
-    let page = numbered::search::<Pr>(cx, owner, repo, "pr", filter).await?;
+    let page = numbered::search::<Pull>(cx, owner, repo, "pr", filter).await?;
     let mut projection = Projection::new();
     for pr in page.items {
         let base = format!("{owner}/{repo}/_prs/{}/{}/", filter.as_ref(), pr.number);
@@ -130,7 +104,7 @@ async fn pr_projection(
     number: u64,
 ) -> Result<Projection> {
     let repo_id = RepoId::new(owner, repo);
-    let pr: Pr = cx
+    let pr: Pull = cx
         .github_json(format!("/repos/{repo_id}/pulls/{number}"))
         .await?;
     let mut projection = Projection::new();
@@ -143,13 +117,12 @@ async fn pr_projection(
 }
 
 async fn pr_comments_projection(
-    cx: &Cx<State>,
+    cx: &DirCx<'_, State>,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,
-    intent: &DirIntent<'_>,
 ) -> Result<Projection> {
-    numbered::comments_projection(cx, owner, repo, number, intent).await
+    numbered::comments_projection(cx, owner, repo, number, cx.intent()).await
 }
 
 async fn pr_diff_file(

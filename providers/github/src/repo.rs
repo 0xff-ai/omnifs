@@ -30,6 +30,8 @@ impl RepoHandlers {
     #[dir("/{owner}/{repo}/_issues")]
     fn issues(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
+        projection.dir("_all");
+        projection.dir("_open");
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }
@@ -37,6 +39,8 @@ impl RepoHandlers {
     #[dir("/{owner}/{repo}/_prs")]
     fn prs(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
+        projection.dir("_all");
+        projection.dir("_open");
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }

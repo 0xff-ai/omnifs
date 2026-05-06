@@ -8,8 +8,8 @@ use crate::{Config, State};
     crate::root::RootHandlers,
     crate::repo::RepoHandlers,
     crate::issues::IssueHandlers,
-    crate::pulls::PullsHandlers,
-    crate::actions::ActionsHandlers,
+    crate::pulls::PullHandlers,
+    crate::actions::ActionHandlers,
 ))]
 impl GithubProvider {
     fn init(_config: Config) -> (State, ProviderInfo) {

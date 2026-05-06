@@ -19,62 +19,36 @@ pub struct IssueHandlers;
 
 #[handlers]
 impl IssueHandlers {
-    #[dir("/{owner}/{repo}/_issues/_open")]
+    #[dir("/{owner}/{repo}/_issues/{filter}")]
     async fn issue_list_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        filter: StateFilter,
     ) -> Result<Projection> {
-        issue_list(cx, &owner, &repo, StateFilter::Open).await
+        issue_list(cx, &owner, &repo, filter).await
     }
 
-    #[dir("/{owner}/{repo}/_issues/_all")]
-    async fn issue_list_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-    ) -> Result<Projection> {
-        issue_list(cx, &owner, &repo, StateFilter::All).await
-    }
-
-    #[dir("/{owner}/{repo}/_issues/_open/{number}")]
+    #[dir("/{owner}/{repo}/_issues/{filter}/{number}")]
     async fn issue_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        _filter: StateFilter,
         number: u64,
     ) -> Result<Projection> {
         issue_projection(cx, &owner, &repo, number).await
     }
 
-    #[dir("/{owner}/{repo}/_issues/_all/{number}")]
-    async fn issue_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-        number: u64,
-    ) -> Result<Projection> {
-        issue_projection(cx, &owner, &repo, number).await
-    }
-
-    #[dir("/{owner}/{repo}/_issues/_open/{number}/comments")]
+    #[dir("/{owner}/{repo}/_issues/{filter}/{number}/comments")]
     async fn issue_comments_open(
         cx: &DirCx<'_, State>,
         owner: OwnerName,
         repo: RepoName,
+        _filter: StateFilter,
         number: u64,
     ) -> Result<Projection> {
-        issue_comments_projection(cx, &owner, &repo, number, cx.intent()).await
-    }
-
-    #[dir("/{owner}/{repo}/_issues/_all/{number}/comments")]
-    async fn issue_comments_all(
-        cx: &DirCx<'_, State>,
-        owner: OwnerName,
-        repo: RepoName,
-        number: u64,
-    ) -> Result<Projection> {
-        issue_comments_projection(cx, &owner, &repo, number, cx.intent()).await
+        issue_comments_projection(cx, &owner, &repo, number).await
     }
 }
 
@@ -125,11 +99,10 @@ async fn issue_projection(
 }
 
 async fn issue_comments_projection(
-    cx: &Cx<State>,
+    cx: &DirCx<'_, State>,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,
-    intent: &DirIntent<'_>,
 ) -> Result<Projection> {
-    numbered::comments_projection(cx, owner, repo, number, intent).await
+    numbered::comments_projection(cx, owner, repo, number, cx.intent()).await
 }
