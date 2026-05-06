@@ -57,14 +57,10 @@ where
     let page_count = capped_total.div_ceil(100);
     let mut items = first_page.items;
 
-    if page_count > 1 {
-        let rest_requests = (2..=page_count)
-            .map(|page| cx.github_json::<SearchResults<T>>(format!("{base_path}&page={page}")));
-        let pages = join_all(rest_requests).await;
-        for page in pages {
-            let page_results = page?;
-            items.extend(page_results.items);
-        }
+    for page in 2..=page_count {
+        let page_results: SearchResults<T> =
+            cx.github_json(format!("{base_path}&page={page}")).await?;
+        items.extend(page_results.items);
     }
 
     Ok(SearchPage {
