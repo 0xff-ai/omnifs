@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "providers/github", "providers/dns", "providers/test"]
+members = ["crates/*", "providers/github", "providers/dns", "providers/ipfs", "providers/test"]
 default-members = ["crates/cli", "crates/host"]
 
 [workspace.dependencies]
