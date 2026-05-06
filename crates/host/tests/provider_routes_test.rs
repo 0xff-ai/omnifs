@@ -2,8 +2,8 @@ mod support;
 
 use omnifs_host::omnifs::provider::log::Host as ProviderLogHost;
 use omnifs_host::omnifs::provider::types::{
-    CalloutResult, EntryKind, ErrorKind, Host as ProviderHost, HttpResponse, ListResult, LogEntry,
-    LookupResult, OpResult, ProviderEvent, ProviderReturn,
+    Callout, CalloutResult, EntryKind, ErrorKind, Header, Host as ProviderHost, HttpRequest,
+    HttpResponse, ListResult, LogEntry, LookupResult, OpResult, ProviderEvent, ProviderReturn,
 };
 use support::{
     create_test_repo, make_engine, make_initialized_runtime, make_runtime_from_config,
@@ -172,6 +172,22 @@ impl GithubProviderSession {
 fn invoke_github_read_route(path: &str) -> ProviderReturn {
     let mut session = GithubProviderSession::new();
     session.read_file(1, path)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn expect_fetch(response: ProviderReturn) -> HttpRequest {
+    let ProviderReturn {
+        terminal: None,
+        callouts,
+        ..
+    } = &response
+    else {
+        panic!("expected callouts response, got {response:?}");
+    };
+    let [Callout::Fetch(request)] = callouts.as_slice() else {
+        panic!("expected fetch callout, got {response:?}");
+    };
+    request.clone()
 }
 
 #[test]
@@ -693,27 +709,16 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     }
 }
 
-#[tokio::test]
-async fn github_provider_routes_namespace_and_numeric_paths() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "plugin": "omnifs_provider_github.wasm",
-            "mount": "github",
-            "capabilities": {
-                "domains": ["api.github.com"]
-            }
-        }
-    "#,
-    );
+#[test]
+fn github_provider_routes_namespace_and_numeric_paths() {
+    let mut session = GithubProviderSession::new();
 
-    let repo_listing = harness
-        .runtime
-        .call_list_children("octocat/Hello-World")
-        .await
-        .unwrap();
+    let repo_listing = session.list_children(5, "octocat/Hello-World");
     match repo_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
             let mut names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -725,13 +730,33 @@ async fn github_provider_routes_namespace_and_numeric_paths() {
         other => panic!("expected repo namespace listing, got {other:?}"),
     }
 
-    let lookup = harness
-        .runtime
-        .call_lookup_child("octocat/Hello-World/_actions", "runs")
-        .await
-        .unwrap();
+    let runs_fetch = expect_fetch(session.lookup_child(6, "octocat/Hello-World/_actions", "runs"));
+    assert!(
+        runs_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/actions/runs?per_page=30"),
+        "unexpected action runs listing URL: {}",
+        runs_fetch.url
+    );
+
+    let lookup = session.resume(
+        6,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{
+                "workflow_runs": [
+                    {"id":123,"status":"completed","conclusion":"success"}
+                ]
+            }"#
+            .to_vec(),
+        })],
+    );
     match lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        ProviderReturn {
+            terminal: Some(OpResult::Lookup(LookupResult::Entry(result))),
+            ..
+        } => {
             let entry = &result.target;
             assert_eq!(entry.name, "runs");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -1229,33 +1254,57 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
     }
 }
 
-#[tokio::test]
-async fn github_owner_listing_tracks_browsed_repos() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "plugin": "omnifs_provider_github.wasm",
-            "mount": "github",
-            "capabilities": {
-                "domains": ["api.github.com"]
-            }
-        }
-    "#,
-    );
+#[test]
+fn github_owner_listing_tracks_browsed_repos() {
+    let mut session = GithubProviderSession::new();
 
-    let repo_listing = harness
-        .runtime
-        .call_list_children("octocat/Hello-World")
-        .await
-        .unwrap();
+    let repo_listing = session.list_children(44, "octocat/Hello-World");
     assert!(
-        matches!(repo_listing, OpResult::List(_)),
+        matches!(
+            repo_listing,
+            ProviderReturn {
+                terminal: Some(OpResult::List(_)),
+                ..
+            }
+        ),
         "expected repo listing, got {repo_listing:?}"
     );
 
-    let owner_listing = harness.runtime.call_list_children("octocat").await.unwrap();
+    let user_fetch = expect_fetch(session.list_children(45, "octocat"));
+    assert!(
+        user_fetch.url.ends_with("/users/octocat"),
+        "expected owner user lookup first, got {}",
+        user_fetch.url
+    );
+    let repos_fetch = expect_fetch(session.resume(
+        45,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
+        })],
+    ));
+    assert!(
+        repos_fetch
+            .url
+            .ends_with("/users/octocat/repos?per_page=100&sort=updated&page=1"),
+        "expected owner repo listing fetch, got {}",
+        repos_fetch.url
+    );
+
+    let owner_listing = session.resume(
+        45,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"[{"name":"Hello-World"}]"#.to_vec(),
+        })],
+    );
     match owner_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1270,31 +1319,35 @@ async fn github_owner_listing_tracks_browsed_repos() {
     }
 }
 
-#[tokio::test]
-async fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
-    let harness = make_initialized_runtime(
-        r#"
-        {
-            "plugin": "omnifs_provider_github.wasm",
-            "mount": "github",
-            "capabilities": {
-                "domains": ["api.github.com"]
-            }
-        }
-    "#,
-    );
+#[test]
+fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
+    let mut session = GithubProviderSession::new();
 
-    for path in ["zeta/zulu", "open/source", "alpha/app", "openai/api"] {
-        let repo_listing = harness.runtime.call_list_children(path).await.unwrap();
+    for (id, path) in [
+        (46, "zeta/zulu"),
+        (47, "open/source"),
+        (48, "alpha/app"),
+        (49, "openai/api"),
+    ] {
+        let repo_listing = session.list_children(id, path);
         assert!(
-            matches!(repo_listing, OpResult::List(_)),
+            matches!(
+                repo_listing,
+                ProviderReturn {
+                    terminal: Some(OpResult::List(_)),
+                    ..
+                }
+            ),
             "expected repo listing for {path}, got {repo_listing:?}"
         );
     }
 
-    let root_listing = harness.runtime.call_list_children("").await.unwrap();
+    let root_listing = session.list_children(50, "");
     match root_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1305,9 +1358,41 @@ async fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         other => panic!("expected root listing, got {other:?}"),
     }
 
-    let owner_listing = harness.runtime.call_list_children("open").await.unwrap();
+    let user_fetch = expect_fetch(session.list_children(51, "open"));
+    assert!(
+        user_fetch.url.ends_with("/users/open"),
+        "expected owner user lookup first, got {}",
+        user_fetch.url
+    );
+    let repos_fetch = expect_fetch(session.resume(
+        51,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"open","type":"User"}"#.to_vec(),
+        })],
+    ));
+    assert!(
+        repos_fetch
+            .url
+            .ends_with("/users/open/repos?per_page=100&sort=updated&page=1"),
+        "expected owner repo listing fetch, got {}",
+        repos_fetch.url
+    );
+
+    let owner_listing = session.resume(
+        51,
+        vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: b"[]".to_vec(),
+        })],
+    );
     match owner_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ProviderReturn {
+            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+            ..
+        } => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
