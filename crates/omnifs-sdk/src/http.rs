@@ -207,8 +207,9 @@ pub enum CalloutFuture<'cx, S, T> {
     Ready(Option<Result<T>>),
 }
 
-// No self-referential state; pinned only for Future signature
-// compatibility.
+// `Ready` carries `T`, so the auto-derive would gate `Unpin` on
+// `T: Unpin`; this future never relies on structural pinning of any
+// variant field, so the manual impl is sound regardless of `T`.
 impl<S, T> Unpin for CalloutFuture<'_, S, T> {}
 
 impl<'cx, S, T> CalloutFuture<'cx, S, T> {
@@ -500,6 +501,7 @@ mod tests {
         let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
             panic!("expected immediate error");
         };
+        assert_eq!(error.kind(), crate::error::ProviderErrorKind::InvalidInput);
         assert!(
             error.to_string().contains("invalid header name"),
             "expected first failure (header name), got {error}"
