@@ -78,6 +78,32 @@ mod rest_handlers {
     }
 }
 
+mod ambiguous_handlers {
+    use super::*;
+
+    pub struct AmbiguousHandlers;
+
+    // Dir+file co-existence on identical rest-captured templates: the
+    // child's kind (file vs directory) is content-determined, so the host
+    // must defer to the parent dir's projection verdict at lookup time.
+    #[omnifs_sdk::handlers]
+    impl AmbiguousHandlers {
+        #[omnifs_sdk::dir("/tree/{*path}")]
+        async fn tree_dir(_cx: &DirCx<'_, State>, _path: String) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.dir("d");
+            projection.file_with_stat("f.txt", FileStat::placeholder());
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+
+        #[omnifs_sdk::file("/tree/{*path}")]
+        async fn tree_file(_cx: &Cx<State>, path: String) -> Result<FileContent> {
+            Ok(FileContent::bytes(format!("file at {path}").into_bytes()))
+        }
+    }
+}
+
 #[omnifs_sdk::provider(mounts(
     crate::root_handlers::RootHandlers,
     crate::hello_handlers::HelloHandlers,
@@ -254,6 +280,71 @@ fn call_rest<'a>(
     _path: Box<dyn std::any::Any>,
 ) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
     Box::pin(async { Ok(FileContent::bytes(b"rest".to_vec())) })
+}
+
+#[tokio::test]
+async fn ambiguous_dir_file_routes_via_parent_projection() {
+    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::new();
+    root_handlers::RootHandlers::mount(&mut registry);
+    ambiguous_handlers::AmbiguousHandlers::mount(&mut registry);
+    // The validator must accept dir+file on identical templates.
+    registry.validate().unwrap();
+
+    let cx = Cx::new(11, Rc::new(RefCell::new(State)));
+
+    // lookup of "f.txt" under "/tree/foo" — the parent dir's projection
+    // says "f.txt" is a file, so the lookup target is a file.
+    let lookup = registry
+        .lookup_child(&cx, "/tree/foo", "f.txt")
+        .await
+        .unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "f.txt");
+    assert_eq!(entry.target().kind(), EntryKind::File);
+
+    // lookup of "d" under "/tree/foo" — the parent's projection says
+    // "d" is a directory.
+    let lookup = registry.lookup_child(&cx, "/tree/foo", "d").await.unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "d");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+
+    // read_file dispatches to the file handler with the rest-captured tail.
+    let content = registry.read_file(&cx, "/tree/foo/f.txt").await.unwrap();
+    assert_eq!(content.content(), b"file at foo/f.txt");
+
+    // list_children dispatches to the dir handler.
+    let listing = registry.list_children(&cx, "/tree/foo").await.unwrap();
+    let List::Entries(listing) = listing else {
+        panic!("expected entries, got subtree");
+    };
+    let names: Vec<&str> = listing.entries().iter().map(|e| e.name()).collect();
+    assert!(names.contains(&"d"));
+    assert!(names.contains(&"f.txt"));
+}
+
+#[test]
+fn registry_rejects_subtree_alongside_dir_or_file_on_same_template() {
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry.add_dir("/handoff", parse_unit, call_dir).unwrap();
+    registry
+        .add_subtree("/handoff", parse_unit, call_subtree)
+        .unwrap();
+    let error = registry.validate().unwrap_err();
+    assert!(error.message().contains("conflicts with a subtree"));
+}
+
+fn call_subtree<'a>(
+    _cx: &'a Cx<State>,
+    _path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, SubtreeRef> {
+    Box::pin(async { Ok(SubtreeRef::new(1)) })
 }
 
 #[tokio::test]
