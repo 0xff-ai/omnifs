@@ -28,7 +28,7 @@ pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
     pub(crate) path: String,
     pub(crate) kind: EntryKind,
-    /// `None`: stat reports 0 and the file opens with direct_io until a
+    /// `None`: stat reports 0 and the file opens with `direct_io` until a
     /// read resolves the length; the inode is then updated and the
     /// kernel invalidated so subsequent stats reflect the truth.
     pub(crate) size: Option<u64>,
