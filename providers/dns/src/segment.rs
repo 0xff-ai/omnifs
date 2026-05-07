@@ -18,16 +18,12 @@ pub struct SegmentHandlers;
 #[handlers]
 impl SegmentHandlers {
     #[dir("/{domain}")]
-    fn domain_dir(_cx: &DirCx<'_, State>, _domain: DomainName) -> Result<Projection> {
+    fn domain_dir(_domain: DomainName) -> Result<Projection> {
         Ok(record_projection())
     }
 
     #[dir("/@{resolver}/{domain}")]
-    fn resolver_domain_dir(
-        _cx: &DirCx<'_, State>,
-        _resolver: ResolverName,
-        _domain: DomainName,
-    ) -> Result<Projection> {
+    fn resolver_domain_dir(_resolver: ResolverName, _domain: DomainName) -> Result<Projection> {
         Ok(record_projection())
     }
 

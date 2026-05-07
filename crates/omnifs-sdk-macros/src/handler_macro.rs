@@ -97,12 +97,14 @@ pub fn expand_handler(
     args: HandlerArgs,
     func: ItemFn,
 ) -> syn::Result<TokenStream2> {
+    let default_state: Type = parse_quote!(State);
     let handler_items = expand_handler_items(
         kind,
         &args,
         &func.sig.ident,
         &func.sig,
         &HandlerTarget::Free,
+        &default_state,
     )?;
     Ok(quote! {
         #func
@@ -116,9 +118,12 @@ pub fn expand_handler_items(
     fn_name: &syn::Ident,
     sig: &Signature,
     target: &HandlerTarget,
+    default_state: &Type,
 ) -> syn::Result<TokenStream2> {
     let template = args.template.clone();
     let HandlerSignature { state_ty, captures } = parse_signature(kind, sig)?;
+    let has_cx = state_ty.is_some();
+    let state_ty = state_ty.unwrap_or_else(|| default_state.clone());
     let pattern = PathPattern::parse(&template.value())
         .map_err(|error| syn::Error::new(template.span(), error.message()))?;
     let template_captures = capture_names(pattern.segments());
@@ -257,26 +262,49 @@ pub fn expand_handler_items(
         HandlerTarget::Free => quote! { #fn_name },
         HandlerTarget::ImplOf(ty) => quote! { <#ty>::#fn_name },
     };
+    let cx_param = if has_cx {
+        format_ident!("__omnifs_cx")
+    } else {
+        format_ident!("_omnifs_cx")
+    };
+    let intent_param = if has_cx {
+        format_ident!("__omnifs_intent")
+    } else {
+        format_ident!("_omnifs_intent")
+    };
+    let no_cx_invoke = quote! { #call_target(#(#source_order_idents,)*) #await_tokens };
+    let dir_invoke = if has_cx {
+        quote! {
+            let __omnifs_dir_cx = omnifs_sdk::handler::DirCx::new(__omnifs_cx.clone(), __omnifs_intent);
+            #call_target(&__omnifs_dir_cx, #(#source_order_idents,)*) #await_tokens
+        }
+    } else {
+        no_cx_invoke.clone()
+    };
+    let simple_invoke = if has_cx {
+        quote! { #call_target(__omnifs_cx, #(#source_order_idents,)*) #await_tokens }
+    } else {
+        no_cx_invoke
+    };
     let call_body = match kind {
         HandlerKind::Dir => quote! {
             fn #call_name<'a>(
-                __omnifs_cx: &'a omnifs_sdk::Cx<#state_ty>,
+                #cx_param: &'a omnifs_sdk::Cx<#state_ty>,
                 __omnifs_path: Box<dyn std::any::Any>,
-                __omnifs_intent: omnifs_sdk::handler::DirIntent<'a>,
+                #intent_param: omnifs_sdk::handler::DirIntent,
             ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::Projection> {
                 let __omnifs_path: Box<#path_struct> = __omnifs_path
                     .downcast()
                     .unwrap_or_else(|_| panic!("dir handler path type mismatch for {}", stringify!(#fn_name)));
                 let #path_struct { #(#destructure_fields,)* .. } = *__omnifs_path;
                 Box::pin(async move {
-                    let __omnifs_dir_cx = omnifs_sdk::handler::DirCx::new(__omnifs_cx, __omnifs_intent);
-                    #call_target(&__omnifs_dir_cx, #(#source_order_idents,)*) #await_tokens
+                    #dir_invoke
                 })
             }
         },
         HandlerKind::File => quote! {
             fn #call_name<'a>(
-                __omnifs_cx: &'a omnifs_sdk::Cx<#state_ty>,
+                #cx_param: &'a omnifs_sdk::Cx<#state_ty>,
                 __omnifs_path: Box<dyn std::any::Any>,
             ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::FileContent> {
                 let __omnifs_path: Box<#path_struct> = __omnifs_path
@@ -284,13 +312,13 @@ pub fn expand_handler_items(
                     .unwrap_or_else(|_| panic!("file handler path type mismatch for {}", stringify!(#fn_name)));
                 let #path_struct { #(#destructure_fields,)* .. } = *__omnifs_path;
                 Box::pin(async move {
-                    #call_target(__omnifs_cx, #(#source_order_idents,)*) #await_tokens
+                    #simple_invoke
                 })
             }
         },
         HandlerKind::Subtree => quote! {
             fn #call_name<'a>(
-                __omnifs_cx: &'a omnifs_sdk::Cx<#state_ty>,
+                #cx_param: &'a omnifs_sdk::Cx<#state_ty>,
                 __omnifs_path: Box<dyn std::any::Any>,
             ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::SubtreeRef> {
                 let __omnifs_path: Box<#path_struct> = __omnifs_path
@@ -298,7 +326,7 @@ pub fn expand_handler_items(
                     .unwrap_or_else(|_| panic!("subtree handler path type mismatch for {}", stringify!(#fn_name)));
                 let #path_struct { #(#destructure_fields,)* .. } = *__omnifs_path;
                 Box::pin(async move {
-                    #call_target(__omnifs_cx, #(#source_order_idents,)*) #await_tokens
+                    #simple_invoke
                 })
             }
         },
@@ -378,29 +406,30 @@ pub fn expand_handlers(args: &HandlersArgs, mut input: ItemImpl) -> syn::Result<
         let attr = method.attrs.remove(index);
         let handler_args: HandlerArgs = attr.parse_args()?;
         let signature = parse_signature(kind, &method.sig)?;
-        let item_state = signature.state_ty.clone();
-        if has_explicit_state && item_state != explicit_state {
-            return Err(syn::Error::new(
-                method.sig.ident.span(),
-                format!(
-                    "handler state `{}` does not match `#[handlers(state = ...)]` `{}`",
-                    quote!(#item_state),
-                    quote!(#explicit_state),
-                ),
-            ));
-        }
-        if let Some(expected_state) = state_ty.as_ref() {
-            if item_state != *expected_state {
+        if let Some(item_state) = signature.state_ty.as_ref() {
+            if has_explicit_state && *item_state != explicit_state {
                 return Err(syn::Error::new(
                     method.sig.ident.span(),
                     format!(
-                        "all handler state types must match; expected `{}`",
-                        quote!(#expected_state),
+                        "handler state `{}` does not match `#[handlers(state = ...)]` `{}`",
+                        quote!(#item_state),
+                        quote!(#explicit_state),
                     ),
                 ));
             }
-        } else {
-            state_ty = Some(item_state.clone());
+            if let Some(expected_state) = state_ty.as_ref() {
+                if *item_state != *expected_state {
+                    return Err(syn::Error::new(
+                        method.sig.ident.span(),
+                        format!(
+                            "all handler state types must match; expected `{}`",
+                            quote!(#expected_state),
+                        ),
+                    ));
+                }
+            } else {
+                state_ty = Some(item_state.clone());
+            }
         }
         let generated = expand_handler_items(
             kind,
@@ -408,6 +437,7 @@ pub fn expand_handlers(args: &HandlersArgs, mut input: ItemImpl) -> syn::Result<
             &method.sig.ident,
             &method.sig,
             &HandlerTarget::ImplOf(self_ty.clone()),
+            &explicit_state,
         )?;
         generated_items.push(generated);
         register_calls.push(format_ident!("__omnifs_mount_{}", method.sig.ident));
@@ -435,28 +465,28 @@ pub fn expand_handlers(args: &HandlersArgs, mut input: ItemImpl) -> syn::Result<
 }
 
 struct HandlerSignature {
-    state_ty: Type,
+    state_ty: Option<Type>,
     captures: Vec<(String, Type)>,
 }
 
 fn parse_signature(kind: HandlerKind, sig: &Signature) -> syn::Result<HandlerSignature> {
-    let mut iter = sig.inputs.iter();
-    let Some(first) = iter.next() else {
-        return Err(syn::Error::new(
-            sig.span(),
-            format!(
-                "handler must take a context argument (`&{}<State>`)",
-                kind.ctx_ident()
-            ),
-        ));
+    let mut iter = sig.inputs.iter().peekable();
+    let state_ty = match iter.peek() {
+        Some(FnArg::Receiver(receiver)) => {
+            return Err(syn::Error::new(
+                receiver.span(),
+                "handler functions must not take a `self` parameter",
+            ));
+        },
+        Some(arg) if is_cx_arg(arg) => {
+            let first = iter.next().expect("peeked Some");
+            let FnArg::Typed(PatType { ty, .. }) = first else {
+                unreachable!("is_cx_arg returns false for receivers");
+            };
+            Some(extract_state_ty(kind, ty)?)
+        },
+        _ => None,
     };
-    let FnArg::Typed(PatType { ty, .. }) = first else {
-        return Err(syn::Error::new(
-            first.span(),
-            format!("handler context must be `&{}<State>`", kind.ctx_ident()),
-        ));
-    };
-    let state_ty = extract_state_ty(kind, ty)?;
 
     let mut captures = Vec::new();
     for arg in iter {
@@ -482,6 +512,22 @@ fn parse_signature(kind: HandlerKind, sig: &Signature) -> syn::Result<HandlerSig
     }
 
     Ok(HandlerSignature { state_ty, captures })
+}
+
+fn is_cx_arg(arg: &FnArg) -> bool {
+    let FnArg::Typed(PatType { ty, .. }) = arg else {
+        return false;
+    };
+    let Type::Reference(r) = &**ty else {
+        return false;
+    };
+    let Type::Path(tp) = &*r.elem else {
+        return false;
+    };
+    let Some(segment) = tp.path.segments.last() else {
+        return false;
+    };
+    matches!(segment.ident.to_string().as_str(), "Cx" | "DirCx")
 }
 
 fn extract_state_ty(kind: HandlerKind, ty: &Type) -> syn::Result<Type> {

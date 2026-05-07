@@ -8,7 +8,7 @@ pub struct RepoHandlers;
 #[handlers]
 impl RepoHandlers {
     #[dir("/{owner}/{repo}")]
-    fn repo(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+    fn repo(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
@@ -28,7 +28,7 @@ impl RepoHandlers {
     }
 
     #[dir("/{owner}/{repo}/_issues")]
-    fn issues(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+    fn issues(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
         projection.dir("_all");
         projection.dir("_open");
@@ -37,7 +37,7 @@ impl RepoHandlers {
     }
 
     #[dir("/{owner}/{repo}/_prs")]
-    fn prs(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+    fn prs(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
         projection.dir("_all");
         projection.dir("_open");
@@ -46,7 +46,7 @@ impl RepoHandlers {
     }
 
     #[dir("/{owner}/{repo}/_actions")]
-    fn actions(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+    fn actions(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
         projection.page(PageStatus::Exhaustive);
         Ok(projection)

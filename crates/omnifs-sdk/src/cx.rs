@@ -21,9 +21,18 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Execution context for async provider handlers.
-#[derive(Clone)]
 pub struct Cx<S> {
     inner: Rc<CxInner<S>>,
+}
+
+// Manual `Clone` to avoid the `S: Clone` bound that `#[derive(Clone)]` would
+// add. `Cx` clones via `Rc`, so `S` need not be `Clone`.
+impl<S> Clone for Cx<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
 }
 
 struct CxInner<S> {

@@ -32,7 +32,7 @@ pub struct IssueHandlers;
 impl IssueHandlers {
     #[dir("/{owner}/{repo}/_issues/{filter}")]
     async fn issue_list_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         filter: StateFilter,
@@ -42,7 +42,7 @@ impl IssueHandlers {
 
     #[dir("/{owner}/{repo}/_issues/{filter}/{number}")]
     async fn issue_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         _filter: StateFilter,
@@ -53,7 +53,7 @@ impl IssueHandlers {
 
     #[dir("/{owner}/{repo}/_issues/{filter}/{number}/comments")]
     async fn issue_comments_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         _filter: StateFilter,
@@ -137,7 +137,7 @@ async fn issue_projection(
 }
 
 async fn issue_comments_projection(
-    cx: &DirCx<'_, State>,
+    cx: &DirCx<State>,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,
