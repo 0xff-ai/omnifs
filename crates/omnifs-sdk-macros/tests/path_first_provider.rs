@@ -347,6 +347,114 @@ fn call_subtree<'a>(
     Box::pin(async { Ok(SubtreeRef::new(1)) })
 }
 
+// Implicit prefix dirs: a path that is a strict prefix of some registered
+// route but has no explicit handler should still resolve as a directory.
+// Listing it must mark `exhaustive=false` whenever a dynamic-capture route
+// extends past it, because such routes can match names outside any static
+// enumeration. This is the structural fix for the cache-poisoning bug
+// where an exhaustive-empty parent listing turns dynamic-capture child
+// lookups into ENOENT before the provider is consulted.
+#[tokio::test]
+async fn implicit_prefix_dir_lookup_resolves_without_explicit_handler() {
+    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    // Only deeper routes; no handler at "/" or "/categories".
+    registry
+        .add_dir("/categories/{category}", parse_path_only, call_dir)
+        .unwrap();
+    registry
+        .add_dir("/categories/{category}/{ym}", parse_path_only, call_dir)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(13, Rc::new(RefCell::new(State)));
+
+    // Listing the implicit root: depth-1 segment is literal `categories`.
+    // No dynamic captures at depth 1 → exhaustive.
+    let list = registry.list_children(&cx, "/").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    let names: Vec<&str> = listing.entries().iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["categories"]);
+    assert!(listing.exhaustive());
+
+    // Listing the implicit `/categories`: only dynamic captures below it,
+    // so the listing has no entries AND must NOT claim exhaustive — that
+    // claim is what poisons the host's negative cache.
+    let list = registry.list_children(&cx, "/categories").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    assert!(listing.entries().is_empty());
+    assert!(
+        !listing.exhaustive(),
+        "implicit prefix dir with dynamic-capture children must not claim exhaustive"
+    );
+
+    // lookup_child on implicit prefix dir returns a dir entry whose
+    // `exhaustive` flag also reflects the dynamic-capture reality.
+    let lookup = registry
+        .lookup_child(&cx, "/", "categories")
+        .await
+        .unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "categories");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+    // /'s siblings are exhaustive (no dynamic captures at depth 1).
+    assert!(entry.is_exhaustive());
+
+    // Lookup of a dynamic-capture child under the implicit prefix dir
+    // dispatches to the depth-2 dir handler — even with no explicit
+    // /categories handler.
+    let lookup = registry
+        .lookup_child(&cx, "/categories", "cs.AI")
+        .await
+        .unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "cs.AI");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+}
+
+#[tokio::test]
+async fn implicit_prefix_dir_with_only_capture_root_lookup_falls_through_to_dynamic() {
+    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    // Mirrors the github case: every route starts with a capture at
+    // depth 1, no explicit `/` handler. The implicit `/` is listed as
+    // empty + non-exhaustive, and `lookup("/", any)` dispatches into
+    // the dynamic-capture handler.
+    registry
+        .add_dir("/{owner}", parse_path_only, call_dir)
+        .unwrap();
+    registry
+        .add_dir("/{owner}/{repo}", parse_path_only, call_dir)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(15, Rc::new(RefCell::new(State)));
+
+    let list = registry.list_children(&cx, "/").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    assert!(listing.entries().is_empty());
+    assert!(!listing.exhaustive());
+
+    let lookup = registry.lookup_child(&cx, "/", "raulk").await.unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "raulk");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+}
+
 #[tokio::test]
 async fn registry_prefers_exact_and_prefix_over_rest() {
     let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();

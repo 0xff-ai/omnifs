@@ -5,7 +5,7 @@ use crate::browse::{
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use omnifs_mount_schema::PathPattern;
+use omnifs_mount_schema::{PathPattern, PathSegment};
 use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
@@ -462,13 +462,20 @@ impl<S> MountRegistry<S> {
 
             if let Some(target) = self.exact_entry_for_path(&child_abs) {
                 let siblings = self.static_entries_for_parent(&parent_abs);
+                let exhaustive = !self.has_capture_child_under(&parent_abs);
                 return Ok(BrowseLookup::entry(target)
                     .with_siblings(siblings)
-                    .exhaustive(true));
+                    .exhaustive(exhaustive));
             }
         }
 
         let Some((route, parsed)) = self.match_dir(&parent_abs) else {
+            // No explicit parent dir handler. If the parent is an implicit
+            // prefix dir, the only resolvable children are those that
+            // either appear as static entries derived from sibling routes
+            // (handled above via `exact_entry_for_path`) or match a
+            // dynamic-capture route at this depth (handled above via
+            // `match_dir(&child_abs)`). Anything else is genuinely absent.
             return Ok(BrowseLookup::not_found());
         };
         let projection = (route.call)(
@@ -500,8 +507,16 @@ impl<S> MountRegistry<S> {
             return projection_listing(&projection, static_entries).map(BrowseList::entries);
         }
 
-        if !static_entries.is_empty() {
-            return Ok(BrowseList::entries(BrowseListing::complete(static_entries)));
+        // Implicit prefix dir: synthesize a listing from sibling routes.
+        // Authoritatively exhaustive only when no dynamic-capture child
+        // route can produce names outside the static enumeration.
+        if self.is_implicit_prefix_dir(&abs) {
+            let listing = if self.has_capture_child_under(&abs) {
+                BrowseListing::partial(static_entries)
+            } else {
+                BrowseListing::complete(static_entries)
+            };
+            return Ok(BrowseList::entries(listing));
         }
 
         if self.match_file(&abs).is_some() {
@@ -554,21 +569,101 @@ impl<S> MountRegistry<S> {
             let name = child_name(absolute_path)?;
             return Some(BrowseEntry::file(name, Size::Unknown));
         }
+        if self.is_implicit_prefix_dir(absolute_path) {
+            let name = child_name(absolute_path)?;
+            return Some(BrowseEntry::dir(name));
+        }
         None
     }
 
     fn static_entries_for_parent(&self, absolute_parent: &str) -> Vec<BrowseEntry> {
+        let Some(parent_segments) = split_path_segments(absolute_parent) else {
+            return Vec::new();
+        };
+        let parent_depth = parent_segments.len();
+
         let mut entries = std::collections::BTreeMap::<String, BrowseEntry>::new();
+        let mut add_from = |pattern: &PathPattern, kind: BrowseEntryKind| {
+            let route_segments = pattern.segments();
+            if route_segments.len() <= parent_depth {
+                return;
+            }
+            if !pattern_prefix_matches_segments(pattern, &parent_segments) {
+                return;
+            }
+            let PathSegment::Literal(name) = &route_segments[parent_depth] else {
+                return;
+            };
+            // A route extending past the immediate child position implies
+            // the child is a directory regardless of its terminal kind.
+            // Files only contribute as files when the route ends exactly
+            // at the child position.
+            let extends_below = route_segments.len() > parent_depth + 1;
+            entries.entry(name.clone()).or_insert_with(|| {
+                if extends_below || matches!(kind, BrowseEntryKind::Directory) {
+                    BrowseEntry::dir(name.as_str())
+                } else {
+                    BrowseEntry::file(name.as_str(), Size::Unknown)
+                }
+            });
+        };
+
         for route in &self.dirs {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, true);
+            add_from(&route.decl.pattern, BrowseEntryKind::Directory);
         }
         for route in &self.files {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, false);
+            add_from(&route.decl.pattern, BrowseEntryKind::File);
         }
         for route in &self.subtrees {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, true);
+            add_from(&route.decl.pattern, BrowseEntryKind::Directory);
         }
         entries.into_values().collect()
+    }
+
+    /// True iff `path` has no explicit handler but at least one registered
+    /// route is a strict prefix-extension of `path`. Such paths exist as
+    /// implicit directory nodes in the tree projected by the route table.
+    fn is_implicit_prefix_dir(&self, absolute_path: &str) -> bool {
+        if self.match_dir(absolute_path).is_some()
+            || self.match_file(absolute_path).is_some()
+            || self.match_subtree(absolute_path).is_some()
+        {
+            return false;
+        }
+        let Some(path_segments) = split_path_segments(absolute_path) else {
+            return false;
+        };
+        self.any_route(|pattern| {
+            pattern.segments().len() > path_segments.len()
+                && pattern_prefix_matches_segments(pattern, &path_segments)
+        })
+    }
+
+    /// True iff some registered route extends past `absolute_parent` and
+    /// the segment immediately below the parent is a capture or rest.
+    /// Used to decide whether a listing of `absolute_parent` can be
+    /// authoritatively exhaustive: dynamic-capture children at depth+1
+    /// can match names not enumerable from the route table.
+    fn has_capture_child_under(&self, absolute_parent: &str) -> bool {
+        let Some(parent_segments) = split_path_segments(absolute_parent) else {
+            return false;
+        };
+        let parent_depth = parent_segments.len();
+        self.any_route(|pattern| {
+            let segments = pattern.segments();
+            segments.len() > parent_depth
+                && pattern_prefix_matches_segments(pattern, &parent_segments)
+                && matches!(
+                    segments[parent_depth],
+                    PathSegment::Capture { .. } | PathSegment::Rest { .. }
+                )
+        })
+    }
+
+    fn any_route(&self, predicate: impl Fn(&PathPattern) -> bool) -> bool {
+        self.dirs.iter().any(|r| predicate(&r.decl.pattern))
+            || self.files.iter().any(|r| predicate(&r.decl.pattern))
+            || self.subtrees.iter().any(|r| predicate(&r.decl.pattern))
     }
 
     fn reserved_static_names(&self, absolute_parent: &str) -> std::collections::BTreeSet<String> {
@@ -749,25 +844,52 @@ fn projection_exact_lookup<S>(
         .exhaustive(exhaustive))
 }
 
-fn add_static_entry(
-    entries: &mut std::collections::BTreeMap<String, BrowseEntry>,
-    decl: &RouteDecl,
-    absolute_parent: &str,
-    is_dir: bool,
-) {
-    if !decl.pattern.matches_parent_path(absolute_parent) {
-        return;
+fn split_path_segments(path: &str) -> Option<Vec<&str>> {
+    if path == "/" {
+        return Some(Vec::new());
     }
-    let Some(name) = decl.pattern.static_child() else {
-        return;
-    };
-    entries.entry(name.to_string()).or_insert_with(|| {
-        if is_dir {
-            BrowseEntry::dir(name)
-        } else {
-            BrowseEntry::file(name, Size::Unknown)
+    if !path.starts_with('/') || path.ends_with('/') {
+        return None;
+    }
+    Some(path.split('/').skip(1).collect())
+}
+
+/// True iff the first `parent_segments.len()` segments of `pattern`
+/// are compatible with `parent_segments` (literal-equals-literal,
+/// capture-matches-anything subject to its prefix constraint, with
+/// rest segments rejected since they only appear at the end).
+fn pattern_prefix_matches_segments(pattern: &PathPattern, parent_segments: &[&str]) -> bool {
+    let route_segments = pattern.segments();
+    if parent_segments.len() > route_segments.len() {
+        return false;
+    }
+    for (parent_seg, route_seg) in parent_segments.iter().zip(route_segments.iter()) {
+        match route_seg {
+            PathSegment::Literal(name) => {
+                if name != parent_seg {
+                    return false;
+                }
+            },
+            PathSegment::Capture { prefix: None, .. } => {
+                if parent_seg.is_empty() {
+                    return false;
+                }
+            },
+            PathSegment::Capture {
+                prefix: Some(prefix),
+                ..
+            } => {
+                if parent_seg
+                    .strip_prefix(prefix.as_str())
+                    .is_none_or(str::is_empty)
+                {
+                    return false;
+                }
+            },
+            PathSegment::Rest { .. } => return false,
         }
-    });
+    }
+    true
 }
 
 trait RegisteredRoute {

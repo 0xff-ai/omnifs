@@ -8,12 +8,12 @@ pub struct RootHandlers;
 
 #[handlers]
 impl RootHandlers {
-    #[dir("/")]
-    fn root() -> Result<Projection> {
-        // Root is not enumerable: GitHub has no "list all visible owners"
-        // call the provider could back this with. Users navigate by path.
-        Ok(Projection::new())
-    }
+    // No `/` handler: GitHub has no "list all visible owners" API to back
+    // it with, so the root is just an implicit prefix dir over the
+    // dynamic-capture `/{owner}` route below. The SDK derives that
+    // automatically — and crucially leaves the listing non-exhaustive,
+    // so `lookup("/", "raulk")` falls through to the capture handler
+    // instead of being short-circuited to ENOENT by the host's cache.
 
     #[dir("/{owner}")]
     async fn repos(cx: &DirCx<State>, owner: OwnerName) -> Result<Projection> {
