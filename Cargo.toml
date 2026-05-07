@@ -15,7 +15,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/raulk/omnifs"
 homepage = "https://github.com/raulk/omnifs"
-readme = "README.md"
 
 [workspace.dependencies]
 wasmtime = { version = "43", features = ["component-model", "runtime"] }
