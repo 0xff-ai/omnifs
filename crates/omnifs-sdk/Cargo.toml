@@ -1,13 +1,18 @@
 [package]
 name = "omnifs-sdk"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "SDK for building omnifs providers"
-license = "MIT OR Apache-2.0"
+categories = ["filesystem", "wasm", "development-tools"]
+keywords = ["omnifs", "wasm", "wit", "sdk", "fuse"]
 
 [dependencies]
-omnifs-mount-schema = { path = "../omnifs-mount-schema" }
-omnifs-sdk-macros = { path = "../omnifs-sdk-macros" }
+omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
+omnifs-sdk-macros = { version = "0.1.0", path = "../omnifs-sdk-macros" }
 wit-bindgen = "0.41"
 lru = "0.16"
 hashbrown = { workspace = true }
