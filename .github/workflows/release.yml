@@ -317,14 +317,11 @@ jobs:
       - name: Build WASM provider components
         run: |
           set -euo pipefail
-          cargo build --target wasm32-wasip2 --release \
-            -p omnifs-provider-arxiv \
-            -p omnifs-provider-github \
-            -p omnifs-provider-dns
+          # `omnifs-provider-*` glob picks up every publishable provider
+          # crate. test-provider is excluded by name on purpose.
+          cargo build --target wasm32-wasip2 --release -p 'omnifs-provider-*'
           mkdir -p dist-wasm
-          cp target/wasm32-wasip2/release/omnifs_provider_arxiv.wasm dist-wasm/
-          cp target/wasm32-wasip2/release/omnifs_provider_github.wasm dist-wasm/
-          cp target/wasm32-wasip2/release/omnifs_provider_dns.wasm dist-wasm/
+          cp target/wasm32-wasip2/release/omnifs_provider_*.wasm dist-wasm/
       - name: Attest WASM components
         uses: actions/attest-build-provenance@v3
         with:

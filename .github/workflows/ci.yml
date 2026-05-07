@@ -49,7 +49,7 @@ jobs:
         run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings
 
       - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 -- -D warnings
+        run: cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 
   rust-build-test:
     runs-on: ubuntu-latest
@@ -80,13 +80,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target wasm32-wasip2 --release \
-              -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
+              -p 'omnifs-provider-*' -p test-provider
 
       - name: Run core tests
         run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema
 
       - name: Check provider test compilation
-        run: cargo test -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 --no-run
+        run: cargo test -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 --no-run
 
       - name: Build CLI release binary
         run: cargo build --release -p omnifs-cli
@@ -96,8 +96,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/release/omnifs dist/omnifs
-          cp target/wasm32-wasip2/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
-          cp target/wasm32-wasip2/release/omnifs_provider_dns.wasm dist/omnifs_provider_dns.wasm
+          cp target/wasm32-wasip2/release/omnifs_provider_*.wasm dist/
 
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@v7.0.1
@@ -275,3 +274,10 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+          # `raulk/omnifs` is a user-owned repo. GitHub's attestation
+          # storage records are only supported for org-owned repos, so
+          # the default create-storage-record=true would fail at attest
+          # time. The Sigstore bundle is still attached to the OCI
+          # manifest (via push-to-registry) and is verifiable with
+          # `gh attestation verify`.
+          create-storage-record: false
