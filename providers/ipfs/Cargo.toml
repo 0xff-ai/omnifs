@@ -1,0 +1,43 @@
+[package]
+name = "omnifs-provider-ipfs"
+version = "0.1.0"
+edition = "2024"
+description = "OmnIFS provider for read-only IPFS and IPNS browsing via Kubo RPC"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raulk/omnifs"
+homepage = "https://github.com/raulk/omnifs"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+omnifs-sdk = { path = "../../crates/omnifs-sdk" }
+cid = { version = "0.11", default-features = false, features = ["alloc", "serde-codec"] }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[package.metadata.component]
+package = "omnifs:provider"
+
+[package.metadata.component.target]
+world = "provider"
+path = "../../wit"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+wildcard_imports = "allow"
+too_many_lines = "allow"
+trivially_copy_pass_by_ref = "allow"
+match_same_arms = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
