@@ -355,21 +355,47 @@ impl<S> MountRegistry<S> {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let mut seen = std::collections::BTreeSet::<&'static str>::new();
+        // Within-kind dedup: two #[dir("X")] (or two #[file("X")], or two
+        // #[subtree("X")]) handlers on the same template are always wrong.
+        // Cross-kind co-existence of dir+file is allowed — the dispatch
+        // routes by request kind. Subtrees still take over the path
+        // entirely, so they're mutually exclusive with both dirs and files
+        // at the same template.
+        fn dedup_within<'a, I>(decls: I, kind: &str) -> Result<()>
+        where
+            I: IntoIterator<Item = &'a RouteDecl>,
+        {
+            let mut seen = std::collections::BTreeSet::<&'static str>::new();
+            for decl in decls {
+                if !seen.insert(decl.template) {
+                    return Err(ProviderError::invalid_input(format!(
+                        "duplicate {kind} handler declared for {}",
+                        decl.template
+                    )));
+                }
+            }
+            Ok(())
+        }
+        dedup_within(self.dirs.iter().map(|e| &e.decl), "dir")?;
+        dedup_within(self.files.iter().map(|e| &e.decl), "file")?;
+        dedup_within(self.subtrees.iter().map(|e| &e.decl), "subtree")?;
+
+        let subtree_templates: std::collections::BTreeSet<&'static str> =
+            self.subtrees.iter().map(|e| e.decl.template).collect();
         for decl in self
             .dirs
             .iter()
-            .map(|entry| &entry.decl)
-            .chain(self.files.iter().map(|entry| &entry.decl))
-            .chain(self.subtrees.iter().map(|entry| &entry.decl))
+            .map(|e| &e.decl)
+            .chain(self.files.iter().map(|e| &e.decl))
         {
-            if !seen.insert(decl.template) {
+            if subtree_templates.contains(decl.template) {
                 return Err(ProviderError::invalid_input(format!(
-                    "duplicate handler declared for {}",
+                    "handler {} conflicts with a subtree handler on the same template",
                     decl.template
                 )));
             }
         }
+
         let mut static_children =
             std::collections::BTreeMap::<(String, &'static str), &'static str>::new();
         for decl in self
@@ -414,17 +440,32 @@ impl<S> MountRegistry<S> {
             return Ok(BrowseLookup::subtree(tree_ref));
         }
 
-        if let Some((route, parsed)) = self.match_dir(&child_abs) {
-            // Exact dir lookups can warm the looked-up directory's adjacent cache shape.
-            let projection = (route.call)(cx, parsed, DirIntent::List { cursor: None }).await?;
-            return projection_exact_lookup(&projection, &child_abs, BrowseEntry::dir(name), self);
-        }
+        // When a #[dir] and #[file] both match the child path (the dir+file
+        // co-existence case enabled for content-determined routing under
+        // rest-captured templates), the structural match can't tell us the
+        // child's kind. Defer to the parent dir handler's projection
+        // verdict by skipping the direct-match shortcuts below.
+        let dir_match = self.match_dir(&child_abs);
+        let ambiguous = dir_match.is_some() && self.match_file(&child_abs).is_some();
 
-        if let Some(target) = self.exact_entry_for_path(&child_abs) {
-            let siblings = self.static_entries_for_parent(&parent_abs);
-            return Ok(BrowseLookup::entry(target)
-                .with_siblings(siblings)
-                .exhaustive(true));
+        if !ambiguous {
+            if let Some((route, parsed)) = dir_match {
+                // Exact dir lookups can warm the looked-up directory's adjacent cache shape.
+                let projection = (route.call)(cx, parsed, DirIntent::List { cursor: None }).await?;
+                return projection_exact_lookup(
+                    &projection,
+                    &child_abs,
+                    BrowseEntry::dir(name),
+                    self,
+                );
+            }
+
+            if let Some(target) = self.exact_entry_for_path(&child_abs) {
+                let siblings = self.static_entries_for_parent(&parent_abs);
+                return Ok(BrowseLookup::entry(target)
+                    .with_siblings(siblings)
+                    .exhaustive(true));
+            }
         }
 
         let Some((route, parsed)) = self.match_dir(&parent_abs) else {
