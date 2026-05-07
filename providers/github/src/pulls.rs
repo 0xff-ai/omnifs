@@ -30,7 +30,7 @@ pub struct PullHandlers;
 impl PullHandlers {
     #[dir("/{owner}/{repo}/_prs/{filter}")]
     async fn pull_list_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         filter: StateFilter,
@@ -40,7 +40,7 @@ impl PullHandlers {
 
     #[dir("/{owner}/{repo}/_prs/{filter}/{number}")]
     async fn pr_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         _filter: StateFilter,
@@ -51,7 +51,7 @@ impl PullHandlers {
 
     #[dir("/{owner}/{repo}/_prs/{filter}/{number}/comments")]
     async fn pr_comments_open(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         _filter: StateFilter,
@@ -126,7 +126,7 @@ async fn pr_projection(
 }
 
 async fn pr_comments_projection(
-    cx: &DirCx<'_, State>,
+    cx: &DirCx<State>,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,

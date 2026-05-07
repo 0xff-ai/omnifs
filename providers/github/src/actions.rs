@@ -24,7 +24,7 @@ pub struct ActionHandlers;
 #[handlers]
 impl ActionHandlers {
     #[dir("/{owner}/{repo}/_actions/runs")]
-    async fn runs(cx: &DirCx<'_, State>, owner: OwnerName, repo: RepoName) -> Result<Projection> {
+    async fn runs(cx: &DirCx<State>, owner: OwnerName, repo: RepoName) -> Result<Projection> {
         let repo_id = RepoId::new(&owner, &repo);
         let runs: WorkflowRunsResponse = cx
             .github_json(format!("/repos/{repo_id}/actions/runs?per_page=30"))
@@ -47,7 +47,7 @@ impl ActionHandlers {
 
     #[dir("/{owner}/{repo}/_actions/runs/{run_id}")]
     async fn run(
-        cx: &DirCx<'_, State>,
+        cx: &DirCx<State>,
         owner: OwnerName,
         repo: RepoName,
         run_id: u64,

@@ -16,7 +16,7 @@ mod root_handlers {
     #[handlers]
     impl RootHandlers {
         #[dir("/")]
-        fn root(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        fn root() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
@@ -57,9 +57,9 @@ mod hello_handlers {
     impl HelloHandlers {
         #[dir("/hello")]
         #[allow(clippy::needless_pass_by_value, clippy::unused_async)]
-        async fn hello(cx: &DirCx<'_, State>) -> Result<Projection> {
+        async fn hello(cx: &DirCx<State>) -> Result<Projection> {
             match cx.intent() {
-                DirIntent::ReadProjectedFile { name } => match *name {
+                DirIntent::ReadProjectedFile { name } => match name.as_str() {
                     "message" | "greeting" | "projected" => projected_file(name),
                     _ => Err(ProviderError::not_found("projected file not found")),
                 },
@@ -78,12 +78,12 @@ mod hello_handlers {
         }
 
         #[file("/hello/lazy")]
-        fn lazy(_cx: &Cx<State>) -> Result<FileContent> {
+        fn lazy() -> Result<FileContent> {
             Ok(FileContent::bytes("lazy\n"))
         }
 
         #[dir("/hello/bundle")]
-        fn bundle(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        fn bundle() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.file_with_content("title", b"title");
             projection.file_with_content("body", b"body");
@@ -92,7 +92,7 @@ mod hello_handlers {
         }
 
         #[dir("/hello/snapshot")]
-        fn snapshot(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        fn snapshot() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.file_with_content("status", b"open\n");
             projection.page(PageStatus::Exhaustive);
@@ -100,7 +100,7 @@ mod hello_handlers {
         }
 
         #[dir("/hello/snapshot/comments")]
-        fn snapshot_comments(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        fn snapshot_comments() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
@@ -116,7 +116,7 @@ mod scoped_handlers {
     #[handlers]
     impl ScopedHandlers {
         #[dir("/scoped")]
-        fn scoped(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        fn scoped() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.file_with_content("item", b"scoped\n");
             projection.page(PageStatus::Exhaustive);
@@ -133,7 +133,7 @@ mod subtree_handlers {
     #[handlers]
     impl SubtreeHandlers {
         #[subtree("/checkout")]
-        fn checkout(_cx: &Cx<State>) -> Result<SubtreeRef> {
+        fn checkout() -> Result<SubtreeRef> {
             Ok(SubtreeRef::new(777))
         }
     }

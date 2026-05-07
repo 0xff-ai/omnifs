@@ -18,7 +18,7 @@ mod root_handlers {
     #[omnifs_sdk::handlers]
     impl RootHandlers {
         #[omnifs_sdk::dir("/")]
-        async fn root(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        async fn root() -> Result<Projection> {
             Ok(Projection::new())
         }
     }
@@ -32,12 +32,12 @@ mod hello_handlers {
     #[omnifs_sdk::handlers]
     impl HelloHandlers {
         #[omnifs_sdk::dir("/hello")]
-        async fn hello_dir(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        async fn hello_dir() -> Result<Projection> {
             Ok(Projection::new())
         }
 
         #[omnifs_sdk::file("/hello/{name}")]
-        async fn hello(_cx: &Cx<State>, name: String) -> Result<FileContent> {
+        async fn hello(name: String) -> Result<FileContent> {
             Ok(FileContent::bytes(format!("hello {name}\n")))
         }
     }
@@ -51,14 +51,14 @@ mod extras_handlers {
     #[omnifs_sdk::handlers]
     impl ExtrasHandlers {
         #[omnifs_sdk::dir("/bundle")]
-        async fn bundle(_cx: &DirCx<'_, State>) -> Result<Projection> {
+        async fn bundle() -> Result<Projection> {
             let mut projection = Projection::new();
             projection.file_with_content("title", b"bundle title\n".to_vec());
             Ok(projection)
         }
 
         #[omnifs_sdk::subtree("/checkout")]
-        async fn checkout(_cx: &Cx<State>) -> Result<SubtreeRef> {
+        async fn checkout() -> Result<SubtreeRef> {
             Ok(SubtreeRef::new(42))
         }
     }
@@ -72,7 +72,7 @@ mod rest_handlers {
     #[omnifs_sdk::handlers]
     impl RestHandlers {
         #[omnifs_sdk::file("/root/{a}/{*rest}")]
-        async fn rest_file(_cx: &Cx<State>, a: String, rest: String) -> Result<FileContent> {
+        async fn rest_file(a: String, rest: String) -> Result<FileContent> {
             Ok(FileContent::bytes(format!("a={a} rest={rest}\n")))
         }
     }
@@ -89,16 +89,16 @@ mod ambiguous_handlers {
     #[omnifs_sdk::handlers]
     impl AmbiguousHandlers {
         #[omnifs_sdk::dir("/tree/{*path}")]
-        async fn tree_dir(_cx: &DirCx<'_, State>, _path: String) -> Result<Projection> {
+        async fn tree_dir(_path: String) -> Result<Projection> {
             let mut projection = Projection::new();
             projection.dir("d");
-            projection.file_with_stat("f.txt", FileStat::placeholder());
+            projection.file("f.txt");
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
         }
 
         #[omnifs_sdk::file("/tree/{*path}")]
-        async fn tree_file(_cx: &Cx<State>, path: String) -> Result<FileContent> {
+        async fn tree_file(path: String) -> Result<FileContent> {
             Ok(FileContent::bytes(format!("file at {path}").into_bytes()))
         }
     }
@@ -195,7 +195,7 @@ fn parse_unit(path: &str) -> Option<Box<dyn std::any::Any>> {
 fn call_dir<'a>(
     _cx: &'a Cx<State>,
     _path: Box<dyn std::any::Any>,
-    _intent: DirIntent<'a>,
+    _intent: DirIntent,
 ) -> omnifs_sdk::handler::BoxFuture<'a, Projection> {
     Box::pin(async { Ok(Projection::new()) })
 }

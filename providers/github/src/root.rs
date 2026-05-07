@@ -9,14 +9,14 @@ pub struct RootHandlers;
 #[handlers]
 impl RootHandlers {
     #[dir("/")]
-    fn root(_cx: &DirCx<'_, State>) -> Result<Projection> {
+    fn root() -> Result<Projection> {
         // Root is not enumerable: GitHub has no "list all visible owners"
         // call the provider could back this with. Users navigate by path.
         Ok(Projection::new())
     }
 
     #[dir("/{owner}")]
-    async fn repos(cx: &DirCx<'_, State>, owner: OwnerName) -> Result<Projection> {
+    async fn repos(cx: &DirCx<State>, owner: OwnerName) -> Result<Projection> {
         let kind = resolve_owner_kind(cx, &owner)
             .await?
             .ok_or_else(|| ProviderError::not_found("owner not found"))?;

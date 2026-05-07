@@ -17,7 +17,7 @@ pub struct RootHandlers;
 #[handlers]
 impl RootHandlers {
     #[dir("/")]
-    fn root(cx: &DirCx<'_, State>) -> Result<Projection> {
+    fn root(cx: &DirCx<State>) -> Result<Projection> {
         let mut projection = Projection::new();
         for resolver in cx.state(|state| {
             state
@@ -48,7 +48,7 @@ impl RootHandlers {
     }
 
     #[dir("/_reverse")]
-    fn reverse_dir(_cx: &DirCx<'_, State>) -> Result<Projection> {
+    fn reverse_dir() -> Result<Projection> {
         let mut projection = Projection::new();
         mark_dynamic(&mut projection);
         Ok(projection)
@@ -61,14 +61,14 @@ impl RootHandlers {
     }
 
     #[dir("/@{resolver}")]
-    fn resolver_root(_cx: &DirCx<'_, State>, _resolver: ResolverName) -> Result<Projection> {
+    fn resolver_root(_resolver: ResolverName) -> Result<Projection> {
         let mut projection = Projection::new();
         mark_dynamic(&mut projection);
         Ok(projection)
     }
 
     #[dir("/@{resolver}/_reverse")]
-    fn resolver_reverse_dir(_cx: &DirCx<'_, State>, _resolver: ResolverName) -> Result<Projection> {
+    fn resolver_reverse_dir(_resolver: ResolverName) -> Result<Projection> {
         let mut projection = Projection::new();
         mark_dynamic(&mut projection);
         Ok(projection)

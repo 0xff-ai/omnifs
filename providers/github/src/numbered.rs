@@ -143,7 +143,7 @@ pub(crate) async fn comments_projection(
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,
-    intent: &DirIntent<'_>,
+    intent: &DirIntent,
 ) -> Result<Projection> {
     match intent {
         DirIntent::ReadProjectedFile { name } => {
@@ -165,10 +165,8 @@ pub(crate) async fn comments_projection(
                 .ok_or_else(|| ProviderError::not_found("comment not found"))?;
             let body = comment.body.as_deref().unwrap_or("");
             let mut projection = Projection::new();
-            projection.file_with_content(
-                (*name).to_string(),
-                format!("{}:\n{body}\n", comment.user.login),
-            );
+            projection
+                .file_with_content(name.clone(), format!("{}:\n{body}\n", comment.user.login));
             Ok(projection)
         },
         DirIntent::Lookup { .. } | DirIntent::List { .. } => {

@@ -22,10 +22,10 @@ pub enum Cursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DirIntent<'a> {
-    Lookup { child: &'a str },
+pub enum DirIntent {
+    Lookup { child: String },
     List { cursor: Option<Cursor> },
-    ReadProjectedFile { name: &'a str },
+    ReadProjectedFile { name: String },
 }
 
 /// Directory handler context: a `Cx<S>` paired with the request intent.
@@ -33,26 +33,26 @@ pub enum DirIntent<'a> {
 /// Dir handlers serve three operations (lookup, list, read-projected-file);
 /// `DirCx` carries which one the host asked for. Derefs to `Cx<S>` so all
 /// the usual context methods (`.http()`, `.git()`, `.state()`) work directly.
-pub struct DirCx<'a, S> {
-    cx: &'a Cx<S>,
-    intent: DirIntent<'a>,
+pub struct DirCx<S> {
+    cx: Cx<S>,
+    intent: DirIntent,
 }
 
-impl<'a, S> DirCx<'a, S> {
-    pub fn new(cx: &'a Cx<S>, intent: DirIntent<'a>) -> Self {
+impl<S> DirCx<S> {
+    pub fn new(cx: Cx<S>, intent: DirIntent) -> Self {
         Self { cx, intent }
     }
 
-    pub fn intent(&self) -> &DirIntent<'a> {
+    pub fn intent(&self) -> &DirIntent {
         &self.intent
     }
 }
 
-impl<S> std::ops::Deref for DirCx<'_, S> {
+impl<S> std::ops::Deref for DirCx<S> {
     type Target = Cx<S>;
 
     fn deref(&self) -> &Cx<S> {
-        self.cx
+        &self.cx
     }
 }
 
@@ -257,7 +257,7 @@ struct RouteDecl {
 }
 
 type ParseFn = fn(&str) -> Option<Box<dyn Any>>;
-type DirCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>, DirIntent<'a>) -> BoxFuture<'a, Projection>;
+type DirCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>, DirIntent) -> BoxFuture<'a, Projection>;
 type FileCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, FileContent>;
 type SubtreeCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, SubtreeRef>;
 
@@ -471,7 +471,14 @@ impl<S> MountRegistry<S> {
         let Some((route, parsed)) = self.match_dir(&parent_abs) else {
             return Ok(BrowseLookup::not_found());
         };
-        let projection = (route.call)(cx, parsed, DirIntent::Lookup { child: name }).await?;
+        let projection = (route.call)(
+            cx,
+            parsed,
+            DirIntent::Lookup {
+                child: name.to_string(),
+            },
+        )
+        .await?;
         projection_lookup(&projection, &parent_abs, name, None, self)
     }
 
@@ -527,7 +534,14 @@ impl<S> MountRegistry<S> {
         let Some((route, parsed)) = self.match_dir(&parent_abs) else {
             return Err(ProviderError::not_found(format!("path not found: {path}")));
         };
-        let projection = (route.call)(cx, parsed, DirIntent::ReadProjectedFile { name }).await?;
+        let projection = (route.call)(
+            cx,
+            parsed,
+            DirIntent::ReadProjectedFile {
+                name: name.to_string(),
+            },
+        )
+        .await?;
         projected_file_from_projection(&projection, name)
     }
 
