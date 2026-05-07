@@ -23,7 +23,7 @@ docker compose down
 
 Behavior:
 
-- `docker compose up --build -d` builds the image, starts the named container, mounts omnifs at `/omnifs`, and exposes `/github` and `/dns` as top-level symlinks inside the container.
+- `docker compose up --build -d` builds the image, starts the named container, mounts omnifs at `/omnifs`, and exposes a top-level symlink (`/<mount>`) inside the container for every configured provider in `~/.omnifs/providers/*.json` (currently `/arxiv`, `/dns`, `/github`).
 - `docker compose exec omnifs /bin/zsh` opens an interactive `zsh` shell in the running container.
 - `docker compose logs omnifs` prints the container output. Runtime logs also remain available at `/tmp/omnifs.log` inside the container.
 - `docker compose down` removes the container.

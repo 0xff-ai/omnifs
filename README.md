@@ -160,10 +160,11 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 
 ## Providers
 
-| Provider   | Mount     | Description                                            |
-| ---------- | --------- | ------------------------------------------------------ |
-| **GitHub** | `/github` | Browse repos, issues, PRs, CI runs, and diffs as files |
-| **DNS**    | `/dns`    | Query DNS records via DNS-over-HTTPS                   |
+| Provider   | Mount     | Description                                                              |
+| ---------- | --------- | ------------------------------------------------------------------------ |
+| **GitHub** | `/github` | Browse repos, issues, PRs, CI runs, and diffs as files                   |
+| **DNS**    | `/dns`    | Query DNS records via DNS-over-HTTPS                                     |
+| **arXiv**  | `/arxiv`  | Browse arXiv papers by id, category, author, or search; PDFs and source |
 
 ### GitHub (`/github`)
 
@@ -199,6 +200,25 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 | `/dns/_reverse/{ip}`                 | Reverse DNS lookup (alternate path)                         |
 | `/dns/_resolvers`                    | List configured resolvers                                   |
 
+### arXiv (`/arxiv`)
+
+Per-paper subtrees under `/arxiv/papers/{id}/` are mirrored under every scope (categories, authors, search), so the same `paper.pdf`, `metadata.json`, `versions/v{n}/...` shape works under `/arxiv/categories/{cat}/{ym}/{id}/...` and friends.
+
+| Path                                                  | Content                                                       |
+| ----------------------------------------------------- | ------------------------------------------------------------- |
+| `/arxiv/papers/{id}/`                                 | Per-paper subtree (any arXiv id, e.g. `1706.03762`)           |
+| `/arxiv/papers/{id}/paper.pdf`                        | Latest version PDF                                            |
+| `/arxiv/papers/{id}/source.tar.gz`                    | Latest version source bundle                                  |
+| `/arxiv/papers/{id}/metadata.json`                    | Title, authors, abstract, categories, comment, links          |
+| `/arxiv/papers/{id}/links.json`                       | Resolved arXiv URLs for this paper / version                  |
+| `/arxiv/papers/{id}/versions/v{n}/{paper.pdf,…}`      | Same files for a specific version                             |
+| `/arxiv/categories/{cat}/{YYYY-MM}/`                  | Papers in `cat` posted in that month (e.g. `cs.AI/2024-01`)   |
+| `/arxiv/categories/{cat}/new/{n}/`                    | Most-recent window `n ∈ 0..=14` (newest first by submitted date) |
+| `/arxiv/categories/{cat}/updated/{n}/`                | Most-recent window by last-updated date                       |
+| `/arxiv/categories/{cat}/by-author/{author}/`         | Papers in `cat` by `author`                                   |
+| `/arxiv/authors/{author}/`                            | Papers by author with the same `new`/`updated`/`by-category` axes |
+| `/arxiv/search/{query}/`                              | arXiv search results (URL-encoded query)                      |
+
 ## What's coming
 
 ### Core omnifs
@@ -220,7 +240,6 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | GitHub               | Commits, branches, reviews, checks, releases, and discussion state                                |
 | Hugging Face         | Models, datasets, spaces, cards, files, versions, and download metadata as browsable trees        |
-| arXiv                | Papers by category, author, and query, with abstracts, source, PDFs, references, and update feeds |
 | Linear               | Teams, projects, issues, cycles, comments, labels, and workflow state with draftable mutations    |
 | DNS                  | Zones, records, history, propagation state, and provider-backed change transactions               |
 | S3 and object stores | Buckets, prefixes, object metadata, versions, lifecycle rules, and event streams                  |

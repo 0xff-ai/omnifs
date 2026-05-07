@@ -4,8 +4,6 @@
 
 omnifs is a projected filesystem that mirrors external services into local paths via FUSE. Providers are WASM components (`wasm32-wasip2`) that the host runtime loads and drives through a WIT interface.
 
-Workspace members: `crates/cli`, `crates/host`, `providers/github`, `providers/dns`, `providers/test`.
-
 ## Build and test
 
 ```bash
@@ -37,11 +35,23 @@ Do not reintroduce a preview1 adapter step unless the runtime design explicitly 
 
 Each provider is a WASM component implementing the `omnifs:provider` WIT
 interface. Providers are authored as free-function path handlers collected
-from modules declared in `#[omnifs_sdk::provider(mounts(...))]`:
+from `#[omnifs_sdk::handlers] impl ...` blocks, with the provider's mounts
+declared via `#[omnifs_sdk::provider(mounts(...))]`. The handler attributes
+inside a `#[handlers]` block are:
 
-- `#[omnifs_sdk::dir("...")]` declares one directory path family
-- `#[omnifs_sdk::file("...")]` declares one exact file path family
-- `#[omnifs_sdk::subtree("...")]` declares one explicit subtree handoff path family
+- `#[dir("...")]` — a directory path family
+- `#[file("...")]` — an exact file path family
+- `#[treeref("...")]` — a subtree handoff path family (returns a `TreeRef`
+  that the host resolves to a bind-mounted clone directory)
+- `#[bind("...")]` — mounts a typed subtree (a `#[subtree] impl B { ... }`
+  block) at this path family; the host parses prefix captures, constructs
+  `B`, and dispatches the suffix through `B`'s inner registry
+- `#[mutate("...")]` — a mutation handler
+
+Top-level attributes include `#[omnifs_sdk::config]` (provider config
+struct), `#[omnifs_sdk::subtree] impl B { ... }` (typed subtree handler
+block whose inner `#[dir]` / `#[file]` items are templates relative to the
+subtree root), and `#[omnifs_sdk::provider(...)]` (provider entrypoint).
 
 The host browse surface is:
 
@@ -50,20 +60,35 @@ The host browse surface is:
 - `read_file(id, path)` reads exact file content
 
 Subtree handoff folds into `lookup_child` and `list_children`: when a
-`#[subtree]` handler matches the requested path, the corresponding
+`#[treeref]` handler matches the requested path, the corresponding
 `lookup-result::subtree(tree-ref)` or `list-result::subtree(tree-ref)`
 terminal is returned and the host resolves the handle to a bind-mounted
-clone directory.
+clone directory. (The WIT keeps the `subtree` arm name on the result
+variants; the SDK-side attribute is `#[treeref]` because `#[subtree]` is
+reserved for typed-subtree-dispatch impl blocks.)
 
 The current browse model is:
 
-- exact sibling handlers auto-derive static child shape
+- any registered route's literal-segment prefix is an auto-navigable
+  directory; provider authors do not write no-op stub `#[dir]` handlers
+  for intermediate navigation nodes (e.g. `/categories` is implicit when
+  `/categories/{category}` exists)
+- per-segment validators (route parse functions) participate in match
+  candidacy: a parse rejection falls through to the next-most-specific
+  candidate route, not to ENOENT
 - `lookup_child` answers subtree handlers first, then falls back to exact/
-  static shape, then to the parent `#[dir]` handler for dynamic children
+  static/auto-navigable shape, then to the parent `#[dir]` handler for
+  dynamic children
 - `list_children` answers subtree handlers first, then merges static child
-  shape with the parent directory projection
+  shape with the parent directory projection; an auto-navigable directory's
+  listing is `exhaustive=false` whenever any sibling route at depth+1 has
+  a capture or rest segment
 - `read_file` uses exact `#[file]` handlers first, then allows bounded eager
   bytes from a parent directory projection for projected files
+
+`docs/design/path-dispatch-and-listing.md` is the source of truth for
+routing precedence, listing exhaustiveness, and the `lookup` vs `readdir`
+authority split. Read it before changing dispatch logic.
 
 Providers return either a terminal `op-result` (wrapped in a
 `provider-return`) or suspend with a list of `callout`s (HTTP fetch, git
@@ -105,7 +130,7 @@ rely on the host's invalidation signals.
 
 ## Gotchas
 
-**Projected file sizes must be non-zero.** The host translates `DirEntry.size: None` to 0 via `unwrap_or(0)`. The kernel sees a 0-byte file and never calls `read`. Use `size: Some(4096)` for projected files whose real size is unknown until read.
+**Projected file sizes use a 256 MiB placeholder by default.** `Projection::file(name)` and SDK-emitted exact-shape file entries fall back to `placeholder_size()` (256 MiB) when the real length isn't known until `read`. The kernel caps `read` at the reported size and treats short reads as EOF, so a too-small placeholder truncates real payloads; 256 MiB is the current upper bound. The host updates the inode size to the actual length on the first successful read (`inode.rs`'s `get_or_alloc_ino` and_modify path), so subsequent stats report the real size. If your provider knows the size cheaply (Content-Length, API metadata, fully-materialized payload), use `Projection::file_with_size(name, FileStat { size })` or `Projection::file_with_content(name, bytes)` so `ls -l` and `du` don't show the inflated placeholder before first read. See `docs/design/projected-file-sizes.md` for the full rationale and the planned `direct_io` redesign.
 
 **Project sibling files on every read where you already know them.** When a read route materializes a payload that contains fields for the item's other sibling files (e.g. an issue's `title`, `body`, `state`), return them in `FileContent::with_sibling_files(..)` so the host caches them alongside the primary file. A later stat or read of a sibling avoids a round trip. The same applies to lookup routes: use `Lookup::with_sibling_files(..)` whenever the payload you fetched already carries the sibling content. For content that isn't a direct sibling of the looked-up target (say, nested children of a listed directory), use `Projection::preload` / `preload_many`; those land on the terminal's preload field.
 
