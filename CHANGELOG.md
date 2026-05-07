@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-07
+
 ### Added
 
 - FUSE filesystem on Linux that projects external services into local paths, with macOS and Windows planned.
