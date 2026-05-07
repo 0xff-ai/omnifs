@@ -725,7 +725,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             names.sort_unstable();
-            assert_eq!(names, vec!["_actions", "_issues", "_prs", "_repo"]);
+            assert_eq!(names, vec!["_actions", "_issues", "_prs", "_q", "_repo"]);
         },
         other => panic!("expected repo namespace listing, got {other:?}"),
     }
@@ -844,12 +844,14 @@ fn github_issue_list_preloads_projected_files() {
                     "octocat/Hello-World/_prs/_open/6/body",
                     "octocat/Hello-World/_prs/_open/6/state",
                     "octocat/Hello-World/_prs/_open/6/user",
+                    "octocat/Hello-World/_prs/_open/6/summary.md",
                     "octocat/Hello-World/_prs/_open/6/comments",
                     "octocat/Hello-World/_prs/_open/6/diff",
                     "octocat/Hello-World/_issues/_open/7/title",
                     "octocat/Hello-World/_issues/_open/7/body",
                     "octocat/Hello-World/_issues/_open/7/state",
                     "octocat/Hello-World/_issues/_open/7/user",
+                    "octocat/Hello-World/_issues/_open/7/summary.md",
                 ]
             );
             assert_eq!(
@@ -1069,6 +1071,7 @@ fn github_pr_list_preloads_projected_files() {
                     "octocat/Hello-World/_prs/_open/7/body",
                     "octocat/Hello-World/_prs/_open/7/state",
                     "octocat/Hello-World/_prs/_open/7/user",
+                    "octocat/Hello-World/_prs/_open/7/summary.md",
                 ]
             );
             let names: Vec<&str> = listing
@@ -1348,12 +1351,17 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
             terminal: Some(OpResult::List(ListResult::Entries(listing))),
             ..
         } => {
-            let names: Vec<&str> = listing
+            let mut names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert!(names.is_empty(), "unexpected root names: {names:?}");
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                vec![".events", "AGENT.md"],
+                "unexpected root names: {names:?}"
+            );
         },
         other => panic!("expected root listing, got {other:?}"),
     }
@@ -1696,7 +1704,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
                 .iter()
                 .map(|file| file.name.as_str())
                 .collect();
-            assert_eq!(sibling_names, vec!["body", "state", "user"]);
+            assert_eq!(sibling_names, vec!["body", "state", "user", "summary.md"]);
         },
         other => panic!("expected PR file result with sibling files, got {other:?}"),
     }
@@ -2277,21 +2285,28 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         other => panic!("expected owner lookup result, got {other:?}"),
     }
 
-    // Root is not enumerable; should always return empty, regardless
-    // of which owners have been resolved in prior calls.
+    // Root is not enumerable; the only entries are the agent-centric
+    // mount-rooted artefacts (`AGENT.md`, `.events`) auto-derived from
+    // the static file routes.
     let root_listing = session.list_children(32, "");
     match root_listing {
         ProviderReturn {
             terminal: Some(OpResult::List(ListResult::Entries(listing))),
             ..
         } => {
-            assert!(
-                listing.entries.is_empty(),
-                "root should be empty, got {:?}",
-                listing.entries
+            let mut names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                vec![".events", "AGENT.md"],
+                "unexpected root names: {names:?}"
             );
         },
-        other => panic!("expected empty root listing, got {other:?}"),
+        other => panic!("expected agent-centric root listing, got {other:?}"),
     }
 }
 

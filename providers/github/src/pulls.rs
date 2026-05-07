@@ -60,6 +60,64 @@ impl PullHandlers {
         pr_comments_projection(cx, &owner, &repo, number).await
     }
 
+    /// Empty parent for `_q/prs`. Mirrors the issues query view: not
+    /// enumerable, exists so lookup/listing of `prs` resolves cleanly
+    /// under the shared `_q` namespace.
+    #[dir("/{owner}/{repo}/_q/prs")]
+    fn pr_q_root(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+        let mut projection = Projection::new();
+        projection.page(PageStatus::Exhaustive);
+        Ok(projection)
+    }
+
+    #[dir("/{owner}/{repo}/_q/prs/{query}")]
+    async fn pr_q_list(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        query: String,
+    ) -> Result<Projection> {
+        let page = numbered::list_query::<Pull>(cx, &owner, &repo, &query, "is:pr").await?;
+        let mut projection = Projection::new();
+        page.apply_status(&mut projection);
+        for pr in page.items {
+            let number = pr.number;
+            let base = format!("{owner}/{repo}/_q/prs/{query}/{number}/");
+            numbered::preload_common_fields(
+                &mut projection,
+                &base,
+                pr.title,
+                pr.body,
+                pr.state,
+                pr.user,
+            );
+            projection.dir(number.to_string());
+        }
+        Ok(projection)
+    }
+
+    #[dir("/{owner}/{repo}/_q/prs/{query}/{number}")]
+    async fn pr_q_detail(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        _query: String,
+        number: u64,
+    ) -> Result<Projection> {
+        pr_projection(cx, &owner, &repo, number).await
+    }
+
+    #[dir("/{owner}/{repo}/_q/prs/{query}/{number}/comments")]
+    async fn pr_q_comments(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        _query: String,
+        number: u64,
+    ) -> Result<Projection> {
+        pr_comments_projection(cx, &owner, &repo, number).await
+    }
+
     #[file("/{owner}/{repo}/_prs/_open/{number}/diff")]
     async fn pr_diff_open(
         cx: &Cx<State>,
@@ -116,11 +174,22 @@ async fn pr_projection(
     let pr: Pull = cx
         .github_json(format!("/repos/{repo_id}/pulls/{number}"))
         .await?;
+    let user_login = pr.user.map(|u| u.login).unwrap_or_default();
+    let body = pr.body.unwrap_or_default();
+    let summary = numbered::build_summary_markdown(
+        "Pull request",
+        Some(pr.number),
+        &pr.title,
+        &pr.state,
+        &user_login,
+        &body,
+    );
     let mut projection = Projection::new();
     projection.file_with_content("title", pr.title);
-    projection.file_with_content("body", pr.body.unwrap_or_default());
+    projection.file_with_content("body", body);
     projection.file_with_content("state", pr.state);
-    projection.file_with_content("user", pr.user.map(|u| u.login).unwrap_or_default());
+    projection.file_with_content("user", user_login);
+    projection.file_with_content("summary.md", summary);
     projection.page(PageStatus::Exhaustive);
     Ok(projection)
 }

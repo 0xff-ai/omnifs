@@ -51,4 +51,15 @@ impl RepoHandlers {
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }
+
+    /// Top-level container for query views (`_q/issues/{query}/...`,
+    /// `_q/prs/{query}/...`). The dir itself surfaces `issues` and
+    /// `prs` as static children via the q-route literals; this handler
+    /// just makes the parent path enumerable and lookup-resolvable.
+    #[dir("/{owner}/{repo}/_q")]
+    fn queries(_cx: &DirCx<'_, State>, _owner: OwnerName, _repo: RepoName) -> Result<Projection> {
+        let mut projection = Projection::new();
+        projection.page(PageStatus::Exhaustive);
+        Ok(projection)
+    }
 }

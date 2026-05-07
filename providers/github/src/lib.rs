@@ -43,7 +43,13 @@ pub(crate) enum OwnerKind {
 #[omnifs_sdk::config]
 pub struct Config {}
 
+/// Cap on how many `on_event` outcomes the provider keeps in its
+/// in-memory tail buffer. Each entry is a small NDJSON line so the
+/// total memory cost stays bounded.
+pub(crate) const EVENT_LOG_CAPACITY: usize = 64;
+
 #[derive(Clone)]
 pub struct State {
-    event_etags: hashbrown::HashMap<RepoId, String>,
+    pub(crate) event_etags: hashbrown::HashMap<RepoId, String>,
+    pub(crate) event_log: std::collections::VecDeque<String>,
 }

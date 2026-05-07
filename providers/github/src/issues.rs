@@ -61,6 +61,73 @@ impl IssueHandlers {
     ) -> Result<Projection> {
         issue_comments_projection(cx, &owner, &repo, number).await
     }
+
+    /// Empty parent for `_q/issues`. Queries are not enumerable; the
+    /// handler exists so listing and lookup of the `issues` child
+    /// resolve cleanly under the shared `_q` namespace.
+    #[dir("/{owner}/{repo}/_q/issues")]
+    fn issue_q_root(
+        _cx: &DirCx<'_, State>,
+        _owner: OwnerName,
+        _repo: RepoName,
+    ) -> Result<Projection> {
+        let mut projection = Projection::new();
+        projection.page(PageStatus::Exhaustive);
+        Ok(projection)
+    }
+
+    #[dir("/{owner}/{repo}/_q/issues/{query}")]
+    async fn issue_q_list(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        query: String,
+    ) -> Result<Projection> {
+        let page = numbered::list_query::<Issue>(cx, &owner, &repo, &query, "is:issue").await?;
+        let mut projection = Projection::new();
+        page.apply_status(&mut projection);
+        for item in page.items {
+            // Search may still bleed PRs into a permissive query; this
+            // route is the issues view so we drop them here.
+            if item.pull_request.is_some() {
+                continue;
+            }
+            let number = item.number;
+            let base = format!("{owner}/{repo}/_q/issues/{query}/{number}/");
+            numbered::preload_common_fields(
+                &mut projection,
+                &base,
+                item.title,
+                item.body,
+                item.state,
+                item.user,
+            );
+            projection.dir(number.to_string());
+        }
+        Ok(projection)
+    }
+
+    #[dir("/{owner}/{repo}/_q/issues/{query}/{number}")]
+    async fn issue_q_detail(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        _query: String,
+        number: u64,
+    ) -> Result<Projection> {
+        issue_projection(cx, &owner, &repo, number).await
+    }
+
+    #[dir("/{owner}/{repo}/_q/issues/{query}/{number}/comments")]
+    async fn issue_q_comments(
+        cx: &DirCx<'_, State>,
+        owner: OwnerName,
+        repo: RepoName,
+        _query: String,
+        number: u64,
+    ) -> Result<Projection> {
+        issue_comments_projection(cx, &owner, &repo, number).await
+    }
 }
 
 async fn issue_list(
@@ -124,14 +191,22 @@ async fn issue_projection(
         .github_json(format!("/repos/{repo_id}/issues/{number}"))
         .await?;
 
+    let user_login = issue.user.map(|u| u.login).unwrap_or_default();
+    let body = issue.body.unwrap_or_default();
+    let summary = numbered::build_summary_markdown(
+        "Issue",
+        Some(issue.number),
+        &issue.title,
+        &issue.state,
+        &user_login,
+        &body,
+    );
     let mut projection = Projection::new();
     projection.file_with_content("title", issue.title);
-    projection.file_with_content("body", issue.body.unwrap_or_default());
+    projection.file_with_content("body", body);
     projection.file_with_content("state", issue.state);
-    projection.file_with_content(
-        "user",
-        issue.user.map(|user| user.login).unwrap_or_default(),
-    );
+    projection.file_with_content("user", user_login);
+    projection.file_with_content("summary.md", summary);
     projection.page(PageStatus::Exhaustive);
     Ok(projection)
 }

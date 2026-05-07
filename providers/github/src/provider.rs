@@ -16,6 +16,7 @@ impl GithubProvider {
         (
             State {
                 event_etags: hashbrown::HashMap::new(),
+                event_log: std::collections::VecDeque::with_capacity(crate::EVENT_LOG_CAPACITY),
             },
             ProviderInfo {
                 name: "github-provider".to_string(),

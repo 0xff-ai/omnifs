@@ -7,7 +7,10 @@ use crate::http_ext::GithubHttpExt;
 use crate::parse_model;
 use crate::repo::RepoPath;
 use crate::types::RepoId;
-use crate::{Result, State};
+use crate::{EVENT_LOG_CAPACITY, Result, State};
+
+/// Absolute path of the in-memory event tail file, exposed at the mount root.
+const EVENTS_LOG_PATH: &str = "/.events";
 
 #[derive(Debug, Deserialize)]
 struct GithubEvent {
@@ -96,9 +99,46 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<EventOutcome> {
         });
     }
 
+    let invalidation_summary = invalidations.iter().cloned().collect::<Vec<_>>();
     for prefix in invalidations {
         outcome.invalidate_prefix(prefix);
     }
 
+    let log_line = build_tick_log_line(&invalidation_summary);
+    cx.state_mut(|state| append_event_line(state, log_line));
+    outcome.invalidate_path(EVENTS_LOG_PATH);
+
     Ok(outcome)
+}
+
+fn build_tick_log_line(invalidations: &[String]) -> String {
+    // NDJSON: keep field order deterministic so cached reads diff cleanly.
+    let kinds = invalidations
+        .iter()
+        .map(|p| serde_json::Value::String(p.clone()))
+        .collect::<Vec<_>>();
+    let entry = serde_json::json!({
+        "event": "timer_tick",
+        "invalidate_prefixes": kinds,
+    });
+    let mut line = entry.to_string();
+    line.push('\n');
+    line
+}
+
+pub(crate) fn append_event_line(state: &mut State, line: String) {
+    if state.event_log.len() == EVENT_LOG_CAPACITY {
+        state.event_log.pop_front();
+    }
+    state.event_log.push_back(line);
+}
+
+/// Render the current event ring buffer as NDJSON bytes for the
+/// `<mount>/.events` projected file. Oldest entry first.
+pub(crate) fn events_log_bytes(state: &State) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in &state.event_log {
+        out.extend_from_slice(line.as_bytes());
+    }
+    out
 }

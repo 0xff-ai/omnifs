@@ -3,6 +3,7 @@ use omnifs_sdk::Cx;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::fmt::Write as _;
 
 use crate::http_ext::GithubHttpExt;
 use crate::types::{OwnerName, RepoName, StateFilter, User};
@@ -69,6 +70,43 @@ pub(crate) struct CommentUser {
     pub(crate) login: String,
 }
 
+/// Run a single Search API page against an arbitrary, agent-supplied
+/// qualifier captured as a path segment (the `_issues/q/{query}` and
+/// `_prs/q/{query}` routes). The `kind_qualifier` arg pins the result
+/// to issues or PRs so the route name keeps its meaning even when the
+/// user's query is ambiguous.
+///
+/// Capped at one Search page (`PAGE_SIZE`); the listing is marked
+/// non-exhaustive when `total_count` exceeds that. We deliberately do
+/// not wire REST pagination here: queries trade scrolling depth for
+/// arbitrary filter expressivity, and a single Search page is what
+/// makes the path-segment query encoding worthwhile.
+pub(crate) async fn list_query<T: Listable>(
+    cx: &Cx<State>,
+    owner: &OwnerName,
+    repo: &RepoName,
+    query: &str,
+    kind_qualifier: &str,
+) -> Result<ListPage<T>> {
+    let mut q = format!("repo:{owner}/{repo}");
+    if !kind_qualifier.is_empty() {
+        q.push('+');
+        q.push_str(kind_qualifier);
+    }
+    let trimmed = query.trim_matches('+');
+    if !trimmed.is_empty() {
+        q.push('+');
+        q.push_str(trimmed);
+    }
+    let search_path = format!("/search/issues?q={q}&sort=created&order=desc&per_page={PAGE_SIZE}");
+    let response: SearchResults<T> = cx.github_json(&search_path).await?;
+    let exhaustive = response.total_count <= PAGE_SIZE;
+    Ok(ListPage {
+        items: response.items,
+        exhaustive,
+    })
+}
+
 /// Search supplies `total_count` so we can size the rest of the work
 /// without parsing Link headers; REST handles pages 2..N in parallel.
 /// Capped at the Search API's 1000-item ceiling.
@@ -119,8 +157,15 @@ pub(crate) async fn list_hybrid<T: Listable>(
     })
 }
 
-/// Preload the four projected files every numbered resource exposes.
-/// `base` must end in `/` so callers can append the file name.
+/// Maximum body excerpt size, in bytes, included in `summary.md`. Longer
+/// bodies are truncated with an ellipsis line so the summary stays
+/// roughly token-bounded for an agent's first read.
+const SUMMARY_BODY_EXCERPT_BYTES: usize = 1024;
+
+/// Preload the projected files every numbered resource exposes: the
+/// four primitive fields plus a bundled `summary.md` for cheap "what
+/// is this?" reads. `base` must end in `/` so callers can append the
+/// file name.
 pub(crate) fn preload_common_fields(
     projection: &mut Projection,
     base: &str,
@@ -129,13 +174,77 @@ pub(crate) fn preload_common_fields(
     state: String,
     user: Option<User>,
 ) {
+    let kind_label = numbered_kind_label_from_base(base);
+    let number = numbered_id_from_base(base);
+    let user_login = user.map(|u| u.login).unwrap_or_default();
+    let body_str = body.unwrap_or_default();
+    let summary =
+        build_summary_markdown(kind_label, number, &title, &state, &user_login, &body_str);
     projection.preload(format!("{base}title"), title);
-    projection.preload(format!("{base}body"), body.unwrap_or_default());
+    projection.preload(format!("{base}body"), body_str);
     projection.preload(format!("{base}state"), state);
-    projection.preload(
-        format!("{base}user"),
-        user.map(|u| u.login).unwrap_or_default(),
+    projection.preload(format!("{base}user"), user_login);
+    projection.preload(format!("{base}summary.md"), summary);
+}
+
+/// Render the `summary.md` bundle that each issue/PR projects alongside
+/// the primitive sibling files. Format is intentionally short and
+/// deterministic so the agent gets a stable answer in ~300 tokens.
+pub(crate) fn build_summary_markdown(
+    kind_label: &str,
+    number: Option<u64>,
+    title: &str,
+    state: &str,
+    user_login: &str,
+    body: &str,
+) -> String {
+    let header = number.map_or_else(
+        || format!("# {kind_label}: {title}\n"),
+        |n| format!("# {kind_label} #{n}: {title}\n"),
     );
+    let mut out = String::with_capacity(header.len() + body.len().min(SUMMARY_BODY_EXCERPT_BYTES));
+    out.push_str(&header);
+    out.push('\n');
+    let user_field = if user_login.is_empty() {
+        "(unknown)"
+    } else {
+        user_login
+    };
+    let _ = writeln!(out, "state: {state}      author: {user_field}\n");
+    if body.is_empty() {
+        out.push_str("(no body)\n");
+    } else if body.len() <= SUMMARY_BODY_EXCERPT_BYTES {
+        out.push_str(body.trim_end());
+        out.push('\n');
+    } else {
+        // Truncate at a UTF-8 boundary: walk back from the byte cap
+        // until we land on a character break, then append an ellipsis.
+        let mut cut = SUMMARY_BODY_EXCERPT_BYTES;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.push_str(body[..cut].trim_end());
+        out.push_str("\n…\n");
+    }
+    out
+}
+
+/// Extract the numeric ID from a numbered-resource base path, e.g.
+/// `"raulk/omnifs/_issues/_open/123/"` → `Some(123)`. Used by the
+/// summary builder so the rendered header shows `#N:`.
+fn numbered_id_from_base(base: &str) -> Option<u64> {
+    base.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
+/// Choose the human-readable kind label for the rendered summary
+/// header from the path family, so issues say "Issue" and PRs say
+/// "Pull request" without callers having to thread the label through.
+fn numbered_kind_label_from_base(base: &str) -> &'static str {
+    if base.contains("/_prs/") {
+        "Pull request"
+    } else {
+        "Issue"
+    }
 }
 
 pub(crate) async fn comments_projection(
