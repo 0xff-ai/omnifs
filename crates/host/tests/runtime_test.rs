@@ -413,7 +413,7 @@ async fn test_lookup_projects_siblings_into_cache() {
         LookupPayload::deserialize(&status_lookup.payload),
         Some(LookupPayload::Positive {
             kind: EntryKindCache::File,
-            size: Some(5),
+            size: 5,
         })
     ));
 
@@ -425,7 +425,7 @@ async fn test_lookup_projects_siblings_into_cache() {
         AttrPayload::deserialize(&status_attr.payload),
         Some(AttrPayload {
             kind: EntryKindCache::File,
-            size: Some(5),
+            size: 5,
         })
     ));
 
@@ -437,7 +437,7 @@ async fn test_lookup_projects_siblings_into_cache() {
         LookupPayload::deserialize(&comments_lookup.payload),
         Some(LookupPayload::Positive {
             kind: EntryKindCache::Directory,
-            size: None,
+            size: 0,
         })
     ));
 }

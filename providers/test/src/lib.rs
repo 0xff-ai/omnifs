@@ -132,9 +132,9 @@ mod subtree_handlers {
 
     #[handlers]
     impl SubtreeHandlers {
-        #[subtree("/checkout")]
-        fn checkout() -> Result<SubtreeRef> {
-            Ok(SubtreeRef::new(777))
+        #[treeref("/checkout")]
+        fn checkout() -> Result<TreeRef> {
+            Ok(TreeRef::new(777))
         }
     }
 }

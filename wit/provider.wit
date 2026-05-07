@@ -218,19 +218,7 @@ interface types {
     record preloaded-entry {
         path: string,
         kind: entry-kind,
-        size: entry-size,
-    }
-
-    /// Size signal for a file entry. `unknown` covers directories (where
-    /// size does not apply) and files whose byte length the provider has
-    /// not computed: the host reports `st_size = 0`, opens reads with
-    /// direct_io so the kernel does not cap them at the stat size, and
-    /// updates the inode size lazily after the first successful read.
-    /// `exact(n)` is reported in stat directly and used for read
-    /// termination.
-    variant entry-size {
-        unknown,
-        exact(u64),
+        size: option<u64>,
     }
 
     variant preload-item {
@@ -295,7 +283,7 @@ interface types {
     record dir-entry {
         name: string,
         kind: entry-kind,
-        size: entry-size,
+        size: option<u64>,
         projected-files: option<list<projected-file>>,
     }
 

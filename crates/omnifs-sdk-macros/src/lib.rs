@@ -3,8 +3,10 @@
 //! `#[provider]` processes a provider lifecycle impl block and stitches
 //! together handler modules declared in `#[provider(mounts(...))]`.
 //!
-//! `#[dir]`, `#[file]`, `#[subtree]`, and reserved `#[mutate]` annotate
-//! free functions that become path handlers.
+//! Inside `#[handlers] impl T { ... }`, `#[dir]`, `#[file]`,
+//! `#[treeref]`, `#[bind]`, and reserved `#[mutate]` annotate methods
+//! that become path handlers. `#[bind]` dispatches into a typed subtree
+//! defined by `#[subtree] impl B { ... }`.
 
 use proc_macro::TokenStream;
 use syn::{Item, ItemFn, ItemImpl, parse_macro_input};
@@ -15,6 +17,7 @@ const HANDLERS_ATTRIBUTE_SCOPE_ERROR: &str =
 mod config_macro;
 mod handler_macro;
 mod provider_macro;
+mod subtree_macro;
 
 /// Attribute macro for omnifs provider impl blocks.
 #[proc_macro_attribute]
@@ -64,7 +67,13 @@ pub fn file(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn subtree(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn treeref(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let _func = parse_macro_input!(item as ItemFn);
+    handlers_attr_scope_error()
+}
+
+#[proc_macro_attribute]
+pub fn bind(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let _func = parse_macro_input!(item as ItemFn);
     handlers_attr_scope_error()
 }
@@ -74,6 +83,16 @@ pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as handler_macro::HandlersArgs);
     let input = parse_macro_input!(item as ItemImpl);
     match handler_macro::expand_handlers(&args, input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn subtree(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as subtree_macro::SubtreeArgs);
+    let input = parse_macro_input!(item as ItemImpl);
+    match subtree_macro::expand_subtree(&args, input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

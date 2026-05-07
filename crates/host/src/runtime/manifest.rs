@@ -1,8 +1,6 @@
-use std::ops::Range;
 use std::path::Path;
 
 use omnifs_mount_schema as mts;
-use wasmparser::{Parser, Payload};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredHandler {
@@ -16,6 +14,7 @@ pub struct DeclaredHandler {
 pub enum DeclaredHandlerKind {
     Dir,
     File,
+    TreeRef,
     Subtree,
 }
 
@@ -26,6 +25,7 @@ impl DeclaredHandler {
         let kind = match record.handler_kind {
             mts::HandlerKindRecord::Dir => DeclaredHandlerKind::Dir,
             mts::HandlerKindRecord::File => DeclaredHandlerKind::File,
+            mts::HandlerKindRecord::TreeRef => DeclaredHandlerKind::TreeRef,
             mts::HandlerKindRecord::Subtree => DeclaredHandlerKind::Subtree,
         };
         Ok(Self {
@@ -56,67 +56,27 @@ impl DeclaredHandler {
 pub fn read_declared_handlers_from_wasm(path: &Path) -> Result<Vec<DeclaredHandler>, String> {
     let bytes =
         std::fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let mut section_bytes = Vec::new();
-    collect_sections(&bytes, &mut section_bytes)?;
+    let section_bytes = mts::read_manifest_section(&bytes).map_err(|error| error.to_string())?;
     if section_bytes.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut handlers = Vec::new();
+    let mut records = Vec::new();
     for record in mts::ManifestRecordIter::new(&section_bytes) {
-        match record.map_err(|error| format!("decoding provider manifest record: {error}"))? {
-            mts::ManifestRecord::Handler(handler) => handlers.push(DeclaredHandler::new(handler)?),
-            mts::ManifestRecord::Mutation(_) | mts::ManifestRecord::Unknown { .. } => {},
-        }
+        records
+            .push(record.map_err(|error| format!("decoding provider manifest record: {error}"))?);
     }
+    let resolved = mts::resolve_manifest(records)
+        .map_err(|error| format!("resolving provider manifest: {error}"))?;
 
-    Ok(handlers)
-}
-
-fn collect_sections(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
-    let mut work: Vec<(Parser, Range<usize>)> = vec![(Parser::new(0), 0..bytes.len())];
-
-    while let Some((mut parser, range)) = work.pop() {
-        let mut offset = range.start;
-        while offset < range.end {
-            let input = &bytes[offset..range.end];
-            match parser
-                .parse(input, true)
-                .map_err(|error| format!("parsing wasm: {error}"))?
-            {
-                wasmparser::Chunk::NeedMoreData(_) => {
-                    return Err(format!("unexpected end of wasm data at offset {offset}"));
-                },
-                wasmparser::Chunk::Parsed { consumed, payload } => {
-                    offset += consumed;
-                    match payload {
-                        Payload::CustomSection(reader)
-                            if reader.name() == mts::MANIFEST_SECTION_NAME =>
-                        {
-                            out.extend_from_slice(reader.data());
-                        },
-                        Payload::ModuleSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        }
-                        | Payload::ComponentSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        } => {
-                            offset = offset.max(unchecked_range.end);
-                            work.push((sub, unchecked_range));
-                        },
-                        Payload::End(_) => break,
-                        _ => {},
-                    }
-                },
-            }
-        }
-    }
-
-    Ok(())
+    // Skip bind sites: they're parents of expanded subtree routes, not
+    // concrete handlers the runtime can dispatch.
+    resolved
+        .handlers
+        .into_iter()
+        .filter(|handler| !matches!(handler.handler_kind, mts::HandlerKindRecord::Subtree))
+        .map(DeclaredHandler::new)
+        .collect()
 }
 
 #[cfg(test)]
@@ -131,6 +91,7 @@ mod tests {
             handler_name: "Repo".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
         let issue = DeclaredHandler::new(HandlerRecord {
@@ -138,6 +99,7 @@ mod tests {
             handler_name: "Issue".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
         let resolver = DeclaredHandler::new(HandlerRecord {
@@ -145,6 +107,7 @@ mod tests {
             handler_name: "ResolverSegment".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
 
@@ -171,6 +134,7 @@ mod tests {
             handler_name: "Resolvers".to_string(),
             handler_kind: HandlerKindRecord::File,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
         let prefixed = DeclaredHandler::new(HandlerRecord {
@@ -178,6 +142,7 @@ mod tests {
             handler_name: "ResolverRoot".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
         let capture = DeclaredHandler::new(HandlerRecord {
@@ -185,6 +150,7 @@ mod tests {
             handler_name: "Segment".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
 

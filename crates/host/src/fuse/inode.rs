@@ -11,15 +11,14 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
+// SAFETY: libc::getuid() and libc::getgid() are trivially safe.
 #[allow(unsafe_code)]
 fn current_uid() -> u32 {
-    // SAFETY: getuid() is async-signal-safe with no preconditions.
     unsafe { libc::getuid() }
 }
 
 #[allow(unsafe_code)]
 fn current_gid() -> u32 {
-    // SAFETY: getgid() is async-signal-safe with no preconditions.
     unsafe { libc::getgid() }
 }
 
@@ -28,10 +27,7 @@ pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
     pub(crate) path: String,
     pub(crate) kind: EntryKind,
-    /// `None`: stat reports 0 and the file opens with `direct_io` until a
-    /// read resolves the length; the inode is then updated and the
-    /// kernel invalidated so subsequent stats reflect the truth.
-    pub(crate) size: Option<u64>,
+    pub(crate) size: u64,
     /// When set, FUSE operations for this inode serve directly from the backing
     /// filesystem instead of routing through the Wasm provider.
     pub(crate) backing_path: Option<PathBuf>,
@@ -51,7 +47,7 @@ impl FuseFs {
         mount_name: &str,
         path: &str,
         kind: EntryKind,
-        size: Option<u64>,
+        size: u64,
     ) -> u64 {
         self.get_or_alloc_ino_inner(mount_name, path, kind, size, None)
     }
@@ -61,7 +57,7 @@ impl FuseFs {
         mount_name: &str,
         path: &str,
         kind: EntryKind,
-        size: Option<u64>,
+        size: u64,
         backing_path: PathBuf,
     ) -> u64 {
         self.get_or_alloc_ino_inner(mount_name, path, kind, size, Some(backing_path))
@@ -72,7 +68,7 @@ impl FuseFs {
         mount_name: &str,
         path: &str,
         kind: EntryKind,
-        size: Option<u64>,
+        size: u64,
         backing_path: Option<PathBuf>,
     ) -> u64 {
         let key = PathKey::new(mount_name, path);
@@ -130,9 +126,8 @@ impl FuseFs {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn file_attr(&self, ino: u64, size: Option<u64>) -> FileAttr {
+    pub(crate) fn file_attr(&self, ino: u64, size: u64) -> FileAttr {
         let now = SystemTime::now();
-        let size = size.unwrap_or(0);
         FileAttr {
             ino: INodeNo(ino),
             size,

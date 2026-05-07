@@ -1,8 +1,8 @@
 [package]
-name = "omnifs-provider-github"
+name = "omnifs-provider-arxiv"
 version = "0.1.0"
 edition = "2024"
-description = "OmnIFS provider for GitHub repository and issue browsing"
+description = "omnifs provider for browsing arXiv papers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/raulk/omnifs"
 homepage = "https://github.com/raulk/omnifs"
@@ -12,12 +12,13 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 omnifs-sdk = { path = "../../crates/omnifs-sdk" }
-hashbrown = { workspace = true }
-http = { workspace = true }
+percent-encoding = { workspace = true }
+quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rc-zip-sync = { version = "4", default-features = false, features = ["deflate"] }
 strum = { workspace = true }
+time = { workspace = true }
+url = { workspace = true }
 
 [package.metadata.component]
 package = "omnifs:provider"

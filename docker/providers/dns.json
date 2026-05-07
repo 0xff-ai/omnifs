@@ -1,0 +1,8 @@
+{
+  "plugin": "omnifs_provider_dns.wasm",
+  "mount": "dns",
+  "capabilities": {
+    "domains": ["cloudflare-dns.com", "dns.google"],
+    "max_memory_mb": 32
+  }
+}

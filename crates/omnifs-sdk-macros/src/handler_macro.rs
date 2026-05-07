@@ -14,15 +14,16 @@ use syn::{
 pub enum HandlerKind {
     Dir,
     File,
-    Subtree,
+    TreeRef,
     Mutate,
+    Bind,
 }
 
 impl HandlerKind {
     fn ctx_ident(self) -> &'static str {
         match self {
             Self::Dir => "DirCx",
-            Self::File | Self::Subtree | Self::Mutate => "Cx",
+            Self::File | Self::TreeRef | Self::Mutate | Self::Bind => "Cx",
         }
     }
 
@@ -30,8 +31,10 @@ impl HandlerKind {
         match self {
             Self::Dir => Some(omnifs_mount_schema::HandlerKindRecord::Dir),
             Self::File => Some(omnifs_mount_schema::HandlerKindRecord::File),
-            Self::Subtree => Some(omnifs_mount_schema::HandlerKindRecord::Subtree),
-            Self::Mutate => None,
+            Self::TreeRef => Some(omnifs_mount_schema::HandlerKindRecord::TreeRef),
+            // `Bind` emits a `Subtree`-kind handler record carrying
+            // `subtree_type`; that path is handled separately below.
+            Self::Bind | Self::Mutate => None,
         }
     }
 }
@@ -39,6 +42,12 @@ impl HandlerKind {
 #[derive(Clone)]
 pub struct HandlerArgs {
     template: LitStr,
+}
+
+impl HandlerArgs {
+    pub(crate) fn template(&self) -> LitStr {
+        self.template.clone()
+    }
 }
 
 impl Parse for HandlerArgs {
@@ -195,34 +204,54 @@ pub fn expand_handler_items(
             }
         })
         .collect::<Vec<_>>();
-    let manifest_bytes = if let Some(handler_kind) = kind.manifest_kind() {
-        let handler_name = path_struct
-            .to_string()
-            .strip_suffix("Path")
-            .map_or_else(|| path_struct.to_string(), str::to_string);
-        let record = omnifs_mount_schema::HandlerRecord {
-            path_template: template.value(),
-            handler_name,
-            handler_kind,
-            capture_schema: manifest_captures,
-        };
-        omnifs_mount_schema::encode_handler(&record).map_err(|error| {
-            syn::Error::new(
-                fn_name.span(),
-                format!("failed to encode handler manifest record: {error}"),
-            )
-        })?
-    } else {
-        let record = omnifs_mount_schema::MutationRecord {
-            path_template: template.value(),
-            capture_schema: manifest_captures,
-        };
-        omnifs_mount_schema::encode_mutation(&record).map_err(|error| {
-            syn::Error::new(
-                fn_name.span(),
-                format!("failed to encode mutation manifest record: {error}"),
-            )
-        })?
+    let handler_name = handler_name_from_path_struct(&path_struct);
+    let manifest_bytes = match kind {
+        HandlerKind::Dir | HandlerKind::File | HandlerKind::TreeRef => {
+            let record = omnifs_mount_schema::HandlerRecord {
+                path_template: template.value(),
+                handler_name: handler_name.clone(),
+                handler_kind: kind
+                    .manifest_kind()
+                    .expect("Dir/File/TreeRef have manifest kinds"),
+                capture_schema: manifest_captures,
+                subtree_type: None,
+            };
+            omnifs_mount_schema::encode_handler(&record).map_err(|error| {
+                syn::Error::new(
+                    fn_name.span(),
+                    format!("failed to encode handler manifest record: {error}"),
+                )
+            })?
+        },
+        HandlerKind::Bind => {
+            let bindings_ty = extract_bind_bindings_ty(sig)?;
+            let subtree_type = quote!(#bindings_ty).to_string();
+            let record = omnifs_mount_schema::HandlerRecord {
+                path_template: template.value(),
+                handler_name: handler_name.clone(),
+                handler_kind: omnifs_mount_schema::HandlerKindRecord::Subtree,
+                capture_schema: manifest_captures,
+                subtree_type: Some(subtree_type),
+            };
+            omnifs_mount_schema::encode_handler(&record).map_err(|error| {
+                syn::Error::new(
+                    fn_name.span(),
+                    format!("failed to encode bind manifest record: {error}"),
+                )
+            })?
+        },
+        HandlerKind::Mutate => {
+            let record = omnifs_mount_schema::MutationRecord {
+                path_template: template.value(),
+                capture_schema: manifest_captures,
+            };
+            omnifs_mount_schema::encode_mutation(&record).map_err(|error| {
+                syn::Error::new(
+                    fn_name.span(),
+                    format!("failed to encode mutation manifest record: {error}"),
+                )
+            })?
+        },
     };
     let manifest_len = manifest_bytes.len();
     let manifest_lits = manifest_bytes;
@@ -246,13 +275,22 @@ pub fn expand_handler_items(
                     .expect("register file handler");
             }
         },
-        HandlerKind::Subtree => quote! {
+        HandlerKind::TreeRef => quote! {
             pub(crate) fn #register_name(
                 registry: &mut omnifs_sdk::__internal::MountRegistry<#state_ty>,
             ) {
                 registry
-                    .add_subtree(#template, #parse_name, #call_name)
-                    .expect("register subtree handler");
+                    .add_treeref(#template, #parse_name, #call_name)
+                    .expect("register treeref handler");
+            }
+        },
+        HandlerKind::Bind => quote! {
+            pub(crate) fn #register_name(
+                registry: &mut omnifs_sdk::__internal::MountRegistry<#state_ty>,
+            ) {
+                registry
+                    .add_bind(#template, #parse_name, #call_name)
+                    .expect("register bind handler");
             }
         },
         HandlerKind::Mutate => TokenStream2::new(),
@@ -316,17 +354,38 @@ pub fn expand_handler_items(
                 })
             }
         },
-        HandlerKind::Subtree => quote! {
+        HandlerKind::TreeRef => quote! {
             fn #call_name<'a>(
                 #cx_param: &'a omnifs_sdk::Cx<#state_ty>,
                 __omnifs_path: Box<dyn std::any::Any>,
-            ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::SubtreeRef> {
+            ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::TreeRef> {
                 let __omnifs_path: Box<#path_struct> = __omnifs_path
                     .downcast()
                     .unwrap_or_else(|_| panic!("subtree handler path type mismatch for {}", stringify!(#fn_name)));
                 let #path_struct { #(#destructure_fields,)* .. } = *__omnifs_path;
                 Box::pin(async move {
                     #simple_invoke
+                })
+            }
+        },
+        HandlerKind::Bind => quote! {
+            fn #call_name<'a>(
+                __omnifs_cx: &'a omnifs_sdk::Cx<#state_ty>,
+                __omnifs_path: Box<dyn std::any::Any>,
+            ) -> omnifs_sdk::handler::BoxFuture<
+                'a,
+                Box<dyn omnifs_sdk::handler::Handler<#state_ty>>,
+            > {
+                let __omnifs_path: Box<#path_struct> = __omnifs_path
+                    .downcast()
+                    .unwrap_or_else(|_| panic!("bind handler path type mismatch for {}", stringify!(#fn_name)));
+                let #path_struct { #(#destructure_fields,)* .. } = *__omnifs_path;
+                Box::pin(async move {
+                    let __omnifs_bound =
+                        #call_target(__omnifs_cx, #(#source_order_idents,)*) #await_tokens?;
+                    let __omnifs_boxed: Box<dyn omnifs_sdk::handler::Handler<#state_ty>> =
+                        Box::new(__omnifs_bound);
+                    Ok(__omnifs_boxed)
                 })
             }
         },
@@ -366,7 +425,8 @@ fn extract_handler_attr_kind(attr: &Attribute) -> Option<HandlerKind> {
     match ident.to_string().as_str() {
         "dir" => Some(HandlerKind::Dir),
         "file" => Some(HandlerKind::File),
-        "subtree" => Some(HandlerKind::Subtree),
+        "treeref" => Some(HandlerKind::TreeRef),
+        "bind" => Some(HandlerKind::Bind),
         _ => None,
     }
 }
@@ -399,7 +459,7 @@ pub fn expand_handlers(args: &HandlersArgs, mut input: ItemImpl) -> syn::Result<
         if marked_attrs.len() > 1 {
             return Err(syn::Error::new(
                 method.sig.ident.span(),
-                "handlers can only have one path attribute (`dir`, `file`, or `subtree`)",
+                "handlers can only have one path attribute (`dir`, `file`, `treeref`, or `bind`)",
             ));
         }
         let (index, kind) = marked_attrs[0];
@@ -530,6 +590,38 @@ fn is_cx_arg(arg: &FnArg) -> bool {
     matches!(segment.ident.to_string().as_str(), "Cx" | "DirCx")
 }
 
+/// For a `#[bind]`-annotated function `fn(...) -> Result<T>`, return `T`.
+/// `T` is the subtree bindings type the bind site dispatches into.
+pub(crate) fn extract_bind_bindings_ty(sig: &Signature) -> syn::Result<Type> {
+    const EXPECTED: &str =
+        "bind handler must return `Result<T>` where T is the subtree bindings type";
+
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return Err(syn::Error::new(sig.span(), EXPECTED));
+    };
+    let Type::Path(tp) = &**ty else {
+        return Err(syn::Error::new(ty.span(), EXPECTED));
+    };
+    let last = tp
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| syn::Error::new(tp.span(), EXPECTED))?;
+    if last.ident != "Result" {
+        return Err(syn::Error::new(last.ident.span(), EXPECTED));
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(syn::Error::new(last.span(), EXPECTED));
+    };
+    args.args
+        .iter()
+        .find_map(|arg| match arg {
+            GenericArgument::Type(ty) => Some(ty.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| syn::Error::new(args.span(), EXPECTED))
+}
+
 fn extract_state_ty(kind: HandlerKind, ty: &Type) -> syn::Result<Type> {
     let expected = kind.ctx_ident();
     let Type::Reference(r) = ty else {
@@ -573,7 +665,13 @@ fn extract_state_ty(kind: HandlerKind, ty: &Type) -> syn::Result<Type> {
     Ok(state_ty)
 }
 
-fn path_struct_name(fn_name: &Ident) -> Ident {
+pub(crate) fn handler_name_from_path_struct(path_struct: &Ident) -> String {
+    let raw = path_struct.to_string();
+    raw.strip_suffix("Path")
+        .map_or_else(|| raw.clone(), str::to_string)
+}
+
+pub(crate) fn path_struct_name(fn_name: &Ident) -> Ident {
     let raw = fn_name.to_string();
     let mut pascal = String::with_capacity(raw.len());
     let mut cap_next = true;
@@ -593,7 +691,7 @@ fn path_struct_name(fn_name: &Ident) -> Ident {
     Ident::new(&pascal, fn_name.span())
 }
 
-fn validate_capture_alignment(
+pub(crate) fn validate_capture_alignment(
     sig_captures: &[(String, Type)],
     template_captures: &[String],
     template: &LitStr,
@@ -634,7 +732,7 @@ fn validate_capture_alignment(
     Ok(())
 }
 
-fn capture_names(segments: &[PathSegment]) -> Vec<String> {
+pub(crate) fn capture_names(segments: &[PathSegment]) -> Vec<String> {
     let mut names = Vec::new();
     let mut seen = BTreeSet::new();
     for segment in segments {
@@ -662,7 +760,7 @@ fn is_string_type(ty: &Type) -> bool {
     segment.ident == "String" && matches!(segment.arguments, PathArguments::None)
 }
 
-fn parse_statements(
+pub(crate) fn parse_statements(
     segments: &[PathSegment],
     capture_type_map: &BTreeMap<String, Type>,
 ) -> (TokenStream2, Vec<TokenStream2>) {
