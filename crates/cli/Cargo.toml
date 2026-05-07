@@ -1,19 +1,22 @@
 [package]
 name = "omnifs-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Command-line interface for mounting OmnIFS virtual filesystems"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/raulk/omnifs"
-homepage = "https://github.com/raulk/omnifs"
+categories = ["filesystem", "command-line-utilities"]
+keywords = ["omnifs", "fuse", "filesystem", "wasm", "cli"]
 
 [[bin]]
 name = "omnifs"
 path = "src/main.rs"
 
 [dependencies]
-omnifs-host = { path = "../host" }
-omnifs-mount-schema = { path = "../omnifs-mount-schema" }
+omnifs-host = { version = "0.1.0", path = "../host" }
+omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 clap = { workspace = true }
 dirs-next = "2"
 tokio = { workspace = true }

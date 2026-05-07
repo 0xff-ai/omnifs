@@ -9,6 +9,14 @@ members = [
 ]
 default-members = ["crates/cli", "crates/host"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raulk/omnifs"
+homepage = "https://github.com/raulk/omnifs"
+readme = "README.md"
+
 [workspace.dependencies]
 wasmtime = { version = "43", features = ["component-model", "runtime"] }
 tokio = { version = "1", features = ["full"] }

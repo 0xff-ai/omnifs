@@ -1,9 +1,14 @@
 [package]
 name = "omnifs-sdk-macros"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Proc macros for the omnifs provider SDK"
-license = "MIT OR Apache-2.0"
+categories = ["development-tools::procedural-macro-helpers", "wasm"]
+keywords = ["omnifs", "macros", "wasm", "wit", "sdk"]
 
 [lib]
 proc-macro = true
@@ -12,10 +17,10 @@ proc-macro = true
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-omnifs-mount-schema = { path = "../omnifs-mount-schema" }
+omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 
 [dev-dependencies]
-omnifs-sdk = { path = "../omnifs-sdk" }
+omnifs-sdk = { version = "0.1.0", path = "../omnifs-sdk" }
 tokio = { workspace = true }
 trybuild = "1"
 serde = { workspace = true }

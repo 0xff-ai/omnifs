@@ -2,12 +2,13 @@
 name = "test-provider"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-omnifs-sdk = { path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
 serde = { workspace = true }
 
 [package.metadata.component]

@@ -1,17 +1,24 @@
 [package]
 name = "omnifs-provider-github"
-version = "0.1.0"
-edition = "2024"
-description = "OmnIFS provider for GitHub repository and issue browsing"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/raulk/omnifs"
-homepage = "https://github.com/raulk/omnifs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "omnifs provider for browsing GitHub repositories, issues, and pull requests"
+categories = ["filesystem", "wasm"]
+keywords = ["omnifs", "github", "filesystem", "wasm", "git"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[package.metadata.docs.rs]
+default-target = "wasm32-wasip2"
+targets = []
+
 [dependencies]
-omnifs-sdk = { path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
 hashbrown = { workspace = true }
 http = { workspace = true }
 serde = { workspace = true }

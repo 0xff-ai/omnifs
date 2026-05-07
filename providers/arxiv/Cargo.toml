@@ -1,17 +1,24 @@
 [package]
 name = "omnifs-provider-arxiv"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "omnifs provider for browsing arXiv papers"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/raulk/omnifs"
-homepage = "https://github.com/raulk/omnifs"
+categories = ["filesystem", "wasm", "science"]
+keywords = ["omnifs", "arxiv", "papers", "research", "wasm"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[package.metadata.docs.rs]
+default-target = "wasm32-wasip2"
+targets = []
+
 [dependencies]
-omnifs-sdk = { path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
