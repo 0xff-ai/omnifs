@@ -1,0 +1,42 @@
+# omnifs-provider-github
+
+[omnifs](https://github.com/raulk/omnifs) provider that projects GitHub repositories, issues, pull requests, and CI runs into a FUSE-visible tree. Source trees are bind-mounted clones (cloned on demand via SSH); issues and PRs are per-item directories with title, body, state, and comments as separate files.
+
+## Mount layout
+
+```
+/github/{owner}/{repo}/
+  issues/{number}/
+    title
+    body
+    state
+    comments/{n}.md
+  pulls/{number}/
+    ... + diff, files/, checks/
+  actions/runs/{id}/
+  src/  ← bind-mounted clone (lazily cloned via SSH)
+```
+
+Hybrid pagination across issues + PRs and cross-listing PR preload keep listings responsive without exhausting GitHub's API budget.
+
+## Capabilities
+
+`api.github.com` over HTTPS plus `git@github.com:*` over SSH for the bind-mounted clones. Bearer-token auth via `GITHUB_TOKEN` env or a Docker secret file. 256 MiB memory limit. Read-only today; mutation path WIP per the design docs.
+
+## Install
+
+This is a wasm component. Build with:
+
+```bash
+cargo build --target wasm32-wasip2 --release -p omnifs-provider-github
+```
+
+The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). Configure in your omnifs mount config under the `github` key.
+
+## Status
+
+Pre-1.0. Mount layout and projection rules may evolve.
+
+## License
+
+Dual licensed under MIT or Apache-2.0 at your option.
