@@ -1,7 +1,6 @@
 use crate::browse::{
     Entry as BrowseEntry, EntryKind as BrowseEntryKind, List as BrowseList,
     Listing as BrowseListing, Lookup as BrowseLookup, Preload as BrowsePreload, ProjectedFile,
-    Size,
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -9,8 +8,20 @@ use omnifs_mount_schema::{PathPattern, PathSegment, split_path};
 use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 
+// Placeholder `st_size` for projected files whose real length is
+// unknown until read. The kernel caps `read` requests at the file's
+// reported size, so this value must comfortably cover any payload a
+// provider might serve (PDFs, tarballs, repo zips). Once `read`
+// returns fewer bytes than requested, the kernel sees EOF.
+//
+// Caveat: until a file is read, `ls -l`, `du`, and `find -size` will
+// report this placeholder. Pick a size large enough for real payloads
+// but not so large that disk-usage tools become absurd. 256 MiB
+// covers every realistic provider download and reads as "256M".
+const DEFAULT_FILE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
@@ -56,10 +67,89 @@ impl<S> std::ops::Deref for DirCx<S> {
     }
 }
 
+/// Context for handlers declared inside a `#[subtree] impl B { ... }`
+/// block. Wraps the underlying `Cx<S>` and exposes the bindings `B`
+/// captured at the bind site.
+///
+/// For dir-shaped handlers in a subtree, the request intent is exposed
+/// via `intent()`; for file-shaped handlers, it's `None`. Methods on
+/// `Cx<S>` (`.http()`, `.git()`, `.state()`) are available through
+/// `Deref`.
+pub struct BindCtx<'a, S, B> {
+    cx: &'a Cx<S>,
+    bindings: &'a B,
+    intent: Option<DirIntent>,
+}
+
+impl<'a, S, B> BindCtx<'a, S, B> {
+    pub fn new(cx: &'a Cx<S>, bindings: &'a B, intent: Option<DirIntent>) -> Self {
+        Self {
+            cx,
+            bindings,
+            intent,
+        }
+    }
+
+    pub fn bindings(&self) -> &B {
+        self.bindings
+    }
+
+    pub fn intent(&self) -> Option<&DirIntent> {
+        self.intent.as_ref()
+    }
+}
+
+impl<S, B> std::ops::Deref for BindCtx<'_, S, B> {
+    type Target = Cx<S>;
+
+    fn deref(&self) -> &Cx<S> {
+        self.cx
+    }
+}
+
+/// A typed subtree handler. The `#[subtree] impl B { ... }` macro
+/// generates an implementation; provider authors do not implement
+/// this trait directly.
+///
+/// No `Send + Sync` bound: the runtime is single-threaded (`Rc`-based).
+pub trait Handler<S> {
+    fn lookup_child<'a>(
+        &'a self,
+        cx: &'a Cx<S>,
+        parent_path: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, crate::browse::Lookup>;
+
+    fn list_children<'a>(
+        &'a self,
+        cx: &'a Cx<S>,
+        path: &'a str,
+    ) -> BoxFuture<'a, crate::browse::List>;
+
+    fn read_file<'a>(
+        &'a self,
+        cx: &'a Cx<S>,
+        path: &'a str,
+    ) -> BoxFuture<'a, crate::browse::FileContent>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageStatus {
     Exhaustive,
     More(Cursor),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStat {
+    pub size: NonZeroU64,
+}
+
+impl FileStat {
+    pub fn placeholder() -> Self {
+        Self {
+            size: placeholder_size(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -73,7 +163,7 @@ pub enum ProjectionKind {
 struct ProjectionEntry {
     name: String,
     kind: ProjectionKind,
-    size: Size,
+    stat: Option<FileStat>,
     bytes: Option<Vec<u8>>,
 }
 
@@ -91,20 +181,20 @@ impl Projection {
     }
 
     pub fn dir(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(name.into(), ProjectionKind::Directory, Size::Unknown, None);
+        let _ = self.push_entry(name.into(), ProjectionKind::Directory, None, None);
     }
 
-    /// Project a file whose size is unknown until read.
-    ///
-    /// The host opens the file with `direct_io`, reports `st_size = 0`,
-    /// and updates the inode size lazily once a read returns content.
-    /// Use [`Self::file_with_size`] to declare an exact size up front.
     pub fn file(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Size::Unknown, None);
+        let _ = self.push_entry(
+            name.into(),
+            ProjectionKind::File,
+            Some(FileStat::placeholder()),
+            None,
+        );
     }
 
-    pub fn file_with_size(&mut self, name: impl Into<String>, size: Size) {
-        let _ = self.push_entry(name.into(), ProjectionKind::File, size, None);
+    pub fn file_with_stat(&mut self, name: impl Into<String>, stat: FileStat) {
+        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), None);
     }
 
     pub fn file_with_content(&mut self, name: impl Into<String>, bytes: impl Into<Vec<u8>>) {
@@ -115,8 +205,9 @@ impl Projection {
             ));
             return;
         }
-        let size = Size::from_content_len(bytes.len());
-        let _ = self.push_entry(name.into(), ProjectionKind::File, size, Some(bytes));
+        let stat = NonZeroU64::new(u64::try_from(bytes.len()).unwrap_or(DEFAULT_FILE_SIZE_BYTES))
+            .map_or_else(FileStat::placeholder, |size| FileStat { size });
+        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), Some(bytes));
     }
 
     pub fn page(&mut self, status: PageStatus) {
@@ -156,7 +247,12 @@ impl Projection {
     /// this directory entry, the host may materialize a partial cached
     /// listing from those children. A directory preload by itself does
     /// not cache an empty listing.
-    pub fn preload_entry(&mut self, path: impl Into<String>, kind: BrowseEntryKind, size: Size) {
+    pub fn preload_entry(
+        &mut self,
+        path: impl Into<String>,
+        kind: BrowseEntryKind,
+        size: Option<NonZeroU64>,
+    ) {
         let path = path.into();
         if path.is_empty() {
             return;
@@ -167,7 +263,7 @@ impl Projection {
     /// Hand directory metadata to the host so a later lookup of `path`
     /// can be served without another provider round trip.
     pub fn preload_dir(&mut self, path: impl Into<String>) {
-        self.preload_entry(path, BrowseEntryKind::Directory, Size::Unknown);
+        self.preload_entry(path, BrowseEntryKind::Directory, None);
     }
 
     pub fn into_error(self) -> Option<String> {
@@ -178,7 +274,7 @@ impl Projection {
         &mut self,
         name: String,
         kind: ProjectionKind,
-        size: Size,
+        stat: Option<FileStat>,
         bytes: Option<Vec<u8>>,
     ) -> Result<()> {
         if !is_valid_rel_segment(&name) {
@@ -190,7 +286,7 @@ impl Projection {
         self.entries.push(ProjectionEntry {
             name,
             kind,
-            size,
+            stat,
             bytes,
         });
         Ok(())
@@ -240,11 +336,11 @@ pub struct RangeReaderHandle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SubtreeRef {
+pub struct TreeRef {
     pub tree_ref: u64,
 }
 
-impl SubtreeRef {
+impl TreeRef {
     pub fn new(tree_ref: u64) -> Self {
         Self { tree_ref }
     }
@@ -259,7 +355,23 @@ struct RouteDecl {
 type ParseFn = fn(&str) -> Option<Box<dyn Any>>;
 type DirCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>, DirIntent) -> BoxFuture<'a, Projection>;
 type FileCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, FileContent>;
-type SubtreeCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, SubtreeRef>;
+type TreeRefCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, TreeRef>;
+
+/// Builds a typed subtree handler from prefix captures parsed at the
+/// bind site. The returned `Box<dyn Handler<S>>` owns its bindings
+/// and routes subsequent path segments through its own per-type
+/// registry.
+#[allow(dead_code)] // wired through MountRegistry dispatch in Phase 1B-ii.
+type BindCallFn<S> = for<'a> fn(&'a Cx<S>, Box<dyn Any>) -> BoxFuture<'a, Box<dyn Handler<S>>>;
+
+/// Per-route call dispatcher inside a `#[subtree] impl B { ... }`.
+/// The `&'a B` is the bindings carried over from the bind site;
+/// the user-facing handler signature receives a `BindCtx<'_, S, B>`
+/// constructed from `(cx, bindings, intent)`.
+type SubtreeDirCallFn<S, B> =
+    for<'a> fn(&'a Cx<S>, &'a B, Box<dyn Any>, DirIntent) -> BoxFuture<'a, Projection>;
+type SubtreeFileCallFn<S, B> =
+    for<'a> fn(&'a Cx<S>, &'a B, Box<dyn Any>) -> BoxFuture<'a, FileContent>;
 
 struct DirHandlerRegistration<S> {
     decl: RouteDecl,
@@ -273,16 +385,24 @@ struct FileHandlerRegistration<S> {
     call: FileCallFn<S>,
 }
 
-struct SubtreeHandlerRegistration<S> {
+struct TreeRefHandlerRegistration<S> {
     decl: RouteDecl,
     parse: ParseFn,
-    call: SubtreeCallFn<S>,
+    call: TreeRefCallFn<S>,
+}
+
+#[allow(dead_code)] // fields read once dispatch hook lands in Phase 1B-ii.
+struct BindRegistration<S> {
+    decl: RouteDecl,
+    parse: ParseFn,
+    call: BindCallFn<S>,
 }
 
 pub struct MountRegistry<S> {
     dirs: Vec<DirHandlerRegistration<S>>,
     files: Vec<FileHandlerRegistration<S>>,
-    subtrees: Vec<SubtreeHandlerRegistration<S>>,
+    treerefs: Vec<TreeRefHandlerRegistration<S>>,
+    binds: Vec<BindRegistration<S>>,
 }
 
 impl<S> Default for MountRegistry<S> {
@@ -290,7 +410,8 @@ impl<S> Default for MountRegistry<S> {
         Self {
             dirs: Vec::new(),
             files: Vec::new(),
-            subtrees: Vec::new(),
+            treerefs: Vec::new(),
+            binds: Vec::new(),
         }
     }
 }
@@ -336,13 +457,13 @@ impl<S> MountRegistry<S> {
         Ok(())
     }
 
-    pub fn add_subtree(
+    pub fn add_treeref(
         &mut self,
         template: &'static str,
         parse: ParseFn,
-        call: SubtreeCallFn<S>,
+        call: TreeRefCallFn<S>,
     ) -> Result<()> {
-        self.subtrees.push(SubtreeHandlerRegistration {
+        self.treerefs.push(TreeRefHandlerRegistration {
             decl: RouteDecl {
                 template,
                 pattern: PathPattern::parse(template)
@@ -354,48 +475,45 @@ impl<S> MountRegistry<S> {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<()> {
-        // Within-kind dedup: two #[dir("X")] (or two #[file("X")], or two
-        // #[subtree("X")]) handlers on the same template are always wrong.
-        // Cross-kind co-existence of dir+file is allowed — the dispatch
-        // routes by request kind. Subtrees still take over the path
-        // entirely, so they're mutually exclusive with both dirs and files
-        // at the same template.
-        fn dedup_within<'a, I>(decls: I, kind: &str) -> Result<()>
-        where
-            I: IntoIterator<Item = &'a RouteDecl>,
-        {
-            let mut seen = std::collections::BTreeSet::<&'static str>::new();
-            for decl in decls {
-                if !seen.insert(decl.template) {
-                    return Err(ProviderError::invalid_input(format!(
-                        "duplicate {kind} handler declared for {}",
-                        decl.template
-                    )));
-                }
-            }
-            Ok(())
-        }
-        dedup_within(self.dirs.iter().map(|e| &e.decl), "dir")?;
-        dedup_within(self.files.iter().map(|e| &e.decl), "file")?;
-        dedup_within(self.subtrees.iter().map(|e| &e.decl), "subtree")?;
+    /// Register a bind: when a request path has `template` as its
+    /// (longest) prefix, the dispatcher invokes `call` to construct the
+    /// typed subtree handler, then routes the remaining suffix through
+    /// the handler's own `#[subtree] impl` registry.
+    pub fn add_bind(
+        &mut self,
+        template: &'static str,
+        parse: ParseFn,
+        call: BindCallFn<S>,
+    ) -> Result<()> {
+        self.binds.push(BindRegistration {
+            decl: RouteDecl {
+                template,
+                pattern: PathPattern::parse(template)
+                    .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?,
+            },
+            parse,
+            call,
+        });
+        Ok(())
+    }
 
-        let subtree_templates: std::collections::BTreeSet<&'static str> =
-            self.subtrees.iter().map(|e| e.decl.template).collect();
+    pub fn validate(&mut self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::<&'static str>::new();
         for decl in self
             .dirs
             .iter()
-            .map(|e| &e.decl)
-            .chain(self.files.iter().map(|e| &e.decl))
+            .map(|entry| &entry.decl)
+            .chain(self.files.iter().map(|entry| &entry.decl))
+            .chain(self.treerefs.iter().map(|entry| &entry.decl))
+            .chain(self.binds.iter().map(|entry| &entry.decl))
         {
-            if subtree_templates.contains(decl.template) {
+            if !seen.insert(decl.template) {
                 return Err(ProviderError::invalid_input(format!(
-                    "handler {} conflicts with a subtree handler on the same template",
+                    "duplicate handler declared for {}",
                     decl.template
                 )));
             }
         }
-
         let mut static_children =
             std::collections::BTreeMap::<(String, &'static str), &'static str>::new();
         for decl in self
@@ -403,7 +521,8 @@ impl<S> MountRegistry<S> {
             .iter()
             .map(|entry| &entry.decl)
             .chain(self.files.iter().map(|entry| &entry.decl))
-            .chain(self.subtrees.iter().map(|entry| &entry.decl))
+            .chain(self.treerefs.iter().map(|entry| &entry.decl))
+            .chain(self.binds.iter().map(|entry| &entry.decl))
         {
             let Some(child) = decl.pattern.static_child() else {
                 continue;
@@ -418,7 +537,34 @@ impl<S> MountRegistry<S> {
         }
         validate_ambiguous_routes(&self.dirs, "dir")?;
         validate_ambiguous_routes(&self.files, "file")?;
-        validate_ambiguous_routes(&self.subtrees, "subtree")?;
+        validate_ambiguous_routes(&self.treerefs, "treeref")?;
+        validate_ambiguous_routes(&self.binds, "bind")?;
+        // Exclusivity: a bind prefix owns all descendants. Reject any
+        // normal route whose template is a strict descendant of any
+        // bind template.
+        for bind in &self.binds {
+            let bind_segments = bind.decl.pattern.segments().len();
+            for decl in self
+                .dirs
+                .iter()
+                .map(|entry| &entry.decl)
+                .chain(self.files.iter().map(|entry| &entry.decl))
+                .chain(self.treerefs.iter().map(|entry| &entry.decl))
+            {
+                if decl.pattern.segments().len() > bind_segments
+                    && pattern_starts_with(&decl.pattern, &bind.decl.pattern)
+                {
+                    return Err(ProviderError::invalid_input(format!(
+                        "route {} is a descendant of bind {} — bind prefixes own all descendants; declare deeper routes inside the subtree's #[subtree] impl",
+                        decl.template, bind.decl.template
+                    )));
+                }
+            }
+        }
+        // Bind dispatch picks the longest-prefix match. Sort once here
+        // so the per-request matcher iterates without re-sorting.
+        self.binds
+            .sort_by_key(|h| std::cmp::Reverse(h.decl.pattern.segments().len()));
         Ok(())
     }
 
@@ -435,38 +581,46 @@ impl<S> MountRegistry<S> {
         let parent_abs = to_absolute_path(parent_path);
         let child_abs = join_absolute_path(&parent_abs, name);
 
-        if let Some((route, parsed)) = self.match_subtree(&child_abs) {
+        // Bind prefix matches the path being looked up exactly: the
+        // bind entry itself is a directory; report it as such.
+        //
+        // `exhaustive(false)` is load-bearing: without it, the host's
+        // lookup-side cache treats the bare `Lookup::entry` as "the
+        // bind has no children" and writes an exhaustive empty Dirents
+        // at this path. A subsequent readdir then short-circuits on
+        // that cache and never invokes the subtree's `list_children`.
+        if self
+            .binds
+            .iter()
+            .any(|h| h.decl.pattern.matches_path(&child_abs))
+        {
+            return Ok(BrowseLookup::entry(BrowseEntry::dir(name)).exhaustive(false));
+        }
+
+        // Bind prefix is a strict ancestor of the path: dispatch
+        // through the typed handler with the relative suffix.
+        if let Some((route, parsed, suffix)) = self.match_bind_prefix(&parent_abs) {
+            let handler = (route.call)(cx, parsed).await?;
+            return handler.lookup_child(cx, &suffix, name).await;
+        }
+
+        if let Some((route, parsed)) = self.match_treeref(&child_abs) {
             let tree_ref = (route.call)(cx, parsed).await?.tree_ref;
             return Ok(BrowseLookup::subtree(tree_ref));
         }
 
-        // When a #[dir] and #[file] both match the child path (the dir+file
-        // co-existence case enabled for content-determined routing under
-        // rest-captured templates), the structural match can't tell us the
-        // child's kind. Defer to the parent dir handler's projection
-        // verdict by skipping the direct-match shortcuts below.
-        let dir_match = self.match_dir(&child_abs);
-        let ambiguous = dir_match.is_some() && self.match_file(&child_abs).is_some();
+        if let Some((route, parsed)) = self.match_dir(&child_abs) {
+            // Exact dir lookups can warm the looked-up directory's adjacent cache shape.
+            let projection = (route.call)(cx, parsed, DirIntent::List { cursor: None }).await?;
+            return projection_exact_lookup(&projection, &child_abs, BrowseEntry::dir(name), self);
+        }
 
-        if !ambiguous {
-            if let Some((route, parsed)) = dir_match {
-                // Exact dir lookups can warm the looked-up directory's adjacent cache shape.
-                let projection = (route.call)(cx, parsed, DirIntent::List { cursor: None }).await?;
-                return projection_exact_lookup(
-                    &projection,
-                    &child_abs,
-                    BrowseEntry::dir(name),
-                    self,
-                );
-            }
-
-            if let Some(target) = self.exact_entry_for_path(&child_abs) {
-                let siblings = self.static_entries_for_parent(&parent_abs);
-                let exhaustive = !self.has_capture_child_under(&parent_abs);
-                return Ok(BrowseLookup::entry(target)
-                    .with_siblings(siblings)
-                    .exhaustive(exhaustive));
-            }
+        if let Some(target) = self.exact_entry_for_path(&child_abs) {
+            let siblings = self.static_entries_for_parent(&parent_abs);
+            let exhaustive = !self.has_capture_child_under(&parent_abs);
+            return Ok(BrowseLookup::entry(target)
+                .with_siblings(siblings)
+                .exhaustive(exhaustive));
         }
 
         let Some((route, parsed)) = self.match_dir(&parent_abs) else {
@@ -490,7 +644,14 @@ impl<S> MountRegistry<S> {
         );
         let abs = to_absolute_path(path);
 
-        if let Some((route, parsed)) = self.match_subtree(&abs) {
+        // Bind prefix matches the listed path exactly or as ancestor:
+        // dispatch through the typed handler with the relative path.
+        if let Some((route, parsed, suffix)) = self.match_bind_at_or_below(&abs) {
+            let handler = (route.call)(cx, parsed).await?;
+            return handler.list_children(cx, &suffix).await;
+        }
+
+        if let Some((route, parsed)) = self.match_treeref(&abs) {
             let tree_ref = (route.call)(cx, parsed).await?.tree_ref;
             return Ok(BrowseList::subtree(tree_ref));
         }
@@ -523,6 +684,14 @@ impl<S> MountRegistry<S> {
             "read_file expects an absolute path"
         );
         let abs = to_absolute_path(path);
+
+        // Bind prefix is a strict ancestor of the read path: dispatch
+        // through the typed handler with the relative suffix.
+        if let Some((route, parsed, suffix)) = self.match_bind_prefix(&abs) {
+            let handler = (route.call)(cx, parsed).await?;
+            return handler.read_file(cx, &suffix).await;
+        }
+
         if let Some((route, parsed)) = self.match_file(&abs) {
             return match (route.call)(cx, parsed).await? {
                 FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
@@ -551,14 +720,463 @@ impl<S> MountRegistry<S> {
         projected_file_from_projection(&projection, name)
     }
 
+    fn match_dir(&self, absolute_path: &str) -> Option<(&DirHandlerRegistration<S>, Box<dyn Any>)> {
+        best_route_match(&self.dirs, absolute_path)
+    }
+
+    fn match_file(
+        &self,
+        absolute_path: &str,
+    ) -> Option<(&FileHandlerRegistration<S>, Box<dyn Any>)> {
+        best_route_match(&self.files, absolute_path)
+    }
+
+    fn match_treeref(
+        &self,
+        absolute_path: &str,
+    ) -> Option<(&TreeRefHandlerRegistration<S>, Box<dyn Any>)> {
+        best_route_match(&self.treerefs, absolute_path)
+    }
+
+    /// Find a bind whose template is a strict ancestor of `path`.
+    /// Returns the matched bind, parsed prefix captures, and the
+    /// remaining absolute suffix (always begins with `/`, may be `/`
+    /// only when the prefix exactly matches `path` — but this method
+    /// requires a STRICT prefix and returns `None` in that case;
+    /// `match_bind_at_or_below` is the variant that allows equality).
+    fn match_bind_prefix(
+        &self,
+        path: &str,
+    ) -> Option<(&BindRegistration<S>, Box<dyn Any>, String)> {
+        match_bind_with(self, path, false)
+    }
+
+    /// Like `match_bind_prefix` but also matches when `path` exactly
+    /// equals a bind template (suffix `/`).
+    fn match_bind_at_or_below(
+        &self,
+        path: &str,
+    ) -> Option<(&BindRegistration<S>, Box<dyn Any>, String)> {
+        match_bind_with(self, path, true)
+    }
+
+    /// True iff `path` is an implicit directory node derivable from
+    /// the route table without an explicit handler. The root is
+    /// implicit whenever any routes are registered; a non-root path
+    /// is implicit only when its last segment appears as a literal
+    /// child of its parent in the static enumeration.
+    fn is_implicit_prefix_dir(&self, absolute_path: &str) -> bool {
+        if self.match_dir(absolute_path).is_some()
+            || self.match_file(absolute_path).is_some()
+            || self.match_treeref(absolute_path).is_some()
+            || self
+                .binds
+                .iter()
+                .any(|h| h.decl.pattern.matches_path(absolute_path))
+        {
+            return false;
+        }
+        if absolute_path == "/" {
+            return !self.dirs.is_empty()
+                || !self.files.is_empty()
+                || !self.treerefs.is_empty()
+                || !self.binds.is_empty();
+        }
+        let Some((parent, name)) = split_parent_name(absolute_path) else {
+            return false;
+        };
+        let parent_abs = to_absolute_path(parent);
+        self.static_entries_for_parent(&parent_abs)
+            .iter()
+            .any(|entry| entry.name() == name && entry.kind() == BrowseEntryKind::Directory)
+    }
+
+    /// True iff some registered route extends past `absolute_parent`
+    /// and the segment immediately below is a capture or rest. A
+    /// listing of such a parent cannot be authoritatively exhaustive.
+    fn has_capture_child_under(&self, absolute_parent: &str) -> bool {
+        let Some(parent_segments) = split_path(absolute_parent) else {
+            return false;
+        };
+        let parent_depth = parent_segments.len();
+        self.routes_extending_parent(&parent_segments)
+            .any(|(pattern, _)| {
+                matches!(
+                    pattern.segments()[parent_depth],
+                    PathSegment::Capture { .. } | PathSegment::Rest { .. }
+                )
+            })
+    }
+
+    /// Yields each registered pattern (with handler kind) that extends
+    /// past `parent_segments` as a strict prefix. Callers can safely
+    /// index `pattern.segments()[parent_segments.len()]` on every
+    /// yielded pattern.
+    fn routes_extending_parent<'a>(
+        &'a self,
+        parent_segments: &'a [&'a str],
+    ) -> impl Iterator<Item = (&'a PathPattern, BrowseEntryKind)> + 'a {
+        let dirs = self
+            .dirs
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        let files = self
+            .files
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::File));
+        let treerefs = self
+            .treerefs
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        let binds = self
+            .binds
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        dirs.chain(files)
+            .chain(treerefs)
+            .chain(binds)
+            .filter(move |(pattern, _)| pattern.accepts_as_strict_ancestor(parent_segments))
+    }
+}
+
+/// Locate a bind registration whose template prefix-matches `path`.
+/// Picks the longest (most-specific) match, parses prefix captures,
+/// and computes the relative suffix to dispatch into the inner handler.
+fn match_bind_with<'r, S>(
+    registry: &'r MountRegistry<S>,
+    path: &str,
+    allow_equal: bool,
+) -> Option<(&'r BindRegistration<S>, Box<dyn Any>, String)> {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let path_segment_count = if segments.len() == 1 && segments[0].is_empty() {
+        0
+    } else {
+        segments.len()
+    };
+
+    // `validate()` has already sorted `binds` so longer (more
+    // specific) templates come first; iterate as-is and the first
+    // successful parse wins.
+    for bind in &registry.binds {
+        let bind_segments = bind.decl.pattern.segments().len();
+        if bind_segments > path_segment_count {
+            continue;
+        }
+        if !allow_equal && bind_segments == path_segment_count {
+            continue;
+        }
+        let prefix = if bind_segments == 0 {
+            "/".to_string()
+        } else {
+            format!("/{}", segments[..bind_segments].join("/"))
+        };
+        let Some(parsed) = (bind.parse)(&prefix) else {
+            continue;
+        };
+        let suffix = if bind_segments == path_segment_count {
+            "/".to_string()
+        } else {
+            format!("/{}", segments[bind_segments..].join("/"))
+        };
+        return Some((bind, parsed, suffix));
+    }
+    None
+}
+
+struct SubtreeDirHandlerRegistration<S, B> {
+    decl: RouteDecl,
+    parse: ParseFn,
+    call: SubtreeDirCallFn<S, B>,
+}
+
+struct SubtreeFileHandlerRegistration<S, B> {
+    decl: RouteDecl,
+    parse: ParseFn,
+    call: SubtreeFileCallFn<S, B>,
+}
+
+/// Per-type registry built once per `#[subtree] impl B { ... }` and
+/// driven by `Handler<S>` trait dispatch. Simpler than `MountRegistry`:
+/// no treerefs, no nested binds (a subtree cannot itself host
+/// another bind in the current model).
+pub struct SubtreeRegistry<S, B> {
+    dirs: Vec<SubtreeDirHandlerRegistration<S, B>>,
+    files: Vec<SubtreeFileHandlerRegistration<S, B>>,
+}
+
+impl<S, B> Default for SubtreeRegistry<S, B> {
+    fn default() -> Self {
+        Self {
+            dirs: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+}
+
+impl<S, B> SubtreeRegistry<S, B> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_dir(
+        &mut self,
+        template: &'static str,
+        parse: ParseFn,
+        call: SubtreeDirCallFn<S, B>,
+    ) -> Result<()> {
+        self.dirs.push(SubtreeDirHandlerRegistration {
+            decl: RouteDecl {
+                template,
+                pattern: PathPattern::parse(template)
+                    .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?,
+            },
+            parse,
+            call,
+        });
+        Ok(())
+    }
+
+    pub fn add_file(
+        &mut self,
+        template: &'static str,
+        parse: ParseFn,
+        call: SubtreeFileCallFn<S, B>,
+    ) -> Result<()> {
+        self.files.push(SubtreeFileHandlerRegistration {
+            decl: RouteDecl {
+                template,
+                pattern: PathPattern::parse(template)
+                    .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?,
+            },
+            parse,
+            call,
+        });
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::<&'static str>::new();
+        for decl in self
+            .dirs
+            .iter()
+            .map(|entry| &entry.decl)
+            .chain(self.files.iter().map(|entry| &entry.decl))
+        {
+            if !seen.insert(decl.template) {
+                return Err(ProviderError::invalid_input(format!(
+                    "duplicate subtree handler declared for {}",
+                    decl.template
+                )));
+            }
+        }
+        validate_ambiguous_routes(&self.dirs, "subtree dir")?;
+        validate_ambiguous_routes(&self.files, "subtree file")?;
+        Ok(())
+    }
+
+    pub async fn lookup_child(
+        &self,
+        cx: &Cx<S>,
+        bindings: &B,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<BrowseLookup> {
+        let parent_abs = to_absolute_path(parent_path);
+        let child_abs = join_absolute_path(&parent_abs, name);
+
+        if let Some((route, parsed)) = self.match_dir(&child_abs) {
+            let projection =
+                (route.call)(cx, bindings, parsed, DirIntent::List { cursor: None }).await?;
+            return projection_exact_lookup(&projection, &child_abs, BrowseEntry::dir(name), self);
+        }
+
+        if let Some(target) = self.exact_entry_for_path(&child_abs) {
+            let siblings = self.static_entries_for_parent(&parent_abs);
+            let exhaustive = !self.has_capture_child_under(&parent_abs);
+            return Ok(BrowseLookup::entry(target)
+                .with_siblings(siblings)
+                .exhaustive(exhaustive));
+        }
+
+        let Some((route, parsed)) = self.match_dir(&parent_abs) else {
+            return Ok(BrowseLookup::not_found());
+        };
+        let projection = (route.call)(
+            cx,
+            bindings,
+            parsed,
+            DirIntent::Lookup {
+                child: name.to_string(),
+            },
+        )
+        .await?;
+        projection_lookup(&projection, &parent_abs, name, None, self)
+    }
+
+    pub async fn list_children(&self, cx: &Cx<S>, bindings: &B, path: &str) -> Result<BrowseList> {
+        let abs = to_absolute_path(path);
+        let static_entries = self.static_entries_for_parent(&abs);
+        if let Some((route, parsed)) = self.match_dir(&abs) {
+            let projection =
+                (route.call)(cx, bindings, parsed, DirIntent::List { cursor: None }).await?;
+            return projection_listing(&projection, static_entries).map(BrowseList::entries);
+        }
+
+        if self.is_implicit_prefix_dir(&abs) {
+            let listing = if self.has_capture_child_under(&abs) {
+                BrowseListing::partial(static_entries)
+            } else {
+                BrowseListing::complete(static_entries)
+            };
+            return Ok(BrowseList::entries(listing));
+        }
+
+        if self.match_file(&abs).is_some() {
+            return Err(ProviderError::not_a_directory(format!("{path} is a file")));
+        }
+
+        Err(ProviderError::not_found(format!("path not found: {path}")))
+    }
+
+    pub async fn read_file(
+        &self,
+        cx: &Cx<S>,
+        bindings: &B,
+        path: &str,
+    ) -> Result<crate::browse::FileContent> {
+        let abs = to_absolute_path(path);
+        if let Some((route, parsed)) = self.match_file(&abs) {
+            return match (route.call)(cx, bindings, parsed).await? {
+                FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
+                FileContent::Stream(_) | FileContent::Range { .. } => {
+                    Err(ProviderError::unimplemented(
+                        "streamed and ranged file reads are reserved but not wired through the current host runtime",
+                    ))
+                },
+            };
+        }
+
+        let (parent_rel, name) = split_parent_name(path)
+            .ok_or_else(|| ProviderError::not_a_file(format!("path is not a file: {path}")))?;
+        let parent_abs = to_absolute_path(parent_rel);
+        let Some((route, parsed)) = self.match_dir(&parent_abs) else {
+            return Err(ProviderError::not_found(format!("path not found: {path}")));
+        };
+        let projection = (route.call)(
+            cx,
+            bindings,
+            parsed,
+            DirIntent::ReadProjectedFile {
+                name: name.to_string(),
+            },
+        )
+        .await?;
+        projected_file_from_projection(&projection, name)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn match_dir(
+        &self,
+        absolute_path: &str,
+    ) -> Option<(&SubtreeDirHandlerRegistration<S, B>, Box<dyn Any>)> {
+        best_route_match(&self.dirs, absolute_path)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn match_file(
+        &self,
+        absolute_path: &str,
+    ) -> Option<(&SubtreeFileHandlerRegistration<S, B>, Box<dyn Any>)> {
+        best_route_match(&self.files, absolute_path)
+    }
+
+    fn is_implicit_prefix_dir(&self, absolute_path: &str) -> bool {
+        if self.match_dir(absolute_path).is_some() || self.match_file(absolute_path).is_some() {
+            return false;
+        }
+        if absolute_path == "/" {
+            return !self.dirs.is_empty() || !self.files.is_empty();
+        }
+        let Some((parent, name)) = split_parent_name(absolute_path) else {
+            return false;
+        };
+        let parent_abs = to_absolute_path(parent);
+        self.static_entries_for_parent(&parent_abs)
+            .iter()
+            .any(|entry| entry.name() == name && entry.kind() == BrowseEntryKind::Directory)
+    }
+
+    fn has_capture_child_under(&self, absolute_parent: &str) -> bool {
+        let Some(parent_segments) = split_path(absolute_parent) else {
+            return false;
+        };
+        let parent_depth = parent_segments.len();
+        self.routes_extending_parent(&parent_segments)
+            .any(|(pattern, _)| {
+                matches!(
+                    pattern.segments()[parent_depth],
+                    PathSegment::Capture { .. } | PathSegment::Rest { .. }
+                )
+            })
+    }
+
+    fn routes_extending_parent<'a>(
+        &'a self,
+        parent_segments: &'a [&'a str],
+    ) -> impl Iterator<Item = (&'a PathPattern, BrowseEntryKind)> + 'a {
+        let dirs = self
+            .dirs
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        let files = self
+            .files
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::File));
+        dirs.chain(files)
+            .filter(move |(pattern, _)| pattern.accepts_as_strict_ancestor(parent_segments))
+    }
+}
+
+impl<S, B> StaticChildren for SubtreeRegistry<S, B> {
+    fn static_entries_for_parent(&self, absolute_parent: &str) -> Vec<BrowseEntry> {
+        let Some(parent_segments) = split_path(absolute_parent) else {
+            return Vec::new();
+        };
+        let parent_depth = parent_segments.len();
+
+        let mut entries = std::collections::BTreeMap::<String, BrowseEntry>::new();
+        for (pattern, kind) in self.routes_extending_parent(&parent_segments) {
+            let route_segments = pattern.segments();
+            let PathSegment::Literal(name) = &route_segments[parent_depth] else {
+                continue;
+            };
+            let extends_below = route_segments.len() > parent_depth + 1;
+            entries.entry(name.clone()).or_insert_with(|| {
+                if extends_below || matches!(kind, BrowseEntryKind::Directory) {
+                    BrowseEntry::dir(name.as_str())
+                } else {
+                    BrowseEntry::file(name.as_str(), placeholder_size())
+                }
+            });
+        }
+        entries.into_values().collect()
+    }
+
+    fn reserved_static_names(&self, absolute_parent: &str) -> std::collections::BTreeSet<String> {
+        self.static_entries_for_parent(absolute_parent)
+            .into_iter()
+            .map(|entry| entry.name().to_string())
+            .collect()
+    }
+
     fn exact_entry_for_path(&self, absolute_path: &str) -> Option<BrowseEntry> {
-        if self.match_dir(absolute_path).is_some() || self.match_subtree(absolute_path).is_some() {
+        if self.match_dir(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
             return Some(BrowseEntry::dir(name));
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, Size::Unknown));
+            return Some(BrowseEntry::file(name, placeholder_size()));
         }
         if self.is_implicit_prefix_dir(absolute_path) {
             let name = child_name(absolute_path)?;
@@ -566,7 +1184,9 @@ impl<S> MountRegistry<S> {
         }
         None
     }
+}
 
+impl<S> StaticChildren for MountRegistry<S> {
     fn static_entries_for_parent(&self, absolute_parent: &str) -> Vec<BrowseEntry> {
         let Some(parent_segments) = split_path(absolute_parent) else {
             return Vec::new();
@@ -587,82 +1207,11 @@ impl<S> MountRegistry<S> {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name.as_str())
                 } else {
-                    BrowseEntry::file(name.as_str(), Size::Unknown)
+                    BrowseEntry::file(name.as_str(), placeholder_size())
                 }
             });
         }
         entries.into_values().collect()
-    }
-
-    /// True iff `path` is an implicit directory node derivable from the
-    /// route table without an explicit handler.
-    ///
-    /// The root is implicit whenever any routes are registered. A
-    /// non-root path is implicit only when its last segment appears as
-    /// a literal child of its parent in the static enumeration —
-    /// capture-derived paths (e.g. `/{domain}` matching `/8.8.8.8`)
-    /// must defer to the parent dir handler's projection, which alone
-    /// can validate against the capture's parse function.
-    fn is_implicit_prefix_dir(&self, absolute_path: &str) -> bool {
-        if self.match_dir(absolute_path).is_some()
-            || self.match_file(absolute_path).is_some()
-            || self.match_subtree(absolute_path).is_some()
-        {
-            return false;
-        }
-        if absolute_path == "/" {
-            return !self.dirs.is_empty() || !self.files.is_empty() || !self.subtrees.is_empty();
-        }
-        let Some((parent, name)) = split_parent_name(absolute_path) else {
-            return false;
-        };
-        let parent_abs = to_absolute_path(parent);
-        self.static_entries_for_parent(&parent_abs)
-            .iter()
-            .any(|entry| entry.name() == name && entry.kind() == BrowseEntryKind::Directory)
-    }
-
-    /// True iff some registered route extends past `absolute_parent` and
-    /// the segment immediately below is a capture or rest. A listing of
-    /// such a parent can never be authoritatively exhaustive: dynamic
-    /// children may match names outside any static enumeration.
-    fn has_capture_child_under(&self, absolute_parent: &str) -> bool {
-        let Some(parent_segments) = split_path(absolute_parent) else {
-            return false;
-        };
-        let parent_depth = parent_segments.len();
-        self.routes_extending_parent(&parent_segments)
-            .any(|(pattern, _)| {
-                matches!(
-                    pattern.segments()[parent_depth],
-                    PathSegment::Capture { .. } | PathSegment::Rest { .. }
-                )
-            })
-    }
-
-    /// Yields each registered pattern (with its handler kind) that
-    /// extends past `parent_segments` as a strict prefix. Callers can
-    /// safely index `pattern.segments()[parent_segments.len()]` on every
-    /// yielded pattern.
-    fn routes_extending_parent<'a>(
-        &'a self,
-        parent_segments: &'a [&'a str],
-    ) -> impl Iterator<Item = (&'a PathPattern, BrowseEntryKind)> + 'a {
-        let dirs = self
-            .dirs
-            .iter()
-            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
-        let files = self
-            .files
-            .iter()
-            .map(|r| (&r.decl.pattern, BrowseEntryKind::File));
-        let subtrees = self
-            .subtrees
-            .iter()
-            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
-        dirs.chain(files)
-            .chain(subtrees)
-            .filter(move |(pattern, _)| pattern.accepts_as_strict_ancestor(parent_segments))
     }
 
     fn reserved_static_names(&self, absolute_parent: &str) -> std::collections::BTreeSet<String> {
@@ -672,22 +1221,26 @@ impl<S> MountRegistry<S> {
             .collect()
     }
 
-    fn match_dir(&self, absolute_path: &str) -> Option<(&DirHandlerRegistration<S>, Box<dyn Any>)> {
-        best_route_match(&self.dirs, absolute_path)
-    }
-
-    fn match_file(
-        &self,
-        absolute_path: &str,
-    ) -> Option<(&FileHandlerRegistration<S>, Box<dyn Any>)> {
-        best_route_match(&self.files, absolute_path)
-    }
-
-    fn match_subtree(
-        &self,
-        absolute_path: &str,
-    ) -> Option<(&SubtreeHandlerRegistration<S>, Box<dyn Any>)> {
-        best_route_match(&self.subtrees, absolute_path)
+    fn exact_entry_for_path(&self, absolute_path: &str) -> Option<BrowseEntry> {
+        if self.match_dir(absolute_path).is_some()
+            || self.match_treeref(absolute_path).is_some()
+            || self
+                .binds
+                .iter()
+                .any(|h| h.decl.pattern.matches_path(absolute_path))
+        {
+            let name = child_name(absolute_path)?;
+            return Some(BrowseEntry::dir(name));
+        }
+        if self.match_file(absolute_path).is_some() {
+            let name = child_name(absolute_path)?;
+            return Some(BrowseEntry::file(name, placeholder_size()));
+        }
+        if self.is_implicit_prefix_dir(absolute_path) {
+            let name = child_name(absolute_path)?;
+            return Some(BrowseEntry::dir(name));
+        }
+        None
     }
 }
 
@@ -708,10 +1261,11 @@ fn merge_projection_entries(
         let browse_entry = match entry.kind {
             ProjectionKind::Directory => BrowseEntry::dir(&entry.name),
             ProjectionKind::File => {
+                let size = entry.stat.map_or_else(placeholder_size, |stat| stat.size);
                 if let Some(bytes) = &entry.bytes {
                     sibling_files.push(ProjectedFile::new(&entry.name, bytes.clone()));
                 }
-                BrowseEntry::file(&entry.name, entry.size)
+                BrowseEntry::file(&entry.name, size)
             },
         };
 
@@ -784,12 +1338,21 @@ fn projection_listing(
     Ok(listing.with_preload(projection.preload.iter().cloned()))
 }
 
-fn projection_lookup<S>(
+/// Source of statically-derived sibling/exact-entry information for a
+/// projection lookup. Both `MountRegistry<S>` and `SubtreeRegistry<S, B>`
+/// implement this so the projection helpers can be reused.
+pub(crate) trait StaticChildren {
+    fn static_entries_for_parent(&self, absolute_parent: &str) -> Vec<BrowseEntry>;
+    fn reserved_static_names(&self, absolute_parent: &str) -> std::collections::BTreeSet<String>;
+    fn exact_entry_for_path(&self, absolute_path: &str) -> Option<BrowseEntry>;
+}
+
+fn projection_lookup<R: StaticChildren>(
     projection: &Projection,
     absolute_parent: &str,
     target_name: &str,
     fallback_target: Option<BrowseEntry>,
-    registry: &MountRegistry<S>,
+    registry: &R,
 ) -> Result<BrowseLookup> {
     if let Some(error) = projection.error.as_deref() {
         return Err(ProviderError::invalid_input(error.to_string()));
@@ -820,11 +1383,11 @@ fn projection_lookup<S>(
         .exhaustive(exhaustive))
 }
 
-fn projection_exact_lookup<S>(
+fn projection_exact_lookup<R: StaticChildren>(
     projection: &Projection,
     absolute_path: &str,
     target: BrowseEntry,
-    registry: &MountRegistry<S>,
+    registry: &R,
 ) -> Result<BrowseLookup> {
     if let Some(error) = projection.error.as_deref() {
         return Err(ProviderError::invalid_input(error.to_string()));
@@ -841,6 +1404,39 @@ fn projection_exact_lookup<S>(
         .with_sibling_files(sibling_files)
         .with_preload(projection.preload.iter().cloned())
         .exhaustive(exhaustive))
+}
+
+/// Whether `inner`'s segment sequence starts with all of `outer`'s
+/// segments (literal-equals-literal, capture-equals-capture-by-prefix).
+/// Used by the exclusivity validator to catch routes declared under a
+/// bind prefix.
+fn pattern_starts_with(inner: &PathPattern, outer: &PathPattern) -> bool {
+    let outer_segments = outer.segments();
+    let inner_segments = inner.segments();
+    if inner_segments.len() < outer_segments.len() {
+        return false;
+    }
+    for (i, o) in inner_segments.iter().zip(outer_segments.iter()) {
+        let same = match (i, o) {
+            (
+                omnifs_mount_schema::PathSegment::Literal(a),
+                omnifs_mount_schema::PathSegment::Literal(b),
+            ) => a == b,
+            (
+                omnifs_mount_schema::PathSegment::Capture { .. },
+                omnifs_mount_schema::PathSegment::Capture { .. },
+            )
+            | (
+                omnifs_mount_schema::PathSegment::Rest { .. },
+                omnifs_mount_schema::PathSegment::Rest { .. },
+            ) => true,
+            _ => false,
+        };
+        if !same {
+            return false;
+        }
+    }
+    true
 }
 
 trait RegisteredRoute {
@@ -868,7 +1464,37 @@ impl<S> RegisteredRoute for FileHandlerRegistration<S> {
     }
 }
 
-impl<S> RegisteredRoute for SubtreeHandlerRegistration<S> {
+impl<S> RegisteredRoute for TreeRefHandlerRegistration<S> {
+    fn decl(&self) -> &RouteDecl {
+        &self.decl
+    }
+
+    fn parse(&self, path: &str) -> Option<Box<dyn Any>> {
+        (self.parse)(path)
+    }
+}
+
+impl<S> RegisteredRoute for BindRegistration<S> {
+    fn decl(&self) -> &RouteDecl {
+        &self.decl
+    }
+
+    fn parse(&self, path: &str) -> Option<Box<dyn Any>> {
+        (self.parse)(path)
+    }
+}
+
+impl<S, B> RegisteredRoute for SubtreeDirHandlerRegistration<S, B> {
+    fn decl(&self) -> &RouteDecl {
+        &self.decl
+    }
+
+    fn parse(&self, path: &str) -> Option<Box<dyn Any>> {
+        (self.parse)(path)
+    }
+}
+
+impl<S, B> RegisteredRoute for SubtreeFileHandlerRegistration<S, B> {
     fn decl(&self) -> &RouteDecl {
         &self.decl
     }
@@ -882,8 +1508,7 @@ impl<S> RegisteredRoute for SubtreeHandlerRegistration<S> {
 /// first whose parse function accepts `absolute_path`. Per-segment
 /// validators participate in match candidacy: a parse rejection means
 /// "this candidate does not own this path", and the dispatcher falls
-/// through to the next-most-specific candidate. See
-/// `docs/design/path-dispatch.md` (matching algorithm).
+/// through to the next-most-specific candidate.
 fn best_route_match<'a, R>(routes: &'a [R], absolute_path: &str) -> Option<(&'a R, Box<dyn Any>)>
 where
     R: RegisteredRoute,
@@ -919,6 +1544,10 @@ where
         }
     }
     Ok(())
+}
+
+fn placeholder_size() -> NonZeroU64 {
+    NonZeroU64::new(DEFAULT_FILE_SIZE_BYTES).expect("placeholder size must be non-zero")
 }
 
 fn is_valid_rel_segment(segment: &str) -> bool {

@@ -6,12 +6,12 @@ description = "Wire types for the omnifs.provider-manifest.v1 custom section"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
+wasmparser = "0.246"
 
 [dev-dependencies]
-anyhow = "1"
-wasmparser = "0.246"
+anyhow = { workspace = true }
 
 [lints.rust]
 unsafe_code = "deny"

@@ -271,7 +271,7 @@ impl CalloutRuntime {
     ) {
         use cache::{AttrPayload, EntryKindCache, LookupPayload};
 
-        let file_size = Some(u64::try_from(content.len()).unwrap_or(u64::MAX));
+        let file_size = u64::try_from(content.len()).unwrap_or(u64::MAX);
         batch.push((
             file_path.to_string(),
             RecordKind::File,
@@ -310,7 +310,7 @@ impl CalloutRuntime {
         use cache::{AttrPayload, EntryKindCache, LookupPayload};
 
         let kind = EntryKindCache::from(entry.kind);
-        let size: Option<u64> = entry.size.into();
+        let size = entry.size.unwrap_or(0);
         let lookup = LookupPayload::Positive { kind, size };
         if let Some(payload) = lookup.serialize() {
             batch.push((
@@ -347,7 +347,7 @@ impl CalloutRuntime {
                         &mut child_records,
                         &file.path,
                         EntryKindCache::File,
-                        Some(u64::try_from(file.content.len()).unwrap_or(u64::MAX)),
+                        u64::try_from(file.content.len()).unwrap_or(u64::MAX),
                     );
                 },
                 wit_types::PreloadItem::Entry(entry) => {
@@ -360,7 +360,7 @@ impl CalloutRuntime {
                         &mut child_records,
                         &entry.path,
                         kind,
-                        entry.size.into(),
+                        entry.size.unwrap_or(0),
                     );
                 },
             }
@@ -397,7 +397,7 @@ impl CalloutRuntime {
         child_records: &mut BTreeMap<String, BTreeMap<String, cache::DirentRecord>>,
         path: &str,
         kind: cache::EntryKindCache,
-        size: Option<u64>,
+        size: u64,
     ) {
         let Some((parent, name)) = path.rsplit_once('/') else {
             return;
@@ -609,17 +609,6 @@ impl From<wit_types::EntryKind> for cache::EntryKindCache {
         match kind {
             wit_types::EntryKind::Directory => Self::Directory,
             wit_types::EntryKind::File => Self::File,
-        }
-    }
-}
-
-/// `None`: provider has not computed a byte length; host opens reads
-/// with `direct_io` and resolves on first read.
-impl From<wit_types::EntrySize> for Option<u64> {
-    fn from(size: wit_types::EntrySize) -> Self {
-        match size {
-            wit_types::EntrySize::Unknown => None,
-            wit_types::EntrySize::Exact(n) => Some(n),
         }
     }
 }

@@ -14,8 +14,8 @@ impl RepoHandlers {
         Ok(projection)
     }
 
-    #[subtree("/{owner}/{repo}/_repo")]
-    async fn repo_tree(cx: &Cx<State>, owner: OwnerName, repo: RepoName) -> Result<SubtreeRef> {
+    #[treeref("/{owner}/{repo}/_repo")]
+    async fn repo_tree(cx: &Cx<State>, owner: OwnerName, repo: RepoName) -> Result<TreeRef> {
         let repo_id = RepoId::new(&owner, &repo);
         let repo = cx
             .git()
@@ -24,7 +24,7 @@ impl RepoHandlers {
                 format!("git@github.com:{repo_id}.git"),
             )
             .await?;
-        Ok(SubtreeRef::new(repo.tree))
+        Ok(TreeRef::new(repo.tree))
     }
 
     #[dir("/{owner}/{repo}/_issues")]

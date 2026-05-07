@@ -19,8 +19,11 @@ mkdir -p \
   "$(dirname "$OMNIFS_LOG_FILE")"
 
 if [ "$OMNIFS_MOUNT_POINT" = "/omnifs" ]; then
-  ln -sfn /omnifs/github /github
-  ln -sfn /omnifs/dns /dns
+  for cfg in "$OMNIFS_CONFIG_DIR"/providers/*.json; do
+    [ -e "$cfg" ] || continue
+    name=$(jq -r '.mount // empty' "$cfg")
+    [ -n "$name" ] && ln -sfn "/omnifs/$name" "/$name"
+  done
 fi
 
 log_pipe=/tmp/omnifs-entrypoint.log.pipe

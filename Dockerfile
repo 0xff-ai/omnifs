@@ -25,14 +25,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
 # --- Build providers ---
+#
+# Discovers every crate under `providers/` whose package name starts
+# with `omnifs-provider-` and builds them in a single cargo invocation.
+# Adding a new provider is therefore just `providers/<name>/...` plus
+# a `docker/providers/<name>.json` config below.
 
 FROM toolchain AS providers
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build \
-        -p omnifs-provider-github -p omnifs-provider-dns \
-        --target wasm32-wasip2 --release --target-dir /src/target
+    set -eux; \
+    pkgs=$(awk -F'"' '/^name = "omnifs-provider-/ { printf " -p %s", $2 }' providers/*/Cargo.toml); \
+    cargo build $pkgs --target wasm32-wasip2 --release --target-dir /src/target
 
 # --- Build host binary ---
 
@@ -50,7 +55,7 @@ FROM ubuntu:25.10 AS runtime-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl fuse3 gnupg \
+        bash ca-certificates curl fuse3 gnupg jq \
         zsh git openssh-client procps \
         bat git-delta ripgrep util-linux \
     && rm -rf /var/lib/apt/lists/* \
@@ -78,33 +83,7 @@ COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
     && mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
 
-RUN cat > /root/.omnifs/providers/github.json <<'CONF'
-{
-  "plugin": "omnifs_provider_github.wasm",
-  "mount": "github",
-  "auth": {
-    "type": "bearer-token",
-    "token_env": "GITHUB_TOKEN",
-    "token_file": "/run/secrets/github_token"
-  },
-  "capabilities": {
-    "domains": ["api.github.com"],
-    "git_repos": ["git@github.com:*"],
-    "max_memory_mb": 256
-  }
-}
-CONF
-
-RUN cat > /root/.omnifs/providers/dns.json <<'CONF'
-{
-  "plugin": "omnifs_provider_dns.wasm",
-  "mount": "dns",
-  "capabilities": {
-    "domains": ["cloudflare-dns.com", "dns.google"],
-    "max_memory_mb": 32
-  }
-}
-CONF
+COPY docker/providers/*.json /root/.omnifs/providers/
 
 SHELL ["/bin/zsh", "-c"]
 ENV SHELL=/bin/zsh
@@ -114,15 +93,12 @@ ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 FROM runtime-base AS runtime-prebuilt
 
 COPY dist/omnifs /usr/local/bin/omnifs
-COPY dist/omnifs_provider_github.wasm /root/.omnifs/plugins/
-COPY dist/omnifs_provider_dns.wasm /root/.omnifs/plugins/
+COPY dist/omnifs_provider_*.wasm /root/.omnifs/plugins/
 RUN chmod 0755 /usr/local/bin/omnifs
 
 FROM runtime-base AS runtime
 
 COPY --from=builder /omnifs /usr/local/bin/
-COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_github.wasm \
-     /root/.omnifs/plugins/
-COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_dns.wasm \
+COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_*.wasm \
      /root/.omnifs/plugins/
 RUN chmod 0755 /usr/local/bin/omnifs

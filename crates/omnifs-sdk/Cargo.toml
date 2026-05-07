@@ -10,9 +10,9 @@ omnifs-mount-schema = { path = "../omnifs-mount-schema" }
 omnifs-sdk-macros = { path = "../omnifs-sdk-macros" }
 wit-bindgen = "0.41"
 lru = "0.16"
-hashbrown = "0.15"
-http = "1"
-serde = { version = "1", features = ["derive"] }
+hashbrown = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 postcard = { workspace = true }

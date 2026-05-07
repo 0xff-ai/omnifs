@@ -5,7 +5,7 @@
 //!
 //! Usage: `#[omnifs_sdk::config]` on config types, `#[omnifs_sdk::provider]`
 //! on a provider lifecycle impl, and `#[dir("...")]`, `#[file("...")]`, or
-//! `#[subtree("...")]` on path handlers.
+//! `#[treeref("...")]` on path handlers.
 
 // Generate WIT bindings once; providers import from here.
 wit_bindgen::generate!({
@@ -36,6 +36,7 @@ pub use omnifs_sdk_macros::handlers;
 pub use omnifs_sdk_macros::mutate;
 pub use omnifs_sdk_macros::provider;
 pub use omnifs_sdk_macros::subtree;
+pub use omnifs_sdk_macros::treeref;
 
 // Re-export deps that generated code references, so providers don't need
 // direct dependencies on them.
@@ -51,7 +52,7 @@ pub use crate::cx::Cx;
 pub mod __internal {
     pub use crate::async_runtime::AsyncRuntime;
     pub use crate::cx::Cx;
-    pub use crate::handler::MountRegistry;
+    pub use crate::handler::{MountRegistry, SubtreeRegistry};
 }
 
 #[cfg(doctest)]

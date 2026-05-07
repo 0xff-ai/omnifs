@@ -5,11 +5,9 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use wasmparser::{Parser, Payload};
 
 use omnifs_mount_schema as mts;
 
@@ -46,8 +44,8 @@ pub struct MountTreeData {
 pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
-    let mut section_bytes = Vec::new();
-    collect_sections(&bytes, &mut section_bytes)?;
+    let section_bytes =
+        mts::read_manifest_section(&bytes).context("reading provider-manifest section")?;
     if section_bytes.is_empty() {
         bail!(
             "no {} custom section found in {}",
@@ -56,19 +54,19 @@ pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
         );
     }
 
-    let mut handlers = Vec::new();
-    let mut mutations = Vec::new();
+    let mut records = Vec::new();
     for record in mts::ManifestRecordIter::new(&section_bytes) {
         match record.context("decoding provider manifest record")? {
-            mts::ManifestRecord::Handler(handler) => handlers.push(handler),
-            mts::ManifestRecord::Mutation(mutation) => mutations.push(mutation),
             mts::ManifestRecord::Unknown { tag, .. } => {
                 eprintln!("warning: unknown provider-manifest tag 0x{tag:02x}, skipping");
             },
+            other => records.push(other),
         }
     }
 
-    if handlers.is_empty() && mutations.is_empty() {
+    let resolved = mts::resolve_manifest(records).context("resolving provider manifest")?;
+
+    if resolved.handlers.is_empty() && resolved.mutations.is_empty() {
         bail!(
             "no handler or mutation records in {} custom section of {}",
             mts::MANIFEST_SECTION_NAME,
@@ -77,52 +75,9 @@ pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
     }
 
     Ok(MountTreeData {
-        handlers,
-        mutations,
+        handlers: resolved.handlers,
+        mutations: resolved.mutations,
     })
-}
-
-fn collect_sections(bytes: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    let mut work: Vec<(Parser, Range<usize>)> = vec![(Parser::new(0), 0..bytes.len())];
-
-    while let Some((mut parser, range)) = work.pop() {
-        let mut offset = range.start;
-        while offset < range.end {
-            let input = &bytes[offset..range.end];
-            match parser.parse(input, true).context("parsing wasm")? {
-                wasmparser::Chunk::NeedMoreData(_) => {
-                    bail!("unexpected end of wasm data at offset {offset}");
-                },
-                wasmparser::Chunk::Parsed { consumed, payload } => {
-                    offset += consumed;
-                    match payload {
-                        Payload::CustomSection(reader)
-                            if reader.name() == mts::MANIFEST_SECTION_NAME =>
-                        {
-                            out.extend_from_slice(reader.data());
-                        },
-                        Payload::ModuleSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        }
-                        | Payload::ComponentSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        } => {
-                            offset = offset.max(unchecked_range.end);
-                            work.push((sub, unchecked_range));
-                        },
-                        Payload::End(_) => break,
-                        _ => {},
-                    }
-                },
-            }
-        }
-    }
-
-    Ok(())
 }
 
 pub fn render(data: &MountTreeData, views: &Views) -> String {
@@ -157,6 +112,7 @@ fn handler_kind_label(kind: &mts::HandlerKindRecord) -> &'static str {
     match kind {
         mts::HandlerKindRecord::Dir => "dir",
         mts::HandlerKindRecord::File => "file",
+        mts::HandlerKindRecord::TreeRef => "treeref",
         mts::HandlerKindRecord::Subtree => "subtree",
     }
 }

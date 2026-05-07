@@ -57,9 +57,9 @@ mod extras_handlers {
             Ok(projection)
         }
 
-        #[omnifs_sdk::subtree("/checkout")]
-        async fn checkout() -> Result<SubtreeRef> {
-            Ok(SubtreeRef::new(42))
+        #[omnifs_sdk::treeref("/checkout")]
+        async fn checkout() -> Result<TreeRef> {
+            Ok(TreeRef::new(42))
         }
     }
 }
@@ -282,69 +282,104 @@ fn call_rest<'a>(
     Box::pin(async { Ok(FileContent::bytes(b"rest".to_vec())) })
 }
 
-#[tokio::test]
-async fn ambiguous_dir_file_routes_via_parent_projection() {
-    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+struct StubSubtree;
 
-    let mut registry = omnifs_sdk::__internal::MountRegistry::new();
-    root_handlers::RootHandlers::mount(&mut registry);
-    ambiguous_handlers::AmbiguousHandlers::mount(&mut registry);
-    // The validator must accept dir+file on identical templates.
+impl omnifs_sdk::handler::Handler<State> for StubSubtree {
+    fn lookup_child<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _parent_path: &'a str,
+        _name: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::Lookup> {
+        Box::pin(async { Ok(omnifs_sdk::browse::Lookup::not_found()) })
+    }
+
+    fn list_children<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::List> {
+        Box::pin(async {
+            Ok(omnifs_sdk::browse::List::entries(
+                omnifs_sdk::browse::Listing::empty_complete(),
+            ))
+        })
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::FileContent> {
+        Box::pin(async { Ok(omnifs_sdk::browse::FileContent::new(Vec::new())) })
+    }
+}
+
+fn call_bind_stub<'a>(
+    _cx: &'a Cx<State>,
+    _parsed: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
+    Box::pin(async { Ok(Box::new(StubSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
+}
+
+// Regression: looking up a path that exactly matches a bind template must
+// return a non-exhaustive Lookup. The host caches lookup-side projections
+// keyed by the looked-up path; if the bind shortcut returns an exhaustive
+// entry with no siblings, the host writes an exhaustive empty Dirents at
+// that path and a subsequent readdir short-circuits before invoking the
+// subtree's `list_children`.
+#[tokio::test]
+async fn bind_exact_match_lookup_is_not_exhaustive() {
+    use omnifs_sdk::browse::Lookup;
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_bind("/papers/{paper}", parse_path_only, call_bind_stub)
+        .unwrap();
     registry.validate().unwrap();
 
     let cx = Cx::new(11, Rc::new(RefCell::new(State)));
-
-    // lookup of "f.txt" under "/tree/foo" — the parent dir's projection
-    // says "f.txt" is a file, so the lookup target is a file.
     let lookup = registry
-        .lookup_child(&cx, "/tree/foo", "f.txt")
+        .lookup_child(&cx, "/papers", "1706.03762")
         .await
         .unwrap();
     let Lookup::Entry(entry) = &lookup else {
         panic!("expected lookup entry, got {lookup:?}");
     };
-    assert_eq!(entry.target().name(), "f.txt");
-    assert_eq!(entry.target().kind(), EntryKind::File);
-
-    // lookup of "d" under "/tree/foo" — the parent's projection says
-    // "d" is a directory.
-    let lookup = registry.lookup_child(&cx, "/tree/foo", "d").await.unwrap();
-    let Lookup::Entry(entry) = &lookup else {
-        panic!("expected lookup entry, got {lookup:?}");
-    };
-    assert_eq!(entry.target().name(), "d");
-    assert_eq!(entry.target().kind(), EntryKind::Directory);
-
-    // read_file dispatches to the file handler with the rest-captured tail.
-    let content = registry.read_file(&cx, "/tree/foo/f.txt").await.unwrap();
-    assert_eq!(content.content(), b"file at foo/f.txt");
-
-    // list_children dispatches to the dir handler.
-    let listing = registry.list_children(&cx, "/tree/foo").await.unwrap();
-    let List::Entries(listing) = listing else {
-        panic!("expected entries, got subtree");
-    };
-    let names: Vec<&str> = listing.entries().iter().map(|e| e.name()).collect();
-    assert!(names.contains(&"d"));
-    assert!(names.contains(&"f.txt"));
+    assert!(
+        !entry.is_exhaustive(),
+        "bind exact-match must not claim an exhaustive sibling set"
+    );
+    assert!(entry.siblings().is_empty());
+    assert!(entry.sibling_files().is_empty());
 }
 
-#[test]
-fn registry_rejects_subtree_alongside_dir_or_file_on_same_template() {
+#[tokio::test]
+async fn registry_prefers_exact_and_prefix_over_rest() {
     let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
-    registry.add_dir("/handoff", parse_unit, call_dir).unwrap();
     registry
-        .add_subtree("/handoff", parse_unit, call_subtree)
+        .add_file("/_ipfs/{cid}/versions", parse_path_only, call_exact)
         .unwrap();
-    let error = registry.validate().unwrap_err();
-    assert!(error.message().contains("conflicts with a subtree"));
-}
+    registry
+        .add_file("/_ipfs/{cid}/v{version}", parse_path_only, call_prefix)
+        .unwrap();
+    registry
+        .add_file("/_ipfs/{cid}/{*path}", parse_path_only, call_rest)
+        .unwrap();
+    registry.validate().unwrap();
 
-fn call_subtree<'a>(
-    _cx: &'a Cx<State>,
-    _path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, SubtreeRef> {
-    Box::pin(async { Ok(SubtreeRef::new(1)) })
+    let cx = Cx::new(9, Rc::new(RefCell::new(State)));
+    let exact = registry
+        .read_file(&cx, "/_ipfs/Qm123/versions")
+        .await
+        .unwrap();
+    assert_eq!(exact.content(), b"exact");
+    let prefix = registry.read_file(&cx, "/_ipfs/Qm123/v1").await.unwrap();
+    assert_eq!(prefix.content(), b"prefix");
+    let rest = registry.read_file(&cx, "/_ipfs/Qm123/a/b/c").await.unwrap();
+    assert_eq!(rest.content(), b"rest");
+    let rest_empty = registry.read_file(&cx, "/_ipfs/Qm123").await.unwrap();
+    assert_eq!(rest_empty.content(), b"rest");
 }
 
 #[tokio::test]
@@ -390,8 +425,6 @@ async fn implicit_prefix_dir_lookup_resolves_without_explicit_handler() {
     assert_eq!(entry.target().kind(), EntryKind::Directory);
     assert!(entry.is_exhaustive());
 
-    // Dynamic-capture lookup under the implicit prefix dir dispatches
-    // to the depth-2 handler.
     let lookup = registry
         .lookup_child(&cx, "/categories", "cs.AI")
         .await
@@ -433,34 +466,6 @@ async fn implicit_prefix_dir_with_only_capture_root_lookup_falls_through_to_dyna
     assert_eq!(entry.target().kind(), EntryKind::Directory);
 }
 
-#[tokio::test]
-async fn registry_prefers_exact_and_prefix_over_rest() {
-    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
-    registry
-        .add_file("/_ipfs/{cid}/versions", parse_path_only, call_exact)
-        .unwrap();
-    registry
-        .add_file("/_ipfs/{cid}/v{version}", parse_path_only, call_prefix)
-        .unwrap();
-    registry
-        .add_file("/_ipfs/{cid}/{*path}", parse_path_only, call_rest)
-        .unwrap();
-    registry.validate().unwrap();
-
-    let cx = Cx::new(9, Rc::new(RefCell::new(State)));
-    let exact = registry
-        .read_file(&cx, "/_ipfs/Qm123/versions")
-        .await
-        .unwrap();
-    assert_eq!(exact.content(), b"exact");
-    let prefix = registry.read_file(&cx, "/_ipfs/Qm123/v1").await.unwrap();
-    assert_eq!(prefix.content(), b"prefix");
-    let rest = registry.read_file(&cx, "/_ipfs/Qm123/a/b/c").await.unwrap();
-    assert_eq!(rest.content(), b"rest");
-    let rest_empty = registry.read_file(&cx, "/_ipfs/Qm123").await.unwrap();
-    assert_eq!(rest_empty.content(), b"rest");
-}
-
 fn parse_only_digits(path: &str) -> Option<Box<dyn std::any::Any>> {
     let last = path.rsplit('/').next()?;
     if !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
@@ -477,12 +482,6 @@ fn call_digits<'a>(
     Box::pin(async { Ok(FileContent::bytes(b"digits".to_vec())) })
 }
 
-// Per-segment validators participate in match candidacy: when the
-// highest-precedence pattern shape matches but its parse function
-// rejects, the dispatcher falls through to the next-most-specific
-// candidate. Without fallthrough, `/items/abc` would resolve to the
-// digits-only handler (highest precedence by literal_count), parse
-// would reject, and the `{*rest}` handler would never be tried.
 #[tokio::test]
 async fn parse_rejection_falls_through_to_next_candidate() {
     let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
@@ -496,14 +495,9 @@ async fn parse_rejection_falls_through_to_next_candidate() {
 
     let cx = Cx::new(17, Rc::new(RefCell::new(State)));
 
-    // Digits-only candidate accepts; it's also the most specific by
-    // literal_count, so it wins outright.
     let digits = registry.read_file(&cx, "/items/42").await.unwrap();
     assert_eq!(digits.content(), b"digits");
 
-    // Non-digit name: digits-only parse rejects. Without fallthrough,
-    // this would error. With fallthrough, the rest-capture handler
-    // takes over.
     let alpha = registry.read_file(&cx, "/items/abc").await.unwrap();
     assert_eq!(alpha.content(), b"rest");
 }

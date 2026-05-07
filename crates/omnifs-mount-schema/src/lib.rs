@@ -8,16 +8,24 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
+use wasmparser::{Parser, Payload};
 
 pub const MANIFEST_SECTION_NAME: &str = "omnifs.provider-manifest.v1";
 
 pub const TAG_HANDLER: u8 = 0x01;
 pub const TAG_MUTATION: u8 = 0x02;
+pub const TAG_SUBTREE_ROUTE: u8 = 0x03;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HandlerKindRecord {
     Dir,
     File,
+    TreeRef,
+    /// Bind site: the handler dispatches a typed subtree implemented in
+    /// a `#[subtree] impl B { ... }` block. `subtree_type` on the record
+    /// names the bindings type `B`; the resolver joins this site against
+    /// `SubtreeRouteRecord`s with the same `subtree_type`.
     Subtree,
 }
 
@@ -33,11 +41,29 @@ pub struct HandlerRecord {
     pub handler_name: String,
     pub handler_kind: HandlerKindRecord,
     pub capture_schema: Vec<ManifestCaptureRecord>,
+    /// Set when `handler_kind == Subtree`: identifies the subtree
+    /// bindings type so the resolver can pair the site with its inner
+    /// `SubtreeRouteRecord`s. Always `None` for other kinds.
+    pub subtree_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationRecord {
     pub path_template: String,
+    pub capture_schema: Vec<ManifestCaptureRecord>,
+}
+
+/// A path handler declared inside a `#[subtree] impl B { ... }` block.
+/// Templates are *relative to the bind site* the resolver pairs the
+/// record with via `subtree_type`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubtreeRouteRecord {
+    pub subtree_type: String,
+    pub path_template: String,
+    pub handler_name: String,
+    /// Subtree routes are always `Dir` or `File`. Treerefs and binds
+    /// are not allowed inside a subtree.
+    pub handler_kind: HandlerKindRecord,
     pub capture_schema: Vec<ManifestCaptureRecord>,
 }
 
@@ -386,6 +412,11 @@ pub fn encode_mutation(rec: &MutationRecord) -> Result<Vec<u8>, serde_json::Erro
     Ok(frame_record(TAG_MUTATION, &body))
 }
 
+pub fn encode_subtree_route(rec: &SubtreeRouteRecord) -> Result<Vec<u8>, serde_json::Error> {
+    let body = serde_json::to_vec(rec)?;
+    Ok(frame_record(TAG_SUBTREE_ROUTE, &body))
+}
+
 pub struct ManifestRecordIter<'a> {
     rest: &'a [u8],
 }
@@ -401,6 +432,7 @@ impl<'a> ManifestRecordIter<'a> {
 pub enum ManifestRecord {
     Handler(HandlerRecord),
     Mutation(MutationRecord),
+    SubtreeRoute(SubtreeRouteRecord),
     Unknown { tag: u8, body: Vec<u8> },
 }
 
@@ -434,6 +466,9 @@ fn decode_manifest_one(tag: u8, body: &[u8]) -> Result<ManifestRecord, DecodeErr
         TAG_MUTATION => serde_json::from_slice(body)
             .map(ManifestRecord::Mutation)
             .map_err(DecodeError::Json),
+        TAG_SUBTREE_ROUTE => serde_json::from_slice(body)
+            .map(ManifestRecord::SubtreeRoute)
+            .map_err(DecodeError::Json),
         other => Ok(ManifestRecord::Unknown {
             tag: other,
             body: body.to_vec(),
@@ -457,6 +492,229 @@ impl core::fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+/// The flat list of routes a manifest declares, with subtree binds
+/// expanded into one absolute `HandlerRecord` per (bind, subtree-route)
+/// pair. Bind sites themselves remain as records with
+/// `handler_kind == Subtree` and `subtree_type` set.
+#[derive(Clone, Debug, Default)]
+pub struct ResolvedManifest {
+    pub handlers: Vec<HandlerRecord>,
+    pub mutations: Vec<MutationRecord>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ResolveError {
+    /// A bind site references a `subtree_type` for which no
+    /// `SubtreeRouteRecord`s were emitted in the manifest.
+    UnresolvedBind {
+        path_template: String,
+        subtree_type: String,
+    },
+    /// A bind record was emitted with `handler_kind == Subtree` but
+    /// without a `subtree_type` set.
+    BindMissingSubtreeType { path_template: String },
+    /// A `SubtreeRouteRecord` was emitted but no bind site references
+    /// its `subtree_type`. Likely a partially-stripped binary or a
+    /// stale subtree impl.
+    OrphanedSubtreeRoute {
+        subtree_type: String,
+        path_template: String,
+    },
+}
+
+impl core::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ResolveError::UnresolvedBind {
+                path_template,
+                subtree_type,
+            } => write!(
+                f,
+                "bind site {path_template} references subtree type {subtree_type:?} \
+                 but no SubtreeRouteRecord matches; ensure the `#[subtree] impl` \
+                 names the same syntactic type as the bind's return type"
+            ),
+            ResolveError::BindMissingSubtreeType { path_template } => write!(
+                f,
+                "bind site {path_template} has handler_kind=Subtree but no subtree_type"
+            ),
+            ResolveError::OrphanedSubtreeRoute {
+                subtree_type,
+                path_template,
+            } => write!(
+                f,
+                "subtree route {path_template} (type {subtree_type:?}) has no bind site"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+/// Resolve raw manifest records into a flat list of absolute handler
+/// records. Bind sites are paired with subtree routes by `subtree_type`;
+/// each pair produces one absolute `HandlerRecord` with the templates
+/// concatenated (bind + relative) and capture schemas appended in that
+/// order.
+pub fn resolve_manifest(records: Vec<ManifestRecord>) -> Result<ResolvedManifest, ResolveError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut handlers: Vec<HandlerRecord> = Vec::new();
+    let mut mutations: Vec<MutationRecord> = Vec::new();
+    let mut binds: Vec<HandlerRecord> = Vec::new();
+    let mut subtree_routes: BTreeMap<String, Vec<SubtreeRouteRecord>> = BTreeMap::new();
+
+    for record in records {
+        match record {
+            ManifestRecord::Handler(handler) => {
+                if handler.handler_kind == HandlerKindRecord::Subtree {
+                    binds.push(handler.clone());
+                }
+                handlers.push(handler);
+            },
+            ManifestRecord::Mutation(mutation) => mutations.push(mutation),
+            ManifestRecord::SubtreeRoute(route) => {
+                subtree_routes
+                    .entry(route.subtree_type.clone())
+                    .or_default()
+                    .push(route);
+            },
+            ManifestRecord::Unknown { .. } => {},
+        }
+    }
+
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    for bind in binds {
+        let Some(subtree_type) = bind.subtree_type.as_deref() else {
+            return Err(ResolveError::BindMissingSubtreeType {
+                path_template: bind.path_template,
+            });
+        };
+        let Some(routes) = subtree_routes.get(subtree_type) else {
+            return Err(ResolveError::UnresolvedBind {
+                path_template: bind.path_template,
+                subtree_type: subtree_type.to_string(),
+            });
+        };
+        referenced.insert(subtree_type.to_string());
+
+        for route in routes {
+            let mut capture_schema = bind.capture_schema.clone();
+            capture_schema.extend(route.capture_schema.iter().cloned());
+            handlers.push(HandlerRecord {
+                path_template: join_template(&bind.path_template, &route.path_template),
+                handler_name: route.handler_name.clone(),
+                handler_kind: route.handler_kind.clone(),
+                capture_schema,
+                subtree_type: None,
+            });
+        }
+    }
+
+    if let Some((subtree_type, mut routes)) = subtree_routes
+        .into_iter()
+        .find(|(ty, _)| !referenced.contains(ty))
+    {
+        let representative = routes.remove(0);
+        return Err(ResolveError::OrphanedSubtreeRoute {
+            subtree_type,
+            path_template: representative.path_template,
+        });
+    }
+
+    Ok(ResolvedManifest {
+        handlers,
+        mutations,
+    })
+}
+
+/// Read all `omnifs.provider-manifest.v1` custom-section bodies from a
+/// wasm component's bytes, concatenating them in order. Recurses into
+/// nested module/component sections so providers built as components
+/// surface their guest module's section.
+pub fn read_manifest_section(bytes: &[u8]) -> Result<Vec<u8>, ManifestSectionError> {
+    let mut out = Vec::new();
+    let mut work: Vec<(Parser, Range<usize>)> = vec![(Parser::new(0), 0..bytes.len())];
+
+    while let Some((mut parser, range)) = work.pop() {
+        let mut offset = range.start;
+        while offset < range.end {
+            let input = &bytes[offset..range.end];
+            match parser.parse(input, true)? {
+                wasmparser::Chunk::NeedMoreData(_) => {
+                    return Err(ManifestSectionError::Truncated { offset });
+                },
+                wasmparser::Chunk::Parsed { consumed, payload } => {
+                    offset += consumed;
+                    match payload {
+                        Payload::CustomSection(reader)
+                            if reader.name() == MANIFEST_SECTION_NAME =>
+                        {
+                            out.extend_from_slice(reader.data());
+                        },
+                        Payload::ModuleSection {
+                            parser: sub,
+                            unchecked_range,
+                            ..
+                        }
+                        | Payload::ComponentSection {
+                            parser: sub,
+                            unchecked_range,
+                            ..
+                        } => {
+                            offset = offset.max(unchecked_range.end);
+                            work.push((sub, unchecked_range));
+                        },
+                        Payload::End(_) => break,
+                        _ => {},
+                    }
+                },
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+#[derive(Debug)]
+pub enum ManifestSectionError {
+    Parse(wasmparser::BinaryReaderError),
+    Truncated { offset: usize },
+}
+
+impl From<wasmparser::BinaryReaderError> for ManifestSectionError {
+    fn from(error: wasmparser::BinaryReaderError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+impl core::fmt::Display for ManifestSectionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "parsing wasm: {error}"),
+            Self::Truncated { offset } => {
+                write!(f, "unexpected end of wasm data at offset {offset}")
+            },
+        }
+    }
+}
+
+impl std::error::Error for ManifestSectionError {}
+
+/// Concatenate a bind path template with a subtree-relative template.
+/// Both are absolute (start with `/`); the relative template's leading
+/// `/` is consumed when the bind path is non-root, and a relative
+/// template of `/` collapses to the bind path itself.
+fn join_template(bind: &str, relative: &str) -> String {
+    if relative == "/" {
+        return bind.to_string();
+    }
+    if bind == "/" {
+        return relative.to_string();
+    }
+    format!("{bind}{relative}")
+}
 
 fn pattern_error(message: String) -> PatternError {
     PatternError { message }
@@ -589,6 +847,7 @@ mod tests {
             handler_name: "Root".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
+            subtree_type: None,
         })
         .unwrap();
         bytes.extend_from_slice(
@@ -627,6 +886,7 @@ mod tests {
                 handler_name: "Root".to_string(),
                 handler_kind: HandlerKindRecord::Dir,
                 capture_schema: Vec::new(),
+                subtree_type: None,
             })
             .unwrap(),
         );
@@ -751,5 +1011,182 @@ mod tests {
         assert!(!bare.is_ambiguous_with(&rest_a));
         assert!(!rest_a.is_ambiguous_with(&exact));
         assert!(!rest_a.is_ambiguous_with(&other_rest));
+    }
+
+    #[test]
+    fn roundtrip_subtree_route_record() {
+        let bytes = encode_subtree_route(&SubtreeRouteRecord {
+            subtree_type: "PaperSubtree".to_string(),
+            path_template: "/versions/{version}/paper.pdf".to_string(),
+            handler_name: "VersionPdf".to_string(),
+            handler_kind: HandlerKindRecord::File,
+            capture_schema: vec![ManifestCaptureRecord {
+                name: "version".to_string(),
+                type_name: "VersionKey".to_string(),
+            }],
+        })
+        .unwrap();
+
+        let records: Vec<_> = ManifestRecordIter::new(&bytes)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let ManifestRecord::SubtreeRoute(route) = &records[0] else {
+            panic!("expected SubtreeRoute, got {:?}", records[0]);
+        };
+        assert_eq!(route.subtree_type, "PaperSubtree");
+        assert_eq!(route.path_template, "/versions/{version}/paper.pdf");
+        assert_eq!(route.handler_kind, HandlerKindRecord::File);
+    }
+
+    fn cap(name: &str, ty: &str) -> ManifestCaptureRecord {
+        ManifestCaptureRecord {
+            name: name.to_string(),
+            type_name: ty.to_string(),
+        }
+    }
+
+    fn bind(path: &str, captures: Vec<ManifestCaptureRecord>) -> HandlerRecord {
+        HandlerRecord {
+            path_template: path.to_string(),
+            handler_name: "BindSite".to_string(),
+            handler_kind: HandlerKindRecord::Subtree,
+            capture_schema: captures,
+            subtree_type: Some("PaperSubtree".to_string()),
+        }
+    }
+
+    fn route(
+        path: &str,
+        kind: HandlerKindRecord,
+        captures: Vec<ManifestCaptureRecord>,
+    ) -> SubtreeRouteRecord {
+        SubtreeRouteRecord {
+            subtree_type: "PaperSubtree".to_string(),
+            path_template: path.to_string(),
+            handler_name: "Route".to_string(),
+            handler_kind: kind,
+            capture_schema: captures,
+        }
+    }
+
+    #[test]
+    fn resolve_manifest_pairs_binds_with_subtree_routes() {
+        let records = vec![
+            ManifestRecord::Handler(bind("/papers/{paper}", vec![cap("paper", "PaperKey")])),
+            ManifestRecord::Handler(bind(
+                "/categories/{category}/{year}/{month}/{paper}",
+                vec![
+                    cap("category", "CategoryKey"),
+                    cap("year", "u32"),
+                    cap("month", "u32"),
+                    cap("paper", "PaperKey"),
+                ],
+            )),
+            ManifestRecord::SubtreeRoute(route("/", HandlerKindRecord::Dir, Vec::new())),
+            ManifestRecord::SubtreeRoute(route("/paper.pdf", HandlerKindRecord::File, Vec::new())),
+            ManifestRecord::SubtreeRoute(route(
+                "/versions/{version}/paper.pdf",
+                HandlerKindRecord::File,
+                vec![cap("version", "VersionKey")],
+            )),
+        ];
+
+        let resolved = resolve_manifest(records).unwrap();
+        // Two bind sites + 2 binds × 3 routes = 8
+        assert_eq!(resolved.handlers.len(), 8);
+
+        let templates: Vec<&str> = resolved
+            .handlers
+            .iter()
+            .map(|h| h.path_template.as_str())
+            .collect();
+        assert!(templates.contains(&"/papers/{paper}"));
+        assert!(templates.contains(&"/papers/{paper}/paper.pdf"));
+        assert!(templates.contains(&"/papers/{paper}/versions/{version}/paper.pdf"));
+        assert!(templates.contains(&"/categories/{category}/{year}/{month}/{paper}"));
+        assert!(templates.contains(&"/categories/{category}/{year}/{month}/{paper}/paper.pdf"));
+        assert!(templates.contains(
+            &"/categories/{category}/{year}/{month}/{paper}/versions/{version}/paper.pdf"
+        ));
+
+        // Resolved subtree route under categories must merge bind + subtree captures.
+        let merged = resolved
+            .handlers
+            .iter()
+            .find(|h| {
+                h.path_template
+                    == "/categories/{category}/{year}/{month}/{paper}/versions/{version}/paper.pdf"
+            })
+            .unwrap();
+        let names: Vec<&str> = merged
+            .capture_schema
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["category", "year", "month", "paper", "version"]);
+    }
+
+    #[test]
+    fn resolve_manifest_root_bind_collapses_relative_root() {
+        let records = vec![
+            ManifestRecord::Handler(bind("/", Vec::new())),
+            ManifestRecord::SubtreeRoute(route("/", HandlerKindRecord::Dir, Vec::new())),
+            ManifestRecord::SubtreeRoute(route("/inner", HandlerKindRecord::File, Vec::new())),
+        ];
+        let resolved = resolve_manifest(records).unwrap();
+        let templates: Vec<&str> = resolved
+            .handlers
+            .iter()
+            .map(|h| h.path_template.as_str())
+            .collect();
+        assert!(templates.contains(&"/"));
+        assert!(templates.contains(&"/inner"));
+    }
+
+    #[test]
+    fn resolve_manifest_unresolved_bind_errors() {
+        let records = vec![ManifestRecord::Handler(bind("/papers/{paper}", Vec::new()))];
+        let error = resolve_manifest(records).unwrap_err();
+        assert!(matches!(
+            error,
+            ResolveError::UnresolvedBind { ref subtree_type, .. } if subtree_type == "PaperSubtree"
+        ));
+    }
+
+    #[test]
+    fn resolve_manifest_orphaned_subtree_route_errors() {
+        let records = vec![ManifestRecord::SubtreeRoute(route(
+            "/",
+            HandlerKindRecord::Dir,
+            Vec::new(),
+        ))];
+        let error = resolve_manifest(records).unwrap_err();
+        assert!(matches!(error, ResolveError::OrphanedSubtreeRoute { .. }));
+    }
+
+    #[test]
+    fn resolve_manifest_handles_multiple_binds_to_same_subtree_type() {
+        // Regression: arxiv mounts PaperSubtree under four bind sites.
+        // Each bind must produce its own expansion of the subtree's
+        // routes; the resolver must not consume routes after the first
+        // bind processes them.
+        let records = vec![
+            ManifestRecord::Handler(bind("/papers/{paper}", vec![cap("paper", "PaperKey")])),
+            ManifestRecord::Handler(bind(
+                "/authors/{author}/{paper}",
+                vec![cap("author", "AuthorKey"), cap("paper", "PaperKey")],
+            )),
+            ManifestRecord::SubtreeRoute(route("/", HandlerKindRecord::Dir, Vec::new())),
+            ManifestRecord::SubtreeRoute(route("/paper.pdf", HandlerKindRecord::File, Vec::new())),
+        ];
+        let resolved = resolve_manifest(records).unwrap();
+        let templates: Vec<&str> = resolved
+            .handlers
+            .iter()
+            .map(|h| h.path_template.as_str())
+            .collect();
+        assert!(templates.contains(&"/papers/{paper}/paper.pdf"));
+        assert!(templates.contains(&"/authors/{author}/{paper}/paper.pdf"));
     }
 }
