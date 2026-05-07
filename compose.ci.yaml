@@ -1,5 +1,0 @@
-# CI override: use pre-built artifacts instead of compiling from source.
-services:
-  omnifs:
-    build:
-      target: runtime-prebuilt

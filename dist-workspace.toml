@@ -11,6 +11,7 @@ installers = []
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 hosting = "github"
 github-attestations = true
+pr-run-mode = "skip"
 
 # We append a build-wasm-providers job to release.yml that ships the
 # four wasm32-wasip2 provider components alongside the host binaries.
