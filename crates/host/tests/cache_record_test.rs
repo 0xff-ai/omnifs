@@ -33,7 +33,7 @@ fn cache_record_rejects_unknown_schema_version() {
 fn lookup_payload_positive_round_trip() {
     let payload = LookupPayload::Positive {
         kind: EntryKindCache::File,
-        size: 42,
+        size: Some(42),
     };
     let bytes = payload.serialize().unwrap();
     let decoded = LookupPayload::deserialize(&bytes).unwrap();
@@ -41,7 +41,24 @@ fn lookup_payload_positive_round_trip() {
         decoded,
         LookupPayload::Positive {
             kind: EntryKindCache::File,
-            size: 42
+            size: Some(42)
+        }
+    ));
+}
+
+#[test]
+fn lookup_payload_unknown_size_round_trip() {
+    let payload = LookupPayload::Positive {
+        kind: EntryKindCache::File,
+        size: None,
+    };
+    let bytes = payload.serialize().unwrap();
+    let decoded = LookupPayload::deserialize(&bytes).unwrap();
+    assert!(matches!(
+        decoded,
+        LookupPayload::Positive {
+            kind: EntryKindCache::File,
+            size: None
         }
     ));
 }
@@ -57,12 +74,12 @@ fn lookup_payload_negative_round_trip() {
 fn attr_payload_round_trip() {
     let payload = AttrPayload {
         kind: EntryKindCache::Directory,
-        size: 0,
+        size: None,
     };
     let bytes = payload.serialize().unwrap();
     let decoded = AttrPayload::deserialize(&bytes).unwrap();
     assert_eq!(decoded.kind, EntryKindCache::Directory);
-    assert_eq!(decoded.size, 0);
+    assert_eq!(decoded.size, None);
 }
 
 #[test]
@@ -72,12 +89,12 @@ fn dirents_payload_round_trip() {
             DirentRecord {
                 name: "title".to_string(),
                 kind: EntryKindCache::File,
-                size: 128,
+                size: Some(128),
             },
             DirentRecord {
                 name: "comments".to_string(),
                 kind: EntryKindCache::Directory,
-                size: 0,
+                size: None,
             },
         ],
         exhaustive: true,
@@ -86,7 +103,8 @@ fn dirents_payload_round_trip() {
     let decoded = DirentsPayload::deserialize(&bytes).unwrap();
     assert_eq!(decoded.entries.len(), 2);
     assert_eq!(decoded.entries[0].name, "title");
-    assert_eq!(decoded.entries[0].size, 128);
+    assert_eq!(decoded.entries[0].size, Some(128));
     assert_eq!(decoded.entries[1].name, "comments");
     assert_eq!(decoded.entries[1].kind, EntryKindCache::Directory);
+    assert_eq!(decoded.entries[1].size, None);
 }

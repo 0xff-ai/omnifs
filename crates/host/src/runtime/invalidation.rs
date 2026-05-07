@@ -149,4 +149,22 @@ impl CalloutRuntime {
     pub fn drain_invalidated_paths(&self) -> Vec<String> {
         self.invalidation.drain_paths()
     }
+
+    /// Tell the kernel to drop its cached attributes for `ino` so the
+    /// next stat re-fetches them from us. Used when the host learns the
+    /// real size of a previously-unknown file from a successful read.
+    /// No-op on non-Linux targets and when the notifier is not yet
+    /// installed.
+    #[cfg(target_os = "linux")]
+    pub fn notify_inval_inode(&self, ino: u64) {
+        let Some(handles) = self.invalidation.handles() else {
+            return;
+        };
+        if let Some(notifier) = handles.notifier.lock().as_ref() {
+            let _ = notifier.inval_inode(fuser::INodeNo(ino), 0, 0);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn notify_inval_inode(&self, _ino: u64) {}
 }

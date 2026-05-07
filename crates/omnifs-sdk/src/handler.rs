@@ -1,6 +1,7 @@
 use crate::browse::{
     Entry as BrowseEntry, EntryKind as BrowseEntryKind, List as BrowseList,
     Listing as BrowseListing, Lookup as BrowseLookup, Preload as BrowsePreload, ProjectedFile,
+    Size,
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -8,10 +9,8 @@ use omnifs_mount_schema::PathPattern;
 use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
-use std::num::NonZeroU64;
 use std::pin::Pin;
 
-const DEFAULT_FILE_SIZE_BYTES: u64 = 4096;
 pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
@@ -63,19 +62,6 @@ pub enum PageStatus {
     More(Cursor),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileStat {
-    pub size: NonZeroU64,
-}
-
-impl FileStat {
-    pub fn placeholder() -> Self {
-        Self {
-            size: placeholder_size(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionKind {
@@ -87,7 +73,7 @@ pub enum ProjectionKind {
 struct ProjectionEntry {
     name: String,
     kind: ProjectionKind,
-    stat: Option<FileStat>,
+    size: Size,
     bytes: Option<Vec<u8>>,
 }
 
@@ -105,20 +91,20 @@ impl Projection {
     }
 
     pub fn dir(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(name.into(), ProjectionKind::Directory, None, None);
+        let _ = self.push_entry(name.into(), ProjectionKind::Directory, Size::Unknown, None);
     }
 
+    /// Project a file whose size is unknown until read.
+    ///
+    /// The host opens the file with `direct_io`, reports `st_size = 0`,
+    /// and updates the inode size lazily once a read returns content.
+    /// Use [`Self::file_with_size`] to declare an exact size up front.
     pub fn file(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(
-            name.into(),
-            ProjectionKind::File,
-            Some(FileStat::placeholder()),
-            None,
-        );
+        let _ = self.push_entry(name.into(), ProjectionKind::File, Size::Unknown, None);
     }
 
-    pub fn file_with_stat(&mut self, name: impl Into<String>, stat: FileStat) {
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), None);
+    pub fn file_with_size(&mut self, name: impl Into<String>, size: Size) {
+        let _ = self.push_entry(name.into(), ProjectionKind::File, size, None);
     }
 
     pub fn file_with_content(&mut self, name: impl Into<String>, bytes: impl Into<Vec<u8>>) {
@@ -129,9 +115,8 @@ impl Projection {
             ));
             return;
         }
-        let stat = NonZeroU64::new(u64::try_from(bytes.len()).unwrap_or(DEFAULT_FILE_SIZE_BYTES))
-            .map_or_else(FileStat::placeholder, |size| FileStat { size });
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), Some(bytes));
+        let size = Size::from_content_len(bytes.len());
+        let _ = self.push_entry(name.into(), ProjectionKind::File, size, Some(bytes));
     }
 
     pub fn page(&mut self, status: PageStatus) {
@@ -171,12 +156,7 @@ impl Projection {
     /// this directory entry, the host may materialize a partial cached
     /// listing from those children. A directory preload by itself does
     /// not cache an empty listing.
-    pub fn preload_entry(
-        &mut self,
-        path: impl Into<String>,
-        kind: BrowseEntryKind,
-        size: Option<NonZeroU64>,
-    ) {
+    pub fn preload_entry(&mut self, path: impl Into<String>, kind: BrowseEntryKind, size: Size) {
         let path = path.into();
         if path.is_empty() {
             return;
@@ -187,7 +167,7 @@ impl Projection {
     /// Hand directory metadata to the host so a later lookup of `path`
     /// can be served without another provider round trip.
     pub fn preload_dir(&mut self, path: impl Into<String>) {
-        self.preload_entry(path, BrowseEntryKind::Directory, None);
+        self.preload_entry(path, BrowseEntryKind::Directory, Size::Unknown);
     }
 
     pub fn into_error(self) -> Option<String> {
@@ -198,7 +178,7 @@ impl Projection {
         &mut self,
         name: String,
         kind: ProjectionKind,
-        stat: Option<FileStat>,
+        size: Size,
         bytes: Option<Vec<u8>>,
     ) -> Result<()> {
         if !is_valid_rel_segment(&name) {
@@ -210,7 +190,7 @@ impl Projection {
         self.entries.push(ProjectionEntry {
             name,
             kind,
-            stat,
+            size,
             bytes,
         });
         Ok(())
@@ -517,7 +497,7 @@ impl<S> MountRegistry<S> {
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, placeholder_size()));
+            return Some(BrowseEntry::file(name, Size::Unknown));
         }
         None
     }
@@ -579,11 +559,10 @@ fn merge_projection_entries(
         let browse_entry = match entry.kind {
             ProjectionKind::Directory => BrowseEntry::dir(&entry.name),
             ProjectionKind::File => {
-                let size = entry.stat.map_or_else(placeholder_size, |stat| stat.size);
                 if let Some(bytes) = &entry.bytes {
                     sibling_files.push(ProjectedFile::new(&entry.name, bytes.clone()));
                 }
-                BrowseEntry::file(&entry.name, size)
+                BrowseEntry::file(&entry.name, entry.size)
             },
         };
 
@@ -731,7 +710,7 @@ fn add_static_entry(
         if is_dir {
             BrowseEntry::dir(name)
         } else {
-            BrowseEntry::file(name, placeholder_size())
+            BrowseEntry::file(name, Size::Unknown)
         }
     });
 }
@@ -798,10 +777,6 @@ where
         }
     }
     Ok(())
-}
-
-fn placeholder_size() -> NonZeroU64 {
-    NonZeroU64::new(DEFAULT_FILE_SIZE_BYTES).expect("placeholder size must be non-zero")
 }
 
 fn is_valid_rel_segment(segment: &str) -> bool {
