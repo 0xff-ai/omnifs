@@ -583,12 +583,18 @@ impl<S> MountRegistry<S> {
 
         // Bind prefix matches the path being looked up exactly: the
         // bind entry itself is a directory; report it as such.
+        //
+        // `exhaustive(false)` is load-bearing: without it, the host's
+        // lookup-side cache treats the bare `Lookup::entry` as "the
+        // bind has no children" and writes an exhaustive empty Dirents
+        // at this path. A subsequent readdir then short-circuits on
+        // that cache and never invokes the subtree's `list_children`.
         if self
             .binds
             .iter()
             .any(|h| h.decl.pattern.matches_path(&child_abs))
         {
-            return Ok(BrowseLookup::entry(BrowseEntry::dir(name)));
+            return Ok(BrowseLookup::entry(BrowseEntry::dir(name)).exhaustive(false));
         }
 
         // Bind prefix is a strict ancestor of the path: dispatch

@@ -282,6 +282,78 @@ fn call_rest<'a>(
     Box::pin(async { Ok(FileContent::bytes(b"rest".to_vec())) })
 }
 
+struct StubSubtree;
+
+impl omnifs_sdk::handler::Handler<State> for StubSubtree {
+    fn lookup_child<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _parent_path: &'a str,
+        _name: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::Lookup> {
+        Box::pin(async { Ok(omnifs_sdk::browse::Lookup::not_found()) })
+    }
+
+    fn list_children<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::List> {
+        Box::pin(async {
+            Ok(omnifs_sdk::browse::List::entries(
+                omnifs_sdk::browse::Listing::empty_complete(),
+            ))
+        })
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::FileContent> {
+        Box::pin(async { Ok(omnifs_sdk::browse::FileContent::new(Vec::new())) })
+    }
+}
+
+fn call_bind_stub<'a>(
+    _cx: &'a Cx<State>,
+    _parsed: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
+    Box::pin(async { Ok(Box::new(StubSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
+}
+
+// Regression: looking up a path that exactly matches a bind template must
+// return a non-exhaustive Lookup. The host caches lookup-side projections
+// keyed by the looked-up path; if the bind shortcut returns an exhaustive
+// entry with no siblings, the host writes an exhaustive empty Dirents at
+// that path and a subsequent readdir short-circuits before invoking the
+// subtree's `list_children`.
+#[tokio::test]
+async fn bind_exact_match_lookup_is_not_exhaustive() {
+    use omnifs_sdk::browse::Lookup;
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_bind("/papers/{paper}", parse_path_only, call_bind_stub)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(11, Rc::new(RefCell::new(State)));
+    let lookup = registry
+        .lookup_child(&cx, "/papers", "1706.03762")
+        .await
+        .unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert!(
+        !entry.is_exhaustive(),
+        "bind exact-match must not claim an exhaustive sibling set"
+    );
+    assert!(entry.siblings().is_empty());
+    assert!(entry.sibling_files().is_empty());
+}
+
 #[tokio::test]
 async fn registry_prefers_exact_and_prefix_over_rest() {
     let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
