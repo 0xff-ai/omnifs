@@ -8,12 +8,8 @@ pub struct RootHandlers;
 
 #[handlers]
 impl RootHandlers {
-    #[dir("/")]
-    fn root() -> Result<Projection> {
-        // Root is not enumerable: GitHub has no "list all visible owners"
-        // call the provider could back this with. Users navigate by path.
-        Ok(Projection::new())
-    }
+    // No `/` handler: GitHub has no "list all visible owners" API. The
+    // SDK derives an implicit prefix dir from `/{owner}` below.
 
     #[dir("/{owner}")]
     async fn repos(cx: &DirCx<State>, owner: OwnerName) -> Result<Projection> {

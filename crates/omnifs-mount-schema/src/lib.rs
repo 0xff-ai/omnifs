@@ -208,6 +208,15 @@ impl PathPattern {
         }
     }
 
+    /// True iff `parent_segments` is a strict prefix of some concrete
+    /// path this pattern would match: the pattern has more segments than
+    /// the parent, and the first `parent_segments.len()` pattern segments
+    /// accept the parent's segments.
+    #[must_use]
+    pub fn accepts_as_strict_ancestor(&self, parent_segments: &[&str]) -> bool {
+        parent_segments.len() < self.segments.len() && self.matches_prefix_segments(parent_segments)
+    }
+
     #[must_use]
     pub fn matches_parent_path(&self, path: &str) -> bool {
         let Ok(segments) = split_absolute_path(path) else {
@@ -466,6 +475,14 @@ fn validate_capture_name(name: &str) -> Result<(), PatternError> {
     } else {
         Err(pattern_error(format!("invalid capture name {name:?}")))
     }
+}
+
+/// Split an absolute path into its segments. Returns `None` if `path`
+/// is not a valid absolute path (`""` and trailing-slash forms are
+/// rejected; `"/"` yields an empty slice).
+#[must_use]
+pub fn split_path(path: &str) -> Option<Vec<&str>> {
+    split_absolute_path(path).ok()
 }
 
 fn split_absolute_path(path: &str) -> Result<Vec<&str>, PatternError> {

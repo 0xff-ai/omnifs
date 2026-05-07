@@ -5,7 +5,7 @@ use crate::browse::{
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use omnifs_mount_schema::PathPattern;
+use omnifs_mount_schema::{PathPattern, PathSegment, split_path};
 use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
@@ -462,9 +462,10 @@ impl<S> MountRegistry<S> {
 
             if let Some(target) = self.exact_entry_for_path(&child_abs) {
                 let siblings = self.static_entries_for_parent(&parent_abs);
+                let exhaustive = !self.has_capture_child_under(&parent_abs);
                 return Ok(BrowseLookup::entry(target)
                     .with_siblings(siblings)
-                    .exhaustive(true));
+                    .exhaustive(exhaustive));
             }
         }
 
@@ -500,8 +501,13 @@ impl<S> MountRegistry<S> {
             return projection_listing(&projection, static_entries).map(BrowseList::entries);
         }
 
-        if !static_entries.is_empty() {
-            return Ok(BrowseList::entries(BrowseListing::complete(static_entries)));
+        if self.is_implicit_prefix_dir(&abs) {
+            let listing = if self.has_capture_child_under(&abs) {
+                BrowseListing::partial(static_entries)
+            } else {
+                BrowseListing::complete(static_entries)
+            };
+            return Ok(BrowseList::entries(listing));
         }
 
         if self.match_file(&abs).is_some() {
@@ -554,21 +560,109 @@ impl<S> MountRegistry<S> {
             let name = child_name(absolute_path)?;
             return Some(BrowseEntry::file(name, Size::Unknown));
         }
+        if self.is_implicit_prefix_dir(absolute_path) {
+            let name = child_name(absolute_path)?;
+            return Some(BrowseEntry::dir(name));
+        }
         None
     }
 
     fn static_entries_for_parent(&self, absolute_parent: &str) -> Vec<BrowseEntry> {
+        let Some(parent_segments) = split_path(absolute_parent) else {
+            return Vec::new();
+        };
+        let parent_depth = parent_segments.len();
+
         let mut entries = std::collections::BTreeMap::<String, BrowseEntry>::new();
-        for route in &self.dirs {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, true);
-        }
-        for route in &self.files {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, false);
-        }
-        for route in &self.subtrees {
-            add_static_entry(&mut entries, &route.decl, absolute_parent, true);
+        for (pattern, kind) in self.routes_extending_parent(&parent_segments) {
+            let route_segments = pattern.segments();
+            let PathSegment::Literal(name) = &route_segments[parent_depth] else {
+                continue;
+            };
+            // A route extending past the child position forces a dir,
+            // regardless of its terminal kind: deeper segments mean the
+            // child is the parent of further paths.
+            let extends_below = route_segments.len() > parent_depth + 1;
+            entries.entry(name.clone()).or_insert_with(|| {
+                if extends_below || matches!(kind, BrowseEntryKind::Directory) {
+                    BrowseEntry::dir(name.as_str())
+                } else {
+                    BrowseEntry::file(name.as_str(), Size::Unknown)
+                }
+            });
         }
         entries.into_values().collect()
+    }
+
+    /// True iff `path` is an implicit directory node derivable from the
+    /// route table without an explicit handler.
+    ///
+    /// The root is implicit whenever any routes are registered. A
+    /// non-root path is implicit only when its last segment appears as
+    /// a literal child of its parent in the static enumeration —
+    /// capture-derived paths (e.g. `/{domain}` matching `/8.8.8.8`)
+    /// must defer to the parent dir handler's projection, which alone
+    /// can validate against the capture's parse function.
+    fn is_implicit_prefix_dir(&self, absolute_path: &str) -> bool {
+        if self.match_dir(absolute_path).is_some()
+            || self.match_file(absolute_path).is_some()
+            || self.match_subtree(absolute_path).is_some()
+        {
+            return false;
+        }
+        if absolute_path == "/" {
+            return !self.dirs.is_empty() || !self.files.is_empty() || !self.subtrees.is_empty();
+        }
+        let Some((parent, name)) = split_parent_name(absolute_path) else {
+            return false;
+        };
+        let parent_abs = to_absolute_path(parent);
+        self.static_entries_for_parent(&parent_abs)
+            .iter()
+            .any(|entry| entry.name() == name && entry.kind() == BrowseEntryKind::Directory)
+    }
+
+    /// True iff some registered route extends past `absolute_parent` and
+    /// the segment immediately below is a capture or rest. A listing of
+    /// such a parent can never be authoritatively exhaustive: dynamic
+    /// children may match names outside any static enumeration.
+    fn has_capture_child_under(&self, absolute_parent: &str) -> bool {
+        let Some(parent_segments) = split_path(absolute_parent) else {
+            return false;
+        };
+        let parent_depth = parent_segments.len();
+        self.routes_extending_parent(&parent_segments)
+            .any(|(pattern, _)| {
+                matches!(
+                    pattern.segments()[parent_depth],
+                    PathSegment::Capture { .. } | PathSegment::Rest { .. }
+                )
+            })
+    }
+
+    /// Yields each registered pattern (with its handler kind) that
+    /// extends past `parent_segments` as a strict prefix. Callers can
+    /// safely index `pattern.segments()[parent_segments.len()]` on every
+    /// yielded pattern.
+    fn routes_extending_parent<'a>(
+        &'a self,
+        parent_segments: &'a [&'a str],
+    ) -> impl Iterator<Item = (&'a PathPattern, BrowseEntryKind)> + 'a {
+        let dirs = self
+            .dirs
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        let files = self
+            .files
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::File));
+        let subtrees = self
+            .subtrees
+            .iter()
+            .map(|r| (&r.decl.pattern, BrowseEntryKind::Directory));
+        dirs.chain(files)
+            .chain(subtrees)
+            .filter(move |(pattern, _)| pattern.accepts_as_strict_ancestor(parent_segments))
     }
 
     fn reserved_static_names(&self, absolute_parent: &str) -> std::collections::BTreeSet<String> {
@@ -749,27 +843,6 @@ fn projection_exact_lookup<S>(
         .exhaustive(exhaustive))
 }
 
-fn add_static_entry(
-    entries: &mut std::collections::BTreeMap<String, BrowseEntry>,
-    decl: &RouteDecl,
-    absolute_parent: &str,
-    is_dir: bool,
-) {
-    if !decl.pattern.matches_parent_path(absolute_parent) {
-        return;
-    }
-    let Some(name) = decl.pattern.static_child() else {
-        return;
-    };
-    entries.entry(name.to_string()).or_insert_with(|| {
-        if is_dir {
-            BrowseEntry::dir(name)
-        } else {
-            BrowseEntry::file(name, Size::Unknown)
-        }
-    });
-}
-
 trait RegisteredRoute {
     fn decl(&self) -> &RouteDecl;
     fn parse(&self, path: &str) -> Option<Box<dyn Any>>;
@@ -805,15 +878,29 @@ impl<S> RegisteredRoute for SubtreeHandlerRegistration<S> {
     }
 }
 
+/// Walk shape-matching candidates in precedence order and return the
+/// first whose parse function accepts `absolute_path`. Per-segment
+/// validators participate in match candidacy: a parse rejection means
+/// "this candidate does not own this path", and the dispatcher falls
+/// through to the next-most-specific candidate. See
+/// `docs/design/path-dispatch.md` (matching algorithm).
 fn best_route_match<'a, R>(routes: &'a [R], absolute_path: &str) -> Option<(&'a R, Box<dyn Any>)>
 where
     R: RegisteredRoute,
 {
-    routes
+    let mut candidates: Vec<&R> = routes
         .iter()
         .filter(|route| route.decl().pattern.matches_path(absolute_path))
-        .max_by_key(|route| route.decl().pattern.precedence_key())
-        .and_then(|route| route.parse(absolute_path).map(|parsed| (route, parsed)))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.decl()
+            .pattern
+            .precedence_key()
+            .cmp(&a.decl().pattern.precedence_key())
+    });
+    candidates
+        .into_iter()
+        .find_map(|route| route.parse(absolute_path).map(|parsed| (route, parsed)))
 }
 
 fn validate_ambiguous_routes<R>(routes: &[R], kind: &str) -> Result<()>
