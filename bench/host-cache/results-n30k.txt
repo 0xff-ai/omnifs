@@ -1,0 +1,67 @@
+scratch dir: /tmp/.tmp1FTgtb
+redb_naive               hot_read                    5890.64 ms  64.76 MiB
+redb_naive               large_blob                  9816.94 ms  1.00 GiB
+redb_naive               file_dedup                  1844.87 ms  257.51 MiB
+redb_naive               bulk_preload                8763.71 ms  64.76 MiB
+redb_naive               prefix_invalidate           8268.85 ms  64.76 MiB
+redb_split               hot_read                    8350.99 ms  64.76 MiB
+redb_split               large_blob                 10437.63 ms  1.00 GiB
+redb_split               file_dedup                  2268.67 ms  129.01 MiB
+redb_split               bulk_preload                8153.95 ms  64.76 MiB
+redb_split               prefix_invalidate           9111.91 ms  64.76 MiB
+redb_split_zstd          hot_read                    9099.36 ms  64.76 MiB
+redb_split_zstd          large_blob                 14021.02 ms  514.51 MiB
+redb_split_zstd          file_dedup                  2426.09 ms  129.01 MiB
+redb_split_zstd          bulk_preload                8469.96 ms  64.76 MiB
+redb_split_zstd          prefix_invalidate          10134.07 ms  64.76 MiB
+sqlite                   hot_read                    5631.03 ms  60.65 MiB
+sqlite                   large_blob                 20318.27 ms  733.13 MiB
+sqlite                   file_dedup                  4198.56 ms  111.73 MiB
+sqlite                   bulk_preload                5166.64 ms  60.65 MiB
+sqlite                   prefix_invalidate           9979.08 ms  62.89 MiB
+fjall_split              hot_read                    1196.61 ms  64.02 MiB
+fjall_split              large_blob                 10922.35 ms  761.98 MiB
+fjall_split              file_dedup                  1318.21 ms  100.83 MiB
+fjall_split              bulk_preload                 635.45 ms  64.02 MiB
+fjall_split              prefix_invalidate            869.28 ms  64.02 MiB
+
+=== workload: hot_read ===
+backend                     elapsed          ops/s      footprint      extra
+redb_naive                5890.64ms          25464      64.76 MiB hit% 100.0  p50 1µs  p99 7µs  reopen 2479µs cold(2k): p50 4µs p99 16µs hit% 100.0
+redb_split                8350.99ms          17962      64.76 MiB hit% 100.0  p50 1µs  p99 5µs  reopen 2838µs cold(2k): p50 4µs p99 17µs hit% 100.0
+redb_split_zstd           9099.36ms          16485      64.76 MiB hit% 100.0  p50 1µs  p99 6µs  reopen 2841µs cold(2k): p50 4µs p99 16µs hit% 100.0
+sqlite                    5631.03ms          26638      60.65 MiB hit% 100.0  p50 3µs  p99 22µs  reopen 411µs cold(2k): p50 5µs p99 35µs hit% 100.0
+fjall_split               1196.61ms         125354      64.02 MiB hit% 100.0  p50 1µs  p99 6µs  reopen 574636µs cold(2k): p50 2µs p99 10µs hit% 100.0
+
+=== workload: large_blob ===
+backend                     elapsed          ops/s      footprint      extra
+redb_naive                9816.94ms            764       1.00 GiB logical_bytes 712.29 MiB read p50 17µs p99 668µs hit% 100.0
+redb_split               10437.63ms            719       1.00 GiB logical_bytes 712.29 MiB read p50 18µs p99 719µs hit% 100.0
+redb_split_zstd          14021.02ms            535     514.51 MiB logical_bytes 712.29 MiB read p50 92µs p99 842µs hit% 100.0
+sqlite                   20318.27ms            369     733.13 MiB logical_bytes 712.29 MiB read p50 274µs p99 619µs hit% 100.0
+fjall_split              10922.35ms            687     761.98 MiB logical_bytes 712.29 MiB read p50 68µs p99 609µs hit% 100.0
+
+=== workload: file_dedup ===
+backend                     elapsed          ops/s      footprint      extra
+redb_naive                1844.87ms          16261     257.51 MiB logical_bytes 174.81 MiB
+redb_split                2268.67ms          13224     129.01 MiB logical_bytes 174.81 MiB
+redb_split_zstd           2426.09ms          12366     129.01 MiB logical_bytes 174.81 MiB
+sqlite                    4198.56ms           7145     111.73 MiB logical_bytes 174.81 MiB
+fjall_split               1318.21ms          22758     100.83 MiB logical_bytes 174.81 MiB
+
+=== workload: bulk_preload ===
+backend                     elapsed          ops/s      footprint      extra
+redb_naive                8763.71ms          16237      64.76 MiB           
+redb_split                8153.95ms          17451      64.76 MiB           
+redb_split_zstd           8469.96ms          16800      64.76 MiB           
+sqlite                    5166.64ms          27541      60.65 MiB           
+fjall_split                635.45ms         223929      64.02 MiB           
+
+=== workload: prefix_invalidate ===
+backend                     elapsed          ops/s      footprint      extra
+redb_naive                8268.85ms             36      64.76 MiB rows_evicted 64271
+redb_split                9111.91ms             33      64.76 MiB rows_evicted 64271
+redb_split_zstd          10134.07ms             30      64.76 MiB rows_evicted 64271
+sqlite                    9979.08ms             30      62.89 MiB rows_evicted 64271
+fjall_split                869.28ms            345      64.02 MiB rows_evicted 64271
+

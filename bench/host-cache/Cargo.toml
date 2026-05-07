@@ -1,0 +1,29 @@
+[package]
+name = "host-cache-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+redb = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+fjall = "3"
+blake3 = "1"
+zstd = "0.13"
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
+rand_chacha = "0.3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tempfile = "3"
+walkdir = "2"
+humansize = "2"
+hdrhistogram = "7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = 0
