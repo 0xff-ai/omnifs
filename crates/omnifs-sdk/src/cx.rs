@@ -10,6 +10,8 @@
 //! trip. Every child future must participate in the same `Cx`'s
 //! yield/deliver protocol and yield exactly one callout per suspension.
 
+use crate::archives;
+use crate::blob::{BlobId, BlobReader};
 use crate::git;
 use crate::http;
 use crate::omnifs::provider::types::{Callout, CalloutResult};
@@ -112,6 +114,14 @@ impl<S> Cx<S> {
 
     pub fn git(&self) -> git::Builder<'_, S> {
         git::Builder::new(self)
+    }
+
+    pub fn archives(&self) -> archives::Builder<'_, S> {
+        archives::Builder::new(self)
+    }
+
+    pub fn blob(&self, id: BlobId) -> BlobReader<'_, S> {
+        BlobReader::new(self, id)
     }
 
     pub(crate) fn take_yielded_callouts(&self) -> Vec<Callout> {

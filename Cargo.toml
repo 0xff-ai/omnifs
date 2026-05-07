@@ -44,6 +44,10 @@ percent-encoding = "2"
 url = "2"
 time = { version = "0.3", default-features = false, features = ["std"] }
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
+tar = "0.4"
+flate2 = "1"
+zip = { version = "5", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

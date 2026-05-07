@@ -14,7 +14,9 @@ wit_bindgen::generate!({
     pub_export_macro: true,
 });
 
+pub mod archives;
 mod async_runtime;
+pub mod blob;
 pub mod browse;
 
 pub mod cx;

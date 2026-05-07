@@ -329,7 +329,8 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
     match resolvers_file {
         OpResult::Read(result) => {
-            let body = String::from_utf8(result.content).expect("utf8 resolvers file");
+            let body = String::from_utf8(support::into_inline(result).content)
+                .expect("utf8 resolvers file");
             assert!(
                 body.contains("cloudflare"),
                 "unexpected resolvers file: {body}"
@@ -1518,6 +1519,7 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn github_pr_lookup_validates_and_exposes_diff() {
     use omnifs_host::omnifs::provider::types::{
         Callout, CalloutError, CalloutResult, ErrorKind, HttpRequest, HttpResponse,
@@ -1612,7 +1614,10 @@ fn github_pr_lookup_validates_and_exposes_diff() {
             terminal: Some(OpResult::Read(file)),
             ..
         } => {
-            assert_eq!(file.content, b"diff --git a/file b/file\n");
+            assert_eq!(
+                support::expect_inline(&file).content,
+                b"diff --git a/file b/file\n"
+            );
         },
         other => panic!("expected PR diff file after read, got {other:?}"),
     }
@@ -1690,8 +1695,11 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
             terminal: Some(OpResult::Read(result)),
             ..
         } => {
-            assert_eq!(result.content, b"PR title".to_vec());
-            let sibling_names: Vec<&str> = result
+            assert_eq!(
+                support::expect_inline(&result).content,
+                b"PR title".to_vec()
+            );
+            let sibling_names: Vec<&str> = support::expect_inline(&result)
                 .sibling_files
                 .iter()
                 .map(|file| file.name.as_str())
@@ -1724,8 +1732,11 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
             terminal: Some(OpResult::Read(result)),
             ..
         } => {
-            assert_eq!(result.content, b"completed".to_vec());
-            let sibling_names: Vec<&str> = result
+            assert_eq!(
+                support::expect_inline(&result).content,
+                b"completed".to_vec()
+            );
+            let sibling_names: Vec<&str> = support::expect_inline(&result)
                 .sibling_files
                 .iter()
                 .map(|file| file.name.as_str())
@@ -1822,7 +1833,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
                 ..
             } => {
                 assert_eq!(
-                    file.content,
+                    support::expect_inline(&file).content,
                     case.expected_content,
                     "{name}: unexpected cached content",
                     name = case.name
@@ -1978,7 +1989,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
             terminal: Some(OpResult::Read(file)),
             ..
         } => {
-            assert_eq!(file.content, b"octocat:\npage two issue comment\n");
+            assert_eq!(
+                support::expect_inline(&file).content,
+                b"octocat:\npage two issue comment\n"
+            );
         },
         other => panic!("expected issue comment page-two content, got {other:?}"),
     }
@@ -1995,7 +2009,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
             terminal: Some(OpResult::Read(file)),
             ..
         } => {
-            assert_eq!(file.content, b"hubot:\nfirst pr comment\n");
+            assert_eq!(
+                support::expect_inline(&file).content,
+                b"hubot:\nfirst pr comment\n"
+            );
         },
         other => panic!("expected PR comment content, got {other:?}"),
     }
@@ -2016,7 +2033,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
             terminal: Some(OpResult::Read(file)),
             ..
         } => {
-            assert_eq!(file.content, b"hubot:\npage two pr comment\n");
+            assert_eq!(
+                support::expect_inline(&file).content,
+                b"hubot:\npage two pr comment\n"
+            );
         },
         other => panic!("expected PR comment page-two content, got {other:?}"),
     }
@@ -2181,6 +2201,7 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_fallback() {
     use omnifs_host::omnifs::provider::types::{
         Callout, CalloutResult, Header, HttpRequest, HttpResponse,
@@ -2373,7 +2394,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
             terminal: Some(OpResult::Read(file)),
             ..
         } => {
-            assert_eq!(file.content, b"Cached issue title");
+            assert_eq!(support::expect_inline(&file).content, b"Cached issue title");
         },
         other => panic!("expected cached issue file content, got {other:?}"),
     }

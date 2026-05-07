@@ -8,6 +8,7 @@ interface types {
     type repo-id = u64;
     type tree-ref = u64;
     type file-handle = u64;
+    type blob-id = u64;
 
     // --- Callouts (provider -> host, request/response) ---
 
@@ -24,6 +25,21 @@ interface types {
         ws-recv(ws-recv-request),
         ws-close(stream-id),
         git-open-repo(git-open-request),
+        /// HTTP fetch whose response body lands in the host's disk-backed
+        /// blob cache instead of crossing the WIT boundary. Returns a
+        /// `blob-id` plus response metadata; the bytes can later be served
+        /// verbatim as file content (`file-content-result.blob`) or
+        /// mounted as a directory tree (`open-archive`).
+        fetch-blob(blob-fetch-request),
+        /// Mount a stored blob as a directory tree, with the host
+        /// performing decompression and walk based on the requested
+        /// archive format. Returns a `tree-ref` resolved by the host's
+        /// existing tree-serving path (the same one git-open-repo uses).
+        open-archive(archive-open-request),
+        /// Bring a (range of a) stored blob across the WIT boundary so
+        /// the provider can parse it. Use sparingly; the point of blobs
+        /// is to keep large bytes host-side.
+        read-blob(read-blob-request),
     }
 
     /// Unified provider return value. A handler may return:
@@ -66,6 +82,9 @@ interface types {
         ws-message(option<list<u8>>),
         ws-closed,
         git-repo-opened(git-repo-info),
+        blob-fetched(blob-fetched),
+        archive-opened(archive-opened),
+        blob-read(list<u8>),
         callout-error(callout-error),
     }
 
@@ -149,8 +168,21 @@ interface types {
         invalidate-prefixes: list<string>,
     }
 
-    record file-content-result {
+    /// Read terminal payload. Inline content travels in the WIT; blob
+    /// content stays in the host's blob cache and is streamed straight
+    /// to FUSE without a round trip through the provider.
+    variant file-content-result {
+        inline(inline-file-content),
+        blob(blob-file-content),
+    }
+
+    record inline-file-content {
         content: list<u8>,
+        sibling-files: list<projected-file>,
+    }
+
+    record blob-file-content {
+        blob: blob-id,
         sibling-files: list<projected-file>,
     }
 
@@ -191,6 +223,62 @@ interface types {
     record git-open-request {
         clone-url: string,
         cache-key: string,
+    }
+
+    /// Archive formats the host knows how to extract for `open-archive`.
+    /// Closed enum on purpose; add arms when a provider needs them.
+    enum archive-format {
+        tar-gz,
+        tar,
+        zip,
+    }
+
+    /// HTTP fetch that lands its response body in the host's disk-backed
+    /// blob cache. `cache-key` is provider-scoped: two providers may
+    /// reuse the same key safely. Reusing the same `cache-key` from the
+    /// same provider deduplicates the fetch — the host returns the
+    /// existing `blob-id` without re-downloading.
+    record blob-fetch-request {
+        method: string,
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+        cache-key: string,
+    }
+
+    /// Result of a successful `fetch-blob`. The body is on disk; only the
+    /// metadata crosses the WIT.
+    record blob-fetched {
+        blob: blob-id,
+        size: u64,
+        content-type: option<string>,
+        etag: option<string>,
+        status: u16,
+        response-headers: list<header>,
+    }
+
+    /// Mount a stored blob as a directory tree. `format` tells the host
+    /// how to decompress and walk the bytes. `strip-prefix`, when set,
+    /// is removed from every entry's path at mount time — useful for
+    /// archives whose tarball wraps everything in a single top-level
+    /// directory (e.g. crates.io's `serde-1.0.197/`).
+    record archive-open-request {
+        blob: blob-id,
+        format: archive-format,
+        strip-prefix: option<string>,
+    }
+
+    record archive-opened {
+        tree: tree-ref,
+    }
+
+    /// Bring (a range of) a stored blob across the WIT. `len = none`
+    /// reads to end of blob, capped by host policy. Mostly an escape
+    /// hatch; prefer `open-archive` or blob-backed file content.
+    record read-blob-request {
+        blob: blob-id,
+        offset: u64,
+        len: option<u32>,
     }
 
     variant cursor {

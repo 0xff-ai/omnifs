@@ -31,6 +31,10 @@ url = "2"
 wasmtime-wasi = "43"
 redb = { workspace = true }
 moka = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+zip = { workspace = true }
+sha2 = { workspace = true }
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

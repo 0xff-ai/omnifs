@@ -1004,14 +1004,18 @@ impl Filesystem for FuseFs {
 
         match self.rt.block_on(runtime.call_read_file(&path)) {
             Ok(OpResult::Read(result)) => {
+                let Some((data, sibling_count)) = resolve_read_payload(&runtime, &path, result)
+                else {
+                    reply.error(Errno::EIO);
+                    return;
+                };
                 tracing::debug!(
                     target: "omnifs_read",
                     path = path,
-                    content_len = result.content.len(),
-                    sibling_files_count = result.sibling_files.len(),
+                    content_len = data.len(),
+                    sibling_files_count = sibling_count,
                     "received Read result"
                 );
-                let data = result.content;
                 let file_record = CacheRecord::new(RecordKind::File, data.clone());
                 if let Some(rt) = self.runtime_for_mount(&mount_name) {
                     rt.cache_put(&path, RecordKind::File, &file_record);
@@ -1094,6 +1098,31 @@ impl From<cache::EntryKindCache> for EntryKind {
 // NOTE: `impl From<EntryKind> for cache::EntryKindCache` lives in
 // `crate::runtime::mod` so it is available regardless of target_os
 // (this `fuse` module is Linux-only). Do not duplicate it here.
+
+/// Materialize a `read-file` terminal into the bytes the FUSE response
+/// will return. Inline content travels in the WIT; blob content gets
+/// pulled from the host's blob cache. Returns `None` when a blob-backed
+/// payload can't be resolved (logged at warn for diagnostics).
+fn resolve_read_payload(
+    runtime: &crate::runtime::CalloutRuntime,
+    path: &str,
+    result: crate::omnifs::provider::types::FileContentResult,
+) -> Option<(Vec<u8>, usize)> {
+    use crate::omnifs::provider::types::FileContentResult;
+    match result {
+        FileContentResult::Inline(inline) => {
+            let count = inline.sibling_files.len();
+            Some((inline.content, count))
+        },
+        FileContentResult::Blob(blob) => match runtime.read_blob_full(blob.blob) {
+            Ok(bytes) => Some((bytes, blob.sibling_files.len())),
+            Err(e) => {
+                tracing::warn!(path, error = %e, "blob-backed read failed");
+                None
+            },
+        },
+    }
+}
 
 /// Slice `data` at the given FUSE `offset` and `size`, returning the relevant
 /// byte range. Returns an empty slice when `offset` is past the end.
