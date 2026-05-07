@@ -21,6 +21,7 @@ providers/*/src/bindings.rs
 # Internal design docs (not published)
 docs/internal/
 docs/superpowers/plans/
+.private/
 
 # Linear CLI workspace config
 .linear.toml
