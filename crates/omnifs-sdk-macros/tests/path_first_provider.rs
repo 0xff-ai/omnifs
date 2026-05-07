@@ -381,3 +381,123 @@ async fn registry_prefers_exact_and_prefix_over_rest() {
     let rest_empty = registry.read_file(&cx, "/_ipfs/Qm123").await.unwrap();
     assert_eq!(rest_empty.content(), b"rest");
 }
+
+#[tokio::test]
+async fn implicit_prefix_dir_lookup_resolves_without_explicit_handler() {
+    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_dir("/categories/{category}", parse_path_only, call_dir)
+        .unwrap();
+    registry
+        .add_dir("/categories/{category}/{ym}", parse_path_only, call_dir)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(13, Rc::new(RefCell::new(State)));
+
+    // Implicit "/" has only literal children at depth 1 → exhaustive.
+    let list = registry.list_children(&cx, "/").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    let names: Vec<&str> = listing.entries().iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["categories"]);
+    assert!(listing.exhaustive());
+
+    // Implicit "/categories" has only dynamic captures below → not exhaustive.
+    let list = registry.list_children(&cx, "/categories").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    assert!(listing.entries().is_empty());
+    assert!(
+        !listing.exhaustive(),
+        "implicit prefix dir with dynamic-capture children must not claim exhaustive"
+    );
+
+    let lookup = registry.lookup_child(&cx, "/", "categories").await.unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "categories");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+    assert!(entry.is_exhaustive());
+
+    let lookup = registry
+        .lookup_child(&cx, "/categories", "cs.AI")
+        .await
+        .unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "cs.AI");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+}
+
+#[tokio::test]
+async fn implicit_prefix_dir_with_only_capture_root_lookup_falls_through_to_dynamic() {
+    use omnifs_sdk::browse::{EntryKind, List, Lookup};
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_dir("/{owner}", parse_path_only, call_dir)
+        .unwrap();
+    registry
+        .add_dir("/{owner}/{repo}", parse_path_only, call_dir)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(15, Rc::new(RefCell::new(State)));
+
+    let list = registry.list_children(&cx, "/").await.unwrap();
+    let List::Entries(listing) = list else {
+        panic!("expected entries, got subtree");
+    };
+    assert!(listing.entries().is_empty());
+    assert!(!listing.exhaustive());
+
+    let lookup = registry.lookup_child(&cx, "/", "raulk").await.unwrap();
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "raulk");
+    assert_eq!(entry.target().kind(), EntryKind::Directory);
+}
+
+fn parse_only_digits(path: &str) -> Option<Box<dyn std::any::Any>> {
+    let last = path.rsplit('/').next()?;
+    if !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
+        Some(Box::new(last.to_string()))
+    } else {
+        None
+    }
+}
+
+fn call_digits<'a>(
+    _cx: &'a Cx<State>,
+    _path: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+    Box::pin(async { Ok(FileContent::bytes(b"digits".to_vec())) })
+}
+
+#[tokio::test]
+async fn parse_rejection_falls_through_to_next_candidate() {
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_file("/items/{id}", parse_only_digits, call_digits)
+        .unwrap();
+    registry
+        .add_file("/items/{*tail}", parse_path_only, call_rest)
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(17, Rc::new(RefCell::new(State)));
+
+    let digits = registry.read_file(&cx, "/items/42").await.unwrap();
+    assert_eq!(digits.content(), b"digits");
+
+    let alpha = registry.read_file(&cx, "/items/abc").await.unwrap();
+    assert_eq!(alpha.content(), b"rest");
+}

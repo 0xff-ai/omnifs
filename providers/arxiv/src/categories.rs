@@ -6,7 +6,7 @@ use crate::query::{
     EARLIEST_YEAR, SortAxis, and, author_query, category_month_query, category_query,
     current_year_utc, listing_url, window_start,
 };
-use crate::selector::{empty_exhaustive_projection, window_index_projection};
+use crate::selector::window_index_projection;
 use crate::types::{CategoryKey, EncodedSelector, PaperKey, YearMonth};
 use crate::{Result, State};
 
@@ -107,10 +107,9 @@ impl CategoryHandlers {
         Ok(PaperSubtree { paper })
     }
 
-    #[dir("/categories/{category}/by-author")]
-    fn category_by_author_root(_cx: &DirCx<State>, _category: CategoryKey) -> Result<Projection> {
-        Ok(empty_exhaustive_projection())
-    }
+    // `/categories/{category}/by-author` is auto-navigable (literal
+    // segment under a captured parent); the SDK derives it from the
+    // `by-author/{author}` route below. No stub handler needed.
 
     #[dir("/categories/{category}/by-author/{author}")]
     async fn category_by_author(

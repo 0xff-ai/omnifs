@@ -3,7 +3,7 @@ use omnifs_sdk::prelude::*;
 use crate::api::fetch_listing;
 use crate::paper_subtree::PaperSubtree;
 use crate::query::{SortAxis, and, author_query, category_query, listing_url, window_start};
-use crate::selector::{empty_exhaustive_projection, window_index_projection};
+use crate::selector::window_index_projection;
 use crate::types::{CategoryKey, EncodedSelector, PaperKey};
 use crate::{Result, State};
 
@@ -87,10 +87,8 @@ impl AuthorHandlers {
         Ok(PaperSubtree { paper })
     }
 
-    #[dir("/authors/{author}/by-category")]
-    fn author_by_category_root(_cx: &DirCx<State>, _author: EncodedSelector) -> Result<Projection> {
-        Ok(empty_exhaustive_projection())
-    }
+    // `/authors/{author}/by-category` is auto-navigable from the
+    // `by-category/{category}` route below; no stub handler needed.
 
     #[dir("/authors/{author}/by-category/{category}")]
     async fn author_by_category(

@@ -15,12 +15,6 @@ pub(crate) fn window_index_projection() -> Projection {
     p
 }
 
-pub(crate) fn empty_exhaustive_projection() -> Projection {
-    let mut p = Projection::new();
-    p.page(PageStatus::Exhaustive);
-    p
-}
-
 impl Listing {
     /// Project a listing of papers under `prefix`. Each paper renders
     /// as a directory; per-paper metadata + version skeleton are
