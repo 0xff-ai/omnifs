@@ -29,13 +29,22 @@ impl<'cx> IpfsApi<'cx> {
         }
     }
 
-    pub(crate) async fn block_stat(&self, cid: &CidText) -> Result<BlockStat> {
-        self.rpc_json("block/stat", &[("arg", cid.to_string())])
-            .await
-    }
-
-    pub(crate) async fn dag_stat(&self, cid: &CidText) -> Result<DagStat> {
-        self.rpc_json("dag/stat", &[("arg", cid.to_string())]).await
+    /// Issue `block/stat` and `dag/stat` for the same CID in a single
+    /// callout batch. The two RPCs are independent, so parallelizing them
+    /// halves the worst-case latency of `inspect_cid`.
+    pub(crate) async fn block_and_dag_stat(&self, cid: &CidText) -> Result<(BlockStat, DagStat)> {
+        let arg = cid.to_string();
+        let block_url = build_rpc_url(&self.base_url, "block/stat", &[("arg", &arg)]);
+        let dag_url = build_rpc_url(&self.base_url, "dag/stat", &[("arg", &arg)]);
+        let mut responses = omnifs_sdk::prelude::join_all([
+            self.cx.http().get(block_url).send(),
+            self.cx.http().get(dag_url).send(),
+        ])
+        .await
+        .into_iter();
+        let block = parse_rpc_response::<BlockStat>("block/stat", responses.next().unwrap())?;
+        let dag = parse_rpc_response::<DagStat>("dag/stat", responses.next().unwrap())?;
+        Ok((block, dag))
     }
 
     pub(crate) async fn ls(&self, ipfs_path: &str) -> Result<LsObject> {
@@ -43,9 +52,9 @@ impl<'cx> IpfsApi<'cx> {
             .rpc_json(
                 "ls",
                 &[
-                    ("arg", ipfs_path.to_string()),
-                    ("resolve-type", String::from("true")),
-                    ("size", String::from("true")),
+                    ("arg", ipfs_path),
+                    ("resolve-type", "true"),
+                    ("size", "true"),
                 ],
             )
             .await?;
@@ -70,25 +79,15 @@ impl<'cx> IpfsApi<'cx> {
     }
 
     pub(crate) async fn cat(&self, ipfs_path: &str) -> Result<Vec<u8>> {
-        self.rpc_bytes(
-            "cat",
-            &[
-                ("arg", ipfs_path.to_string()),
-                ("progress", String::from("false")),
-            ],
-        )
-        .await
+        self.rpc_bytes("cat", &[("arg", ipfs_path), ("progress", "false")])
+            .await
     }
 
     pub(crate) async fn probe_cat(&self, ipfs_path: &str) -> Result<Option<Vec<u8>>> {
         match self
             .rpc_bytes(
                 "cat",
-                &[
-                    ("arg", ipfs_path.to_string()),
-                    ("length", String::from("1")),
-                    ("progress", String::from("false")),
-                ],
+                &[("arg", ipfs_path), ("length", "1"), ("progress", "false")],
             )
             .await
         {
@@ -111,16 +110,15 @@ impl<'cx> IpfsApi<'cx> {
     }
 
     pub(crate) async fn resolve_ipns(&self, name: &IpnsName) -> Result<String> {
+        let arg = format!("/ipns/{name}");
+        let timeout = format!("{}s", self.ipns_resolve_timeout_secs);
         let response: ResolveResponse = self
             .rpc_json(
                 "resolve",
                 &[
-                    ("arg", format!("/ipns/{name}")),
-                    ("recursive", String::from("true")),
-                    (
-                        "dht-timeout",
-                        format!("{}s", self.ipns_resolve_timeout_secs),
-                    ),
+                    ("arg", &arg),
+                    ("recursive", "true"),
+                    ("dht-timeout", &timeout),
                 ],
             )
             .await?;
@@ -129,13 +127,7 @@ impl<'cx> IpfsApi<'cx> {
 
     pub(crate) async fn pin_list(&self) -> Result<Vec<String>> {
         let response: PinLsResponse = self
-            .rpc_json(
-                "pin/ls",
-                &[
-                    ("type", String::from("recursive")),
-                    ("quiet", String::from("true")),
-                ],
-            )
+            .rpc_json("pin/ls", &[("type", "recursive"), ("quiet", "true")])
             .await?;
         Ok(response.keys.into_keys().collect())
     }
@@ -145,23 +137,30 @@ impl<'cx> IpfsApi<'cx> {
         Ok(response.keys.into_iter().map(|k| k.name).collect())
     }
 
-    async fn rpc_json<T: DeserializeOwned>(
-        &self,
-        cmd: &str,
-        query: &[(&str, String)],
-    ) -> Result<T> {
+    async fn rpc_json<T: DeserializeOwned>(&self, cmd: &str, query: &[(&str, &str)]) -> Result<T> {
         let body = self.rpc_bytes(cmd, query).await?;
-        serde_json::from_slice(&body).map_err(|error| {
-            ProviderError::invalid_input(format!("{cmd} returned invalid JSON: {error}"))
-        })
+        parse_json_body(cmd, &body)
     }
 
-    async fn rpc_bytes(&self, cmd: &str, query: &[(&str, String)]) -> Result<Vec<u8>> {
+    async fn rpc_bytes(&self, cmd: &str, query: &[(&str, &str)]) -> Result<Vec<u8>> {
         let url = build_rpc_url(&self.base_url, cmd, query);
         let response = self.cx.http().get(url).send().await?;
-        let response = response.error_for_status()?;
-        Ok(response.into_body())
+        Ok(response.error_for_status()?.into_body())
     }
+}
+
+fn parse_json_body<T: DeserializeOwned>(cmd: &str, body: &[u8]) -> Result<T> {
+    serde_json::from_slice(body).map_err(|error| {
+        ProviderError::invalid_input(format!("{cmd} returned invalid JSON: {error}"))
+    })
+}
+
+fn parse_rpc_response<T: DeserializeOwned>(
+    cmd: &str,
+    response: Result<http::Response<Vec<u8>>>,
+) -> Result<T> {
+    let response = response?.error_for_status()?;
+    parse_json_body(cmd, response.body())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -215,7 +214,16 @@ pub(crate) struct LsLink {
     #[serde(rename = "Size", deserialize_with = "deserialize_u64")]
     pub(crate) size: u64,
     #[serde(rename = "Type", deserialize_with = "deserialize_i32")]
-    pub(crate) kind: i32,
+    kind: i32,
+}
+
+impl LsLink {
+    // Kubo's UnixFS link `Type` field uses `1` for legacy directory and
+    // `5` for HAMT-sharded directory; everything else (file, raw block,
+    // symlink, unknown) is a file from the projection's perspective.
+    pub(crate) fn is_directory(&self) -> bool {
+        matches!(self.kind, 1 | 5)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -240,12 +248,9 @@ struct KeyListResponse {
 struct KeyEntry {
     #[serde(rename = "Name")]
     name: String,
-    #[allow(dead_code)]
-    #[serde(rename = "Id")]
-    id: String,
 }
 
-fn build_rpc_url(base_url: &str, cmd: &str, query: &[(&str, String)]) -> String {
+fn build_rpc_url(base_url: &str, cmd: &str, query: &[(&str, &str)]) -> String {
     let mut url = format!(
         "{}/{}",
         base_url.trim_end_matches('/'),
@@ -330,9 +335,9 @@ mod tests {
             "https://kubo.test/api/v0",
             "resolve",
             &[
-                ("arg", "/ipns/example.com".to_string()),
-                ("arg", "/ipfs/bafy".to_string()),
-                ("recursive", "true".to_string()),
+                ("arg", "/ipns/example.com"),
+                ("arg", "/ipfs/bafy"),
+                ("recursive", "true"),
             ],
         );
         assert_eq!(

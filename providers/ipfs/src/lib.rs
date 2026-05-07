@@ -49,10 +49,6 @@ mod registry_smoke {
     use crate::root::RootHandlers;
     use omnifs_sdk::__internal::MountRegistry;
 
-    // The provider's path manifest must validate end-to-end. This is the
-    // first dir+file co-existence on identical rest-captured templates;
-    // the SDK's MountRegistry::validate change in feat/sdk-handlers-coexist
-    // is what makes it accept.
     #[test]
     fn manifest_validates() {
         let mut registry: MountRegistry<State> = MountRegistry::new();

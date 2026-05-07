@@ -141,15 +141,11 @@ fn join_subpath(prefix: &str, suffix: &str) -> String {
 }
 
 fn emit_link(projection: &mut Projection, link: &LsLink) {
-    if is_directory_link(link.kind) {
+    if link.is_directory() {
         projection.dir(link.name.clone());
     } else {
         projection.file_with_stat(link.name.clone(), nonzero_size(link.size));
     }
-}
-
-fn is_directory_link(kind: i32) -> bool {
-    matches!(kind, 1 | 5)
 }
 
 fn nonzero_size(size: u64) -> FileStat {

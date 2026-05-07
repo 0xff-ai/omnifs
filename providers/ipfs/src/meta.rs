@@ -88,10 +88,8 @@ impl CidSummary {
 
 async fn inspect_cid(cx: &Cx<State>, cid: &CidText) -> Result<CidSummary> {
     let api = IpfsApi::new(cx);
-    let block_stat = api.block_stat(cid).await?;
-    let dag_stat = api.dag_stat(cid).await?;
-    let root_path = format!("/ipfs/{cid}");
-    let kind = classify_root(cid, &root_path, &api).await?;
+    let (block_stat, dag_stat) = api.block_and_dag_stat(cid).await?;
+    let kind = classify_root(cid, &api).await?;
     Ok(CidSummary {
         block_size: block_stat.size,
         dag_size: dag_stat.total_size(),
@@ -99,14 +97,15 @@ async fn inspect_cid(cx: &Cx<State>, cid: &CidText) -> Result<CidSummary> {
     })
 }
 
-async fn classify_root(cid: &CidText, root_path: &str, api: &IpfsApi<'_>) -> Result<RootKind> {
+async fn classify_root(cid: &CidText, api: &IpfsApi<'_>) -> Result<RootKind> {
     if cid.codec() == 0x55 {
         return Ok(RootKind::Raw);
     }
-    if api.probe_cat(root_path).await?.is_some() {
+    let root_path = format!("/ipfs/{cid}");
+    if api.probe_cat(&root_path).await?.is_some() {
         return Ok(RootKind::File);
     }
-    if api.try_ls(root_path).await?.is_some() {
+    if api.try_ls(&root_path).await?.is_some() {
         return Ok(RootKind::Directory);
     }
     Ok(RootKind::Dag)
