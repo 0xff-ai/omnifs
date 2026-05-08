@@ -8,28 +8,89 @@ symlink to this file.
 
 1. **Read `docs/repo-intent.md` once.** Project mission, hard architectural
    commitments, planned directions, what "good" looks like.
-2. Skim this index. Note the read-triggers below.
-3. Open the specific `.rules/*.md` files whose triggers fire for the task
-   you're starting.
-
-You should not need to read every rules file at the start of a session.
-Read on demand, guided by the triggers.
+2. Skim this index. The trigger lists below tell you which `.rules/*.md`
+   files to open for the task in front of you, and which to update as part
+   of the change you're making.
+3. Open only the files whose triggers fire. You should not need to read
+   every rules file at the start of a session.
 
 ## Rules index
 
-Each file declares its own `Read when:` (open it) and `Update when:` (edit
-it as part of your change). The summary below is the at-a-glance trigger
-list — open the file for the authoritative version.
+For each file, **Read** triggers tell you when to open it; **Update**
+triggers tell you when your change requires editing it. If you're making a
+change that fires an Update trigger but you didn't read the file first,
+read it now.
 
-| File                          | Read when…                                                                                                                                                  |
-|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`.rules/workflow.md`](./.rules/workflow.md)         | Starting a session; building; running tests; running the project locally; a build/test command isn't doing what you expect.                                  |
-| [`.rules/auth.md`](./.rules/auth.md)                 | Changing auth flow, credential injection, secret handling, or git remote/clone behavior; before suggesting an SSH ↔ HTTPS transport change.                   |
-| [`.rules/debugging.md`](./.rules/debugging.md)       | Something is failing at runtime — `Input/output error`, hangs on `ls` / `cd`, silent clone failures, wrong FUSE results. Read before forming a theory.        |
-| [`.rules/caching.md`](./.rules/caching.md)           | Touching the host browse cache, FUSE notifier, invalidation logic, or a provider tempted to memoize. Before adding any "freshness" or "TTL" knob.            |
-| [`.rules/provider-sdk.md`](./.rules/provider-sdk.md) | Authoring or modifying a provider; touching `omnifs-sdk` / `omnifs-sdk-macros`; changing the WIT; working on host-side dispatch; a path isn't resolving right. |
-| [`.rules/gotchas.md`](./.rules/gotchas.md)           | Writing or reviewing provider code; touching the FUSE layer; sizing/streaming a projected file; before writing your first new provider handler.              |
-| [`.rules/code-style.md`](./.rules/code-style.md)     | Refactoring; introducing an abstraction; changing a public contract (WIT, SDK macros, host browse surface); reviewing a PR for fit.                          |
+### [`.rules/workflow.md`](./.rules/workflow.md)
+
+- **Read when:** starting a session; building; running tests; running the
+  project locally; a build/test command isn't doing what you expect.
+- **Update when:** adding or changing a build target, a `just` recipe, the
+  Docker Compose flow, the provider build pipeline (e.g. reintroducing a
+  preview1 adapter step), test-harness conventions, or interactive shell
+  defaults baked into the image.
+
+### [`.rules/auth.md`](./.rules/auth.md)
+
+- **Read when:** changing auth flow, credential injection, secret handling,
+  or git remote/clone behavior; before suggesting an SSH ↔ HTTPS transport
+  change; touching anything that consumes `GITHUB_TOKEN` or
+  `SSH_AUTH_SOCK`.
+- **Update when:** adding a new credential source; changing how tokens
+  reach the host or providers; switching git clone transport; adding a new
+  auth-related provider capability; changing the operational contract for
+  required host setup.
+
+### [`.rules/debugging.md`](./.rules/debugging.md)
+
+- **Read when:** something is failing at runtime — `Input/output error` on
+  a mount path, hangs on `ls`/`cd`, silent clone failures, wrong FUSE
+  results. Read before forming a theory; user-visible probes beat
+  speculation.
+- **Update when:** discovering a new failure mode worth triaging; a new log
+  surface or trace channel appears; `omnifs status` grows new fields; the
+  "expected noise" set changes.
+
+### [`.rules/caching.md`](./.rules/caching.md)
+
+- **Read when:** touching the host browse cache, FUSE notifier, or
+  invalidation logic; a provider is tempted to memoize; before adding any
+  "freshness" or "TTL" knob.
+- **Update when:** changing tier sizing or thresholds; adding or removing a
+  cache surface; changing invalidation semantics (`event-outcome`, FUSE
+  notifier); adding a new preload or sibling-files mechanism; modifying
+  how cache effects fold into terminals.
+
+### [`.rules/provider-sdk.md`](./.rules/provider-sdk.md)
+
+- **Read when:** authoring or modifying a provider; touching `omnifs-sdk` /
+  `omnifs-sdk-macros`; changing the WIT; working on host-side dispatch; a
+  path isn't resolving the way you expect.
+- **Update when:** adding, renaming, or removing a handler attribute or
+  top-level macro; changing the WIT contract; changing the browse-method
+  surface (`lookup_child` / `list_children` / `read_file` / streaming);
+  changing dispatch precedence, auto-navigability, or exhaustiveness rules
+  (also update `docs/design/path-dispatch-and-listing.md`); changing the
+  callout/resume protocol shape.
+
+### [`.rules/gotchas.md`](./.rules/gotchas.md)
+
+- **Read when:** writing or reviewing provider code; touching the FUSE
+  layer; sizing/streaming a projected file; working with hashmaps inside a
+  provider; before writing your first new provider handler.
+- **Update when:** discovering a new code-level surprise that an agent
+  could plausibly regress without a written-down warning. Append rather
+  than rewrite — the framing of a footgun usually matters.
+
+### [`.rules/code-style.md`](./.rules/code-style.md)
+
+- **Read when:** refactoring; introducing an abstraction; changing a public
+  contract (WIT, SDK macros, host browse surface); renaming something
+  user-visible; merging multi-phase orchestration into a hot path;
+  reviewing a PR for fit.
+- **Update when:** an architectural commitment changes; a new
+  design-judgment heuristic earns its place from real PR experience; the
+  design-status convention changes; a new contract guardrail is added.
 
 ## Designs of record
 
@@ -48,9 +109,6 @@ Add `.rules/<topic>.md` only when:
 - An agent benefits from reading those rules proactively (not just
   searching when they hit a problem).
 
-Add a row to the index above with a clear `Read when` trigger. Include
-both `Read when:` and `Update when:` headers in the new file.
-
-When a rule no longer matches reality, update the rules file in the same
-PR as the behavior change. Each rules file's `Update when:` header tells
-you whether your change qualifies.
+Add a section above with both `Read when` and `Update when` triggers. Keep
+the rules file itself focused on the rules; triggers live here in the
+index.

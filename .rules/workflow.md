@@ -1,13 +1,5 @@
 # Workflow
 
-**Read when:** starting a session, building, running tests, or running the
-project locally. Re-read if a build/test command isn't doing what you expect.
-
-**Update when:** adding or changing a build target, a `just` recipe, the
-Docker Compose flow, the provider build pipeline (e.g. reintroducing a
-preview1 adapter step), test-harness conventions, or interactive shell
-defaults baked into the image.
-
 ## Scope
 
 - Linux-only. Don't reintroduce macOS-specific mount behavior, `diskutil`,

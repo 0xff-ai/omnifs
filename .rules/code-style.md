@@ -1,16 +1,5 @@
 # Code style and contract guardrails
 
-**Read when:** about to refactor, introduce an abstraction, change a public
-contract (WIT, SDK macros, host browse surface), rename something
-user-visible, or merge a multi-phase orchestration into a hot path. Read
-before reviewing a PR for "does this fit the project's instincts."
-
-**Update when:** an architectural commitment changes, a new design-judgment
-heuristic earns its place from real PR experience, the design-status
-convention changes, or a new contract guardrail is added.
-
----
-
 ## Codebase expectations
 
 - Keep changes small and local.

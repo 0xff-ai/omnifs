@@ -1,15 +1,5 @@
 # Debugging
 
-**Read when:** something is failing at runtime — `Input/output error` on a
-mount path, a hang on `ls`/`cd`, a clone failing silently, a FUSE op
-returning the wrong thing. Read before forming a theory; user-visible probes
-beat speculation.
-
-**Update when:** discovering a new failure mode worth triaging, a new log
-surface or trace channel appears, `omnifs status` grows new fields, or the
-"expected noise" set changes (e.g. a previously-spurious warning becomes
-load-bearing).
-
 ## Two log surfaces, not one
 
 - `docker compose logs omnifs` — stdout/stderr from the container

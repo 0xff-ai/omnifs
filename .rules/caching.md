@@ -1,14 +1,5 @@
 # Caching model
 
-**Read when:** touching anything cache-related — host browse cache, FUSE
-notifier, invalidation logic, or a provider tempted to memoize. Also read
-before adding a "freshness" or "TTL" knob anywhere.
-
-**Update when:** changing tier sizing or thresholds, adding or removing a
-cache surface, changing invalidation semantics (`event-outcome`, FUSE
-notifier paths), adding a new preload or sibling-files mechanism, or
-modifying how cache effects fold into terminals.
-
 ## The rule
 
 The host owns **all** caching. Providers must not reintroduce their own

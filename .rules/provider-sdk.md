@@ -1,16 +1,5 @@
 # Writing a provider
 
-**Read when:** authoring or modifying a provider, touching the
-`omnifs-sdk` / `omnifs-sdk-macros` crates, changing the WIT, or working on
-host-side dispatch. Also read if a path isn't resolving the way you expect.
-
-**Update when:** adding, renaming, or removing a handler attribute or
-top-level macro; changing the WIT contract; changing the browse-method
-surface (`lookup_child` / `list_children` / `read_file` / streaming);
-changing dispatch precedence, auto-navigability, or exhaustiveness rules
-(also update `docs/design/path-dispatch-and-listing.md`); or changing the
-callout/resume protocol shape.
-
 For routing/listing rules in detail, this file is a summary; the source of
 truth is `docs/design/path-dispatch-and-listing.md`. **Read that doc before
 changing dispatch logic.**

@@ -1,15 +1,5 @@
 # Auth and cloning
 
-**Read when:** changing auth flow, credential injection, secret handling, git
-remote/clone behavior, or anything that touches `GITHUB_TOKEN` /
-`SSH_AUTH_SOCK`. Also read before suggesting a transport change (SSH ↔
-HTTPS).
-
-**Update when:** adding a new credential source, changing how tokens reach
-the host or providers, switching git clone transport (SSH ↔ HTTPS/token),
-adding a new auth-related provider capability, or changing the operational
-contract for required host setup.
-
 ## GitHub API auth
 
 Two intake mechanisms, both supported by the baked provider config:

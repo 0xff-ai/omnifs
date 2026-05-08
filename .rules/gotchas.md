@@ -1,16 +1,8 @@
 # Gotchas
 
-**Read when:** writing or reviewing provider code, touching the FUSE layer,
-sizing/streaming a projected file, working with hashmaps inside a provider,
-or running into a "this should work but doesn't" surprise. Skim before
-writing your first new provider handler.
-
-**Update when:** discovering a new code-level surprise that an agent could
-plausibly regress without a written-down warning. Add a new entry rather
-than rewriting an old one — these are footguns, and the framing usually
-matters.
-
----
+These are code-level surprises an agent could plausibly regress without a
+written-down warning. When adding a new entry, prefer appending rather than
+rewriting an existing one — the framing of a footgun usually matters.
 
 ## Projected file sizes use a 256 MiB placeholder by default
 
