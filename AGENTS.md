@@ -1,172 +1,56 @@
 # AGENTS.md
 
-Repository-local guidance for working in `omnifs`.
+Operational and code-level rules for working in the omnifs repo. This file
+is the index; the actual rules live in `.rules/*.md`. `CLAUDE.md` is a
+symlink to this file.
 
-## Scope
+## Start here
 
-- This repo is currently **Linux-only**.
-- Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested.
-- The primary supported workflow is the **container workflow** in `compose.yaml`.
+1. **Read `docs/repo-intent.md` once.** Project mission, hard architectural
+   commitments, planned directions, what "good" looks like.
+2. Skim this index. Note the read-triggers below.
+3. Open the specific `.rules/*.md` files whose triggers fire for the task
+   you're starting.
 
-## Current workflow
+You should not need to read every rules file at the start of a session.
+Read on demand, guided by the triggers.
 
-Use these commands:
+## Rules index
 
-```bash
-mkdir -p .secrets
-gh auth token > .secrets/github_token
-docker compose up --build -d
-docker compose exec omnifs /bin/zsh
-docker compose logs omnifs
-docker compose down
-```
+Each file declares its own `Read when:` (open it) and `Update when:` (edit
+it as part of your change). The summary below is the at-a-glance trigger
+list — open the file for the authoritative version.
 
-Behavior:
+| File                          | Read when…                                                                                                                                                  |
+|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`.rules/workflow.md`](./.rules/workflow.md)         | Starting a session; building; running tests; running the project locally; a build/test command isn't doing what you expect.                                  |
+| [`.rules/auth.md`](./.rules/auth.md)                 | Changing auth flow, credential injection, secret handling, or git remote/clone behavior; before suggesting an SSH ↔ HTTPS transport change.                   |
+| [`.rules/debugging.md`](./.rules/debugging.md)       | Something is failing at runtime — `Input/output error`, hangs on `ls` / `cd`, silent clone failures, wrong FUSE results. Read before forming a theory.        |
+| [`.rules/caching.md`](./.rules/caching.md)           | Touching the host browse cache, FUSE notifier, invalidation logic, or a provider tempted to memoize. Before adding any "freshness" or "TTL" knob.            |
+| [`.rules/provider-sdk.md`](./.rules/provider-sdk.md) | Authoring or modifying a provider; touching `omnifs-sdk` / `omnifs-sdk-macros`; changing the WIT; working on host-side dispatch; a path isn't resolving right. |
+| [`.rules/gotchas.md`](./.rules/gotchas.md)           | Writing or reviewing provider code; touching the FUSE layer; sizing/streaming a projected file; before writing your first new provider handler.              |
+| [`.rules/code-style.md`](./.rules/code-style.md)     | Refactoring; introducing an abstraction; changing a public contract (WIT, SDK macros, host browse surface); reviewing a PR for fit.                          |
 
-- `docker compose up --build -d` builds the image, starts the named container, mounts omnifs at `/omnifs`, and exposes a top-level symlink (`/<mount>`) inside the container for every configured provider in `~/.omnifs/providers/*.json` (currently `/arxiv`, `/dns`, `/github`).
-- `docker compose exec omnifs /bin/zsh` opens an interactive `zsh` shell in the running container.
-- `docker compose logs omnifs` prints the container output. Runtime logs also remain available at `/tmp/omnifs.log` inside the container.
-- `docker compose down` removes the container.
+## Designs of record
 
-`just` remains available as a wrapper for the same container flow and as the task runner for build and test recipes.
+- **Project intent:** [`docs/repo-intent.md`](./docs/repo-intent.md)
+- **Design index:** [`docs/design/README.md`](./docs/design/README.md) —
+  aggregate status table for every design doc.
+- Status convention is documented in
+  [`.rules/code-style.md`](./.rules/code-style.md).
 
-Do not add alternate local mount recipes unless explicitly requested.
+## When to add a new rules file
 
-## Auth and cloning
+Add `.rules/<topic>.md` only when:
 
-Current auth model:
+- Three or more rules accumulate in one domain that doesn't fit any
+  existing file, **and**
+- An agent benefits from reading those rules proactively (not just
+  searching when they hit a problem).
 
-- GitHub API auth for the Docker Compose path comes from a mounted secret file at `.secrets/github_token`, exposed in the container as `/run/secrets/github_token`.
-- The baked provider config supports both `token_file` and `token_env`; Compose uses the secret file, while `just start` can still pass `GITHUB_TOKEN`.
-- Git clone currently uses SSH:
-  - remote format: `git@github.com:<owner>/<repo>.git`
-  - auth comes from forwarded `SSH_AUTH_SOCK`
-  - do not mount host private keys into the container
+Add a row to the index above with a clear `Read when` trigger. Include
+both `Read when:` and `Update when:` headers in the new file.
 
-Container startup requires:
-
-- host `gh auth token` works so `.secrets/github_token` can be created, or `GITHUB_TOKEN` is already set if using `just start`
-- host `SSH_AUTH_SOCK` is set
-- host SSH agent has a usable GitHub key loaded
-
-Useful checks on the host:
-
-```bash
-test -s .secrets/github_token || gh auth token > .secrets/github_token
-ssh-add -L
-ssh -T git@github.com
-```
-
-Useful checks in the container:
-
-```bash
-cat /tmp/omnifs.log
-ssh -F /dev/null -T git@github.com
-```
-
-## Logging and debugging
-
-- Runtime log file is `/tmp/omnifs.log` inside the container.
-- Clone failures should surface there with `git clone` stderr.
-- FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
-- Use `omnifs status` inside the container for fast mount/config/plugin/cache triage.
-- Do not assume `docker exec` inherits the entrypoint environment; verify live runtime paths rather than inferring them from defaults.
-
-When a repo path returns `Input/output error`, check:
-
-1. `docker compose logs omnifs`
-2. SSH auth inside the container
-3. whether the mount is still present in `/proc/mounts`
-
-When debugging hangs or slow paths, start with user-visible probes before theory:
-
-1. `cd /github/<owner>`
-2. `cat /dns/@google/<domain>/MX`
-3. `tail -n 80 /tmp/omnifs.log`
-
-## Shell expectations
-
-The runtime image uses Ubuntu 25.10 and `zsh`.
-
-Expected interactive shell behavior:
-
-- `ls` is aliased to `ls --color=auto`
-- `ll` is aliased to `ls -lrt`
-
-If changing shell behavior, prefer putting it in the image rather than generating per-session shell config.
-
-## Build and test
-
-Rust validation:
-
-```bash
-cargo fmt
-cargo test
-```
-
-Docker build:
-
-```bash
-docker compose build
-```
-
-For mount/provider/clone changes, do not stop at Rust-only checks. Validate through the supported runtime path:
-
-```bash
-just dev
-docker exec omnifs /bin/zsh -lc 'omnifs status'
-docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
-docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
-```
-
-The Dockerfile is intentionally cache-oriented:
-
-- multi-stage build
-- `cargo-chef`
-- BuildKit cache mounts
-- minimal build context via `.dockerignore`
-
-Preserve that structure unless there is a clear regression or simplification with equal caching behavior.
-
-## Codebase expectations
-
-- Keep changes small and local.
-- Prefer preserving the current architecture:
-  - inode table
-  - router
-  - providers
-  - GitHub cache/scheduler/poller
-  - clone manager
-- Do not silently change the auth model or transport model.
-- If switching clone transport from SSH to HTTPS/token, call that out explicitly because it changes the operational contract.
-- When a refactor touches clone, routing, or traversal behavior, compare against the pre-refactor behavior before accepting the new result.
-- Preserve existing repo-tree passthrough and ownership semantics unless intentionally changing the contract.
-- Providers must project all data they have already fetched. If a handler has an upstream payload in hand, emit every sibling file and child that can be derived from it instead of returning only the requested field and forcing later refetches.
-
-## Design judgment
-
-- Prefer the simpler end-to-end flow, not the purer local abstraction.
-- Bias toward single-phase designs over multi-phase orchestration on the hot path.
-- Keep data near the point where it is naturally produced and immediately consumed; split it into a second mechanism only when that separation buys something concrete.
-- Do not defend abstraction boundaries that add complexity in the common case.
-- Once the direct path exists, remove bridge-style dispatch layers and other transitional glue instead of letting them harden into architecture.
-
-## Protocol and contract guardrails
-
-- Reuse source-of-truth terms. Do not invent new names for public surfaces unless the rename is explicit.
-- Keep public contracts at the right layer. Host internals must not leak into SDK/WIT naming or semantics.
-- Do not reuse an existing abstraction if it changes the behavior model. Semantic fit matters more than code reuse.
-- For protocol changes, write the exact interaction trace first and reject extra hops on hot paths.
-- If something is conceptually one-way, stop before making it `await`-shaped. Fix the boundary instead of forcing it through request/response machinery.
-
-## Mutation protocol
-
-Mutations are not implemented yet.
-
-If adding them, prefer:
-
-- read model remains read-only
-- drafts live under a draft namespace
-- execution is triggered by moving a prepared transaction directory into a control namespace
-
-Do not make projected issue/PR files directly writable as an implicit mutation mechanism.
+When a rule no longer matches reality, update the rules file in the same
+PR as the behavior change. Each rules file's `Update when:` header tells
+you whether your change qualifies.

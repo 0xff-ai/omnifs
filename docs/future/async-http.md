@@ -1,5 +1,8 @@
 # Future redesign: direct WASIp2 HTTP with async components
 
+Status: future / north star (gated on async-component readiness in wasmtime/wasi-http)
+Scope: WIT, host runtime, SDK callout/resume machinery, all providers
+
 This is the redesign OmnIFS should pursue once async components are mature enough to preserve the concurrency we already rely on.
 
 The target end state is clean:
