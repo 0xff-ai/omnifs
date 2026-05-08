@@ -499,6 +499,7 @@ async fn test_cache_isolated_by_mount_name() {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+    let extractor = support::make_extractor();
     let runtime_a = CalloutRuntime::new(
         &engine,
         &support::provider_wasm_path(&config.plugin),
@@ -506,6 +507,7 @@ async fn test_cache_isolated_by_mount_name() {
         cloner.clone(),
         cache_dir.path(),
         "mount-a",
+        extractor.clone(),
     )
     .unwrap();
     let runtime_b = CalloutRuntime::new(
@@ -515,6 +517,7 @@ async fn test_cache_isolated_by_mount_name() {
         cloner,
         cache_dir.path(),
         "mount-b",
+        extractor,
     )
     .unwrap();
 

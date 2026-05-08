@@ -180,11 +180,10 @@ impl GitCloner {
         }
     }
 
-    /// Write the clone URL to a sidecar file atomically (write tmp + rename).
+    /// Write the clone URL to a sidecar file. Best-effort; the cache
+    /// entry is still usable without the sidecar (we just lose the
+    /// clone-url conflict check on the next open).
     fn write_sidecar(path: &std::path::Path, clone_url: &str) {
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, clone_url).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let _ = crate::runtime::fsutil::atomic_write(path, clone_url.as_bytes());
     }
 }

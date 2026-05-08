@@ -10,15 +10,14 @@
 use crate::auth::AuthManager;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
+use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use dashmap::DashMap;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::warn;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -209,7 +208,7 @@ impl BlobExecutor {
         };
 
         let status = response.status().as_u16();
-        let response_headers = read_response_headers(response.headers());
+        let response_headers = decode_response_headers(response.headers());
         let etag = lookup_header(&response_headers, "etag");
         let content_type = lookup_header(&response_headers, "content-type");
 
@@ -225,7 +224,7 @@ impl BlobExecutor {
         {
             return error(ErrorKind::Internal, format!("create blob dir: {e}"), false);
         }
-        if let Err(e) = atomic_write(&blob_path, &bytes) {
+        if let Err(e) = crate::runtime::fsutil::atomic_write(&blob_path, &bytes) {
             return error(ErrorKind::Internal, format!("write blob: {e}"), false);
         }
 
@@ -275,55 +274,6 @@ fn read_range(path: &Path, offset: u64, len: Option<u32>) -> std::io::Result<Vec
         },
     }
     Ok(buf)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn build_header_map(
-    auth: &[(String, String)],
-    request: &[(String, String)],
-) -> Result<HeaderMap, String> {
-    let mut map = HeaderMap::new();
-    append_headers(&mut map, auth, "auth")?;
-    append_headers(&mut map, request, "request")?;
-    Ok(map)
-}
-
-fn append_headers(
-    map: &mut HeaderMap,
-    headers: &[(String, String)],
-    source: &str,
-) -> Result<(), String> {
-    for (name, value) in headers {
-        let header_name = HeaderName::from_str(name)
-            .map_err(|e| format!("invalid {source} header name `{name}`: {e}"))?;
-        let header_value = HeaderValue::from_str(value).map_err(|e| {
-            format!(
-                "invalid {source} header value for `{}`: {e}",
-                header_name.as_str()
-            )
-        })?;
-        map.append(header_name, header_value);
-    }
-    Ok(())
-}
-
-fn read_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| match value.to_str() {
-            Ok(value) => Some((name.as_str().to_string(), value.to_string())),
-            Err(error) => {
-                warn!(header = %name, err = %error, "dropping non-UTF8 response header");
-                None
-            },
-        })
-        .collect()
 }
 
 fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {

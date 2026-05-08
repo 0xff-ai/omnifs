@@ -3088,6 +3088,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-archive-extractor"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tar",
+ "wit-bindgen 0.41.0",
+ "zip",
+]
+
+[[package]]
 name = "omnifs-cli"
 version = "0.1.0"
 dependencies = [

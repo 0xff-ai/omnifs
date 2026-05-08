@@ -2,10 +2,16 @@ use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{FileContentResult, InlineFileContent};
 use omnifs_host::runtime::CalloutRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
+use omnifs_host::runtime::wasm_extractor::WasmExtractor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tempfile::TempDir;
+
+#[allow(dead_code)]
+pub fn make_extractor() -> Arc<WasmExtractor> {
+    Arc::new(WasmExtractor::new().expect("build extractor"))
+}
 
 /// Borrow the inline payload of a `FileContentResult`, panicking if the
 /// terminal returned a blob-backed file. Tests that intentionally
@@ -91,6 +97,7 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
         cloner,
         cache_dir.path(),
         "test-mount",
+        make_extractor(),
     )
     .unwrap();
 
@@ -116,6 +123,7 @@ pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
         cloner,
         cache_dir.path(),
         &config.mount,
+        make_extractor(),
     )
     .unwrap();
 

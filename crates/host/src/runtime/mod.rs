@@ -12,11 +12,16 @@ pub mod cloner;
 pub mod correlation;
 pub mod coverage;
 pub mod executor;
+pub mod fsutil;
 pub mod git;
+pub mod http_headers;
 pub mod inflight;
 mod invalidation;
 pub mod manifest;
+#[cfg(test)]
+mod test_archives;
 pub mod tree_registry;
+pub mod wasm_extractor;
 
 use crate::Provider;
 use crate::auth::AuthManager;
@@ -28,7 +33,7 @@ use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
 use crate::omnifs::provider::types::{self as wit_types, Host as TypesHost};
 use crate::runtime::activity::ActivityTable;
-use crate::runtime::archive::{ArchiveExecutor, ArchiveFormat};
+use crate::runtime::archive::ArchiveExecutor;
 use crate::runtime::blob::{BlobCache, BlobExecutor};
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
@@ -38,6 +43,7 @@ use crate::runtime::inflight::InFlight;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
 use crate::runtime::tree_registry::TreeRegistry;
+use crate::runtime::wasm_extractor::{ArchiveFormat, WasmExtractor};
 #[cfg(target_os = "linux")]
 use fuser::Notifier;
 use parking_lot::Mutex;
@@ -69,7 +75,7 @@ pub struct CalloutRuntime {
     http: HttpExecutor,
     git: git::GitExecutor,
     blob: BlobExecutor,
-    archive: ArchiveExecutor,
+    archive: Arc<ArchiveExecutor>,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRegistry>,
     l2: Option<BrowseCacheL2>,
@@ -134,6 +140,7 @@ impl CalloutRuntime {
         cloner: Arc<GitCloner>,
         cache_dir: &Path,
         mount_name: &str,
+        extractor: Arc<WasmExtractor>,
     ) -> Result<Self> {
         let mut linker = Linker::<HostState>::new(engine);
 
@@ -196,7 +203,12 @@ impl CalloutRuntime {
             );
         }
         let blob_cache = Arc::new(BlobCache::new(blob_cache_dir));
-        let archive = ArchiveExecutor::new(blob_cache.clone(), trees.clone(), archive_root);
+        let archive = Arc::new(ArchiveExecutor::new(
+            blob_cache.clone(),
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
         let l2 = {
             let db_path = cache_dir
@@ -615,8 +627,22 @@ impl CalloutRuntime {
                     wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
                     wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
                 };
-                let strip = req.strip_prefix.as_deref();
-                archive_response_to_wit(self.archive.open_archive(req.blob, format, strip))
+                // Wasm extraction is sync and CPU-bound; run it on the
+                // blocking pool so it doesn't park the tokio reactor
+                // thread under big tarballs.
+                let archive = Arc::clone(&self.archive);
+                let blob = req.blob;
+                let strip = req.strip_prefix.clone();
+                let resp = tokio::task::spawn_blocking(move || {
+                    archive.open_archive(blob, format, strip.as_deref())
+                })
+                .await
+                .unwrap_or_else(|join_err| CalloutResponse::Error {
+                    kind: ErrorKind::Internal,
+                    message: format!("extract task join: {join_err}"),
+                    retryable: false,
+                });
+                archive_response_to_wit(resp)
             },
             wit_types::Callout::ReadBlob(req) => {
                 blob_read_to_wit(self.blob.read_blob(req.blob, req.offset, req.len))

@@ -31,14 +31,6 @@ impl TreeRegistry {
     pub fn resolve(&self, tree_ref: u64) -> Option<PathBuf> {
         self.paths.get(&tree_ref).map(|r| r.clone())
     }
-
-    pub fn contains(&self, tree_ref: u64) -> bool {
-        self.paths.contains_key(&tree_ref)
-    }
-
-    pub fn forget(&self, tree_ref: u64) -> Option<PathBuf> {
-        self.paths.remove(&tree_ref).map(|(_, path)| path)
-    }
 }
 
 impl Default for TreeRegistry {
