@@ -112,3 +112,23 @@ Add `.rules/<topic>.md` only when:
 Add a section above with both `Read when` and `Update when` triggers. Keep
 the rules file itself focused on the rules; triggers live here in the
 index.
+
+## Provider-specific rules
+
+Top-level `.rules/*.md` covers cross-cutting concerns: SDK contracts, host
+behavior, code-wide style. **Rules specific to one provider live with that
+provider**, not here.
+
+- Single provider, a handful of rules → `providers/<name>/AGENTS.md`.
+- Larger surface that benefits from topic split →
+  `providers/<name>/.rules/*.md` indexed by `providers/<name>/AGENTS.md`,
+  same pattern as this file.
+
+Examples that belong in a provider's local file, not the top-level
+`.rules/`: GitHub rate-limit / ETag handling, arXiv pagination quirks,
+DNS resolver fallback policy, the hybrid issue/PR pagination strategy,
+repo-clone cache-key conventions.
+
+If you find yourself reaching for `.rules/provider-sdk.md` to write a
+rule that only applies to one provider, redirect to that provider's own
+file.

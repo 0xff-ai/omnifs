@@ -1,5 +1,10 @@
 # Writing a provider
 
+This file covers the SDK / host contract every provider shares: WIT,
+attribute macros, dispatch, callouts, configs. Rules specific to one
+provider (rate limits, pagination, ETag handling, etc.) belong in that
+provider's `providers/<name>/AGENTS.md`, not here.
+
 For routing/listing rules in detail, this file is a summary; the source of
 truth is `docs/design/path-dispatch-and-listing.md`. **Read that doc before
 changing dispatch logic.**
