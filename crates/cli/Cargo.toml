@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 omnifs-host = { version = "0.1.0", path = "../host" }
+omnifs-nfs = { version = "0.1.0", path = "../omnifs-nfs" }
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 clap = { workspace = true }
 dirs-next = "2"

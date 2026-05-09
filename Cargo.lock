@@ -3096,6 +3096,7 @@ dependencies = [
  "dirs-next",
  "omnifs-host",
  "omnifs-mount-schema",
+ "omnifs-nfs",
  "tempfile",
  "tokio",
  "tracing",
@@ -3144,6 +3145,19 @@ dependencies = [
  "serde",
  "serde_json",
  "wasmparser 0.246.2",
+]
+
+[[package]]
+name = "omnifs-nfs"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "omnifs-host",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

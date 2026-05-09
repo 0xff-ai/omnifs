@@ -1,0 +1,24 @@
+[package]
+name = "omnifs-nfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Read-only NFSv4.0 loopback frontend for OmnIFS"
+categories = ["filesystem"]
+keywords = ["omnifs", "nfs", "filesystem"]
+
+[dependencies]
+omnifs-host = { version = "0.1.0", path = "../host" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
