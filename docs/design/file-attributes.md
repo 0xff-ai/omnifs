@@ -1,6 +1,6 @@
 # File attributes for projected files
 
-Status: design / proposed
+Status: implemented
 Scope: `wit/provider.wit`, host FUSE layer, SDK projection API, providers
 Supersedes the relevant parts of: `docs/design/projected-file-sizes.md` (the size-only model)
 
@@ -136,7 +136,7 @@ FUSE still requires the host to return a numeric `st_size` for regular files. `S
 
 Inline bytes are capped by the SDK's eager byte limit, currently `MAX_PROJECTED_BYTES = 64 KiB`. This cap is part of the provider contract because inline bytes ride inside listings and lookup responses. Larger payloads must use `Bytes::Deferred { read: ReadMode::Full }` or `Bytes::Deferred { read: ReadMode::Ranged }`.
 
-The host must also enforce a response-level eager-byte cap across entries, preloads, and sibling files in one terminal response. The concrete cap is an implementation constant, but it must live beside `MAX_PROJECTED_BYTES` and must be low enough that a single listing cannot smuggle unbounded inline payloads through WIT. If a response would exceed the aggregate cap, the SDK should promote excess inline files to `Deferred { read: ReadMode::Full }` when it can do so safely; otherwise the response is rejected.
+The host also enforces a response-level eager-byte cap across entries, preloads, and sibling files in one terminal response. The implementation cap is `MAX_EAGER_RESPONSE_BYTES = 512 KiB`. The boundary rejects responses that exceed the aggregate cap; it does not silently promote excess inline files to deferred reads, because that would require inventing a handler path or changing provider-declared byte semantics.
 
 `Bytes::Deferred { read: ReadMode::Full }` means the provider can produce the whole payload when the host asks to read the file.
 
@@ -304,17 +304,18 @@ For byte-producing handlers:
 | Bytes | Bytes from | Handler returns |
 |---|---|---|
 | `Inline(bytes)` | Projection entry | No handler needed |
-| `Deferred { read: Full }` | matched `#[file]` handler | `FileContent::Bytes(...)` |
-| `Deferred { read: Ranged }` | matched `#[file]` handler | Session/ranged `FileChunk { content, eof }` results |
+| `Deferred { read: Full }` | matched `#[file]` handler | `FileContent::bytes(...)` |
+| `Deferred { read: Ranged }` | matched `#[file]` handler | `FileContent::ranged(attrs, reader)` or `FileContent::range_bytes(attrs, bytes)`, then `FileChunk { content, eof }` results |
 
-The SDK should validate attrs and handler pairing at registry build time. A `Deferred { read: Full }` declaration whose handler returns a session, or a `Deferred { read: Ranged }` declaration whose handler only returns whole bytes, is a provider contract error. Inline-declared paths must not also have a `#[file]` handler.
+The SDK and host validate attrs at the response boundary and at read/open time. A `Deferred { read: Full }` path whose `read-file` handler returns a stream or ranged content is a provider contract error. A `Deferred { read: Ranged }` path whose `open-file` handler returns whole bytes is a provider contract error. Inline-declared paths do not need a `#[file]` handler; if a handler also exists, the inline payload can still satisfy cached reads for that observation.
 
 Validation phase:
 
-- Macro expansion records declared handler capability: full-file handler or ranged/session handler.
-- Registry build validates static path conflicts and attrs/handler pairing before the provider serves requests.
-- Runtime validates dynamic projection entries returned by handlers, including inline size consistency, inline byte caps, illegal volatile combinations, and inline entries whose path also matches a registered `#[file]` handler.
-- First-use runtime errors are reserved for genuinely dynamic violations that cannot be proven at registry build time.
+- Registry build validates route conflicts before the provider serves requests.
+- Runtime validates dynamic projection entries returned by handlers, including inline size consistency, inline byte caps, illegal volatile combinations, version tokens, and aggregate eager-byte caps.
+- `read-file` validates complete content against returned attrs and rejects streams or ranged content on the full-read path.
+- `open-file` validates ranged attrs and rejects whole-byte content on the ranged path.
+- First-use runtime errors are expected for dynamic handler/attrs pairing violations that cannot be proven from route shape alone.
 
 ## WIT shape
 
@@ -373,6 +374,28 @@ record file-chunk {
     content: list<u8>,
     eof: bool,
 }
+
+record file-content-result {
+    attrs: file-attrs,
+    content: list<u8>,
+    sibling-files: list<projected-file>,
+}
+
+record file-open-result {
+    handle: file-handle,
+    attrs: file-attrs,
+}
+
+record preloaded-file {
+    path: string,
+    attrs: file-attrs,
+    content: list<u8>,
+}
+
+record preloaded-entry {
+    path: string,
+    kind: entry-kind,
+}
 ```
 
 File attributes are carried by the `file(file-attrs)` entry-kind payload and by preloaded file content. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, `lookup-entry.siblings`, and preloaded entries, must carry the same shape.
@@ -385,7 +408,7 @@ Deferred full files map to the existing `read-file` operation. Deferred ranged f
 
 `read-chunk` must return `file-chunk { content, eof }` or an equivalent terminal that lets the host distinguish a partial short read from observation EOF. For `Mutable + Ranged`, `eof = true` means the end of the snapshot represented by that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size. The WIT operation names can stay stable; the new attrs tell the host which path is valid for each projected file.
 
-For preloads, entry metadata carries the same `file-attrs` shape when the preload is metadata-only, and `preloaded-file` carries its own `file-attrs` next to the content bytes. Preloaded bytes are a warm content entry for that observation; they do not change a `Deferred` declaration into `Inline`, and they are discarded or scoped according to `Stability`.
+For preloads, `preloaded-entry.kind` carries the same `entry-kind` shape as directory entries, so metadata-only file preloads carry `file-attrs` through `entry-kind::file(file-attrs)`. `preloaded-file` carries its own `file-attrs` next to the content bytes. Preloaded bytes are a warm content entry for that observation; they do not change a `Deferred` declaration into `Inline`, and they are discarded or scoped according to `Stability`.
 
 Sibling files returned from a byte-producing handler use the same `projected-file { name, attrs }` shape. This keeps provider-side fanout from losing size, bytes, stability, or version information after the provider has already fetched the upstream payload.
 
