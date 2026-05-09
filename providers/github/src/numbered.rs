@@ -177,7 +177,7 @@ pub(crate) async fn comments_projection(
                 .await?;
             let mut projection = Projection::new();
             for idx in 1..=comments.len() {
-                projection.file(idx.to_string());
+                projection.deferred_file(idx.to_string());
             }
             let exhaustive = u64::try_from(comments.len()).unwrap_or(u64::MAX) < COMMENT_PAGE_SIZE;
             if exhaustive {

@@ -26,7 +26,7 @@ use crate::Provider;
 use crate::auth::AuthManager;
 use crate::cache;
 use crate::cache::l2::Cache as L2Cache;
-use crate::cache::{CacheRecord, Key, RecordKind};
+use crate::cache::{BatchRecord, CacheRecord, FilePayload, Key, RecordKind};
 use crate::config::InstanceConfig;
 use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
@@ -294,6 +294,19 @@ impl CalloutRuntime {
         self.l2.as_ref()?.get(&Key::new(path, kind)).ok().flatten()
     }
 
+    pub fn cache_get_with_aux(
+        &self,
+        path: &str,
+        kind: RecordKind,
+        aux: Option<&str>,
+    ) -> Option<CacheRecord> {
+        self.l2
+            .as_ref()?
+            .get(&Key::with_aux(path, kind, aux))
+            .ok()
+            .flatten()
+    }
+
     pub fn cache_put(&self, path: &str, kind: RecordKind, record: &CacheRecord) {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put(&Key::new(path, kind), record)
@@ -302,7 +315,21 @@ impl CalloutRuntime {
         }
     }
 
-    pub fn cache_put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) {
+    pub fn cache_put_with_aux(
+        &self,
+        path: &str,
+        kind: RecordKind,
+        aux: Option<&str>,
+        record: &CacheRecord,
+    ) {
+        if let Some(ref l2) = self.l2
+            && let Err(e) = l2.put(&Key::with_aux(path, kind, aux), record)
+        {
+            tracing::debug!(path, error = %e, "L2 cache put failed");
+        }
+    }
+
+    pub fn cache_put_batch(&self, records: &[BatchRecord]) {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put_batch(records)
         {
@@ -316,73 +343,98 @@ impl CalloutRuntime {
     }
 
     fn push_projected_file(
-        batch: &mut Vec<(String, RecordKind, CacheRecord)>,
+        batch: &mut Vec<BatchRecord>,
         file_path: &str,
-        content: &[u8],
+        attrs: &wit_types::FileAttrs,
     ) {
-        use cache::{AttrPayload, EntryKindCache, LookupPayload};
+        use cache::{AttrPayload, EntryMeta, LookupPayload};
 
-        let file_size = u64::try_from(content.len()).unwrap_or(u64::MAX);
-        batch.push((
-            file_path.to_string(),
-            RecordKind::File,
-            CacheRecord::new(RecordKind::File, content.to_vec()),
-        ));
+        let attrs_cache = cache::FileAttrsCache::from(attrs);
+        let meta = EntryMeta::file(attrs_cache.clone());
 
-        let pf_lookup = LookupPayload::Positive {
-            kind: EntryKindCache::File,
-            size: file_size,
-        };
+        if let Some(content) = attrs_cache.inline_bytes()
+            && let Some(aux) = attrs_cache.durable_cache_aux()
+        {
+            let payload = FilePayload::new(attrs_cache.version_token.clone(), content.to_vec());
+            if let Some(payload) = payload.serialize() {
+                batch.push(BatchRecord::new(
+                    file_path,
+                    RecordKind::File,
+                    aux,
+                    CacheRecord::new(RecordKind::File, payload),
+                ));
+            }
+        }
+
+        let pf_lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = pf_lookup.serialize() {
-            batch.push((
-                file_path.to_string(),
+            batch.push(BatchRecord::new(
+                file_path,
                 RecordKind::Lookup,
+                None,
                 CacheRecord::new(RecordKind::Lookup, payload),
             ));
         }
 
-        let pf_attr = AttrPayload {
-            kind: EntryKindCache::File,
-            size: file_size,
-        };
+        let pf_attr = AttrPayload { meta };
         if let Some(payload) = pf_attr.serialize() {
-            batch.push((
-                file_path.to_string(),
+            batch.push(BatchRecord::new(
+                file_path,
                 RecordKind::Attr,
+                None,
                 CacheRecord::new(RecordKind::Attr, payload),
             ));
         }
     }
 
-    fn push_preloaded_entry(
-        batch: &mut Vec<(String, RecordKind, CacheRecord)>,
-        entry: &wit_types::PreloadedEntry,
-    ) {
-        use cache::{AttrPayload, EntryKindCache, LookupPayload};
+    fn push_preloaded_entry(batch: &mut Vec<BatchRecord>, entry: &wit_types::PreloadedEntry) {
+        use cache::{AttrPayload, EntryMeta, LookupPayload};
 
-        let kind = EntryKindCache::from(entry.kind);
-        let size = entry.size.unwrap_or(0);
-        let lookup = LookupPayload::Positive { kind, size };
+        let meta = EntryMeta::from(&entry.kind);
+        let lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = lookup.serialize() {
-            batch.push((
+            batch.push(BatchRecord::new(
                 entry.path.clone(),
                 RecordKind::Lookup,
+                None,
                 CacheRecord::new(RecordKind::Lookup, payload),
             ));
         }
 
-        let attr = AttrPayload { kind, size };
+        let attr = AttrPayload { meta };
         if let Some(payload) = attr.serialize() {
-            batch.push((
+            batch.push(BatchRecord::new(
                 entry.path.clone(),
                 RecordKind::Attr,
+                None,
                 CacheRecord::new(RecordKind::Attr, payload),
+            ));
+        }
+    }
+
+    fn push_preloaded_file_content(
+        batch: &mut Vec<BatchRecord>,
+        file_path: &str,
+        attrs: &wit_types::FileAttrs,
+        content: &[u8],
+    ) {
+        let attrs_cache = cache::FileAttrsCache::from(attrs);
+        let Some(aux) = attrs_cache.durable_cache_aux() else {
+            return;
+        };
+        let payload = FilePayload::new(attrs_cache.version_token.clone(), content.to_vec());
+        if let Some(payload) = payload.serialize() {
+            batch.push(BatchRecord::new(
+                file_path,
+                RecordKind::File,
+                aux,
+                CacheRecord::new(RecordKind::File, payload),
             ));
         }
     }
 
     pub(super) fn apply_preloads(&self, items: &[wit_types::PreloadItem]) {
-        use cache::{DirentRecord, DirentsPayload, EntryKindCache};
+        use cache::{DirentRecord, DirentsPayload, EntryKindCache, EntryMeta};
 
         if items.is_empty() {
             return;
@@ -393,26 +445,25 @@ impl CalloutRuntime {
         for item in items {
             match item {
                 wit_types::PreloadItem::File(file) => {
-                    Self::push_projected_file(&mut batch, &file.path, &file.content);
+                    Self::push_preloaded_file_content(
+                        &mut batch,
+                        &file.path,
+                        &file.attrs,
+                        &file.content,
+                    );
                     Self::record_preload_child(
                         &mut child_records,
                         &file.path,
-                        EntryKindCache::File,
-                        u64::try_from(file.content.len()).unwrap_or(u64::MAX),
+                        EntryMeta::file(cache::FileAttrsCache::from(&file.attrs)),
                     );
                 },
                 wit_types::PreloadItem::Entry(entry) => {
                     Self::push_preloaded_entry(&mut batch, entry);
-                    let kind = EntryKindCache::from(entry.kind);
-                    if matches!(kind, EntryKindCache::Directory) {
+                    let meta = EntryMeta::from(&entry.kind);
+                    if matches!(meta.kind, EntryKindCache::Directory) {
                         preloaded_dirs.push(entry.path.clone());
                     }
-                    Self::record_preload_child(
-                        &mut child_records,
-                        &entry.path,
-                        kind,
-                        entry.size.unwrap_or(0),
-                    );
+                    Self::record_preload_child(&mut child_records, &entry.path, meta);
                 },
             }
         }
@@ -425,9 +476,10 @@ impl CalloutRuntime {
                 exhaustive: false,
             };
             if let Some(payload) = dirents.serialize() {
-                batch.push((
+                batch.push(BatchRecord::new(
                     path,
                     RecordKind::Dirents,
+                    None,
                     CacheRecord::new(RecordKind::Dirents, payload),
                 ));
             }
@@ -447,8 +499,7 @@ impl CalloutRuntime {
     fn record_preload_child(
         child_records: &mut BTreeMap<String, BTreeMap<String, cache::DirentRecord>>,
         path: &str,
-        kind: cache::EntryKindCache,
-        size: u64,
+        meta: cache::EntryMeta,
     ) {
         let Some((parent, name)) = path.rsplit_once('/') else {
             return;
@@ -460,8 +511,7 @@ impl CalloutRuntime {
             name.to_string(),
             cache::DirentRecord {
                 name: name.to_string(),
-                kind,
-                size,
+                meta,
             },
         );
     }
@@ -513,6 +563,7 @@ impl CalloutRuntime {
             let callouts = std::mem::take(&mut response.callouts);
             match response.terminal.take() {
                 Some(terminal) => {
+                    validate_terminal_attrs(&terminal).map_err(RuntimeError::ProviderError)?;
                     self.apply_terminal_boundary(&terminal);
                     if !callouts.is_empty() {
                         let _ = self.execute_batch(&callouts).await;
@@ -584,6 +635,10 @@ impl CalloutRuntime {
         response
             .terminal
             .ok_or_else(|| RuntimeError::ProviderError("initialize returned empty response".into()))
+            .and_then(|terminal| {
+                validate_terminal_attrs(&terminal).map_err(RuntimeError::ProviderError)?;
+                Ok(terminal)
+            })
     }
 
     async fn execute_single_callout(
@@ -680,6 +735,267 @@ impl CalloutRuntime {
     }
 }
 
+fn validate_terminal_attrs(terminal: &wit_types::OpResult) -> std::result::Result<(), String> {
+    let mut validator = AttrValidator::default();
+    match terminal {
+        wit_types::OpResult::List(wit_types::ListResult::Entries(listing)) => {
+            for entry in &listing.entries {
+                validator.entry(&entry.kind)?;
+            }
+            validator.preloads(&listing.preload)?;
+        },
+        wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(entry)) => {
+            validator.entry(&entry.target.kind)?;
+            for sibling in &entry.siblings {
+                validator.entry(&sibling.kind)?;
+            }
+            for file in &entry.sibling_files {
+                validator.projected_file(file)?;
+            }
+            validator.preloads(&entry.preload)?;
+        },
+        wit_types::OpResult::Read(result) => match result {
+            wit_types::FileContentResult::Inline(inline) => {
+                validator.file_attrs(&inline.attrs)?;
+                let attrs = cache::FileAttrsCache::from(&inline.attrs);
+                validate_complete_content(&attrs, inline.content.len())
+                    .map_err(|error| format!("read result: {error}"))?;
+                for file in &inline.sibling_files {
+                    validator.projected_file(file)?;
+                }
+            },
+            wit_types::FileContentResult::Blob(blob) => {
+                validator.file_attrs(&blob.attrs)?;
+                for file in &blob.sibling_files {
+                    validator.projected_file(file)?;
+                }
+            },
+        },
+        wit_types::OpResult::OpenFile(result) => {
+            validator.file_attrs(&result.attrs)?;
+            if !matches!(
+                &result.attrs.bytes,
+                wit_types::FileBytes::Deferred(wit_types::ReadMode::Ranged)
+            ) {
+                return Err("open-file requires Bytes::Deferred { read: ReadMode::Ranged }".into());
+            }
+        },
+        _ => {},
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct AttrValidator {
+    eager_bytes: usize,
+}
+
+impl AttrValidator {
+    fn entry(&mut self, kind: &wit_types::EntryKind) -> std::result::Result<(), String> {
+        match kind {
+            wit_types::EntryKind::Directory => Ok(()),
+            wit_types::EntryKind::File(attrs) => self.file_attrs(attrs),
+        }
+    }
+
+    fn projected_file(
+        &mut self,
+        file: &wit_types::ProjectedFile,
+    ) -> std::result::Result<(), String> {
+        self.file_attrs(&file.attrs)
+            .map_err(|error| format!("projected file {:?}: {error}", file.name))
+    }
+
+    fn file_attrs(&mut self, attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
+        let attrs = cache::FileAttrsCache::from(attrs);
+        attrs.validate()?;
+        self.add_eager_bytes(attrs.eager_byte_len())
+    }
+
+    fn preloads(&mut self, items: &[wit_types::PreloadItem]) -> std::result::Result<(), String> {
+        for item in items {
+            let wit_types::PreloadItem::Entry(entry) = item else {
+                continue;
+            };
+            self.entry(&entry.kind)
+                .map_err(|error| format!("preloaded entry {:?}: {error}", entry.path))?;
+        }
+
+        for item in items {
+            let wit_types::PreloadItem::File(file) = item else {
+                continue;
+            };
+            let attrs = cache::FileAttrsCache::from(&file.attrs);
+            attrs
+                .validate()
+                .map_err(|error| format!("preloaded file {:?}: {error}", file.path))?;
+            validate_complete_content(&attrs, file.content.len())
+                .map_err(|error| format!("preloaded file {:?}: {error}", file.path))?;
+            if matches!(attrs.stability, cache::StabilityCache::Volatile) {
+                return Err(format!(
+                    "preloaded file {:?}: Stability::Volatile cannot carry whole-file preload bytes",
+                    file.path
+                ));
+            }
+            self.add_eager_bytes(file.content.len())?;
+        }
+        Ok(())
+    }
+
+    fn add_eager_bytes(&mut self, bytes: usize) -> std::result::Result<(), String> {
+        self.eager_bytes = self
+            .eager_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "aggregate eager byte count overflowed".to_string())?;
+        if self.eager_bytes > cache::MAX_EAGER_RESPONSE_BYTES {
+            return Err(format!(
+                "terminal response exceeds aggregate eager byte limit of {} bytes",
+                cache::MAX_EAGER_RESPONSE_BYTES
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_complete_content(
+    attrs: &cache::FileAttrsCache,
+    content_len: usize,
+) -> std::result::Result<(), String> {
+    attrs.validate_complete_content(content_len)
+}
+
+#[cfg(test)]
+mod attr_contract_tests {
+    use super::*;
+
+    fn attrs(
+        size: wit_types::FileSize,
+        bytes: wit_types::FileBytes,
+        stability: wit_types::Stability,
+    ) -> wit_types::FileAttrs {
+        wit_types::FileAttrs {
+            size,
+            bytes,
+            stability,
+            version_token: None,
+        }
+    }
+
+    fn deferred_exact(size: u64) -> wit_types::FileAttrs {
+        attrs(
+            wit_types::FileSize::Exact(size),
+            wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
+            wit_types::Stability::Immutable,
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_inline_attrs_in_entries() {
+        let terminal =
+            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+                entries: vec![wit_types::DirEntry {
+                    name: "bad".to_string(),
+                    kind: wit_types::EntryKind::File(attrs(
+                        wit_types::FileSize::Unknown,
+                        wit_types::FileBytes::Inline(b"bad".to_vec()),
+                        wit_types::Stability::Immutable,
+                    )),
+                }],
+                exhaustive: true,
+                preload: Vec::new(),
+            }));
+
+        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        assert!(error.contains("inline bytes require Size::Exact"));
+    }
+
+    #[test]
+    fn rejects_volatile_non_ranged_attrs() {
+        let terminal =
+            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+                entries: vec![wit_types::DirEntry {
+                    name: "tail".to_string(),
+                    kind: wit_types::EntryKind::File(attrs(
+                        wit_types::FileSize::Unknown,
+                        wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
+                        wit_types::Stability::Volatile,
+                    )),
+                }],
+                exhaustive: true,
+                preload: Vec::new(),
+            }));
+
+        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        assert!(error.contains("Stability::Volatile requires"));
+    }
+
+    #[test]
+    fn rejects_bad_preload_size_and_aggregate_eager_cap() {
+        let bad_size =
+            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+                entries: Vec::new(),
+                exhaustive: true,
+                preload: vec![wit_types::PreloadItem::File(wit_types::PreloadedFile {
+                    path: "bad".to_string(),
+                    attrs: deferred_exact(4),
+                    content: b"toolong".to_vec(),
+                })],
+            }));
+        let error = validate_terminal_attrs(&bad_size).unwrap_err();
+        assert!(error.contains("declares exact size 4"));
+
+        let too_large =
+            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+                entries: Vec::new(),
+                exhaustive: true,
+                preload: vec![wit_types::PreloadItem::File(wit_types::PreloadedFile {
+                    path: "large".to_string(),
+                    attrs: deferred_exact((cache::MAX_EAGER_RESPONSE_BYTES + 1) as u64),
+                    content: vec![0; cache::MAX_EAGER_RESPONSE_BYTES + 1],
+                })],
+            }));
+        let error = validate_terminal_attrs(&too_large).unwrap_err();
+        assert!(error.contains("aggregate eager byte limit"));
+    }
+
+    #[test]
+    fn rejects_read_content_that_violates_declared_size() {
+        let terminal = wit_types::OpResult::Read(wit_types::FileContentResult::Inline(
+            wit_types::InlineFileContent {
+                attrs: attrs(
+                    wit_types::FileSize::NonZero,
+                    wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
+                    wit_types::Stability::Immutable,
+                ),
+                content: Vec::new(),
+                sibling_files: Vec::new(),
+            },
+        ));
+
+        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        assert!(error.contains("read result"));
+        assert!(error.contains("Size::NonZero"));
+    }
+
+    #[test]
+    fn rejects_empty_version_tokens() {
+        let mut file_attrs = deferred_exact(1);
+        file_attrs.version_token = Some(String::new());
+        let terminal =
+            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+                entries: vec![wit_types::DirEntry {
+                    name: "versioned".to_string(),
+                    kind: wit_types::EntryKind::File(file_attrs),
+                }],
+                exhaustive: true,
+                preload: Vec::new(),
+            }));
+
+        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        assert!(error.contains("version token must not be empty"));
+    }
+}
+
 fn build_grants(config: &InstanceConfig, needs_git: bool) -> CapabilityGrants {
     let caps = config.capabilities.as_ref();
     CapabilityGrants {
@@ -725,11 +1041,71 @@ fn validate_instance_config(
     }
 }
 
-impl From<wit_types::EntryKind> for cache::EntryKindCache {
-    fn from(kind: wit_types::EntryKind) -> Self {
+impl From<&wit_types::FileAttrs> for cache::FileAttrsCache {
+    fn from(attrs: &wit_types::FileAttrs) -> Self {
+        Self {
+            size: cache::SizeCache::from(&attrs.size),
+            bytes: cache::BytesCache::from(&attrs.bytes),
+            stability: cache::StabilityCache::from(attrs.stability),
+            version_token: attrs.version_token.clone(),
+        }
+    }
+}
+
+impl From<&wit_types::FileSize> for cache::SizeCache {
+    fn from(size: &wit_types::FileSize) -> Self {
+        match size {
+            wit_types::FileSize::Exact(size) => Self::Exact(*size),
+            wit_types::FileSize::NonZero => Self::NonZero,
+            wit_types::FileSize::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<&wit_types::FileBytes> for cache::BytesCache {
+    fn from(bytes: &wit_types::FileBytes) -> Self {
+        match bytes {
+            wit_types::FileBytes::Inline(bytes) => Self::Inline(bytes.clone()),
+            wit_types::FileBytes::Deferred(mode) => {
+                Self::Deferred(cache::ReadModeCache::from(*mode))
+            },
+        }
+    }
+}
+
+impl From<wit_types::ReadMode> for cache::ReadModeCache {
+    fn from(mode: wit_types::ReadMode) -> Self {
+        match mode {
+            wit_types::ReadMode::Full => Self::Full,
+            wit_types::ReadMode::Ranged => Self::Ranged,
+        }
+    }
+}
+
+impl From<wit_types::Stability> for cache::StabilityCache {
+    fn from(stability: wit_types::Stability) -> Self {
+        match stability {
+            wit_types::Stability::Immutable => Self::Immutable,
+            wit_types::Stability::Mutable => Self::Mutable,
+            wit_types::Stability::Volatile => Self::Volatile,
+        }
+    }
+}
+
+impl From<&wit_types::EntryKind> for cache::EntryMeta {
+    fn from(kind: &wit_types::EntryKind) -> Self {
+        match kind {
+            wit_types::EntryKind::Directory => Self::directory(),
+            wit_types::EntryKind::File(attrs) => Self::file(cache::FileAttrsCache::from(attrs)),
+        }
+    }
+}
+
+impl From<&wit_types::EntryKind> for cache::EntryKindCache {
+    fn from(kind: &wit_types::EntryKind) -> Self {
         match kind {
             wit_types::EntryKind::Directory => Self::Directory,
-            wit_types::EntryKind::File => Self::File,
+            wit_types::EntryKind::File(_) => Self::File,
         }
     }
 }

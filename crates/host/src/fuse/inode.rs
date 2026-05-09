@@ -3,8 +3,8 @@
 //! Manages the mapping from virtual paths to inode numbers with
 //! deduplication and stale entry updates.
 
+use crate::cache::{EntryKindCache, FileAttrsCache};
 use crate::fuse::FuseFs;
-use crate::omnifs::provider::types::EntryKind;
 use crate::path_key::PathKey;
 use fuser::{FileAttr, FileType, INodeNo};
 use std::path::PathBuf;
@@ -26,7 +26,8 @@ fn current_gid() -> u32 {
 pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
     pub(crate) path: String,
-    pub(crate) kind: EntryKind,
+    pub(crate) kind: EntryKindCache,
+    pub(crate) attrs: Option<FileAttrsCache>,
     pub(crate) size: u64,
     /// When set, FUSE operations for this inode serve directly from the backing
     /// filesystem instead of routing through the Wasm provider.
@@ -46,28 +47,39 @@ impl FuseFs {
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKind,
+        kind: EntryKindCache,
         size: u64,
     ) -> u64 {
-        self.get_or_alloc_ino_inner(mount_name, path, kind, size, None)
+        self.get_or_alloc_ino_inner(mount_name, path, kind, None, size, None)
+    }
+
+    pub(crate) fn get_or_alloc_ino_meta(
+        &self,
+        mount_name: &str,
+        path: &str,
+        meta: crate::cache::EntryMeta,
+    ) -> u64 {
+        let size = meta.st_size();
+        self.get_or_alloc_ino_inner(mount_name, path, meta.kind, meta.attrs, size, None)
     }
 
     pub(crate) fn get_or_alloc_ino_backing(
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKind,
+        kind: EntryKindCache,
         size: u64,
         backing_path: PathBuf,
     ) -> u64 {
-        self.get_or_alloc_ino_inner(mount_name, path, kind, size, Some(backing_path))
+        self.get_or_alloc_ino_inner(mount_name, path, kind, None, size, Some(backing_path))
     }
 
     fn get_or_alloc_ino_inner(
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKind,
+        kind: EntryKindCache,
+        attrs: Option<FileAttrsCache>,
         size: u64,
         backing_path: Option<PathBuf>,
     ) -> u64 {
@@ -81,6 +93,7 @@ impl FuseFs {
             .and_modify(|existing_ino| {
                 if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
                     entry.kind = kind;
+                    entry.attrs.clone_from(&attrs);
                     entry.size = size;
                     if backing_path.is_some() {
                         entry.backing_path.clone_from(&backing_path);
@@ -95,6 +108,7 @@ impl FuseFs {
                         mount_name: mount_name.to_string(),
                         path: path.to_string(),
                         kind,
+                        attrs,
                         size,
                         backing_path,
                     },

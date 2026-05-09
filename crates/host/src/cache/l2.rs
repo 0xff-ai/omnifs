@@ -1,6 +1,6 @@
 //! L2 browse cache: durable, path-keyed, per-provider-instance redb database.
 
-use crate::cache::{CacheRecord, Key, L2_BULK_THRESHOLD, RecordKind};
+use crate::cache::{BatchRecord, CacheRecord, Key, L2_BULK_THRESHOLD, RecordKind};
 use crate::path_prefix::path_prefix_matches;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
@@ -68,20 +68,21 @@ impl Cache {
         Ok(())
     }
 
-    pub fn put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) -> L2Result<()> {
+    pub fn put_batch(&self, records: &[BatchRecord]) -> L2Result<()> {
         let txn = self.db.begin_write()?;
         {
             let mut meta = txn.open_table(METADATA_TABLE)?;
             let mut content = txn.open_table(CONTENT_TABLE)?;
             let mut bulk = txn.open_table(BULK_TABLE)?;
-            for (path, kind, record) in records {
-                let wire_key = make_key(&Key {
-                    path: path.clone(),
-                    kind: *kind,
-                });
-                let bytes = record.serialize();
-                let is_bulk = record.payload.len() >= L2_BULK_THRESHOLD;
-                match (*kind, is_bulk) {
+            for item in records {
+                let wire_key = make_key(&Key::with_aux(
+                    item.path.clone(),
+                    item.kind,
+                    item.aux.as_deref(),
+                ));
+                let bytes = item.record.serialize();
+                let is_bulk = item.record.payload.len() >= L2_BULK_THRESHOLD;
+                match (item.kind, is_bulk) {
                     (RecordKind::File, true) => {
                         bulk.insert(wire_key.as_str(), bytes.as_slice())?;
                         content.remove(wire_key.as_str())?; // clear stale small copy
@@ -130,26 +131,25 @@ impl Cache {
     pub fn delete_exact(&self, path: &str) -> L2Result<usize> {
         let txn = self.db.begin_write()?;
         let mut deleted = 0;
-        let keys = [
-            make_key(&Key::new(path, RecordKind::Lookup)),
-            make_key(&Key::new(path, RecordKind::Attr)),
-            make_key(&Key::new(path, RecordKind::Dirents)),
-            make_key(&Key::new(path, RecordKind::File)),
-        ];
+        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
 
-        {
-            let mut meta = txn.open_table(METADATA_TABLE)?;
-            for key in &keys[..3] {
-                if meta.remove(key.as_str())?.is_some() {
-                    deleted += 1;
+        for table_def in tables {
+            let mut table = txn.open_table(table_def)?;
+            let mut to_delete = Vec::new();
+            for kind in RecordKind::ALL {
+                let scan_prefix = make_key(&Key::new(path, kind));
+                let range_end = range_end_for_prefix(&scan_prefix);
+                let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
+                for entry in range {
+                    let entry = entry?;
+                    let key = entry.0.value().to_string();
+                    if stored_key_path(&key) == Some(path) {
+                        to_delete.push(key);
+                    }
                 }
             }
-            let mut content = txn.open_table(CONTENT_TABLE)?;
-            if content.remove(keys[3].as_str())?.is_some() {
-                deleted += 1;
-            }
-            let mut bulk = txn.open_table(BULK_TABLE)?;
-            if bulk.remove(keys[3].as_str())?.is_some() {
+            for key in &to_delete {
+                table.remove(key.as_str())?;
                 deleted += 1;
             }
         }
@@ -161,8 +161,8 @@ impl Cache {
     /// Delete all records whose logical path is equal to `prefix` or lies
     /// beneath it on a segment boundary.
     ///
-    /// The stored key format is `{kind_char}:{path}`, so each record
-    /// kind gets one ordered range scan.
+    /// The stored key format is `{kind_char}:{path}` plus an optional
+    /// auxiliary suffix, so each record kind gets one ordered range scan.
     pub fn delete_prefix(&self, prefix: &str) -> L2Result<usize> {
         let txn = self.db.begin_write()?;
         let mut deleted = 0;
@@ -172,14 +172,13 @@ impl Cache {
             let mut table = txn.open_table(table_def)?;
             let mut to_delete = Vec::new();
             for kind in RecordKind::ALL {
-                let (scan_prefix, range_end) = key_range_for_prefix(kind, prefix);
+                let scan_prefix = make_key(&Key::new(prefix, kind));
+                let range_end = range_end_for_prefix(&scan_prefix);
                 let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
                 for entry in range {
                     let entry = entry?;
                     let key = entry.0.value().to_string();
-                    let path = key
-                        .split_once(':')
-                        .map_or("", |(_, logical_path)| logical_path);
+                    let path = stored_key_path(&key).unwrap_or("");
                     if path_prefix_matches(prefix, path) {
                         to_delete.push(key);
                     }
@@ -196,14 +195,26 @@ impl Cache {
 }
 
 fn make_key(key: &Key) -> String {
-    format!("{}:{}", kind_prefix(key.kind), key.path)
+    let prefix = kind_prefix(key.kind);
+    match &key.aux {
+        Some(aux) => format!("{prefix}:{}\u{1f}{}", key.path, hex_bytes(aux)),
+        None => format!("{prefix}:{}", key.path),
+    }
 }
 
-fn key_range_for_prefix(kind: RecordKind, prefix: &str) -> (String, String) {
-    let scan_prefix = format!("{}:{prefix}", kind_prefix(kind));
-    let mut range_end = scan_prefix.clone();
-    range_end.push('\u{ffff}');
-    (scan_prefix, range_end)
+fn stored_key_path(key: &str) -> Option<&str> {
+    let (_, path_and_aux) = key.split_once(':')?;
+    Some(
+        path_and_aux
+            .split_once('\u{1f}')
+            .map_or(path_and_aux, |(path, _)| path),
+    )
+}
+
+fn range_end_for_prefix(prefix: &str) -> String {
+    let mut end = prefix.to_string();
+    end.push('\u{10ffff}');
+    end
 }
 
 fn kind_prefix(kind: RecordKind) -> char {
@@ -213,4 +224,15 @@ fn kind_prefix(kind: RecordKind) -> char {
         RecordKind::Dirents => 'D',
         RecordKind::File => 'F',
     }
+}
+
+fn hex_bytes(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }

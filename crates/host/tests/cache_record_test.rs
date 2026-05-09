@@ -1,7 +1,26 @@
 use omnifs_host::cache::{
-    AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload,
-    RecordKind, SCHEMA_VERSION,
+    AttrPayload, BytesCache, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, EntryMeta,
+    FileAttrsCache, LookupPayload, ReadModeCache, RecordKind, SCHEMA_VERSION, SizeCache,
+    StabilityCache,
 };
+
+fn exact_file(size: u64) -> EntryMeta {
+    EntryMeta::file(FileAttrsCache {
+        size: SizeCache::Exact(size),
+        bytes: BytesCache::Deferred(ReadModeCache::Full),
+        stability: StabilityCache::Immutable,
+        version_token: None,
+    })
+}
+
+fn deferred_file(size: SizeCache) -> EntryMeta {
+    EntryMeta::file(FileAttrsCache {
+        size,
+        bytes: BytesCache::Deferred(ReadModeCache::Full),
+        stability: StabilityCache::Immutable,
+        version_token: None,
+    })
+}
 
 #[test]
 fn cache_record_round_trip() {
@@ -31,19 +50,14 @@ fn cache_record_rejects_unknown_schema_version() {
 
 #[test]
 fn lookup_payload_positive_round_trip() {
-    let payload = LookupPayload::Positive {
-        kind: EntryKindCache::File,
-        size: 42,
-    };
+    let payload = LookupPayload::Positive(exact_file(42));
     let bytes = payload.serialize().unwrap();
     let decoded = LookupPayload::deserialize(&bytes).unwrap();
-    assert!(matches!(
-        decoded,
-        LookupPayload::Positive {
-            kind: EntryKindCache::File,
-            size: 42
-        }
-    ));
+    let LookupPayload::Positive(meta) = decoded else {
+        panic!("expected positive lookup payload");
+    };
+    assert_eq!(meta.kind, EntryKindCache::File);
+    assert_eq!(meta.st_size(), 42);
 }
 
 #[test]
@@ -56,13 +70,18 @@ fn lookup_payload_negative_round_trip() {
 #[test]
 fn attr_payload_round_trip() {
     let payload = AttrPayload {
-        kind: EntryKindCache::Directory,
-        size: 0,
+        meta: EntryMeta::directory(),
     };
     let bytes = payload.serialize().unwrap();
     let decoded = AttrPayload::deserialize(&bytes).unwrap();
-    assert_eq!(decoded.kind, EntryKindCache::Directory);
-    assert_eq!(decoded.size, 0);
+    assert_eq!(decoded.meta.kind, EntryKindCache::Directory);
+    assert_eq!(decoded.meta.st_size(), 0);
+}
+
+#[test]
+fn non_exact_sizes_report_fuse_stat_values() {
+    assert_eq!(deferred_file(SizeCache::NonZero).st_size(), 1);
+    assert_eq!(deferred_file(SizeCache::Unknown).st_size(), 0);
 }
 
 #[test]
@@ -71,13 +90,11 @@ fn dirents_payload_round_trip() {
         entries: vec![
             DirentRecord {
                 name: "title".to_string(),
-                kind: EntryKindCache::File,
-                size: 128,
+                meta: exact_file(128),
             },
             DirentRecord {
                 name: "comments".to_string(),
-                kind: EntryKindCache::Directory,
-                size: 0,
+                meta: EntryMeta::directory(),
             },
         ],
         exhaustive: true,
@@ -86,7 +103,7 @@ fn dirents_payload_round_trip() {
     let decoded = DirentsPayload::deserialize(&bytes).unwrap();
     assert_eq!(decoded.entries.len(), 2);
     assert_eq!(decoded.entries[0].name, "title");
-    assert_eq!(decoded.entries[0].size, 128);
+    assert_eq!(decoded.entries[0].meta.st_size(), 128);
     assert_eq!(decoded.entries[1].name, "comments");
-    assert_eq!(decoded.entries[1].kind, EntryKindCache::Directory);
+    assert_eq!(decoded.entries[1].meta.kind, EntryKindCache::Directory);
 }

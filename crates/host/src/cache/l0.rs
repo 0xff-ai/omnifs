@@ -14,7 +14,7 @@ impl Cache {
             .max_capacity(L0_MAX_WEIGHT)
             .support_invalidation_closures()
             .weigher(|key: &Key, value: &Arc<CacheRecord>| -> u32 {
-                let key_size = 1 + key.path.len();
+                let key_size = 1 + key.path.len() + key.aux.as_ref().map_or(0, String::len);
                 let val_size = 2 + value.payload.len();
                 (key_size + val_size).try_into().unwrap_or(u32::MAX)
             })

@@ -21,6 +21,7 @@ pub mod browse;
 
 pub mod cx;
 pub mod error;
+pub mod file_attrs;
 pub mod git;
 pub mod handler;
 pub mod helpers;
@@ -30,6 +31,8 @@ pub mod prelude;
 pub mod schema;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
+pub use file_attrs::{Bytes, FileAttrs, ReadMode, Size, Stability, VersionToken};
+pub use handler::{FileChunk, MemoryRangeReader, RangeReader};
 pub use omnifs_sdk_macros::Config;
 pub use omnifs_sdk_macros::config;
 pub use omnifs_sdk_macros::dir;

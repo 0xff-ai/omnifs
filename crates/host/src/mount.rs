@@ -23,8 +23,14 @@ pub fn mount_blocking(
 ) -> Result<(), MountError> {
     // Create shared path_to_inode map for invalidation.
     let path_to_inode: Arc<PathToInode> = Arc::new(DashMap::new());
+    let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(None));
 
-    let fs = FuseFs::new_with_path_map(rt, Arc::clone(registry), Arc::clone(&path_to_inode));
+    let fs = FuseFs::new_with_path_map_and_notifier(
+        rt,
+        Arc::clone(registry),
+        Arc::clone(&path_to_inode),
+        Arc::clone(&notifier),
+    );
     let config = FuseFs::mount_config();
 
     tracing::info!(mount = %mount_point.display(), "starting FUSE mount");
@@ -35,7 +41,7 @@ pub fn mount_blocking(
     // Extract the notifier before spawning the session — `spawn` takes
     // `Session` by value. The notifier only needs the message channel,
     // which is shared between foreground and background halves.
-    let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(Some(session.notifier())));
+    *notifier.lock() = Some(session.notifier());
     for (mount, runtime) in registry.runtime_entries() {
         runtime.install_invalidation(Arc::clone(&path_to_inode), Arc::clone(&notifier), mount);
     }

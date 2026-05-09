@@ -29,9 +29,22 @@ mod hello_handlers {
 
     fn hello_listing() -> Projection {
         let mut projection = Projection::new();
-        projection.file("message");
-        projection.file("greeting");
-        projection.file("projected");
+        projection.deferred_file("message");
+        projection.deferred_file("greeting");
+        projection.deferred_file("projected");
+        projection.file(
+            "ranged",
+            FileAttrs::deferred(Size::Exact(26), ReadMode::Ranged, Stability::Mutable)
+                .with_version("alphabet-v1"),
+        );
+        projection.file(
+            "unknown-ranged",
+            FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Immutable),
+        );
+        projection.file(
+            "volatile-tail",
+            FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Volatile),
+        );
         projection.page(PageStatus::Exhaustive);
         projection
     }
@@ -82,6 +95,31 @@ mod hello_handlers {
             Ok(FileContent::bytes("lazy\n"))
         }
 
+        #[file("/hello/ranged")]
+        fn ranged() -> Result<FileContent> {
+            Ok(FileContent::range_bytes(
+                FileAttrs::deferred(Size::Exact(26), ReadMode::Ranged, Stability::Mutable)
+                    .with_version("alphabet-v1"),
+                b"abcdefghijklmnopqrstuvwxyz".to_vec(),
+            ))
+        }
+
+        #[file("/hello/unknown-ranged")]
+        fn unknown_ranged() -> Result<FileContent> {
+            Ok(FileContent::range_bytes(
+                FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Immutable),
+                b"unknown-size\n".to_vec(),
+            ))
+        }
+
+        #[file("/hello/volatile-tail")]
+        fn volatile_tail() -> Result<FileContent> {
+            Ok(FileContent::ranged(
+                FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Volatile),
+                LiveTailReader,
+            ))
+        }
+
         #[dir("/hello/bundle")]
         fn bundle() -> Result<Projection> {
             let mut projection = Projection::new();
@@ -104,6 +142,24 @@ mod hello_handlers {
             let mut projection = Projection::new();
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct LiveTailReader;
+
+    impl RangeReader for LiveTailReader {
+        fn read_chunk<'a>(
+            &'a self,
+            offset: u64,
+            length: u32,
+        ) -> omnifs_sdk::handler::BoxFuture<'a, FileChunk> {
+            Box::pin(async move {
+                let body = format!("tail:{offset}\n");
+                let mut bytes = body.into_bytes();
+                bytes.truncate(length as usize);
+                Ok(FileChunk::new(bytes, false))
+            })
         }
     }
 }

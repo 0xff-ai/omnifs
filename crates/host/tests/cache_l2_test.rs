@@ -1,6 +1,6 @@
 use omnifs_host::cache::l2::Cache;
 use omnifs_host::cache::{
-    AttrPayload, CacheRecord, EntryKindCache, Key, LookupPayload, RecordKind,
+    AttrPayload, BatchRecord, CacheRecord, EntryMeta, Key, LookupPayload, RecordKind,
 };
 
 #[test]
@@ -79,19 +79,22 @@ fn l2_put_batch() {
     let l2 = Cache::open(&dir.path().join("browse.redb")).unwrap();
 
     let records = vec![
-        (
+        BatchRecord::new(
             "a/title".to_string(),
             RecordKind::File,
+            None,
             CacheRecord::new(RecordKind::File, b"hello\n".to_vec()),
         ),
-        (
+        BatchRecord::new(
             "a/body".to_string(),
             RecordKind::File,
+            None,
             CacheRecord::new(RecordKind::File, b"world\n".to_vec()),
         ),
-        (
+        BatchRecord::new(
             "a".to_string(),
             RecordKind::Attr,
+            None,
             CacheRecord::new(RecordKind::Attr, vec![0, 0, 0, 0, 0, 0, 0, 0, 0]),
         ),
     ];
@@ -150,18 +153,14 @@ fn l2_keying_distinguishes_kinds() {
     let shared_path = "owner/repo/README.md";
     let lookup = CacheRecord::new(
         RecordKind::Lookup,
-        LookupPayload::Positive {
-            kind: EntryKindCache::File,
-            size: 42,
-        }
-        .serialize()
-        .unwrap(),
+        LookupPayload::Positive(EntryMeta::directory())
+            .serialize()
+            .unwrap(),
     );
     let attr = CacheRecord::new(
         RecordKind::Attr,
         AttrPayload {
-            kind: EntryKindCache::File,
-            size: 42,
+            meta: EntryMeta::directory(),
         }
         .serialize()
         .unwrap(),
@@ -184,6 +183,54 @@ fn l2_keying_distinguishes_kinds() {
     );
     assert!(
         l2.get(&Key::new(shared_path, RecordKind::Dirents))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn l2_keying_distinguishes_aux_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let l2 = Cache::open(&dir.path().join("browse.redb")).unwrap();
+
+    let path = "owner/repo/state.txt";
+    let v1 = CacheRecord::new(RecordKind::File, b"v1".to_vec());
+    let v2 = CacheRecord::new(RecordKind::File, b"v2".to_vec());
+
+    l2.put(
+        &Key::with_aux(path, RecordKind::File, Some("version:1")),
+        &v1,
+    )
+    .unwrap();
+    l2.put(
+        &Key::with_aux(path, RecordKind::File, Some("version:2")),
+        &v2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        l2.get(&Key::with_aux(path, RecordKind::File, Some("version:1")))
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"v1"
+    );
+    assert_eq!(
+        l2.get(&Key::with_aux(path, RecordKind::File, Some("version:2")))
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"v2"
+    );
+
+    l2.delete_exact(path).unwrap();
+    assert!(
+        l2.get(&Key::with_aux(path, RecordKind::File, Some("version:1")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        l2.get(&Key::with_aux(path, RecordKind::File, Some("version:2")))
             .unwrap()
             .is_none()
     );

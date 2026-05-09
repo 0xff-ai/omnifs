@@ -92,7 +92,7 @@ mod ambiguous_handlers {
         async fn tree_dir(_path: String) -> Result<Projection> {
             let mut projection = Projection::new();
             projection.dir("d");
-            projection.file("f.txt");
+            projection.deferred_file("f.txt");
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
         }
