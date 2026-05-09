@@ -375,7 +375,7 @@ record file-chunk {
 }
 ```
 
-File attributes are carried by the `file(file-attrs)` entry-kind payload. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, `lookup-entry.siblings`, and preloaded entries, must carry the same shape.
+File attributes are carried by the `file(file-attrs)` entry-kind payload and by preloaded file content. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, `lookup-entry.siblings`, and preloaded entries, must carry the same shape.
 
 Subtree handoffs remain a separate terminal shape, such as `list-result.subtree(tree-ref)`. They do not appear inside `dir-entry.kind`; `entry-kind` only describes entries materialized in a directory listing or lookup response.
 
@@ -385,7 +385,7 @@ Deferred full files map to the existing `read-file` operation. Deferred ranged f
 
 `read-chunk` must return `file-chunk { content, eof }` or an equivalent terminal that lets the host distinguish a partial short read from observation EOF. For `Mutable + Ranged`, `eof = true` means the end of the snapshot represented by that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size. The WIT operation names can stay stable; the new attrs tell the host which path is valid for each projected file.
 
-For preloads, entry metadata carries the same `file-attrs` shape. Preloaded file content inherits attrs from the matching entry in the same terminal response. A preload for a path with no matching entry is rejected. Preloaded bytes are a warm content entry for that observation; they do not change a `Deferred` declaration into `Inline`, and they are discarded or scoped according to `Stability`.
+For preloads, entry metadata carries the same `file-attrs` shape when the preload is metadata-only, and `preloaded-file` carries its own `file-attrs` next to the content bytes. Preloaded bytes are a warm content entry for that observation; they do not change a `Deferred` declaration into `Inline`, and they are discarded or scoped according to `Stability`.
 
 Sibling files returned from a byte-producing handler use the same `projected-file { name, attrs }` shape. This keeps provider-side fanout from losing size, bytes, stability, or version information after the provider has already fetched the upstream payload.
 

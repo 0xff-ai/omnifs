@@ -384,6 +384,13 @@ fn generate_resume_impl(
 
 fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStream2 {
     quote! {
+        thread_local! {
+            static RANGE_READERS: ::std::cell::RefCell<
+                ::std::collections::BTreeMap<u64, ::std::rc::Rc<dyn omnifs_sdk::handler::RangeReader>>
+            > = ::std::cell::RefCell::new(::std::collections::BTreeMap::new());
+            static NEXT_RANGE_HANDLE: ::std::cell::Cell<u64> = ::std::cell::Cell::new(1);
+        }
+
         impl omnifs_sdk::exports::omnifs::provider::browse::Guest for #type_name {
             fn lookup_child(
                 id: u64,
@@ -461,23 +468,102 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn open_file(_: u64, _: String) -> omnifs_sdk::prelude::ProviderReturn {
-                omnifs_sdk::prelude::err(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "open_file is reserved until streamed file reads are wired through the host runtime"
-                    )
-                )
+            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderReturn {
+                let Ok(state) = state_handle() else {
+                    return omnifs_sdk::prelude::err(
+                        omnifs_sdk::error::ProviderError::internal("provider not initialized")
+                    );
+                };
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                let future_cx = cx.clone();
+                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
+                    Box::pin(async move {
+                        let registry = match mount_registry() {
+                            Ok(registry) => registry,
+                            Err(error) => return omnifs_sdk::prelude::err(error),
+                        };
+                        match registry.open_file(&future_cx, &path).await {
+                            Ok(opened) => {
+                                let mut reader = Some(opened.reader);
+                                let handle = RANGE_READERS.with(|readers| {
+                                    let mut readers = readers.borrow_mut();
+                                    NEXT_RANGE_HANDLE.with(|next| {
+                                        let start = next.get().max(1);
+                                        let mut handle = start;
+                                        loop {
+                                            if !readers.contains_key(&handle) {
+                                                readers.insert(
+                                                    handle,
+                                                    reader.take().expect("range reader stored once"),
+                                                );
+                                                let next_handle = handle.wrapping_add(1);
+                                                next.set(if next_handle == 0 { 1 } else { next_handle });
+                                                return Some(handle);
+                                            }
+                                            let next_handle = handle.wrapping_add(1);
+                                            handle = if next_handle == 0 { 1 } else { next_handle };
+                                            if handle == start {
+                                                return None;
+                                            }
+                                        }
+                                    })
+                                });
+                                let Some(handle) = handle else {
+                                    return omnifs_sdk::prelude::err(
+                                        omnifs_sdk::error::ProviderError::internal("no free ranged file handles")
+                                    );
+                                };
+                                omnifs_sdk::prelude::ProviderReturn::terminal(
+                                    omnifs_sdk::prelude::OpResult::OpenFile(
+                                        omnifs_sdk::omnifs::provider::types::FileOpenResult {
+                                            handle,
+                                            attrs: opened.attrs.into(),
+                                        },
+                                    )
+                                )
+                            },
+                            Err(error) => omnifs_sdk::prelude::err(error),
+                        }
+                    });
+                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn read_chunk(_: u64, _: u64, _: u64, _: u32) -> omnifs_sdk::prelude::ProviderReturn {
-                omnifs_sdk::prelude::err(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "read_chunk is reserved until streamed file reads are wired through the host runtime"
-                    )
-                )
+            fn read_chunk(
+                id: u64,
+                handle: u64,
+                offset: u64,
+                length: u32,
+            ) -> omnifs_sdk::prelude::ProviderReturn {
+                let Ok(state) = state_handle() else {
+                    return omnifs_sdk::prelude::err(
+                        omnifs_sdk::error::ProviderError::internal("provider not initialized")
+                    );
+                };
+                let Some(reader) = RANGE_READERS.with(|readers| {
+                    readers.borrow().get(&handle).cloned()
+                }) else {
+                    return omnifs_sdk::prelude::err(
+                        omnifs_sdk::error::ProviderError::not_found(format!("unknown file handle {handle}"))
+                    );
+                };
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
+                    Box::pin(async move {
+                        match reader.read_chunk(offset, length).await {
+                            Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
+                                omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
+                            ),
+                            Err(error) => omnifs_sdk::prelude::err(error),
+                        }
+                    });
+                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn close_file(_: u64) {}
+            fn close_file(handle: u64) {
+                RANGE_READERS.with(|readers| {
+                    readers.borrow_mut().remove(&handle);
+                });
+            }
         }
     }
 }

@@ -77,6 +77,22 @@ fn preload_paper_files(p: &mut Projection, base: &str, entry: &ParsedEntry, vers
         format!("{base}/links.json"),
         entry.links_json_bytes(version),
     );
-    p.preload_entry(format!("{base}/paper.pdf"), EntryKind::File, None);
-    p.preload_entry(format!("{base}/source.tar.gz"), EntryKind::File, None);
+    p.preload_entry(
+        format!("{base}/paper.pdf"),
+        EntryKind::File,
+        Some(FileAttrs::deferred(
+            Size::Unknown,
+            ReadMode::Full,
+            Stability::Immutable,
+        )),
+    );
+    p.preload_entry(
+        format!("{base}/source.tar.gz"),
+        EntryKind::File,
+        Some(FileAttrs::deferred(
+            Size::Unknown,
+            ReadMode::Full,
+            Stability::Immutable,
+        )),
+    );
 }

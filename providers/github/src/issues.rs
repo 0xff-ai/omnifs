@@ -110,7 +110,15 @@ fn preload_pr_from_issue(
         projection, &base, item.title, item.body, item.state, item.user,
     );
     projection.preload_dir(format!("{base}comments").trim_end_matches('/'));
-    projection.preload_entry(format!("{base}diff"), EntryKind::File, None);
+    projection.preload_entry(
+        format!("{base}diff"),
+        EntryKind::File,
+        Some(FileAttrs::deferred(
+            Size::Unknown,
+            ReadMode::Full,
+            Stability::Immutable,
+        )),
+    );
 }
 
 async fn issue_projection(

@@ -3,10 +3,13 @@ mod support;
 use std::sync::Arc;
 
 use omnifs_host::cache::{
-    AttrPayload, CacheRecord, DirentsPayload, EntryKindCache, LookupPayload, RecordKind,
+    AttrPayload, CacheRecord, DirentsPayload, EntryKindCache, FilePayload, LookupPayload,
+    RecordKind,
 };
 use omnifs_host::config::InstanceConfig;
-use omnifs_host::omnifs::provider::types::{EntryKind, ListResult, LookupResult, OpResult};
+use omnifs_host::omnifs::provider::types::{
+    EntryKind, FileSize, ListResult, LookupResult, OpResult, Stability,
+};
 use omnifs_host::runtime::CalloutRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
 use support::{make_engine, make_initialized_runtime, make_runtime};
@@ -61,12 +64,15 @@ async fn test_list_hello_dir() {
     let result = harness.runtime.call_list_children("hello").await.unwrap();
     match result {
         OpResult::List(ListResult::Entries(listing)) => {
-            assert_eq!(listing.entries.len(), 6);
+            assert_eq!(listing.entries.len(), 9);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"message"));
             assert!(names.contains(&"greeting"));
             assert!(names.contains(&"projected"));
             assert!(names.contains(&"lazy"));
+            assert!(names.contains(&"ranged"));
+            assert!(names.contains(&"unknown-ranged"));
+            assert!(names.contains(&"volatile-tail"));
             assert!(names.contains(&"bundle"));
             assert!(names.contains(&"snapshot"));
         },
@@ -110,9 +116,9 @@ async fn test_list_preloads_nested_files_into_cache() {
         .runtime
         .cache_get("hello/bundle", RecordKind::Dirents)
         .expect("bundle dirents should be preloaded");
-    assert_eq!(title.payload, b"title".to_vec());
-    assert_eq!(body.payload, b"body".to_vec());
-    assert!(empty.payload.is_empty());
+    assert_eq!(file_payload(&title).content, b"title".to_vec());
+    assert_eq!(file_payload(&body).content, b"body".to_vec());
+    assert!(file_payload(&empty).content.is_empty());
     let dirents = DirentsPayload::deserialize(&bundle_dirents.payload)
         .expect("bundle dirents payload should deserialize");
     let mut entry_names: Vec<_> = dirents
@@ -211,7 +217,10 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "lazy",
             "message",
             "projected",
-            "snapshot"
+            "ranged",
+            "snapshot",
+            "unknown-ranged",
+            "volatile-tail"
         ]
     );
 
@@ -223,8 +232,117 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         .runtime
         .cache_get("hello/state", RecordKind::File)
         .expect("state sibling projection should be cached");
-    assert_eq!(body.payload, b"body\n");
-    assert_eq!(state.payload, b"open\n");
+    assert_eq!(file_payload(&body).content, b"body\n");
+    assert_eq!(file_payload(&state).content, b"open\n");
+}
+
+#[tokio::test]
+async fn test_ranged_open_read_chunk_contract() {
+    let harness = make_initialized_runtime(
+        r#"
+        {
+            "plugin": "test_provider.wasm",
+            "mount": "test",
+            "capabilities": {
+                "domains": ["httpbin.org"]
+            }
+        }
+    "#,
+    );
+
+    let open = harness
+        .runtime
+        .call_open_file("hello/ranged")
+        .await
+        .unwrap();
+    let OpResult::OpenFile(opened) = open else {
+        panic!("expected OpenFile, got {open:?}");
+    };
+    assert!(matches!(opened.attrs.size, FileSize::Exact(26)));
+    assert_eq!(opened.attrs.stability, Stability::Mutable);
+    assert_eq!(opened.attrs.version_token.as_deref(), Some("alphabet-v1"));
+
+    let chunk = harness
+        .runtime
+        .call_read_chunk(opened.handle, 2, 4)
+        .await
+        .unwrap();
+    let OpResult::ReadChunk(chunk) = chunk else {
+        panic!("expected ReadChunk, got {chunk:?}");
+    };
+    assert_eq!(chunk.content, b"cdef");
+    assert!(!chunk.eof);
+
+    let eof = harness
+        .runtime
+        .call_read_chunk(opened.handle, 26, 8)
+        .await
+        .unwrap();
+    let OpResult::ReadChunk(eof) = eof else {
+        panic!("expected ReadChunk EOF, got {eof:?}");
+    };
+    assert!(eof.content.is_empty());
+    assert!(eof.eof);
+
+    harness.runtime.call_close_file(opened.handle).unwrap();
+}
+
+#[tokio::test]
+async fn test_unknown_and_volatile_ranged_eof_contracts() {
+    let harness = make_initialized_runtime(
+        r#"
+        {
+            "plugin": "test_provider.wasm",
+            "mount": "test",
+            "capabilities": {
+                "domains": ["httpbin.org"]
+            }
+        }
+    "#,
+    );
+
+    let open = harness
+        .runtime
+        .call_open_file("hello/unknown-ranged")
+        .await
+        .unwrap();
+    let OpResult::OpenFile(opened) = open else {
+        panic!("expected OpenFile, got {open:?}");
+    };
+    assert!(matches!(opened.attrs.size, FileSize::Unknown));
+    let eof = harness
+        .runtime
+        .call_read_chunk(opened.handle, 8, 32)
+        .await
+        .unwrap();
+    let OpResult::ReadChunk(eof) = eof else {
+        panic!("expected ReadChunk EOF, got {eof:?}");
+    };
+    assert_eq!(eof.content, b"size\n");
+    assert!(eof.eof);
+    harness.runtime.call_close_file(opened.handle).unwrap();
+
+    let open = harness
+        .runtime
+        .call_open_file("hello/volatile-tail")
+        .await
+        .unwrap();
+    let OpResult::OpenFile(opened) = open else {
+        panic!("expected OpenFile, got {open:?}");
+    };
+    assert_eq!(opened.attrs.stability, Stability::Volatile);
+    assert!(matches!(opened.attrs.size, FileSize::Unknown));
+    let chunk = harness
+        .runtime
+        .call_read_chunk(opened.handle, 42, 128)
+        .await
+        .unwrap();
+    let OpResult::ReadChunk(chunk) = chunk else {
+        panic!("expected live ReadChunk, got {chunk:?}");
+    };
+    assert_eq!(chunk.content, b"tail:42\n");
+    assert!(!chunk.eof);
+    harness.runtime.call_close_file(opened.handle).unwrap();
 }
 
 #[tokio::test]
@@ -255,7 +373,7 @@ async fn test_lookup_child() {
         OpResult::Lookup(LookupResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "lazy");
-            assert!(matches!(entry.kind, EntryKind::File));
+            assert!(matches!(entry.kind, EntryKind::File(_)));
         },
         other => panic!("expected file Lookup, got {other:?}"),
     }
@@ -335,8 +453,8 @@ async fn test_lookup_projects_sibling_files_into_cache() {
         .cache_get("hello/bundle", RecordKind::Dirents)
         .expect("bundle dirents should be in cache");
 
-    assert_eq!(title.payload, b"title".to_vec());
-    assert_eq!(body.payload, b"body".to_vec());
+    assert_eq!(file_payload(&title).content, b"title".to_vec());
+    assert_eq!(file_payload(&body).content, b"body".to_vec());
     let dirents = DirentsPayload::deserialize(&bundle_dirents.payload)
         .expect("bundle dirents payload should deserialize");
     let mut entry_names: Vec<_> = dirents
@@ -409,37 +527,40 @@ async fn test_lookup_projects_siblings_into_cache() {
         .runtime
         .cache_get("hello/snapshot/status", RecordKind::Lookup)
         .expect("status lookup should be cached");
-    assert!(matches!(
-        LookupPayload::deserialize(&status_lookup.payload),
-        Some(LookupPayload::Positive {
-            kind: EntryKindCache::File,
-            size: 5,
-        })
-    ));
+    let Some(LookupPayload::Positive(status_meta)) =
+        LookupPayload::deserialize(&status_lookup.payload)
+    else {
+        panic!("expected positive status lookup");
+    };
+    assert_eq!(status_meta.kind, EntryKindCache::File);
+    assert_eq!(status_meta.st_size(), 5);
 
     let status_attr = harness
         .runtime
         .cache_get("hello/snapshot/status", RecordKind::Attr)
         .expect("status attr should be cached");
-    assert!(matches!(
-        AttrPayload::deserialize(&status_attr.payload),
-        Some(AttrPayload {
-            kind: EntryKindCache::File,
-            size: 5,
-        })
-    ));
+    let Some(AttrPayload { meta: status_meta }) = AttrPayload::deserialize(&status_attr.payload)
+    else {
+        panic!("expected status attr payload");
+    };
+    assert_eq!(status_meta.kind, EntryKindCache::File);
+    assert_eq!(status_meta.st_size(), 5);
 
     let comments_lookup = harness
         .runtime
         .cache_get("hello/snapshot/comments", RecordKind::Lookup)
         .expect("comments lookup should be cached");
-    assert!(matches!(
-        LookupPayload::deserialize(&comments_lookup.payload),
-        Some(LookupPayload::Positive {
-            kind: EntryKindCache::Directory,
-            size: 0,
-        })
-    ));
+    let Some(LookupPayload::Positive(comments_meta)) =
+        LookupPayload::deserialize(&comments_lookup.payload)
+    else {
+        panic!("expected positive comments lookup");
+    };
+    assert_eq!(comments_meta.kind, EntryKindCache::Directory);
+    assert_eq!(comments_meta.st_size(), 0);
+}
+
+fn file_payload(record: &CacheRecord) -> FilePayload {
+    FilePayload::deserialize(&record.payload).expect("file payload should deserialize")
 }
 
 #[test]

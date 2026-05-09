@@ -1,11 +1,8 @@
 //! L0 browse cache: in-memory, path-keyed, byte-weighted moka cache.
 
 use crate::cache::{CacheRecord, Key, L0_MAX_WEIGHT, L0_SKIP_THRESHOLD};
-use dashmap::DashMap;
 use moka::sync::Cache as MokaCache;
 use std::sync::Arc;
-
-pub type Result<T> = core::result::Result<T, core::convert::Infallible>;
 
 pub struct Cache {
     cache: MokaCache<Key, Arc<CacheRecord>>,
@@ -17,7 +14,7 @@ impl Cache {
             .max_capacity(L0_MAX_WEIGHT)
             .support_invalidation_closures()
             .weigher(|key: &Key, value: &Arc<CacheRecord>| -> u32 {
-                let key_size = 1 + key.path.len();
+                let key_size = 1 + key.path.len() + key.aux.as_ref().map_or(0, String::len);
                 let val_size = 2 + value.payload.len();
                 (key_size + val_size).try_into().unwrap_or(u32::MAX)
             })
@@ -53,34 +50,5 @@ impl Cache {
 impl Default for Cache {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Default)]
-pub struct MountCaches {
-    caches: DashMap<String, Cache>,
-}
-
-impl MountCaches {
-    pub fn get(&self, mount: &str, key: &Key) -> Option<Arc<CacheRecord>> {
-        self.cache_for(mount).get(key)
-    }
-
-    pub fn put(&self, mount: &str, key: Key, record: CacheRecord) {
-        self.cache_for(mount).put(key, record);
-    }
-
-    pub fn invalidate_entries_if<P>(&self, mount: &str, predicate: P)
-    where
-        P: Fn(&Key, &Arc<CacheRecord>) -> bool + Send + Sync + 'static,
-    {
-        let Some(cache) = self.caches.get(mount) else {
-            return;
-        };
-        cache.invalidate_entries_if(predicate);
-    }
-
-    fn cache_for(&self, mount: &str) -> dashmap::mapref::one::RefMut<'_, String, Cache> {
-        self.caches.entry(mount.to_string()).or_default()
     }
 }

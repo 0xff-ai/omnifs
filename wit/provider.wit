@@ -63,6 +63,8 @@ interface types {
         lookup(lookup-result),
         %list(list-result),
         read(file-content-result),
+        open-file(file-open-result),
+        read-chunk(file-chunk),
         init(provider-info),
         event(event-outcome),
         err(provider-error),
@@ -115,6 +117,42 @@ interface types {
         kind: error-kind,
         message: string,
         retryable: bool,
+    }
+
+    type version-token = string;
+
+    variant file-size {
+        exact(u64),
+        non-zero,
+        unknown,
+    }
+
+    enum read-mode {
+        full,
+        ranged,
+    }
+
+    variant file-bytes {
+        inline(list<u8>),
+        deferred(read-mode),
+    }
+
+    enum stability {
+        immutable,
+        mutable,
+        volatile,
+    }
+
+    record file-attrs {
+        size: file-size,
+        bytes: file-bytes,
+        stability: stability,
+        version-token: option<version-token>,
+    }
+
+    variant entry-kind {
+        directory,
+        file(file-attrs),
     }
 
     // --- Terminal payloads ---
@@ -177,13 +215,25 @@ interface types {
     }
 
     record inline-file-content {
+        attrs: file-attrs,
         content: list<u8>,
         sibling-files: list<projected-file>,
     }
 
     record blob-file-content {
+        attrs: file-attrs,
         blob: blob-id,
         sibling-files: list<projected-file>,
+    }
+
+    record file-open-result {
+        handle: file-handle,
+        attrs: file-attrs,
+    }
+
+    record file-chunk {
+        content: list<u8>,
+        eof: bool,
     }
 
     // --- Data types ---
@@ -301,6 +351,7 @@ interface types {
     /// the handler has already fetched.
     record preloaded-file {
         path: string,
+        attrs: file-attrs,
         content: list<u8>,
     }
 
@@ -310,7 +361,6 @@ interface types {
     record preloaded-entry {
         path: string,
         kind: entry-kind,
-        size: option<u64>,
     }
 
     variant preload-item {
@@ -375,18 +425,11 @@ interface types {
     record dir-entry {
         name: string,
         kind: entry-kind,
-        size: option<u64>,
-        projected-files: option<list<projected-file>>,
     }
 
     record projected-file {
         name: string,
-        content: list<u8>,
-    }
-
-    enum entry-kind {
-        directory,
-        file,
+        attrs: file-attrs,
     }
 
     record file-entry {
