@@ -151,6 +151,26 @@ Preserve that structure unless there is a clear regression or simplification wit
 - Do not defend abstraction boundaries that add complexity in the common case.
 - Once the direct path exists, remove bridge-style dispatch layers and other transitional glue instead of letting them harden into architecture.
 
+## Design invariants
+
+### Bash tool compatibility
+
+omnifs paths must behave like real files for the standard Linux toolbox. Every code path is judged against this list. A change that makes any of these regress is wrong.
+
+- **Read content**: `cat`, `head`, `tail` (incl. `-f`, `-n`, `-c`), `less`, `more`, `xxd`, `hexdump`, `od`, `file`.
+- **Search and traversal**: `grep` (incl. `-r`), `rg`, `find` (incl. `-name`, `-size`, `-type`), `fd`.
+- **Stat-based**: `ls` (incl. `-l`, `-h`), `du` (incl. `-sh`), `wc` (incl. `-l`, `-c`, `-m`), `stat`.
+- **Copy and archive**: `cp`, `mv`, `tar` (`c`, `x`, `t`), `rsync`.
+- **Compare and hash**: `diff`, `cmp`, `md5sum`, `sha256sum`, `b3sum`.
+- **Inspection**: `jq`, `yq`, `xmllint`.
+- **Editors**: `vim`, `neovim`, `nano`. Editors that mmap (some `code` configurations) are best-effort but should not break.
+
+When introducing a new feature, the burden of proof is on the change to demonstrate (via the smoke harness in `tests/smoke/` or a unit test) that it does not regress any of the above.
+
+### File attributes
+
+Projected files declare `size`, `access`, and `mutability` attributes via the SDK's `Projection` API; the host wires `st_size`, FUSE flags, cache layers, and post-read invalidation from those attributes. Full design at `docs/design/file-attributes.md` — enum definitions, the single structural rule (`Volatile` ⇒ `Ranged`), the seven valid combinations, and the byte-source ↔ handler pairing.
+
 ## Protocol and contract guardrails
 
 - Reuse source-of-truth terms. Do not invent new names for public surfaces unless the rename is explicit.
