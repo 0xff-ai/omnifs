@@ -180,7 +180,8 @@ impl FuseFs {
         };
 
         let mut to_remove = Vec::new();
-        for key in self.path_to_inode.iter() {
+        for entry in self.path_to_inode.iter() {
+            let key = entry.key();
             if key.mount != mount {
                 continue;
             }
@@ -190,7 +191,7 @@ impl FuseFs {
                 .iter()
                 .any(|prefix| path_prefix_matches(prefix, path));
             if matches_exact || matches_prefix {
-                to_remove.push(PathKey::new(mount, path.clone()));
+                to_remove.push(key.clone());
             }
         }
 
@@ -464,7 +465,7 @@ impl FuseFs {
     fn opendir_check_caches(
         &self,
         mount_name: &str,
-        ino: u64,
+        _ino: u64,
         path: &str,
     ) -> Result<Option<DirSnapshot>, Errno> {
         // Only serve readdir from cache when the Dirents record was
