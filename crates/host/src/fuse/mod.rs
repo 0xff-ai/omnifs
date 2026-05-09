@@ -1283,19 +1283,6 @@ impl Filesystem for FuseFs {
     }
 }
 
-impl From<cache::EntryKindCache> for EntryKind {
-    fn from(kind: cache::EntryKindCache) -> Self {
-        match kind {
-            cache::EntryKindCache::Directory => Self::Directory,
-            cache::EntryKindCache::File => Self::File,
-        }
-    }
-}
-
-// NOTE: `impl From<EntryKind> for cache::EntryKindCache` lives in
-// `crate::runtime::mod` so it is available regardless of target_os
-// (this `fuse` module is Linux-only). Do not duplicate it here.
-
 /// Materialize a `read-file` terminal into the bytes the FUSE response
 /// will return. Inline content travels in the WIT; blob content gets
 /// pulled from the host's blob cache. Returns `None` when a blob-backed
