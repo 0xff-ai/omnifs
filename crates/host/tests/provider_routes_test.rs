@@ -855,7 +855,11 @@ fn github_issue_list_preloads_projected_files() {
             );
             assert_eq!(
                 preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/body"),
-                Some(&[][..])
+                None
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_issues/_open/7/body"),
+                None
             );
             assert_eq!(
                 preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/user"),
@@ -1071,6 +1075,10 @@ fn github_pr_list_preloads_projected_files() {
                     "octocat/Hello-World/_prs/_open/7/state",
                     "octocat/Hello-World/_prs/_open/7/user",
                 ]
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/7/body"),
+                None
             );
             let names: Vec<&str> = listing
                 .entries

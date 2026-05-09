@@ -139,6 +139,7 @@ impl FileAttrsCache {
         }
     }
 
+    #[must_use]
     pub fn with_exact_size(mut self, size: u64) -> Self {
         self.size = SizeCache::Exact(size);
         self

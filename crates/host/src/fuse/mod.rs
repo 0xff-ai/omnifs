@@ -24,7 +24,7 @@ use fuser::{
 };
 use inode::NodeEntry;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -54,6 +54,15 @@ fn join_child_path(parent_path: &str, name: &str) -> String {
     } else {
         format!("{parent_path}/{name}")
     }
+}
+
+struct FullReadTarget {
+    ino: u64,
+    fh: u64,
+    mount_name: String,
+    path: String,
+    backing_path: Option<PathBuf>,
+    attrs: Option<cache::FileAttrsCache>,
 }
 
 /// Map a provider error to its corresponding FUSE errno.
@@ -703,6 +712,180 @@ impl FuseFs {
         }
     }
 
+    fn read_full_handle(
+        &self,
+        ino: INodeNo,
+        fh: FuseFileHandle,
+        offset: u64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        let Some(inode_entry) = self.inodes.get(&ino.0) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let target = FullReadTarget {
+            ino: ino.0,
+            fh: fh.0,
+            mount_name: inode_entry.mount_name.clone(),
+            path: inode_entry.path.clone(),
+            backing_path: inode_entry.backing_path.clone(),
+            attrs: inode_entry.attrs.clone(),
+        };
+        drop(inode_entry);
+
+        if let Some(attrs) = target.attrs.as_ref()
+            && matches!(attrs.size, cache::SizeCache::Exact(0))
+        {
+            reply.data(&[]);
+            return;
+        }
+
+        let durable_aux = target
+            .attrs
+            .as_ref()
+            .and_then(cache::FileAttrsCache::durable_cache_aux);
+
+        if let Some(aux) = durable_aux.clone()
+            && let Some(record) = self.l0_get_with_aux(
+                &target.mount_name,
+                &target.path,
+                RecordKind::File,
+                aux.as_deref(),
+            )
+            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
+        {
+            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            reply.data(data_slice(&payload.content, offset, size));
+            self.file_cache.insert(target.fh, payload.content);
+            return;
+        }
+
+        if target.backing_path.is_none()
+            && let Some(aux) = durable_aux.clone()
+            && let Some(runtime) = self.runtime_for_mount(&target.mount_name)
+            && let Some(record) =
+                runtime.cache_get_with_aux(&target.path, RecordKind::File, aux.as_deref())
+            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
+        {
+            tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            let data = payload.content;
+            self.l0_put_with_aux(
+                &target.mount_name,
+                &target.path,
+                RecordKind::File,
+                aux,
+                record,
+            );
+            reply.data(data_slice(&data, offset, size));
+            self.file_cache.insert(target.fh, data);
+            return;
+        }
+
+        if let Some(ref rp) = target.backing_path {
+            match std::fs::read(rp) {
+                Ok(data) => {
+                    reply.data(data_slice(&data, offset, size));
+                    self.file_cache.insert(target.fh, data);
+                },
+                Err(e) => {
+                    tracing::warn!(path = ?rp, err = %e, "backing fs error");
+                    reply.error(Errno::EIO);
+                },
+            }
+            return;
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+
+        self.drain_and_evict_pending(&target.mount_name);
+
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
+
+        match self.rt.block_on(runtime.call_read_file(&target.path)) {
+            Ok(OpResult::Read(result)) => {
+                self.finish_full_read(&target, &runtime, offset, size, result, reply);
+            },
+            Ok(OpResult::Err(error)) => {
+                tracing::warn!(
+                    path = target.path.as_str(),
+                    kind = ?error.kind,
+                    retryable = error.retryable,
+                    message = error.message,
+                    "provider returned typed error for read_file"
+                );
+                reply.error(provider_errno(&error));
+            },
+            Ok(other) => {
+                tracing::warn!(path = target.path.as_str(), result = ?other, "read_file returned unexpected result");
+                reply.error(Errno::EIO);
+            },
+            Err(e) => {
+                tracing::warn!(path = target.path.as_str(), error = %e, "read_file runtime error");
+                reply.error(Errno::EIO);
+            },
+        }
+    }
+
+    fn finish_full_read(
+        &self,
+        target: &FullReadTarget,
+        runtime: &CalloutRuntime,
+        offset: u64,
+        size: u32,
+        result: crate::omnifs::provider::types::FileContentResult,
+        reply: ReplyData,
+    ) {
+        let Some((data, result_attrs, sibling_count)) =
+            resolve_read_payload(runtime, &target.path, result)
+        else {
+            reply.error(Errno::EIO);
+            return;
+        };
+        tracing::debug!(
+            target: "omnifs_read",
+            path = target.path.as_str(),
+            content_len = data.len(),
+            sibling_files_count = sibling_count,
+            "received Read result"
+        );
+        let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
+        if !full_read_matches_attrs(&attrs_cache, data.len()) {
+            tracing::warn!(
+                path = target.path.as_str(),
+                expected = ?attrs_cache.size,
+                actual = data.len(),
+                "provider returned bytes that contradict file attrs"
+            );
+            reply.error(Errno::EIO);
+            return;
+        }
+        self.promote_inode_attrs(target.ino, attrs_cache.clone());
+        if let Some(aux) = attrs_cache.durable_cache_aux() {
+            let payload = FilePayload::new(attrs_cache.version_token.clone(), data.clone());
+            let Some(payload) = payload.serialize() else {
+                reply.error(Errno::EIO);
+                return;
+            };
+            let file_record = CacheRecord::new(RecordKind::File, payload);
+            if let Some(rt) = self.runtime_for_mount(&target.mount_name) {
+                rt.cache_put_with_aux(&target.path, RecordKind::File, aux.as_deref(), &file_record);
+            }
+            self.l0_put_with_aux(
+                &target.mount_name,
+                &target.path,
+                RecordKind::File,
+                aux,
+                file_record,
+            );
+        }
+        reply.data(data_slice(&data, offset, size));
+        self.file_cache.insert(target.fh, data);
+    }
+
     fn promote_inode_attrs(&self, ino: u64, attrs: cache::FileAttrsCache) {
         if matches!(attrs.stability, cache::StabilityCache::Volatile) {
             return;
@@ -982,145 +1165,7 @@ impl Filesystem for FuseFs {
             return;
         }
 
-        let Some(inode_entry) = self.inodes.get(&ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let mount_name = inode_entry.mount_name.clone();
-        let path = inode_entry.path.clone();
-        let backing_path = inode_entry.backing_path.clone();
-        let attrs = inode_entry.attrs.clone();
-        drop(inode_entry);
-
-        if let Some(attrs) = attrs.as_ref()
-            && matches!(attrs.size, cache::SizeCache::Exact(0))
-        {
-            reply.data(&[]);
-            return;
-        }
-
-        let durable_aux = attrs
-            .as_ref()
-            .and_then(cache::FileAttrsCache::durable_cache_aux);
-
-        // L0: check cached file by path.
-        if let Some(aux) = durable_aux.clone()
-            && let Some(record) =
-                self.l0_get_with_aux(&mount_name, &path, RecordKind::File, aux.as_deref())
-            && let Some(payload) = file_payload_for_attrs(&record, attrs.as_ref())
-        {
-            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-            reply.data(data_slice(&payload.content, offset, size));
-            self.file_cache.insert(fh.0, payload.content);
-            return;
-        }
-
-        // L2: check cached file by path (only for non-passthrough).
-        if backing_path.is_none()
-            && let Some(aux) = durable_aux.clone()
-            && let Some(runtime) = self.runtime_for_mount(&mount_name)
-            && let Some(record) =
-                runtime.cache_get_with_aux(&path, RecordKind::File, aux.as_deref())
-            && let Some(payload) = file_payload_for_attrs(&record, attrs.as_ref())
-        {
-            tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-            let data = payload.content;
-            self.l0_put_with_aux(&mount_name, &path, RecordKind::File, aux, record.clone());
-            reply.data(data_slice(&data, offset, size));
-            self.file_cache.insert(fh.0, data);
-            return;
-        }
-
-        // Passthrough for inodes with backing_path.
-        if let Some(ref rp) = backing_path {
-            match std::fs::read(rp) {
-                Ok(data) => {
-                    reply.data(data_slice(&data, offset, size));
-                    self.file_cache.insert(fh.0, data);
-                },
-                Err(e) => {
-                    tracing::warn!(path = ?rp, err = %e, "backing fs error");
-                    reply.error(Errno::EIO);
-                },
-            }
-            return;
-        }
-
-        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-
-        self.drain_and_evict_pending(&mount_name);
-
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = mount_name.as_str(), "cache miss");
-
-        match self.rt.block_on(runtime.call_read_file(&path)) {
-            Ok(OpResult::Read(result)) => {
-                let Some((data, result_attrs, sibling_count)) =
-                    resolve_read_payload(&runtime, &path, result)
-                else {
-                    reply.error(Errno::EIO);
-                    return;
-                };
-                tracing::debug!(
-                    target: "omnifs_read",
-                    path = path,
-                    content_len = data.len(),
-                    sibling_files_count = sibling_count,
-                    "received Read result"
-                );
-                let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
-                if !full_read_matches_attrs(&attrs_cache, data.len()) {
-                    tracing::warn!(
-                        path,
-                        expected = ?attrs_cache.size,
-                        actual = data.len(),
-                        "provider returned bytes that contradict file attrs"
-                    );
-                    reply.error(Errno::EIO);
-                    return;
-                }
-                self.promote_inode_attrs(ino.0, attrs_cache.clone());
-                if let Some(aux) = attrs_cache.durable_cache_aux() {
-                    let payload = FilePayload::new(attrs_cache.version_token.clone(), data.clone());
-                    let Some(payload) = payload.serialize() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    let file_record = CacheRecord::new(RecordKind::File, payload);
-                    if let Some(rt) = self.runtime_for_mount(&mount_name) {
-                        rt.cache_put_with_aux(
-                            &path,
-                            RecordKind::File,
-                            aux.as_deref(),
-                            &file_record,
-                        );
-                    }
-                    self.l0_put_with_aux(&mount_name, &path, RecordKind::File, aux, file_record);
-                }
-                reply.data(data_slice(&data, offset, size));
-                self.file_cache.insert(fh.0, data);
-            },
-            Ok(OpResult::Err(error)) => {
-                tracing::warn!(
-                    path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = error.message,
-                    "provider returned typed error for read_file"
-                );
-                reply.error(provider_errno(&error));
-            },
-            Ok(other) => {
-                tracing::warn!(path, result = ?other, "read_file returned unexpected result");
-                reply.error(Errno::EIO);
-            },
-            Err(e) => {
-                tracing::warn!(path, error = %e, "read_file runtime error");
-                reply.error(Errno::EIO);
-            },
-        }
+        self.read_full_handle(ino, fh, offset, size, reply);
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {

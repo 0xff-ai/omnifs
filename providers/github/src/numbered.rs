@@ -119,18 +119,30 @@ pub(crate) async fn list_hybrid<T: Listable>(
     })
 }
 
-/// Preload the four projected files every numbered resource exposes.
+/// Preload the projected files every numbered resource exposes.
+///
+/// List responses can include many large issue/PR bodies, so `body` is
+/// projected as deferred metadata and fetched from the single resource
+/// handler on read.
 /// `base` must end in `/` so callers can append the file name.
 pub(crate) fn preload_common_fields(
     projection: &mut Projection,
     base: &str,
     title: String,
-    body: Option<String>,
+    _body: Option<String>,
     state: String,
     user: Option<User>,
 ) {
     projection.preload(format!("{base}title"), title);
-    projection.preload(format!("{base}body"), body.unwrap_or_default());
+    projection.preload_entry(
+        format!("{base}body"),
+        EntryKind::File,
+        Some(FileAttrs::deferred(
+            Size::Unknown,
+            ReadMode::Full,
+            Stability::Mutable,
+        )),
+    );
     projection.preload(format!("{base}state"), state);
     projection.preload(
         format!("{base}user"),

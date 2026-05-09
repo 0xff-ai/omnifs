@@ -356,7 +356,7 @@ impl From<FileChunk> for crate::omnifs::provider::types::FileChunk {
 }
 
 pub trait RangeReader {
-    fn read_chunk<'a>(&'a self, offset: u64, length: u32) -> BoxFuture<'a, FileChunk>;
+    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk>;
 }
 
 #[derive(Clone, Debug)]
@@ -373,7 +373,7 @@ impl MemoryRangeReader {
 }
 
 impl RangeReader for MemoryRangeReader {
-    fn read_chunk<'a>(&'a self, offset: u64, length: u32) -> BoxFuture<'a, FileChunk> {
+    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk> {
         Box::pin(async move {
             let start = usize::try_from(offset).unwrap_or(usize::MAX);
             if start >= self.bytes.len() {
