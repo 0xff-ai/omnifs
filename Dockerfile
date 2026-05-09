@@ -46,7 +46,7 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p omnifs-archive-extractor --target wasm32-wasip2 \
+    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
     && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
 

@@ -1,5 +1,5 @@
 [package]
-name = "omnifs-archive-extractor"
+name = "omnifs-tool-archive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

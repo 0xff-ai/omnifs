@@ -6,7 +6,7 @@
 /// the archive and writes entries under `/out/`, enforcing the limits
 /// in `extract-options`. Trips return a typed `extract-error`; success
 /// returns `extract-stats`.
-package omnifs:archive-extractor@0.1.0;
+package omnifs:tool-archive@0.1.0;
 
 interface extract {
     enum archive-format {

@@ -6,7 +6,7 @@
 //! [`Guest::extract`] with the requested format and limits. The
 //! component walks the archive, validates each entry, and writes
 //! sanitized output under `/out/`. Limit trips return a typed
-//! [`exports::omnifs::archive_extractor::extract::ExtractError`]; the
+//! [`exports::omnifs::tool_archive::extract::ExtractError`]; the
 //! host translates that into its own `ArchiveError`.
 
 #![allow(clippy::cast_possible_truncation)]
@@ -19,7 +19,7 @@ wit_bindgen::generate!({
     path: "../../wit/extractor",
 });
 
-use exports::omnifs::archive_extractor::extract::{
+use exports::omnifs::tool_archive::extract::{
     ArchiveFormat, ExtractError, ExtractOptions, ExtractStats, Guest,
 };
 

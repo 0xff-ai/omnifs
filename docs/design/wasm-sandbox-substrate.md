@@ -154,6 +154,9 @@ direction should hold: `runtime::wasm` contains reusable component host
 primitives; the provider runtime owns provider lifecycle;
 `runtime::tools` owns semantic tool adapters; `runtime::sandbox` owns
 one-shot materialization support.
+Concrete embedded tool crates should follow the `omnifs-tool-*`
+package prefix, with the current archive implementation living in
+`crates/omnifs-tool-archive`.
 
 ## Archive adapter target shape
 

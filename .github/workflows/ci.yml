@@ -44,11 +44,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Build wasm tools
+        run: cargo build --target wasm32-wasip2 --release -p 'omnifs-tool-*'
+
       - name: Run core clippy
         run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings
 
       - name: Run provider clippy
-        run: cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
+        run: cargo clippy -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
 
   rust-build-test:
     runs-on: ubuntu-latest
@@ -75,11 +78,11 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Build providers
+      - name: Build providers and tools
         run: |
           set -euo pipefail
           cargo build --target wasm32-wasip2 --release \
-              -p 'omnifs-provider-*' -p test-provider
+              -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'
 
       - name: Run core tests
         run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema

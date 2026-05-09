@@ -1,7 +1,7 @@
 //! Sandboxed archive extraction adapter for the embedded Wasm tool.
 //!
-//! The host ships a precompiled `omnifs-archive-extractor.wasm` (built
-//! from `crates/omnifs-archive-extractor`) and runs it in a fresh
+//! The host ships a precompiled `omnifs-tool-archive.wasm` (built
+//! from `crates/omnifs-tool-archive`) and runs it in a fresh
 //! `wasmtime::Store` for each `open-archive` callout. The component
 //! sees only:
 //!
@@ -14,7 +14,7 @@
 //! extractor's WIT adapter, options, stats, and domain errors.
 
 use crate::extractor_bindings::Extractor;
-use crate::extractor_bindings::exports::omnifs::archive_extractor::extract as wit_extract;
+use crate::extractor_bindings::exports::omnifs::tool_archive::extract as wit_extract;
 use crate::runtime::sandbox::preopen::StagedBlob;
 use crate::runtime::wasm;
 use std::path::Path;
@@ -28,7 +28,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 /// compiles.
 const EXTRACTOR_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasm32-wasip2/release/omnifs_archive_extractor.wasm"
+    "/../../target/wasm32-wasip2/release/omnifs_tool_archive.wasm"
 ));
 
 /// Defaults the host applies if an `ArchiveExecutor` doesn't override.
@@ -205,7 +205,7 @@ impl ArchiveExtractorComponent {
         };
 
         match bindings
-            .omnifs_archive_extractor_extract()
+            .omnifs_tool_archive_extract()
             .call_extract(&mut store, &options)
         {
             Ok(Ok(stats)) => Ok(ExtractStats {

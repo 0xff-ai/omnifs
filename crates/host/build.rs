@@ -1,7 +1,7 @@
-//! Validate the embedded archive-extractor wasm artifact before the host
+//! Validate the embedded archive tool wasm artifact before the host
 //! crate compiles.
 //!
-//! The host embeds `target/wasm32-wasip2/release/omnifs_archive_extractor.wasm`.
+//! The host embeds `target/wasm32-wasip2/release/omnifs_tool_archive.wasm`.
 //! Building that component is an explicit workspace/Docker step; this script
 //! only stages a caller-supplied artifact and reports a clear error when the
 //! artifact is missing.
@@ -19,7 +19,7 @@ fn main() {
         .join("target")
         .join("wasm32-wasip2")
         .join("release")
-        .join("omnifs_archive_extractor.wasm");
+        .join("omnifs_tool_archive.wasm");
 
     println!("cargo:rerun-if-changed={}", canonical_path.display());
     println!("cargo:rerun-if-env-changed=OMNIFS_EXTRACTOR_WASM");
@@ -59,7 +59,7 @@ fn main() {
     assert!(
         canonical_path.exists(),
         "missing archive extractor wasm at {}. Run `just build-providers` or \
-         `cargo build -p omnifs-archive-extractor --target wasm32-wasip2 --release` before \
+         `cargo build -p omnifs-tool-archive --target wasm32-wasip2 --release` before \
          building `omnifs-host`.",
         canonical_path.display()
     );
