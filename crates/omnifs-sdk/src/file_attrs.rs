@@ -37,6 +37,7 @@ impl FileAttrs {
         }
     }
 
+    #[must_use]
     pub fn with_version(mut self, version: impl Into<VersionToken>) -> Self {
         self.version = Some(version.into());
         self

@@ -149,11 +149,11 @@ mod hello_handlers {
     struct LiveTailReader;
 
     impl RangeReader for LiveTailReader {
-        fn read_chunk<'a>(
-            &'a self,
+        fn read_chunk(
+            &self,
             offset: u64,
             length: u32,
-        ) -> omnifs_sdk::handler::BoxFuture<'a, FileChunk> {
+        ) -> omnifs_sdk::handler::BoxFuture<'_, FileChunk> {
             Box::pin(async move {
                 let body = format!("tail:{offset}\n");
                 let mut bytes = body.into_bytes();
