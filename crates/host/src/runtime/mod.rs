@@ -4,6 +4,8 @@
 //! implementations (HTTP, Git), and drives async continuations.
 
 pub mod activity;
+pub mod archive;
+pub mod blob;
 mod browse_pipeline;
 pub mod capability;
 pub mod cloner;
@@ -11,9 +13,14 @@ pub mod correlation;
 pub mod coverage;
 pub mod executor;
 pub mod git;
+pub mod http_headers;
 pub mod inflight;
 mod invalidation;
 pub mod manifest;
+pub(crate) mod sandbox;
+pub mod tools;
+pub mod tree_registry;
+pub(crate) mod wasm;
 
 use crate::Provider;
 use crate::auth::AuthManager;
@@ -25,6 +32,8 @@ use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
 use crate::omnifs::provider::types::{self as wit_types, Host as TypesHost};
 use crate::runtime::activity::ActivityTable;
+use crate::runtime::archive::ArchiveExecutor;
+use crate::runtime::blob::{BlobCache, BlobExecutor, BlobLimits};
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::correlation::CorrelationTracker;
@@ -32,11 +41,13 @@ use crate::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
 use crate::runtime::inflight::InFlight;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
+use crate::runtime::tools::archive::{ArchiveExtractorComponent, ArchiveFormat};
+use crate::runtime::tree_registry::TreeRegistry;
 #[cfg(target_os = "linux")]
 use fuser::Notifier;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -62,6 +73,10 @@ pub struct CalloutRuntime {
     correlations: CorrelationTracker,
     http: HttpExecutor,
     git: git::GitExecutor,
+    blob: BlobExecutor,
+    archive: Arc<ArchiveExecutor>,
+    blob_cache: Arc<BlobCache>,
+    trees: Arc<TreeRegistry>,
     l2: Option<BrowseCacheL2>,
     invalidation: InvalidationState,
     activity_table: Mutex<ActivityTable>,
@@ -124,10 +139,11 @@ impl CalloutRuntime {
         cloner: Arc<GitCloner>,
         cache_dir: &Path,
         mount_name: &str,
+        extractor: Arc<ArchiveExtractorComponent>,
     ) -> Result<Self> {
         let mut linker = Linker::<HostState>::new(engine);
 
-        wasmtime_wasi::p2::add_to_linker_sync::<HostState>(&mut linker)?;
+        wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
         Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
 
         let component = Component::from_file(engine, wasm_path)?;
@@ -165,12 +181,36 @@ impl CalloutRuntime {
             )
         };
 
-        let git = git::GitExecutor::new(cloner, capability.clone());
+        let trees = Arc::new(TreeRegistry::new());
+        let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
+
+        let provider_cache_root = cache_dir.join("providers").join(mount_name);
+        let blob_cache_dir = provider_cache_root.join("blobs");
+        let archive_root = provider_cache_root.join("archives");
+        if let Err(e) = std::fs::create_dir_all(&blob_cache_dir) {
+            tracing::warn!(
+                dir = %blob_cache_dir.display(),
+                error = %e,
+                "failed to create blob cache dir; fetch-blob will fail until resolved"
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&archive_root) {
+            tracing::warn!(
+                dir = %archive_root.display(),
+                error = %e,
+                "failed to create archive extract dir; open-archive will fail until resolved"
+            );
+        }
+        let blob_cache = Arc::new(BlobCache::new(blob_cache_dir));
+        let archive = Arc::new(ArchiveExecutor::new(
+            blob_cache.clone(),
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
+
         let l2 = {
-            let db_path = cache_dir
-                .join("providers")
-                .join(mount_name)
-                .join("browse.redb");
+            let db_path = provider_cache_root.join("browse.redb");
             match BrowseCacheL2::open(&db_path) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
@@ -182,6 +222,13 @@ impl CalloutRuntime {
         let declared_handlers =
             read_declared_handlers_from_wasm(wasm_path).map_err(RuntimeError::InvalidConfig)?;
 
+        let blob_limits = blob_limits_from_config(config);
+        let blob = BlobExecutor::new(
+            auth.clone(),
+            capability.clone(),
+            blob_cache.clone(),
+            blob_limits,
+        )?;
         Ok(Self {
             store: Mutex::new(store),
             bindings,
@@ -189,6 +236,10 @@ impl CalloutRuntime {
             correlations: CorrelationTracker::new(),
             http: HttpExecutor::new(auth, capability)?,
             git,
+            blob,
+            archive,
+            blob_cache,
+            trees,
             l2,
             invalidation: InvalidationState::default(),
             activity_table: Mutex::new(ActivityTable::new(ACTIVITY_TTL)),
@@ -506,9 +557,21 @@ impl CalloutRuntime {
     }
 
     /// Resolve a tree-ref handle to a real filesystem path.
-    /// Returns the clone directory for the given handle.
-    pub fn resolve_tree_ref(&self, tree_ref: u64) -> Option<std::path::PathBuf> {
-        self.git.repo_path(tree_ref)
+    /// Works for both git clones and extracted archives — they share a
+    /// single tree registry, so a `tree-ref` is unambiguous.
+    pub fn resolve_tree_ref(&self, tree_ref: u64) -> Option<PathBuf> {
+        self.trees.resolve(tree_ref)
+    }
+
+    /// Read the full bytes of a stored blob. Used by the FUSE read path
+    /// when a `read-file` terminal returns blob-backed file content.
+    pub fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
+        let record = self
+            .blob_cache
+            .lookup(blob_id)
+            .ok_or_else(|| RuntimeError::ProviderError(format!("blob {blob_id} not found")))?;
+        std::fs::read(&record.path)
+            .map_err(|e| RuntimeError::ProviderError(format!("read blob {blob_id}: {e}")))
     }
 
     fn resolve_response_sync(response: wit_types::ProviderReturn) -> Result<wit_types::OpResult> {
@@ -541,6 +604,50 @@ impl CalloutRuntime {
             },
             wit_types::Callout::GitOpenRepo(req) => {
                 git_response_to_wit(self.git.open_repo(&req.cache_key, &req.clone_url))
+            },
+            wit_types::Callout::FetchBlob(req) => {
+                let headers: Vec<(String, String)> = req
+                    .headers
+                    .iter()
+                    .map(|h| (h.name.clone(), h.value.clone()))
+                    .collect();
+                let resp = self
+                    .blob
+                    .fetch_blob(
+                        &req.method,
+                        &req.url,
+                        &headers,
+                        req.body.as_deref(),
+                        &req.cache_key,
+                    )
+                    .await;
+                blob_response_to_wit(resp)
+            },
+            wit_types::Callout::OpenArchive(req) => {
+                let format = match req.format {
+                    wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
+                    wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
+                    wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
+                };
+                // Wasm extraction is sync and CPU-bound; run it on the
+                // blocking pool so it doesn't park the tokio reactor
+                // thread under big tarballs.
+                let archive = Arc::clone(&self.archive);
+                let blob = req.blob;
+                let strip = req.strip_prefix.clone();
+                let resp = tokio::task::spawn_blocking(move || {
+                    archive.open_archive(blob, format, strip.as_deref())
+                })
+                .await
+                .unwrap_or_else(|join_err| CalloutResponse::Error {
+                    kind: ErrorKind::Internal,
+                    message: format!("extract task join: {join_err}"),
+                    retryable: false,
+                });
+                archive_response_to_wit(resp)
+            },
+            wit_types::Callout::ReadBlob(req) => {
+                blob_read_to_wit(self.blob.read_blob(req.blob, req.offset, req.len))
             },
             _ => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
                 kind: wit_types::ErrorKind::Internal,
@@ -579,6 +686,19 @@ fn build_grants(config: &InstanceConfig, needs_git: bool) -> CapabilityGrants {
         git_repos: caps.and_then(|c| c.git_repos.clone()).unwrap_or_default(),
         max_memory_mb: caps.and_then(|c| c.max_memory_mb).unwrap_or(64),
         needs_git,
+    }
+}
+
+fn blob_limits_from_config(config: &InstanceConfig) -> BlobLimits {
+    let defaults = BlobLimits::default();
+    let caps = config.capabilities.as_ref();
+    BlobLimits {
+        max_fetch_blob_bytes: caps
+            .and_then(|c| c.max_fetch_blob_bytes)
+            .unwrap_or(defaults.max_fetch_blob_bytes),
+        max_read_blob_bytes: caps
+            .and_then(|c| c.max_read_blob_bytes)
+            .unwrap_or(defaults.max_read_blob_bytes),
     }
 }
 
@@ -621,6 +741,8 @@ impl From<ErrorKind> for wit_types::ErrorKind {
             ErrorKind::Denied => Self::Denied,
             ErrorKind::NotFound => Self::NotFound,
             ErrorKind::RateLimited => Self::RateLimited,
+            ErrorKind::InvalidInput => Self::InvalidInput,
+            ErrorKind::TooLarge => Self::TooLarge,
             ErrorKind::Internal => Self::Internal,
         }
     }
@@ -659,13 +781,7 @@ fn callout_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
             message,
             retryable,
         }),
-        CalloutResponse::GitRepoOpened(_) => {
-            wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-                kind: wit_types::ErrorKind::Internal,
-                message: "unexpected git response in http callout".to_string(),
-                retryable: false,
-            })
-        },
+        _ => unexpected("unexpected non-http response in http callout"),
     }
 }
 
@@ -683,12 +799,77 @@ fn git_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
             message,
             retryable,
         }),
-        CalloutResponse::HttpResponse { .. } => {
-            wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-                kind: wit_types::ErrorKind::Internal,
-                message: "unexpected http response in git callout".to_string(),
-                retryable: false,
+        _ => unexpected("unexpected response in git callout"),
+    }
+}
+
+fn blob_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
+    match resp {
+        CalloutResponse::BlobFetched(record) => {
+            wit_types::CalloutResult::BlobFetched(wit_types::BlobFetched {
+                blob: record.id,
+                size: record.size,
+                content_type: record.content_type,
+                etag: record.etag,
+                status: record.status,
+                response_headers: record
+                    .response_headers
+                    .into_iter()
+                    .map(|(name, value)| wit_types::Header { name, value })
+                    .collect(),
             })
         },
+        CalloutResponse::Error {
+            kind,
+            message,
+            retryable,
+        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: kind.into(),
+            message,
+            retryable,
+        }),
+        _ => unexpected("unexpected response in fetch-blob callout"),
     }
+}
+
+fn archive_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
+    match resp {
+        CalloutResponse::ArchiveOpened(tree) => {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree })
+        },
+        CalloutResponse::Error {
+            kind,
+            message,
+            retryable,
+        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: kind.into(),
+            message,
+            retryable,
+        }),
+        _ => unexpected("unexpected response in open-archive callout"),
+    }
+}
+
+fn blob_read_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
+    match resp {
+        CalloutResponse::BlobRead(bytes) => wit_types::CalloutResult::BlobRead(bytes),
+        CalloutResponse::Error {
+            kind,
+            message,
+            retryable,
+        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: kind.into(),
+            message,
+            retryable,
+        }),
+        _ => unexpected("unexpected response in read-blob callout"),
+    }
+}
+
+fn unexpected(message: &str) -> wit_types::CalloutResult {
+    wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+        kind: wit_types::ErrorKind::Internal,
+        message: message.to_string(),
+        retryable: false,
+    })
 }

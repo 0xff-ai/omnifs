@@ -5,10 +5,11 @@
 //! Uses --depth=1 --single-branch --no-tags for fast first access;
 //! the FUSE passthrough only reads the HEAD working tree.
 
+use crate::runtime::sandbox::publish;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,7 +45,7 @@ fn is_safe_cache_key(key: &str) -> bool {
         if component.is_empty() || component == ".." || component == "." {
             return false;
         }
-        if component.contains(std::path::MAIN_SEPARATOR) && std::path::MAIN_SEPARATOR != '/' {
+        if component.contains(MAIN_SEPARATOR) && MAIN_SEPARATOR != '/' {
             return false;
         }
     }
@@ -180,11 +181,10 @@ impl GitCloner {
         }
     }
 
-    /// Write the clone URL to a sidecar file atomically (write tmp + rename).
-    fn write_sidecar(path: &std::path::Path, clone_url: &str) {
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, clone_url).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+    /// Write the clone URL to a sidecar file. Best-effort; the cache
+    /// entry is still usable without the sidecar (we just lose the
+    /// clone-url conflict check on the next open).
+    fn write_sidecar(path: &Path, clone_url: &str) {
+        let _ = publish::replace_file_via_temp_rename(path, clone_url.as_bytes());
     }
 }

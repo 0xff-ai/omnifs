@@ -5,6 +5,8 @@
 
 use crate::config::InstanceConfig;
 use crate::runtime::cloner::GitCloner;
+use crate::runtime::tools::archive::ArchiveExtractorComponent;
+use crate::runtime::wasm;
 use crate::runtime::{CalloutRuntime, RuntimeError};
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,10 +34,16 @@ impl ProviderRegistry {
         cloner: &Arc<GitCloner>,
         cache_dir: &Path,
     ) -> Result<Self, RegistryError> {
-        let mut wasm_config = wasmtime::Config::new();
-        wasm_config.wasm_component_model(true);
-        let engine = wasmtime::Engine::new(&wasm_config)
-            .map_err(|e| RegistryError::RuntimeError(e.to_string()))?;
+        let engine = wasm::component_engine(|_| {})
+            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
+
+        // One extractor (engine + parsed component + linker pre) shared
+        // across every mount; the per-call sandbox lives on a fresh
+        // `wasmtime::Store`.
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new()
+                .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
+        );
 
         let mut instances = HashMap::new();
         let mut root_mount = None;
@@ -59,7 +67,7 @@ impl ProviderRegistry {
                 continue;
             }
 
-            match Self::load_instance(&engine, &path, plugin_dir, cloner, cache_dir) {
+            match Self::load_instance(&engine, &path, plugin_dir, cloner, cache_dir, &extractor) {
                 Ok((mount, is_root, runtime)) => {
                     if instances.contains_key(&mount) {
                         tracing::warn!(
@@ -106,6 +114,7 @@ impl ProviderRegistry {
         plugin_dir: &Path,
         cloner: &Arc<GitCloner>,
         cache_dir: &Path,
+        extractor: &Arc<ArchiveExtractorComponent>,
     ) -> Result<(String, bool, CalloutRuntime), RegistryError> {
         let config = InstanceConfig::from_file(config_path)
             .map_err(|e| RegistryError::ConfigError(e.to_string()))?;
@@ -125,6 +134,7 @@ impl ProviderRegistry {
             cloner.clone(),
             cache_dir,
             &config.mount,
+            extractor.clone(),
         )
         .map_err(|e| match e {
             RuntimeError::InvalidConfig(message) => RegistryError::ConfigError(format!(

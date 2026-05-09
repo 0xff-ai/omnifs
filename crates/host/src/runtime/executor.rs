@@ -7,11 +7,10 @@
 
 use crate::auth::AuthManager;
 use crate::runtime::capability::CapabilityChecker;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -20,6 +19,8 @@ pub enum ErrorKind {
     Denied,
     NotFound,
     RateLimited,
+    InvalidInput,
+    TooLarge,
     Internal,
 }
 
@@ -31,6 +32,9 @@ pub enum CalloutResponse {
         body: Vec<u8>,
     },
     GitRepoOpened(u64),
+    BlobFetched(crate::runtime::blob::BlobRecord),
+    ArchiveOpened(u64),
+    BlobRead(Vec<u8>),
     Error {
         kind: ErrorKind,
         message: String,
@@ -112,7 +116,7 @@ impl HttpExecutor {
         match req.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
-                let resp_headers = response_headers(response.headers());
+                let resp_headers = decode_response_headers(response.headers());
                 match response.bytes().await {
                     Ok(body) => CalloutResponse::HttpResponse {
                         status,
@@ -135,80 +139,8 @@ impl HttpExecutor {
     }
 }
 
-fn build_header_map(
-    auth_headers: &[(String, String)],
-    request_headers: &[(String, String)],
-) -> Result<HeaderMap, String> {
-    let mut header_map = HeaderMap::new();
-    append_headers(&mut header_map, auth_headers, "auth")?;
-    append_headers(&mut header_map, request_headers, "request")?;
-    Ok(header_map)
-}
-
-fn append_headers(
-    header_map: &mut HeaderMap,
-    headers: &[(String, String)],
-    source: &str,
-) -> Result<(), String> {
-    for (name, value) in headers {
-        let header_name = HeaderName::from_str(name)
-            .map_err(|error| format!("invalid {source} header name `{name}`: {error}"))?;
-        let header_value = HeaderValue::from_str(value).map_err(|error| {
-            format!(
-                "invalid {source} header value for `{}`: {error}",
-                header_name.as_str()
-            )
-        })?;
-        header_map.append(header_name, header_value);
-    }
-    Ok(())
-}
-
-fn response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| match value.to_str() {
-            Ok(value) => Some((name.as_str().to_string(), value.to_string())),
-            Err(error) => {
-                warn!(
-                    header = %name,
-                    err = %error,
-                    "dropping non-UTF8 response header because provider headers are UTF-8 only"
-                );
-                None
-            },
-        })
-        .collect()
-}
-
 fn owned_body(body: &[u8]) -> reqwest::Body {
     // reqwest owns the request body across the async send path, so a borrowed
     // provider slice has to be copied into an owned body here.
     reqwest::Body::from(body.to_vec())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_header_map_rejects_invalid_header_name() {
-        let error =
-            build_header_map(&[], &[("bad header".to_string(), "value".to_string())]).unwrap_err();
-        assert!(error.contains("invalid request header name"));
-    }
-
-    #[test]
-    fn response_headers_drop_non_utf8_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-valid", HeaderValue::from_static("ok"));
-        headers.insert("x-bytes", HeaderValue::from_bytes(b"\x80binary").unwrap());
-
-        let response_headers = response_headers(&headers);
-
-        assert_eq!(
-            response_headers,
-            vec![("x-valid".to_string(), "ok".to_string())]
-        );
-    }
 }

@@ -55,11 +55,23 @@ pub struct AuthConfig {
     pub scopes: Option<Vec<String>>,
 }
 
+/// Capability grants and runtime caps for one provider instance.
+///
+/// Domain and git grants constrain which external resources a provider
+/// can ask the host to reach. Blob caps bound host disk fetches and
+/// guest-visible `read-blob` responses independently.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CapabilitiesConfig {
+    /// HTTPS domains the provider may fetch.
     pub domains: Option<Vec<String>>,
+    /// Git remotes the provider may open.
     pub git_repos: Option<Vec<String>>,
+    /// Maximum memory granted to the provider component, in MiB.
     pub max_memory_mb: Option<u32>,
+    /// Maximum response-body bytes accepted by a `fetch-blob` callout.
+    pub max_fetch_blob_bytes: Option<u64>,
+    /// Maximum bytes returned by one `read-blob` callout.
+    pub max_read_blob_bytes: Option<u64>,
 }
 
 impl InstanceConfig {
