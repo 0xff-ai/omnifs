@@ -9,27 +9,22 @@
 //! bind-mount path that already serves git clones. There are no
 //! per-file callouts; extraction happens inside the WASI sandbox.
 
+#[cfg(test)]
+use crate::runtime::blob::BlobRecordDraft;
 use crate::runtime::blob::{BlobCache, BlobRecord};
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
-use crate::runtime::sandbox::tree_cache::{MaterializeError, MaterializedTree, TreeMaterializer};
+use crate::runtime::sandbox::tree_cache::{
+    MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
+};
+#[cfg(test)]
+use crate::runtime::tools::archive as archive_tool;
 use crate::runtime::tools::archive::{
-    self as archive_tool, ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
-    ExtractorLimits,
+    ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
 };
 use crate::runtime::tree_registry::TreeRegistry;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ArchiveError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("extractor sandbox: {0}")]
-    Extractor(#[from] ExtractError),
-    #[error("audit: extractor reported {reported} bytes but disk holds {audited}")]
-    AuditMismatch { reported: u64, audited: u64 },
-}
 
 /// Per-provider archive extractor. Owns the on-disk extraction root and
 /// shares a [`TreeRegistry`] with the git executor so a returned
@@ -37,28 +32,60 @@ pub(crate) enum ArchiveError {
 /// extraction is delegated to the sandboxed
 /// [`ArchiveExtractorComponent`].
 ///
-/// Cached extraction directories are keyed by the full `(blob-id,
+/// Cached extraction directories are keyed by the full `(cache-key,
 /// format, strip-prefix)` view and published with a temporary directory
 /// rename, so a registered `tree-ref` never points at a partial tree.
 pub(crate) struct ArchiveExecutor {
     cache: Arc<BlobCache>,
     materializer: TreeMaterializer<ExtractKey>,
     extractor: Arc<ArchiveExtractorComponent>,
-    limits: ExtractorLimits,
-    /// Defense-in-depth check that walks the extracted directory and
-    /// confirms its byte total matches what the sandbox reported. Off
-    /// by default; the WASI preopen capability is what enforces the
-    /// scope; the audit only catches a counter bug in the host-shipped
-    /// wasm. Leaving it off keeps it from costing real time on large
-    /// source trees (Chromium-class).
-    audit_bytes: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ExtractKey {
-    blob_id: u64,
+    cache_key: String,
     format: ArchiveFormat,
     strip_prefix: Option<String>,
+}
+
+impl ExtractKey {
+    fn new(
+        cache_key: impl Into<String>,
+        format: ArchiveFormat,
+        strip_prefix: Option<String>,
+    ) -> Self {
+        Self {
+            cache_key: cache_key.into(),
+            format,
+            strip_prefix,
+        }
+    }
+}
+
+impl TreeKey for ExtractKey {
+    fn dir_name(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.cache_key.as_bytes());
+        match &self.strip_prefix {
+            Some(strip_prefix) => {
+                hasher.update([1]);
+                hasher.update(strip_prefix.as_bytes());
+            },
+            None => hasher.update([0]),
+        }
+        let digest = hasher.finalize();
+        format!(
+            "{}-{}",
+            archive_format_component(self.format),
+            hex_prefix(&digest, 16),
+        )
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ArchiveError {
+    #[error("{0}")]
+    Extract(#[from] ExtractError),
 }
 
 impl ArchiveExecutor {
@@ -72,18 +99,7 @@ impl ArchiveExecutor {
             cache,
             materializer: TreeMaterializer::new(extract_root, trees),
             extractor,
-            limits: archive_tool::DEFAULT_LIMITS,
-            audit_bytes: false,
         }
-    }
-
-    /// Enable the post-extract audit walk. Useful in tests; production
-    /// callers leave it off because the WASI preopen scope is the
-    /// real guarantee.
-    #[cfg(test)]
-    pub(crate) fn with_audit(mut self) -> Self {
-        self.audit_bytes = true;
-        self
     }
 
     pub(crate) fn open_archive(
@@ -93,25 +109,18 @@ impl ArchiveExecutor {
         strip_prefix: Option<&str>,
     ) -> CalloutResponse {
         let strip_prefix = strip_prefix.filter(|s| !s.is_empty()).map(str::to_string);
-        let key = ExtractKey {
-            blob_id,
-            format,
-            strip_prefix: strip_prefix.clone(),
-        };
-
-        let Some(record) = self.cache.lookup(blob_id) else {
-            return error(
+        let Some(record) = self.cache.lookup_by_id(blob_id) else {
+            return error_response(
                 ErrorKind::NotFound,
                 format!("blob {blob_id} not found"),
                 false,
             );
         };
+        let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
 
         let result = self
             .materializer
-            .materialize(&key, extraction_dir_name(&key), |tmp| {
-                self.extract_to(tmp, &key, &record, strip_prefix.as_deref())
-            });
+            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record));
         let tree = match result {
             Ok(MaterializedTree::Cached { tree }) => tree,
             Ok(MaterializedTree::Fresh {
@@ -119,23 +128,23 @@ impl ArchiveExecutor {
                 output: stats,
             }) => {
                 tracing::debug!(
-                    blob = blob_id,
+                    cache_key = key.cache_key,
                     entries = stats.entries,
                     bytes = stats.bytes_written,
                     "archive extracted"
                 );
                 tree
             },
-            Err(MaterializeError::Run(response)) => return response,
+            Err(MaterializeError::Run(e)) => return archive_error(e),
             Err(MaterializeError::Prepare(e)) => {
-                return error(
+                return error_response(
                     ErrorKind::Internal,
                     format!("prepare archive extraction: {e}"),
                     false,
                 );
             },
             Err(MaterializeError::Publish(e)) => {
-                return error(
+                return error_response(
                     ErrorKind::Internal,
                     format!("publish archive extraction: {e}"),
                     false,
@@ -150,48 +159,22 @@ impl ArchiveExecutor {
         tmp: &Path,
         key: &ExtractKey,
         record: &BlobRecord,
-        strip_prefix: Option<&str>,
-    ) -> Result<ExtractStats, CalloutResponse> {
-        let stats =
-            match self
-                .extractor
-                .extract(key.format, &record.path, tmp, strip_prefix, self.limits)
-            {
-                Ok(stats) => stats,
-                Err(e) => {
-                    tracing::warn!(blob = key.blob_id, error = %e, "archive extraction failed");
-                    return Err(error(error_kind_for(&e), e.to_string(), false));
-                },
-            };
-
-        if self.audit_bytes
-            && let Err(e) = audit(tmp, stats)
-        {
-            tracing::warn!(blob = key.blob_id, error = %e, "post-extract audit failed");
-            return Err(error(ErrorKind::Internal, e.to_string(), false));
-        }
+    ) -> Result<ExtractStats, ArchiveError> {
+        let blob_path = self.cache.blob_path(&record.cache_key);
+        let stats = match self.extractor.extract(
+            key.format,
+            &blob_path,
+            tmp,
+            key.strip_prefix.as_deref(),
+        ) {
+            Ok(stats) => stats,
+            Err(e) => {
+                tracing::warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
+                return Err(e.into());
+            },
+        };
         Ok(stats)
     }
-}
-
-fn extraction_dir_name(key: &ExtractKey) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.blob_id.to_le_bytes());
-    hasher.update(archive_format_component(key.format).as_bytes());
-    match &key.strip_prefix {
-        Some(strip_prefix) => {
-            hasher.update([1]);
-            hasher.update(strip_prefix.as_bytes());
-        },
-        None => hasher.update([0]),
-    }
-    let digest = hasher.finalize();
-    format!(
-        "{}-{}-{}",
-        key.blob_id,
-        archive_format_component(key.format),
-        hex_prefix(&digest, 16)
-    )
 }
 
 fn archive_format_component(format: ArchiveFormat) -> &'static str {
@@ -224,7 +207,15 @@ fn error_kind_for(error: &ExtractError) -> ErrorKind {
     }
 }
 
-fn error(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
+fn archive_error(error: ArchiveError) -> CalloutResponse {
+    match error {
+        ArchiveError::Extract(error) => {
+            error_response(error_kind_for(&error), error.to_string(), false)
+        },
+    }
+}
+
+fn error_response(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
     CalloutResponse::Error {
         kind,
         message,
@@ -232,21 +223,7 @@ fn error(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
     }
 }
 
-/// Defense-in-depth audit: confirm the bytes the component reported
-/// match what's actually on disk. A mismatch can't happen if the
-/// sandbox's preopen-scoped writes are honest, but a bug in the
-/// component would show up here.
-fn audit(dest: &Path, stats: ExtractStats) -> Result<(), ArchiveError> {
-    let audited = archive_tool::audit_bytes_written(dest)?;
-    if audited != stats.bytes_written {
-        return Err(ArchiveError::AuditMismatch {
-            reported: stats.bytes_written,
-            audited,
-        });
-    }
-    Ok(())
-}
-
+/// Regression coverage for archive key stability and restart-safe materialization.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +276,7 @@ mod tests {
     #[test]
     fn extraction_dir_name_changes_with_full_key() {
         let base = ExtractKey {
-            blob_id: 7,
+            cache_key: "pkg-1.0.crate".to_string(),
             format: ArchiveFormat::TarGz,
             strip_prefix: Some("alpha/".into()),
         };
@@ -312,30 +289,28 @@ mod tests {
             ..base.clone()
         };
 
-        assert_ne!(
-            extraction_dir_name(&base),
-            extraction_dir_name(&different_strip)
-        );
-        assert_ne!(
-            extraction_dir_name(&base),
-            extraction_dir_name(&different_format)
-        );
+        assert_ne!(base.dir_name(), different_strip.dir_name());
+        assert_ne!(base.dir_name(), different_format.dir_name());
+        assert!(!base.dir_name().contains("pkg-1.0.crate"));
+        assert!(base.dir_name().starts_with("targz-"));
     }
 
-    fn insert_archive_blob(cache: &BlobCache, blob_path: PathBuf, archive_bytes: &[u8]) {
+    fn insert_archive_blob(
+        cache: &BlobCache,
+        cache_key: &str,
+        blob_path: PathBuf,
+        archive_bytes: &[u8],
+    ) -> u64 {
         std::fs::write(&blob_path, archive_bytes).unwrap();
-        cache.insert_for_test(
-            "pkg-1.0.crate",
-            BlobRecord {
-                id: 7,
-                path: blob_path,
-                size: archive_bytes.len() as u64,
-                content_type: Some("application/x-gzip".into()),
-                etag: None,
-                status: 200,
-                response_headers: Vec::new(),
-            },
-        );
+        let record = cache.store(BlobRecordDraft {
+            cache_key: cache_key.to_string(),
+            size: archive_bytes.len() as u64,
+            content_type: Some("application/x-gzip".into()),
+            etag: None,
+            status: 200,
+            response_headers: Vec::new(),
+        });
+        record.id
     }
 
     #[test]
@@ -349,14 +324,15 @@ mod tests {
         let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
 
         let blob_path = blob_cache_dir.join("pkg-1.0.crate");
-        insert_archive_blob(&cache, blob_path, &synthesize_targz());
+        let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", blob_path, &synthesize_targz());
 
         let trees = Arc::new(TreeRegistry::new());
-        let extractor = Arc::new(ArchiveExtractorComponent::new().expect("build extractor"));
-        let executor =
-            ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor).with_audit();
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
+        );
+        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
 
-        let response = executor.open_archive(7, ArchiveFormat::TarGz, Some("pkg-1.0/"));
+        let response = executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"));
         let tree = match response {
             CalloutResponse::ArchiveOpened(t) => t,
             other => panic!("unexpected response: {other:?}"),
@@ -376,18 +352,20 @@ mod tests {
         std::fs::create_dir_all(&archive_root).unwrap();
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
-        insert_archive_blob(
+        let blob_id = insert_archive_blob(
             &cache,
+            "multi-root.crate",
             blob_cache_dir.join("multi-root.crate"),
             &synthesize_multi_root_targz(),
         );
 
         let trees = Arc::new(TreeRegistry::new());
-        let extractor = Arc::new(ArchiveExtractorComponent::new().expect("build extractor"));
-        let executor =
-            ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor).with_audit();
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
+        );
+        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
 
-        let alpha = match executor.open_archive(7, ArchiveFormat::TarGz, Some("alpha/")) {
+        let alpha = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/")) {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected alpha response: {other:?}"),
         };
@@ -397,7 +375,7 @@ mod tests {
             "alpha\n"
         );
 
-        let beta = match executor.open_archive(7, ArchiveFormat::TarGz, Some("beta/")) {
+        let beta = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/")) {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected beta response: {other:?}"),
         };
@@ -427,18 +405,20 @@ mod tests {
         std::fs::create_dir_all(&archive_root).unwrap();
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
-        insert_archive_blob(
+        let blob_id = insert_archive_blob(
             &cache,
+            "pkg-1.0.crate",
             blob_cache_dir.join("pkg-1.0.crate"),
             &synthesize_targz(),
         );
 
         let trees = Arc::new(TreeRegistry::new());
-        let extractor = Arc::new(ArchiveExtractorComponent::new().expect("build extractor"));
-        let executor =
-            ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor).with_audit();
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
+        );
+        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
 
-        let tree = match executor.open_archive(7, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
+        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
@@ -459,15 +439,71 @@ mod tests {
         std::fs::create_dir_all(&archive_root).unwrap();
         let stale = archive_root.join(".7-targz-deadbeef.tmp.123.456");
         std::fs::create_dir_all(&stale).unwrap();
-        let keep = archive_root.join("7-targz-live");
+        let key = ExtractKey {
+            cache_key: "pkg-1.0.crate".into(),
+            format: ArchiveFormat::TarGz,
+            strip_prefix: Some("pkg-1.0/".into()),
+        };
+        let keep = archive_root.join(key.dir_name());
         std::fs::create_dir_all(&keep).unwrap();
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir));
         let trees = Arc::new(TreeRegistry::new());
-        let extractor = Arc::new(ArchiveExtractorComponent::new().expect("build extractor"));
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
+        );
         let _executor = ArchiveExecutor::new(cache, trees, archive_root, extractor);
 
         assert!(!stale.exists());
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn fresh_materializer_reuses_existing_extracted_tree_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_cache_dir = tmp.path().join("blobs");
+        let archive_root = tmp.path().join("archives");
+        std::fs::create_dir_all(&blob_cache_dir).unwrap();
+        std::fs::create_dir_all(&archive_root).unwrap();
+
+        let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
+        let blob_id = insert_archive_blob(
+            &cache,
+            "pkg-1.0.crate",
+            blob_cache_dir.join("pkg-1.0.crate"),
+            &synthesize_targz(),
+        );
+
+        let trees = Arc::new(TreeRegistry::new());
+        let extractor = Arc::new(
+            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
+        );
+        let executor = ArchiveExecutor::new(
+            cache.clone(),
+            trees.clone(),
+            archive_root.clone(),
+            extractor.clone(),
+        );
+
+        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
+            CalloutResponse::ArchiveOpened(tree) => tree,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        let first_root = trees.resolve(tree).expect("tree-ref resolves");
+        let marker = first_root.join(".reuse-marker");
+        std::fs::write(&marker, b"stable").unwrap();
+
+        let second_trees = Arc::new(TreeRegistry::new());
+        let second_executor =
+            ArchiveExecutor::new(cache, second_trees.clone(), archive_root.clone(), extractor);
+
+        let tree =
+            match second_executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
+                CalloutResponse::ArchiveOpened(tree) => tree,
+                other => panic!("unexpected response: {other:?}"),
+            };
+        let second_root = second_trees.resolve(tree).expect("tree-ref resolves");
+        assert_eq!(first_root, second_root);
+        assert!(marker.exists());
     }
 }

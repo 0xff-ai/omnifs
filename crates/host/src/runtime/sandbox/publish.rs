@@ -45,6 +45,10 @@ pub(crate) fn temp_sibling_path(dest: &Path) -> PathBuf {
 }
 
 /// Remove stale temp publish paths from a cache root.
+///
+/// Cache roots are owned by one host process at a time; this sweep treats
+/// all matching names as stale without checking whether the recorded pid is
+/// still alive.
 pub(crate) fn sweep_temp_publish_dirs(root: &Path) -> std::io::Result<()> {
     if !root.exists() {
         std::fs::create_dir_all(root)?;

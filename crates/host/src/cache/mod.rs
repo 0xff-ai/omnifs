@@ -27,6 +27,8 @@ pub enum RecordKind {
 }
 
 impl RecordKind {
+    pub const ALL: [Self; 4] = [Self::Lookup, Self::Attr, Self::Dirents, Self::File];
+
     fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Lookup),
@@ -34,6 +36,21 @@ impl RecordKind {
             2 => Some(Self::Dirents),
             3 => Some(Self::File),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub struct Key {
+    pub path: String,
+    pub kind: RecordKind,
+}
+
+impl Key {
+    pub fn new(path: impl Into<String>, kind: RecordKind) -> Self {
+        Self {
+            path: path.into(),
+            kind,
         }
     }
 }

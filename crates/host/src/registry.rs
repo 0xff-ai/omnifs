@@ -5,7 +5,7 @@
 
 use crate::config::InstanceConfig;
 use crate::runtime::cloner::GitCloner;
-use crate::runtime::tools::archive::ArchiveExtractorComponent;
+use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::runtime::wasm;
 use crate::runtime::{CalloutRuntime, RuntimeError};
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ impl ProviderRegistry {
         // across every mount; the per-call sandbox lives on a fresh
         // `wasmtime::Store`.
         let extractor = Arc::new(
-            ArchiveExtractorComponent::new()
+            ArchiveExtractorComponent::new(DEFAULT_LIMITS)
                 .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
         );
 

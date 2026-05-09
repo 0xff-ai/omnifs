@@ -25,8 +25,8 @@ pub(crate) mod wasm;
 use crate::Provider;
 use crate::auth::AuthManager;
 use crate::cache;
-use crate::cache::l2::BrowseCacheL2;
-use crate::cache::{CacheRecord, RecordKind};
+use crate::cache::l2::Cache as L2Cache;
+use crate::cache::{CacheRecord, Key, RecordKind};
 use crate::config::InstanceConfig;
 use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
@@ -77,7 +77,7 @@ pub struct CalloutRuntime {
     archive: Arc<ArchiveExecutor>,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRegistry>,
-    l2: Option<BrowseCacheL2>,
+    l2: Option<L2Cache>,
     invalidation: InvalidationState,
     activity_table: Mutex<ActivityTable>,
     declared_handlers: Vec<DeclaredHandler>,
@@ -211,7 +211,7 @@ impl CalloutRuntime {
 
         let l2 = {
             let db_path = provider_cache_root.join("browse.redb");
-            match BrowseCacheL2::open(&db_path) {
+            match L2Cache::open(&db_path) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
                     tracing::warn!(mount = mount_name, error = %e, "failed to open L2 browse cache");
@@ -291,12 +291,12 @@ impl CalloutRuntime {
     }
 
     pub fn cache_get(&self, path: &str, kind: RecordKind) -> Option<CacheRecord> {
-        self.l2.as_ref()?.get(path, kind).ok().flatten()
+        self.l2.as_ref()?.get(&Key::new(path, kind)).ok().flatten()
     }
 
     pub fn cache_put(&self, path: &str, kind: RecordKind, record: &CacheRecord) {
         if let Some(ref l2) = self.l2
-            && let Err(e) = l2.put(path, kind, record)
+            && let Err(e) = l2.put(&Key::new(path, kind), record)
         {
             tracing::debug!(path, error = %e, "L2 cache put failed");
         }
@@ -568,9 +568,10 @@ impl CalloutRuntime {
     pub fn read_blob_full(&self, blob_id: u64) -> Result<Vec<u8>> {
         let record = self
             .blob_cache
-            .lookup(blob_id)
+            .lookup_by_id(blob_id)
             .ok_or_else(|| RuntimeError::ProviderError(format!("blob {blob_id} not found")))?;
-        std::fs::read(&record.path)
+        let path = self.blob_cache.blob_path(&record.cache_key);
+        std::fs::read(path)
             .map_err(|e| RuntimeError::ProviderError(format!("read blob {blob_id}: {e}")))
     }
 

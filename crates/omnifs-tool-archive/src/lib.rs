@@ -37,10 +37,10 @@ impl Guest for ExtractorComponent {
         match options.format {
             ArchiveFormat::TarGz => {
                 let decoder = flate2::read::GzDecoder::new(blob);
-                extract_tar(decoder, strip_prefix, &limits)
+                extract_tar(decoder, &limits, strip_prefix)
             },
-            ArchiveFormat::Tar => extract_tar(blob, strip_prefix, &limits),
-            ArchiveFormat::Zip => extract_zip(blob, strip_prefix, &limits),
+            ArchiveFormat::Tar => extract_tar(blob, &limits, strip_prefix),
+            ArchiveFormat::Zip => extract_zip(blob, &limits, strip_prefix),
         }
     }
 }
@@ -51,6 +51,7 @@ export!(ExtractorComponent);
 // the WIT `extract-options` record and the host's `ExtractorLimits`.
 // Renaming would diverge three structs; leave them aligned.
 #[allow(clippy::struct_field_names)]
+#[derive(Clone, Copy)]
 struct Limits {
     max_entries: u64,
     max_file_size: u64,
@@ -103,6 +104,90 @@ impl Counter {
     }
 }
 
+struct Extraction<'a> {
+    limits: Limits,
+    counter: Counter,
+    buf: Vec<u8>,
+    strip_prefix: Option<&'a str>,
+}
+
+impl<'a> Extraction<'a> {
+    fn new(strip_prefix: Option<&'a str>, limits: Limits) -> Self {
+        Self {
+            limits,
+            counter: Counter::default(),
+            buf: vec![0u8; 64 * 1024],
+            strip_prefix,
+        }
+    }
+
+    /// Apply the post-classification work that's identical across every
+    /// archive backend: count + cap-check, write or refuse, advance the
+    /// total-bytes counter. Backends only have to convert their own
+    /// per-entry shape into [`EntryShape`].
+    fn process_entry<R: Read>(
+        &mut self,
+        rel: &Path,
+        shape: EntryShape,
+        reader: &mut R,
+    ) -> Result<(), ExtractError> {
+        match shape {
+            EntryShape::Dir => {
+                self.counter.check_entry_count(&self.limits)?;
+                self.counter.entries += 1;
+                ensure_dir(&join_out(rel))
+            },
+            EntryShape::Link => {
+                // Refuse links: a benign archive can express its layout
+                // without them, and resolving them inside a sandbox is an
+                // attack class we don't need to support.
+                Err(ExtractError::UnsupportedEntryKind(format!(
+                    "{} (link)",
+                    rel.display()
+                )))
+            },
+            EntryShape::Other(detail) => Err(ExtractError::UnsupportedEntryKind(format!(
+                "{} ({detail})",
+                rel.display()
+            ))),
+            EntryShape::File { size } => {
+                if size > self.limits.max_file_size {
+                    return Err(ExtractError::FileTooLarge(rel.display().to_string()));
+                }
+                self.counter.check_entry_count(&self.limits)?;
+                self.counter.entries += 1;
+                let dest = join_out(rel);
+                if let Some(parent) = dest.parent() {
+                    ensure_dir(parent)?;
+                }
+                self.stream_to_file(reader, &dest)
+            },
+        }
+    }
+
+    fn stream_to_file<R: Read>(&mut self, entry: &mut R, dest: &Path) -> Result<(), ExtractError> {
+        let mut out = std::fs::File::create(dest)
+            .map_err(|e| ExtractError::Io(format!("create {}: {e}", dest.display())))?;
+        let mut written: u64 = 0;
+        loop {
+            let n = match entry.read(&mut self.buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(ExtractError::Io(e.to_string())),
+            };
+            let candidate = written.saturating_add(n as u64);
+            if candidate > self.limits.max_file_size {
+                return Err(ExtractError::FileTooLarge(dest.display().to_string()));
+            }
+            self.counter.add_bytes(n as u64, &self.limits)?;
+            out.write_all(&self.buf[..n])
+                .map_err(|e| ExtractError::Io(format!("write {}: {e}", dest.display())))?;
+            written = candidate;
+        }
+        Ok(())
+    }
+}
+
 enum EntryShape {
     Dir,
     File { size: u64 },
@@ -112,12 +197,11 @@ enum EntryShape {
 
 fn extract_tar<R: Read>(
     reader: R,
-    strip_prefix: Option<&str>,
     limits: &Limits,
+    strip_prefix: Option<&str>,
 ) -> Result<ExtractStats, ExtractError> {
     let mut archive = tar::Archive::new(reader);
-    let mut counter = Counter::default();
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut extraction = Extraction::new(strip_prefix, *limits);
 
     let entries = archive
         .entries()
@@ -128,7 +212,8 @@ fn extract_tar<R: Read>(
             .path()
             .map_err(|e| ExtractError::Malformed(e.to_string()))?
             .into_owned();
-        let Some(rel) = sanitize_path(&raw_path, strip_prefix, limits)? else {
+        let Some(rel) = sanitize_path(&raw_path, extraction.strip_prefix, &extraction.limits)?
+        else {
             continue;
         };
         let header = entry.header();
@@ -144,21 +229,20 @@ fn extract_tar<R: Read>(
         } else {
             EntryShape::Other(format!("{kind:?}"))
         };
-        process_entry(&rel, shape, &mut entry, &mut counter, &mut buf, limits)?;
+        extraction.process_entry(&rel, shape, &mut entry)?;
     }
 
-    Ok(counter.into_stats())
+    Ok(extraction.counter.into_stats())
 }
 
 fn extract_zip<R: Read + std::io::Seek>(
     reader: R,
-    strip_prefix: Option<&str>,
     limits: &Limits,
+    strip_prefix: Option<&str>,
 ) -> Result<ExtractStats, ExtractError> {
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|e| ExtractError::Malformed(e.to_string()))?;
-    let mut counter = Counter::default();
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut extraction = Extraction::new(strip_prefix, *limits);
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -167,7 +251,8 @@ fn extract_zip<R: Read + std::io::Seek>(
         let Some(enclosed) = entry.enclosed_name() else {
             return Err(ExtractError::UnsafePath(entry.name().to_string()));
         };
-        let Some(rel) = sanitize_path(&enclosed, strip_prefix, limits)? else {
+        let Some(rel) = sanitize_path(&enclosed, extraction.strip_prefix, &extraction.limits)?
+        else {
             continue;
         };
         let shape = if entry.is_dir() {
@@ -177,57 +262,10 @@ fn extract_zip<R: Read + std::io::Seek>(
         } else {
             EntryShape::File { size: entry.size() }
         };
-        process_entry(&rel, shape, &mut entry, &mut counter, &mut buf, limits)?;
+        extraction.process_entry(&rel, shape, &mut entry)?;
     }
 
-    Ok(counter.into_stats())
-}
-
-/// Apply the post-classification work that's identical across every
-/// archive backend: count + cap-check, write or refuse, advance the
-/// total-bytes counter. Backends only have to convert their own
-/// per-entry shape into [`EntryShape`].
-fn process_entry<R: Read>(
-    rel: &Path,
-    shape: EntryShape,
-    reader: &mut R,
-    counter: &mut Counter,
-    buf: &mut [u8],
-    limits: &Limits,
-) -> Result<(), ExtractError> {
-    match shape {
-        EntryShape::Dir => {
-            counter.check_entry_count(limits)?;
-            counter.entries += 1;
-            ensure_dir(&join_out(rel))
-        },
-        EntryShape::Link => {
-            // Refuse links: a benign archive can express its layout
-            // without them, and resolving them inside a sandbox is an
-            // attack class we don't need to support.
-            Err(ExtractError::UnsupportedEntryKind(format!(
-                "{} (link)",
-                rel.display()
-            )))
-        },
-        EntryShape::Other(detail) => Err(ExtractError::UnsupportedEntryKind(format!(
-            "{} ({detail})",
-            rel.display()
-        ))),
-        EntryShape::File { size } => {
-            if size > limits.max_file_size {
-                return Err(ExtractError::FileTooLarge(rel.display().to_string()));
-            }
-            counter.check_entry_count(limits)?;
-            counter.entries += 1;
-            let dest = join_out(rel);
-            if let Some(parent) = dest.parent() {
-                ensure_dir(parent)?;
-            }
-            let written = stream_to_file(reader, &dest, buf, limits)?;
-            counter.add_bytes(written, limits)
-        },
-    }
+    Ok(extraction.counter.into_stats())
 }
 
 /// Validate an archive entry's path. Returns:
@@ -295,34 +333,4 @@ fn ensure_dir(path: &Path) -> Result<(), ExtractError> {
         )));
     }
     Ok(())
-}
-
-/// Stream `entry` into `dest`, enforcing per-file and total-byte caps.
-/// Returns the number of bytes actually written. The caller-owned `buf`
-/// is reused across files in the same archive to avoid per-file
-/// allocator churn through wasm linear memory.
-fn stream_to_file<R: Read>(
-    entry: &mut R,
-    dest: &Path,
-    buf: &mut [u8],
-    limits: &Limits,
-) -> Result<u64, ExtractError> {
-    let mut out = std::fs::File::create(dest)
-        .map_err(|e| ExtractError::Io(format!("create {}: {e}", dest.display())))?;
-    let mut written: u64 = 0;
-    loop {
-        let n = match entry.read(buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => return Err(ExtractError::Io(e.to_string())),
-        };
-        let candidate = written.saturating_add(n as u64);
-        if candidate > limits.max_file_size {
-            return Err(ExtractError::FileTooLarge(dest.display().to_string()));
-        }
-        out.write_all(&buf[..n])
-            .map_err(|e| ExtractError::Io(format!("write {}: {e}", dest.display())))?;
-        written = candidate;
-    }
-    Ok(written)
 }

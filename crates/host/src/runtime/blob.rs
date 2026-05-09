@@ -12,21 +12,23 @@ use crate::auth::AuthManager;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
+use crate::runtime::sandbox::publish;
 use dashmap::DashMap;
 use futures::StreamExt;
-use sha2::Digest;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MAX_FETCH_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READ_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const BLOB_TMP_DIR: &str = ".tmp";
+const BLOB_META_DIR: &str = ".meta";
 
 /// Host-side size limits for blob fetches and guest-visible reads.
 ///
@@ -52,14 +54,14 @@ impl Default for BlobLimits {
 
 /// Metadata for a blob resident in the host cache.
 ///
-/// The host stores the bytes at [`Self::path`] and hands the rest of
-/// this record back to the provider as fetch metadata.
+/// The host stores the bytes at `BlobCache::blob_path(cache_key)` and
+/// hands this record back to the provider as fetch metadata.
 #[derive(Debug, Clone)]
 pub struct BlobRecord {
     /// Runtime-local blob id exposed through WIT as `blob-id`.
     pub id: u64,
-    /// Filesystem path to the cached blob bytes.
-    pub path: PathBuf,
+    /// Stable cache key supplied by the provider.
+    pub cache_key: String,
     /// Size of the cached blob in bytes.
     pub size: u64,
     /// Response `Content-Type`, when present.
@@ -72,13 +74,24 @@ pub struct BlobRecord {
     pub response_headers: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BlobRecordDraft {
+    pub cache_key: String,
+    pub size: u64,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub status: u16,
+    pub response_headers: Vec<(String, String)>,
+}
+
 /// Disk-backed blob store, scoped to a single provider runtime. Each
 /// blob is identified by a provider-supplied `cache-key` and assigned
 /// an in-memory `u64` id the WIT exposes as `blob-id`.
 ///
-/// IDs and the in-memory key index are not persisted across host
-/// restarts in v1. The on-disk file persists, but a restart re-fetches
-/// on first reuse. Persisting the index is a future enhancement.
+/// IDs and the in-memory key index are allocated at runtime and are
+/// not persisted across host restarts. Blob bytes and metadata are
+/// rehydrated from disk when the cache starts, so construction is
+/// synchronous and proportional to the number of cached blob files.
 pub struct BlobCache {
     cache_dir: PathBuf,
     keys: DashMap<String, u64>,
@@ -91,33 +104,152 @@ impl BlobCache {
     /// Create a cache rooted at `cache_dir` and clear stale temporary
     /// fetch files from a previous host process.
     pub fn new(cache_dir: PathBuf) -> Self {
-        // Startup cleanup + setup is best-effort; the actual fetch path
-        // re-creates the dir and surfaces concrete filesystem errors.
-        let tmp_dir = cache_dir.join(BLOB_TMP_DIR);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        let _ = std::fs::create_dir_all(&tmp_dir);
-        Self {
+        let cache = Self {
             cache_dir,
             keys: DashMap::new(),
             blobs: DashMap::new(),
             locks: DashMap::new(),
             next_id: AtomicU64::new(1),
-        }
+        };
+
+        let tmp_dir = cache.cache_dir.join(BLOB_TMP_DIR);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        cache.rehydrate();
+        cache
     }
 
-    /// Look up cached blob metadata by runtime-local id.
-    pub fn lookup(&self, blob_id: u64) -> Option<Arc<BlobRecord>> {
+    /// Look up cached metadata by runtime-local id.
+    pub fn lookup_by_id(&self, blob_id: u64) -> Option<Arc<BlobRecord>> {
         self.blobs.get(&blob_id).map(|r| r.clone())
     }
 
-    /// Register a pre-existing record under its declared id and key.
-    /// Used by tests; production code should always go through
-    /// [`BlobExecutor::fetch_blob`].
-    #[cfg(test)]
-    pub(crate) fn insert_for_test(&self, key: &str, record: BlobRecord) {
-        let id = record.id;
-        self.blobs.insert(id, Arc::new(record));
-        self.keys.insert(key.to_string(), id);
+    /// Look up cached metadata by provider cache key.
+    pub fn lookup_by_key(&self, cache_key: &str) -> Option<Arc<BlobRecord>> {
+        let id = self.keys.get(cache_key).map(|entry| *entry)?;
+        self.blobs.get(&id).map(|entry| entry.clone())
+    }
+
+    /// Return the filesystem path for a provider cache key.
+    pub(crate) fn blob_path(&self, cache_key: &str) -> PathBuf {
+        self.cache_dir.join(cache_key)
+    }
+
+    /// Store a blob in-memory index, assigning a runtime-local id.
+    pub(crate) fn store(&self, draft: BlobRecordDraft) -> Arc<BlobRecord> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let record = Arc::new(BlobRecord {
+            id,
+            cache_key: draft.cache_key,
+            size: draft.size,
+            content_type: draft.content_type,
+            etag: draft.etag,
+            status: draft.status,
+            response_headers: draft.response_headers,
+        });
+        self.blobs.insert(id, record.clone());
+        self.keys.insert(record.cache_key.clone(), id);
+        record
+    }
+
+    /// Load existing blob files from disk and populate the in-memory index.
+    fn rehydrate(&self) {
+        let mut dirs = vec![self.cache_dir.clone()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.filter_map(Result::ok) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == BLOB_TMP_DIR || name == BLOB_META_DIR {
+                    continue;
+                }
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+
+                let Some(relative_key) = path.strip_prefix(&self.cache_dir).ok() else {
+                    continue;
+                };
+                let cache_key = relative_key.to_string_lossy().into_owned();
+                if cache_key.is_empty() {
+                    continue;
+                }
+                if !is_safe_path_segment(&cache_key) {
+                    tracing::warn!(
+                        cache_key,
+                        path = %path.display(),
+                        "skipping unsafe rehydrated blob key"
+                    );
+                    continue;
+                }
+
+                let record = match self.rehydrate_record(&cache_key) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        tracing::warn!(
+                            cache_key,
+                            error = %error,
+                            path = %path.display(),
+                            "failed to rehydrate blob metadata"
+                        );
+                        continue;
+                    },
+                };
+                let _ = self.store(record);
+            }
+        }
+    }
+
+    /// Rehydrate a blob metadata record from disk state.
+    fn rehydrate_record(&self, cache_key: &str) -> Result<BlobRecordDraft, std::io::Error> {
+        let sidecar_path = sidecar_path(&self.cache_dir, cache_key);
+        let sidecar = match std::fs::read_to_string(&sidecar_path) {
+            Ok(raw) => serde_json::from_str::<BlobMetadata>(&raw).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("parse blob metadata {}: {error}", sidecar_path.display()),
+                )
+            })?,
+            Err(error) => return Err(error),
+        };
+        Ok(BlobRecordDraft {
+            cache_key: cache_key.to_owned(),
+            size: sidecar.size,
+            content_type: sidecar.content_type,
+            etag: sidecar.etag,
+            status: sidecar.status,
+            response_headers: sidecar.response_headers,
+        })
+    }
+
+    fn store_sidecar(&self, record: &BlobRecordDraft) -> Result<(), BlobError> {
+        let sidecar = BlobMetadata {
+            status: record.status,
+            content_type: record.content_type.clone(),
+            etag: record.etag.clone(),
+            response_headers: record.response_headers.clone(),
+            size: record.size,
+        };
+        let path = sidecar_path(&self.cache_dir, &record.cache_key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_vec_pretty(&sidecar).map_err(|error| {
+            BlobError::Io(std::io::Error::other(format!(
+                "serialize blob metadata: {error}"
+            )))
+        })?;
+        publish::replace_file_via_temp_rename(&path, &json)?;
+        Ok(())
     }
 
     fn key_lock(&self, key: &str) -> Arc<AsyncMutex<()>> {
@@ -126,6 +258,21 @@ impl BlobCache {
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
     }
+}
+
+fn sidecar_path(cache_root: &Path, cache_key: &str) -> PathBuf {
+    cache_root
+        .join(BLOB_META_DIR)
+        .join(format!("{cache_key}.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlobMetadata {
+    status: u16,
+    content_type: Option<String>,
+    etag: Option<String>,
+    response_headers: Vec<(String, String)>,
+    size: u64,
 }
 
 /// Errors raised while fetching, storing, or reading host-resident blobs.
@@ -156,10 +303,7 @@ fn is_safe_path_segment(s: &str) -> bool {
         if component.is_empty() || component == ".." || component == "." {
             return false;
         }
-        if component == BLOB_TMP_DIR {
-            return false;
-        }
-        if component.contains(MAIN_SEPARATOR) && MAIN_SEPARATOR != '/' {
+        if component == BLOB_TMP_DIR || component == BLOB_META_DIR {
             return false;
         }
     }
@@ -225,9 +369,7 @@ impl BlobExecutor {
         let _guard = lock.lock().await;
 
         // Fast path: another caller already populated the cache.
-        if let Some(id) = self.cache.keys.get(cache_key).map(|r| *r)
-            && let Some(record) = self.cache.blobs.get(&id).map(|r| r.clone())
-        {
+        if let Some(record) = self.cache.lookup_by_key(cache_key) {
             return CalloutResponse::BlobFetched((*record).clone());
         }
 
@@ -268,36 +410,41 @@ impl BlobExecutor {
         let content_type = lookup_header(&response_headers, "content-type");
 
         // Persist to disk.
-        let blob_path = self.cache.cache_dir.join(cache_key);
+        let blob_path = self.cache.blob_path(cache_key);
         if let Some(parent) = blob_path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             return error(ErrorKind::Internal, format!("create blob dir: {e}"), false);
         }
-        let size = match stream_response_body(
+        let staged = match stream_response_body(
             response,
             &self.cache.cache_dir,
-            &blob_path,
             self.limits.max_fetch_blob_bytes,
         )
         .await
         {
-            Ok(size) => size,
+            Ok(staged) => staged,
             Err(e) => return blob_error("fetch blob", e),
         };
+        let size = staged.size;
 
-        let id = self.cache.next_id.fetch_add(1, Ordering::Relaxed);
-        let record = Arc::new(BlobRecord {
-            id,
-            path: blob_path,
+        let record = BlobRecordDraft {
+            cache_key: cache_key.to_string(),
             size,
             content_type,
             etag,
             status,
             response_headers,
-        });
-        self.cache.blobs.insert(id, record.clone());
-        self.cache.keys.insert(cache_key.to_string(), id);
+        };
+        if let Err(error) = self.cache.store_sidecar(&record) {
+            return blob_error("store blob metadata", error);
+        }
+        if let Err(error) = staged.persist(&blob_path) {
+            // Best-effort: a stranded sidecar is overwritten by the next fetch for this key.
+            let _ = std::fs::remove_file(sidecar_path(&self.cache.cache_dir, cache_key));
+            return blob_error("publish blob", error);
+        }
+        let record = self.cache.store(record);
 
         CalloutResponse::BlobFetched((*record).clone())
     }
@@ -308,26 +455,40 @@ impl BlobExecutor {
     /// The configured read cap applies to the number of bytes returned
     /// by this call, not to the absolute offset.
     pub fn read_blob(&self, blob_id: u64, offset: u64, len: Option<u32>) -> CalloutResponse {
-        let Some(record) = self.cache.lookup(blob_id) else {
+        let Some(record) = self.cache.lookup_by_id(blob_id) else {
             return error(
                 ErrorKind::NotFound,
                 format!("blob {blob_id} not found"),
                 false,
             );
         };
-        match read_range(&record.path, offset, len, self.limits.max_read_blob_bytes) {
+        let path = self.cache.blob_path(&record.cache_key);
+        match read_range(&path, offset, len, self.limits.max_read_blob_bytes) {
             Ok(bytes) => CalloutResponse::BlobRead(bytes),
             Err(e) => blob_error("read blob", e),
         }
     }
 }
 
+struct StagedBlob {
+    tmp: tempfile::NamedTempFile,
+    size: u64,
+}
+
+impl StagedBlob {
+    fn persist(self, path: &Path) -> Result<(), BlobError> {
+        self.tmp
+            .persist(path)
+            .map_err(|error| BlobError::Io(error.into()))?;
+        Ok(())
+    }
+}
+
 async fn stream_response_body(
     response: reqwest::Response,
-    cache_dir: &Path,
-    path: &Path,
+    cache_root: &Path,
     max_bytes: u64,
-) -> Result<u64, BlobError> {
+) -> Result<StagedBlob, BlobError> {
     if let Some(content_length) = response.content_length()
         && content_length > max_bytes
     {
@@ -337,12 +498,14 @@ async fn stream_response_body(
             actual: content_length,
         });
     }
-    let tmp = temp_blob_path(cache_dir, path);
-    let result = async {
-        if let Some(parent) = tmp.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let mut file = tokio::fs::File::create(&tmp).await?;
+    let cache_dir = cache_root.join(BLOB_TMP_DIR);
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    async {
+        let mut tmp = tempfile::Builder::new()
+            .prefix("fetch-")
+            .suffix(".tmp")
+            .tempfile_in(cache_dir)
+            .map_err(BlobError::Io)?;
         let mut stream = response.bytes_stream();
         let mut total = 0_u64;
         while let Some(chunk) = stream.next().await {
@@ -364,45 +527,12 @@ async fn stream_response_body(
                     actual: total,
                 });
             }
-            file.write_all(&chunk).await?;
+            tmp.as_file_mut().write_all(&chunk).map_err(BlobError::Io)?;
         }
-        file.flush().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, path).await?;
-        Ok(total)
+        tmp.flush().map_err(BlobError::Io)?;
+        Ok(StagedBlob { tmp, size: total })
     }
-    .await;
-    if result.is_err() {
-        // Best-effort cleanup; the stream/write error is the primary
-        // failure returned to the provider.
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result
-}
-
-fn temp_blob_path(cache_dir: &Path, path: &Path) -> PathBuf {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    cache_dir.join(BLOB_TMP_DIR).join(format!(
-        "fetch-{}-{nanos}-{}",
-        std::process::id(),
-        hex_prefix(&digest, 8)
-    ))
-}
-
-fn hex_prefix(bytes: &[u8], len: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(len * 2);
-    for byte in bytes.iter().take(len) {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
+    .await
 }
 
 fn read_range(
@@ -472,6 +602,11 @@ mod tests {
         assert!(!is_safe_path_segment("a//b"));
         assert!(!is_safe_path_segment("a/./b"));
         assert!(!is_safe_path_segment(".tmp/fetch"));
+        assert!(!is_safe_path_segment(".meta/fetch"));
+        assert_eq!(
+            sidecar_path(Path::new("/cache"), "pkg/foo.bin"),
+            Path::new("/cache").join(".meta/pkg/foo.bin.json")
+        );
     }
 
     #[test]
@@ -518,18 +653,14 @@ mod tests {
         std::fs::write(&path, b"abcdef").unwrap();
 
         let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf()));
-        cache.insert_for_test(
-            "blob",
-            BlobRecord {
-                id: 1,
-                path,
-                size: 6,
-                content_type: None,
-                etag: None,
-                status: 200,
-                response_headers: Vec::new(),
-            },
-        );
+        let record = cache.store(BlobRecordDraft {
+            cache_key: "blob".into(),
+            size: 6,
+            content_type: None,
+            etag: None,
+            status: 200,
+            response_headers: Vec::new(),
+        });
         let capability = CapabilityChecker::new(CapabilityGrants {
             domains: Vec::new(),
             git_repos: Vec::new(),
@@ -547,7 +678,7 @@ mod tests {
         )
         .unwrap();
 
-        match executor.read_blob(1, 0, None) {
+        match executor.read_blob(record.id, 0, None) {
             CalloutResponse::Error {
                 kind: ErrorKind::TooLarge,
                 retryable: false,
@@ -560,24 +691,21 @@ mod tests {
     #[tokio::test]
     async fn stream_response_body_rejects_large_content_length_before_writing() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("blob");
         let response: reqwest::Response = http::Response::builder()
             .header(http::header::CONTENT_LENGTH, "5")
             .body(reqwest::Body::from("abcde"))
             .unwrap()
             .into();
 
-        let result = stream_response_body(response, tmp.path(), &path, 4).await;
+        let result = stream_response_body(response, tmp.path(), 4).await;
 
         assert!(matches!(result, Err(BlobError::TooLarge { actual: 5, .. })));
-        assert!(!path.exists());
         assert!(!tmp.path().join(BLOB_TMP_DIR).exists());
     }
 
     #[tokio::test]
     async fn stream_response_body_rejects_body_that_exceeds_cap() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("blob");
         let chunks = futures::stream::iter([
             Ok::<_, std::io::Error>(b"abc".to_vec()),
             Ok::<_, std::io::Error>(b"de".to_vec()),
@@ -587,15 +715,104 @@ mod tests {
             .unwrap()
             .into();
 
-        let result = stream_response_body(response, tmp.path(), &path, 4).await;
+        let result = stream_response_body(response, tmp.path(), 4).await;
 
         assert!(matches!(result, Err(BlobError::TooLarge { actual: 5, .. })));
-        assert!(!path.exists());
         assert!(
             std::fs::read_dir(tmp.path().join(BLOB_TMP_DIR))
                 .unwrap()
                 .next()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn stream_response_body_stages_until_explicit_publish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("blob");
+        let response: reqwest::Response = http::Response::builder()
+            .body(reqwest::Body::from("abcde"))
+            .unwrap()
+            .into();
+
+        let staged = stream_response_body(response, tmp.path(), 5)
+            .await
+            .expect("stage body");
+
+        assert_eq!(staged.size, 5);
+        assert!(!path.exists());
+        staged.persist(&path).expect("publish staged body");
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcde");
+    }
+
+    #[test]
+    fn rehydrates_existing_blob_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("blob-cache");
+        let cache_key = "pkg-1.0/foo.bin";
+        let blob_path = cache_root.join(cache_key);
+        let sidecar = sidecar_path(&cache_root, cache_key);
+        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&blob_path, b"hello world").unwrap();
+        std::fs::write(
+            &sidecar,
+            serde_json::to_vec_pretty(&BlobMetadata {
+                status: 200,
+                content_type: Some("text/plain".into()),
+                etag: Some("etag-1".into()),
+                response_headers: vec![("x-test".into(), "value".into())],
+                size: 11,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cache = BlobCache::new(cache_root.clone());
+        let record = cache
+            .lookup_by_key(cache_key)
+            .expect("expected rehydrated blob");
+
+        assert_eq!(record.cache_key, cache_key);
+        assert_eq!(cache.blob_path(&record.cache_key), blob_path);
+        assert_eq!(record.size, 11);
+        assert_eq!(record.status, 200);
+        assert_eq!(record.content_type, Some("text/plain".to_string()));
+        assert_eq!(record.etag, Some("etag-1".to_string()));
+        assert_eq!(
+            record.response_headers,
+            vec![("x-test".into(), "value".into())]
+        );
+    }
+
+    #[test]
+    fn rehydrate_skips_blob_with_malformed_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("blob-cache");
+        let cache_key = "pkg-1.0/foo.bin";
+        let blob_path = cache_root.join(cache_key);
+        let sidecar = sidecar_path(&cache_root, cache_key);
+        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&blob_path, b"hello world").unwrap();
+        std::fs::write(&sidecar, b"{not json").unwrap();
+
+        let cache = BlobCache::new(cache_root);
+
+        assert!(cache.lookup_by_key(cache_key).is_none());
+    }
+
+    #[test]
+    fn rehydrate_skips_blob_with_missing_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("blob-cache");
+        let cache_key = "old/path.bin";
+        let blob_path = cache_root.join(cache_key);
+        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+        std::fs::write(&blob_path, b"legacy").unwrap();
+
+        let cache = BlobCache::new(cache_root);
+
+        assert!(cache.lookup_by_key(cache_key).is_none());
     }
 }

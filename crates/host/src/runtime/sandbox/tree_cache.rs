@@ -28,6 +28,12 @@ pub(crate) enum MaterializeError<E> {
     Publish(std::io::Error),
 }
 
+/// Semantic key for a materialized tool output tree.
+pub(crate) trait TreeKey: Clone + Eq + Hash {
+    /// Stable directory name for this semantic view under the materializer root.
+    fn dir_name(&self) -> String;
+}
+
 /// Cache of tool-produced directory trees keyed by semantic view.
 ///
 /// The cache coalesces concurrent materializations of the same key,
@@ -42,7 +48,7 @@ pub(crate) struct TreeMaterializer<K> {
 
 impl<K> TreeMaterializer<K>
 where
-    K: Clone + Eq + Hash,
+    K: TreeKey,
 {
     /// Create a materializer rooted at `root` and sweep stale temp dirs.
     pub(crate) fn new(root: PathBuf, trees: Arc<TreeRegistry>) -> Self {
@@ -62,7 +68,6 @@ where
     pub(crate) fn materialize<R, E>(
         &self,
         key: &K,
-        dir_name: String,
         materialize: impl FnOnce(&Path) -> Result<R, E>,
     ) -> Result<MaterializedTree<R>, MaterializeError<E>> {
         if let Some(id) = self.trees_by_key.get(key).map(|r| *r) {
@@ -82,10 +87,18 @@ where
         }
 
         std::fs::create_dir_all(&self.root).map_err(MaterializeError::Prepare)?;
-        let dest = self.root.join(dir_name);
-        if dest.exists() {
+        let dest = self.root.join(key.dir_name());
+
+        if let Ok(metadata) = std::fs::symlink_metadata(&dest) {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                let tree = self.trees.register(dest);
+                self.trees_by_key.insert(key.clone(), tree);
+                self.locks.remove(key);
+                return Ok(MaterializedTree::Cached { tree });
+            }
             publish::remove_existing_path(&dest).map_err(MaterializeError::Prepare)?;
         }
+
         let tmp = publish::temp_sibling_path(&dest);
         if tmp.exists() {
             publish::remove_existing_path(&tmp).map_err(MaterializeError::Prepare)?;
@@ -96,12 +109,14 @@ where
             Ok(output) => output,
             Err(e) => {
                 publish::remove_path_best_effort(&tmp);
+                self.locks.remove(key);
                 return Err(MaterializeError::Run(e));
             },
         };
 
         if let Err(e) = publish::publish_dir_by_rename(&tmp, &dest) {
             publish::remove_path_best_effort(&tmp);
+            self.locks.remove(key);
             return Err(MaterializeError::Publish(e));
         }
 

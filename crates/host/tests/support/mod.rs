@@ -2,7 +2,7 @@ use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{FileContentResult, InlineFileContent};
 use omnifs_host::runtime::CalloutRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
-use omnifs_host::runtime::tools::archive::ArchiveExtractorComponent;
+use omnifs_host::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 #[allow(dead_code)]
 pub fn make_extractor() -> Arc<ArchiveExtractorComponent> {
-    Arc::new(ArchiveExtractorComponent::new().expect("build extractor"))
+    Arc::new(ArchiveExtractorComponent::new(DEFAULT_LIMITS).expect("build extractor"))
 }
 
 /// Borrow the inline payload of a `FileContentResult`, panicking if the

@@ -129,11 +129,12 @@ pub struct ExtractStats {
 pub struct ArchiveExtractorComponent {
     engine: Engine,
     instance_pre: InstancePre<ExtractorState>,
+    limits: ExtractorLimits,
 }
 
 impl ArchiveExtractorComponent {
     /// Compile and pre-instantiate the embedded extractor component.
-    pub fn new() -> Result<Self, ExtractError> {
+    pub fn new(limits: ExtractorLimits) -> Result<Self, ExtractError> {
         let engine = wasm::component_engine(|config| {
             config.consume_fuel(true);
         })
@@ -149,21 +150,21 @@ impl ArchiveExtractorComponent {
         Ok(Self {
             engine,
             instance_pre,
+            limits,
         })
     }
 
     /// Run extraction on `blob_path` (a regular file), writing to
     /// `dest_dir` (which the caller must have created). Returns the
-    /// component's reported stats; the host is expected to verify the
-    /// reported `bytes_written` against an audit walk of `dest_dir`.
+    /// component's reported stats.
     pub fn extract(
         &self,
         format: ArchiveFormat,
         blob_path: &Path,
         dest_dir: &Path,
         strip_prefix: Option<&str>,
-        limits: ExtractorLimits,
     ) -> Result<ExtractStats, ExtractError> {
+        let limits = self.limits;
         // Held to end of fn so the staged hardlink survives the call.
         let scratch = StagedBlob::stage(blob_path).map_err(|e| ExtractError::Io(e.to_string()))?;
 
@@ -248,55 +249,22 @@ impl WasiView for ExtractorState {
     }
 }
 
-/// Walk `root` and sum the bytes of every regular file. Used by the
-/// host to audit the component's reported `bytes_written`; defense in
-/// depth, since the sandbox can't actually exceed the limit but a
-/// future bug in the .wasm could under-report.
-pub(crate) fn audit_bytes_written(root: &Path) -> Result<u64, std::io::Error> {
-    fn visit(path: &Path, total: &mut u64) -> std::io::Result<()> {
-        let meta = std::fs::symlink_metadata(path)?;
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(path)? {
-                visit(&entry?.path(), total)?;
-            }
-        } else if meta.is_file() {
-            *total = total.saturating_add(meta.len());
-        }
-        Ok(())
-    }
-    let mut total = 0u64;
-    visit(root, &mut total)?;
-    Ok(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::path::PathBuf;
-    use std::sync::{Arc, OnceLock};
 
-    fn shared_extractor() -> &'static Arc<ArchiveExtractorComponent> {
-        static EXTRACTOR: OnceLock<Arc<ArchiveExtractorComponent>> = OnceLock::new();
-        EXTRACTOR
-            .get_or_init(|| Arc::new(ArchiveExtractorComponent::new().expect("build extractor")))
-    }
+    const CARGO_TOML_BYTES: &[u8] = b"[package]\nname = \"pkg\"\nversion = \"1.0.0\"\n";
+    const LIB_RS_BYTES: &[u8] = b"pub fn answer() -> u32 { 42 }\n";
 
     fn synthesize_targz() -> Vec<u8> {
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         {
             let mut tar = tar::Builder::new(&mut gz);
-            append_targz_file(
-                &mut tar,
-                "pkg-1.0/Cargo.toml",
-                b"[package]\nname = \"pkg\"\nversion = \"1.0.0\"\n",
-            );
-            append_targz_file(
-                &mut tar,
-                "pkg-1.0/src/lib.rs",
-                b"pub fn answer() -> u32 { 42 }\n",
-            );
+            append_targz_file(&mut tar, "pkg-1.0/Cargo.toml", CARGO_TOML_BYTES);
+            append_targz_file(&mut tar, "pkg-1.0/src/lib.rs", LIB_RS_BYTES);
             tar.finish().unwrap();
         }
         gz.finish().unwrap()
@@ -330,7 +298,8 @@ mod tests {
         write_blob(&blob_path, bytes);
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
-        let result = shared_extractor().extract(format, &blob_path, &dest, strip, limits);
+        let extractor = ArchiveExtractorComponent::new(limits).expect("build extractor");
+        let result = extractor.extract(format, &blob_path, &dest, strip);
         // Keep tmp alive for caller to inspect dest.
         std::mem::forget(tmp);
         (dest, result)
@@ -347,12 +316,14 @@ mod tests {
         );
         let stats = result.expect("extract ok");
         assert_eq!(stats.entries, 2);
+        assert_eq!(
+            stats.bytes_written,
+            (CARGO_TOML_BYTES.len() + LIB_RS_BYTES.len()) as u64
+        );
         let cargo = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("name = \"pkg\""));
         let lib = std::fs::read_to_string(dest.join("src").join("lib.rs")).unwrap();
         assert!(lib.contains("answer"));
-        let audited = audit_bytes_written(&dest).unwrap();
-        assert_eq!(audited, stats.bytes_written);
     }
 
     #[test]
