@@ -244,7 +244,7 @@ impl FuseFs {
             let key = entry.key();
             if key.mount != mount {
                 continue;
-            };
+            }
             let path = &key.path;
             let matches_exact = paths.iter().any(|p| p == path);
             let matches_prefix = prefixes
