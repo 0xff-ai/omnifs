@@ -39,9 +39,19 @@ impl CalloutRuntime {
                     kind: e.kind.clone(),
                 })
                 .collect();
-
+            // Exact implicit-prefix lookups return parent siblings, while projection
+            // lookups return children of the target. Cache them at the path they
+            // actually describe so dynamic prefixes stay traversable.
+            let cache_parent = if entries
+                .iter()
+                .any(|sibling| sibling.name == entry.target.name)
+            {
+                parent_path
+            } else {
+                child_path.as_str()
+            };
             self.cache_projection_batch(
-                &child_path,
+                cache_parent,
                 &entries,
                 &entry.sibling_files,
                 entry.exhaustive,
@@ -69,7 +79,6 @@ impl CalloutRuntime {
 
         Ok(Self::strip_projected_files(result))
     }
-
     pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OpResult> {
         let result = self
             .coalesced(path, || {

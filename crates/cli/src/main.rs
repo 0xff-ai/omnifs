@@ -6,11 +6,16 @@
 mod mount_tree;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use omnifs_host::config::InstanceConfig;
+use omnifs_host::registry::ProviderRegistry;
+use omnifs_host::runtime::cloner::GitCloner;
 use std::fmt::Write as _;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "omnifs", about = "omnifs: a virtual filesystem for everything")]
@@ -28,6 +33,12 @@ enum Commands {
         config_dir: Option<String>,
         #[arg(long)]
         cache_dir: Option<String>,
+        #[arg(long, value_enum, default_value_t = MountBackend::Auto)]
+        backend: MountBackend,
+        #[arg(long)]
+        nfs_port: Option<u16>,
+        #[arg(long)]
+        nfs_trace: Option<String>,
     },
     Unmount {
         #[arg(long)]
@@ -57,6 +68,112 @@ enum Commands {
         #[arg(long)]
         cache_dir: Option<String>,
     },
+    /// Start the `NFSv4` server without mounting it.
+    #[command(hide = true)]
+    NfsServe {
+        #[arg(long)]
+        config_dir: Option<String>,
+        #[arg(long)]
+        cache_dir: Option<String>,
+        #[arg(long)]
+        bind: Option<String>,
+        #[arg(long)]
+        ready_file: Option<String>,
+        #[arg(long)]
+        trace: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MountBackend {
+    Auto,
+    Fuse,
+    Nfs,
+}
+
+fn selected_backend(backend: MountBackend) -> MountBackend {
+    match backend {
+        MountBackend::Auto => default_backend(),
+        explicit => explicit,
+    }
+}
+
+fn default_backend() -> MountBackend {
+    if cfg!(target_os = "linux") {
+        MountBackend::Fuse
+    } else {
+        MountBackend::Nfs
+    }
+}
+
+fn load_registry(config_path: &Path, cache_path: &Path) -> anyhow::Result<Arc<ProviderRegistry>> {
+    let plugin_dir = config_path.join("plugins");
+    std::fs::create_dir_all(cache_path)?;
+
+    let cloner = Arc::new(GitCloner::new(cache_path.to_path_buf()));
+    tracing::info!(
+        config = %config_path.display(),
+        cache = %cloner.cache_dir().display(),
+        "loading providers"
+    );
+
+    let registry = ProviderRegistry::load(config_path, &plugin_dir, &cloner, cloner.cache_dir())?;
+    for mount_name in registry.mounts() {
+        if let Some(runtime) = registry.get(&mount_name) {
+            match runtime.initialize() {
+                Ok(_) => tracing::info!(mount = mount_name, "provider initialized"),
+                Err(e) => tracing::warn!(mount = mount_name, error = %e, "init failed"),
+            }
+        }
+    }
+    Ok(Arc::new(registry))
+}
+
+fn nfs_options(
+    config_path: &Path,
+    port: Option<u16>,
+    trace_path: Option<PathBuf>,
+) -> omnifs_nfs::NfsMountOptions {
+    let mut options = omnifs_nfs::NfsMountOptions::loopback(config_path.join("state").join("nfs"));
+    options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port.unwrap_or(0));
+    options.trace_path = trace_path;
+    options
+}
+
+fn parse_bind(bind: Option<&str>) -> anyhow::Result<SocketAddr> {
+    bind.map_or_else(
+        || Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+        |bind| {
+            bind.parse::<SocketAddr>()
+                .with_context(|| format!("invalid --bind value: {bind}"))
+        },
+    )
+}
+
+fn run_nfs_serve(
+    config_dir: Option<String>,
+    cache_dir: Option<String>,
+    bind: Option<&str>,
+    ready_file: Option<String>,
+    trace: Option<String>,
+) -> anyhow::Result<()> {
+    use omnifs_nfs::{OmnifsExport, start_server};
+    use tokio::runtime::Handle;
+
+    let config_path = config_dir.map_or_else(default_config_dir, PathBuf::from);
+    let cache_path = cache_dir.map_or_else(|| default_cache_dir(&config_path), PathBuf::from);
+    let registry = load_registry(&config_path, &cache_path)?;
+    let rt = Handle::current();
+    registry.start_timers(&rt);
+    let export = Arc::new(OmnifsExport::new(rt, Arc::clone(&registry)));
+    let server = start_server(export, parse_bind(bind)?, trace.map(PathBuf::from))?;
+    if let Some(ready_file) = ready_file {
+        fs::write(ready_file, server.addr().port().to_string())?;
+    }
+    println!("nfs_addr={}", server.addr());
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +394,11 @@ fn find_mount(path: &Path) -> anyhow::Result<Option<MountInfo>> {
         .find(|mount| normalize_path(&mount.mount_point) == wanted))
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn mount_uses_nfs_unmount(mount: &MountInfo) -> bool {
+    matches!(mount.fs_type.as_str(), "nfs" | "nfs4")
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
@@ -470,9 +592,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 fn run(cli: Cli) -> anyhow::Result<()> {
     use omnifs_host::mount;
-    use omnifs_host::registry::ProviderRegistry;
-    use omnifs_host::runtime::cloner::GitCloner;
-    use std::sync::Arc;
+    use omnifs_nfs as nfs;
     use tokio::runtime::Handle;
 
     match cli.command {
@@ -480,48 +600,44 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             mount_point,
             config_dir,
             cache_dir,
+            backend,
+            nfs_port,
+            nfs_trace,
         } => {
             let config_path = config_dir.map_or_else(default_config_dir, PathBuf::from);
             let cache_path =
                 cache_dir.map_or_else(|| default_cache_dir(&config_path), PathBuf::from);
-            let plugin_dir = config_path.join("plugins");
             let mount_path = PathBuf::from(&mount_point);
 
             std::fs::create_dir_all(&mount_path)?;
-            std::fs::create_dir_all(&cache_path)?;
-
-            // Construct the shared GitCloner early and pass it to all components.
-            let cloner = Arc::new(GitCloner::new(cache_path));
-
-            tracing::info!(
-                mount_point,
-                config = %config_path.display(),
-                cache = %cloner.cache_dir().display(),
-                "loading providers"
-            );
-
-            let registry =
-                ProviderRegistry::load(&config_path, &plugin_dir, &cloner, cloner.cache_dir())?;
-
-            for mount_name in registry.mounts() {
-                if let Some(runtime) = registry.get(&mount_name) {
-                    match runtime.initialize() {
-                        Ok(_) => tracing::info!(mount = mount_name, "provider initialized"),
-                        Err(e) => tracing::warn!(mount = mount_name, error = %e, "init failed"),
-                    }
-                }
-            }
-
-            let registry = Arc::new(registry);
+            let registry = load_registry(&config_path, &cache_path)?;
             let rt = Handle::current();
             registry.start_timers(&rt);
 
-            tracing::info!(mount_point, "starting FUSE mount");
-            mount::mount_blocking(&mount_path, &registry, rt)?;
+            match selected_backend(backend) {
+                MountBackend::Fuse => {
+                    tracing::info!(mount_point, "starting FUSE mount");
+                    mount::mount_blocking(&mount_path, &registry, rt)?;
+                },
+                MountBackend::Nfs => {
+                    tracing::info!(mount_point, "starting NFS loopback mount");
+                    let options = nfs_options(&config_path, nfs_port, nfs_trace.map(PathBuf::from));
+                    nfs::mount_blocking(&mount_path, &registry, rt, &options)?;
+                },
+                MountBackend::Auto => unreachable!("auto backend should be resolved"),
+            }
             Ok(())
         },
         Commands::Unmount { mount_point } => {
-            mount::unmount(&PathBuf::from(mount_point))?;
+            let mount_path = PathBuf::from(mount_point);
+            if find_mount(&mount_path)?
+                .as_ref()
+                .is_some_and(mount_uses_nfs_unmount)
+            {
+                nfs::unmount(&mount_path)?;
+            } else {
+                mount::unmount(&mount_path)?;
+            }
             Ok(())
         },
         Commands::PluginInfo { path: _ } => Err(anyhow::anyhow!("plugin info not yet implemented")),
@@ -546,15 +662,62 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             config_dir,
             cache_dir,
         } => print_status(mount_point, config_dir, cache_dir),
+        Commands::NfsServe {
+            config_dir,
+            cache_dir,
+            bind,
+            ready_file,
+            trace,
+        } => run_nfs_serve(config_dir, cache_dir, bind.as_deref(), ready_file, trace),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn run(cli: &Cli) -> anyhow::Result<()> {
+    use omnifs_nfs as nfs;
+    use tokio::runtime::Handle;
+
     match &cli.command {
-        Commands::Mount { .. } | Commands::Unmount { .. } => Err(anyhow::anyhow!(
-            "FUSE mount/unmount is only supported on Linux"
-        )),
+        Commands::Mount {
+            mount_point,
+            config_dir,
+            cache_dir,
+            backend,
+            nfs_port,
+            nfs_trace,
+        } => {
+            match selected_backend(*backend) {
+                MountBackend::Nfs => {},
+                MountBackend::Fuse => {
+                    return Err(anyhow::anyhow!("FUSE mount is only supported on Linux"));
+                },
+                MountBackend::Auto => unreachable!("auto backend should be resolved"),
+            }
+
+            let config_path = config_dir
+                .clone()
+                .map_or_else(default_config_dir, PathBuf::from);
+            let cache_path = cache_dir
+                .clone()
+                .map_or_else(|| default_cache_dir(&config_path), PathBuf::from);
+            let mount_path = PathBuf::from(mount_point);
+
+            std::fs::create_dir_all(&mount_path)?;
+            let registry = load_registry(&config_path, &cache_path)?;
+            let rt = Handle::current();
+            registry.start_timers(&rt);
+            let options = nfs_options(
+                &config_path,
+                *nfs_port,
+                nfs_trace.clone().map(PathBuf::from),
+            );
+            nfs::mount_blocking(&mount_path, &registry, rt, &options)?;
+            Ok(())
+        },
+        Commands::Unmount { mount_point } => {
+            nfs::unmount(&PathBuf::from(mount_point))?;
+            Ok(())
+        },
         Commands::PluginInfo { path: _ } => Err(anyhow::anyhow!("plugin info not yet implemented")),
         Commands::MountTree {
             path,
@@ -577,14 +740,27 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             config_dir,
             cache_dir,
         } => print_status(mount_point.clone(), config_dir.clone(), cache_dir.clone()),
+        Commands::NfsServe {
+            config_dir,
+            cache_dir,
+            bind,
+            ready_file,
+            trace,
+        } => run_nfs_serve(
+            config_dir.clone(),
+            cache_dir.clone(),
+            bind.as_deref(),
+            ready_file.clone(),
+            trace.clone(),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderConfigStatus, ProviderReadyStatus, decode_mount_field, parse_mount_command_args,
-        parse_proc_mounts, scan_provider_configs,
+        MountInfo, ProviderConfigStatus, ProviderReadyStatus, decode_mount_field,
+        mount_uses_nfs_unmount, parse_mount_command_args, parse_proc_mounts, scan_provider_configs,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -603,6 +779,25 @@ mod tests {
         assert_eq!(mounts[0].source, "omnifs");
         assert_eq!(mounts[0].mount_point, std::path::PathBuf::from("/omnifs"));
         assert_eq!(mounts[0].fs_type, "fuse");
+    }
+
+    #[test]
+    fn mount_uses_nfs_unmount_only_for_nfs_types() {
+        assert!(mount_uses_nfs_unmount(&MountInfo {
+            source: "127.0.0.1:/omnifs".to_string(),
+            mount_point: PathBuf::from("/omnifs"),
+            fs_type: "nfs4".to_string(),
+        }));
+        assert!(mount_uses_nfs_unmount(&MountInfo {
+            source: "127.0.0.1:/omnifs".to_string(),
+            mount_point: PathBuf::from("/omnifs"),
+            fs_type: "nfs".to_string(),
+        }));
+        assert!(!mount_uses_nfs_unmount(&MountInfo {
+            source: "omnifs".to_string(),
+            mount_point: PathBuf::from("/omnifs"),
+            fs_type: "fuse".to_string(),
+        }));
     }
 
     #[test]

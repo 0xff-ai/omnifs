@@ -181,6 +181,25 @@ mod scoped_handlers {
     }
 }
 
+mod dynamic_handlers {
+    use super::*;
+
+    pub struct DynamicHandlers;
+
+    #[handlers]
+    impl DynamicHandlers {
+        #[dir("/dynamic/{name}")]
+        fn dynamic(name: String) -> Result<Projection> {
+            let mut projection = Projection::new();
+            let mut content = name.into_bytes();
+            content.push(b'\n');
+            projection.file_with_content("value", content);
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+    }
+}
+
 mod subtree_handlers {
     use super::*;
 
@@ -199,6 +218,7 @@ mod subtree_handlers {
     crate::root_handlers::RootHandlers,
     crate::hello_handlers::HelloHandlers,
     crate::scoped_handlers::ScopedHandlers,
+    crate::dynamic_handlers::DynamicHandlers,
     crate::subtree_handlers::SubtreeHandlers,
 ))]
 impl TestProvider {

@@ -7,7 +7,7 @@ members = [
     "providers/dns",
     "providers/test",
 ]
-default-members = ["crates/cli", "crates/host"]
+default-members = ["crates/cli", "crates/host", "crates/omnifs-nfs"]
 
 [workspace.package]
 version = "0.1.0"

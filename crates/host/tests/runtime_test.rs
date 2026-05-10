@@ -36,15 +36,13 @@ async fn test_list_root() {
     let result = harness.runtime.call_list_children("").await.unwrap();
     match result {
         OpResult::List(ListResult::Entries(listing)) => {
-            assert_eq!(listing.entries.len(), 3);
-            let names: Vec<&str> = listing
+            let mut names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert!(names.contains(&"hello"));
-            assert!(names.contains(&"scoped"));
-            assert!(names.contains(&"checkout"));
+            names.sort_unstable();
+            assert_eq!(names, ["checkout", "dynamic", "hello", "scoped"]);
             assert!(
                 listing
                     .entries
