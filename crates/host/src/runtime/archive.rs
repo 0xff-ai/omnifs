@@ -4,14 +4,14 @@
 //! The provider issues `open-archive(blob, format, strip-prefix)`; the
 //! host hands the blob and a fresh extraction directory to the
 //! archive extractor tool and, on success, registers the resulting
-//! directory in the shared [`TreeRegistry`]. The provider returns the
+//! directory in the shared [`TreeRefs`]. The provider returns the
 //! resulting `tree-ref`, which the host serves through the same FUSE
 //! bind-mount path that already serves git clones. There are no
 //! per-file callouts; extraction happens inside the WASI sandbox.
 
 #[cfg(test)]
-use crate::runtime::blob::BlobRecordDraft;
-use crate::runtime::blob::{BlobCache, BlobRecord};
+use crate::cache::blobs::BlobRecordDraft;
+use crate::cache::blobs::{BlobCache, BlobRecord};
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::sandbox::tree_cache::{
     MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
@@ -21,13 +21,13 @@ use crate::runtime::tools::archive as archive_tool;
 use crate::runtime::tools::archive::{
     ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
 };
-use crate::runtime::tree_registry::TreeRegistry;
+use crate::runtime::tree_refs::TreeRefs;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Per-provider archive extractor. Owns the on-disk extraction root and
-/// shares a [`TreeRegistry`] with the git executor so a returned
+/// shares a [`TreeRefs`] with the git executor so a returned
 /// `tree-ref` resolves identically regardless of source. All actual
 /// extraction is delegated to the sandboxed
 /// [`ArchiveExtractorComponent`].
@@ -76,7 +76,7 @@ impl TreeKey for ExtractKey {
         let digest = hasher.finalize();
         format!(
             "{}-{}",
-            archive_format_component(self.format),
+            self.format.cache_component(),
             hex_prefix(&digest, 16),
         )
     }
@@ -91,7 +91,7 @@ enum ArchiveError {
 impl ArchiveExecutor {
     pub(crate) fn new(
         cache: Arc<BlobCache>,
-        trees: Arc<TreeRegistry>,
+        trees: Arc<TreeRefs>,
         extract_root: PathBuf,
         extractor: Arc<ArchiveExtractorComponent>,
     ) -> Self {
@@ -174,14 +174,6 @@ impl ArchiveExecutor {
             },
         };
         Ok(stats)
-    }
-}
-
-fn archive_format_component(format: ArchiveFormat) -> &'static str {
-    match format {
-        ArchiveFormat::TarGz => "targz",
-        ArchiveFormat::Tar => "tar",
-        ArchiveFormat::Zip => "zip",
     }
 }
 
@@ -326,7 +318,7 @@ mod tests {
         let blob_path = blob_cache_dir.join("pkg-1.0.crate");
         let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", blob_path, &synthesize_targz());
 
-        let trees = Arc::new(TreeRegistry::new());
+        let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
@@ -359,7 +351,7 @@ mod tests {
             &synthesize_multi_root_targz(),
         );
 
-        let trees = Arc::new(TreeRegistry::new());
+        let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
@@ -412,7 +404,7 @@ mod tests {
             &synthesize_targz(),
         );
 
-        let trees = Arc::new(TreeRegistry::new());
+        let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
@@ -448,7 +440,7 @@ mod tests {
         std::fs::create_dir_all(&keep).unwrap();
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir));
-        let trees = Arc::new(TreeRegistry::new());
+        let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
@@ -474,7 +466,7 @@ mod tests {
             &synthesize_targz(),
         );
 
-        let trees = Arc::new(TreeRegistry::new());
+        let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
@@ -493,7 +485,7 @@ mod tests {
         let marker = first_root.join(".reuse-marker");
         std::fs::write(&marker, b"stable").unwrap();
 
-        let second_trees = Arc::new(TreeRegistry::new());
+        let second_trees = Arc::new(TreeRefs::new());
         let second_executor =
             ArchiveExecutor::new(cache, second_trees.clone(), archive_root.clone(), extractor);
 

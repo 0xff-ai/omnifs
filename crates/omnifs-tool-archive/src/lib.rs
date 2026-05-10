@@ -9,8 +9,7 @@
 //! [`exports::omnifs::tool_archive::extract::ExtractError`]; the
 //! host translates that into its own `ArchiveError`.
 
-#![allow(clippy::cast_possible_truncation)]
-
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +22,8 @@ use exports::omnifs::tool_archive::extract::{
     ArchiveFormat, ExtractError, ExtractOptions, ExtractStats, Guest,
 };
 
+// These are virtual WASI paths. The host grants them by preopening a
+// staged blob directory at `/blob` and an extraction directory at `/out`.
 const BLOB_PATH: &str = "/blob/blob.dat";
 const OUT_ROOT: &str = "/out";
 
@@ -80,20 +81,21 @@ struct Counter {
 
 impl Counter {
     fn check_entry_count(&self, limits: &Limits) -> Result<(), ExtractError> {
-        if self.entries >= limits.max_entries {
-            Err(ExtractError::TooManyEntries)
-        } else {
-            Ok(())
-        }
+        (self.entries < limits.max_entries)
+            .then_some(())
+            .ok_or(ExtractError::TooManyEntries)
     }
 
     fn add_bytes(&mut self, n: u64, limits: &Limits) -> Result<(), ExtractError> {
-        self.bytes_written = self.bytes_written.saturating_add(n);
-        if self.bytes_written > limits.max_total_bytes {
-            Err(ExtractError::TotalTooLarge)
-        } else {
-            Ok(())
-        }
+        let next = self
+            .bytes_written
+            .checked_add(n)
+            .ok_or(ExtractError::TotalTooLarge)?;
+        (next <= limits.max_total_bytes)
+            .then_some(())
+            .ok_or(ExtractError::TotalTooLarge)?;
+        self.bytes_written = next;
+        Ok(())
     }
 
     fn into_stats(self) -> ExtractStats {
@@ -108,6 +110,7 @@ struct Extraction<'a> {
     limits: Limits,
     counter: Counter,
     buf: Vec<u8>,
+    created_dirs: HashSet<PathBuf>,
     strip_prefix: Option<&'a str>,
 }
 
@@ -117,6 +120,7 @@ impl<'a> Extraction<'a> {
             limits,
             counter: Counter::default(),
             buf: vec![0u8; 64 * 1024],
+            created_dirs: HashSet::new(),
             strip_prefix,
         }
     }
@@ -135,7 +139,8 @@ impl<'a> Extraction<'a> {
             EntryShape::Dir => {
                 self.counter.check_entry_count(&self.limits)?;
                 self.counter.entries += 1;
-                ensure_dir(&join_out(rel))
+                let dest = join_out(rel);
+                self.ensure_dir(&dest)
             },
             EntryShape::Link => {
                 // Refuse links: a benign archive can express its layout
@@ -158,11 +163,20 @@ impl<'a> Extraction<'a> {
                 self.counter.entries += 1;
                 let dest = join_out(rel);
                 if let Some(parent) = dest.parent() {
-                    ensure_dir(parent)?;
+                    self.ensure_dir(parent)?;
                 }
                 self.stream_to_file(reader, &dest)
             },
         }
+    }
+
+    fn ensure_dir(&mut self, path: &Path) -> Result<(), ExtractError> {
+        if self.created_dirs.contains(path) {
+            return Ok(());
+        }
+        ensure_dir(path)?;
+        self.created_dirs.insert(path.to_path_buf());
+        Ok(())
     }
 
     fn stream_to_file<R: Read>(&mut self, entry: &mut R, dest: &Path) -> Result<(), ExtractError> {
@@ -175,11 +189,14 @@ impl<'a> Extraction<'a> {
                 Ok(n) => n,
                 Err(e) => return Err(ExtractError::Io(e.to_string())),
             };
-            let candidate = written.saturating_add(n as u64);
+            let bytes = u64::try_from(n).map_err(|_| ExtractError::TotalTooLarge)?;
+            let candidate = written
+                .checked_add(bytes)
+                .ok_or_else(|| ExtractError::FileTooLarge(dest.display().to_string()))?;
             if candidate > self.limits.max_file_size {
                 return Err(ExtractError::FileTooLarge(dest.display().to_string()));
             }
-            self.counter.add_bytes(n as u64, &self.limits)?;
+            self.counter.add_bytes(bytes, &self.limits)?;
             out.write_all(&self.buf[..n])
                 .map_err(|e| ExtractError::Io(format!("write {}: {e}", dest.display())))?;
             written = candidate;
@@ -218,16 +235,15 @@ fn extract_tar<R: Read>(
         };
         let header = entry.header();
         let kind = header.entry_type();
-        let shape = if kind.is_dir() {
-            EntryShape::Dir
-        } else if kind.is_symlink() || kind.is_hard_link() {
-            EntryShape::Link
-        } else if kind.is_file() {
-            EntryShape::File {
-                size: header.size().unwrap_or(0),
-            }
-        } else {
-            EntryShape::Other(format!("{kind:?}"))
+        let shape = match (header, kind) {
+            (_, kind) if kind.is_dir() => EntryShape::Dir,
+            (_, kind) if kind.is_symlink() || kind.is_hard_link() => EntryShape::Link,
+            (header, kind) if kind.is_file() => EntryShape::File {
+                size: header
+                    .size()
+                    .map_err(|e| ExtractError::Malformed(e.to_string()))?,
+            },
+            (_, kind) => EntryShape::Other(format!("{kind:?}")),
         };
         extraction.process_entry(&rel, shape, &mut entry)?;
     }

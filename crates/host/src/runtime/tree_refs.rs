@@ -9,12 +9,12 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub struct TreeRegistry {
+pub struct TreeRefs {
     paths: DashMap<u64, PathBuf>,
     next_id: AtomicU64,
 }
 
-impl TreeRegistry {
+impl TreeRefs {
     pub fn new() -> Self {
         Self {
             paths: DashMap::new(),
@@ -33,7 +33,7 @@ impl TreeRegistry {
     }
 }
 
-impl Default for TreeRegistry {
+impl Default for TreeRefs {
     fn default() -> Self {
         Self::new()
     }
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn register_assigns_unique_ids() {
-        let reg = TreeRegistry::new();
+        let reg = TreeRefs::new();
         let a = reg.register(PathBuf::from("/tmp/a"));
         let b = reg.register(PathBuf::from("/tmp/b"));
         assert_ne!(a, b);
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_returns_none() {
-        let reg = TreeRegistry::new();
+        let reg = TreeRefs::new();
         assert!(reg.resolve(9999).is_none());
     }
 }

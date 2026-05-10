@@ -32,7 +32,7 @@ pub enum CalloutResponse {
         body: Vec<u8>,
     },
     GitRepoOpened(u64),
-    BlobFetched(crate::runtime::blob::BlobRecord),
+    BlobFetched(crate::cache::blobs::BlobRecord),
     ArchiveOpened(u64),
     BlobRead(Vec<u8>),
     Error {

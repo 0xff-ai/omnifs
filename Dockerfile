@@ -22,7 +22,7 @@ WORKDIR /src
 COPY --from=planner /src/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
-    OMNIFS_SKIP_EXTRACTOR_CHECK=1 cargo chef cook --release --recipe-path recipe.json
+    cargo chef cook --release --recipe-path recipe.json
 
 # --- Build providers ---
 #

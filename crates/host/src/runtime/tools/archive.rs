@@ -84,6 +84,16 @@ impl From<ArchiveFormat> for wit_extract::ArchiveFormat {
     }
 }
 
+impl ArchiveFormat {
+    pub(crate) const fn cache_component(self) -> &'static str {
+        match self {
+            Self::TarGz => "targz",
+            Self::Tar => "tar",
+            Self::Zip => "zip",
+        }
+    }
+}
+
 /// Failure returned by the sandboxed extractor or its host wrapper.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {

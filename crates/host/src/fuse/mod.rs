@@ -6,7 +6,7 @@
 
 pub(crate) mod inode;
 
-use crate::cache::l0::Cache as L0Cache;
+use crate::cache::l0::MountCaches as L0Caches;
 use crate::cache::{self, CacheRecord, Key, RecordKind};
 use crate::omnifs::provider::types::{
     EntryKind, ErrorKind, ListResult, LookupResult, OpResult, ProviderError,
@@ -107,7 +107,7 @@ pub struct FuseFs {
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
     /// Single owner of the per-mount L0 browse caches (path-keyed, in-memory).
-    l0_caches: DashMap<String, L0Cache>,
+    l0_caches: L0Caches,
 }
 
 impl FuseFs {
@@ -140,7 +140,7 @@ impl FuseFs {
             dir_snapshots: DashMap::new(),
             next_fh: AtomicU64::new(1),
             file_cache: DashMap::new(),
-            l0_caches: DashMap::new(),
+            l0_caches: L0Caches::default(),
         }
     }
 
@@ -154,16 +154,6 @@ impl FuseFs {
         self.registry.get(mount).cloned()
     }
 
-    fn l0_get(&self, mount: &str, path: &str, kind: RecordKind) -> Option<Arc<CacheRecord>> {
-        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
-        l0.get(&Key::new(path, kind))
-    }
-
-    fn l0_put(&self, mount: &str, path: &str, kind: RecordKind, record: CacheRecord) {
-        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
-        l0.put(Key::new(path, kind), record);
-    }
-
     /// Drain pending invalidation prefixes from the runtime and evict
     /// matching L0 cache entries.
     fn drain_and_evict_pending(&self, mount: &str) {
@@ -175,10 +165,6 @@ impl FuseFs {
         if prefixes.is_empty() && paths.is_empty() {
             return;
         }
-        let Some(l0) = self.l0_caches.get(mount) else {
-            return;
-        };
-
         let mut to_remove = Vec::new();
         for entry in self.path_to_inode.iter() {
             let key = entry.key();
@@ -199,7 +185,7 @@ impl FuseFs {
             self.path_to_inode.remove(path_key);
         }
 
-        l0.invalidate_entries_if({
+        self.l0_caches.invalidate_entries_if(mount, {
             let paths = paths.clone();
             let prefixes = prefixes.clone();
             move |k, _| {
@@ -256,7 +242,9 @@ impl FuseFs {
 
         // Dirents-implied negative: if parent dirents are cached and
         // exhaustive, trust the cache.
-        if let Some(record) = self.l0_get(mount_name, parent_path, RecordKind::Dirents)
+        if let Some(record) = self
+            .l0_caches
+            .get(mount_name, &Key::new(parent_path, RecordKind::Dirents))
             && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
             && dirents.exhaustive
         {
@@ -276,7 +264,9 @@ impl FuseFs {
         }
 
         // L0: check cached lookup by child path.
-        if let Some(record) = self.l0_get(mount_name, &child_path, RecordKind::Lookup)
+        if let Some(record) = self
+            .l0_caches
+            .get(mount_name, &Key::new(&child_path, RecordKind::Lookup))
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
             return self
@@ -291,7 +281,11 @@ impl FuseFs {
         if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
-            self.l0_put(mount_name, &child_path, RecordKind::Lookup, record.clone());
+            self.l0_caches.put(
+                mount_name,
+                Key::new(&child_path, RecordKind::Lookup),
+                record.clone(),
+            );
             return self
                 .resolve_lookup_hit(mount_name, &child_path, &lookup, "l2_hit")
                 .map(Some);
@@ -358,7 +352,11 @@ impl FuseFs {
                 if let Some(encoded) = payload.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
                     runtime.cache_put(&child_path, RecordKind::Lookup, &record);
-                    self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
+                    self.l0_caches.put(
+                        mount_name,
+                        Key::new(&child_path, RecordKind::Lookup),
+                        record,
+                    );
                 }
                 Ok(self.attr_for_kind(ino, kind, size))
             },
@@ -367,7 +365,11 @@ impl FuseFs {
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
                     runtime.cache_put(&child_path, RecordKind::Lookup, &record);
-                    self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
+                    self.l0_caches.put(
+                        mount_name,
+                        Key::new(&child_path, RecordKind::Lookup),
+                        record,
+                    );
                 }
                 Err(Errno::ENOENT)
             },
@@ -474,7 +476,9 @@ impl FuseFs {
         // derived structural children) and must NOT be returned as the
         // authoritative listing. The host has to fall through to
         // list_children so the provider enumerates the full set.
-        if let Some(record) = self.l0_get(mount_name, path, RecordKind::Dirents)
+        if let Some(record) = self
+            .l0_caches
+            .get(mount_name, &Key::new(path, RecordKind::Dirents))
             && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
             && dirents.exhaustive
         {
@@ -489,7 +493,11 @@ impl FuseFs {
                 && dirents.exhaustive
             {
                 tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount_name, "cache hit");
-                self.l0_put(mount_name, path, RecordKind::Dirents, record.clone());
+                self.l0_caches.put(
+                    mount_name,
+                    Key::new(path, RecordKind::Dirents),
+                    record.clone(),
+                );
                 return Ok(Some(self.snapshot_from_dirents(mount_name, path, &dirents)));
             }
         } else {
@@ -549,7 +557,11 @@ impl FuseFs {
                 if let Some(encoded) = dirents_payload.serialize() {
                     let dirents_record = CacheRecord::new(RecordKind::Dirents, encoded);
                     runtime.cache_put(path, RecordKind::Dirents, &dirents_record);
-                    self.l0_put(mount_name, path, RecordKind::Dirents, dirents_record);
+                    self.l0_caches.put(
+                        mount_name,
+                        Key::new(path, RecordKind::Dirents),
+                        dirents_record,
+                    );
                 }
                 Ok(snapshot)
             },
@@ -849,7 +861,10 @@ impl Filesystem for FuseFs {
         drop(inode_entry);
 
         // L0: check cached file by path.
-        if let Some(record) = self.l0_get(&mount_name, &path, RecordKind::File) {
+        if let Some(record) = self
+            .l0_caches
+            .get(&mount_name, &Key::new(&path, RecordKind::File))
+        {
             tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount_name.as_str(), "cache hit");
             reply.data(data_slice(&record.payload, offset, size));
             self.file_cache.insert(fh.0, record.payload.clone());
@@ -863,7 +878,11 @@ impl Filesystem for FuseFs {
         {
             tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount_name.as_str(), "cache hit");
             let data = record.payload.clone();
-            self.l0_put(&mount_name, &path, RecordKind::File, record.clone());
+            self.l0_caches.put(
+                &mount_name,
+                Key::new(&path, RecordKind::File),
+                record.clone(),
+            );
             reply.data(data_slice(&data, offset, size));
             self.file_cache.insert(fh.0, data);
             return;
@@ -911,7 +930,8 @@ impl Filesystem for FuseFs {
                 if let Some(rt) = self.runtime_for_mount(&mount_name) {
                     rt.cache_put(&path, RecordKind::File, &file_record);
                 }
-                self.l0_put(&mount_name, &path, RecordKind::File, file_record);
+                self.l0_caches
+                    .put(&mount_name, Key::new(&path, RecordKind::File), file_record);
                 reply.data(data_slice(&data, offset, size));
                 self.file_cache.insert(fh.0, data);
             },

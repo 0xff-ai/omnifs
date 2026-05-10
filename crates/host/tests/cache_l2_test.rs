@@ -143,6 +143,44 @@ fn l2_delete_prefix_respects_segment_boundaries() {
 }
 
 #[test]
+fn l2_delete_exact_removes_all_kinds_for_one_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let l2 = Cache::open(&dir.path().join("browse.redb")).unwrap();
+
+    let path = "owner/repo";
+    for kind in [
+        RecordKind::Lookup,
+        RecordKind::Attr,
+        RecordKind::Dirents,
+        RecordKind::File,
+    ] {
+        l2.put(&Key::new(path, kind), &CacheRecord::new(kind, vec![1]))
+            .unwrap();
+        l2.put(
+            &Key::new("owner/repo/issues", kind),
+            &CacheRecord::new(kind, vec![2]),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(l2.delete_exact(path).unwrap(), 4);
+
+    for kind in [
+        RecordKind::Lookup,
+        RecordKind::Attr,
+        RecordKind::Dirents,
+        RecordKind::File,
+    ] {
+        assert!(l2.get(&Key::new(path, kind)).unwrap().is_none());
+        assert!(
+            l2.get(&Key::new("owner/repo/issues", kind))
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn l2_keying_distinguishes_kinds() {
     let dir = tempfile::tempdir().unwrap();
     let l2 = Cache::open(&dir.path().join("browse.redb")).unwrap();

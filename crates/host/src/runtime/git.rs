@@ -9,21 +9,21 @@
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
-use crate::runtime::tree_registry::TreeRegistry;
+use crate::runtime::tree_refs::TreeRefs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
     capability: Arc<CapabilityChecker>,
-    trees: Arc<TreeRegistry>,
+    trees: Arc<TreeRefs>,
 }
 
 impl GitExecutor {
     pub fn new(
         cloner: Arc<GitCloner>,
         capability: Arc<CapabilityChecker>,
-        trees: Arc<TreeRegistry>,
+        trees: Arc<TreeRefs>,
     ) -> Self {
         Self {
             cloner,

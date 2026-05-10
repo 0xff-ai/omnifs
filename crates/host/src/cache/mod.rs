@@ -1,9 +1,11 @@
-//! Host browse cache types and serialization.
+//! Host cache types and serialization.
 //!
-//! Defines the shared types used by both L0 (in-memory moka) and
-//! L2 (durable redb) cache tiers. Cache entries do not carry TTLs:
-//! eviction is driven purely by capacity and explicit invalidation
-//! (via `delete_prefix` or provider-driven cache-invalidate effects).
+//! Defines the shared browse-cache types used by both L0 (in-memory
+//! moka) and L2 (durable redb) tiers, plus the disk-backed blob cache
+//! used by provider blob callouts. Browse cache entries do not carry
+//! TTLs: eviction is driven purely by capacity and explicit
+//! invalidation (via `delete_prefix` or provider-driven
+//! cache-invalidate effects).
 
 pub const SCHEMA_VERSION: u8 = 2;
 
@@ -14,6 +16,7 @@ pub const L0_SKIP_THRESHOLD: usize = 256 * 1024; // 256 KiB
 /// L2 table routing threshold.
 pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
 
+pub mod blobs;
 pub mod l0;
 pub mod l2;
 

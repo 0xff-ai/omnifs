@@ -88,7 +88,7 @@ shape as archive extraction.
 2. Compute a semantic cache key for the requested view.
 3. Run the tool into a temporary output directory.
 4. Publish the output directory into the cache with a final rename.
-5. Register the published path in `TreeRegistry`.
+5. Register the published path in `TreeRefs`.
 6. Return a `tree-ref` to the provider.
 
 The semantic cache key belongs to the tool adapter, not the generic
@@ -142,7 +142,7 @@ crates/host/src/runtime/
     mod.rs
     preopen.rs      # blob staging and narrow preopen helpers
     publish.rs      # temp-dir/temp-file publication helpers
-    tree_cache.rs   # keyed materialization into TreeRegistry
+    tree_cache.rs   # keyed materialization into TreeRefs
 
   tools/
     archive.rs      # archive WIT adapter, view key, limits, errors

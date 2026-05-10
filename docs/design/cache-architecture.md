@@ -53,8 +53,9 @@ and stable.
 
 ### D2. L0 is a small per-mount memory overlay
 
-`cache::l0::Cache` is owned by `FuseFs` and keyed by mount name plus
-`cache::Key`. It is a byte-weighted moka cache with a 32 MiB maximum
+`cache::l0::MountCaches` is owned by `FuseFs` and creates one
+`cache::l0::Cache` per mount name. Each per-mount cache is keyed by
+`cache::Key` and is a byte-weighted moka cache with a 32 MiB maximum
 weight per provider instance.
 
 L0 intentionally skips records whose payload is larger than 256 KiB.
@@ -76,9 +77,11 @@ Lookup, attribute, and directory records live in `metadata`; file records
 live in `content` until their serialized payload crosses the 64 KiB bulk
 threshold, then move to `bulk`.
 
-The L2 wire key is `{kind-char}:{path}`. Prefix deletion scans each record
-kind and then applies segment-bounded path matching, so invalidating
-`foo` removes `foo` and `foo/bar` without removing `foobar`.
+The L2 stored key is `{path}\0{kind-char}`. Exact deletion scans the
+`{path}\0` range across all three tables, while prefix deletion scans the
+path prefix range and applies segment-bounded path matching, so
+invalidating `foo` removes `foo` and `foo/bar` without removing
+`foobar`.
 
 Malformed records and unknown schema versions are treated as cache
 misses. The cache should cause a provider refresh, not make FUSE fail
@@ -98,14 +101,15 @@ complete listing for `opendir` or negative lookup answers.
 
 `BlobCache` is scoped to one provider runtime and stores each response
 body at `blobs/<cache-key>`. Metadata is stored beside it in
-`blobs/.meta/<cache-key>.json`. The sidecar is required for rehydration;
-blob files with missing or malformed sidecars are skipped on startup.
+`blobs/.meta/<cache-key>.json`. That metadata file is required for
+rehydration; blob files with missing or malformed metadata are skipped on
+startup.
 
 `fetch-blob` coalesces concurrent fetches for the same key with an
 in-process key lock. It streams the response body into `blobs/.tmp/`,
 enforces the configured fetch cap while streaming, writes the metadata
-sidecar via a temporary-file rename, then publishes the body into its
-final path. A visible body plus valid sidecar is the committed cache
+file via a temporary-file rename, then publishes the body into its final
+path. A visible body plus valid metadata is the committed cache
 entry.
 
 `read-blob` reads from the cached body by runtime `blob-id`, offset, and
@@ -123,7 +127,7 @@ the archive path.
 `TreeMaterializer<ExtractKey>` coalesces concurrent materializations of
 the same key. It writes the extractor output into a sibling temporary
 directory, publishes the completed directory with `publish_dir_by_rename`,
-registers the published path in `TreeRegistry`, and returns a runtime
+registers the published path in `TreeRefs`, and returns a runtime
 `tree-ref`.
 
 The rename gives atomic visibility on one filesystem: FUSE sees either
@@ -133,7 +137,7 @@ directory.
 
 ### D7. Tree refs are handles, not cache keys
 
-`tree-ref` values are runtime-local handles in `TreeRegistry`. They are
+`tree-ref` values are runtime-local handles in `TreeRefs`. They are
 the traversal mechanism used by FUSE after a provider returns a subtree,
 but they are not stable storage identity.
 
@@ -146,7 +150,7 @@ for the same semantic view.
 
 Cache failures should degrade toward misses where that is safe. A failed
 L2 open disables durable browse caching for that provider runtime and logs
-the error. A corrupt L2 record is ignored. A missing blob sidecar prevents
+the error. A corrupt L2 record is ignored. Missing blob metadata prevents
 rehydration for that blob, but a future `fetch-blob` for the same key can
 populate it again.
 

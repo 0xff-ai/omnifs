@@ -1,7 +1,7 @@
 //! Keyed materialization of sandbox output trees.
 
 use crate::runtime::sandbox::publish;
-use crate::runtime::tree_registry::TreeRegistry;
+use crate::runtime::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::hash::Hash;
@@ -38,10 +38,10 @@ pub(crate) trait TreeKey: Clone + Eq + Hash {
 ///
 /// The cache coalesces concurrent materializations of the same key,
 /// publishes completed trees through a sibling temp directory rename,
-/// and registers the published path in the shared [`TreeRegistry`].
+/// and registers the published path in the shared [`TreeRefs`].
 pub(crate) struct TreeMaterializer<K> {
     root: PathBuf,
-    trees: Arc<TreeRegistry>,
+    trees: Arc<TreeRefs>,
     trees_by_key: DashMap<K, u64>,
     locks: DashMap<K, Arc<Mutex<()>>>,
 }
@@ -51,7 +51,7 @@ where
     K: TreeKey,
 {
     /// Create a materializer rooted at `root` and sweep stale temp dirs.
-    pub(crate) fn new(root: PathBuf, trees: Arc<TreeRegistry>) -> Self {
+    pub(crate) fn new(root: PathBuf, trees: Arc<TreeRefs>) -> Self {
         // Startup cleanup is best-effort; later writes report concrete
         // filesystem errors when the cache root is unusable.
         let _ = publish::sweep_temp_publish_dirs(&root);
