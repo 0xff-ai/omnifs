@@ -38,16 +38,6 @@ pub struct BlobRecord {
     pub response_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct BlobRecordDraft {
-    pub cache_key: String,
-    pub size: u64,
-    pub content_type: Option<String>,
-    pub etag: Option<String>,
-    pub status: u16,
-    pub response_headers: Vec<(String, String)>,
-}
-
 /// Disk-backed blob store, scoped to a single provider runtime. Each
 /// blob is identified by a provider-supplied `cache-key` and assigned
 /// an in-memory `u64` id the WIT exposes as `blob-id`.
@@ -111,16 +101,16 @@ impl BlobCache {
     }
 
     /// Store a blob in-memory index, assigning a runtime-local id.
-    pub(crate) fn store(&self, draft: BlobRecordDraft) -> Arc<BlobRecord> {
+    pub(crate) fn store(&self, cache_key: String, metadata: BlobMetadata) -> Arc<BlobRecord> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let record = Arc::new(BlobRecord {
             id,
-            cache_key: draft.cache_key,
-            size: draft.size,
-            content_type: draft.content_type,
-            etag: draft.etag,
-            status: draft.status,
-            response_headers: draft.response_headers,
+            cache_key,
+            size: metadata.size,
+            content_type: metadata.content_type,
+            etag: metadata.etag,
+            status: metadata.status,
+            response_headers: metadata.response_headers,
         });
         self.blobs.insert(id, record.clone());
         self.keys.insert(record.cache_key.clone(), id);
@@ -167,8 +157,8 @@ impl BlobCache {
                     continue;
                 }
 
-                let record = match self.rehydrate_record(&cache_key) {
-                    Ok(record) => record,
+                let metadata = match self.rehydrate_metadata(&cache_key) {
+                    Ok(metadata) => metadata,
                     Err(error) => {
                         tracing::warn!(
                             cache_key,
@@ -179,43 +169,30 @@ impl BlobCache {
                         continue;
                     },
                 };
-                let _ = self.store(record);
+                let _ = self.store(cache_key, metadata);
             }
         }
     }
 
-    /// Rehydrate a blob metadata record from disk state.
-    fn rehydrate_record(&self, cache_key: &str) -> Result<BlobRecordDraft, std::io::Error> {
+    /// Rehydrate blob metadata from disk state.
+    fn rehydrate_metadata(&self, cache_key: &str) -> Result<BlobMetadata, std::io::Error> {
         let metadata_path = self.metadata_path(cache_key);
-        let metadata = match std::fs::read_to_string(&metadata_path) {
-            Ok(raw) => serde_json::from_str::<BlobMetadata>(&raw).map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("parse blob metadata {}: {error}", metadata_path.display()),
-                )
-            })?,
-            Err(error) => return Err(error),
-        };
-        Ok(BlobRecordDraft {
-            cache_key: cache_key.to_owned(),
-            size: metadata.size,
-            content_type: metadata.content_type,
-            etag: metadata.etag,
-            status: metadata.status,
-            response_headers: metadata.response_headers,
+        let raw = std::fs::read_to_string(&metadata_path)?;
+        serde_json::from_str::<BlobMetadata>(&raw).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("parse blob metadata {}: {error}", metadata_path.display()),
+            )
         })
     }
 
     /// Persist the metadata needed to rehydrate this blob on restart.
-    pub(crate) fn store_metadata(&self, record: &BlobRecordDraft) -> Result<(), BlobCacheError> {
-        let metadata = BlobMetadata {
-            status: record.status,
-            content_type: record.content_type.clone(),
-            etag: record.etag.clone(),
-            response_headers: record.response_headers.clone(),
-            size: record.size,
-        };
-        let path = self.metadata_path(&record.cache_key);
+    pub(crate) fn store_metadata(
+        &self,
+        cache_key: &str,
+        metadata: &BlobMetadata,
+    ) -> Result<(), BlobCacheError> {
+        let path = self.metadata_path(cache_key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

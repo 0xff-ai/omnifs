@@ -890,15 +890,12 @@ impl Filesystem for FuseFs {
 
         // Passthrough for inodes with backing_path.
         if let Some(ref rp) = backing_path {
-            match std::fs::read(rp) {
+            match read_backing_file(rp) {
                 Ok(data) => {
                     reply.data(data_slice(&data, offset, size));
                     self.file_cache.insert(fh.0, data);
                 },
-                Err(e) => {
-                    tracing::warn!(path = ?rp, err = %e, "backing fs error");
-                    reply.error(Errno::EIO);
-                },
+                Err(errno) => reply.error(errno),
             }
             return;
         }
@@ -1046,4 +1043,11 @@ fn data_slice(data: &[u8], offset: u64, size: u32) -> &[u8] {
     } else {
         &data[start..end]
     }
+}
+
+fn read_backing_file(path: &Path) -> Result<Vec<u8>, Errno> {
+    std::fs::read(path).map_err(|e| {
+        tracing::warn!(path = ?path, err = %e, "backing fs error");
+        Errno::EIO
+    })
 }

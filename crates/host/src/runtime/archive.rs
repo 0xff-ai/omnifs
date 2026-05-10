@@ -10,7 +10,7 @@
 //! per-file callouts; extraction happens inside the WASI sandbox.
 
 #[cfg(test)]
-use crate::cache::blobs::BlobRecordDraft;
+use crate::cache::blobs::BlobMetadata;
 use crate::cache::blobs::{BlobCache, BlobRecord};
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::sandbox::tree_cache::{
@@ -294,14 +294,16 @@ mod tests {
         archive_bytes: &[u8],
     ) -> u64 {
         std::fs::write(&blob_path, archive_bytes).unwrap();
-        let record = cache.store(BlobRecordDraft {
-            cache_key: cache_key.to_string(),
-            size: archive_bytes.len() as u64,
-            content_type: Some("application/x-gzip".into()),
-            etag: None,
-            status: 200,
-            response_headers: Vec::new(),
-        });
+        let record = cache.store(
+            cache_key.to_string(),
+            BlobMetadata {
+                status: 200,
+                content_type: Some("application/x-gzip".into()),
+                etag: None,
+                response_headers: Vec::new(),
+                size: archive_bytes.len() as u64,
+            },
+        );
         record.id
     }
 

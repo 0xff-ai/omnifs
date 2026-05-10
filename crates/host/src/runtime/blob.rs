@@ -8,9 +8,9 @@
 
 use crate::auth::AuthManager;
 #[cfg(test)]
-use crate::cache::blobs::{BLOB_META_DIR, BlobMetadata};
+use crate::cache::blobs::BLOB_META_DIR;
 use crate::cache::blobs::{
-    BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobRecordDraft, is_safe_path_segment,
+    BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobMetadata, is_safe_path_segment,
 };
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
@@ -189,15 +189,14 @@ impl BlobExecutor {
         };
         let size = staged.size;
 
-        let record = BlobRecordDraft {
-            cache_key: cache_key.to_string(),
-            size,
+        let metadata = BlobMetadata {
+            status,
             content_type,
             etag,
-            status,
             response_headers,
+            size,
         };
-        if let Err(error) = self.cache.store_metadata(&record) {
+        if let Err(error) = self.cache.store_metadata(cache_key, &metadata) {
             return blob_error("store blob metadata", error.into());
         }
         if let Err(error) = staged.persist(&blob_path) {
@@ -205,7 +204,7 @@ impl BlobExecutor {
             let _ = std::fs::remove_file(self.cache.metadata_path(cache_key));
             return blob_error("publish blob", error);
         }
-        let record = self.cache.store(record);
+        let record = self.cache.store(cache_key.to_string(), metadata);
 
         CalloutResponse::BlobFetched((*record).clone())
     }
@@ -416,14 +415,16 @@ mod tests {
         std::fs::write(&path, b"abcdef").unwrap();
 
         let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf()));
-        let record = cache.store(BlobRecordDraft {
-            cache_key: "blob".into(),
-            size: 6,
-            content_type: None,
-            etag: None,
-            status: 200,
-            response_headers: Vec::new(),
-        });
+        let record = cache.store(
+            "blob".into(),
+            BlobMetadata {
+                status: 200,
+                content_type: None,
+                etag: None,
+                response_headers: Vec::new(),
+                size: 6,
+            },
+        );
         let capability = CapabilityChecker::new(CapabilityGrants {
             domains: Vec::new(),
             git_repos: Vec::new(),
