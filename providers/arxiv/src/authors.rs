@@ -3,7 +3,6 @@ use omnifs_sdk::prelude::*;
 use crate::api::fetch_listing;
 use crate::paper_subtree::PaperSubtree;
 use crate::query::{SortAxis, and, author_query, category_query, listing_url, window_start};
-use crate::selector::window_index_projection;
 use crate::types::{CategoryKey, EncodedSelector, PaperKey};
 use crate::{Result, State};
 
@@ -30,8 +29,21 @@ impl AuthorHandlers {
     }
 
     #[dir("/authors/{author}/new")]
-    fn author_new_index(_cx: &DirCx<State>, _author: EncodedSelector) -> Result<Projection> {
-        Ok(window_index_projection())
+    async fn author_new_index(cx: &DirCx<State>, author: EncodedSelector) -> Result<Projection> {
+        let decoded = author.decode()?;
+        let url = listing_url(&author_query(&decoded), SortAxis::Submitted, 0);
+        let listing = fetch_listing(cx, url).await?;
+        let prefix = format!("authors/{author}/new");
+        Ok(listing.dir_projection(&prefix))
+    }
+
+    #[bind("/authors/{author}/new/{paper}")]
+    fn author_new_index_paper(
+        _cx: &Cx<State>,
+        _author: EncodedSelector,
+        paper: PaperKey,
+    ) -> Result<PaperSubtree> {
+        Ok(PaperSubtree { paper })
     }
 
     #[dir("/authors/{author}/new/{n}")]
@@ -59,8 +71,24 @@ impl AuthorHandlers {
     }
 
     #[dir("/authors/{author}/updated")]
-    fn author_updated_index(_cx: &DirCx<State>, _author: EncodedSelector) -> Result<Projection> {
-        Ok(window_index_projection())
+    async fn author_updated_index(
+        cx: &DirCx<State>,
+        author: EncodedSelector,
+    ) -> Result<Projection> {
+        let decoded = author.decode()?;
+        let url = listing_url(&author_query(&decoded), SortAxis::Updated, 0);
+        let listing = fetch_listing(cx, url).await?;
+        let prefix = format!("authors/{author}/updated");
+        Ok(listing.dir_projection(&prefix))
+    }
+
+    #[bind("/authors/{author}/updated/{paper}")]
+    fn author_updated_index_paper(
+        _cx: &Cx<State>,
+        _author: EncodedSelector,
+        paper: PaperKey,
+    ) -> Result<PaperSubtree> {
+        Ok(PaperSubtree { paper })
     }
 
     #[dir("/authors/{author}/updated/{n}")]

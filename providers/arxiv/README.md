@@ -12,12 +12,15 @@
     metadata.json
     links.json
     versions/v{n}/
-  categories/{cat}/{ym | new | updated | by-author}/
+  categories/{cat}/{YYYY}/{MM}/{DD}/
+  categories/{cat}/{new | updated | by-author}/
   authors/{author}/{... | by-category}/
   search/{query}/
 ```
 
 `{id}` accepts both the modern `2401.12345` and legacy `cs.LG/0512345` formats. `versions/v{n}/` re-projects the paper subtree at a specific version.
+
+Category calendar listings are day-bounded to keep each arXiv API query small. If a listing returns fewer papers than arXiv reports for that scope, the directory includes `_more` with a short `fetched listed/total` marker.
 
 ## Capabilities
 

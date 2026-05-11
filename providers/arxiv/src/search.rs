@@ -3,7 +3,6 @@ use omnifs_sdk::prelude::*;
 use crate::api::fetch_listing;
 use crate::paper_subtree::PaperSubtree;
 use crate::query::{SortAxis, listing_url, window_start};
-use crate::selector::window_index_projection;
 use crate::types::{EncodedSelector, PaperKey};
 use crate::{Result, State};
 
@@ -30,8 +29,21 @@ impl SearchHandlers {
     }
 
     #[dir("/search/{query}/new")]
-    fn search_new_index(_cx: &DirCx<State>, _query: EncodedSelector) -> Result<Projection> {
-        Ok(window_index_projection())
+    async fn search_new_index(cx: &DirCx<State>, query: EncodedSelector) -> Result<Projection> {
+        let decoded = query.decode()?;
+        let url = listing_url(&decoded, SortAxis::Submitted, 0);
+        let listing = fetch_listing(cx, url).await?;
+        let prefix = format!("search/{query}/new");
+        Ok(listing.dir_projection(&prefix))
+    }
+
+    #[bind("/search/{query}/new/{paper}")]
+    fn search_new_index_paper(
+        _cx: &Cx<State>,
+        _query: EncodedSelector,
+        paper: PaperKey,
+    ) -> Result<PaperSubtree> {
+        Ok(PaperSubtree { paper })
     }
 
     #[dir("/search/{query}/new/{n}")]
@@ -59,8 +71,21 @@ impl SearchHandlers {
     }
 
     #[dir("/search/{query}/updated")]
-    fn search_updated_index(_cx: &DirCx<State>, _query: EncodedSelector) -> Result<Projection> {
-        Ok(window_index_projection())
+    async fn search_updated_index(cx: &DirCx<State>, query: EncodedSelector) -> Result<Projection> {
+        let decoded = query.decode()?;
+        let url = listing_url(&decoded, SortAxis::Updated, 0);
+        let listing = fetch_listing(cx, url).await?;
+        let prefix = format!("search/{query}/updated");
+        Ok(listing.dir_projection(&prefix))
+    }
+
+    #[bind("/search/{query}/updated/{paper}")]
+    fn search_updated_index_paper(
+        _cx: &Cx<State>,
+        _query: EncodedSelector,
+        paper: PaperKey,
+    ) -> Result<PaperSubtree> {
+        Ok(PaperSubtree { paper })
     }
 
     #[dir("/search/{query}/updated/{n}")]

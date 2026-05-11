@@ -49,6 +49,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -562,7 +563,7 @@ impl CalloutRuntime {
                     validate_terminal_attrs(&terminal).map_err(RuntimeError::ProviderError)?;
                     self.apply_terminal_boundary(&terminal);
                     if !callouts.is_empty() {
-                        let _ = self.execute_batch(&callouts).await;
+                        let _ = self.execute_batch(id, &callouts).await;
                     }
                     return Ok(terminal);
                 },
@@ -572,7 +573,7 @@ impl CalloutRuntime {
                     ));
                 },
                 None => {
-                    let results = self.execute_batch(&callouts).await;
+                    let results = self.execute_batch(id, &callouts).await;
                     let mut store = self.store.lock();
                     response = self.bindings.omnifs_provider_resume().call_resume(
                         &mut *store,
@@ -639,67 +640,28 @@ impl CalloutRuntime {
 
     async fn execute_single_callout(
         &self,
+        operation_id: u64,
+        callout_index: usize,
         callout: &wit_types::Callout,
     ) -> wit_types::CalloutResult {
         match callout {
             wit_types::Callout::Fetch(req) => {
-                let headers: Vec<(String, String)> = req
-                    .headers
-                    .iter()
-                    .map(|h| (h.name.clone(), h.value.clone()))
-                    .collect();
-                let resp = self
-                    .http
-                    .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
-                    .await;
-                callout_response_to_wit(resp)
+                self.execute_fetch_callout(operation_id, callout_index, req)
+                    .await
             },
             wit_types::Callout::GitOpenRepo(req) => {
-                git_response_to_wit(self.git.open_repo(&req.cache_key, &req.clone_url))
+                self.execute_git_open_callout(operation_id, callout_index, req)
             },
             wit_types::Callout::FetchBlob(req) => {
-                let headers: Vec<(String, String)> = req
-                    .headers
-                    .iter()
-                    .map(|h| (h.name.clone(), h.value.clone()))
-                    .collect();
-                let resp = self
-                    .blob
-                    .fetch_blob(
-                        &req.method,
-                        &req.url,
-                        &headers,
-                        req.body.as_deref(),
-                        &req.cache_key,
-                    )
-                    .await;
-                blob_response_to_wit(resp)
+                self.execute_blob_fetch_callout(operation_id, callout_index, req)
+                    .await
             },
             wit_types::Callout::OpenArchive(req) => {
-                let format = match req.format {
-                    wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
-                    wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
-                    wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
-                };
-                // Wasm extraction is sync and CPU-bound; run it on the
-                // blocking pool so it doesn't park the tokio reactor
-                // thread under big tarballs.
-                let archive = Arc::clone(&self.archive);
-                let blob = req.blob;
-                let strip = req.strip_prefix.clone();
-                let resp = tokio::task::spawn_blocking(move || {
-                    archive.open_archive(blob, format, strip.as_deref())
-                })
-                .await
-                .unwrap_or_else(|join_err| CalloutResponse::Error {
-                    kind: ErrorKind::Internal,
-                    message: format!("extract task join: {join_err}"),
-                    retryable: false,
-                });
-                archive_response_to_wit(resp)
+                self.execute_archive_open_callout(operation_id, callout_index, req)
+                    .await
             },
             wit_types::Callout::ReadBlob(req) => {
-                blob_read_to_wit(self.blob.read_blob(req.blob, req.offset, req.len))
+                self.execute_blob_read_callout(operation_id, callout_index, req)
             },
             _ => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
                 kind: wit_types::ErrorKind::Internal,
@@ -707,6 +669,178 @@ impl CalloutRuntime {
                 retryable: false,
             }),
         }
+    }
+
+    async fn execute_fetch_callout(
+        &self,
+        operation_id: u64,
+        callout_index: usize,
+        req: &wit_types::HttpRequest,
+    ) -> wit_types::CalloutResult {
+        let headers = header_pairs(&req.headers);
+        let callout_kind = "http.fetch";
+        log_callout_start(
+            operation_id,
+            callout_index,
+            callout_kind,
+            Some(&req.method),
+            Some(&req.url),
+            Some(&headers),
+            req.body.as_ref().map(Vec::len),
+        );
+        let start = Instant::now();
+        let resp = self
+            .http
+            .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
+            .await;
+        log_callout_response(
+            operation_id,
+            callout_index,
+            callout_kind,
+            start.elapsed(),
+            &resp,
+        );
+        callout_response_to_wit(resp)
+    }
+
+    fn execute_git_open_callout(
+        &self,
+        operation_id: u64,
+        callout_index: usize,
+        req: &wit_types::GitOpenRequest,
+    ) -> wit_types::CalloutResult {
+        let callout_kind = "git.open_repo";
+        log_callout_start(
+            operation_id,
+            callout_index,
+            callout_kind,
+            None,
+            Some(&req.clone_url),
+            None,
+            None,
+        );
+        let start = Instant::now();
+        let resp = self.git.open_repo(&req.cache_key, &req.clone_url);
+        log_callout_response(
+            operation_id,
+            callout_index,
+            callout_kind,
+            start.elapsed(),
+            &resp,
+        );
+        git_response_to_wit(resp)
+    }
+
+    async fn execute_blob_fetch_callout(
+        &self,
+        operation_id: u64,
+        callout_index: usize,
+        req: &wit_types::BlobFetchRequest,
+    ) -> wit_types::CalloutResult {
+        let headers = header_pairs(&req.headers);
+        let callout_kind = "blob.fetch";
+        log_callout_start(
+            operation_id,
+            callout_index,
+            callout_kind,
+            Some(&req.method),
+            Some(&req.url),
+            Some(&headers),
+            req.body.as_ref().map(Vec::len),
+        );
+        let start = Instant::now();
+        let resp = self
+            .blob
+            .fetch_blob(
+                &req.method,
+                &req.url,
+                &headers,
+                req.body.as_deref(),
+                &req.cache_key,
+            )
+            .await;
+        log_callout_response(
+            operation_id,
+            callout_index,
+            callout_kind,
+            start.elapsed(),
+            &resp,
+        );
+        blob_response_to_wit(resp)
+    }
+
+    async fn execute_archive_open_callout(
+        &self,
+        operation_id: u64,
+        callout_index: usize,
+        req: &wit_types::ArchiveOpenRequest,
+    ) -> wit_types::CalloutResult {
+        let format = match req.format {
+            wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
+            wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
+            wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
+        };
+        let callout_kind = "archive.open";
+        info!(
+            target: "omnifs_callout",
+            operation_id,
+            callout_index,
+            callout_kind,
+            blob = req.blob,
+            format = ?format,
+            strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
+            "callout started"
+        );
+        let start = Instant::now();
+        let archive = Arc::clone(&self.archive);
+        let blob = req.blob;
+        let strip = req.strip_prefix.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            archive.open_archive(blob, format, strip.as_deref())
+        })
+        .await
+        .unwrap_or_else(|join_err| CalloutResponse::Error {
+            kind: ErrorKind::Internal,
+            message: format!("extract task join: {join_err}"),
+            retryable: false,
+        });
+        log_callout_response(
+            operation_id,
+            callout_index,
+            callout_kind,
+            start.elapsed(),
+            &resp,
+        );
+        archive_response_to_wit(resp)
+    }
+
+    fn execute_blob_read_callout(
+        &self,
+        operation_id: u64,
+        callout_index: usize,
+        req: &wit_types::ReadBlobRequest,
+    ) -> wit_types::CalloutResult {
+        let callout_kind = "blob.read";
+        info!(
+            target: "omnifs_callout",
+            operation_id,
+            callout_index,
+            callout_kind,
+            blob = req.blob,
+            offset = req.offset,
+            len = req.len,
+            "callout started"
+        );
+        let start = Instant::now();
+        let resp = self.blob.read_blob(req.blob, req.offset, req.len);
+        log_callout_response(
+            operation_id,
+            callout_index,
+            callout_kind,
+            start.elapsed(),
+            &resp,
+        );
+        blob_read_to_wit(resp)
     }
 
     /// Runs every callout in `callouts` concurrently and returns their
@@ -721,13 +855,242 @@ impl CalloutRuntime {
     /// guest expects.
     async fn execute_batch(
         &self,
+        operation_id: u64,
         callouts: &[wit_types::Callout],
     ) -> Vec<wit_types::CalloutResult> {
         let futures: Vec<_> = callouts
             .iter()
-            .map(|callout| self.execute_single_callout(callout))
+            .enumerate()
+            .map(|(callout_index, callout)| {
+                self.execute_single_callout(operation_id, callout_index, callout)
+            })
             .collect();
         futures::future::join_all(futures).await
+    }
+}
+
+fn header_pairs(headers: &[wit_types::Header]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect()
+}
+
+fn log_callout_start(
+    operation_id: u64,
+    callout_index: usize,
+    callout_kind: &str,
+    method: Option<&str>,
+    url: Option<&str>,
+    headers: Option<&[(String, String)]>,
+    body_len: Option<usize>,
+) {
+    info!(
+        target: "omnifs_callout",
+        operation_id,
+        callout_index,
+        callout_kind,
+        method = method.unwrap_or(""),
+        url = url.map(url_for_log).unwrap_or_default(),
+        request_headers = headers.map(headers_for_log).unwrap_or_default(),
+        request_body_bytes = body_len.unwrap_or(0),
+        "callout started"
+    );
+}
+
+fn log_callout_response(
+    operation_id: u64,
+    callout_index: usize,
+    callout_kind: &str,
+    elapsed: std::time::Duration,
+    response: &CalloutResponse,
+) {
+    let elapsed_us = elapsed.as_micros();
+    match response {
+        CalloutResponse::HttpResponse {
+            status,
+            headers,
+            body,
+        } => {
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                status,
+                response_headers = %headers_for_log(headers),
+                response_body_bytes = body.len(),
+                elapsed_us,
+                "callout response"
+            );
+        },
+        CalloutResponse::GitRepoOpened(tree_ref) => {
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                tree_ref,
+                elapsed_us,
+                "callout response"
+            );
+        },
+        CalloutResponse::BlobFetched(record) => {
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                blob = record.id,
+                cache_key = %record.cache_key,
+                status = record.status,
+                response_headers = %headers_for_log(&record.response_headers),
+                response_body_bytes = record.size,
+                elapsed_us,
+                "callout response"
+            );
+        },
+        CalloutResponse::ArchiveOpened(tree_ref) => {
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                tree_ref,
+                elapsed_us,
+                "callout response"
+            );
+        },
+        CalloutResponse::BlobRead(bytes) => {
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                response_body_bytes = bytes.len(),
+                elapsed_us,
+                "callout response"
+            );
+        },
+        CalloutResponse::Error {
+            kind,
+            message,
+            retryable,
+        } => {
+            warn!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                kind = ?kind,
+                retryable,
+                error = %message,
+                elapsed_us,
+                "callout error"
+            );
+        },
+    }
+}
+
+fn url_for_log(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+
+    let query_pairs = parsed.query_pairs().into_owned().collect::<Vec<_>>();
+    if !query_pairs.is_empty() {
+        parsed.set_query(None);
+        {
+            let mut pairs = parsed.query_pairs_mut();
+            for (name, value) in query_pairs {
+                let logged_value = if is_sensitive_query_param(&name) {
+                    "redacted"
+                } else {
+                    value.as_str()
+                };
+                pairs.append_pair(&name, logged_value);
+            }
+        }
+    }
+
+    parsed.to_string()
+}
+
+fn headers_for_log(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let value = if is_sensitive_header(name) {
+                "<redacted>".to_string()
+            } else {
+                truncate_for_log(value, 256)
+            };
+            format!("{name}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn truncate_for_log(value: &str, max: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index == max {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+    )
+}
+
+fn is_sensitive_query_param(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("token")
+        || name.contains("secret")
+        || name.contains("password")
+        || name == "key"
+        || name.ends_with("_key")
+}
+
+#[cfg(test)]
+mod callout_log_tests {
+    use super::*;
+
+    #[test]
+    fn url_for_log_preserves_diagnostic_query_and_redacts_secrets() {
+        let logged = url_for_log(
+            "https://user:pass@example.com/api?search_query=cat%3Acs.AI&access_token=secret",
+        );
+
+        assert!(logged.contains("search_query=cat%3Acs.AI"));
+        assert!(logged.contains("access_token=redacted"));
+        assert!(!logged.contains("user:pass"));
+        assert!(!logged.contains("secret"));
+    }
+
+    #[test]
+    fn headers_for_log_redacts_credentials() {
+        let logged = headers_for_log(&[
+            (
+                "User-Agent".to_string(),
+                "omnifs-provider-arxiv/0.1.0".to_string(),
+            ),
+            ("Authorization".to_string(), "Bearer secret".to_string()),
+        ]);
+
+        assert!(logged.contains("User-Agent=omnifs-provider-arxiv/0.1.0"));
+        assert!(logged.contains("Authorization=<redacted>"));
+        assert!(!logged.contains("Bearer secret"));
     }
 }
 

@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::api::{ABS_BASE, API_BASE, PDF_BASE, SOURCE_BASE};
-use crate::types::{CategoryKey, EncodedSelector, PaperKey, YearMonth};
+use crate::types::{CategoryKey, EncodedSelector, PaperKey, YearMonthDay};
 
 const DEFAULT_SORT_ORDER: &str = "descending";
 
@@ -83,17 +83,13 @@ pub(crate) fn category_query(category: &CategoryKey) -> String {
     format!("cat:{category}")
 }
 
-/// `cat:{category} AND submittedDate:[YYYYMMDD0000 TO YYYYMMDDhhmm]` for
-/// a single calendar month.
-pub(crate) fn category_month_query(category: &CategoryKey, ym: YearMonth) -> String {
-    let month_enum = time::Month::try_from(u8::try_from(ym.month).unwrap_or(0))
-        .expect("YearMonth invariant: month is 1..=12");
-    let year_i32 = i32::try_from(ym.year).expect("year fits in i32");
-    let last_day = month_enum.length(year_i32);
-    let YearMonth { year, month } = ym;
+/// `cat:{category} AND submittedDate:[YYYYMMDD0000 TO YYYYMMDD2359]`
+/// for a single UTC calendar day.
+pub(crate) fn category_day_query(category: &CategoryKey, ymd: YearMonthDay) -> String {
+    let YearMonthDay { year, month, day } = ymd;
     format!(
         "cat:{category} AND \
-         submittedDate:[{year:04}{month:02}010000 TO {year:04}{month:02}{last_day:02}2359]"
+         submittedDate:[{year:04}{month:02}{day:02}0000 TO {year:04}{month:02}{day:02}2359]"
     )
 }
 
@@ -149,6 +145,15 @@ impl EncodedSelector {
 
 pub(crate) fn current_year_utc() -> u32 {
     u32::try_from(OffsetDateTime::now_utc().year()).expect("UTC year fits in u32")
+}
+
+pub(crate) fn current_date_utc() -> (u32, u32, u32) {
+    let now = OffsetDateTime::now_utc().date();
+    (
+        u32::try_from(now.year()).expect("UTC year fits in u32"),
+        u32::from(u8::from(now.month())),
+        u32::from(now.day()),
+    )
 }
 
 pub(crate) fn paper_lookup_url(raw_id: &str) -> String {
@@ -253,6 +258,22 @@ mod tests {
         assert_eq!(
             paper_pdf_url("hep-th/9901001", Some(2)),
             "https://arxiv.org/pdf/hep-th/9901001v2.pdf"
+        );
+    }
+
+    #[test]
+    fn category_day_query_bounds_to_one_utc_day() {
+        let category: CategoryKey = "cs.AI".parse().unwrap();
+        let ymd = YearMonthDay::new(
+            "2026".parse().unwrap(),
+            "05".parse().unwrap(),
+            "11".parse().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            category_day_query(&category, ymd),
+            "cat:cs.AI AND submittedDate:[202605110000 TO 202605112359]"
         );
     }
 

@@ -3,7 +3,7 @@
 //! arxiv-provider: arXiv virtual filesystem provider for omnifs.
 //!
 //! Mirrors arXiv into a projected filesystem: browse papers by
-//! `categories/{cat}/{YYYY-MM}/`, `authors/{author}/`, or
+//! `categories/{cat}/{YYYY}/{MM}/{DD}/`, `authors/{author}/`, or
 //! `search/{query}/`, plus `new/{N}` and `updated/{N}` windowed
 //! scrolls under each scope. Each paper exposes its PDF, tarball
 //! source, `metadata.json`, and `links.json`, with per-version

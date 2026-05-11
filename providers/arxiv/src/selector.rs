@@ -2,18 +2,7 @@
 
 use omnifs_sdk::prelude::*;
 
-use crate::query::MAX_WINDOW_INDEX;
 use crate::types::{ListedPaper, Listing, ParsedEntry};
-
-/// Project the `0..=14` window dirs under a `new/` or `updated/` index.
-pub(crate) fn window_index_projection() -> Projection {
-    let mut p = Projection::new();
-    for i in 0..=MAX_WINDOW_INDEX {
-        p.dir(format!("{i}"));
-    }
-    p.page(PageStatus::Exhaustive);
-    p
-}
 
 impl Listing {
     /// Project a listing of papers under `prefix`. Each paper renders
@@ -22,20 +11,37 @@ impl Listing {
     pub(crate) fn dir_projection(&self, prefix: &str) -> Projection {
         let mut p = Projection::new();
         p.file_with_content("listing.json", self.summary_json_bytes());
+        if self.has_more() {
+            p.file_with_content("_more", self.more_marker_bytes());
+        }
         for paper in &self.papers {
             p.dir(paper.encoded_key.clone());
             paper.preload_into(&mut p, prefix);
         }
-        p.page(PageStatus::Exhaustive);
+        if self.has_more() {
+            p.page(PageStatus::More(Cursor::Opaque(format!(
+                "start={}",
+                self.papers.len()
+            ))));
+        } else {
+            p.page(PageStatus::Exhaustive);
+        }
         p
     }
 
+    fn has_more(&self) -> bool {
+        u64::from(self.total_results) > self.papers.len() as u64
+    }
+
+    fn more_marker_bytes(&self) -> Vec<u8> {
+        format!("fetched {}/{}\n", self.papers.len(), self.total_results).into_bytes()
+    }
+
     fn summary_json_bytes(&self) -> Vec<u8> {
-        let truncated = u64::from(self.total_results) > self.papers.len() as u64;
         let payload = serde_json::json!({
             "total_results": self.total_results,
             "listed_results": self.papers.len(),
-            "truncated": truncated,
+            "truncated": self.has_more(),
             "request_url": &self.request_url,
         });
         let mut bytes =
@@ -95,4 +101,24 @@ fn preload_paper_files(p: &mut Projection, base: &str, entry: &ParsedEntry, vers
             Stability::Immutable,
         )),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn more_marker_reports_listed_and_total_results() {
+        let listing = Listing {
+            request_url: "https://export.arxiv.org/api/query".to_string(),
+            total_results: 2001,
+            papers: Vec::new(),
+        };
+
+        assert!(listing.has_more());
+        assert_eq!(
+            String::from_utf8(listing.more_marker_bytes()).unwrap(),
+            "fetched 0/2001\n"
+        );
+    }
 }
