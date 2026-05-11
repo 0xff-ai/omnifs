@@ -145,8 +145,7 @@ impl Size {
     pub fn st_size(&self) -> u64 {
         match self {
             Self::Exact(size) => *size,
-            Self::NonZero => 1,
-            Self::Unknown => 1,
+            Self::NonZero | Self::Unknown => 1,
         }
     }
 }

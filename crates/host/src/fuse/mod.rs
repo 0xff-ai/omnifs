@@ -936,6 +936,123 @@ impl FuseFs {
         Ok(())
     }
 
+    fn open_ranged_file(&self, target: &FullReadTarget) -> Result<Option<FopenFlags>, Errno> {
+        if target.backing_path.is_some()
+            || !target.attrs.as_ref().is_some_and(|attrs| {
+                matches!(&attrs.bytes, BytesCache::Deferred(ReadModeCache::Ranged))
+            })
+        {
+            return Ok(None);
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            return Err(Errno::ENOENT);
+        };
+        match self.rt.block_on(runtime.call_open_file(&target.path)) {
+            Ok(OpResult::OpenFile(opened)) => {
+                let opened_attrs = FileAttrsCache::from(&opened.attrs);
+                if !matches!(
+                    &opened_attrs.bytes,
+                    BytesCache::Deferred(ReadModeCache::Ranged)
+                ) {
+                    return Err(Errno::EIO);
+                }
+                self.promote_inode_attrs(target.ino, opened_attrs.clone());
+                self.ranged_handles.insert(
+                    target.fh,
+                    RangedFileHandle {
+                        mount_name: target.mount_name.clone(),
+                        path: target.path.clone(),
+                        provider_handle: opened.handle,
+                        attrs: opened_attrs,
+                    },
+                );
+                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(other) => {
+                warn!(
+                    path = target.path.as_str(),
+                    result = ?other,
+                    "open_file returned unexpected result"
+                );
+                Err(Errno::EIO)
+            },
+            Err(e) => {
+                warn!(
+                    path = target.path.as_str(),
+                    error = %e,
+                    "open_file runtime error"
+                );
+                Err(Errno::EIO)
+            },
+        }
+    }
+
+    fn prefetch_full_file_on_open(
+        &self,
+        target: &FullReadTarget,
+    ) -> Result<Option<FopenFlags>, Errno> {
+        if target.backing_path.is_some()
+            || !target
+                .attrs
+                .as_ref()
+                .is_some_and(should_prefetch_full_on_open)
+        {
+            return Ok(None);
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            return Err(Errno::ENOENT);
+        };
+        self.drain_and_evict_pending(&target.mount_name);
+        match self.rt.block_on(runtime.call_read_file(&target.path)) {
+            Ok(OpResult::Read(result)) => {
+                let Some((data, result_attrs, _sibling_count)) =
+                    resolve_read_payload(&runtime, &target.path, result)
+                else {
+                    return Err(Errno::EIO);
+                };
+                let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
+                if !full_read_matches_attrs(&attrs_cache, data.len()) {
+                    warn!(
+                        path = target.path.as_str(),
+                        expected = ?attrs_cache.size,
+                        actual = data.len(),
+                        "provider returned bytes that contradict file attrs"
+                    );
+                    return Err(Errno::EIO);
+                }
+                self.promote_inode_attrs(target.ino, attrs_cache.clone());
+                self.cache_durable_file_payload(
+                    &target.mount_name,
+                    &target.path,
+                    &attrs_cache,
+                    &data,
+                )?;
+                self.file_cache.insert(target.fh, data);
+                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(other) => {
+                warn!(
+                    path = target.path.as_str(),
+                    result = ?other,
+                    "read_file returned unexpected result during open"
+                );
+                Err(Errno::EIO)
+            },
+            Err(e) => {
+                warn!(
+                    path = target.path.as_str(),
+                    error = %e,
+                    "read_file runtime error during open"
+                );
+                Err(Errno::EIO)
+            },
+        }
+    }
+
     fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
         if matches!(attrs.stability, cache::StabilityCache::Volatile) {
             return;
@@ -1225,112 +1342,41 @@ impl Filesystem for FuseFs {
         let attrs = entry.attrs.clone();
         drop(entry);
 
-        if backing_path.is_none()
-            && let Some(attrs) = attrs.as_ref()
-            && matches!(&attrs.bytes, BytesCache::Deferred(ReadModeCache::Ranged))
-        {
-            let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-                reply.error(Errno::ENOENT);
+        let target = FullReadTarget {
+            ino: ino.0,
+            fh,
+            mount_name,
+            path,
+            backing_path,
+            attrs,
+        };
+
+        match self.open_ranged_file(&target) {
+            Ok(Some(flags)) => {
+                reply.opened(FuseFileHandle(fh), flags);
                 return;
-            };
-            match self.rt.block_on(runtime.call_open_file(&path)) {
-                Ok(OpResult::OpenFile(opened)) => {
-                    let opened_attrs = FileAttrsCache::from(&opened.attrs);
-                    if !matches!(
-                        &opened_attrs.bytes,
-                        BytesCache::Deferred(ReadModeCache::Ranged)
-                    ) {
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                    self.promote_inode_attrs(ino.0, opened_attrs.clone());
-                    self.ranged_handles.insert(
-                        fh,
-                        RangedFileHandle {
-                            mount_name,
-                            path,
-                            provider_handle: opened.handle,
-                            attrs: opened_attrs,
-                        },
-                    );
-                    reply.opened(FuseFileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
-                    return;
-                },
-                Ok(OpResult::Err(error)) => {
-                    reply.error(provider_errno(&error));
-                    return;
-                },
-                Ok(other) => {
-                    warn!(path, result = ?other, "open_file returned unexpected result");
-                    reply.error(Errno::EIO);
-                    return;
-                },
-                Err(e) => {
-                    warn!(path, error = %e, "open_file runtime error");
-                    reply.error(Errno::EIO);
-                    return;
-                },
-            }
+            },
+            Ok(None) => {},
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            },
         }
 
-        if backing_path.is_none()
-            && let Some(attrs) = attrs.as_ref()
-            && should_prefetch_full_on_open(attrs)
-        {
-            let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-                reply.error(Errno::ENOENT);
+        match self.prefetch_full_file_on_open(&target) {
+            Ok(Some(flags)) => {
+                reply.opened(FuseFileHandle(fh), flags);
                 return;
-            };
-            self.drain_and_evict_pending(&mount_name);
-            match self.rt.block_on(runtime.call_read_file(&path)) {
-                Ok(OpResult::Read(result)) => {
-                    let Some((data, result_attrs, _sibling_count)) =
-                        resolve_read_payload(&runtime, &path, result)
-                    else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
-                    if !full_read_matches_attrs(&attrs_cache, data.len()) {
-                        warn!(
-                            path = path.as_str(),
-                            expected = ?attrs_cache.size,
-                            actual = data.len(),
-                            "provider returned bytes that contradict file attrs"
-                        );
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                    self.promote_inode_attrs(ino.0, attrs_cache.clone());
-                    if self
-                        .cache_durable_file_payload(&mount_name, &path, &attrs_cache, &data)
-                        .is_err()
-                    {
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                    self.file_cache.insert(fh, data);
-                    reply.opened(FuseFileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
-                    return;
-                },
-                Ok(OpResult::Err(error)) => {
-                    reply.error(provider_errno(&error));
-                    return;
-                },
-                Ok(other) => {
-                    warn!(path, result = ?other, "read_file returned unexpected result during open");
-                    reply.error(Errno::EIO);
-                    return;
-                },
-                Err(e) => {
-                    warn!(path, error = %e, "read_file runtime error during open");
-                    reply.error(Errno::EIO);
-                    return;
-                },
-            }
+            },
+            Ok(None) => {},
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            },
         }
 
-        let flags = attrs
+        let flags = target
+            .attrs
             .filter(FileAttrsCache::should_direct_io)
             .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO);
         reply.opened(FuseFileHandle(fh), flags);
@@ -1447,8 +1493,7 @@ fn learned_ranged_eof_attrs(attrs: FileAttrsCache, eof_size: u64) -> Option<File
 
 fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
     match attrs.stability {
-        cache::StabilityCache::Immutable => true,
-        cache::StabilityCache::Mutable => true,
+        cache::StabilityCache::Immutable | cache::StabilityCache::Mutable => true,
         cache::StabilityCache::Volatile => false,
     }
 }

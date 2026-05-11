@@ -97,8 +97,7 @@ impl FileAttrsCache {
     pub fn st_size(&self) -> u64 {
         match self.size {
             SizeCache::Exact(size) => size,
-            SizeCache::NonZero => 1,
-            SizeCache::Unknown => 1,
+            SizeCache::NonZero | SizeCache::Unknown => 1,
         }
     }
 
