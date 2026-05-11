@@ -74,38 +74,13 @@ pub(crate) async fn query_all(
 
     let responses = join_all(requests).await;
 
-    let mut all_records = Vec::new();
-    let mut first_error = None;
-    let mut had_success = false;
-    for response in responses {
-        let result = response
+    let all_records = collect_query_all_results(responses.into_iter().map(|response| {
+        response
             .and_then(ResponseExt::error_for_status)
-            .and_then(|resp| doh::parse_response(resp.body()));
-        match result {
-            Ok((records, _)) => {
-                had_success = true;
-                all_records.extend(records);
-            },
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            },
-        }
-    }
+            .and_then(|resp| doh::parse_response(resp.body()))
+    }))?;
 
-    if !had_success {
-        return Err(match first_error {
-            Some(error) => error,
-            None => ProviderError::internal("no DNS record types configured"),
-        });
-    }
-
-    let mut output = String::new();
-    for r in &all_records {
-        let _ = writeln!(output, "{}\t{}", r.rtype, r.value);
-    }
-    Ok(output.into_bytes())
+    Ok(format_record_lines(&all_records))
 }
 
 /// Query the A record for `domain` and render the response in
@@ -144,4 +119,83 @@ fn format_records(records: &[DnsRecord]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+fn collect_query_all_results(
+    results: impl IntoIterator<Item = Result<(Vec<DnsRecord>, u64)>>,
+) -> Result<Vec<DnsRecord>> {
+    let mut all_records = Vec::new();
+    let mut first_error = None;
+    let mut rate_limited_error = None;
+    let mut had_success = false;
+
+    for result in results {
+        match result {
+            Ok((records, _)) => {
+                had_success = true;
+                all_records.extend(records);
+            },
+            Err(error) => {
+                if error.kind() == ProviderErrorKind::RateLimited {
+                    rate_limited_error.get_or_insert(error);
+                    continue;
+                }
+                first_error.get_or_insert(error);
+            },
+        }
+    }
+
+    if had_success {
+        return Ok(all_records);
+    }
+
+    Err(rate_limited_error
+        .or(first_error)
+        .unwrap_or_else(|| ProviderError::internal("no DNS record types configured")))
+}
+
+fn format_record_lines(records: &[DnsRecord]) -> Vec<u8> {
+    let mut output = String::new();
+    for r in records {
+        let _ = writeln!(output, "{}\t{}", r.rtype, r.value);
+    }
+    output.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RecordType;
+
+    fn a_record(value: &str) -> DnsRecord {
+        DnsRecord {
+            rtype: RecordType::A,
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn query_all_keeps_partial_success_when_a_record_type_is_rate_limited() {
+        let records = collect_query_all_results(vec![
+            Ok((vec![a_record("93.184.216.34")], 300)),
+            Err(ProviderError::rate_limited("HTTP 429")),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(format_record_lines(&records)).unwrap(),
+            "A\t93.184.216.34\n"
+        );
+    }
+
+    #[test]
+    fn query_all_prefers_rate_limited_when_every_record_type_fails() {
+        let error = collect_query_all_results(vec![
+            Err(ProviderError::internal("resolver failed")),
+            Err(ProviderError::rate_limited("HTTP 429")),
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+    }
 }
