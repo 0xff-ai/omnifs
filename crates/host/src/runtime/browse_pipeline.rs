@@ -3,6 +3,7 @@ use crate::cache::{self, BatchRecord, CacheRecord, RecordKind};
 use crate::omnifs::provider::types::{self as wit_types, DirListing};
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
+use tracing::debug;
 
 impl CalloutRuntime {
     pub async fn call_lookup_child(
@@ -249,7 +250,7 @@ impl CalloutRuntime {
         }
 
         if !batch.is_empty() {
-            tracing::debug!(
+            debug!(
                 target: "omnifs_cache",
                 kind = "projection",
                 count = batch.len(),
@@ -271,7 +272,7 @@ impl CalloutRuntime {
         }
 
         if !batch.is_empty() {
-            tracing::debug!(
+            debug!(
                 target: "omnifs_cache",
                 kind = "projection",
                 count = batch.len(),

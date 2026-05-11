@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::info;
 
 /// Mount the FUSE filesystem and block until it exits. Calls
 /// `registry.shutdown_all()` on exit regardless of how the mount ends.
@@ -33,7 +34,7 @@ pub fn mount_blocking(
     );
     let config = FuseFs::mount_config();
 
-    tracing::info!(mount = %mount_point.display(), "starting FUSE mount");
+    info!(mount = %mount_point.display(), "starting FUSE mount");
 
     let session = Session::new(fs, mount_point, &config)
         .map_err(|e| MountError::FuseFailed(e.to_string()))?;
@@ -60,7 +61,7 @@ pub fn mount_blocking(
     // Drop the notifier before joining the session.
     notifier.lock().take();
 
-    tracing::info!("FUSE mount exited, shutting down providers");
+    info!("FUSE mount exited, shutting down providers");
     registry.shutdown_all();
 
     result

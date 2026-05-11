@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 pub(crate) const BLOB_TMP_DIR: &str = ".tmp";
 pub(crate) const BLOB_META_DIR: &str = ".meta";
@@ -149,7 +150,7 @@ impl BlobCache {
                     continue;
                 }
                 if !is_safe_path_segment(&cache_key) {
-                    tracing::warn!(
+                    warn!(
                         cache_key,
                         path = %path.display(),
                         "skipping unsafe rehydrated blob key"
@@ -160,7 +161,7 @@ impl BlobCache {
                 let metadata = match self.rehydrate_metadata(&cache_key) {
                     Ok(metadata) => metadata,
                     Err(error) => {
-                        tracing::warn!(
+                        warn!(
                             cache_key,
                             error = %error,
                             path = %path.display(),

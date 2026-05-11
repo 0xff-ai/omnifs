@@ -49,6 +49,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::{debug, error, info, trace, warn};
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -101,11 +102,11 @@ impl TypesHost for HostState {}
 impl LogHost for HostState {
     fn log(&mut self, entry: wit_types::LogEntry) {
         match entry.level {
-            wit_types::LogLevel::Trace => tracing::trace!("{}", entry.message),
-            wit_types::LogLevel::Debug => tracing::debug!("{}", entry.message),
-            wit_types::LogLevel::Info => tracing::info!("{}", entry.message),
-            wit_types::LogLevel::Warn => tracing::warn!("{}", entry.message),
-            wit_types::LogLevel::Error => tracing::error!("{}", entry.message),
+            wit_types::LogLevel::Trace => trace!("{}", entry.message),
+            wit_types::LogLevel::Debug => debug!("{}", entry.message),
+            wit_types::LogLevel::Info => info!("{}", entry.message),
+            wit_types::LogLevel::Warn => warn!("{}", entry.message),
+            wit_types::LogLevel::Error => error!("{}", entry.message),
         }
     }
 }
@@ -183,14 +184,14 @@ impl CalloutRuntime {
         let blob_cache_dir = provider_cache_root.join("blobs");
         let archive_root = provider_cache_root.join("archives");
         if let Err(e) = std::fs::create_dir_all(&blob_cache_dir) {
-            tracing::warn!(
+            warn!(
                 dir = %blob_cache_dir.display(),
                 error = %e,
                 "failed to create blob cache dir; fetch-blob will fail until resolved"
             );
         }
         if let Err(e) = std::fs::create_dir_all(&archive_root) {
-            tracing::warn!(
+            warn!(
                 dir = %archive_root.display(),
                 error = %e,
                 "failed to create archive extract dir; open-archive will fail until resolved"
@@ -209,7 +210,7 @@ impl CalloutRuntime {
             match L2Cache::open(&db_path) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
-                    tracing::warn!(mount = mount_name, error = %e, "failed to open L2 browse cache");
+                    warn!(mount = mount_name, error = %e, "failed to open L2 browse cache");
                     None
                 },
             }
@@ -306,7 +307,7 @@ impl CalloutRuntime {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put(&Key::new(path, kind), record)
         {
-            tracing::debug!(path, error = %e, "L2 cache put failed");
+            debug!(path, error = %e, "L2 cache put failed");
         }
     }
 
@@ -320,7 +321,7 @@ impl CalloutRuntime {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put(&Key::with_aux(path, kind, aux), record)
         {
-            tracing::debug!(path, error = %e, "L2 cache put failed");
+            debug!(path, error = %e, "L2 cache put failed");
         }
     }
 
@@ -328,7 +329,7 @@ impl CalloutRuntime {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put_batch(records)
         {
-            tracing::debug!(error = %e, "L2 cache batch put failed");
+            debug!(error = %e, "L2 cache batch put failed");
         }
     }
 
@@ -481,7 +482,7 @@ impl CalloutRuntime {
         }
 
         if !batch.is_empty() {
-            tracing::debug!(
+            debug!(
                 target: "omnifs_cache",
                 kind = "preload",
                 count = batch.len(),
