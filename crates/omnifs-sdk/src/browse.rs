@@ -472,41 +472,77 @@ impl From<List> for wit_types::ListResult {
 }
 
 /// File content with optional projected siblings.
+///
+/// Two flavours: inline bytes that travel through the WIT, or a
+/// blob-backed reference whose bytes live in the host's blob cache and
+/// are streamed straight to FUSE without crossing the boundary.
 #[derive(Clone, Debug)]
-pub struct FileContent {
-    pub(crate) content: Vec<u8>,
-    pub(crate) sibling_files: Vec<ProjectedFile>,
+pub enum FileContent {
+    Inline {
+        content: Vec<u8>,
+        sibling_files: Vec<ProjectedFile>,
+    },
+    Blob {
+        blob: crate::blob::BlobId,
+        sibling_files: Vec<ProjectedFile>,
+    },
 }
 
 impl FileContent {
     pub fn new(content: impl Into<Vec<u8>>) -> Self {
-        Self {
+        Self::Inline {
             content: content.into(),
+            sibling_files: Vec::new(),
+        }
+    }
+
+    /// Serve from a host-resident blob — no bytes cross the WIT.
+    pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
+        Self::Blob {
+            blob: blob.into(),
             sibling_files: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn with_sibling_files<I: IntoIterator<Item = ProjectedFile>>(mut self, files: I) -> Self {
-        self.sibling_files
-            .extend(files.into_iter().filter(|file| !file.content.is_empty()));
+        let extra = files.into_iter().filter(|file| !file.content.is_empty());
+        let (Self::Inline { sibling_files, .. } | Self::Blob { sibling_files, .. }) = &mut self;
+        sibling_files.extend(extra);
         self
     }
 
-    pub fn content(&self) -> &[u8] {
-        &self.content
+    pub fn content(&self) -> Option<&[u8]> {
+        match self {
+            Self::Inline { content, .. } => Some(content.as_slice()),
+            Self::Blob { .. } => None,
+        }
     }
 
     pub fn sibling_files(&self) -> &[ProjectedFile] {
-        &self.sibling_files
+        match self {
+            Self::Inline { sibling_files, .. } | Self::Blob { sibling_files, .. } => sibling_files,
+        }
     }
 }
 
 impl From<FileContent> for wit_types::FileContentResult {
     fn from(result: FileContent) -> Self {
-        Self {
-            content: result.content,
-            sibling_files: result.sibling_files.into_iter().map(Into::into).collect(),
+        match result {
+            FileContent::Inline {
+                content,
+                sibling_files,
+            } => Self::Inline(wit_types::InlineFileContent {
+                content,
+                sibling_files: sibling_files.into_iter().map(Into::into).collect(),
+            }),
+            FileContent::Blob {
+                blob,
+                sibling_files,
+            } => Self::Blob(wit_types::BlobFileContent {
+                blob: blob.raw(),
+                sibling_files: sibling_files.into_iter().map(Into::into).collect(),
+            }),
         }
     }
 }

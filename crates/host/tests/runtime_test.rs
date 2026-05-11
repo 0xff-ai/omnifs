@@ -145,7 +145,7 @@ async fn test_read_file() {
         .unwrap();
     match result {
         OpResult::Read(file_result) => {
-            assert_eq!(file_result.content, b"Hello, world!");
+            assert_eq!(support::inline_content(&file_result), b"Hello, world!");
         },
         other => panic!("expected File, got {other:?}"),
     }
@@ -153,7 +153,7 @@ async fn test_read_file() {
     let exact = harness.runtime.call_read_file("hello/lazy").await.unwrap();
     match exact {
         OpResult::Read(file_result) => {
-            assert_eq!(file_result.content, b"lazy\n");
+            assert_eq!(support::inline_content(&file_result), b"lazy\n");
         },
         other => panic!("expected exact File, got {other:?}"),
     }
@@ -186,7 +186,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         .unwrap();
     match result {
         OpResult::Read(file_result) => {
-            assert_eq!(file_result.content, b"title\n");
+            assert_eq!(support::inline_content(&file_result), b"title\n");
         },
         other => panic!("expected File, got {other:?}"),
     }
@@ -499,6 +499,7 @@ async fn test_cache_isolated_by_mount_name() {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+    let extractor = support::make_extractor();
     let runtime_a = CalloutRuntime::new(
         &engine,
         &support::provider_wasm_path(&config.plugin),
@@ -506,6 +507,7 @@ async fn test_cache_isolated_by_mount_name() {
         cloner.clone(),
         cache_dir.path(),
         "mount-a",
+        extractor.clone(),
     )
     .unwrap();
     let runtime_b = CalloutRuntime::new(
@@ -515,6 +517,7 @@ async fn test_cache_isolated_by_mount_name() {
         cloner,
         cache_dir.path(),
         "mount-b",
+        extractor,
     )
     .unwrap();
 

@@ -1,8 +1,14 @@
 # Projected file sizes: honest stat, direct_io, and lazy resolution
 
-Status: implemented on `design/projected-file-sizes`
+Status: proposal from `design/projected-file-sizes`; not implemented in this branch
 Scope: `wit/provider.wit`, host FUSE layer + cache schema, SDK projection API, providers
 Branch: design/projected-file-sizes
+
+Current implementation note: this branch still uses `FileStat`,
+`DEFAULT_FILE_SIZE_BYTES`, WIT `option<u64>` sizes, and cache schema
+version 2. The sections below describe the target design from the
+projected-file-sizes branch, not the implementation in
+`sandbox-archive-hardening`.
 
 ## Problem
 
@@ -38,8 +44,9 @@ This document proposes decoupling the two concerns.
   Content-Length headers, or fully materialized payloads) should be
   able to report it.
 - The SDK API must distinguish "I know the size" from "I do not."
-- macOS (macFUSE) and Linux behavior must both be considered, since
-  omnifs runs in both environments.
+- Linux behavior is the implementation target for the current repo. The
+  original proposal also considered macFUSE, but macOS support is out of
+  scope here.
 
 ## Non-goals
 
@@ -128,8 +135,9 @@ impl Size {
   materializes the payload inline; size is derived from `bytes.len()`
   and used directly.
 
-The placeholder constant `DEFAULT_FILE_SIZE_BYTES` and
-`FileStat::placeholder` are gone; `FileStat` is removed entirely.
+The target design removes the placeholder constant
+`DEFAULT_FILE_SIZE_BYTES`, `FileStat::placeholder`, and `FileStat`
+entirely.
 Static-shape entries auto-derived from `#[file]` declarations report
 `Size::Unknown` so the host opens them with direct_io until the read
 resolves the real length.
@@ -172,9 +180,10 @@ record dir-entry {
 inline, the host derives the size from `content.len()` at the WIT
 boundary; no explicit field is needed.
 
-### Host FUSE layer
+### Host FUSE layer target
 
-Three changes in `crates/host/src/fuse/` and `crates/host/src/runtime/`:
+The target design needs three changes in `crates/host/src/fuse/` and
+`crates/host/src/runtime/`:
 
 1. **Open flag.** `FuseFs::open` sets `FopenFlags::FOPEN_DIRECT_IO`
    when the inode's `size` is `None`. When it is `Some(n)`, open uses
@@ -189,40 +198,32 @@ Three changes in `crates/host/src/fuse/` and `crates/host/src/runtime/`:
    notifier method directly; no version bump needed. Best-effort: if
    the notifier is gone (mount tearing down), reads still succeed.
 
-The cache schema bumps from version 2 to version 3 because
+The cache schema would bump from version 2 to version 3 because
 `LookupPayload`, `AttrPayload`, and `DirentRecord` now serialize
 `size: Option<u64>` instead of a `u64` sentinel. The host's
 `From<wit_types::EntrySize> for Option<u64>` impl bridges WIT to
 cache types.
 
-### Provider migrations
+### Provider migration target
 
-The current `Projection::file(name)` keeps its meaning ("declare a
-file with no inline content") and now reports `Size::Unknown`.
-Existing call sites compile unchanged; the host opens those files
-with direct_io. Future providers can opt into `file_with_size(name,
-Size::Exact(n))` when an upstream API hands them a byte count
-cheaply (for example github's `content.size` for blob reads). The
-arxiv branch (#34, not yet merged) will adopt this once it lands;
-its `paper.pdf` and `source.tar.gz` stay on the default
-`Size::Unknown` path, while `metadata.json`, `links.json`,
-`authors.txt`, `comment.txt`, and `selector.txt` already use
-`file_with_content` and now report exact sizes derived from their
-bytes.
+In the target design, `Projection::file(name)` keeps its meaning
+("declare a file with no inline content") and reports `Size::Unknown`.
+Existing call sites compile unchanged; the host opens those files with
+direct_io. Providers can opt into `file_with_size(name, Size::Exact(n))`
+when an upstream API hands them a byte count cheaply (for example
+github's `content.size` for blob reads).
 
-### macOS / macFUSE
+### macOS / macFUSE note
 
-macFUSE supports `direct_io` with the same semantics as Linux for
-read pass-through and page cache bypass. mmap support on direct_io
-files is not guaranteed across macFUSE versions; tools that mmap
-projected files (which is rare for the providers in tree) may need
-to fall back to read. This is documented; no code mitigation.
+The current repository is Linux-only. The original proposal considered
+macFUSE behavior, but that is not an implementation requirement for this
+branch.
 
 ## Open questions and follow-ups
 
 - **Concurrent reads on the same `Unknown` file**: if two reads race
   and both complete, both call `notify_inval_inode`. Idempotent on
-  Linux. Worth verifying on macFUSE under load.
+  Linux.
 - **Direct_io and FUSE writeback cache**: irrelevant today (omnifs is
   read-only for the file surface). If mutations land via the
   filesystem path, the writeback story for direct_io files needs its

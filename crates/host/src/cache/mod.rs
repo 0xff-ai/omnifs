@@ -1,9 +1,11 @@
-//! Host browse cache types and serialization.
+//! Host cache types and serialization.
 //!
-//! Defines the shared types used by both L0 (in-memory moka) and
-//! L2 (durable redb) cache tiers. Cache entries do not carry TTLs:
-//! eviction is driven purely by capacity and explicit invalidation
-//! (via `delete_prefix` or provider-driven cache-invalidate effects).
+//! Defines the shared browse-cache types used by both L0 (in-memory
+//! moka) and L2 (durable redb) tiers, plus the disk-backed blob cache
+//! used by provider blob callouts. Browse cache entries do not carry
+//! TTLs: eviction is driven purely by capacity and explicit
+//! invalidation (via `delete_prefix` or provider-driven
+//! cache-invalidate effects).
 
 pub const SCHEMA_VERSION: u8 = 2;
 
@@ -14,6 +16,7 @@ pub const L0_SKIP_THRESHOLD: usize = 256 * 1024; // 256 KiB
 /// L2 table routing threshold.
 pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
 
+pub mod blobs;
 pub mod l0;
 pub mod l2;
 
@@ -27,6 +30,8 @@ pub enum RecordKind {
 }
 
 impl RecordKind {
+    pub const ALL: [Self; 4] = [Self::Lookup, Self::Attr, Self::Dirents, Self::File];
+
     fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Lookup),
@@ -34,6 +39,21 @@ impl RecordKind {
             2 => Some(Self::Dirents),
             3 => Some(Self::File),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub struct Key {
+    pub path: String,
+    pub kind: RecordKind,
+}
+
+impl Key {
+    pub fn new(path: impl Into<String>, kind: RecordKind) -> Self {
+        Self {
+            path: path.into(),
+            kind,
         }
     }
 }

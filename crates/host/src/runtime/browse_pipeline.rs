@@ -85,7 +85,11 @@ impl CalloutRuntime {
 
         if let wit_types::OpResult::Read(ref file_result) = result {
             let parent_path = path.rsplit_once('/').map_or("", |(p, _)| p);
-            self.cache_sibling_files(parent_path, &file_result.sibling_files);
+            let sibling_files = match file_result {
+                wit_types::FileContentResult::Inline(inline) => &inline.sibling_files,
+                wit_types::FileContentResult::Blob(blob) => &blob.sibling_files,
+            };
+            self.cache_sibling_files(parent_path, sibling_files);
             self.touch_activity_for_relative_path(path);
         }
 

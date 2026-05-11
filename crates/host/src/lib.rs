@@ -27,6 +27,13 @@ wasmtime::component::bindgen!({
     additional_derives: [Clone],
 });
 
+pub(crate) mod extractor_bindings {
+    wasmtime::component::bindgen!({
+        path: "../../wit/extractor",
+        world: "extractor",
+    });
+}
+
 impl omnifs::provider::types::ProviderReturn {
     /// True when the provider needs the host to run the staged callouts
     /// and call `resume` with their outcomes.

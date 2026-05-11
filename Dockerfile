@@ -39,14 +39,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     pkgs=$(awk -F'"' '/^name = "omnifs-provider-/ { printf " -p %s", $2 }' providers/*/Cargo.toml); \
     cargo build $pkgs --target wasm32-wasip2 --release --target-dir /src/target
 
-# --- Build host binary ---
+# --- Build extractor and host binary ---
 
 FROM deps AS builder
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p omnifs-cli \
+    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
+    && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
 
 # --- Runtime ---

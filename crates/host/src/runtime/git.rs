@@ -9,25 +9,26 @@
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
-use dashmap::DashMap;
+use crate::runtime::tree_refs::TreeRefs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
     capability: Arc<CapabilityChecker>,
-    repos: DashMap<u64, PathBuf>,
-    next_id: AtomicU64,
+    trees: Arc<TreeRefs>,
 }
 
 impl GitExecutor {
-    pub fn new(cloner: Arc<GitCloner>, capability: Arc<CapabilityChecker>) -> Self {
+    pub fn new(
+        cloner: Arc<GitCloner>,
+        capability: Arc<CapabilityChecker>,
+        trees: Arc<TreeRefs>,
+    ) -> Self {
         Self {
             cloner,
             capability,
-            repos: DashMap::new(),
-            next_id: AtomicU64::new(1),
+            trees,
         }
     }
 
@@ -52,21 +53,18 @@ impl GitExecutor {
             },
         };
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.repos.insert(id, cache_path);
+        let id = self.trees.register(cache_path);
         CalloutResponse::GitRepoOpened(id)
     }
 
     /// Look up the local filesystem path for a `repo-id`.
     /// Used by the runtime to resolve `subtree` op-results.
     pub fn repo_path(&self, repo_id: u64) -> Option<PathBuf> {
-        self.repos.get(&repo_id).map(|r| r.clone())
+        self.trees.resolve(repo_id)
     }
 
     /// Register a local repo path directly, returning its repo ID.
     pub fn register_local(&self, path: PathBuf) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.repos.insert(id, path);
-        id
+        self.trees.register(path)
     }
 }

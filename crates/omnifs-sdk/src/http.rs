@@ -136,6 +136,65 @@ impl<'cx, S> Request<'cx, S> {
             },
         )
     }
+
+    /// Convert this request into a blob-fetch. The response body lands
+    /// in the host's blob cache rather than crossing the WIT, and the
+    /// returned [`crate::blob::BlobRef`] can be handed to
+    /// `FileContent::blob`, `cx.archives().open(...)`, or
+    /// `cx.blob(id).read()`.
+    pub fn into_blob(self) -> BlobRequest<'cx, S> {
+        BlobRequest {
+            inner: self,
+            cache_key: None,
+        }
+    }
+}
+
+#[must_use]
+pub struct BlobRequest<'cx, S> {
+    inner: Request<'cx, S>,
+    cache_key: Option<String>,
+}
+
+impl<'cx, S> BlobRequest<'cx, S> {
+    pub fn header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Self {
+        self.inner = self.inner.header(name, value);
+        self
+    }
+
+    pub fn body(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.inner = self.inner.body(bytes);
+        self
+    }
+
+    /// Provider-supplied cache key. Two callers using the same key
+    /// share the same blob; the host fetches once.
+    pub fn with_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.cache_key = Some(key.into());
+        self
+    }
+
+    pub fn send(self) -> CalloutFuture<'cx, S, crate::blob::BlobRef> {
+        if let Some(error) = self.inner.error {
+            return CalloutFuture::ready_error(self.inner.cx, error);
+        }
+        let Some(cache_key) = self.cache_key else {
+            return CalloutFuture::ready_error(
+                self.inner.cx,
+                ProviderError::invalid_input(
+                    "blob fetch requires a cache key (call .with_cache_key)",
+                ),
+            );
+        };
+        let callout = crate::blob::blob_fetch_callout(
+            self.inner.method.as_str().to_string(),
+            self.inner.url,
+            header_map_to_wit(&self.inner.headers),
+            self.inner.body,
+            cache_key,
+        );
+        CalloutFuture::new(self.inner.cx, callout, crate::blob::extract_blob)
+    }
 }
 
 fn header_map_to_wit(map: &HeaderMap) -> Vec<Header> {

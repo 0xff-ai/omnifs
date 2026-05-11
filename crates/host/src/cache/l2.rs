@@ -1,22 +1,22 @@
 //! L2 browse cache: durable, path-keyed, per-provider-instance redb database.
 
-use crate::cache::{CacheRecord, L2_BULK_THRESHOLD, RecordKind};
+use crate::cache::{CacheRecord, Key, L2_BULK_THRESHOLD, RecordKind};
 use crate::path_prefix::path_prefix_matches;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, TableDefinition};
 use std::path::Path;
 
 const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 const CONTENT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("content");
 const BULK_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bulk");
 
-type L2Result<T> = anyhow::Result<T>;
+pub type Result<T> = anyhow::Result<T>;
 
-pub struct BrowseCacheL2 {
+pub struct Cache {
     db: Database,
 }
 
-impl BrowseCacheL2 {
-    pub fn open(path: &Path) -> L2Result<Self> {
+impl Cache {
+    pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -32,50 +32,50 @@ impl BrowseCacheL2 {
         Ok(Self { db })
     }
 
-    pub fn get(&self, path: &str, kind: RecordKind) -> L2Result<Option<CacheRecord>> {
+    pub fn get(&self, key: &Key) -> Result<Option<CacheRecord>> {
         let txn = self.db.begin_read()?;
-        let key = make_key(path, kind);
+        let serialized = stored_key(key.path.as_str(), key.kind);
 
         // For File records, check content first, then bulk.
-        if kind == RecordKind::File {
-            if let Some(record) = Self::read_from_table(&txn, CONTENT_TABLE, &key)? {
+        if key.kind == RecordKind::File {
+            if let Some(record) = Self::read_from_table(&txn, CONTENT_TABLE, &serialized)? {
                 return Ok(Some(record));
             }
-            return Self::read_from_table(&txn, BULK_TABLE, &key);
+            return Self::read_from_table(&txn, BULK_TABLE, &serialized);
         }
 
-        Self::read_from_table(&txn, METADATA_TABLE, &key)
+        Self::read_from_table(&txn, METADATA_TABLE, &serialized)
     }
 
-    pub fn put(&self, path: &str, kind: RecordKind, record: &CacheRecord) -> L2Result<()> {
+    pub fn put(&self, key: &Key, record: &CacheRecord) -> Result<()> {
         let txn = self.db.begin_write()?;
-        let key = make_key(path, kind);
+        let serialized = stored_key(key.path.as_str(), key.kind);
         let bytes = record.serialize();
-        let target = Self::table_for(kind, record.payload.len());
+        let target = Self::table_for(key.kind, record.payload.len());
         {
             let mut table = txn.open_table(target)?;
-            table.insert(key.as_str(), bytes.as_slice())?;
+            table.insert(serialized.as_str(), bytes.as_slice())?;
         }
         // Remove stale copy from the other file table if the record
         // crossed the bulk threshold since last write.
-        if kind == RecordKind::File {
+        if key.kind == RecordKind::File {
             let is_bulk = record.payload.len() >= L2_BULK_THRESHOLD;
             let other = if is_bulk { CONTENT_TABLE } else { BULK_TABLE };
             let mut other_table = txn.open_table(other)?;
-            other_table.remove(key.as_str())?;
+            other_table.remove(serialized.as_str())?;
         }
         txn.commit()?;
         Ok(())
     }
 
-    pub fn put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) -> L2Result<()> {
+    pub fn put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) -> Result<()> {
         let txn = self.db.begin_write()?;
         {
             let mut meta = txn.open_table(METADATA_TABLE)?;
             let mut content = txn.open_table(CONTENT_TABLE)?;
             let mut bulk = txn.open_table(BULK_TABLE)?;
             for (path, kind, record) in records {
-                let key = make_key(path, *kind);
+                let key = stored_key(path, *kind);
                 let bytes = record.serialize();
                 let is_bulk = record.payload.len() >= L2_BULK_THRESHOLD;
                 match (*kind, is_bulk) {
@@ -101,7 +101,7 @@ impl BrowseCacheL2 {
         txn: &redb::ReadTransaction,
         table_def: TableDefinition<&str, &[u8]>,
         key: &str,
-    ) -> L2Result<Option<CacheRecord>> {
+    ) -> Result<Option<CacheRecord>> {
         let table = txn.open_table(table_def)?;
         let Some(value) = table.get(key)? else {
             return Ok(None);
@@ -123,34 +123,18 @@ impl BrowseCacheL2 {
     }
 }
 
-impl BrowseCacheL2 {
-    pub fn delete_exact(&self, path: &str) -> L2Result<usize> {
+impl Cache {
+    pub fn delete_exact(&self, path: &str) -> Result<usize> {
         let txn = self.db.begin_write()?;
+        let scan_prefix = format!("{path}\0");
+        let range_end = range_end(&scan_prefix);
         let mut deleted = 0;
-        let keys = [
-            make_key(path, RecordKind::Lookup),
-            make_key(path, RecordKind::Attr),
-            make_key(path, RecordKind::Dirents),
-            make_key(path, RecordKind::File),
-        ];
-
-        {
-            let mut meta = txn.open_table(METADATA_TABLE)?;
-            for key in &keys[..3] {
-                if meta.remove(key.as_str())?.is_some() {
-                    deleted += 1;
-                }
-            }
-            let mut content = txn.open_table(CONTENT_TABLE)?;
-            if content.remove(keys[3].as_str())?.is_some() {
-                deleted += 1;
-            }
-            let mut bulk = txn.open_table(BULK_TABLE)?;
-            if bulk.remove(keys[3].as_str())?.is_some() {
-                deleted += 1;
-            }
+        for table_def in [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE] {
+            let mut table = txn.open_table(table_def)?;
+            deleted += table
+                .extract_from_if::<&str, _>(scan_prefix.as_str()..range_end.as_str(), |_, _| true)?
+                .try_fold(0, |count, entry| entry.map(|_| count + 1))?;
         }
-
         txn.commit()?;
         Ok(deleted)
     }
@@ -158,57 +142,46 @@ impl BrowseCacheL2 {
     /// Delete all records whose logical path is equal to `prefix` or lies
     /// beneath it on a segment boundary.
     ///
-    /// The stored key format is `{kind_char}:{path}`, so we scan each table
-    /// for keys matching `L:{prefix}`, `A:{prefix}`, `D:{prefix}`, `F:{prefix}`
-    /// using redb's ordered range iteration.
-    pub fn delete_prefix(&self, prefix: &str) -> L2Result<usize> {
+    /// The stored key format is `{path}\0{kind_char}`, so one broad
+    /// ordered range scan per table covers every record kind.
+    pub fn delete_prefix(&self, prefix: &str) -> Result<usize> {
         let txn = self.db.begin_write()?;
+        let scan_prefix = prefix.to_string();
+        let range_end = range_end(&scan_prefix);
         let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
-        let kind_chars = ['L', 'A', 'D', 'F'];
-
-        for table_def in tables {
+        for table_def in [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE] {
             let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
-            for ch in &kind_chars {
-                let scan_prefix = format!("{ch}:{prefix}");
-                // Range from scan_prefix.. to collect matching keys.
-                // redb range is inclusive-start, exclusive-end. We use the
-                // prefix incremented by one char as the upper bound.
-                let range_end = {
-                    let mut end = scan_prefix.clone();
-                    // Append a high char to create an exclusive upper bound.
-                    end.push('\u{ffff}');
-                    end
-                };
-                let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let key = entry.0.value().to_string();
+            deleted += table
+                .extract_from_if::<&str, _>(scan_prefix.as_str()..range_end.as_str(), |key, _| {
                     let path = key
-                        .split_once(':')
-                        .map_or("", |(_, logical_path)| logical_path);
-                    if path_prefix_matches(prefix, path) {
-                        to_delete.push(key);
-                    }
-                }
-            }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
+                        .split_once('\0')
+                        .map_or("", |(logical_path, _)| logical_path);
+                    path_prefix_matches(prefix, path)
+                })?
+                .try_fold(0, |count, entry| entry.map(|_| count + 1))?;
         }
         txn.commit()?;
         Ok(deleted)
     }
 }
 
-fn make_key(path: &str, kind: RecordKind) -> String {
-    let prefix = match kind {
+// Stored as path first so exact-path and subtree invalidation can use
+// one ordered range scan across all record kinds.
+fn stored_key(path: &str, kind: RecordKind) -> String {
+    format!("{path}\0{}", kind_tag(kind))
+}
+
+fn kind_tag(kind: RecordKind) -> char {
+    match kind {
         RecordKind::Lookup => 'L',
         RecordKind::Attr => 'A',
         RecordKind::Dirents => 'D',
         RecordKind::File => 'F',
-    };
-    format!("{prefix}:{path}")
+    }
+}
+
+fn range_end(prefix: &str) -> String {
+    let mut end = prefix.to_string();
+    end.push('\u{ffff}');
+    end
 }

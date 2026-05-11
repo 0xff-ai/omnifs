@@ -164,10 +164,10 @@ async fn registry_uses_path_first_handlers() {
     assert_eq!(entry.target().name(), "world");
 
     let file = registry.read_file(&cx, "/hello/world").await.unwrap();
-    assert_eq!(file.content(), b"hello world\n");
+    assert_eq!(file.content(), Some(&b"hello world\n"[..]));
 
     let projected = registry.read_file(&cx, "/bundle/title").await.unwrap();
-    assert_eq!(projected.content(), b"bundle title\n");
+    assert_eq!(projected.content(), Some(&b"bundle title\n"[..]));
 
     let checkout_list = registry.list_children(&cx, "/checkout").await.unwrap();
     assert!(matches!(checkout_list, List::Subtree(42)));
@@ -177,11 +177,11 @@ async fn registry_uses_path_first_handlers() {
 
     // Rest-capture dispatch: multi-segment tails decode to the joined string.
     let rest_empty = registry.read_file(&cx, "/root/alpha").await.unwrap();
-    assert_eq!(rest_empty.content(), b"a=alpha rest=\n");
+    assert_eq!(rest_empty.content(), Some(&b"a=alpha rest=\n"[..]));
     let rest_one = registry.read_file(&cx, "/root/alpha/beta").await.unwrap();
-    assert_eq!(rest_one.content(), b"a=alpha rest=beta\n");
+    assert_eq!(rest_one.content(), Some(&b"a=alpha rest=beta\n"[..]));
     let rest_deep = registry.read_file(&cx, "/root/alpha/b/c/d").await.unwrap();
-    assert_eq!(rest_deep.content(), b"a=alpha rest=b/c/d\n");
+    assert_eq!(rest_deep.content(), Some(&b"a=alpha rest=b/c/d\n"[..]));
 }
 
 fn parse_unit(path: &str) -> Option<Box<dyn std::any::Any>> {
@@ -373,13 +373,13 @@ async fn registry_prefers_exact_and_prefix_over_rest() {
         .read_file(&cx, "/_ipfs/Qm123/versions")
         .await
         .unwrap();
-    assert_eq!(exact.content(), b"exact");
+    assert_eq!(exact.content(), Some(&b"exact"[..]));
     let prefix = registry.read_file(&cx, "/_ipfs/Qm123/v1").await.unwrap();
-    assert_eq!(prefix.content(), b"prefix");
+    assert_eq!(prefix.content(), Some(&b"prefix"[..]));
     let rest = registry.read_file(&cx, "/_ipfs/Qm123/a/b/c").await.unwrap();
-    assert_eq!(rest.content(), b"rest");
+    assert_eq!(rest.content(), Some(&b"rest"[..]));
     let rest_empty = registry.read_file(&cx, "/_ipfs/Qm123").await.unwrap();
-    assert_eq!(rest_empty.content(), b"rest");
+    assert_eq!(rest_empty.content(), Some(&b"rest"[..]));
 }
 
 #[tokio::test]
@@ -496,8 +496,8 @@ async fn parse_rejection_falls_through_to_next_candidate() {
     let cx = Cx::new(17, Rc::new(RefCell::new(State)));
 
     let digits = registry.read_file(&cx, "/items/42").await.unwrap();
-    assert_eq!(digits.content(), b"digits");
+    assert_eq!(digits.content(), Some(&b"digits"[..]));
 
     let alpha = registry.read_file(&cx, "/items/abc").await.unwrap();
-    assert_eq!(alpha.content(), b"rest");
+    assert_eq!(alpha.content(), Some(&b"rest"[..]));
 }

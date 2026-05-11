@@ -30,15 +30,20 @@ url = "2"
 wasmtime-wasi = "43"
 redb = { workspace = true }
 moka = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"
 
 [dev-dependencies]
-tempfile = { workspace = true }
+http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wasmtime = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
 
 [lints]
 workspace = true

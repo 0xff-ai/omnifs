@@ -8,15 +8,16 @@ check: build-providers
     just check-providers
 
 check-providers:
-    cargo check -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2
-    cargo clippy -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 -- -D warnings
+    cargo check -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2
+    cargo clippy -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
     cargo test -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 --no-run
 
 build-providers:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --target wasm32-wasip2 --release \
-        -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
+        -p omnifs-provider-arxiv -p omnifs-provider-github -p omnifs-provider-dns -p test-provider \
+        -p 'omnifs-tool-*'
 
 test: build-providers
     cargo test --workspace
