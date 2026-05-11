@@ -164,8 +164,8 @@ async fn test_list_projects_direct_file_content_into_cache() {
         .cache_get("hello/bundle/body", RecordKind::File)
         .expect("projected body should be cached at its own path");
 
-    assert_eq!(title.payload, b"title".to_vec());
-    assert_eq!(body.payload, b"body".to_vec());
+    assert_eq!(file_payload(&title).content, b"title".to_vec());
+    assert_eq!(file_payload(&body).content, b"body".to_vec());
     assert!(
         harness
             .runtime

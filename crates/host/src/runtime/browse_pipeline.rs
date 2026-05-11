@@ -217,26 +217,30 @@ impl CalloutRuntime {
                 format!("{parent_path}/{}", entry.name)
             };
 
-            let meta = EntryMeta::from(&entry.kind);
+            if let wit_types::EntryKind::File(attrs) = &entry.kind {
+                Self::push_projected_file(&mut batch, &child_path, attrs);
+            } else {
+                let meta = EntryMeta::from(&entry.kind);
 
-            let lookup = LookupPayload::Positive(meta.clone());
-            if let Some(payload) = lookup.serialize() {
-                batch.push(BatchRecord::new(
-                    child_path.clone(),
-                    RecordKind::Lookup,
-                    None,
-                    CacheRecord::new(RecordKind::Lookup, payload),
-                ));
-            }
+                let lookup = LookupPayload::Positive(meta.clone());
+                if let Some(payload) = lookup.serialize() {
+                    batch.push(BatchRecord::new(
+                        child_path.clone(),
+                        RecordKind::Lookup,
+                        None,
+                        CacheRecord::new(RecordKind::Lookup, payload),
+                    ));
+                }
 
-            let attr = AttrPayload { meta };
-            if let Some(payload) = attr.serialize() {
-                batch.push(BatchRecord::new(
-                    child_path.clone(),
-                    RecordKind::Attr,
-                    None,
-                    CacheRecord::new(RecordKind::Attr, payload),
-                ));
+                let attr = AttrPayload { meta };
+                if let Some(payload) = attr.serialize() {
+                    batch.push(BatchRecord::new(
+                        child_path.clone(),
+                        RecordKind::Attr,
+                        None,
+                        CacheRecord::new(RecordKind::Attr, payload),
+                    ));
+                }
             }
         }
 
