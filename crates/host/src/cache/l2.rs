@@ -2,6 +2,7 @@
 
 use crate::cache::{BatchRecord, CacheRecord, Key, L2_BULK_THRESHOLD, RecordKind};
 use crate::path_prefix::path_prefix_matches;
+use anyhow::Result;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 
@@ -9,14 +10,12 @@ const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metad
 const CONTENT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("content");
 const BULK_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bulk");
 
-type L2Result<T> = anyhow::Result<T>;
-
 pub struct Cache {
     db: Database,
 }
 
 impl Cache {
-    pub fn open(path: &Path) -> L2Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -32,7 +31,7 @@ impl Cache {
         Ok(Self { db })
     }
 
-    pub fn get(&self, key: &Key) -> L2Result<Option<CacheRecord>> {
+    pub fn get(&self, key: &Key) -> Result<Option<CacheRecord>> {
         let txn = self.db.begin_read()?;
         let serialized = make_key(key);
 
@@ -47,7 +46,7 @@ impl Cache {
         Self::read_from_table(&txn, METADATA_TABLE, &serialized)
     }
 
-    pub fn put(&self, key: &Key, record: &CacheRecord) -> L2Result<()> {
+    pub fn put(&self, key: &Key, record: &CacheRecord) -> Result<()> {
         let txn = self.db.begin_write()?;
         let serialized = make_key(key);
         let bytes = record.serialize();
@@ -68,7 +67,7 @@ impl Cache {
         Ok(())
     }
 
-    pub fn put_batch(&self, records: &[BatchRecord]) -> L2Result<()> {
+    pub fn put_batch(&self, records: &[BatchRecord]) -> Result<()> {
         let txn = self.db.begin_write()?;
         {
             let mut meta = txn.open_table(METADATA_TABLE)?;
@@ -105,7 +104,7 @@ impl Cache {
         txn: &redb::ReadTransaction,
         table_def: TableDefinition<&str, &[u8]>,
         key: &str,
-    ) -> L2Result<Option<CacheRecord>> {
+    ) -> Result<Option<CacheRecord>> {
         let table = txn.open_table(table_def)?;
         let Some(value) = table.get(key)? else {
             return Ok(None);
@@ -128,7 +127,7 @@ impl Cache {
 }
 
 impl Cache {
-    pub fn delete_exact(&self, path: &str) -> L2Result<usize> {
+    pub fn delete_exact(&self, path: &str) -> Result<usize> {
         let txn = self.db.begin_write()?;
         let mut deleted = 0;
         let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
@@ -163,7 +162,7 @@ impl Cache {
     ///
     /// The stored key format is `{kind_char}:{path}` plus an optional
     /// auxiliary suffix, so each record kind gets one ordered range scan.
-    pub fn delete_prefix(&self, prefix: &str) -> L2Result<usize> {
+    pub fn delete_prefix(&self, prefix: &str) -> Result<usize> {
         let txn = self.db.begin_write()?;
         let mut deleted = 0;
         let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
