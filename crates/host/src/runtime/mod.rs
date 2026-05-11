@@ -27,7 +27,7 @@ use crate::auth::AuthManager;
 use crate::cache;
 use crate::cache::blobs::BlobCache;
 use crate::cache::l2::Cache as L2Cache;
-use crate::cache::{BatchRecord, CacheRecord, FilePayload, Key, RecordKind};
+use crate::cache::{BatchRecord, CacheRecord, EntryMeta, FilePayload, Key, RecordKind, SizeCache};
 use crate::config::InstanceConfig;
 use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
@@ -44,7 +44,6 @@ use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
 use crate::runtime::tools::archive::{ArchiveExtractorComponent, ArchiveFormat};
 use crate::runtime::tree_refs::TreeRefs;
-#[cfg(target_os = "linux")]
 use fuser::Notifier;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -56,12 +55,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 const ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// FUSE notifier handle (only available on Linux with FUSE support).
-#[cfg(target_os = "linux")]
 pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
-
-/// FUSE notifier handle (stub for non-Linux platforms).
-#[cfg(not(target_os = "linux"))]
-pub type NotifierHandle = Arc<Mutex<Option<()>>>;
 
 /// Runtime for executing WASM provider components.
 ///
@@ -500,7 +494,7 @@ impl CalloutRuntime {
     fn record_preload_child(
         child_records: &mut BTreeMap<String, BTreeMap<String, cache::DirentRecord>>,
         path: &str,
-        meta: cache::EntryMeta,
+        meta: EntryMeta,
     ) {
         let Some((parent, name)) = path.rsplit_once('/') else {
             return;
@@ -1045,7 +1039,7 @@ fn validate_instance_config(
 impl From<&wit_types::FileAttrs> for cache::FileAttrsCache {
     fn from(attrs: &wit_types::FileAttrs) -> Self {
         Self {
-            size: cache::SizeCache::from(&attrs.size),
+            size: SizeCache::from(&attrs.size),
             bytes: cache::BytesCache::from(&attrs.bytes),
             stability: cache::StabilityCache::from(attrs.stability),
             version_token: attrs.version_token.clone(),
@@ -1053,7 +1047,7 @@ impl From<&wit_types::FileAttrs> for cache::FileAttrsCache {
     }
 }
 
-impl From<&wit_types::FileSize> for cache::SizeCache {
+impl From<&wit_types::FileSize> for SizeCache {
     fn from(size: &wit_types::FileSize) -> Self {
         match size {
             wit_types::FileSize::Exact(size) => Self::Exact(*size),
@@ -1093,7 +1087,7 @@ impl From<wit_types::Stability> for cache::StabilityCache {
     }
 }
 
-impl From<&wit_types::EntryKind> for cache::EntryMeta {
+impl From<&wit_types::EntryKind> for EntryMeta {
     fn from(kind: &wit_types::EntryKind) -> Self {
         match kind {
             wit_types::EntryKind::Directory => Self::directory(),

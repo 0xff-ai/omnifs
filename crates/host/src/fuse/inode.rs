@@ -3,7 +3,7 @@
 //! Manages the mapping from virtual paths to inode numbers with
 //! deduplication and stale entry updates.
 
-use crate::cache::{EntryKindCache, FileAttrsCache};
+use crate::cache::{EntryKindCache, EntryMeta, FileAttrsCache};
 use crate::fuse::FuseFs;
 use crate::path_key::PathKey;
 use fuser::{FileAttr, FileType, INodeNo};
@@ -57,7 +57,7 @@ impl FuseFs {
         &self,
         mount_name: &str,
         path: &str,
-        meta: crate::cache::EntryMeta,
+        meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
         self.get_or_alloc_ino_inner(mount_name, path, meta.kind, meta.attrs, size, None)
