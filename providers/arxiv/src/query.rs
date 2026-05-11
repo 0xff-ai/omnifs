@@ -143,10 +143,6 @@ impl EncodedSelector {
     }
 }
 
-pub(crate) fn current_year_utc() -> u32 {
-    u32::try_from(OffsetDateTime::now_utc().year()).expect("UTC year fits in u32")
-}
-
 pub(crate) fn current_date_utc() -> (u32, u32, u32) {
     let now = OffsetDateTime::now_utc().date();
     (
@@ -264,12 +260,11 @@ mod tests {
     #[test]
     fn category_day_query_bounds_to_one_utc_day() {
         let category: CategoryKey = "cs.AI".parse().unwrap();
-        let ymd = YearMonthDay::new(
-            "2026".parse().unwrap(),
-            "05".parse().unwrap(),
-            "11".parse().unwrap(),
-        )
-        .unwrap();
+        let ymd = YearMonthDay {
+            year: 2026,
+            month: 5,
+            day: 11,
+        };
 
         assert_eq!(
             category_day_query(&category, ymd),

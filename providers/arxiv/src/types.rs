@@ -120,10 +120,6 @@ impl VersionKey {
 }
 
 impl YearKey {
-    pub(crate) fn from_value(value: u32) -> Self {
-        Self(value)
-    }
-
     pub(crate) fn value(self) -> u32 {
         self.0
     }
@@ -134,10 +130,6 @@ impl YearKey {
 }
 
 impl MonthKey {
-    pub(crate) fn from_value(value: u32) -> Self {
-        Self(value)
-    }
-
     pub(crate) fn value(self) -> u32 {
         self.0
     }
@@ -160,19 +152,6 @@ impl DayKey {
             let day: u32 = value.parse().unwrap_or(0);
             (1..=31).contains(&day)
         }
-    }
-}
-
-impl YearMonthDay {
-    pub(crate) fn new(year: YearKey, month: MonthKey, day: DayKey) -> Result<Self> {
-        let year = year.value();
-        let month = month.value();
-        let day = day.value();
-        let days = days_in_month(year, month)?;
-        if day > days {
-            return Err(ProviderError::not_found("day is outside the month"));
-        }
-        Ok(Self { year, month, day })
     }
 }
 
@@ -268,14 +247,5 @@ mod tests {
         assert_eq!(day.value(), 11);
         assert!("5".parse::<MonthKey>().is_err());
         assert!("32".parse::<DayKey>().is_err());
-    }
-
-    #[test]
-    fn year_month_day_rejects_impossible_dates() {
-        let year: YearKey = "2026".parse().unwrap();
-        let february: MonthKey = "02".parse().unwrap();
-        let bad_day: DayKey = "30".parse().unwrap();
-
-        assert!(YearMonthDay::new(year, february, bad_day).is_err());
     }
 }

@@ -27,7 +27,7 @@ pub(crate) async fn read_reverse_bytes(
     let url = cx.state(|s| doh::reverse_query_url(&s.resolvers, resolver_name, ip))?;
     let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
     let (records, _) = doh::parse_response(resp.body())?;
-    Ok(format_records(&records).into_bytes())
+    Ok(format_record_lines(&records))
 }
 
 pub(crate) async fn read_record_bytes(
@@ -49,7 +49,7 @@ pub(crate) async fn read_record_bytes(
                 .state(|s| doh::query_url(&s.resolvers, resolver_name, &domain_str, record_type))?;
             let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
             let (records, _) = doh::parse_response(resp.body())?;
-            Ok(format_records(&records).into_bytes())
+            Ok(format_record_lines(&records))
         },
     }
 }
@@ -110,15 +110,6 @@ pub(crate) async fn query_raw(
     let _ = writeln!(out);
     let _ = writeln!(out, ";; RECORDS: {}", records.len());
     Ok(out.into_bytes())
-}
-
-fn format_records(records: &[DnsRecord]) -> String {
-    records
-        .iter()
-        .map(|r| format!("{}\t{}", r.rtype, r.value))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
 }
 
 fn collect_query_all_results(

@@ -646,22 +646,152 @@ impl CalloutRuntime {
     ) -> wit_types::CalloutResult {
         match callout {
             wit_types::Callout::Fetch(req) => {
-                self.execute_fetch_callout(operation_id, callout_index, req)
-                    .await
+                let headers = header_pairs(&req.headers);
+                let callout_kind = "http.fetch";
+                info!(
+                    target: "omnifs_callout",
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    method = req.method.as_str(),
+                    url = %url_for_log(&req.url),
+                    request_headers = %headers_for_log(&headers),
+                    request_body_bytes = req.body.as_ref().map(Vec::len).unwrap_or(0),
+                    "callout started"
+                );
+                let start = Instant::now();
+                let resp = self
+                    .http
+                    .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
+                    .await;
+                log_callout_response(
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    start.elapsed(),
+                    &resp,
+                );
+                callout_response_to_wit(resp)
             },
             wit_types::Callout::GitOpenRepo(req) => {
-                self.execute_git_open_callout(operation_id, callout_index, req)
+                let callout_kind = "git.open_repo";
+                info!(
+                    target: "omnifs_callout",
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    method = "",
+                    url = %url_for_log(&req.clone_url),
+                    request_headers = "",
+                    request_body_bytes = 0,
+                    "callout started"
+                );
+                let start = Instant::now();
+                let resp = self.git.open_repo(&req.cache_key, &req.clone_url);
+                log_callout_response(
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    start.elapsed(),
+                    &resp,
+                );
+                git_response_to_wit(resp)
             },
             wit_types::Callout::FetchBlob(req) => {
-                self.execute_blob_fetch_callout(operation_id, callout_index, req)
-                    .await
+                let headers = header_pairs(&req.headers);
+                let callout_kind = "blob.fetch";
+                info!(
+                    target: "omnifs_callout",
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    method = req.method.as_str(),
+                    url = %url_for_log(&req.url),
+                    request_headers = %headers_for_log(&headers),
+                    request_body_bytes = req.body.as_ref().map(Vec::len).unwrap_or(0),
+                    "callout started"
+                );
+                let start = Instant::now();
+                let resp = self
+                    .blob
+                    .fetch_blob(
+                        &req.method,
+                        &req.url,
+                        &headers,
+                        req.body.as_deref(),
+                        &req.cache_key,
+                    )
+                    .await;
+                log_callout_response(
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    start.elapsed(),
+                    &resp,
+                );
+                blob_response_to_wit(resp)
             },
             wit_types::Callout::OpenArchive(req) => {
-                self.execute_archive_open_callout(operation_id, callout_index, req)
-                    .await
+                let format = match req.format {
+                    wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
+                    wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
+                    wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
+                };
+                let callout_kind = "archive.open";
+                info!(
+                    target: "omnifs_callout",
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    blob = req.blob,
+                    format = ?format,
+                    strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
+                    "callout started"
+                );
+                let start = Instant::now();
+                let archive = Arc::clone(&self.archive);
+                let blob = req.blob;
+                let strip = req.strip_prefix.clone();
+                let resp = tokio::task::spawn_blocking(move || {
+                    archive.open_archive(blob, format, strip.as_deref())
+                })
+                .await
+                .unwrap_or_else(|join_err| CalloutResponse::Error {
+                    kind: ErrorKind::Internal,
+                    message: format!("extract task join: {join_err}"),
+                    retryable: false,
+                });
+                log_callout_response(
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    start.elapsed(),
+                    &resp,
+                );
+                archive_response_to_wit(resp)
             },
             wit_types::Callout::ReadBlob(req) => {
-                self.execute_blob_read_callout(operation_id, callout_index, req)
+                let callout_kind = "blob.read";
+                info!(
+                    target: "omnifs_callout",
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    blob = req.blob,
+                    offset = req.offset,
+                    len = req.len,
+                    "callout started"
+                );
+                let start = Instant::now();
+                let resp = self.blob.read_blob(req.blob, req.offset, req.len);
+                log_callout_response(
+                    operation_id,
+                    callout_index,
+                    callout_kind,
+                    start.elapsed(),
+                    &resp,
+                );
+                blob_read_to_wit(resp)
             },
             _ => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
                 kind: wit_types::ErrorKind::Internal,
@@ -669,178 +799,6 @@ impl CalloutRuntime {
                 retryable: false,
             }),
         }
-    }
-
-    async fn execute_fetch_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        req: &wit_types::HttpRequest,
-    ) -> wit_types::CalloutResult {
-        let headers = header_pairs(&req.headers);
-        let callout_kind = "http.fetch";
-        log_callout_start(
-            operation_id,
-            callout_index,
-            callout_kind,
-            Some(&req.method),
-            Some(&req.url),
-            Some(&headers),
-            req.body.as_ref().map(Vec::len),
-        );
-        let start = Instant::now();
-        let resp = self
-            .http
-            .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
-            .await;
-        log_callout_response(
-            operation_id,
-            callout_index,
-            callout_kind,
-            start.elapsed(),
-            &resp,
-        );
-        callout_response_to_wit(resp)
-    }
-
-    fn execute_git_open_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        req: &wit_types::GitOpenRequest,
-    ) -> wit_types::CalloutResult {
-        let callout_kind = "git.open_repo";
-        log_callout_start(
-            operation_id,
-            callout_index,
-            callout_kind,
-            None,
-            Some(&req.clone_url),
-            None,
-            None,
-        );
-        let start = Instant::now();
-        let resp = self.git.open_repo(&req.cache_key, &req.clone_url);
-        log_callout_response(
-            operation_id,
-            callout_index,
-            callout_kind,
-            start.elapsed(),
-            &resp,
-        );
-        git_response_to_wit(resp)
-    }
-
-    async fn execute_blob_fetch_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        req: &wit_types::BlobFetchRequest,
-    ) -> wit_types::CalloutResult {
-        let headers = header_pairs(&req.headers);
-        let callout_kind = "blob.fetch";
-        log_callout_start(
-            operation_id,
-            callout_index,
-            callout_kind,
-            Some(&req.method),
-            Some(&req.url),
-            Some(&headers),
-            req.body.as_ref().map(Vec::len),
-        );
-        let start = Instant::now();
-        let resp = self
-            .blob
-            .fetch_blob(
-                &req.method,
-                &req.url,
-                &headers,
-                req.body.as_deref(),
-                &req.cache_key,
-            )
-            .await;
-        log_callout_response(
-            operation_id,
-            callout_index,
-            callout_kind,
-            start.elapsed(),
-            &resp,
-        );
-        blob_response_to_wit(resp)
-    }
-
-    async fn execute_archive_open_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        req: &wit_types::ArchiveOpenRequest,
-    ) -> wit_types::CalloutResult {
-        let format = match req.format {
-            wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
-            wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
-            wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
-        };
-        let callout_kind = "archive.open";
-        info!(
-            target: "omnifs_callout",
-            operation_id,
-            callout_index,
-            callout_kind,
-            blob = req.blob,
-            format = ?format,
-            strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
-            "callout started"
-        );
-        let start = Instant::now();
-        let archive = Arc::clone(&self.archive);
-        let blob = req.blob;
-        let strip = req.strip_prefix.clone();
-        let resp = tokio::task::spawn_blocking(move || {
-            archive.open_archive(blob, format, strip.as_deref())
-        })
-        .await
-        .unwrap_or_else(|join_err| CalloutResponse::Error {
-            kind: ErrorKind::Internal,
-            message: format!("extract task join: {join_err}"),
-            retryable: false,
-        });
-        log_callout_response(
-            operation_id,
-            callout_index,
-            callout_kind,
-            start.elapsed(),
-            &resp,
-        );
-        archive_response_to_wit(resp)
-    }
-
-    fn execute_blob_read_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        req: &wit_types::ReadBlobRequest,
-    ) -> wit_types::CalloutResult {
-        let callout_kind = "blob.read";
-        info!(
-            target: "omnifs_callout",
-            operation_id,
-            callout_index,
-            callout_kind,
-            blob = req.blob,
-            offset = req.offset,
-            len = req.len,
-            "callout started"
-        );
-        let start = Instant::now();
-        let resp = self.blob.read_blob(req.blob, req.offset, req.len);
-        log_callout_response(
-            operation_id,
-            callout_index,
-            callout_kind,
-            start.elapsed(),
-            &resp,
-        );
-        blob_read_to_wit(resp)
     }
 
     /// Runs every callout in `callouts` concurrently and returns their
@@ -876,28 +834,6 @@ fn header_pairs(headers: &[wit_types::Header]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn log_callout_start(
-    operation_id: u64,
-    callout_index: usize,
-    callout_kind: &str,
-    method: Option<&str>,
-    url: Option<&str>,
-    headers: Option<&[(String, String)]>,
-    body_len: Option<usize>,
-) {
-    info!(
-        target: "omnifs_callout",
-        operation_id,
-        callout_index,
-        callout_kind,
-        method = method.unwrap_or(""),
-        url = url.map(url_for_log).unwrap_or_default(),
-        request_headers = headers.map(headers_for_log).unwrap_or_default(),
-        request_body_bytes = body_len.unwrap_or(0),
-        "callout started"
-    );
-}
-
 fn log_callout_response(
     operation_id: u64,
     callout_index: usize,
@@ -924,7 +860,7 @@ fn log_callout_response(
                 "callout response"
             );
         },
-        CalloutResponse::GitRepoOpened(tree_ref) => {
+        CalloutResponse::GitRepoOpened(tree_ref) | CalloutResponse::ArchiveOpened(tree_ref) => {
             info!(
                 target: "omnifs_callout",
                 operation_id,
@@ -946,17 +882,6 @@ fn log_callout_response(
                 status = record.status,
                 response_headers = %headers_for_log(&record.response_headers),
                 response_body_bytes = record.size,
-                elapsed_us,
-                "callout response"
-            );
-        },
-        CalloutResponse::ArchiveOpened(tree_ref) => {
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                tree_ref,
                 elapsed_us,
                 "callout response"
             );

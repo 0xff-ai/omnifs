@@ -4,7 +4,7 @@ use crate::api::fetch_listing;
 use crate::paper_subtree::PaperSubtree;
 use crate::query::{
     EARLIEST_YEAR, SortAxis, and, author_query, category_day_query, category_query,
-    current_date_utc, current_year_utc, listing_url, window_start,
+    current_date_utc, listing_url, window_start,
 };
 use crate::types::{
     CategoryKey, DayKey, EncodedSelector, MonthKey, PaperKey, YearKey, YearMonthDay, days_in_month,
@@ -20,8 +20,9 @@ impl CategoryHandlers {
     /// auto-derive as static children from the routes below).
     #[dir("/categories/{category}")]
     fn category_root(_cx: &DirCx<State>, _category: CategoryKey) -> Result<Projection> {
+        let (current_year, _, _) = current_date_utc();
         let mut p = Projection::new();
-        for year in (EARLIEST_YEAR..=current_year_utc()).rev() {
+        for year in (EARLIEST_YEAR..=current_year).rev() {
             p.dir(format!("{year:04}"));
         }
         p.page(PageStatus::Exhaustive);
@@ -34,8 +35,8 @@ impl CategoryHandlers {
         _category: CategoryKey,
         year: YearKey,
     ) -> Result<Projection> {
-        let year = supported_year(year)?;
         let (current_year, current_month, _) = current_date_utc();
+        let year = supported_year(year, current_year)?;
         let max_month = if year == current_year {
             current_month
         } else {
@@ -57,9 +58,9 @@ impl CategoryHandlers {
         year: YearKey,
         month: MonthKey,
     ) -> Result<Projection> {
-        let year = supported_year(year)?;
-        let month = supported_month(year, month)?;
         let (current_year, current_month, current_day) = current_date_utc();
+        let year = supported_year(year, current_year)?;
+        let month = supported_month(year, month, current_year, current_month)?;
         let max_day = if year == current_year && month == current_month {
             current_day
         } else {
@@ -214,17 +215,21 @@ impl CategoryHandlers {
     }
 }
 
-fn supported_year(year: YearKey) -> Result<u32> {
+fn supported_year(year: YearKey, current_year: u32) -> Result<u32> {
     let year = year.value();
-    if !(EARLIEST_YEAR..=current_year_utc()).contains(&year) {
+    if !(EARLIEST_YEAR..=current_year).contains(&year) {
         return Err(ProviderError::not_found("year is outside the arXiv range"));
     }
     Ok(year)
 }
 
-fn supported_month(year: u32, month: MonthKey) -> Result<u32> {
+fn supported_month(
+    year: u32,
+    month: MonthKey,
+    current_year: u32,
+    current_month: u32,
+) -> Result<u32> {
     let month = month.value();
-    let (current_year, current_month, _) = current_date_utc();
     if year == current_year && month > current_month {
         return Err(ProviderError::not_found("month is in the future"));
     }
@@ -232,12 +237,29 @@ fn supported_month(year: u32, month: MonthKey) -> Result<u32> {
 }
 
 fn supported_day(year: YearKey, month: MonthKey, day: DayKey) -> Result<YearMonthDay> {
-    let year = supported_year(year)?;
-    let month = supported_month(year, month)?;
-    let ymd = YearMonthDay::new(YearKey::from_value(year), MonthKey::from_value(month), day)?;
     let (current_year, current_month, current_day) = current_date_utc();
-    if ymd.year == current_year && ymd.month == current_month && ymd.day > current_day {
+    let year = supported_year(year, current_year)?;
+    let month = supported_month(year, month, current_year, current_month)?;
+    let day = day.value();
+    if day > days_in_month(year, month)? {
+        return Err(ProviderError::not_found("day is outside the month"));
+    }
+    if year == current_year && month == current_month && day > current_day {
         return Err(ProviderError::not_found("day is in the future"));
     }
-    Ok(ymd)
+    Ok(YearMonthDay { year, month, day })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_day_rejects_impossible_dates() {
+        let year: YearKey = "2024".parse().unwrap();
+        let february: MonthKey = "02".parse().unwrap();
+        let bad_day: DayKey = "30".parse().unwrap();
+
+        assert!(supported_day(year, february, bad_day).is_err());
+    }
 }
