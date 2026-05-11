@@ -15,6 +15,7 @@ struct Issue {
     state: String,
     user: Option<User>,
     pull_request: Option<IgnoredAny>,
+    updated_at: Option<String>,
 }
 
 impl Listable for Issue {
@@ -84,6 +85,7 @@ fn ingest_issue_items(
     items: impl IntoIterator<Item = Issue>,
 ) {
     for item in items {
+        let version = item.updated_at.clone();
         if item.pull_request.is_some() {
             preload_pr_from_issue(projection, owner, repo, filter, item);
             continue;
@@ -91,7 +93,13 @@ fn ingest_issue_items(
         let number = item.number;
         let base = format!("{owner}/{repo}/_issues/{}/{number}/", filter.as_ref());
         numbered::preload_common_fields(
-            projection, &base, item.title, item.body, item.state, item.user,
+            projection,
+            &base,
+            item.title,
+            item.body,
+            item.state,
+            item.user,
+            version.as_deref(),
         );
         projection.dir(number.to_string());
     }
@@ -104,19 +112,25 @@ fn preload_pr_from_issue(
     filter: StateFilter,
     item: Issue,
 ) {
+    let version = item.updated_at.clone();
     let base = format!("{owner}/{repo}/_prs/{}/{}/", filter.as_ref(), item.number);
     projection.preload_dir(base.trim_end_matches('/'));
     numbered::preload_common_fields(
-        projection, &base, item.title, item.body, item.state, item.user,
+        projection,
+        &base,
+        item.title,
+        item.body,
+        item.state,
+        item.user,
+        version.as_deref(),
     );
     projection.preload_dir(format!("{base}comments").trim_end_matches('/'));
     projection.preload_entry(
         format!("{base}diff"),
         EntryKind::File,
-        Some(FileAttrs::deferred(
+        Some(numbered::mutable_deferred_attrs(
             Size::Unknown,
-            ReadMode::Full,
-            Stability::Immutable,
+            version.as_deref(),
         )),
     );
 }
@@ -133,12 +147,13 @@ async fn issue_projection(
         .await?;
 
     let mut projection = Projection::new();
-    projection.file_with_content("title", issue.title);
-    projection.file_with_content("body", issue.body.unwrap_or_default());
-    projection.file_with_content("state", issue.state);
-    projection.file_with_content(
-        "user",
-        issue.user.map(|user| user.login).unwrap_or_default(),
+    numbered::project_common_fields(
+        &mut projection,
+        issue.title,
+        issue.body,
+        issue.state,
+        issue.user,
+        issue.updated_at.as_deref(),
     );
     projection.page(PageStatus::Exhaustive);
     Ok(projection)

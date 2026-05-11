@@ -313,6 +313,14 @@ impl omnifs_sdk::handler::Handler<State> for StubSubtree {
     ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::FileContent> {
         Box::pin(async { Ok(omnifs_sdk::browse::FileContent::new(Vec::new())) })
     }
+
+    fn open_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::OpenedFile> {
+        Box::pin(async { Err(ProviderError::not_found("path not found")) })
+    }
 }
 
 fn call_bind_stub<'a>(

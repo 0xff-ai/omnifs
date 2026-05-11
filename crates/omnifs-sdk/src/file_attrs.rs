@@ -146,7 +146,7 @@ impl Size {
         match self {
             Self::Exact(size) => *size,
             Self::NonZero => 1,
-            Self::Unknown => 0,
+            Self::Unknown => 1,
         }
     }
 }

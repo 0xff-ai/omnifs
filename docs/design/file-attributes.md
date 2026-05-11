@@ -167,14 +167,14 @@ The provider declares attributes; the host derives FUSE and cache behavior from 
 | Attributes | `st_size` before read | Open/read policy | Content cache policy | Post-read size learning |
 |---|---:|---|---|---|
 | `Size::Exact(n)` | `n` | Normal reads unless `Stability::Volatile` forces the ranged live path. | Derived from `Stability`. | Already exact. Inline and deferred reads validate against `n`. |
-| `Size::NonZero` | `1` | Use direct I/O until the real size is learned, because `1` is a truthful lower-bound hint, not a read bound. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
-| `Size::Unknown` | `0` | Use direct I/O until the real size is learned or until the file is known to be live. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
+| `Size::NonZero` | `1` | Materialize full-deferred files on open before the first read; use direct I/O while non-exact. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
+| `Size::Unknown` | `1` | Materialize full-deferred files on open before the first read; use direct I/O while non-exact or until the file is known to be live. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
 
 `Size::NonZero` reports `st_size = 1` before materialization. This preserves a truthful non-empty signal for stat-only tools without pretending to know the length. The host must still treat that size as a lower-bound hint only: it is never used to clamp reads, allocate final buffers, or decide EOF.
 
-`Size::Unknown` reports `st_size = 0` before materialization. This is the only truthful POSIX value available when the provider has no length information.
+`Size::Unknown` reports `st_size = 1` before materialization. This is a compatibility sentinel, not a provider claim that the file is non-empty. Linux tools such as `cat` can skip reads for zero-sized regular files even when the host asks for direct I/O, so the host uses the smallest non-zero stat value to force materialization. A complete read can still learn and publish `Size::Exact(0)`.
 
-For both `NonZero` and `Unknown`, the host uses direct I/O when ordinary kernel read bounding would make the reported stat size observable as a content limit. After a complete read teaches the host the real length, the host updates inode metadata and invalidates the kernel's cached attributes so the next stat can report `Size::Exact(n)`.
+For both `NonZero` and `Unknown`, direct I/O alone is not enough to make the reported stat size invisible. Linux can still make the old `st_size` observable to the reader. For full-deferred files, the host materializes content during `open`, publishes the learned exact size before the post-open `getattr`, and serves the first read from the open file handle. Cached non-exact dirents must not downgrade that learned exact size when they describe the same stability, byte mode, and version identity.
 
 Size learning is valid only when the host has a complete observation:
 
@@ -191,7 +191,7 @@ The host-derived FUSE policy is deliberately host-owned:
 | Stability / size condition | FUSE/cache behavior |
 |---|---|
 | `Immutable + Exact` | Normal attribute TTLs and content caches are safe by identity. |
-| `Immutable + NonZero/Unknown` | Use direct I/O until an exact size is learned, then invalidate kernel attributes. |
+| `Immutable + NonZero/Unknown` | Materialize full-deferred files on open, use direct I/O while non-exact, and retain learned exact size across stale non-exact dirent refreshes. |
 | `Mutable` without version or invalidation proof | Keep content and learned size within the current observation only. Use short attribute TTLs and do not reuse whole-file content across opens. |
 | `Mutable` with version or invalidation proof | Cache by version identity and invalidate path aliases through provider events. |
 | `Volatile` | Use the ranged live path, direct I/O, short or zero attribute TTLs, and file-handle-aware attributes where the kernel path requires them. Do not use durable whole-file caches. |
@@ -420,12 +420,12 @@ These cases are the minimum behavior expected from the supported Linux toolbox.
 |---|---|---|
 | `Exact + Inline + Immutable` | `ls -l`, `cat`, `tar c`, `rsync --size-only` | `st_size` equals `bytes.len()`. Reads serve the inline bytes. Archive/copy tools see the real size and complete without padding. |
 | `Exact + Deferred + Immutable` | `cp`, `sha256sum`, `tar c` | Host reads deferred bytes, validates/read-clamps against exact size, and may cache content by identity. |
-| `NonZero + Deferred + Immutable` | `find -size +0`, `cat`, later `stat` | Initial stat reports size `1`, so non-empty-sensitive tools do not skip it. Streaming reads are direct I/O and continue until provider EOF. After complete read with EOF proof, later stat reports exact size. |
-| `Unknown + Deferred + Immutable` | `cat`, `head`, later `stat` | Initial stat reports size `0`. Streaming reads still materialize content through direct I/O. After complete read with EOF proof, later stat reports exact size. |
+| `NonZero + Deferred + Immutable` | `find -size +0`, `cat`, later `stat` | Initial stat reports size `1`, so non-empty-sensitive tools do not skip it. Opening the file materializes the full content and publishes the exact size before the first read. Later stat reports exact size. |
+| `Unknown + Deferred + Immutable` | `cat`, `head`, later `stat` | Initial stat reports size `1` as a compatibility sentinel. Opening the file materializes the full content and publishes exact size before the first read, including exact zero. |
 | `Exact + Inline + Mutable` | `cat` twice across observations | Each projected inline payload is a consistent snapshot. Host does not reuse it permanently unless invalidation or version identity proves it is still current. |
 | `Unknown + Deferred + Mutable` | `cat`, then later `cat` | Each complete read produces a consistent observation. Learned size is observation-scoped unless version identity or invalidation proof allows durable reuse. |
 | `NonZero + Deferred + Volatile` | `tail -f`, repeated `read` on one handle | Initial stat reports size `1`. Host uses the ranged live path, avoids whole-file caches, and does not publish a durable learned size from partial live reads. |
-| `Unknown + Deferred + Volatile` | `tail -f`, `head`, `less` | Initial stat reports size `0`. Host uses the ranged live path. Tools that stream reads should see current bytes without stale whole-file caching. |
+| `Unknown + Deferred + Volatile` | `tail -f`, `head`, `less` | Initial stat reports size `1` as a compatibility sentinel. Host uses the ranged live path. Tools that stream reads should see current bytes without stale whole-file caching. |
 
 For `NonZero` and `Unknown`, the matrix intentionally excludes `tar c`, `wc -c`, `tail -n`, `tail -c`, and size-only traversal modes as guaranteed scenarios. Those tools can be correct after materialization promotes the inode to `Size::Exact`, but they cannot be promised before exact size is known.
 
@@ -433,7 +433,7 @@ For `NonZero` and `Unknown`, the matrix intentionally excludes `tar c`, `wc -c`,
 
 Earlier versions of omnifs reported a 256 MiB placeholder for unsized files. That single value tried to be both a read-termination upper bound, which must be larger than any payload to avoid truncation, and a userspace size report, which must be small enough to not lie. 256 MiB was the compromise; it was unsound in both directions. `tail -n` would `lseek(SEEK_END)` to 256 MiB and panic walking back through unallocated space; `du -sh` over a directory of projected files reported terabytes; some real downloads exceeded the bound and silently truncated.
 
-The replacement is truthful but not magic. `Size::NonZero` makes `du` and size-only tools under-report until the file is materialized, while `Size::Unknown` reports `0` until exact size is learned. That is still preferable to a large fabricated length because it makes the absence of size knowledge explicit.
+The replacement is conservative but not magic. `Size::NonZero` and `Size::Unknown` make `du` and size-only tools under-report until the file is materialized. That is still preferable to a large fabricated length because it makes the absence of size knowledge explicit while preserving normal read behavior for `cat`-style tools.
 
 The new model decouples provider knowledge from host FUSE policy. `Size::Exact` is an exact length. `Size::NonZero` is a truthful lower-bound hint. `Size::Unknown` is explicit absence of length information. The host then chooses how to expose stat size and direct I/O without pretending a compatibility sentinel is an exact file length.
 

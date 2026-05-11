@@ -40,6 +40,7 @@ use tracing::{debug, debug_span, info, warn};
 /// a finite Duration, so pick one large enough that refresh churn is
 /// irrelevant in practice (~136 years).
 const TTL: Duration = Duration::from_secs(u32::MAX as u64);
+const TTL_DYNAMIC: Duration = Duration::from_secs(0);
 const ROOT_INO: u64 = 1;
 
 type DirSnapshot = Vec<(u64, String, EntryKindCache)>;
@@ -123,7 +124,6 @@ pub struct FuseFs {
     /// Shared via `Arc` so the FUSE notifier can also hold a reference
     /// and invalidate entries concurrently without cloning the map.
     path_to_inode: Arc<PathToInode>,
-    notifier: NotifierHandle,
     next_ino: AtomicU64,
     dir_snapshots: DashMap<u64, DirSnapshot>,
     next_fh: AtomicU64,
@@ -156,7 +156,7 @@ impl FuseFs {
         rt: Handle,
         registry: Arc<ProviderRegistry>,
         path_to_inode: Arc<PathToInode>,
-        notifier: NotifierHandle,
+        _notifier: NotifierHandle,
     ) -> Self {
         let inodes = DashMap::new();
 
@@ -175,7 +175,6 @@ impl FuseFs {
             registry,
             inodes,
             path_to_inode,
-            notifier,
             next_ino: AtomicU64::new(2),
             dir_snapshots: DashMap::new(),
             next_fh: AtomicU64::new(1),
@@ -282,16 +281,48 @@ impl FuseFs {
         }
     }
 
-    /// Resolve a deserialized `LookupPayload` into a `FileAttr` (positive)
-    /// or `Errno::ENOENT` (negative), emitting a cache-hit trace with the
-    /// given `tier` label.
+    fn attr_for_inode_or_meta(
+        &self,
+        ino: u64,
+        fallback_kind: EntryKindCache,
+        fallback_size: u64,
+    ) -> FileAttr {
+        if let Some(entry) = self.inodes.get(&ino) {
+            return self.attr_for_kind(ino, entry.kind, entry.size);
+        }
+        self.attr_for_kind(ino, fallback_kind, fallback_size)
+    }
+
+    fn ttl_for_attrs(attrs: Option<&FileAttrsCache>) -> Duration {
+        let Some(attrs) = attrs else {
+            return TTL;
+        };
+        if !matches!(attrs.size, SizeCache::Exact(_))
+            || !matches!(attrs.stability, cache::StabilityCache::Immutable)
+        {
+            return TTL_DYNAMIC;
+        }
+        TTL
+    }
+
+    fn ttl_for_meta(meta: &EntryMeta) -> Duration {
+        Self::ttl_for_attrs(meta.attrs.as_ref())
+    }
+
+    fn ttl_for_entry(entry: &NodeEntry) -> Duration {
+        Self::ttl_for_attrs(entry.attrs.as_ref())
+    }
+
+    /// Resolve a deserialized `LookupPayload` into `FileAttr` plus kernel
+    /// TTL (positive) or `Errno::ENOENT` (negative), emitting a cache-hit
+    /// trace with the given `tier` label.
     fn resolve_lookup_hit(
         &self,
         mount_name: &str,
         child_path: &str,
         lookup: &cache::LookupPayload,
         tier: &str,
-    ) -> Result<FileAttr, Errno> {
+    ) -> Result<(FileAttr, Duration), Errno> {
         match lookup {
             cache::LookupPayload::Negative => {
                 debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount_name, "negative cache hit");
@@ -300,21 +331,24 @@ impl FuseFs {
             cache::LookupPayload::Positive(meta) => {
                 debug!(target: "omnifs_cache", kind = tier, op = "lookup", mount = mount_name, "cache hit");
                 let ino = self.get_or_alloc_ino_meta(mount_name, child_path, meta.clone());
-                Ok(self.attr_for_kind(ino, meta.kind, meta.st_size()))
+                Ok((
+                    self.attr_for_inode_or_meta(ino, meta.kind, meta.st_size()),
+                    Self::ttl_for_meta(meta),
+                ))
             },
         }
     }
 
     /// Check L0/L2 caches and the path→inode dedup table for a lookup.
     ///
-    /// Returns `Ok(Some(attr))` on a positive hit, `Ok(None)` on a miss,
-    /// or `Err(Errno)` on a negative hit or missing runtime.
+    /// Returns `Ok(Some((attr, ttl)))` on a positive hit, `Ok(None)` on a
+    /// miss, or `Err(Errno)` on a negative hit or missing runtime.
     fn lookup_check_caches(
         &self,
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
-    ) -> Result<Option<FileAttr>, Errno> {
+    ) -> Result<Option<(FileAttr, Duration)>, Errno> {
         let child_path = join_child_path(parent_path, name_str);
 
         // Dirents-implied negative: if parent dirents are cached and
@@ -331,10 +365,9 @@ impl FuseFs {
                 // enumerated them but there is no dedicated lookup
                 // handler at the per-child path.
                 let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, dirent.meta.clone());
-                return Ok(Some(self.attr_for_kind(
-                    ino,
-                    dirent.meta.kind,
-                    dirent.meta.st_size(),
+                return Ok(Some((
+                    self.attr_for_inode_or_meta(ino, dirent.meta.kind, dirent.meta.st_size()),
+                    Self::ttl_for_meta(&dirent.meta),
                 )));
             }
             return Err(Errno::ENOENT);
@@ -369,7 +402,9 @@ impl FuseFs {
             let ino = *ino_ref;
             drop(ino_ref);
             if let Some(entry) = self.inodes.get(&ino) {
-                return Ok(Some(self.attr_for_kind(ino, entry.kind, entry.size)));
+                let attr = self.attr_for_kind(ino, entry.kind, entry.size);
+                let ttl = Self::ttl_for_entry(&entry);
+                return Ok(Some((attr, ttl)));
             }
         }
 
@@ -383,7 +418,7 @@ impl FuseFs {
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
-    ) -> Result<FileAttr, Errno> {
+    ) -> Result<(FileAttr, Duration), Errno> {
         let child_path = join_child_path(parent_path, name_str);
 
         match self
@@ -401,7 +436,7 @@ impl FuseFs {
                     0,
                     real_root,
                 );
-                Ok(self.dir_attr(ino))
+                Ok((self.dir_attr(ino), TTL))
             },
             Ok(OpResult::Lookup(LookupResult::Entry(entry))) => {
                 debug!(
@@ -415,6 +450,7 @@ impl FuseFs {
                 let meta = EntryMeta::from(&entry.target.kind);
                 let size = meta.st_size();
                 let kind = meta.kind;
+                let ttl = Self::ttl_for_meta(&meta);
                 let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, meta.clone());
                 let payload = cache::LookupPayload::Positive(meta);
                 if let Some(encoded) = payload.serialize() {
@@ -422,7 +458,7 @@ impl FuseFs {
                     runtime.cache_put(&child_path, RecordKind::Lookup, &record);
                     self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
-                Ok(self.attr_for_kind(ino, kind, size))
+                Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
             },
             Ok(OpResult::Lookup(LookupResult::NotFound)) => {
                 let neg = cache::LookupPayload::Negative;
@@ -867,26 +903,37 @@ impl FuseFs {
             return;
         }
         self.promote_inode_attrs(target.ino, attrs_cache.clone());
-        if let Some(aux) = attrs_cache.durable_cache_aux() {
-            let payload = FilePayload::new(attrs_cache.version_token.clone(), data.clone());
-            let Some(payload) = payload.serialize() else {
-                reply.error(Errno::EIO);
-                return;
-            };
-            let file_record = CacheRecord::new(RecordKind::File, payload);
-            if let Some(rt) = self.runtime_for_mount(&target.mount_name) {
-                rt.cache_put_with_aux(&target.path, RecordKind::File, aux.as_deref(), &file_record);
-            }
-            self.l0_put_with_aux(
-                &target.mount_name,
-                &target.path,
-                RecordKind::File,
-                aux,
-                file_record,
-            );
+        if self
+            .cache_durable_file_payload(&target.mount_name, &target.path, &attrs_cache, &data)
+            .is_err()
+        {
+            reply.error(Errno::EIO);
+            return;
         }
         reply.data(data_slice(&data, offset, size));
         self.file_cache.insert(target.fh, data);
+    }
+
+    fn cache_durable_file_payload(
+        &self,
+        mount_name: &str,
+        path: &str,
+        attrs_cache: &FileAttrsCache,
+        data: &[u8],
+    ) -> Result<(), Errno> {
+        let Some(aux) = attrs_cache.durable_cache_aux() else {
+            return Ok(());
+        };
+        let payload = FilePayload::new(attrs_cache.version_token.clone(), data.to_vec());
+        let Some(payload) = payload.serialize() else {
+            return Err(Errno::EIO);
+        };
+        let file_record = CacheRecord::new(RecordKind::File, payload);
+        if let Some(rt) = self.runtime_for_mount(mount_name) {
+            rt.cache_put_with_aux(path, RecordKind::File, aux.as_deref(), &file_record);
+        }
+        self.l0_put_with_aux(mount_name, path, RecordKind::File, aux, file_record);
+        Ok(())
     }
 
     fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
@@ -898,12 +945,6 @@ impl FuseFs {
         };
         entry.size = attrs.st_size();
         entry.attrs = Some(attrs);
-        drop(entry);
-        if let Some(notifier) = self.notifier.lock().as_ref()
-            && let Err(error) = notifier.inval_inode(INodeNo(ino), 0, 0)
-        {
-            debug!(ino, error = %error, "kernel inode attr invalidation failed");
-        }
     }
 }
 
@@ -967,8 +1008,8 @@ impl Filesystem for FuseFs {
 
         // L0/L2 cache path.
         match self.lookup_check_caches(&mount_name, &parent_path, name_str) {
-            Ok(Some(attr)) => {
-                reply.entry(&TTL, &attr, Generation(0));
+            Ok(Some((attr, ttl))) => {
+                reply.entry(&ttl, &attr, Generation(0));
                 return;
             },
             Err(e) => {
@@ -986,7 +1027,7 @@ impl Filesystem for FuseFs {
         debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
 
         match self.lookup_via_provider(&runtime, &mount_name, &parent_path, name_str) {
-            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Ok((attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
             Err(e) => reply.error(e),
         }
     }
@@ -1022,7 +1063,8 @@ impl Filesystem for FuseFs {
             EntryKindCache::Directory => self.dir_attr(ino.0),
             EntryKindCache::File => self.file_attr(ino.0, entry.size),
         };
-        reply.attr(&TTL, &attr);
+        let ttl = Self::ttl_for_entry(&entry);
+        reply.attr(&ttl, &attr);
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
@@ -1231,6 +1273,63 @@ impl Filesystem for FuseFs {
             }
         }
 
+        if backing_path.is_none()
+            && let Some(attrs) = attrs.as_ref()
+            && should_prefetch_full_on_open(attrs)
+        {
+            let Some(runtime) = self.runtime_for_mount(&mount_name) else {
+                reply.error(Errno::ENOENT);
+                return;
+            };
+            self.drain_and_evict_pending(&mount_name);
+            match self.rt.block_on(runtime.call_read_file(&path)) {
+                Ok(OpResult::Read(result)) => {
+                    let Some((data, result_attrs, _sibling_count)) =
+                        resolve_read_payload(&runtime, &path, result)
+                    else {
+                        reply.error(Errno::EIO);
+                        return;
+                    };
+                    let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
+                    if !full_read_matches_attrs(&attrs_cache, data.len()) {
+                        warn!(
+                            path = path.as_str(),
+                            expected = ?attrs_cache.size,
+                            actual = data.len(),
+                            "provider returned bytes that contradict file attrs"
+                        );
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                    self.promote_inode_attrs(ino.0, attrs_cache.clone());
+                    if self
+                        .cache_durable_file_payload(&mount_name, &path, &attrs_cache, &data)
+                        .is_err()
+                    {
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                    self.file_cache.insert(fh, data);
+                    reply.opened(FuseFileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
+                    return;
+                },
+                Ok(OpResult::Err(error)) => {
+                    reply.error(provider_errno(&error));
+                    return;
+                },
+                Ok(other) => {
+                    warn!(path, result = ?other, "read_file returned unexpected result during open");
+                    reply.error(Errno::EIO);
+                    return;
+                },
+                Err(e) => {
+                    warn!(path, error = %e, "read_file runtime error during open");
+                    reply.error(Errno::EIO);
+                    return;
+                },
+            }
+        }
+
         let flags = attrs
             .filter(FileAttrsCache::should_direct_io)
             .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO);
@@ -1319,6 +1418,11 @@ fn data_slice(data: &[u8], offset: u64, size: u32) -> &[u8] {
     data.get(start..end).unwrap_or(&[])
 }
 
+fn should_prefetch_full_on_open(attrs: &FileAttrsCache) -> bool {
+    matches!(attrs.bytes, BytesCache::Deferred(ReadModeCache::Full))
+        && !matches!(attrs.size, SizeCache::Exact(_))
+}
+
 fn learned_full_read_attrs(attrs: FileAttrsCache, content_len: usize) -> FileAttrsCache {
     if !can_publish_learned_size(&attrs) {
         return attrs;
@@ -1344,7 +1448,7 @@ fn learned_ranged_eof_attrs(attrs: FileAttrsCache, eof_size: u64) -> Option<File
 fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
     match attrs.stability {
         cache::StabilityCache::Immutable => true,
-        cache::StabilityCache::Mutable => attrs.version_token.is_some(),
+        cache::StabilityCache::Mutable => true,
         cache::StabilityCache::Volatile => false,
     }
 }

@@ -98,7 +98,7 @@ impl FileAttrsCache {
         match self.size {
             SizeCache::Exact(size) => size,
             SizeCache::NonZero => 1,
-            SizeCache::Unknown => 0,
+            SizeCache::Unknown => 1,
         }
     }
 

@@ -87,14 +87,18 @@ impl FuseFs {
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
+        let incoming_attrs = attrs;
         *self
             .path_to_inode
             .entry(key)
             .and_modify(|existing_ino| {
                 if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
+                    let merged_attrs =
+                        merge_inode_attrs(entry.attrs.as_ref(), incoming_attrs.clone());
+                    let merged_size = merged_attrs.as_ref().map_or(size, FileAttrsCache::st_size);
                     entry.kind = kind;
-                    entry.attrs.clone_from(&attrs);
-                    entry.size = size;
+                    entry.attrs = merged_attrs;
+                    entry.size = merged_size;
                     if backing_path.is_some() {
                         entry.backing_path.clone_from(&backing_path);
                     }
@@ -108,7 +112,7 @@ impl FuseFs {
                         mount_name: mount_name.to_string(),
                         path: path.to_string(),
                         kind,
-                        attrs,
+                        attrs: incoming_attrs.clone(),
                         size,
                         backing_path,
                     },
@@ -192,5 +196,92 @@ impl FuseFs {
             blksize: 512,
             flags: 0,
         }
+    }
+}
+
+fn merge_inode_attrs(
+    existing: Option<&FileAttrsCache>,
+    incoming: Option<FileAttrsCache>,
+) -> Option<FileAttrsCache> {
+    match (existing, incoming) {
+        (Some(existing), Some(incoming))
+            if should_preserve_learned_exact_size(existing, &incoming) =>
+        {
+            Some(existing.clone())
+        },
+        (_, incoming) => incoming,
+    }
+}
+
+fn should_preserve_learned_exact_size(
+    existing: &FileAttrsCache,
+    incoming: &FileAttrsCache,
+) -> bool {
+    matches!(existing.size, crate::cache::SizeCache::Exact(_))
+        && !matches!(incoming.size, crate::cache::SizeCache::Exact(_))
+        && existing.bytes == incoming.bytes
+        && existing.stability == incoming.stability
+        && existing.version_token == incoming.version_token
+        && (matches!(existing.stability, crate::cache::StabilityCache::Immutable)
+            || (matches!(existing.stability, crate::cache::StabilityCache::Mutable)
+                && existing.version_token.is_some()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::{BytesCache, ReadModeCache, SizeCache, StabilityCache};
+
+    fn attrs(size: SizeCache, version_token: Option<&str>) -> FileAttrsCache {
+        FileAttrsCache {
+            size,
+            bytes: BytesCache::Deferred(ReadModeCache::Full),
+            stability: StabilityCache::Mutable,
+            version_token: version_token.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn learned_exact_survives_same_version_non_exact_refresh() {
+        let existing = attrs(SizeCache::Exact(42), Some("v1"));
+        let incoming = attrs(SizeCache::Unknown, Some("v1"));
+
+        assert_eq!(
+            merge_inode_attrs(Some(&existing), Some(incoming)),
+            Some(existing)
+        );
+    }
+
+    #[test]
+    fn incoming_exact_replaces_learned_exact() {
+        let existing = attrs(SizeCache::Exact(42), Some("v1"));
+        let incoming = attrs(SizeCache::Exact(7), Some("v1"));
+
+        assert_eq!(
+            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
+            Some(incoming)
+        );
+    }
+
+    #[test]
+    fn version_change_drops_learned_exact() {
+        let existing = attrs(SizeCache::Exact(42), Some("v1"));
+        let incoming = attrs(SizeCache::Unknown, Some("v2"));
+
+        assert_eq!(
+            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
+            Some(incoming)
+        );
+    }
+
+    #[test]
+    fn unversioned_mutable_refresh_drops_learned_exact() {
+        let existing = attrs(SizeCache::Exact(42), None);
+        let incoming = attrs(SizeCache::Unknown, None);
+
+        assert_eq!(
+            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
+            Some(incoming)
+        );
     }
 }

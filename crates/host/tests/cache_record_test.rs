@@ -81,7 +81,7 @@ fn attr_payload_round_trip() {
 #[test]
 fn non_exact_sizes_report_fuse_stat_values() {
     assert_eq!(deferred_file(SizeCache::NonZero).st_size(), 1);
-    assert_eq!(deferred_file(SizeCache::Unknown).st_size(), 0);
+    assert_eq!(deferred_file(SizeCache::Unknown).st_size(), 1);
 }
 
 #[test]

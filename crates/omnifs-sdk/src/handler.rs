@@ -121,6 +121,8 @@ pub trait Handler<S> {
         cx: &'a Cx<S>,
         path: &'a str,
     ) -> BoxFuture<'a, crate::browse::FileContent>;
+
+    fn open_file<'a>(&'a self, cx: &'a Cx<S>, path: &'a str) -> BoxFuture<'a, OpenedFile>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +196,17 @@ impl Projection {
         self.file(name, FileAttrs::inline(bytes, Stability::Immutable, None));
     }
 
+    pub fn file_with_content_attrs(
+        &mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+        stability: Stability,
+        version: Option<crate::file_attrs::VersionToken>,
+    ) {
+        let bytes = bytes.into();
+        self.file(name, FileAttrs::inline(bytes, stability, version));
+    }
+
     pub fn page(&mut self, status: PageStatus) {
         self.page = Some(status);
     }
@@ -209,6 +222,20 @@ impl Projection {
             return;
         }
         self.preload.push(BrowsePreload::file(path, content));
+    }
+
+    pub fn preload_with_attrs(
+        &mut self,
+        path: impl Into<String>,
+        attrs: FileAttrs,
+        content: impl Into<Vec<u8>>,
+    ) {
+        let path = path.into();
+        if path.is_empty() {
+            return;
+        }
+        self.preload
+            .push(BrowsePreload::file_with_attrs(path, attrs, content));
     }
 
     /// Hand a batch of file contents to the host so later reads of each
@@ -293,6 +320,10 @@ impl Projection {
 #[derive(Clone)]
 pub enum FileContent {
     Bytes(Vec<u8>),
+    BytesWithAttrs {
+        attrs: FileAttrs,
+        bytes: Vec<u8>,
+    },
     Stream(StreamHandle),
     Range {
         attrs: FileAttrs,
@@ -303,6 +334,13 @@ pub enum FileContent {
 impl FileContent {
     pub fn bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self::Bytes(bytes.into())
+    }
+
+    pub fn bytes_with_attrs(attrs: FileAttrs, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::BytesWithAttrs {
+            attrs,
+            bytes: bytes.into(),
+        }
     }
 
     pub fn stream(handle: StreamHandle) -> Self {
@@ -325,6 +363,11 @@ impl std::fmt::Debug for FileContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bytes(bytes) => f.debug_tuple("Bytes").field(bytes).finish(),
+            Self::BytesWithAttrs { attrs, bytes } => f
+                .debug_struct("BytesWithAttrs")
+                .field("attrs", attrs)
+                .field("bytes", bytes)
+                .finish(),
             Self::Stream(handle) => f.debug_tuple("Stream").field(handle).finish(),
             Self::Range { attrs, .. } => f.debug_struct("Range").field("attrs", attrs).finish(),
         }
@@ -765,6 +808,9 @@ impl<S> MountRegistry<S> {
         if let Some((route, parsed)) = self.match_file(&abs) {
             return match (route.call)(cx, parsed).await? {
                 FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
+                FileContent::BytesWithAttrs { attrs, bytes } => {
+                    Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -797,10 +843,9 @@ impl<S> MountRegistry<S> {
         );
         let abs = to_absolute_path(path);
 
-        if self.match_bind_prefix(&abs).is_some() {
-            return Err(ProviderError::unimplemented(
-                "ranged reads through bound subtrees are not wired yet",
-            ));
+        if let Some((route, parsed, suffix)) = self.match_bind_prefix(&abs) {
+            let handler = (route.call)(cx, parsed).await?;
+            return handler.open_file(cx, &suffix).await;
         }
 
         if let Some((route, parsed)) = self.match_file(&abs) {
@@ -1138,6 +1183,9 @@ impl<S, B> SubtreeRegistry<S, B> {
         if let Some((route, parsed)) = self.match_file(&abs) {
             return match (route.call)(cx, bindings, parsed).await? {
                 FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
+                FileContent::BytesWithAttrs { attrs, bytes } => {
+                    Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -1411,14 +1459,18 @@ fn projected_file_from_projection(
             }
         })
         .collect::<Vec<_>>();
-    Ok(crate::browse::FileContent::new(bytes.to_vec()).with_sibling_files(sibling_files))
+    Ok(crate::browse::FileContent::new(bytes.to_vec())
+        .with_attrs(read_result_attrs(attrs))
+        .with_sibling_files(sibling_files))
 }
 
 fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
     match content {
-        FileContent::Bytes(_) => Err(ProviderError::invalid_input(
-            "open-file requires FileContent::ranged or FileContent::range_bytes",
-        )),
+        FileContent::Bytes(_) | FileContent::BytesWithAttrs { .. } => {
+            Err(ProviderError::invalid_input(
+                "open-file requires FileContent::ranged or FileContent::range_bytes",
+            ))
+        },
         FileContent::Range { attrs, reader } => {
             attrs
                 .validate()
@@ -1438,6 +1490,20 @@ fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
         FileContent::Stream(_) => Err(ProviderError::unimplemented(
             "streamed file reads are not wired through the current host runtime",
         )),
+    }
+}
+
+fn read_result_attrs(attrs: &FileAttrs) -> FileAttrs {
+    match &attrs.bytes {
+        Bytes::Inline(_) => FileAttrs {
+            size: attrs.size.clone(),
+            bytes: Bytes::Deferred {
+                read: ReadMode::Full,
+            },
+            stability: attrs.stability,
+            version: attrs.version.clone(),
+        },
+        Bytes::Deferred { .. } => attrs.clone(),
     }
 }
 

@@ -142,7 +142,7 @@ When introducing a new feature, the burden of proof is on the change to demonstr
 
 ### File attributes
 
-Every projected file declares its attributes — `size`, `access`, `mutability` — via the SDK's `Projection` API. The host wires `st_size`, FUSE flags, cache layers, and post-read invalidation from those attributes. The full design (enum definitions, the `Volatile` ⇒ `Ranged` rule, the seven valid combinations, the byte-source ↔ handler pairing) lives in `docs/design/file-attributes.md`. Read it before changing the projection API or adding a new `#[file]` handler shape.
+Every projected file declares `Size`, `Bytes`, `ReadMode`, `Stability`, and optional version evidence via the SDK's `Projection` API. The host wires `st_size`, FUSE flags/direct I/O, cache layers, durable version-keyed content, learned-size promotion, and post-read invalidation from those attributes. The full design (enum definitions, the `Volatile` requires `Ranged` rule, the legal combinations, and the byte-source to handler pairing) lives in `docs/design/file-attributes.md`. Read it before changing the projection API or adding a new `#[file]` handler shape.
 
 ## Caching model
 

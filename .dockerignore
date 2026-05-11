@@ -2,6 +2,7 @@ target/
 **/target/
 providers/target/
 .worktrees/
+.claude/
 .git/
 .ssh/
 .env

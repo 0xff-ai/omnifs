@@ -83,12 +83,13 @@ where the design has to make a choice.
 
 ### Case 3: unknown-until-read
 
-The kernel-side answer is `direct_io`. When a file is opened with the
-`FOPEN_DIRECT_IO` flag in the FUSE `open` reply, the kernel:
+The kernel-side answer has two parts: materialize full unknown files during
+`open`, and use `direct_io` while the size is still non-exact. Direct I/O alone
+is not enough. Linux can still make the old `st_size` visible to the caller, so
+a one-byte sentinel can truncate the first `cat` even if the FUSE daemon returns
+the full payload. When a file is opened with the `FOPEN_DIRECT_IO` flag in the
+FUSE `open` reply, the kernel:
 
-- Does not cap reads at `st_size`. Reads are passed through verbatim
-  and the FUSE driver returns whatever bytes it has; a short read
-  signals EOF.
 - Does not use the page cache for this file. Every read is a syscall
   round trip to userspace. Writes (irrelevant here) bypass the cache
   too.
@@ -185,18 +186,19 @@ boundary; no explicit field is needed.
 The target design needs three changes in `crates/host/src/fuse/` and
 `crates/host/src/runtime/`:
 
-1. **Open flag.** `FuseFs::open` sets `FopenFlags::FOPEN_DIRECT_IO`
-   when the inode's `size` is `None`. When it is `Some(n)`, open uses
-   default flags (page cache enabled).
+1. **Open behavior.** `FuseFs::open` materializes non-exact
+   `Deferred { read: Full }` files before the first read, promotes the learned
+   exact size, and stores the bytes on the file handle. Non-exact handles use
+   `FopenFlags::FOPEN_DIRECT_IO`.
 2. **Stat reporting.** `attr_for_kind` takes `Option<u64>` directly.
-   `None` reports `st_size = 0`. `Some(n)` reports `st_size = n`.
-3. **Lazy size resolution.** After `OpResult::Read` returns content,
-   `FuseFs::resolve_unknown_size` updates the inode's cached size
-   (when previously `None`) and calls
-   `CalloutRuntime::notify_inval_inode`, which forwards to
-   `fuser::Notifier::inval_inode(ino, 0, 0)`. fuser 0.17 exposes the
-   notifier method directly; no version bump needed. Best-effort: if
-   the notifier is gone (mount tearing down), reads still succeed.
+   `None` reports `st_size = 1` as a compatibility sentinel. `Some(n)`
+   reports `st_size = n`.
+3. **Lazy size resolution.** After `OpResult::Read` or open materialization
+   returns content, the host updates the inode's cached size when previously
+   unknown. Dynamic attr TTLs and inode metadata merging make the learned exact
+   size visible without synchronous reverse inode invalidation from inside the
+   read path, and cached non-exact dirents do not downgrade the same versioned
+   observation.
 
 The cache schema would bump from version 2 to version 3 because
 `LookupPayload`, `AttrPayload`, and `DirentRecord` now serialize
