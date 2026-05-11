@@ -321,7 +321,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         OpResult::Lookup(LookupResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_resolvers");
-            assert!(matches!(entry.kind, EntryKind::File));
+            assert!(matches!(entry.kind, EntryKind::File(_)));
         },
         other => panic!("expected Lookup, got {other:?}"),
     }
@@ -404,7 +404,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         OpResult::Lookup(LookupResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
-            assert!(matches!(entry.kind, EntryKind::File));
+            assert!(matches!(entry.kind, EntryKind::File(_)));
             assert!(result.siblings.is_empty());
         },
         other => panic!("expected reverse IP lookup, got {other:?}"),
@@ -419,7 +419,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         OpResult::Lookup(LookupResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
-            assert!(matches!(entry.kind, EntryKind::File));
+            assert!(matches!(entry.kind, EntryKind::File(_)));
             assert!(result.siblings.is_empty());
         },
         other => panic!("expected resolver-qualified reverse IP lookup, got {other:?}"),
@@ -855,7 +855,11 @@ fn github_issue_list_preloads_projected_files() {
             );
             assert_eq!(
                 preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/body"),
-                Some(&[][..])
+                None
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_issues/_open/7/body"),
+                None
             );
             assert_eq!(
                 preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/user"),
@@ -1071,6 +1075,10 @@ fn github_pr_list_preloads_projected_files() {
                     "octocat/Hello-World/_prs/_open/7/state",
                     "octocat/Hello-World/_prs/_open/7/user",
                 ]
+            );
+            assert_eq!(
+                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/7/body"),
+                None
             );
             let names: Vec<&str> = listing
                 .entries

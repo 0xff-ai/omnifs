@@ -6,15 +6,19 @@
 
 pub(crate) mod inode;
 
-use crate::cache::l0::MountCaches as L0Caches;
-use crate::cache::{self, CacheRecord, Key, RecordKind};
+use crate::cache::l0::Cache as L0Cache;
+use crate::cache::{
+    self, BytesCache, CacheRecord, EntryKindCache, EntryMeta, FilePayload, ReadModeCache,
+    RecordKind, SizeCache,
+};
+use crate::cache::{FileAttrsCache, Key};
 use crate::omnifs::provider::types::{
-    EntryKind, ErrorKind, ListResult, LookupResult, OpResult, ProviderError,
+    ErrorKind, FileContentResult, ListResult, LookupResult, OpResult, ProviderError,
 };
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use crate::registry::ProviderRegistry;
-use crate::runtime::CalloutRuntime;
+use crate::runtime::{CalloutRuntime, NotifierHandle};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo,
@@ -23,11 +27,12 @@ use fuser::{
 };
 use inode::NodeEntry;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+use tracing::{debug, debug_span, info, warn};
 
 /// Kernel-side entry/attr TTL. The host never expires entries on time,
 /// only on capacity or explicit invalidation via the FUSE notifier and
@@ -35,9 +40,18 @@ use tokio::runtime::Handle;
 /// a finite Duration, so pick one large enough that refresh churn is
 /// irrelevant in practice (~136 years).
 const TTL: Duration = Duration::from_secs(u32::MAX as u64);
+const TTL_DYNAMIC: Duration = Duration::from_secs(0);
 const ROOT_INO: u64 = 1;
 
-type DirSnapshot = Vec<(u64, String, EntryKind)>;
+type DirSnapshot = Vec<(u64, String, EntryKindCache)>;
+
+#[derive(Clone)]
+struct RangedFileHandle {
+    mount_name: String,
+    path: String,
+    provider_handle: u64,
+    attrs: FileAttrsCache,
+}
 
 fn join_child_path(parent_path: &str, name: &str) -> String {
     if parent_path.is_empty() {
@@ -45,6 +59,15 @@ fn join_child_path(parent_path: &str, name: &str) -> String {
     } else {
         format!("{parent_path}/{name}")
     }
+}
+
+struct FullReadTarget {
+    ino: u64,
+    fh: u64,
+    mount_name: String,
+    path: String,
+    backing_path: Option<PathBuf>,
+    attrs: Option<FileAttrsCache>,
 }
 
 /// Map a provider error to its corresponding FUSE errno.
@@ -82,7 +105,7 @@ impl FuseTrace {
 
 impl Drop for FuseTrace {
     fn drop(&mut self) {
-        tracing::info!(
+        info!(
             target: "omnifs_trace",
             kind = "fuse",
             op = self.op,
@@ -106,8 +129,9 @@ pub struct FuseFs {
     next_fh: AtomicU64,
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
+    ranged_handles: DashMap<u64, RangedFileHandle>,
     /// Single owner of the per-mount L0 browse caches (path-keyed, in-memory).
-    l0_caches: L0Caches,
+    l0_caches: DashMap<String, L0Cache>,
 }
 
 impl FuseFs {
@@ -120,12 +144,27 @@ impl FuseFs {
         registry: Arc<ProviderRegistry>,
         path_to_inode: Arc<PathToInode>,
     ) -> Self {
+        Self::new_with_path_map_and_notifier(
+            rt,
+            registry,
+            path_to_inode,
+            Arc::new(parking_lot::Mutex::new(None)),
+        )
+    }
+
+    pub fn new_with_path_map_and_notifier(
+        rt: Handle,
+        registry: Arc<ProviderRegistry>,
+        path_to_inode: Arc<PathToInode>,
+        _notifier: NotifierHandle,
+    ) -> Self {
         let inodes = DashMap::new();
 
         let root_entry = NodeEntry {
             mount_name: registry.root_mount_name().unwrap_or("").to_string(),
             path: String::new(),
-            kind: EntryKind::Directory,
+            kind: EntryKindCache::Directory,
+            attrs: None,
             size: 0,
             backing_path: None,
         };
@@ -140,7 +179,8 @@ impl FuseFs {
             dir_snapshots: DashMap::new(),
             next_fh: AtomicU64::new(1),
             file_cache: DashMap::new(),
-            l0_caches: L0Caches::default(),
+            ranged_handles: DashMap::new(),
+            l0_caches: DashMap::new(),
         }
     }
 
@@ -154,6 +194,39 @@ impl FuseFs {
         self.registry.get(mount).cloned()
     }
 
+    fn l0_get(&self, mount: &str, path: &str, kind: RecordKind) -> Option<Arc<CacheRecord>> {
+        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
+        l0.get(&Key::new(path, kind))
+    }
+
+    fn l0_get_with_aux(
+        &self,
+        mount: &str,
+        path: &str,
+        kind: RecordKind,
+        aux: Option<&str>,
+    ) -> Option<Arc<CacheRecord>> {
+        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
+        l0.get(&Key::with_aux(path, kind, aux))
+    }
+
+    fn l0_put(&self, mount: &str, path: &str, kind: RecordKind, record: CacheRecord) {
+        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
+        l0.put(Key::new(path, kind), record);
+    }
+
+    fn l0_put_with_aux(
+        &self,
+        mount: &str,
+        path: &str,
+        kind: RecordKind,
+        aux: Option<String>,
+        record: CacheRecord,
+    ) {
+        let l0 = self.l0_caches.entry(mount.to_string()).or_default();
+        l0.put(Key::with_aux(path, kind, aux), record);
+    }
+
     /// Drain pending invalidation prefixes from the runtime and evict
     /// matching L0 cache entries.
     fn drain_and_evict_pending(&self, mount: &str) {
@@ -165,6 +238,10 @@ impl FuseFs {
         if prefixes.is_empty() && paths.is_empty() {
             return;
         }
+        let Some(l0) = self.l0_caches.get(mount) else {
+            return;
+        };
+
         let mut to_remove = Vec::new();
         for entry in self.path_to_inode.iter() {
             let key = entry.key();
@@ -185,7 +262,7 @@ impl FuseFs {
             self.path_to_inode.remove(path_key);
         }
 
-        self.l0_caches.invalidate_entries_if(mount, {
+        l0.invalidate_entries_if({
             let paths = paths.clone();
             let prefixes = prefixes.clone();
             move |k, _| {
@@ -197,54 +274,86 @@ impl FuseFs {
         });
     }
 
-    fn attr_for_kind(&self, ino: u64, kind: EntryKind, size: u64) -> FileAttr {
+    fn attr_for_kind(&self, ino: u64, kind: EntryKindCache, size: u64) -> FileAttr {
         match kind {
-            EntryKind::Directory => self.dir_attr(ino),
-            EntryKind::File => self.file_attr(ino, size),
+            EntryKindCache::Directory => self.dir_attr(ino),
+            EntryKindCache::File => self.file_attr(ino, size),
         }
     }
 
-    /// Resolve a deserialized `LookupPayload` into a `FileAttr` (positive)
-    /// or `Errno::ENOENT` (negative), emitting a cache-hit trace with the
-    /// given `tier` label.
+    fn attr_for_inode_or_meta(
+        &self,
+        ino: u64,
+        fallback_kind: EntryKindCache,
+        fallback_size: u64,
+    ) -> FileAttr {
+        if let Some(entry) = self.inodes.get(&ino) {
+            return self.attr_for_kind(ino, entry.kind, entry.size);
+        }
+        self.attr_for_kind(ino, fallback_kind, fallback_size)
+    }
+
+    fn ttl_for_attrs(attrs: Option<&FileAttrsCache>) -> Duration {
+        let Some(attrs) = attrs else {
+            return TTL;
+        };
+        if !matches!(attrs.size, SizeCache::Exact(_))
+            || !matches!(attrs.stability, cache::StabilityCache::Immutable)
+        {
+            return TTL_DYNAMIC;
+        }
+        TTL
+    }
+
+    fn ttl_for_meta(meta: &EntryMeta) -> Duration {
+        Self::ttl_for_attrs(meta.attrs.as_ref())
+    }
+
+    fn ttl_for_entry(entry: &NodeEntry) -> Duration {
+        Self::ttl_for_attrs(entry.attrs.as_ref())
+    }
+
+    /// Resolve a deserialized `LookupPayload` into `FileAttr` plus kernel
+    /// TTL (positive) or `Errno::ENOENT` (negative), emitting a cache-hit
+    /// trace with the given `tier` label.
     fn resolve_lookup_hit(
         &self,
         mount_name: &str,
         child_path: &str,
         lookup: &cache::LookupPayload,
         tier: &str,
-    ) -> Result<FileAttr, Errno> {
+    ) -> Result<(FileAttr, Duration), Errno> {
         match lookup {
             cache::LookupPayload::Negative => {
-                tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount_name, "negative cache hit");
+                debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount_name, "negative cache hit");
                 Err(Errno::ENOENT)
             },
-            cache::LookupPayload::Positive { kind, size } => {
-                tracing::debug!(target: "omnifs_cache", kind = tier, op = "lookup", mount = mount_name, "cache hit");
-                let ek = EntryKind::from(*kind);
-                let ino = self.get_or_alloc_ino(mount_name, child_path, ek, *size);
-                Ok(self.attr_for_kind(ino, ek, *size))
+            cache::LookupPayload::Positive(meta) => {
+                debug!(target: "omnifs_cache", kind = tier, op = "lookup", mount = mount_name, "cache hit");
+                let ino = self.get_or_alloc_ino_meta(mount_name, child_path, meta.clone());
+                Ok((
+                    self.attr_for_inode_or_meta(ino, meta.kind, meta.st_size()),
+                    Self::ttl_for_meta(meta),
+                ))
             },
         }
     }
 
     /// Check L0/L2 caches and the path→inode dedup table for a lookup.
     ///
-    /// Returns `Ok(Some(attr))` on a positive hit, `Ok(None)` on a miss,
-    /// or `Err(Errno)` on a negative hit or missing runtime.
+    /// Returns `Ok(Some((attr, ttl)))` on a positive hit, `Ok(None)` on a
+    /// miss, or `Err(Errno)` on a negative hit or missing runtime.
     fn lookup_check_caches(
         &self,
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
-    ) -> Result<Option<FileAttr>, Errno> {
+    ) -> Result<Option<(FileAttr, Duration)>, Errno> {
         let child_path = join_child_path(parent_path, name_str);
 
         // Dirents-implied negative: if parent dirents are cached and
         // exhaustive, trust the cache.
-        if let Some(record) = self
-            .l0_caches
-            .get(mount_name, &Key::new(parent_path, RecordKind::Dirents))
+        if let Some(record) = self.l0_get(mount_name, parent_path, RecordKind::Dirents)
             && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
             && dirents.exhaustive
         {
@@ -255,18 +364,17 @@ impl FuseFs {
                 // for projected sibling files: the provider's list
                 // enumerated them but there is no dedicated lookup
                 // handler at the per-child path.
-                let size = dirent.size;
-                let kind: EntryKind = dirent.kind.into();
-                let ino = self.get_or_alloc_ino(mount_name, &child_path, kind, size);
-                return Ok(Some(self.attr_for_kind(ino, kind, size)));
+                let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, dirent.meta.clone());
+                return Ok(Some((
+                    self.attr_for_inode_or_meta(ino, dirent.meta.kind, dirent.meta.st_size()),
+                    Self::ttl_for_meta(&dirent.meta),
+                )));
             }
             return Err(Errno::ENOENT);
         }
 
         // L0: check cached lookup by child path.
-        if let Some(record) = self
-            .l0_caches
-            .get(mount_name, &Key::new(&child_path, RecordKind::Lookup))
+        if let Some(record) = self.l0_get(mount_name, &child_path, RecordKind::Lookup)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
             return self
@@ -281,11 +389,7 @@ impl FuseFs {
         if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
-            self.l0_caches.put(
-                mount_name,
-                Key::new(&child_path, RecordKind::Lookup),
-                record.clone(),
-            );
+            self.l0_put(mount_name, &child_path, RecordKind::Lookup, record.clone());
             return self
                 .resolve_lookup_hit(mount_name, &child_path, &lookup, "l2_hit")
                 .map(Some);
@@ -298,7 +402,9 @@ impl FuseFs {
             let ino = *ino_ref;
             drop(ino_ref);
             if let Some(entry) = self.inodes.get(&ino) {
-                return Ok(Some(self.attr_for_kind(ino, entry.kind, entry.size)));
+                let attr = self.attr_for_kind(ino, entry.kind, entry.size);
+                let ttl = Self::ttl_for_entry(&entry);
+                return Ok(Some((attr, ttl)));
             }
         }
 
@@ -312,7 +418,7 @@ impl FuseFs {
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
-    ) -> Result<FileAttr, Errno> {
+    ) -> Result<(FileAttr, Duration), Errno> {
         let child_path = join_child_path(parent_path, name_str);
 
         match self
@@ -326,14 +432,14 @@ impl FuseFs {
                 let ino = self.get_or_alloc_ino_backing(
                     mount_name,
                     &child_path,
-                    EntryKind::Directory,
+                    EntryKindCache::Directory,
                     0,
                     real_root,
                 );
-                Ok(self.dir_attr(ino))
+                Ok((self.dir_attr(ino), TTL))
             },
             Ok(OpResult::Lookup(LookupResult::Entry(entry))) => {
-                tracing::debug!(
+                debug!(
                     target: "omnifs_lookup",
                     path = child_path,
                     siblings_count = entry.siblings.len(),
@@ -341,40 +447,30 @@ impl FuseFs {
                     "received Lookup entry"
                 );
 
-                let size = entry.target.size.unwrap_or(0);
-                let kind = entry.target.kind;
-                let ino = self.get_or_alloc_ino(mount_name, &child_path, kind, size);
-                let kind_cache = cache::EntryKindCache::from(kind);
-                let payload = cache::LookupPayload::Positive {
-                    kind: kind_cache,
-                    size,
-                };
+                let meta = EntryMeta::from(&entry.target.kind);
+                let size = meta.st_size();
+                let kind = meta.kind;
+                let ttl = Self::ttl_for_meta(&meta);
+                let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, meta.clone());
+                let payload = cache::LookupPayload::Positive(meta);
                 if let Some(encoded) = payload.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
                     runtime.cache_put(&child_path, RecordKind::Lookup, &record);
-                    self.l0_caches.put(
-                        mount_name,
-                        Key::new(&child_path, RecordKind::Lookup),
-                        record,
-                    );
+                    self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
-                Ok(self.attr_for_kind(ino, kind, size))
+                Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
             },
             Ok(OpResult::Lookup(LookupResult::NotFound)) => {
                 let neg = cache::LookupPayload::Negative;
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
                     runtime.cache_put(&child_path, RecordKind::Lookup, &record);
-                    self.l0_caches.put(
-                        mount_name,
-                        Key::new(&child_path, RecordKind::Lookup),
-                        record,
-                    );
+                    self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
                 Err(Errno::ENOENT)
             },
             Ok(OpResult::Err(error)) => {
-                tracing::warn!(
+                warn!(
                     path = child_path,
                     kind = ?error.kind,
                     retryable = error.retryable,
@@ -384,7 +480,7 @@ impl FuseFs {
                 Err(provider_errno(&error))
             },
             Ok(other) => {
-                tracing::warn!(
+                warn!(
                     path = child_path,
                     result = ?other,
                     "lookup_child returned unexpected result"
@@ -392,7 +488,7 @@ impl FuseFs {
                 Err(Errno::EIO)
             },
             Err(e) => {
-                tracing::warn!(
+                warn!(
                     path = child_path,
                     error = %e,
                     "lookup_child runtime error"
@@ -421,9 +517,9 @@ impl FuseFs {
                 continue;
             };
             let kind = if meta.is_dir() {
-                EntryKind::Directory
+                EntryKindCache::Directory
             } else {
-                EntryKind::File
+                EntryKindCache::File
             };
             let child_path = if path.is_empty() {
                 fname_str.to_string()
@@ -453,9 +549,8 @@ impl FuseFs {
                 } else {
                     format!("{path}/{}", e.name)
                 };
-                let ek = EntryKind::from(e.kind);
-                let child_ino = self.get_or_alloc_ino(mount_name, &child_path, ek, e.size);
-                (child_ino, e.name.clone(), ek)
+                let child_ino = self.get_or_alloc_ino_meta(mount_name, &child_path, e.meta.clone());
+                (child_ino, e.name.clone(), e.meta.kind)
             })
             .collect()
     }
@@ -476,13 +571,11 @@ impl FuseFs {
         // derived structural children) and must NOT be returned as the
         // authoritative listing. The host has to fall through to
         // list_children so the provider enumerates the full set.
-        if let Some(record) = self
-            .l0_caches
-            .get(mount_name, &Key::new(path, RecordKind::Dirents))
+        if let Some(record) = self.l0_get(mount_name, path, RecordKind::Dirents)
             && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
             && dirents.exhaustive
         {
-            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount_name, "cache hit");
+            debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount_name, "cache hit");
             return Ok(Some(self.snapshot_from_dirents(mount_name, path, &dirents)));
         }
 
@@ -492,12 +585,8 @@ impl FuseFs {
                 && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
                 && dirents.exhaustive
             {
-                tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount_name, "cache hit");
-                self.l0_caches.put(
-                    mount_name,
-                    Key::new(path, RecordKind::Dirents),
-                    record.clone(),
-                );
+                debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount_name, "cache hit");
+                self.l0_put(mount_name, path, RecordKind::Dirents, record.clone());
                 return Ok(Some(self.snapshot_from_dirents(mount_name, path, &dirents)));
             }
         } else {
@@ -541,13 +630,13 @@ impl FuseFs {
                     } else {
                         format!("{path}/{}", e.name)
                     };
-                    let size = e.size.unwrap_or(0);
-                    let child_ino = self.get_or_alloc_ino(mount_name, &child_path, e.kind, size);
-                    snapshot.push((child_ino, e.name.clone(), e.kind));
+                    let meta = EntryMeta::from(&e.kind);
+                    let child_ino =
+                        self.get_or_alloc_ino_meta(mount_name, &child_path, meta.clone());
+                    snapshot.push((child_ino, e.name.clone(), meta.kind));
                     dirent_records.push(cache::DirentRecord {
                         name: e.name.clone(),
-                        kind: cache::EntryKindCache::from(e.kind),
-                        size,
+                        meta,
                     });
                 }
                 let dirents_payload = cache::DirentsPayload {
@@ -557,16 +646,12 @@ impl FuseFs {
                 if let Some(encoded) = dirents_payload.serialize() {
                     let dirents_record = CacheRecord::new(RecordKind::Dirents, encoded);
                     runtime.cache_put(path, RecordKind::Dirents, &dirents_record);
-                    self.l0_caches.put(
-                        mount_name,
-                        Key::new(path, RecordKind::Dirents),
-                        dirents_record,
-                    );
+                    self.l0_put(mount_name, path, RecordKind::Dirents, dirents_record);
                 }
                 Ok(snapshot)
             },
             Ok(OpResult::Err(error)) => {
-                tracing::warn!(
+                warn!(
                     path,
                     kind = ?error.kind,
                     retryable = error.retryable,
@@ -576,7 +661,7 @@ impl FuseFs {
                 Err(provider_errno(&error))
             },
             Ok(other) => {
-                tracing::warn!(
+                warn!(
                     path,
                     result = ?other,
                     "list_children returned unexpected result"
@@ -584,7 +669,7 @@ impl FuseFs {
                 Err(Errno::EIO)
             },
             Err(e) => {
-                tracing::warn!(
+                warn!(
                     path,
                     error = %e,
                     "list_children runtime error"
@@ -592,6 +677,391 @@ impl FuseFs {
                 Err(Errno::EIO)
             },
         }
+    }
+
+    fn read_ranged_handle(
+        &self,
+        ino: u64,
+        ranged: &RangedFileHandle,
+        offset: u64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        let Some(runtime) = self.runtime_for_mount(&ranged.mount_name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+
+        match self
+            .rt
+            .block_on(runtime.call_read_chunk(ranged.provider_handle, offset, size))
+        {
+            Ok(OpResult::ReadChunk(chunk)) => {
+                if chunk.content.len() > size as usize {
+                    warn!(
+                        path = ranged.path.as_str(),
+                        requested = size,
+                        returned = chunk.content.len(),
+                        "provider returned oversized ranged chunk"
+                    );
+                    reply.error(Errno::EIO);
+                    return;
+                }
+                if chunk.eof {
+                    let Some(content_len) = u64::try_from(chunk.content.len()).ok() else {
+                        reply.error(Errno::EIO);
+                        return;
+                    };
+                    let Some(eof_size) = offset.checked_add(content_len) else {
+                        reply.error(Errno::EIO);
+                        return;
+                    };
+                    if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
+                        warn!(
+                            path = ranged.path.as_str(),
+                            error, "provider returned ranged EOF that contradicts file attrs"
+                        );
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                    if let Some(attrs) = learned_ranged_eof_attrs(ranged.attrs.clone(), eof_size) {
+                        self.promote_inode_attrs(ino, attrs);
+                    }
+                }
+                reply.data(&chunk.content);
+            },
+            Ok(OpResult::Err(error)) => {
+                warn!(
+                    path = ranged.path.as_str(),
+                    kind = ?error.kind,
+                    retryable = error.retryable,
+                    message = error.message,
+                    "provider returned typed error for read_chunk"
+                );
+                reply.error(provider_errno(&error));
+            },
+            Ok(other) => {
+                warn!(path = ranged.path.as_str(), result = ?other, "read_chunk returned unexpected result");
+                reply.error(Errno::EIO);
+            },
+            Err(e) => {
+                warn!(path = ranged.path.as_str(), error = %e, "read_chunk runtime error");
+                reply.error(Errno::EIO);
+            },
+        }
+    }
+
+    fn read_full_handle(
+        &self,
+        ino: INodeNo,
+        fh: FuseFileHandle,
+        offset: u64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        let Some(inode_entry) = self.inodes.get(&ino.0) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let target = FullReadTarget {
+            ino: ino.0,
+            fh: fh.0,
+            mount_name: inode_entry.mount_name.clone(),
+            path: inode_entry.path.clone(),
+            backing_path: inode_entry.backing_path.clone(),
+            attrs: inode_entry.attrs.clone(),
+        };
+        drop(inode_entry);
+
+        if let Some(attrs) = target.attrs.as_ref()
+            && matches!(attrs.size, SizeCache::Exact(0))
+        {
+            reply.data(&[]);
+            return;
+        }
+
+        let durable_aux = target
+            .attrs
+            .as_ref()
+            .and_then(FileAttrsCache::durable_cache_aux);
+
+        if let Some(aux) = durable_aux.clone()
+            && let Some(record) = self.l0_get_with_aux(
+                &target.mount_name,
+                &target.path,
+                RecordKind::File,
+                aux.as_deref(),
+            )
+            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
+        {
+            debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            reply.data(data_slice(&payload.content, offset, size));
+            self.file_cache.insert(target.fh, payload.content);
+            return;
+        }
+
+        if target.backing_path.is_none()
+            && let Some(aux) = durable_aux.clone()
+            && let Some(runtime) = self.runtime_for_mount(&target.mount_name)
+            && let Some(record) =
+                runtime.cache_get_with_aux(&target.path, RecordKind::File, aux.as_deref())
+            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
+        {
+            debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            let data = payload.content;
+            self.l0_put_with_aux(
+                &target.mount_name,
+                &target.path,
+                RecordKind::File,
+                aux,
+                record,
+            );
+            reply.data(data_slice(&data, offset, size));
+            self.file_cache.insert(target.fh, data);
+            return;
+        }
+
+        if let Some(ref rp) = target.backing_path {
+            match std::fs::read(rp) {
+                Ok(data) => {
+                    reply.data(data_slice(&data, offset, size));
+                    self.file_cache.insert(target.fh, data);
+                },
+                Err(e) => {
+                    warn!(path = ?rp, err = %e, "backing fs error");
+                    reply.error(Errno::EIO);
+                },
+            }
+            return;
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+
+        self.drain_and_evict_pending(&target.mount_name);
+
+        debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
+
+        match self.rt.block_on(runtime.call_read_file(&target.path)) {
+            Ok(OpResult::Read(result)) => {
+                self.finish_full_read(&target, &runtime, offset, size, result, reply);
+            },
+            Ok(OpResult::Err(error)) => {
+                warn!(
+                    path = target.path.as_str(),
+                    kind = ?error.kind,
+                    retryable = error.retryable,
+                    message = error.message,
+                    "provider returned typed error for read_file"
+                );
+                reply.error(provider_errno(&error));
+            },
+            Ok(other) => {
+                warn!(path = target.path.as_str(), result = ?other, "read_file returned unexpected result");
+                reply.error(Errno::EIO);
+            },
+            Err(e) => {
+                warn!(path = target.path.as_str(), error = %e, "read_file runtime error");
+                reply.error(Errno::EIO);
+            },
+        }
+    }
+
+    fn finish_full_read(
+        &self,
+        target: &FullReadTarget,
+        runtime: &CalloutRuntime,
+        offset: u64,
+        size: u32,
+        result: FileContentResult,
+        reply: ReplyData,
+    ) {
+        let Some((data, result_attrs, sibling_count)) =
+            resolve_read_payload(runtime, &target.path, result)
+        else {
+            reply.error(Errno::EIO);
+            return;
+        };
+        debug!(
+            target: "omnifs_read",
+            path = target.path.as_str(),
+            content_len = data.len(),
+            sibling_files_count = sibling_count,
+            "received Read result"
+        );
+        let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
+        if !full_read_matches_attrs(&attrs_cache, data.len()) {
+            warn!(
+                path = target.path.as_str(),
+                expected = ?attrs_cache.size,
+                actual = data.len(),
+                "provider returned bytes that contradict file attrs"
+            );
+            reply.error(Errno::EIO);
+            return;
+        }
+        self.promote_inode_attrs(target.ino, attrs_cache.clone());
+        if self
+            .cache_durable_file_payload(&target.mount_name, &target.path, &attrs_cache, &data)
+            .is_err()
+        {
+            reply.error(Errno::EIO);
+            return;
+        }
+        reply.data(data_slice(&data, offset, size));
+        self.file_cache.insert(target.fh, data);
+    }
+
+    fn cache_durable_file_payload(
+        &self,
+        mount_name: &str,
+        path: &str,
+        attrs_cache: &FileAttrsCache,
+        data: &[u8],
+    ) -> Result<(), Errno> {
+        let Some(aux) = attrs_cache.durable_cache_aux() else {
+            return Ok(());
+        };
+        let payload = FilePayload::new(attrs_cache.version_token.clone(), data.to_vec());
+        let Some(payload) = payload.serialize() else {
+            return Err(Errno::EIO);
+        };
+        let file_record = CacheRecord::new(RecordKind::File, payload);
+        if let Some(rt) = self.runtime_for_mount(mount_name) {
+            rt.cache_put_with_aux(path, RecordKind::File, aux.as_deref(), &file_record);
+        }
+        self.l0_put_with_aux(mount_name, path, RecordKind::File, aux, file_record);
+        Ok(())
+    }
+
+    fn open_ranged_file(&self, target: &FullReadTarget) -> Result<Option<FopenFlags>, Errno> {
+        if target.backing_path.is_some()
+            || !target.attrs.as_ref().is_some_and(|attrs| {
+                matches!(&attrs.bytes, BytesCache::Deferred(ReadModeCache::Ranged))
+            })
+        {
+            return Ok(None);
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            return Err(Errno::ENOENT);
+        };
+        match self.rt.block_on(runtime.call_open_file(&target.path)) {
+            Ok(OpResult::OpenFile(opened)) => {
+                let opened_attrs = FileAttrsCache::from(&opened.attrs);
+                if !matches!(
+                    &opened_attrs.bytes,
+                    BytesCache::Deferred(ReadModeCache::Ranged)
+                ) {
+                    return Err(Errno::EIO);
+                }
+                self.promote_inode_attrs(target.ino, opened_attrs.clone());
+                self.ranged_handles.insert(
+                    target.fh,
+                    RangedFileHandle {
+                        mount_name: target.mount_name.clone(),
+                        path: target.path.clone(),
+                        provider_handle: opened.handle,
+                        attrs: opened_attrs,
+                    },
+                );
+                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(other) => {
+                warn!(
+                    path = target.path.as_str(),
+                    result = ?other,
+                    "open_file returned unexpected result"
+                );
+                Err(Errno::EIO)
+            },
+            Err(e) => {
+                warn!(
+                    path = target.path.as_str(),
+                    error = %e,
+                    "open_file runtime error"
+                );
+                Err(Errno::EIO)
+            },
+        }
+    }
+
+    fn prefetch_full_file_on_open(
+        &self,
+        target: &FullReadTarget,
+    ) -> Result<Option<FopenFlags>, Errno> {
+        if target.backing_path.is_some()
+            || !target
+                .attrs
+                .as_ref()
+                .is_some_and(should_prefetch_full_on_open)
+        {
+            return Ok(None);
+        }
+
+        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            return Err(Errno::ENOENT);
+        };
+        self.drain_and_evict_pending(&target.mount_name);
+        match self.rt.block_on(runtime.call_read_file(&target.path)) {
+            Ok(OpResult::Read(result)) => {
+                let Some((data, result_attrs, _sibling_count)) =
+                    resolve_read_payload(&runtime, &target.path, result)
+                else {
+                    return Err(Errno::EIO);
+                };
+                let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
+                if !full_read_matches_attrs(&attrs_cache, data.len()) {
+                    warn!(
+                        path = target.path.as_str(),
+                        expected = ?attrs_cache.size,
+                        actual = data.len(),
+                        "provider returned bytes that contradict file attrs"
+                    );
+                    return Err(Errno::EIO);
+                }
+                self.promote_inode_attrs(target.ino, attrs_cache.clone());
+                self.cache_durable_file_payload(
+                    &target.mount_name,
+                    &target.path,
+                    &attrs_cache,
+                    &data,
+                )?;
+                self.file_cache.insert(target.fh, data);
+                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(other) => {
+                warn!(
+                    path = target.path.as_str(),
+                    result = ?other,
+                    "read_file returned unexpected result during open"
+                );
+                Err(Errno::EIO)
+            },
+            Err(e) => {
+                warn!(
+                    path = target.path.as_str(),
+                    error = %e,
+                    "read_file runtime error during open"
+                );
+                Err(Errno::EIO)
+            },
+        }
+    }
+
+    fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
+        if matches!(attrs.stability, cache::StabilityCache::Volatile) {
+            return;
+        }
+        let Some(mut entry) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        entry.size = attrs.st_size();
+        entry.attrs = Some(attrs);
     }
 }
 
@@ -602,13 +1072,12 @@ impl Filesystem for FuseFs {
             return;
         };
         let _trace = FuseTrace::new("lookup", format!("parent={} name={}", parent.0, name_str));
-        let _span =
-            tracing::debug_span!("fuse::lookup", parent = parent.0, name = name_str).entered();
+        let _span = debug_span!("fuse::lookup", parent = parent.0, name = name_str).entered();
 
         // Synthetic root (no root_mount): mount points are children.
         if parent.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
             if self.registry.get(name_str).is_some() {
-                let ino = self.get_or_alloc_ino(name_str, "", EntryKind::Directory, 0);
+                let ino = self.get_or_alloc_ino(name_str, "", EntryKindCache::Directory, 0);
                 reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
                 return;
             }
@@ -633,9 +1102,9 @@ impl Filesystem for FuseFs {
             match std::fs::symlink_metadata(&child_rp) {
                 Ok(meta) => {
                     let kind = if meta.is_dir() {
-                        EntryKind::Directory
+                        EntryKindCache::Directory
                     } else {
-                        EntryKind::File
+                        EntryKindCache::File
                     };
                     let ino = self.get_or_alloc_ino_backing(
                         &mount_name,
@@ -647,7 +1116,7 @@ impl Filesystem for FuseFs {
                     reply.entry(&TTL, &self.attr_from_metadata(ino, &meta), Generation(0));
                 },
                 Err(e) => {
-                    tracing::warn!(path = ?child_rp, err = %e, "backing fs error");
+                    warn!(path = ?child_rp, err = %e, "backing fs error");
                     reply.error(Errno::ENOENT);
                 },
             }
@@ -656,8 +1125,8 @@ impl Filesystem for FuseFs {
 
         // L0/L2 cache path.
         match self.lookup_check_caches(&mount_name, &parent_path, name_str) {
-            Ok(Some(attr)) => {
-                reply.entry(&TTL, &attr, Generation(0));
+            Ok(Some((attr, ttl))) => {
+                reply.entry(&ttl, &attr, Generation(0));
                 return;
             },
             Err(e) => {
@@ -672,10 +1141,10 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
+        debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
 
         match self.lookup_via_provider(&runtime, &mount_name, &parent_path, name_str) {
-            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Ok((attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
             Err(e) => reply.error(e),
         }
     }
@@ -700,7 +1169,7 @@ impl Filesystem for FuseFs {
                     reply.attr(&TTL, &attr);
                 },
                 Err(e) => {
-                    tracing::warn!(path = ?rp, err = %e, "backing fs error");
+                    warn!(path = ?rp, err = %e, "backing fs error");
                     reply.error(Errno::ENOENT);
                 },
             }
@@ -708,15 +1177,16 @@ impl Filesystem for FuseFs {
         }
 
         let attr = match entry.kind {
-            EntryKind::Directory => self.dir_attr(ino.0),
-            EntryKind::File => self.file_attr(ino.0, entry.size),
+            EntryKindCache::Directory => self.dir_attr(ino.0),
+            EntryKindCache::File => self.file_attr(ino.0, entry.size),
         };
-        reply.attr(&TTL, &attr);
+        let ttl = Self::ttl_for_entry(&entry);
+        reply.attr(&ttl, &attr);
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let _trace = FuseTrace::new("opendir", format!("ino={}", ino.0));
-        let _span = tracing::debug_span!("fuse::opendir", inode = ino.0).entered();
+        let _span = debug_span!("fuse::opendir", inode = ino.0).entered();
 
         let fh = self.alloc_fh();
 
@@ -725,8 +1195,8 @@ impl Filesystem for FuseFs {
             let mounts = self.registry.mounts();
             let mut entries = Vec::new();
             for m in mounts {
-                let child_ino = self.get_or_alloc_ino(&m, "", EntryKind::Directory, 0);
-                entries.push((child_ino, m, EntryKind::Directory));
+                let child_ino = self.get_or_alloc_ino(&m, "", EntryKindCache::Directory, 0);
+                entries.push((child_ino, m, EntryKindCache::Directory));
             }
             self.dir_snapshots.insert(fh, entries);
             reply.opened(FuseFileHandle(fh), FopenFlags::empty());
@@ -775,7 +1245,7 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount_name.as_str(), "cache miss");
+        debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount_name.as_str(), "cache miss");
 
         match self.opendir_via_provider(&runtime, &mount_name, ino.0, &path) {
             Ok(snapshot) => {
@@ -804,8 +1274,8 @@ impl Filesystem for FuseFs {
         let skip = offset as usize;
         for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(skip) {
             let ftype = match kind {
-                EntryKind::Directory => fuser::FileType::Directory,
-                EntryKind::File => fuser::FileType::RegularFile,
+                EntryKindCache::Directory => fuser::FileType::Directory,
+                EntryKindCache::File => fuser::FileType::RegularFile,
             };
             let buffer_full = reply.add(INodeNo(*ino), (index + 1) as u64, ftype, name.as_str());
             if buffer_full {
@@ -843,7 +1313,12 @@ impl Filesystem for FuseFs {
             "read",
             format!("ino={} fh={} offset={} size={}", ino.0, fh.0, offset, size),
         );
-        let _span = tracing::debug_span!("fuse::read", inode = ino.0, offset, size).entered();
+        let _span = debug_span!("fuse::read", inode = ino.0, offset, size).entered();
+
+        if let Some(ranged) = self.ranged_handles.get(&fh.0).map(|entry| entry.clone()) {
+            self.read_ranged_handle(ino.0, &ranged, offset, size, reply);
+            return;
+        }
 
         // Serve from cache if this file handle already has data.
         if let Some(cached) = self.file_cache.get(&fh.0) {
@@ -851,112 +1326,60 @@ impl Filesystem for FuseFs {
             return;
         }
 
-        let Some(inode_entry) = self.inodes.get(&ino.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let mount_name = inode_entry.mount_name.clone();
-        let path = inode_entry.path.clone();
-        let backing_path = inode_entry.backing_path.clone();
-        drop(inode_entry);
-
-        // L0: check cached file by path.
-        if let Some(record) = self
-            .l0_caches
-            .get(&mount_name, &Key::new(&path, RecordKind::File))
-        {
-            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-            reply.data(data_slice(&record.payload, offset, size));
-            self.file_cache.insert(fh.0, record.payload.clone());
-            return;
-        }
-
-        // L2: check cached file by path (only for non-passthrough).
-        if backing_path.is_none()
-            && let Some(runtime) = self.runtime_for_mount(&mount_name)
-            && let Some(record) = runtime.cache_get(&path, RecordKind::File)
-        {
-            tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-            let data = record.payload.clone();
-            self.l0_caches.put(
-                &mount_name,
-                Key::new(&path, RecordKind::File),
-                record.clone(),
-            );
-            reply.data(data_slice(&data, offset, size));
-            self.file_cache.insert(fh.0, data);
-            return;
-        }
-
-        // Passthrough for inodes with backing_path.
-        if let Some(ref rp) = backing_path {
-            match read_backing_file(rp) {
-                Ok(data) => {
-                    reply.data(data_slice(&data, offset, size));
-                    self.file_cache.insert(fh.0, data);
-                },
-                Err(errno) => reply.error(errno),
-            }
-            return;
-        }
-
-        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-
-        self.drain_and_evict_pending(&mount_name);
-
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = mount_name.as_str(), "cache miss");
-
-        match self.rt.block_on(runtime.call_read_file(&path)) {
-            Ok(OpResult::Read(result)) => {
-                let Some((data, sibling_count)) = resolve_read_payload(&runtime, &path, result)
-                else {
-                    reply.error(Errno::EIO);
-                    return;
-                };
-                tracing::debug!(
-                    target: "omnifs_read",
-                    path = path,
-                    content_len = data.len(),
-                    sibling_files_count = sibling_count,
-                    "received Read result"
-                );
-                let file_record = CacheRecord::new(RecordKind::File, data.clone());
-                if let Some(rt) = self.runtime_for_mount(&mount_name) {
-                    rt.cache_put(&path, RecordKind::File, &file_record);
-                }
-                self.l0_caches
-                    .put(&mount_name, Key::new(&path, RecordKind::File), file_record);
-                reply.data(data_slice(&data, offset, size));
-                self.file_cache.insert(fh.0, data);
-            },
-            Ok(OpResult::Err(error)) => {
-                tracing::warn!(
-                    path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = error.message,
-                    "provider returned typed error for read_file"
-                );
-                reply.error(provider_errno(&error));
-            },
-            Ok(other) => {
-                tracing::warn!(path, result = ?other, "read_file returned unexpected result");
-                reply.error(Errno::EIO);
-            },
-            Err(e) => {
-                tracing::warn!(path, error = %e, "read_file runtime error");
-                reply.error(Errno::EIO);
-            },
-        }
+        self.read_full_handle(ino, fh, offset, size, reply);
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let _trace = FuseTrace::new("open", String::new());
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _trace = FuseTrace::new("open", format!("ino={}", ino.0));
         let fh = self.alloc_fh();
-        reply.opened(FuseFileHandle(fh), FopenFlags::empty());
+        let Some(entry) = self.inodes.get(&ino.0) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let mount_name = entry.mount_name.clone();
+        let path = entry.path.clone();
+        let backing_path = entry.backing_path.clone();
+        let attrs = entry.attrs.clone();
+        drop(entry);
+
+        let target = FullReadTarget {
+            ino: ino.0,
+            fh,
+            mount_name,
+            path,
+            backing_path,
+            attrs,
+        };
+
+        match self.open_ranged_file(&target) {
+            Ok(Some(flags)) => {
+                reply.opened(FuseFileHandle(fh), flags);
+                return;
+            },
+            Ok(None) => {},
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            },
+        }
+
+        match self.prefetch_full_file_on_open(&target) {
+            Ok(Some(flags)) => {
+                reply.opened(FuseFileHandle(fh), flags);
+                return;
+            },
+            Ok(None) => {},
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            },
+        }
+
+        let flags = target
+            .attrs
+            .filter(FileAttrsCache::should_direct_io)
+            .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO);
+        reply.opened(FuseFileHandle(fh), flags);
     }
 
     fn release(
@@ -971,6 +1394,16 @@ impl Filesystem for FuseFs {
     ) {
         let _trace = FuseTrace::new("release", format!("fh={}", fh.0));
         self.file_cache.remove(&fh.0);
+        if let Some((_, ranged)) = self.ranged_handles.remove(&fh.0)
+            && let Some(runtime) = self.runtime_for_mount(&ranged.mount_name)
+            && let Err(e) = runtime.call_close_file(ranged.provider_handle)
+        {
+            debug!(
+                path = ranged.path,
+                error = %e,
+                "close_file runtime error"
+            );
+        }
         reply.ok();
     }
 
@@ -984,7 +1417,7 @@ impl Filesystem for FuseFs {
             match std::fs::read_link(rp) {
                 Ok(target) => reply.data(target.as_os_str().as_encoded_bytes()),
                 Err(e) => {
-                    tracing::warn!(path = ?rp, err = %e, "backing fs error");
+                    warn!(path = ?rp, err = %e, "backing fs error");
                     reply.error(Errno::EIO);
                 },
             }
@@ -994,38 +1427,28 @@ impl Filesystem for FuseFs {
     }
 }
 
-impl From<cache::EntryKindCache> for EntryKind {
-    fn from(kind: cache::EntryKindCache) -> Self {
-        match kind {
-            cache::EntryKindCache::Directory => Self::Directory,
-            cache::EntryKindCache::File => Self::File,
-        }
-    }
-}
-
-// NOTE: `impl From<EntryKind> for cache::EntryKindCache` lives in
-// `crate::runtime::mod` so it is available regardless of target_os
-// (this `fuse` module is Linux-only). Do not duplicate it here.
-
 /// Materialize a `read-file` terminal into the bytes the FUSE response
 /// will return. Inline content travels in the WIT; blob content gets
 /// pulled from the host's blob cache. Returns `None` when a blob-backed
 /// payload can't be resolved (logged at warn for diagnostics).
 fn resolve_read_payload(
-    runtime: &crate::runtime::CalloutRuntime,
+    runtime: &CalloutRuntime,
     path: &str,
-    result: crate::omnifs::provider::types::FileContentResult,
-) -> Option<(Vec<u8>, usize)> {
-    use crate::omnifs::provider::types::FileContentResult;
+    result: FileContentResult,
+) -> Option<(Vec<u8>, FileAttrsCache, usize)> {
     match result {
         FileContentResult::Inline(inline) => {
             let count = inline.sibling_files.len();
-            Some((inline.content, count))
+            Some((inline.content, FileAttrsCache::from(&inline.attrs), count))
         },
         FileContentResult::Blob(blob) => match runtime.read_blob_full(blob.blob) {
-            Ok(bytes) => Some((bytes, blob.sibling_files.len())),
+            Ok(bytes) => Some((
+                bytes,
+                FileAttrsCache::from(&blob.attrs),
+                blob.sibling_files.len(),
+            )),
             Err(e) => {
-                tracing::warn!(path, error = %e, "blob-backed read failed");
+                warn!(path, error = %e, "blob-backed read failed");
                 None
             },
         },
@@ -1038,16 +1461,66 @@ fn resolve_read_payload(
 fn data_slice(data: &[u8], offset: u64, size: u32) -> &[u8] {
     let start = offset as usize;
     let end = (start + size as usize).min(data.len());
-    if start >= data.len() {
-        &[]
-    } else {
-        &data[start..end]
+    data.get(start..end).unwrap_or(&[])
+}
+
+fn should_prefetch_full_on_open(attrs: &FileAttrsCache) -> bool {
+    matches!(attrs.bytes, BytesCache::Deferred(ReadModeCache::Full))
+        && !matches!(attrs.size, SizeCache::Exact(_))
+}
+
+fn learned_full_read_attrs(attrs: FileAttrsCache, content_len: usize) -> FileAttrsCache {
+    if !can_publish_learned_size(&attrs) {
+        return attrs;
+    }
+    match attrs.size {
+        SizeCache::Exact(_) => attrs,
+        SizeCache::NonZero | SizeCache::Unknown => {
+            attrs.with_exact_size(u64::try_from(content_len).unwrap_or(u64::MAX))
+        },
     }
 }
 
-fn read_backing_file(path: &Path) -> Result<Vec<u8>, Errno> {
-    std::fs::read(path).map_err(|e| {
-        tracing::warn!(path = ?path, err = %e, "backing fs error");
-        Errno::EIO
-    })
+fn learned_ranged_eof_attrs(attrs: FileAttrsCache, eof_size: u64) -> Option<FileAttrsCache> {
+    if !can_publish_learned_size(&attrs) {
+        return None;
+    }
+    match attrs.size {
+        SizeCache::Exact(_) => None,
+        SizeCache::NonZero | SizeCache::Unknown => Some(attrs.with_exact_size(eof_size)),
+    }
+}
+
+fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
+    match attrs.stability {
+        cache::StabilityCache::Immutable | cache::StabilityCache::Mutable => true,
+        cache::StabilityCache::Volatile => false,
+    }
+}
+
+fn full_read_matches_attrs(attrs: &FileAttrsCache, content_len: usize) -> bool {
+    match attrs.size {
+        SizeCache::Exact(size) => {
+            u64::try_from(content_len).is_ok_and(|content_len| content_len == size)
+        },
+        SizeCache::NonZero => content_len > 0,
+        SizeCache::Unknown => true,
+    }
+}
+
+fn file_payload_for_attrs(
+    record: &CacheRecord,
+    attrs: Option<&FileAttrsCache>,
+) -> Option<FilePayload> {
+    let payload = FilePayload::deserialize(&record.payload)?;
+    let attrs = attrs?;
+    if matches!(attrs.stability, cache::StabilityCache::Mutable)
+        && payload.version_token != attrs.version_token
+    {
+        return None;
+    }
+    if !full_read_matches_attrs(attrs, payload.content.len()) {
+        return None;
+    }
+    Some(payload)
 }

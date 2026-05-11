@@ -92,7 +92,7 @@ mod ambiguous_handlers {
         async fn tree_dir(_path: String) -> Result<Projection> {
             let mut projection = Projection::new();
             projection.dir("d");
-            projection.file("f.txt");
+            projection.deferred_file("f.txt");
             projection.page(PageStatus::Exhaustive);
             Ok(projection)
         }
@@ -312,6 +312,14 @@ impl omnifs_sdk::handler::Handler<State> for StubSubtree {
         _path: &'a str,
     ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::FileContent> {
         Box::pin(async { Ok(omnifs_sdk::browse::FileContent::new(Vec::new())) })
+    }
+
+    fn open_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::OpenedFile> {
+        Box::pin(async { Err(ProviderError::not_found("path not found")) })
     }
 }
 

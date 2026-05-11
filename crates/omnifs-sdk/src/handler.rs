@@ -4,25 +4,15 @@ use crate::browse::{
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
+use crate::file_attrs::{Bytes, FileAttrs, ReadMode, Size, Stability};
 use omnifs_mount_schema::{PathPattern, PathSegment, split_path};
 use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
-use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::rc::Rc;
 
-// Placeholder `st_size` for projected files whose real length is
-// unknown until read. The kernel caps `read` requests at the file's
-// reported size, so this value must comfortably cover any payload a
-// provider might serve (PDFs, tarballs, repo zips). Once `read`
-// returns fewer bytes than requested, the kernel sees EOF.
-//
-// Caveat: until a file is read, `ls -l`, `du`, and `find -size` will
-// report this placeholder. Pick a size large enough for real payloads
-// but not so large that disk-usage tools become absurd. 256 MiB
-// covers every realistic provider download and reads as "256M".
-const DEFAULT_FILE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
-pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
+pub use crate::file_attrs::MAX_PROJECTED_BYTES;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
 
@@ -131,6 +121,8 @@ pub trait Handler<S> {
         cx: &'a Cx<S>,
         path: &'a str,
     ) -> BoxFuture<'a, crate::browse::FileContent>;
+
+    fn open_file<'a>(&'a self, cx: &'a Cx<S>, path: &'a str) -> BoxFuture<'a, OpenedFile>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,14 +133,12 @@ pub enum PageStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStat {
-    pub size: NonZeroU64,
+    pub size: u64,
 }
 
 impl FileStat {
-    pub fn placeholder() -> Self {
-        Self {
-            size: placeholder_size(),
-        }
+    pub fn exact(size: u64) -> Self {
+        Self { size }
     }
 }
 
@@ -163,8 +153,7 @@ pub enum ProjectionKind {
 struct ProjectionEntry {
     name: String,
     kind: ProjectionKind,
-    stat: Option<FileStat>,
-    bytes: Option<Vec<u8>>,
+    attrs: Option<FileAttrs>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -181,33 +170,41 @@ impl Projection {
     }
 
     pub fn dir(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(name.into(), ProjectionKind::Directory, None, None);
+        let _ = self.push_entry(name.into(), ProjectionKind::Directory, None);
     }
 
-    pub fn file(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(
-            name.into(),
-            ProjectionKind::File,
-            Some(FileStat::placeholder()),
-            None,
+    pub fn file(&mut self, name: impl Into<String>, attrs: FileAttrs) {
+        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(attrs));
+    }
+
+    pub fn deferred_file(&mut self, name: impl Into<String>) {
+        self.file(
+            name,
+            FileAttrs::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable),
         );
     }
 
     pub fn file_with_stat(&mut self, name: impl Into<String>, stat: FileStat) {
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), None);
+        self.file(
+            name,
+            FileAttrs::deferred(Size::Exact(stat.size), ReadMode::Full, Stability::Immutable),
+        );
     }
 
     pub fn file_with_content(&mut self, name: impl Into<String>, bytes: impl Into<Vec<u8>>) {
         let bytes = bytes.into();
-        if bytes.len() > MAX_PROJECTED_BYTES {
-            let _ = self.reject::<()>(format!(
-                "projected file exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
-            ));
-            return;
-        }
-        let stat = NonZeroU64::new(u64::try_from(bytes.len()).unwrap_or(DEFAULT_FILE_SIZE_BYTES))
-            .map_or_else(FileStat::placeholder, |size| FileStat { size });
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(stat), Some(bytes));
+        self.file(name, FileAttrs::inline(bytes, Stability::Immutable, None));
+    }
+
+    pub fn file_with_content_attrs(
+        &mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+        stability: Stability,
+        version: Option<crate::file_attrs::VersionToken>,
+    ) {
+        let bytes = bytes.into();
+        self.file(name, FileAttrs::inline(bytes, stability, version));
     }
 
     pub fn page(&mut self, status: PageStatus) {
@@ -225,6 +222,20 @@ impl Projection {
             return;
         }
         self.preload.push(BrowsePreload::file(path, content));
+    }
+
+    pub fn preload_with_attrs(
+        &mut self,
+        path: impl Into<String>,
+        attrs: FileAttrs,
+        content: impl Into<Vec<u8>>,
+    ) {
+        let path = path.into();
+        if path.is_empty() {
+            return;
+        }
+        self.preload
+            .push(BrowsePreload::file_with_attrs(path, attrs, content));
     }
 
     /// Hand a batch of file contents to the host so later reads of each
@@ -251,13 +262,13 @@ impl Projection {
         &mut self,
         path: impl Into<String>,
         kind: BrowseEntryKind,
-        size: Option<NonZeroU64>,
+        attrs: Option<FileAttrs>,
     ) {
         let path = path.into();
         if path.is_empty() {
             return;
         }
-        self.preload.push(BrowsePreload::entry(path, kind, size));
+        self.preload.push(BrowsePreload::entry(path, kind, attrs));
     }
 
     /// Hand directory metadata to the host so a later lookup of `path`
@@ -274,8 +285,7 @@ impl Projection {
         &mut self,
         name: String,
         kind: ProjectionKind,
-        stat: Option<FileStat>,
-        bytes: Option<Vec<u8>>,
+        attrs: Option<FileAttrs>,
     ) -> Result<()> {
         if !is_valid_rel_segment(&name) {
             return self.reject(format!("invalid child name {name:?}"));
@@ -283,12 +293,15 @@ impl Projection {
         if self.entries.iter().any(|entry| entry.name == name) {
             return self.reject(format!("duplicate child name {name:?}"));
         }
-        self.entries.push(ProjectionEntry {
-            name,
-            kind,
-            stat,
-            bytes,
-        });
+        if matches!(kind, ProjectionKind::File) {
+            let Some(attrs) = &attrs else {
+                return self.reject(format!("file child {name:?} is missing attributes"));
+            };
+            if let Err(error) = attrs.validate() {
+                return self.reject(error.message().to_string());
+            }
+        }
+        self.entries.push(ProjectionEntry { name, kind, attrs });
         Ok(())
     }
 
@@ -304,11 +317,18 @@ impl Projection {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum FileContent {
     Bytes(Vec<u8>),
+    BytesWithAttrs {
+        attrs: FileAttrs,
+        bytes: Vec<u8>,
+    },
     Stream(StreamHandle),
-    Range { len: u64, reader: RangeReaderHandle },
+    Range {
+        attrs: FileAttrs,
+        reader: Rc<dyn RangeReader>,
+    },
 }
 
 impl FileContent {
@@ -316,12 +336,98 @@ impl FileContent {
         Self::Bytes(bytes.into())
     }
 
+    pub fn bytes_with_attrs(attrs: FileAttrs, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::BytesWithAttrs {
+            attrs,
+            bytes: bytes.into(),
+        }
+    }
+
     pub fn stream(handle: StreamHandle) -> Self {
         Self::Stream(handle)
     }
 
-    pub fn range(len: u64, reader: RangeReaderHandle) -> Self {
-        Self::Range { len, reader }
+    pub fn ranged(attrs: FileAttrs, reader: impl RangeReader + 'static) -> Self {
+        Self::Range {
+            attrs,
+            reader: Rc::new(reader),
+        }
+    }
+
+    pub fn range_bytes(attrs: FileAttrs, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::ranged(attrs, MemoryRangeReader::new(bytes))
+    }
+}
+
+impl std::fmt::Debug for FileContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(bytes) => f.debug_tuple("Bytes").field(bytes).finish(),
+            Self::BytesWithAttrs { attrs, bytes } => f
+                .debug_struct("BytesWithAttrs")
+                .field("attrs", attrs)
+                .field("bytes", bytes)
+                .finish(),
+            Self::Stream(handle) => f.debug_tuple("Stream").field(handle).finish(),
+            Self::Range { attrs, .. } => f.debug_struct("Range").field("attrs", attrs).finish(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChunk {
+    pub content: Vec<u8>,
+    pub eof: bool,
+}
+
+impl FileChunk {
+    pub fn new(content: impl Into<Vec<u8>>, eof: bool) -> Self {
+        Self {
+            content: content.into(),
+            eof,
+        }
+    }
+}
+
+impl From<FileChunk> for crate::omnifs::provider::types::FileChunk {
+    fn from(chunk: FileChunk) -> Self {
+        Self {
+            content: chunk.content,
+            eof: chunk.eof,
+        }
+    }
+}
+
+pub trait RangeReader {
+    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk>;
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryRangeReader {
+    bytes: Rc<Vec<u8>>,
+}
+
+impl MemoryRangeReader {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            bytes: Rc::new(bytes.into()),
+        }
+    }
+}
+
+impl RangeReader for MemoryRangeReader {
+    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk> {
+        Box::pin(async move {
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            if start >= self.bytes.len() {
+                return Ok(FileChunk::new(Vec::new(), true));
+            }
+            let end = start.saturating_add(length as usize).min(self.bytes.len());
+            Ok(FileChunk::new(
+                self.bytes[start..end].to_vec(),
+                end == self.bytes.len(),
+            ))
+        })
     }
 }
 
@@ -330,9 +436,16 @@ pub struct StreamHandle {
     pub id: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RangeReaderHandle {
-    pub id: u64,
+#[derive(Clone)]
+pub struct OpenedFile {
+    pub attrs: FileAttrs,
+    pub reader: Rc<dyn RangeReader>,
+}
+
+impl OpenedFile {
+    pub fn new(attrs: FileAttrs, reader: Rc<dyn RangeReader>) -> Self {
+        Self { attrs, reader }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -695,6 +808,9 @@ impl<S> MountRegistry<S> {
         if let Some((route, parsed)) = self.match_file(&abs) {
             return match (route.call)(cx, parsed).await? {
                 FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
+                FileContent::BytesWithAttrs { attrs, bytes } => {
+                    Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -718,6 +834,25 @@ impl<S> MountRegistry<S> {
         )
         .await?;
         projected_file_from_projection(&projection, name)
+    }
+
+    pub async fn open_file(&self, cx: &Cx<S>, path: &str) -> Result<OpenedFile> {
+        debug_assert!(
+            !path.is_empty() && path.starts_with('/'),
+            "open_file expects an absolute path"
+        );
+        let abs = to_absolute_path(path);
+
+        if let Some((route, parsed, suffix)) = self.match_bind_prefix(&abs) {
+            let handler = (route.call)(cx, parsed).await?;
+            return handler.open_file(cx, &suffix).await;
+        }
+
+        if let Some((route, parsed)) = self.match_file(&abs) {
+            return opened_file_from_content((route.call)(cx, parsed).await?);
+        }
+
+        Err(ProviderError::not_found(format!("path not found: {path}")))
     }
 
     fn match_dir(&self, absolute_path: &str) -> Option<(&DirHandlerRegistration<S>, Box<dyn Any>)> {
@@ -1048,6 +1183,9 @@ impl<S, B> SubtreeRegistry<S, B> {
         if let Some((route, parsed)) = self.match_file(&abs) {
             return match (route.call)(cx, bindings, parsed).await? {
                 FileContent::Bytes(bytes) => Ok(crate::browse::FileContent::new(bytes)),
+                FileContent::BytesWithAttrs { attrs, bytes } => {
+                    Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -1072,6 +1210,15 @@ impl<S, B> SubtreeRegistry<S, B> {
         )
         .await?;
         projected_file_from_projection(&projection, name)
+    }
+
+    pub async fn open_file(&self, cx: &Cx<S>, bindings: &B, path: &str) -> Result<OpenedFile> {
+        let abs = to_absolute_path(path);
+        if let Some((route, parsed)) = self.match_file(&abs) {
+            return opened_file_from_content((route.call)(cx, bindings, parsed).await?);
+        }
+
+        Err(ProviderError::not_found(format!("path not found: {path}")))
     }
 
     #[allow(clippy::type_complexity)]
@@ -1155,7 +1302,7 @@ impl<S, B> StaticChildren for SubtreeRegistry<S, B> {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name.as_str())
                 } else {
-                    BrowseEntry::file(name.as_str(), placeholder_size())
+                    BrowseEntry::file(name.as_str(), default_static_file_attrs())
                 }
             });
         }
@@ -1176,7 +1323,7 @@ impl<S, B> StaticChildren for SubtreeRegistry<S, B> {
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, placeholder_size()));
+            return Some(BrowseEntry::file(name, default_static_file_attrs()));
         }
         if self.is_implicit_prefix_dir(absolute_path) {
             let name = child_name(absolute_path)?;
@@ -1207,7 +1354,7 @@ impl<S> StaticChildren for MountRegistry<S> {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name.as_str())
                 } else {
-                    BrowseEntry::file(name.as_str(), placeholder_size())
+                    BrowseEntry::file(name.as_str(), default_static_file_attrs())
                 }
             });
         }
@@ -1234,7 +1381,7 @@ impl<S> StaticChildren for MountRegistry<S> {
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, placeholder_size()));
+            return Some(BrowseEntry::file(name, default_static_file_attrs()));
         }
         if self.is_implicit_prefix_dir(absolute_path) {
             let name = child_name(absolute_path)?;
@@ -1261,20 +1408,18 @@ fn merge_projection_entries(
         let browse_entry = match entry.kind {
             ProjectionKind::Directory => BrowseEntry::dir(&entry.name),
             ProjectionKind::File => {
-                let size = entry.stat.map_or_else(placeholder_size, |stat| stat.size);
-                if let Some(bytes) = &entry.bytes {
-                    sibling_files.push(ProjectedFile::new(&entry.name, bytes.clone()));
+                let attrs = entry
+                    .attrs
+                    .clone()
+                    .ok_or_else(|| ProviderError::internal("file projection missing attrs"))?;
+                if matches!(&attrs.bytes, Bytes::Inline(_)) {
+                    sibling_files.push(ProjectedFile::new(&entry.name, attrs.clone()));
                 }
-                BrowseEntry::file(&entry.name, size)
+                BrowseEntry::file(&entry.name, attrs)
             },
         };
 
-        if entries.insert(entry.name.clone(), browse_entry).is_some() {
-            return Err(ProviderError::invalid_input(format!(
-                "child {:?} was emitted more than once",
-                entry.name
-            )));
-        }
+        entries.insert(entry.name.clone(), browse_entry);
     }
 
     Ok((entries, sibling_files))
@@ -1292,7 +1437,11 @@ fn projected_file_from_projection(
         .iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| ProviderError::not_found(format!("path not found: {name}")))?;
-    let Some(bytes) = &entry.bytes else {
+    let attrs = entry
+        .attrs
+        .as_ref()
+        .ok_or_else(|| ProviderError::internal("projected file missing attrs"))?;
+    let Some(bytes) = attrs.inline_bytes() else {
         return Err(ProviderError::not_found(format!(
             "projected file {name} has no eager bytes"
         )));
@@ -1302,13 +1451,60 @@ fn projected_file_from_projection(
         .iter()
         .filter(|entry| entry.name != name)
         .filter_map(|entry| {
-            entry
-                .bytes
-                .as_ref()
-                .map(|bytes| ProjectedFile::new(&entry.name, bytes.clone()))
+            let attrs = entry.attrs.as_ref()?;
+            if matches!(&attrs.bytes, Bytes::Inline(_)) {
+                Some(ProjectedFile::new(&entry.name, attrs.clone()))
+            } else {
+                None
+            }
         })
         .collect::<Vec<_>>();
-    Ok(crate::browse::FileContent::new(bytes.clone()).with_sibling_files(sibling_files))
+    Ok(crate::browse::FileContent::new(bytes.to_vec())
+        .with_attrs(read_result_attrs(attrs))
+        .with_sibling_files(sibling_files))
+}
+
+fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
+    match content {
+        FileContent::Bytes(_) | FileContent::BytesWithAttrs { .. } => {
+            Err(ProviderError::invalid_input(
+                "open-file requires FileContent::ranged or FileContent::range_bytes",
+            ))
+        },
+        FileContent::Range { attrs, reader } => {
+            attrs
+                .validate()
+                .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
+            if !matches!(
+                attrs.bytes,
+                Bytes::Deferred {
+                    read: ReadMode::Ranged
+                }
+            ) {
+                return Err(ProviderError::invalid_input(
+                    "ranged file content requires Bytes::Deferred { read: ReadMode::Ranged }",
+                ));
+            }
+            Ok(OpenedFile::new(attrs, reader))
+        },
+        FileContent::Stream(_) => Err(ProviderError::unimplemented(
+            "streamed file reads are not wired through the current host runtime",
+        )),
+    }
+}
+
+fn read_result_attrs(attrs: &FileAttrs) -> FileAttrs {
+    match &attrs.bytes {
+        Bytes::Inline(_) => FileAttrs {
+            size: attrs.size.clone(),
+            bytes: Bytes::Deferred {
+                read: ReadMode::Full,
+            },
+            stability: attrs.stability,
+            version: attrs.version.clone(),
+        },
+        Bytes::Deferred { .. } => attrs.clone(),
+    }
 }
 
 fn projection_listing(
@@ -1321,7 +1517,7 @@ fn projection_listing(
     let (mut entries, sibling_files) = merge_projection_entries(projection, static_entries)?;
     for projected in sibling_files {
         if let Some(entry) = entries.get_mut(projected.name()) {
-            *entry = entry.clone().projected(projected.content().to_vec());
+            *entry = entry.clone().with_attrs(projected.attrs().clone());
         }
     }
 
@@ -1363,7 +1559,9 @@ fn projection_lookup<R: StaticChildren>(
         projection,
         registry.static_entries_for_parent(absolute_parent),
     )?;
-    let target = if reserved.contains(target_name) {
+    let target = if let Some(entry) = siblings.get(target_name).cloned() {
+        Some(entry)
+    } else if reserved.contains(target_name) {
         Some(
             registry
                 .exact_entry_for_path(&join_absolute_path(absolute_parent, target_name))
@@ -1546,8 +1744,8 @@ where
     Ok(())
 }
 
-fn placeholder_size() -> NonZeroU64 {
-    NonZeroU64::new(DEFAULT_FILE_SIZE_BYTES).expect("placeholder size must be non-zero")
+fn default_static_file_attrs() -> FileAttrs {
+    FileAttrs::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable)
 }
 
 fn is_valid_rel_segment(segment: &str) -> bool {

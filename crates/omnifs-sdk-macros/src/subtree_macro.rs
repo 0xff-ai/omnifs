@@ -185,6 +185,18 @@ pub fn expand_subtree(_args: &SubtreeArgs, mut input: ItemImpl) -> syn::Result<T
                         .await
                 })
             }
+
+            fn open_file<'a>(
+                &'a self,
+                __cx: &'a omnifs_sdk::Cx<#state_ty>,
+                __path: &'a str,
+            ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::OpenedFile> {
+                Box::pin(async move {
+                    Self::__omnifs_subtree_registry()
+                        .open_file(__cx, self, __path)
+                        .await
+                })
+            }
         }
     };
 

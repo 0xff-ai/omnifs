@@ -3,20 +3,8 @@
 //! provider authors build `Projection` / `FileContent` from `handler.rs`
 //! and the SDK does the mapping.
 
+use crate::file_attrs::{Bytes, FileAttrs, ReadMode, Size, Stability};
 use crate::omnifs::provider::types as wit_types;
-use std::num::NonZeroU64;
-
-pub(crate) const DEFAULT_PROJECTED_FILE_SIZE: NonZeroU64 = match NonZeroU64::new(4096) {
-    Some(size) => size,
-    None => unreachable!(),
-};
-
-fn size_from_content_len(len: usize) -> NonZeroU64 {
-    u64::try_from(len)
-        .ok()
-        .and_then(NonZeroU64::new)
-        .unwrap_or(DEFAULT_PROJECTED_FILE_SIZE)
-}
 
 /// The kind of a filesystem entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,23 +17,31 @@ pub enum EntryKind {
 #[derive(Clone, Debug)]
 pub struct ProjectedFile {
     pub(crate) name: String,
-    pub(crate) content: Vec<u8>,
+    pub(crate) attrs: FileAttrs,
 }
 
 impl ProjectedFile {
-    pub fn new(name: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+    pub fn new(name: impl Into<String>, attrs: FileAttrs) -> Self {
         Self {
             name: name.into(),
-            content: bytes.into(),
+            attrs,
         }
+    }
+
+    pub fn inline_immutable(name: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::new(name, FileAttrs::inline(bytes, Stability::Immutable, None))
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn content(&self) -> &[u8] {
-        &self.content
+    pub fn attrs(&self) -> &FileAttrs {
+        &self.attrs
+    }
+
+    pub fn content(&self) -> Option<&[u8]> {
+        self.attrs.inline_bytes()
     }
 }
 
@@ -53,7 +49,7 @@ impl From<ProjectedFile> for wit_types::ProjectedFile {
     fn from(file: ProjectedFile) -> Self {
         Self {
             name: file.name,
-            content: file.content,
+            attrs: file.attrs.into(),
         }
     }
 }
@@ -63,7 +59,7 @@ impl From<ProjectedFile> for wit_types::ProjectedFile {
 pub struct Entry {
     pub(crate) name: String,
     pub(crate) kind: EntryKind,
-    pub(crate) size: Option<NonZeroU64>,
+    pub(crate) attrs: Option<FileAttrs>,
     pub(crate) projected_files: Vec<ProjectedFile>,
 }
 
@@ -72,23 +68,23 @@ impl Entry {
         Self {
             name: name.into(),
             kind: EntryKind::Directory,
-            size: None,
+            attrs: None,
             projected_files: Vec::new(),
         }
     }
 
-    pub fn file(name: impl Into<String>, size: NonZeroU64) -> Self {
+    pub fn file(name: impl Into<String>, attrs: FileAttrs) -> Self {
         Self {
             name: name.into(),
             kind: EntryKind::File,
-            size: Some(size),
+            attrs: Some(attrs),
             projected_files: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn with_size(mut self, size: NonZeroU64) -> Self {
-        self.size = Some(size);
+    pub fn with_attrs(mut self, attrs: FileAttrs) -> Self {
+        self.attrs = Some(attrs);
         self
     }
 
@@ -96,19 +92,19 @@ impl Entry {
     pub fn projected(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         let bytes = bytes.into();
         if matches!(self.kind, EntryKind::File) {
-            self.size = Some(size_from_content_len(bytes.len()));
+            self.attrs = Some(FileAttrs::inline(bytes.clone(), Stability::Immutable, None));
         }
-        if !bytes.is_empty() {
+        if self.kind == EntryKind::Directory && !bytes.is_empty() {
             let name = self.name.clone();
-            self.projected_files.push(ProjectedFile::new(name, bytes));
+            self.projected_files
+                .push(ProjectedFile::inline_immutable(name, bytes));
         }
         self
     }
 
     #[must_use]
     pub fn with_projected_files<I: IntoIterator<Item = ProjectedFile>>(mut self, files: I) -> Self {
-        self.projected_files
-            .extend(files.into_iter().filter(|file| !file.content.is_empty()));
+        self.projected_files.extend(files);
         self
     }
 
@@ -120,8 +116,8 @@ impl Entry {
         self.kind
     }
 
-    pub fn size(&self) -> Option<NonZeroU64> {
-        self.size
+    pub fn attrs(&self) -> Option<&FileAttrs> {
+        self.attrs.as_ref()
     }
 
     pub fn projected_files(&self) -> &[ProjectedFile] {
@@ -135,13 +131,9 @@ impl From<Entry> for wit_types::DirEntry {
             name: entry.name,
             kind: match entry.kind {
                 EntryKind::Directory => wit_types::EntryKind::Directory,
-                EntryKind::File => wit_types::EntryKind::File,
-            },
-            size: entry.size.map(NonZeroU64::get),
-            projected_files: if entry.projected_files.is_empty() {
-                None
-            } else {
-                Some(entry.projected_files.into_iter().map(Into::into).collect())
+                EntryKind::File => wit_types::EntryKind::File(
+                    entry.attrs.expect("file entries must carry attrs").into(),
+                ),
             },
         }
     }
@@ -154,28 +146,47 @@ impl From<Entry> for wit_types::DirEntry {
 pub enum Preload {
     File {
         path: String,
+        attrs: FileAttrs,
         content: Vec<u8>,
     },
     Entry {
         path: String,
         kind: EntryKind,
-        size: Option<NonZeroU64>,
+        attrs: Option<FileAttrs>,
     },
 }
 
 impl Preload {
     pub fn file(path: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
+        let content = content.into();
+        Self::file_with_attrs(
+            path,
+            FileAttrs::deferred(
+                Size::Exact(u64::try_from(content.len()).unwrap_or(u64::MAX)),
+                ReadMode::Full,
+                Stability::Immutable,
+            ),
+            content,
+        )
+    }
+
+    pub fn file_with_attrs(
+        path: impl Into<String>,
+        attrs: FileAttrs,
+        content: impl Into<Vec<u8>>,
+    ) -> Self {
         Self::File {
             path: path.into(),
+            attrs,
             content: content.into(),
         }
     }
 
-    pub fn entry(path: impl Into<String>, kind: EntryKind, size: Option<NonZeroU64>) -> Self {
+    pub fn entry(path: impl Into<String>, kind: EntryKind, attrs: Option<FileAttrs>) -> Self {
         Self::Entry {
             path: path.into(),
             kind,
-            size,
+            attrs,
         }
     }
 
@@ -193,16 +204,25 @@ impl Preload {
 impl From<Preload> for wit_types::PreloadItem {
     fn from(preload: Preload) -> Self {
         match preload {
-            Preload::File { path, content } => {
-                Self::File(wit_types::PreloadedFile { path, content })
-            },
-            Preload::Entry { path, kind, size } => Self::Entry(wit_types::PreloadedEntry {
+            Preload::File {
+                path,
+                attrs,
+                content,
+            } => Self::File(wit_types::PreloadedFile {
+                path,
+                attrs: attrs.into(),
+                content,
+            }),
+            Preload::Entry { path, kind, attrs } => Self::Entry(wit_types::PreloadedEntry {
                 path,
                 kind: match kind {
                     EntryKind::Directory => wit_types::EntryKind::Directory,
-                    EntryKind::File => wit_types::EntryKind::File,
+                    EntryKind::File => wit_types::EntryKind::File(
+                        attrs
+                            .expect("preloaded file entries must carry attrs")
+                            .into(),
+                    ),
                 },
-                size: size.map(NonZeroU64::get),
             }),
         }
     }
@@ -335,15 +355,11 @@ impl Lookup {
     pub fn file(name: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         let name = name.into();
         let content = content.into();
-        let size = size_from_content_len(content.len());
-        let mut sibling_files = Vec::new();
-        if !content.is_empty() {
-            sibling_files.push(ProjectedFile::new(&name, content));
-        }
+        let attrs = FileAttrs::inline(content, Stability::Immutable, None);
         Self::Entry(LookupEntry {
-            target: Entry::file(&name, size),
+            target: Entry::file(&name, attrs),
             siblings: Vec::new(),
-            sibling_files,
+            sibling_files: Vec::new(),
             exhaustive: true,
             preload: Vec::new(),
         })
@@ -371,9 +387,7 @@ impl Lookup {
     pub fn with_sibling_files<I: IntoIterator<Item = ProjectedFile>>(self, files: I) -> Self {
         match self {
             Self::Entry(mut entry) => {
-                entry
-                    .sibling_files
-                    .extend(files.into_iter().filter(|file| !file.content.is_empty()));
+                entry.sibling_files.extend(files);
                 Self::Entry(entry)
             },
             other => other,
@@ -479,10 +493,12 @@ impl From<List> for wit_types::ListResult {
 #[derive(Clone, Debug)]
 pub enum FileContent {
     Inline {
+        attrs: FileAttrs,
         content: Vec<u8>,
         sibling_files: Vec<ProjectedFile>,
     },
     Blob {
+        attrs: FileAttrs,
         blob: crate::blob::BlobId,
         sibling_files: Vec<ProjectedFile>,
     },
@@ -490,8 +506,18 @@ pub enum FileContent {
 
 impl FileContent {
     pub fn new(content: impl Into<Vec<u8>>) -> Self {
+        let content = content.into();
+        let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
         Self::Inline {
-            content: content.into(),
+            attrs: FileAttrs {
+                size: Size::Exact(size),
+                bytes: Bytes::Deferred {
+                    read: ReadMode::Full,
+                },
+                stability: Stability::Immutable,
+                version: None,
+            },
+            content,
             sibling_files: Vec::new(),
         }
     }
@@ -499,17 +525,40 @@ impl FileContent {
     /// Serve from a host-resident blob — no bytes cross the WIT.
     pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
         Self::Blob {
+            attrs: FileAttrs {
+                size: Size::Unknown,
+                bytes: Bytes::Deferred {
+                    read: ReadMode::Full,
+                },
+                stability: Stability::Immutable,
+                version: None,
+            },
             blob: blob.into(),
             sibling_files: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn with_sibling_files<I: IntoIterator<Item = ProjectedFile>>(mut self, files: I) -> Self {
-        let extra = files.into_iter().filter(|file| !file.content.is_empty());
-        let (Self::Inline { sibling_files, .. } | Self::Blob { sibling_files, .. }) = &mut self;
-        sibling_files.extend(extra);
+    pub fn with_attrs(mut self, attrs: FileAttrs) -> Self {
+        match &mut self {
+            Self::Inline { attrs: current, .. } | Self::Blob { attrs: current, .. } => {
+                *current = attrs;
+            },
+        }
         self
+    }
+
+    #[must_use]
+    pub fn with_sibling_files<I: IntoIterator<Item = ProjectedFile>>(mut self, files: I) -> Self {
+        let (Self::Inline { sibling_files, .. } | Self::Blob { sibling_files, .. }) = &mut self;
+        sibling_files.extend(files);
+        self
+    }
+
+    pub fn attrs(&self) -> &FileAttrs {
+        match self {
+            Self::Inline { attrs, .. } | Self::Blob { attrs, .. } => attrs,
+        }
     }
 
     pub fn content(&self) -> Option<&[u8]> {
@@ -530,16 +579,20 @@ impl From<FileContent> for wit_types::FileContentResult {
     fn from(result: FileContent) -> Self {
         match result {
             FileContent::Inline {
+                attrs,
                 content,
                 sibling_files,
             } => Self::Inline(wit_types::InlineFileContent {
+                attrs: attrs.into(),
                 content,
                 sibling_files: sibling_files.into_iter().map(Into::into).collect(),
             }),
             FileContent::Blob {
+                attrs,
                 blob,
                 sibling_files,
             } => Self::Blob(wit_types::BlobFileContent {
+                attrs: attrs.into(),
                 blob: blob.raw(),
                 sibling_files: sibling_files.into_iter().map(Into::into).collect(),
             }),

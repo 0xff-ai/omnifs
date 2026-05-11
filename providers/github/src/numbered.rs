@@ -119,23 +119,92 @@ pub(crate) async fn list_hybrid<T: Listable>(
     })
 }
 
-/// Preload the four projected files every numbered resource exposes.
+/// Preload the projected files every numbered resource exposes.
+///
+/// List responses can include many large issue/PR bodies, so `body` is
+/// projected as deferred metadata and fetched from the single resource
+/// handler on read.
 /// `base` must end in `/` so callers can append the file name.
 pub(crate) fn preload_common_fields(
     projection: &mut Projection,
     base: &str,
     title: String,
+    _body: Option<String>,
+    state: String,
+    user: Option<User>,
+    version: Option<&str>,
+) {
+    mutable_preload(projection, format!("{base}title"), title, version);
+    projection.preload_entry(
+        format!("{base}body"),
+        EntryKind::File,
+        Some(mutable_deferred_attrs(Size::Unknown, version)),
+    );
+    mutable_preload(projection, format!("{base}state"), state, version);
+    mutable_preload(
+        projection,
+        format!("{base}user"),
+        user.map(|u| u.login).unwrap_or_default(),
+        version,
+    );
+}
+
+pub(crate) fn project_common_fields(
+    projection: &mut Projection,
+    title: String,
     body: Option<String>,
     state: String,
     user: Option<User>,
+    version: Option<&str>,
 ) {
-    projection.preload(format!("{base}title"), title);
-    projection.preload(format!("{base}body"), body.unwrap_or_default());
-    projection.preload(format!("{base}state"), state);
-    projection.preload(
-        format!("{base}user"),
-        user.map(|u| u.login).unwrap_or_default(),
+    projection.file_with_content_attrs("title", title, Stability::Mutable, version_token(version));
+    projection.file_with_content_attrs(
+        "body",
+        body.unwrap_or_default(),
+        Stability::Mutable,
+        version_token(version),
     );
+    projection.file_with_content_attrs("state", state, Stability::Mutable, version_token(version));
+    projection.file_with_content_attrs(
+        "user",
+        user.map(|u| u.login).unwrap_or_default(),
+        Stability::Mutable,
+        version_token(version),
+    );
+}
+
+pub(crate) fn mutable_file_content(
+    bytes: impl Into<Vec<u8>>,
+    version: Option<&str>,
+) -> FileContent {
+    let bytes = bytes.into();
+    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    FileContent::bytes_with_attrs(mutable_deferred_attrs(size, version), bytes)
+}
+
+pub(crate) fn mutable_deferred_attrs(size: Size, version: Option<&str>) -> FileAttrs {
+    let attrs = FileAttrs::deferred(size, ReadMode::Full, Stability::Mutable);
+    match version.filter(|version| !version.is_empty()) {
+        Some(version) => attrs.with_version(version),
+        None => attrs,
+    }
+}
+
+fn mutable_preload(
+    projection: &mut Projection,
+    path: impl Into<String>,
+    content: impl Into<Vec<u8>>,
+    version: Option<&str>,
+) {
+    let content = content.into();
+    let size = Size::Exact(u64::try_from(content.len()).unwrap_or(u64::MAX));
+    projection.preload_with_attrs(path, mutable_deferred_attrs(size, version), content);
+}
+
+fn version_token(version: Option<&str>) -> Option<VersionToken> {
+    version
+        .filter(|version| !version.is_empty())
+        .map(VersionToken::from)
 }
 
 pub(crate) async fn comments_projection(
@@ -177,7 +246,7 @@ pub(crate) async fn comments_projection(
                 .await?;
             let mut projection = Projection::new();
             for idx in 1..=comments.len() {
-                projection.file(idx.to_string());
+                projection.deferred_file(idx.to_string());
             }
             let exhaustive = u64::try_from(comments.len()).unwrap_or(u64::MAX) < COMMENT_PAGE_SIZE;
             if exhaustive {

@@ -13,6 +13,7 @@ use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(120);
 const STDERR_MAX_BYTES: usize = 4096;
@@ -158,7 +159,7 @@ impl GitCloner {
                         return Ok(());
                     }
                     let _ = std::fs::remove_dir_all(dest);
-                    tracing::warn!(url, %status, stderr = %stderr, "git clone failed");
+                    warn!(url, %status, stderr = %stderr, "git clone failed");
                     return Err(CloneError::Failed { status, stderr });
                 },
                 Ok(None) => {
@@ -166,7 +167,7 @@ impl GitCloner {
                         let _ = child.kill();
                         let _ = child.wait();
                         let _ = std::fs::remove_dir_all(dest);
-                        tracing::warn!(url, "git clone timed out");
+                        warn!(url, "git clone timed out");
                         return Err(CloneError::Timeout {
                             timeout_secs: CLONE_TIMEOUT.as_secs(),
                         });

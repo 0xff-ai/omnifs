@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tracing::{debug, info, warn};
 
 /// Registry of loaded WASM providers.
 ///
@@ -70,7 +71,7 @@ impl ProviderRegistry {
             match Self::load_instance(&engine, &path, plugin_dir, cloner, cache_dir, &extractor) {
                 Ok((mount, is_root, runtime)) => {
                     if instances.contains_key(&mount) {
-                        tracing::warn!(
+                        warn!(
                             mount = mount,
                             file = %path.display(),
                             "duplicate mount name; skipping provider (already loaded from another file)"
@@ -79,7 +80,7 @@ impl ProviderRegistry {
                     }
                     if is_root {
                         if let Some(existing) = &root_mount {
-                            tracing::warn!(
+                            warn!(
                                 mount = mount,
                                 existing = existing.as_str(),
                                 "multiple root_mount providers; ignoring root_mount for this one"
@@ -88,12 +89,12 @@ impl ProviderRegistry {
                             root_mount = Some(mount.clone());
                         }
                     }
-                    tracing::info!(mount = mount, file = %path.display(), root = is_root, "loaded provider");
+                    info!(mount = mount, file = %path.display(), root = is_root, "loaded provider");
                     instances.insert(mount, Arc::new(runtime));
                 },
                 Err(e @ RegistryError::ConfigError(_)) => return Err(e),
                 Err(e) => {
-                    tracing::warn!(file = %path.display(), error = %e, "skipping provider");
+                    warn!(file = %path.display(), error = %e, "skipping provider");
                 },
             }
         }
@@ -174,7 +175,7 @@ impl ProviderRegistry {
         }
         for (mount, runtime) in &self.instances {
             if let Err(e) = runtime.shutdown() {
-                tracing::warn!(mount, error = %e, "shutdown failed");
+                warn!(mount, error = %e, "shutdown failed");
             }
         }
     }
@@ -189,7 +190,7 @@ impl ProviderRegistry {
             let interval_secs = match runtime.capabilities() {
                 Ok(caps) => caps.refresh_interval_secs,
                 Err(e) => {
-                    tracing::warn!(mount, error = %e, "failed to read provider capabilities");
+                    warn!(mount, error = %e, "failed to read provider capabilities");
                     continue;
                 },
             };
@@ -206,7 +207,7 @@ impl ProviderRegistry {
                     tokio::select! {
                         _ = interval.tick() => {
                             if let Err(e) = runtime.call_timer_tick().await {
-                                tracing::debug!(mount = mount.as_str(), error = %e, "provider timer tick failed");
+                                debug!(mount = mount.as_str(), error = %e, "provider timer tick failed");
                             }
                         }
                         changed = shutdown.changed() => {

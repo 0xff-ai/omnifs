@@ -7,7 +7,7 @@ use crate::{Result, State};
 fn record_projection() -> Projection {
     let mut projection = Projection::new();
     for record in record_names() {
-        projection.file(record);
+        projection.deferred_file(record);
     }
     projection.page(PageStatus::Exhaustive);
     projection

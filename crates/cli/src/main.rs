@@ -11,6 +11,7 @@ use omnifs_host::config::InstanceConfig;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "omnifs", about = "omnifs: a virtual filesystem for everything")]
@@ -461,13 +462,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    #[cfg(target_os = "linux")]
     return run(cli);
-    #[cfg(not(target_os = "linux"))]
-    return run(&cli);
 }
 
-#[cfg(target_os = "linux")]
 fn run(cli: Cli) -> anyhow::Result<()> {
     use omnifs_host::mount;
     use omnifs_host::registry::ProviderRegistry;
@@ -493,7 +490,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             // Construct the shared GitCloner early and pass it to all components.
             let cloner = Arc::new(GitCloner::new(cache_path));
 
-            tracing::info!(
+            info!(
                 mount_point,
                 config = %config_path.display(),
                 cache = %cloner.cache_dir().display(),
@@ -506,8 +503,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             for mount_name in registry.mounts() {
                 if let Some(runtime) = registry.get(&mount_name) {
                     match runtime.initialize() {
-                        Ok(_) => tracing::info!(mount = mount_name, "provider initialized"),
-                        Err(e) => tracing::warn!(mount = mount_name, error = %e, "init failed"),
+                        Ok(_) => info!(mount = mount_name, "provider initialized"),
+                        Err(e) => warn!(mount = mount_name, error = %e, "init failed"),
                     }
                 }
             }
@@ -516,7 +513,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let rt = Handle::current();
             registry.start_timers(&rt);
 
-            tracing::info!(mount_point, "starting FUSE mount");
+            info!(mount_point, "starting FUSE mount");
             mount::mount_blocking(&mount_path, &registry, rt)?;
             Ok(())
         },
@@ -546,37 +543,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             config_dir,
             cache_dir,
         } => print_status(mount_point, config_dir, cache_dir),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run(cli: &Cli) -> anyhow::Result<()> {
-    match &cli.command {
-        Commands::Mount { .. } | Commands::Unmount { .. } => Err(anyhow::anyhow!(
-            "FUSE mount/unmount is only supported on Linux"
-        )),
-        Commands::PluginInfo { path: _ } => Err(anyhow::anyhow!("plugin info not yet implemented")),
-        Commands::MountTree {
-            path,
-            tree,
-            paths,
-            by_type,
-        } => {
-            let views = crate::mount_tree::Views {
-                tree: *tree,
-                paths: *paths,
-                by_type: *by_type,
-            }
-            .with_defaults();
-            let data = crate::mount_tree::read_from_wasm(std::path::Path::new(path.as_str()))?;
-            print!("{}", crate::mount_tree::render(&data, &views));
-            Ok(())
-        },
-        Commands::Status {
-            mount_point,
-            config_dir,
-            cache_dir,
-        } => print_status(mount_point.clone(), config_dir.clone(), cache_dir.clone()),
     }
 }
 

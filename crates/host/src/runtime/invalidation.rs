@@ -1,18 +1,15 @@
 use super::{CalloutRuntime, NotifierHandle};
 use crate::path_key::{PathKey, PathToInode};
-#[cfg(target_os = "linux")]
 use crate::path_prefix::path_prefix_matches;
-#[cfg(target_os = "linux")]
 use fuser::INodeNo;
 use parking_lot::Mutex;
-#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::sync::Arc;
+use tracing::debug;
 
 #[derive(Clone)]
 struct InvalidationHandles {
     path_to_inode: Arc<PathToInode>,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     notifier: NotifierHandle,
     mount: String,
 }
@@ -76,30 +73,27 @@ impl CalloutRuntime {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.delete_prefix(prefix)
         {
-            tracing::debug!(prefix, error = %e, "L2 cache prefix delete failed");
+            debug!(prefix, error = %e, "L2 cache prefix delete failed");
         }
 
-        #[cfg(target_os = "linux")]
-        {
-            let Some(handles) = self.invalidation.handles() else {
-                return;
-            };
+        let Some(handles) = self.invalidation.handles() else {
+            return;
+        };
 
-            for entry in handles.path_to_inode.iter() {
-                let (key, _) = entry.pair();
-                if key.mount != handles.mount || !path_prefix_matches(prefix, &key.path) {
-                    continue;
-                }
-                let Some((parent_path, child_name)) = key.path.rsplit_once('/') else {
-                    continue;
-                };
-                let parent_ino = handles
-                    .path_to_inode
-                    .get(&PathKey::new(handles.mount.clone(), parent_path))
-                    .map_or(1, |r| *r.value());
-                if let Some(notifier) = handles.notifier.lock().as_ref() {
-                    let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
-                }
+        for entry in handles.path_to_inode.iter() {
+            let (key, _) = entry.pair();
+            if key.mount != handles.mount || !path_prefix_matches(prefix, &key.path) {
+                continue;
+            }
+            let Some((parent_path, child_name)) = key.path.rsplit_once('/') else {
+                continue;
+            };
+            let parent_ino = handles
+                .path_to_inode
+                .get(&PathKey::new(handles.mount.clone(), parent_path))
+                .map_or(1, |r| *r.value());
+            if let Some(notifier) = handles.notifier.lock().as_ref() {
+                let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
             }
         }
     }
@@ -118,27 +112,24 @@ impl CalloutRuntime {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.delete_exact(path)
         {
-            tracing::debug!(path, error = %e, "L2 cache exact delete failed");
+            debug!(path, error = %e, "L2 cache exact delete failed");
         }
 
-        #[cfg(target_os = "linux")]
-        {
-            let Some(handles) = self.invalidation.handles() else {
-                return;
-            };
-            let Some((parent_path, child_name)) = path.rsplit_once('/') else {
-                return;
-            };
-            let parent_ino = handles
-                .path_to_inode
-                .get(&PathKey::new(
-                    handles.mount.clone(),
-                    parent_path.to_string(),
-                ))
-                .map_or(1, |r| *r.value());
-            if let Some(notifier) = handles.notifier.lock().as_ref() {
-                let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
-            }
+        let Some(handles) = self.invalidation.handles() else {
+            return;
+        };
+        let Some((parent_path, child_name)) = path.rsplit_once('/') else {
+            return;
+        };
+        let parent_ino = handles
+            .path_to_inode
+            .get(&PathKey::new(
+                handles.mount.clone(),
+                parent_path.to_string(),
+            ))
+            .map_or(1, |r| *r.value());
+        if let Some(notifier) = handles.notifier.lock().as_ref() {
+            let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
         }
     }
 

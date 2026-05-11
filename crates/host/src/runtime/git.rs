@@ -12,6 +12,7 @@ use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::tree_refs::TreeRefs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::warn;
 
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
@@ -44,7 +45,7 @@ impl GitExecutor {
         let cache_path = match self.cloner.clone_if_needed(cache_key, clone_url) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(cache_key, clone_url, error = %e, "clone failed");
+                warn!(cache_key, clone_url, error = %e, "clone failed");
                 return CalloutResponse::Error {
                     kind: ErrorKind::Network,
                     message: e.to_string(),

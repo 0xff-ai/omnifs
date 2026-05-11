@@ -1,8 +1,9 @@
 use super::{CalloutRuntime, Result, RuntimeError};
-use crate::cache::{self, CacheRecord, RecordKind};
+use crate::cache::{self, BatchRecord, CacheRecord, RecordKind};
 use crate::omnifs::provider::types::{self as wit_types, DirListing};
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
+use tracing::debug;
 
 impl CalloutRuntime {
     pub async fn call_lookup_child(
@@ -36,9 +37,7 @@ impl CalloutRuntime {
                 .iter()
                 .map(|e| wit_types::DirEntry {
                     name: e.name.clone(),
-                    kind: e.kind,
-                    size: e.size,
-                    projected_files: None,
+                    kind: e.kind.clone(),
                 })
                 .collect();
 
@@ -96,6 +95,36 @@ impl CalloutRuntime {
         Ok(result)
     }
 
+    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OpResult> {
+        let result = self
+            .call_provider_op(move |store, id| {
+                self.bindings
+                    .omnifs_provider_browse()
+                    .call_open_file(store, id, path)
+            })
+            .await?;
+
+        if matches!(result, wit_types::OpResult::OpenFile(_)) {
+            self.touch_activity_for_relative_path(path);
+        }
+
+        Ok(result)
+    }
+
+    pub async fn call_read_chunk(
+        &self,
+        handle: u64,
+        offset: u64,
+        length: u32,
+    ) -> Result<wit_types::OpResult> {
+        self.call_provider_op(move |store, id| {
+            self.bindings
+                .omnifs_provider_browse()
+                .call_read_chunk(store, id, handle, offset, length)
+        })
+        .await
+    }
+
     async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OpResult>
     where
         F: Fn() -> Fu,
@@ -144,28 +173,28 @@ impl CalloutRuntime {
         sibling_files: &[wit_types::ProjectedFile],
         exhaustive: bool,
     ) {
-        use cache::{AttrPayload, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload};
+        use cache::{AttrPayload, DirentRecord, DirentsPayload, EntryMeta, LookupPayload};
 
         let mut batch = Vec::new();
 
         let mut dirent_map = BTreeMap::new();
         for entry in entries {
+            let meta = EntryMeta::from(&entry.kind);
             dirent_map.insert(
                 entry.name.clone(),
                 DirentRecord {
                     name: entry.name.clone(),
-                    kind: EntryKindCache::from(entry.kind),
-                    size: entry.size.unwrap_or(0),
+                    meta,
                 },
             );
         }
         for pf in sibling_files {
+            let meta = EntryMeta::file(cache::FileAttrsCache::from(&pf.attrs));
             dirent_map
                 .entry(pf.name.clone())
                 .or_insert_with(|| DirentRecord {
                     name: pf.name.clone(),
-                    kind: EntryKindCache::File,
-                    size: u64::try_from(pf.content.len()).unwrap_or(u64::MAX),
+                    meta,
                 });
         }
         let dirents_payload = DirentsPayload {
@@ -173,9 +202,10 @@ impl CalloutRuntime {
             exhaustive,
         };
         if let Some(payload) = dirents_payload.serialize() {
-            batch.push((
+            batch.push(BatchRecord::new(
                 parent_path.to_string(),
                 RecordKind::Dirents,
+                None,
                 CacheRecord::new(RecordKind::Dirents, payload),
             ));
         }
@@ -187,38 +217,26 @@ impl CalloutRuntime {
                 format!("{parent_path}/{}", entry.name)
             };
 
-            let kind_cache = EntryKindCache::from(entry.kind);
-            let size = entry.size.unwrap_or(0);
+            let meta = EntryMeta::from(&entry.kind);
 
-            let lookup = LookupPayload::Positive {
-                kind: kind_cache,
-                size,
-            };
+            let lookup = LookupPayload::Positive(meta.clone());
             if let Some(payload) = lookup.serialize() {
-                batch.push((
+                batch.push(BatchRecord::new(
                     child_path.clone(),
                     RecordKind::Lookup,
+                    None,
                     CacheRecord::new(RecordKind::Lookup, payload),
                 ));
             }
 
-            let attr = AttrPayload {
-                kind: kind_cache,
-                size,
-            };
+            let attr = AttrPayload { meta };
             if let Some(payload) = attr.serialize() {
-                batch.push((
+                batch.push(BatchRecord::new(
                     child_path.clone(),
                     RecordKind::Attr,
+                    None,
                     CacheRecord::new(RecordKind::Attr, payload),
                 ));
-            }
-
-            if let Some(ref projected) = entry.projected_files {
-                for pf in projected {
-                    let file_path = format!("{child_path}/{}", pf.name);
-                    Self::push_projected_file(&mut batch, &file_path, &pf.content);
-                }
             }
         }
 
@@ -228,11 +246,11 @@ impl CalloutRuntime {
             } else {
                 format!("{parent_path}/{}", pf.name)
             };
-            Self::push_projected_file(&mut batch, &file_path, &pf.content);
+            Self::push_projected_file(&mut batch, &file_path, &pf.attrs);
         }
 
         if !batch.is_empty() {
-            tracing::debug!(
+            debug!(
                 target: "omnifs_cache",
                 kind = "projection",
                 count = batch.len(),
@@ -250,11 +268,11 @@ impl CalloutRuntime {
             } else {
                 format!("{parent_path}/{}", pf.name)
             };
-            Self::push_projected_file(&mut batch, &file_path, &pf.content);
+            Self::push_projected_file(&mut batch, &file_path, &pf.attrs);
         }
 
         if !batch.is_empty() {
-            tracing::debug!(
+            debug!(
                 target: "omnifs_cache",
                 kind = "projection",
                 count = batch.len(),
@@ -304,23 +322,14 @@ impl CalloutRuntime {
         self.activity_table.lock().touch(touched);
     }
 
-    /// Strip listing-carried transient fields (per-entry projected-files,
-    /// listing-wide preloads) before the result is stored or surfaced to
-    /// the FUSE layer. These land at the response boundary via
+    /// Strip listing-carried preload data before the result is stored or
+    /// surfaced to the FUSE layer. These land at the response boundary via
     /// `apply_terminal_boundary`; they do not belong in the cached form.
     fn strip_projected_files(result: wit_types::OpResult) -> wit_types::OpResult {
         match result {
             wit_types::OpResult::List(wit_types::ListResult::Entries(listing)) => {
-                let stripped: Vec<wit_types::DirEntry> = listing
-                    .entries
-                    .into_iter()
-                    .map(|mut e| {
-                        e.projected_files = None;
-                        e
-                    })
-                    .collect();
                 wit_types::OpResult::List(wit_types::ListResult::Entries(DirListing {
-                    entries: stripped,
+                    entries: listing.entries,
                     exhaustive: listing.exhaustive,
                     preload: Vec::new(),
                 }))

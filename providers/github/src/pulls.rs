@@ -13,6 +13,7 @@ struct Pull {
     body: Option<String>,
     state: String,
     user: Option<User>,
+    updated_at: Option<String>,
 }
 
 impl Listable for Pull {
@@ -91,6 +92,7 @@ async fn pr_list(
     let mut projection = Projection::new();
     page.apply_status(&mut projection);
     for pr in page.items {
+        let version = pr.updated_at.clone();
         let number = pr.number;
         let base = format!("{owner}/{repo}/_prs/{}/{number}/", filter.as_ref());
         numbered::preload_common_fields(
@@ -100,6 +102,7 @@ async fn pr_list(
             pr.body,
             pr.state,
             pr.user,
+            version.as_deref(),
         );
         projection.dir(number.to_string());
     }
@@ -117,10 +120,14 @@ async fn pr_projection(
         .github_json(format!("/repos/{repo_id}/pulls/{number}"))
         .await?;
     let mut projection = Projection::new();
-    projection.file_with_content("title", pr.title);
-    projection.file_with_content("body", pr.body.unwrap_or_default());
-    projection.file_with_content("state", pr.state);
-    projection.file_with_content("user", pr.user.map(|u| u.login).unwrap_or_default());
+    numbered::project_common_fields(
+        &mut projection,
+        pr.title,
+        pr.body,
+        pr.state,
+        pr.user,
+        pr.updated_at.as_deref(),
+    );
     projection.page(PageStatus::Exhaustive);
     Ok(projection)
 }
@@ -146,5 +153,8 @@ async fn pr_diff_file(
         .header("Accept", "application/vnd.github.diff")
         .send()
         .await?;
-    Ok(FileContent::bytes(github_check_status(resp)?.into_body()))
+    Ok(numbered::mutable_file_content(
+        github_check_status(resp)?.into_body(),
+        None,
+    ))
 }

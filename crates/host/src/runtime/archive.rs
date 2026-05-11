@@ -25,6 +25,7 @@ use crate::runtime::tree_refs::TreeRefs;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::{debug, warn};
 
 /// Per-provider archive extractor. Owns the on-disk extraction root and
 /// shares a [`TreeRefs`] with the git executor so a returned
@@ -127,7 +128,7 @@ impl ArchiveExecutor {
                 tree,
                 output: stats,
             }) => {
-                tracing::debug!(
+                debug!(
                     cache_key = key.cache_key,
                     entries = stats.entries,
                     bytes = stats.bytes_written,
@@ -161,18 +162,17 @@ impl ArchiveExecutor {
         record: &BlobRecord,
     ) -> Result<ExtractStats, ArchiveError> {
         let blob_path = self.cache.blob_path(&record.cache_key);
-        let stats = match self.extractor.extract(
-            key.format,
-            &blob_path,
-            tmp,
-            key.strip_prefix.as_deref(),
-        ) {
-            Ok(stats) => stats,
-            Err(e) => {
-                tracing::warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
-                return Err(e.into());
-            },
-        };
+        let stats =
+            match self
+                .extractor
+                .extract(key.format, &blob_path, tmp, key.strip_prefix.as_deref())
+            {
+                Ok(stats) => stats,
+                Err(e) => {
+                    warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
+                    return Err(e.into());
+                },
+            };
         Ok(stats)
     }
 }

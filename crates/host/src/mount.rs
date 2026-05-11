@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::info;
 
 /// Mount the FUSE filesystem and block until it exits. Calls
 /// `registry.shutdown_all()` on exit regardless of how the mount ends.
@@ -23,11 +24,17 @@ pub fn mount_blocking(
 ) -> Result<(), MountError> {
     // Create shared path_to_inode map for invalidation.
     let path_to_inode: Arc<PathToInode> = Arc::new(DashMap::new());
+    let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(None));
 
-    let fs = FuseFs::new_with_path_map(rt, Arc::clone(registry), Arc::clone(&path_to_inode));
+    let fs = FuseFs::new_with_path_map_and_notifier(
+        rt,
+        Arc::clone(registry),
+        Arc::clone(&path_to_inode),
+        Arc::clone(&notifier),
+    );
     let config = FuseFs::mount_config();
 
-    tracing::info!(mount = %mount_point.display(), "starting FUSE mount");
+    info!(mount = %mount_point.display(), "starting FUSE mount");
 
     let session = Session::new(fs, mount_point, &config)
         .map_err(|e| MountError::FuseFailed(e.to_string()))?;
@@ -35,7 +42,7 @@ pub fn mount_blocking(
     // Extract the notifier before spawning the session — `spawn` takes
     // `Session` by value. The notifier only needs the message channel,
     // which is shared between foreground and background halves.
-    let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(Some(session.notifier())));
+    *notifier.lock() = Some(session.notifier());
     for (mount, runtime) in registry.runtime_entries() {
         runtime.install_invalidation(Arc::clone(&path_to_inode), Arc::clone(&notifier), mount);
     }
@@ -54,7 +61,7 @@ pub fn mount_blocking(
     // Drop the notifier before joining the session.
     notifier.lock().take();
 
-    tracing::info!("FUSE mount exited, shutting down providers");
+    info!("FUSE mount exited, shutting down providers");
     registry.shutdown_all();
 
     result

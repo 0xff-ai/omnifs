@@ -118,6 +118,32 @@ for the `initialize()` call. Providers receive the raw config payload
 as JSON bytes and deserialize via `serde_json::from_slice` (the SDK's
 `#[omnifs_sdk::config]` macro wires this up automatically).
 
+## Design invariants
+
+### Bash tool compatibility
+
+omnifs paths must behave like real files for the standard Linux toolbox. Every code path (host runtime, SDK, providers) is judged against this list. If a change makes any of these tools regress, the change is wrong.
+
+**Read content**: `cat`, `head`, `tail` (incl. `-f`, `-n`, `-c`), `less`, `more`, `xxd`, `hexdump`, `od`, `file`.
+
+**Search and traversal**: `grep` (incl. `-r`), `rg` (ripgrep), `find` (incl. `-name`, `-size`, `-type`), `fd`.
+
+**Stat-based**: `ls` (incl. `-l`, `-h`), `du` (incl. `-sh`), `wc` (incl. `-l`, `-c`, `-m`), `stat`.
+
+**Copy and archive**: `cp`, `mv`, `tar` (`c`, `x`, `t`), `rsync`.
+
+**Compare and hash**: `diff`, `cmp`, `md5sum`, `sha256sum`, `b3sum`.
+
+**Inspection**: `jq`, `yq`, `xmllint`.
+
+**Editors**: `vim`, `neovim`, `nano`. Editors that mmap (e.g. some `code` configurations) are best-effort but should not break.
+
+When introducing a new feature, the burden of proof is on the change to demonstrate (via the smoke harness or a unit test) that it does not regress any of the above. The `tests/smoke/` directory is the right home for these.
+
+### File attributes
+
+Every projected file declares `Size`, `Bytes`, `ReadMode`, `Stability`, and optional version evidence via the SDK's `Projection` API. The host wires `st_size`, FUSE flags/direct I/O, cache layers, durable version-keyed content, learned-size promotion, and post-read invalidation from those attributes. The full design (enum definitions, the `Volatile` requires `Ranged` rule, the legal combinations, and the byte-source to handler pairing) lives in `docs/design/file-attributes.md`. Read it before changing the projection API or adding a new `#[file]` handler shape.
+
 ## Caching model
 
 The host owns all caching. Provider results (listings, lookups, file
@@ -129,8 +155,6 @@ Providers must not reintroduce their own LRUs or time-based expiration;
 rely on the host's invalidation signals.
 
 ## Gotchas
-
-**Projected file sizes use a 256 MiB placeholder by default.** `Projection::file(name)` and SDK-emitted exact-shape file entries fall back to `placeholder_size()` (256 MiB) when the real length isn't known until `read`. The kernel caps `read` at the reported size and treats short reads as EOF, so a too-small placeholder truncates real payloads; 256 MiB is the current upper bound. The host updates the inode size to the actual length on the first successful read (`inode.rs`'s `get_or_alloc_ino` and_modify path), so subsequent stats report the real size. If your provider knows the size cheaply (Content-Length, API metadata, fully-materialized payload), use `Projection::file_with_size(name, FileStat { size })` or `Projection::file_with_content(name, bytes)` so `ls -l` and `du` don't show the inflated placeholder before first read. See `docs/design/projected-file-sizes.md` for the full rationale and the planned `direct_io` redesign.
 
 **Project sibling files on every read where you already know them.** When a read route materializes a payload that contains fields for the item's other sibling files (e.g. an issue's `title`, `body`, `state`), return them in `FileContent::with_sibling_files(..)` so the host caches them alongside the primary file. A later stat or read of a sibling avoids a round trip. The same applies to lookup routes: use `Lookup::with_sibling_files(..)` whenever the payload you fetched already carries the sibling content. For content that isn't a direct sibling of the looked-up target (say, nested children of a listed directory), use `Projection::preload` / `preload_many`; those land on the terminal's preload field.
 
