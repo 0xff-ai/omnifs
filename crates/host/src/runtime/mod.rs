@@ -509,11 +509,11 @@ impl CalloutRuntime {
             )?
         };
 
-        self.drive_provider_step(id, step, None).await
+        self.drive_provider(id, step, None).await
     }
 
     /// Drive a provider call to completion.
-    pub(super) async fn drive_provider_step(
+    pub(super) async fn drive_provider(
         &self,
         id: u64,
         mut step: wit_types::ProviderStep,

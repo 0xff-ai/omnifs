@@ -198,8 +198,7 @@ impl CalloutRuntime {
             f(&mut store, id)?
         };
 
-        self.drive_provider_step(id, step, expected_handoff_path)
-            .await
+        self.drive_provider(id, step, expected_handoff_path).await
     }
 
     fn cache_lookup_projection(&self, parent_path: &str, entry: &wit_types::LookupEntry) {
