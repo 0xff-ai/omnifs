@@ -136,11 +136,61 @@ type Result<T> = std::result::Result<T, RuntimeError>;
 
 #[derive(Clone, Debug)]
 pub enum Op {
-    LookupChild,
-    ListChildren,
-    ReadFile,
-    OpenFile,
-    ReadChunk,
+    LookupChild {
+        parent_path: String,
+        name: String,
+    },
+    ListChildren {
+        path: String,
+    },
+    ReadFile {
+        path: String,
+    },
+    OpenFile {
+        path: String,
+    },
+    ReadChunk {
+        handle: u64,
+        offset: u64,
+        length: u32,
+    },
+    Initialize,
+    OnEvent {
+        event: wit_types::ProviderEvent,
+    },
+}
+
+impl Op {
+    fn execute(&self, runtime: &CalloutRuntime, id: u64) -> Result<wit_types::ProviderStep> {
+        let mut store = runtime.store.lock();
+        let browse = runtime.bindings.omnifs_provider_browse();
+        let step = match self {
+            Op::LookupChild { parent_path, name } => {
+                browse.call_lookup_child(&mut *store, id, parent_path, name)
+            },
+            Op::ListChildren { path } => browse.call_list_children(&mut *store, id, path),
+            Op::ReadFile { path } => browse.call_read_file(&mut *store, id, path),
+            Op::OpenFile { path } => browse.call_open_file(&mut *store, id, path),
+            Op::ReadChunk {
+                handle,
+                offset,
+                length,
+            } => browse.call_read_chunk(&mut *store, id, *handle, *offset, *length),
+            Op::Initialize => Ok(wit_types::ProviderStep::Returned(
+                runtime
+                    .bindings
+                    .omnifs_provider_lifecycle()
+                    .call_initialize(&mut *store, &runtime.config_bytes)?,
+            )),
+            Op::OnEvent { event } => {
+                runtime
+                    .bindings
+                    .omnifs_provider_notify()
+                    .call_on_event(&mut *store, id, event)
+            },
+        }?;
+        Ok(step)
+    }
 }
 
 impl CalloutRuntime {
@@ -261,13 +311,13 @@ impl CalloutRuntime {
     }
 
     pub fn initialize(&self) -> Result<wit_types::OpResult> {
-        let response = {
-            let mut store = self.store.lock();
-            self.bindings
-                .omnifs_provider_lifecycle()
-                .call_initialize(&mut *store, &self.config_bytes)?
-        };
-        Self::resolve_response_sync(response)
+        let op = Op::Initialize;
+        match op.execute(self, 0)? {
+            wit_types::ProviderStep::Returned(ret) => self.finish_provider_return(&op, ret),
+            wit_types::ProviderStep::Suspended(_) => Err(RuntimeError::ProviderProtocol(
+                "initialize suspended with callouts".to_string(),
+            )),
+        }
     }
 
     pub fn shutdown(&self) -> Result<()> {
@@ -501,19 +551,13 @@ impl CalloutRuntime {
     }
 
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
-        let id = self.correlations.allocate();
         let active_paths = self.activity_table.lock().active_path_sets();
-
-        let step = {
-            let mut store = self.store.lock();
-            self.bindings.omnifs_provider_notify().call_on_event(
-                &mut *store,
-                id,
-                &wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext { active_paths }),
-            )?
+        let op = Op::OnEvent {
+            event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
+                active_paths,
+            }),
         };
-
-        self.drive_provider(id, step, None).await
+        self.call_provider_op(op).await
     }
 
     /// Drive a provider call to completion.
@@ -521,22 +565,15 @@ impl CalloutRuntime {
         &self,
         id: u64,
         mut step: wit_types::ProviderStep,
-        expected_handoff_path: Option<&str>,
+        op: Op,
     ) -> Result<wit_types::OpResult> {
         loop {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
-                    validate_provider_return(&ret, expected_handoff_path)
-                        .map_err(RuntimeError::ProviderProtocol)?;
-                    self.apply_effects(&ret.effects)?;
-                    return Ok(ret.result);
-                },
-                wit_types::ProviderStep::Suspended(callouts) if callouts.is_empty() => {
-                    return Err(RuntimeError::ProviderProtocol(
-                        "provider suspended with no callouts".into(),
-                    ));
+                    return self.finish_provider_return(&op, ret);
                 },
                 wit_types::ProviderStep::Suspended(callouts) => {
+                    Validator::suspended(&callouts).map_err(RuntimeError::ProviderProtocol)?;
                     let results = self.execute_batch(id, &callouts).await;
                     let mut store = self.store.lock();
                     step = self.bindings.omnifs_provider_continuation().call_resume(
@@ -547,6 +584,16 @@ impl CalloutRuntime {
                 },
             }
         }
+    }
+
+    fn finish_provider_return(
+        &self,
+        op: &Op,
+        ret: wit_types::ProviderReturn,
+    ) -> Result<wit_types::OpResult> {
+        Validator::returned(op, &ret).map_err(RuntimeError::ProviderProtocol)?;
+        self.apply_effects(&ret.effects)?;
+        Ok(ret.result)
     }
 
     /// Resolve a tree-ref handle to a real filesystem path.
@@ -566,11 +613,6 @@ impl CalloutRuntime {
         let path = self.blob_cache.blob_path(&record.cache_key);
         std::fs::read(path)
             .map_err(|e| RuntimeError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
-    }
-
-    fn resolve_response_sync(response: wit_types::ProviderReturn) -> Result<wit_types::OpResult> {
-        validate_provider_return(&response, None).map_err(RuntimeError::ProviderProtocol)?;
-        Ok(response.result)
     }
 
     async fn execute_single_callout(
@@ -1004,44 +1046,46 @@ mod callout_log_tests {
 
 #[cfg(test)]
 fn validate_operation_result(result: &wit_types::OpResult) -> std::result::Result<(), String> {
-    let mut validator = AttrValidator::default();
-    validate_operation_result_with(result, &mut validator)
+    let op = match result {
+        wit_types::OpResult::LookupChild(_) => Op::LookupChild {
+            parent_path: String::new(),
+            name: "child".to_string(),
+        },
+        wit_types::OpResult::ListChildren(_) => Op::ListChildren {
+            path: String::new(),
+        },
+        wit_types::OpResult::ReadFile(_) => Op::ReadFile {
+            path: "file".to_string(),
+        },
+        wit_types::OpResult::OpenFile(_) => Op::OpenFile {
+            path: "file".to_string(),
+        },
+        wit_types::OpResult::ReadChunk(_) => Op::ReadChunk {
+            handle: 0,
+            offset: 0,
+            length: 0,
+        },
+        wit_types::OpResult::Initialize(_) => Op::Initialize,
+        wit_types::OpResult::OnEvent => Op::OnEvent {
+            event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
+                active_paths: Vec::new(),
+            }),
+        },
+        wit_types::OpResult::Error(_) => Op::Initialize,
+        wit_types::OpResult::PlanMutations(_)
+        | wit_types::OpResult::Execute(_)
+        | wit_types::OpResult::FetchResource(_) => Op::Initialize,
+    };
+    let ret = wit_types::ProviderReturn {
+        result: result.clone(),
+        effects: Vec::new(),
+    };
+    Validator::returned(&op, &ret)
 }
 
-fn validate_operation_result_with(
-    result: &wit_types::OpResult,
-    validator: &mut AttrValidator,
-) -> std::result::Result<(), String> {
-    match result {
-        wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(listing)) => {
-            for entry in &listing.entries {
-                validator.entry(&entry.kind)?;
-            }
-        },
-        wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) => {
-            validator.entry(&entry.target.kind)?;
-            for sibling in &entry.siblings {
-                validator.entry(&sibling.kind)?;
-            }
-        },
-        wit_types::OpResult::ReadFile(result) => {
-            AttrValidator::file_attrs_metadata(&result.attrs)?;
-            match &result.bytes {
-                wit_types::ReadFileBytes::Inline(bytes) => {
-                    let attrs = cache::FileAttrsCache::from(&result.attrs);
-                    validate_complete_content(&attrs, bytes.len())
-                        .map_err(|error| format!("read-file result: {error}"))?;
-                    validator.add_eager_bytes(bytes.len())?;
-                },
-                wit_types::ReadFileBytes::Blob(_) => {},
-            }
-        },
-        wit_types::OpResult::OpenFile(result) => {
-            AttrValidator::file_attrs_metadata(&result.attrs)?;
-        },
-        _ => {},
-    }
-    Ok(())
+#[cfg(test)]
+fn validate_return(op: &Op, ret: &wit_types::ProviderReturn) -> std::result::Result<(), String> {
+    Validator::returned(op, ret)
 }
 
 fn split_projected_path(path: &str) -> Option<(&str, &str)> {
@@ -1049,23 +1093,49 @@ fn split_projected_path(path: &str) -> Option<(&str, &str)> {
     (!name.is_empty()).then_some((parent, name))
 }
 
-struct Effects<'a> {
-    effects: &'a [wit_types::Effect],
+struct Validator<'a> {
+    op: &'a Op,
+    ret: &'a wit_types::ProviderReturn,
+    eager_bytes: usize,
 }
 
-impl<'a> Effects<'a> {
-    fn new(effects: &'a [wit_types::Effect]) -> Self {
-        Self { effects }
+impl<'a> Validator<'a> {
+    fn suspended(callouts: &[wit_types::Callout]) -> std::result::Result<(), String> {
+        if callouts.is_empty() {
+            return Err("provider suspended with no callouts".to_string());
+        }
+        Ok(())
     }
 
-    fn is_empty(&self) -> bool {
-        self.effects.is_empty()
+    fn returned(op: &'a Op, ret: &'a wit_types::ProviderReturn) -> std::result::Result<(), String> {
+        Self {
+            op,
+            ret,
+            eager_bytes: 0,
+        }
+        .validate_return()
     }
 
-    fn validate(&self, validator: &mut AttrValidator) -> std::result::Result<(), String> {
-        for effect in self.effects {
+    fn validate_return(&mut self) -> std::result::Result<(), String> {
+        self.error_returns_do_not_mutate()?;
+        self.op_result()?;
+        self.effects()?;
+        self.subtree_handoff()?;
+        Ok(())
+    }
+
+    fn error_returns_do_not_mutate(&self) -> std::result::Result<(), String> {
+        if matches!(self.ret.result, wit_types::OpResult::Error(_)) && !self.ret.effects.is_empty()
+        {
+            return Err("provider error returns must not carry effects".to_string());
+        }
+        Ok(())
+    }
+
+    fn effects(&mut self) -> std::result::Result<(), String> {
+        for effect in &self.ret.effects {
             match effect {
-                wit_types::Effect::Project(entry) => validator
+                wit_types::Effect::Project(entry) => self
                     .entry(&entry.kind)
                     .map_err(|error| format!("project effect {:?}: {error}", entry.path))?,
                 wit_types::Effect::InvalidatePath(_)
@@ -1076,76 +1146,133 @@ impl<'a> Effects<'a> {
         Ok(())
     }
 
-    fn disown_handoffs(&self) -> Vec<&'a wit_types::TreeHandoff> {
-        self.effects
-            .iter()
-            .filter_map(|effect| {
-                if let wit_types::Effect::DisownTree(handoff) = effect {
-                    Some(handoff)
-                } else {
-                    None
+    fn op_result(&mut self) -> std::result::Result<(), String> {
+        match (self.op, &self.ret.result) {
+            (
+                Op::LookupChild { .. },
+                wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)),
+            ) => {
+                self.entry(&entry.target.kind)?;
+                for sibling in &entry.siblings {
+                    self.entry(&sibling.kind)?;
                 }
+            },
+            (
+                Op::LookupChild { .. },
+                wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(_))
+                | wit_types::OpResult::LookupChild(wit_types::LookupChildResult::NotFound),
+            ) => {},
+            (
+                Op::ListChildren { .. },
+                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(listing)),
+            ) => {
+                for entry in &listing.entries {
+                    self.entry(&entry.kind)?;
+                }
+            },
+            (
+                Op::ListChildren { .. },
+                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(_)),
+            ) => {},
+            (Op::ReadFile { .. }, wit_types::OpResult::ReadFile(result)) => {
+                self.read_file_result(result)?;
+            },
+            (Op::OpenFile { .. }, wit_types::OpResult::OpenFile(result)) => {
+                self.file_attrs_metadata(&result.attrs)?;
+            },
+            (Op::ReadChunk { .. }, wit_types::OpResult::ReadChunk(_)) => {},
+            (Op::Initialize, wit_types::OpResult::Initialize(_)) => {},
+            (Op::OnEvent { .. }, wit_types::OpResult::OnEvent) => {},
+            (_, wit_types::OpResult::Error(_)) => {},
+            _ => {
+                return Err(format!(
+                    "{:?} returned unexpected result: {:?}",
+                    self.op, self.ret.result
+                ));
+            },
+        }
+        Ok(())
+    }
+
+    fn subtree_handoff(&self) -> std::result::Result<(), String> {
+        let handoffs = self.disown_handoffs();
+        let subtree = match &self.ret.result {
+            wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
+            | wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
+                Some(*tree)
+            },
+            _ => None,
+        };
+
+        match subtree {
+            Some(tree) => {
+                if handoffs.len() != 1 || handoffs[0].tree != tree {
+                    return Err(format!(
+                        "subtree result for tree {tree} requires exactly one matching disown-tree effect"
+                    ));
+                }
+                self.validate_handoff_path(tree, handoffs[0])?;
+            },
+            None if !handoffs.is_empty() => {
+                return Err(format!(
+                    "disown-tree effects require a subtree result, got {} orphan effect(s)",
+                    handoffs.len()
+                ));
+            },
+            None => {},
+        }
+
+        Ok(())
+    }
+
+    fn validate_handoff_path(
+        &self,
+        tree: u64,
+        handoff: &wit_types::TreeHandoff,
+    ) -> std::result::Result<(), String> {
+        match self.op {
+            Op::LookupChild { parent_path, name } => {
+                let expected = if parent_path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{parent_path}/{name}")
+                };
+                if handoff.path != expected {
+                    return Err(format!(
+                        "subtree result for tree {tree} requires disown-tree path {:?}, got {:?}",
+                        expected, handoff.path
+                    ));
+                }
+            },
+            Op::ListChildren { path } => {
+                if handoff.path != *path {
+                    return Err(format!(
+                        "subtree result for tree {tree} requires disown-tree path {:?}, got {:?}",
+                        path, handoff.path
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "subtree result for tree {tree} is not valid for {:?}",
+                    self.op
+                ));
+            },
+        }
+        Ok(())
+    }
+
+    fn disown_handoffs(&self) -> Vec<&wit_types::TreeHandoff> {
+        self.ret
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                wit_types::Effect::DisownTree(handoff) => Some(handoff),
+                _ => None,
             })
             .collect()
     }
-}
 
-fn validate_provider_return(
-    ret: &wit_types::ProviderReturn,
-    expected_handoff_path: Option<&str>,
-) -> std::result::Result<(), String> {
-    let effects = Effects::new(&ret.effects);
-    if matches!(ret.result, wit_types::OpResult::Error(_)) && !effects.is_empty() {
-        return Err("provider error returns must not carry effects".to_string());
-    }
-    let mut validator = AttrValidator::default();
-    validate_operation_result_with(&ret.result, &mut validator)?;
-    effects.validate(&mut validator)?;
-
-    let handoffs = effects.disown_handoffs();
-
-    let subtree = match &ret.result {
-        wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
-        | wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
-            Some(*tree)
-        },
-        _ => None,
-    };
-    match subtree {
-        Some(tree) => {
-            if handoffs.len() != 1 || handoffs[0].tree != tree {
-                return Err(format!(
-                    "subtree result for tree {tree} requires exactly one matching disown-tree effect"
-                ));
-            }
-            if let Some(expected_path) = expected_handoff_path {
-                let expected_path = expected_path.trim_matches('/');
-                if handoffs[0].path != expected_path {
-                    return Err(format!(
-                        "subtree result for tree {tree} requires disown-tree path {:?}, got {:?}",
-                        expected_path, handoffs[0].path
-                    ));
-                }
-            }
-        },
-        None if !handoffs.is_empty() => {
-            return Err(format!(
-                "disown-tree effects require a subtree result, got {} orphan effect(s)",
-                handoffs.len()
-            ));
-        },
-        None => {},
-    }
-
-    Ok(())
-}
-
-#[derive(Default)]
-struct AttrValidator {
-    eager_bytes: usize,
-}
-
-impl AttrValidator {
     fn entry(&mut self, kind: &wit_types::EntryKind) -> std::result::Result<(), String> {
         match kind {
             wit_types::EntryKind::Directory => Ok(()),
@@ -1159,7 +1286,25 @@ impl AttrValidator {
         self.add_eager_bytes(attrs.eager_byte_len())
     }
 
-    fn file_attrs_metadata(attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
+    fn read_file_result(
+        &mut self,
+        result: &wit_types::ReadFileResult,
+    ) -> std::result::Result<(), String> {
+        self.file_attrs_metadata(&result.attrs)?;
+        match &result.bytes {
+            wit_types::ReadFileBytes::Inline(bytes) => {
+                let attrs = cache::FileAttrsCache::from(&result.attrs);
+                attrs
+                    .validate_complete_content(bytes.len())
+                    .map_err(|error| format!("read-file result: {error}"))?;
+                self.add_eager_bytes(bytes.len())?;
+            },
+            wit_types::ReadFileBytes::Blob(_) => {},
+        }
+        Ok(())
+    }
+
+    fn file_attrs_metadata(&self, attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
         if let Some(token) = &attrs.version_token {
             if token.is_empty() {
                 return Err("version token must not be empty".to_string());
@@ -1189,16 +1334,24 @@ impl AttrValidator {
     }
 }
 
-fn validate_complete_content(
-    attrs: &cache::FileAttrsCache,
-    content_len: usize,
-) -> std::result::Result<(), String> {
-    attrs.validate_complete_content(content_len)
-}
-
 #[cfg(test)]
 mod attr_contract_tests {
     use super::*;
+
+    fn on_event_op() -> Op {
+        Op::OnEvent {
+            event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
+                active_paths: Vec::new(),
+            }),
+        }
+    }
+
+    fn lookup_op(parent_path: &str, name: &str) -> Op {
+        Op::LookupChild {
+            parent_path: parent_path.to_string(),
+            name: name.to_string(),
+        }
+    }
 
     fn attrs(size: wit_types::FileSize, stability: wit_types::Stability) -> wit_types::FileAttrs {
         wit_types::FileAttrs {
@@ -1278,7 +1431,7 @@ mod attr_contract_tests {
                 kind: wit_types::EntryKind::File(bad_size_file),
             })],
         };
-        let error = validate_provider_return(&bad_size, None).unwrap_err();
+        let error = validate_return(&on_event_op(), &bad_size).unwrap_err();
         assert!(error.contains("declares size 4"));
 
         let too_large = wit_types::ProviderReturn {
@@ -1299,7 +1452,7 @@ mod attr_contract_tests {
                 })
                 .collect(),
         };
-        let error = validate_provider_return(&too_large, None).unwrap_err();
+        let error = validate_return(&on_event_op(), &too_large).unwrap_err();
         assert!(error.contains("aggregate eager byte limit"));
     }
 
@@ -1342,7 +1495,7 @@ mod attr_contract_tests {
             result: wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(7)),
             effects: Vec::new(),
         };
-        let error = validate_provider_return(&missing, Some("checkout")).unwrap_err();
+        let error = validate_return(&lookup_op("", "checkout"), &missing).unwrap_err();
         assert!(error.contains("requires exactly one matching disown-tree effect"));
 
         let valid = wit_types::ProviderReturn {
@@ -1352,9 +1505,9 @@ mod attr_contract_tests {
                 tree: 7,
             })],
         };
-        validate_provider_return(&valid, Some("checkout")).unwrap();
+        validate_return(&lookup_op("", "checkout"), &valid).unwrap();
 
-        let error = validate_provider_return(&valid, Some("other")).unwrap_err();
+        let error = validate_return(&lookup_op("", "other"), &valid).unwrap_err();
         assert!(error.contains("requires disown-tree path"));
 
         let orphan = wit_types::ProviderReturn {
@@ -1364,7 +1517,7 @@ mod attr_contract_tests {
                 tree: 7,
             })],
         };
-        let error = validate_provider_return(&orphan, None).unwrap_err();
+        let error = validate_return(&on_event_op(), &orphan).unwrap_err();
         assert!(error.contains("require a subtree result"));
     }
 
@@ -1379,7 +1532,7 @@ mod attr_contract_tests {
             effects: vec![wit_types::Effect::InvalidatePath("x".to_string())],
         };
 
-        let error = validate_provider_return(&ret, None).unwrap_err();
+        let error = validate_return(&on_event_op(), &ret).unwrap_err();
         assert!(error.contains("error returns must not carry effects"));
     }
 }

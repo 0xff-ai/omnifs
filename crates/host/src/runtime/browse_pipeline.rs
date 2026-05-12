@@ -11,21 +11,13 @@ impl CalloutRuntime {
         parent_path: &str,
         name: &str,
     ) -> Result<wit_types::LookupChildResult> {
+        let op = Op::LookupChild {
+            parent_path: parent_path.to_string(),
+            name: name.to_string(),
+        };
         let child_path = child_path(parent_path, name);
         let result = self
-            .coalesced(&child_path, || {
-                self.call_provider_op_with_handoff_path(
-                    Some(child_path.as_str()),
-                    move |store, id| {
-                        self.bindings.omnifs_provider_browse().call_lookup_child(
-                            store,
-                            id,
-                            parent_path,
-                            name,
-                        )
-                    },
-                )
-            })
+            .coalesced(&child_path, || self.call_provider_op(op.clone()))
             .await?;
 
         if let wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
@@ -38,22 +30,16 @@ impl CalloutRuntime {
         match result {
             wit_types::OpResult::LookupChild(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult {
-                op: Op::LookupChild,
-                result,
-            }),
+            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
         }
     }
 
     pub async fn list_children(&self, path: &str) -> Result<wit_types::ListChildrenResult> {
+        let op = Op::ListChildren {
+            path: path.to_string(),
+        };
         let result = self
-            .coalesced(path, || {
-                self.call_provider_op_with_handoff_path(Some(path), move |store, id| {
-                    self.bindings
-                        .omnifs_provider_browse()
-                        .call_list_children(store, id, path)
-                })
-            })
+            .coalesced(path, || self.call_provider_op(op.clone()))
             .await?;
 
         if let wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
@@ -67,22 +53,16 @@ impl CalloutRuntime {
         match result {
             wit_types::OpResult::ListChildren(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult {
-                op: Op::ListChildren,
-                result,
-            }),
+            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
         }
     }
 
     pub async fn read_file(&self, path: &str) -> Result<wit_types::ReadFileResult> {
+        let op = Op::ReadFile {
+            path: path.to_string(),
+        };
         let result = self
-            .coalesced(path, || {
-                self.call_provider_op(move |store, id| {
-                    self.bindings
-                        .omnifs_provider_browse()
-                        .call_read_file(store, id, path)
-                })
-            })
+            .coalesced(path, || self.call_provider_op(op.clone()))
             .await?;
 
         if matches!(result, wit_types::OpResult::ReadFile(_)) {
@@ -92,21 +72,15 @@ impl CalloutRuntime {
         match result {
             wit_types::OpResult::ReadFile(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult {
-                op: Op::ReadFile,
-                result,
-            }),
+            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
         }
     }
 
     pub async fn open_file(&self, path: &str) -> Result<wit_types::OpenFileResult> {
-        let result = self
-            .call_provider_op(move |store, id| {
-                self.bindings
-                    .omnifs_provider_browse()
-                    .call_open_file(store, id, path)
-            })
-            .await?;
+        let op = Op::OpenFile {
+            path: path.to_string(),
+        };
+        let result = self.call_provider_op(op.clone()).await?;
 
         if matches!(result, wit_types::OpResult::OpenFile(_)) {
             self.touch_activity_for_relative_path(path);
@@ -115,10 +89,7 @@ impl CalloutRuntime {
         match result {
             wit_types::OpResult::OpenFile(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult {
-                op: Op::OpenFile,
-                result,
-            }),
+            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
         }
     }
 
@@ -128,21 +99,17 @@ impl CalloutRuntime {
         offset: u64,
         length: u32,
     ) -> Result<wit_types::ReadChunkResult> {
-        let result = self
-            .call_provider_op(move |store, id| {
-                self.bindings
-                    .omnifs_provider_browse()
-                    .call_read_chunk(store, id, handle, offset, length)
-            })
-            .await?;
+        let op = Op::ReadChunk {
+            handle,
+            offset,
+            length,
+        };
+        let result = self.call_provider_op(op.clone()).await?;
 
         match result {
             wit_types::OpResult::ReadChunk(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult {
-                op: Op::ReadChunk,
-                result,
-            }),
+            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
         }
     }
 
@@ -170,35 +137,10 @@ impl CalloutRuntime {
         }
     }
 
-    pub(super) async fn call_provider_op<F>(&self, f: F) -> Result<wit_types::OpResult>
-    where
-        F: FnOnce(
-            &mut wasmtime::Store<super::HostState>,
-            u64,
-        ) -> std::result::Result<wit_types::ProviderStep, wasmtime::Error>,
-    {
-        self.call_provider_op_with_handoff_path(None, f).await
-    }
-
-    pub(super) async fn call_provider_op_with_handoff_path<F>(
-        &self,
-        expected_handoff_path: Option<&str>,
-        f: F,
-    ) -> Result<wit_types::OpResult>
-    where
-        F: FnOnce(
-            &mut wasmtime::Store<super::HostState>,
-            u64,
-        ) -> std::result::Result<wit_types::ProviderStep, wasmtime::Error>,
-    {
+    pub(super) async fn call_provider_op(&self, op: Op) -> Result<wit_types::OpResult> {
         let id = self.correlations.allocate();
-
-        let step = {
-            let mut store = self.store.lock();
-            f(&mut store, id)?
-        };
-
-        self.drive_provider(id, step, expected_handoff_path).await
+        let step = op.execute(self, id)?;
+        self.drive_provider(id, step, op).await
     }
 
     fn cache_lookup_projection(&self, parent_path: &str, entry: &wit_types::LookupEntry) {
