@@ -414,13 +414,17 @@ impl CalloutRuntime {
                         projected_dirs.insert(entry.path.clone());
                     }
                     if let Some((parent, name)) = split_projected_path(&entry.path) {
-                        projected_children.entry(parent).or_default().insert(
-                            name.clone(),
-                            DirentRecord {
-                                name,
-                                meta: EntryMeta::from(&entry.kind),
-                            },
-                        );
+                        let name = name.to_string();
+                        projected_children
+                            .entry(parent.to_string())
+                            .or_default()
+                            .insert(
+                                name.clone(),
+                                DirentRecord {
+                                    name,
+                                    meta: EntryMeta::from(&entry.kind),
+                                },
+                            );
                     }
                     Self::push_projected_entry(&mut batch, &entry.path, &entry.kind);
                     if let wit_types::EntryKind::File(file) = &entry.kind {
@@ -1040,15 +1044,9 @@ fn validate_operation_result_with(
     Ok(())
 }
 
-fn split_projected_path(path: &str) -> Option<(String, String)> {
-    if path.is_empty() {
-        return None;
-    }
-    match path.rsplit_once('/') {
-        Some((parent, name)) if !name.is_empty() => Some((parent.to_string(), name.to_string())),
-        None => Some((String::new(), path.to_string())),
-        _ => None,
-    }
+fn split_projected_path(path: &str) -> Option<(&str, &str)> {
+    let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+    (!name.is_empty()).then_some((parent, name))
 }
 
 fn validate_effects_with(
