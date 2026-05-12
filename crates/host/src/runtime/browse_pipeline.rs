@@ -1,5 +1,5 @@
 use super::{CalloutRuntime, Op, Result, RuntimeError};
-use crate::cache::{self, BatchRecord, CacheRecord, RecordKind};
+use crate::cache::{BatchRecord, CacheRecord, DirentRecord, DirentsPayload, EntryMeta, RecordKind};
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
@@ -215,8 +215,6 @@ impl CalloutRuntime {
         entries: &[wit_types::DirEntry],
         exhaustive: bool,
     ) {
-        use cache::{DirentRecord, DirentsPayload, EntryMeta};
-
         let mut batch = Vec::new();
 
         let mut dirent_map = BTreeMap::new();

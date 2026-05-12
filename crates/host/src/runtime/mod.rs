@@ -26,7 +26,10 @@ use crate::Provider;
 use crate::auth::AuthManager;
 use crate::cache;
 use crate::cache::blobs::BlobCache;
-use crate::cache::{BatchRecord, CacheRecord, EntryMeta, FilePayload, Key, RecordKind, SizeCache};
+use crate::cache::{
+    AttrPayload, BatchRecord, CacheRecord, DirentRecord, DirentsPayload, EntryMeta, FilePayload,
+    Key, LookupPayload, RecordKind, SizeCache,
+};
 use crate::config::InstanceConfig;
 use crate::config::schema;
 use crate::omnifs::provider::log::Host as LogHost;
@@ -377,8 +380,6 @@ impl CalloutRuntime {
         path: &str,
         kind: &wit_types::EntryKind,
     ) {
-        use cache::{AttrPayload, EntryMeta, LookupPayload};
-
         let meta = EntryMeta::from(kind);
         let lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = lookup.serialize() {
@@ -402,8 +403,6 @@ impl CalloutRuntime {
     }
 
     pub(super) fn apply_effects(&self, effects: &[wit_types::Effect]) -> Result<()> {
-        use cache::{DirentRecord, DirentsPayload};
-
         let mut batch = Vec::new();
         let mut projected_dirs = BTreeSet::new();
         let mut projected_children: BTreeMap<String, BTreeMap<String, DirentRecord>> =

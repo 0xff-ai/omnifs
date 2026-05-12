@@ -188,13 +188,12 @@ fn hex_prefix(bytes: &[u8], len: usize) -> String {
 }
 
 fn error_kind_for(error: &ExtractError) -> ErrorKind {
-    use ExtractError as E;
     match error {
-        E::UnsafePath(_)
-        | E::PathTooDeep(_)
-        | E::PathTooLong(_)
-        | E::UnsupportedEntryKind(_)
-        | E::Malformed(_) => ErrorKind::InvalidInput,
+        ExtractError::UnsafePath(_)
+        | ExtractError::PathTooDeep(_)
+        | ExtractError::PathTooLong(_)
+        | ExtractError::UnsupportedEntryKind(_)
+        | ExtractError::Malformed(_) => ErrorKind::InvalidInput,
         _ => ErrorKind::Internal,
     }
 }

@@ -230,17 +230,16 @@ impl ArchiveExtractorComponent {
 }
 
 fn translate_wit_error(err: wit_extract::ExtractError) -> ExtractError {
-    use wit_extract::ExtractError as W;
     match err {
-        W::TooManyEntries => ExtractError::TooManyEntries,
-        W::FileTooLarge(p) => ExtractError::FileTooLarge(p),
-        W::TotalTooLarge => ExtractError::TotalTooLarge,
-        W::PathTooDeep(p) => ExtractError::PathTooDeep(p),
-        W::PathTooLong(p) => ExtractError::PathTooLong(p),
-        W::UnsafePath(p) => ExtractError::UnsafePath(p),
-        W::UnsupportedEntryKind(p) => ExtractError::UnsupportedEntryKind(p),
-        W::Malformed(m) => ExtractError::Malformed(m),
-        W::Io(m) => ExtractError::Io(m),
+        wit_extract::ExtractError::TooManyEntries => ExtractError::TooManyEntries,
+        wit_extract::ExtractError::FileTooLarge(p) => ExtractError::FileTooLarge(p),
+        wit_extract::ExtractError::TotalTooLarge => ExtractError::TotalTooLarge,
+        wit_extract::ExtractError::PathTooDeep(p) => ExtractError::PathTooDeep(p),
+        wit_extract::ExtractError::PathTooLong(p) => ExtractError::PathTooLong(p),
+        wit_extract::ExtractError::UnsafePath(p) => ExtractError::UnsafePath(p),
+        wit_extract::ExtractError::UnsupportedEntryKind(p) => ExtractError::UnsupportedEntryKind(p),
+        wit_extract::ExtractError::Malformed(m) => ExtractError::Malformed(m),
+        wit_extract::ExtractError::Io(m) => ExtractError::Io(m),
     }
 }
 

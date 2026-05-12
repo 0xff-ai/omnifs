@@ -16,7 +16,7 @@ use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use futures::StreamExt;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -301,7 +301,6 @@ fn read_range(
     len: Option<u32>,
     max_bytes: u64,
 ) -> Result<Vec<u8>, BlobError> {
-    use std::io::{Read, Seek, SeekFrom};
     let file_len = std::fs::metadata(path)?.len();
     let available = file_len.saturating_sub(offset);
     let bytes_to_read = match len {
