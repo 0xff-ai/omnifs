@@ -95,7 +95,7 @@ async fn pr_list(
         let version = pr.updated_at.clone();
         let number = pr.number;
         let base = format!("{owner}/{repo}/_prs/{}/{number}/", filter.as_ref());
-        numbered::preload_common_fields(
+        numbered::project_common_field_effects(
             &mut projection,
             &base,
             pr.title,

@@ -139,7 +139,7 @@ The host's mount table is a flat name → mount lookup. Mount names are unique; 
 ## Host invariants
 
 - The negative-cache short-circuit in `lookup_check_caches` reads the parent's cached `Dirents` only when `dirents.exhaustive` is true. The exhaustive flag is the SDK's responsibility to compute correctly per D7.
-- The lookup-side `cache_projection_batch` writes a `Dirents` record only when the lookup carried child information (siblings or sibling_files). A bare lookup entry is not a directory listing and must not synthesize one.
+- The lookup-side `cache_projection_batch` writes a `Dirents` record only when the lookup carried child information in the direct result. A bare lookup entry is not a directory listing and must not synthesize one.
 
 ## Sources
 

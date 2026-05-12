@@ -1,7 +1,7 @@
 use crate::cx::Cx;
 use crate::error::ProviderError;
 use crate::hashbrown::HashMap;
-use crate::prelude::{CalloutResults, OpResult, ProviderReturn};
+use crate::prelude::{CalloutResults, OperationResult, ProviderReturn, ProviderStep};
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
@@ -37,14 +37,16 @@ impl<S> AsyncRuntime<S> {
 }
 
 impl<S: 'static> AsyncRuntime<S> {
-    pub fn start(&self, id: u64, cx: Cx<S>, future: HandlerFuture) -> ProviderReturn {
+    pub fn start(&self, id: u64, cx: Cx<S>, future: HandlerFuture) -> ProviderStep {
         self.poll(id, future, cx)
     }
 
-    pub fn resume(&self, id: u64, outcomes: CalloutResults) -> Option<ProviderReturn> {
+    pub fn resume(&self, id: u64, outcomes: CalloutResults) -> Option<ProviderStep> {
         let (future, cx) = self.pending.borrow_mut().remove(&id)?;
         if outcomes.is_empty() {
-            return Some(ProviderError::internal("expected at least one callout result").into());
+            return Some(ProviderStep::returned(
+                ProviderError::internal("expected at least one callout result").into(),
+            ));
         }
         for outcome in outcomes {
             cx.push_delivered(outcome);
@@ -52,30 +54,33 @@ impl<S: 'static> AsyncRuntime<S> {
         Some(self.poll(id, future, cx))
     }
 
-    fn poll(&self, id: u64, mut future: HandlerFuture, cx: Cx<S>) -> ProviderReturn {
+    fn poll(&self, id: u64, mut future: HandlerFuture, cx: Cx<S>) -> ProviderStep {
         let mut context = Context::from_waker(Waker::noop());
         match future.as_mut().poll(&mut context) {
             Poll::Ready(response) => {
-                // Merge trailing callouts (queued after the last await, or before
-                // the sync-return terminal) with the handler's terminal.
-                let mut callouts = cx.take_yielded_callouts();
-                callouts.extend(response.callouts);
-                ProviderReturn {
-                    callouts,
-                    terminal: response.terminal,
+                let callouts = cx.take_yielded_callouts();
+                if !callouts.is_empty() {
+                    return ProviderStep::returned(ProviderReturn::terminal(
+                        OperationResult::from(ProviderError::internal(
+                            "future returned while yielding callouts",
+                        )),
+                    ));
                 }
+                ProviderStep::returned(response)
             },
             Poll::Pending => {
                 let callouts = cx.take_yielded_callouts();
                 if callouts.is_empty() {
                     // Stalled guest future with no staged work: cancel and
                     // surface an internal error rather than wedging the host.
-                    return ProviderReturn::terminal(OpResult::from(ProviderError::internal(
-                        "future polled Pending without yielding callouts",
-                    )));
+                    return ProviderStep::returned(ProviderReturn::terminal(
+                        OperationResult::from(ProviderError::internal(
+                            "future polled Pending without yielding callouts",
+                        )),
+                    ));
                 }
                 self.pending.borrow_mut().insert(id, (future, cx));
-                ProviderReturn::suspend(callouts)
+                ProviderStep::suspend(callouts)
             },
         }
     }

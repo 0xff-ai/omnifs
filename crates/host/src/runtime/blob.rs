@@ -576,7 +576,7 @@ mod tests {
         let cache_key = "old/path.bin";
         let blob_path = cache_root.join(cache_key);
         std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        std::fs::write(&blob_path, b"legacy").unwrap();
+        std::fs::write(&blob_path, b"stale").unwrap();
 
         let cache = BlobCache::new(cache_root);
 

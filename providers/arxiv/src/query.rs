@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn paper_pdf_url_handles_legacy_slash_id() {
+    fn paper_pdf_url_handles_slash_form_id() {
         assert_eq!(
             paper_pdf_url("hep-th/9901001", Some(2)),
             "https://arxiv.org/pdf/hep-th/9901001v2.pdf"

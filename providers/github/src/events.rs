@@ -20,15 +20,15 @@ struct TickOutcome {
     response: Result<Response<Vec<u8>>>,
 }
 
-pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<EventOutcome> {
-    let mut outcome = EventOutcome::new();
+pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<Effects> {
+    let mut effects = Effects::new();
 
     let mut repo_paths = cx.active_paths(RepoPath::MOUNT_ID, RepoId::parse);
     repo_paths.sort();
     repo_paths.dedup();
 
     if repo_paths.is_empty() {
-        return Ok(outcome);
+        return Ok(effects);
     }
 
     let fetches = repo_paths.into_iter().map(|repo_id| {
@@ -97,8 +97,8 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<EventOutcome> {
     }
 
     for prefix in invalidations {
-        outcome.invalidate_prefix(prefix);
+        effects.invalidate_prefix(prefix);
     }
 
-    Ok(outcome)
+    Ok(effects)
 }

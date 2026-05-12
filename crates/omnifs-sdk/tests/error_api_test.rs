@@ -1,5 +1,5 @@
 use omnifs_sdk::error::{ProviderError, ProviderErrorKind};
-use omnifs_sdk::omnifs::provider::types::{OpResult, ProviderReturn};
+use omnifs_sdk::omnifs::provider::types::{OperationResult, ProviderReturn};
 
 #[test]
 fn provider_error_maps_http_statuses_to_typed_kinds() {
@@ -22,7 +22,7 @@ fn provider_error_into_response_preserves_retryable_flag() {
     let response: ProviderReturn = ProviderError::denied("final denial").into();
 
     let ProviderReturn {
-        terminal: Some(OpResult::Err(error)),
+        result: OperationResult::Error(error),
         ..
     } = response
     else {

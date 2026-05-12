@@ -1,6 +1,6 @@
 use super::{CalloutRuntime, Result, RuntimeError};
 use crate::cache::{self, BatchRecord, CacheRecord, RecordKind};
-use crate::omnifs::provider::types::{self as wit_types, DirListing};
+use crate::omnifs::provider::types as wit_types;
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -10,7 +10,7 @@ impl CalloutRuntime {
         &self,
         parent_path: &str,
         name: &str,
-    ) -> Result<wit_types::OpResult> {
+    ) -> Result<wit_types::OperationResult> {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
@@ -19,43 +19,34 @@ impl CalloutRuntime {
 
         let result = self
             .coalesced(&child_path, || {
-                self.call_provider_op(move |store, id| {
-                    self.bindings.omnifs_provider_browse().call_lookup_child(
-                        store,
-                        id,
-                        parent_path,
-                        name,
-                    )
-                })
+                self.call_provider_op_with_handoff_path(
+                    Some(child_path.as_str()),
+                    move |store, id| {
+                        self.bindings.omnifs_provider_browse().call_lookup_child(
+                            store,
+                            id,
+                            parent_path,
+                            name,
+                        )
+                    },
+                )
             })
             .await?;
 
-        if let wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(entry)) = &result {
+        if let wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
+            &result
+        {
             self.touch_activity_for_relative_path(&child_path);
-            let entries: Vec<wit_types::DirEntry> = entry
-                .siblings
-                .iter()
-                .map(|e| wit_types::DirEntry {
-                    name: e.name.clone(),
-                    kind: e.kind.clone(),
-                })
-                .collect();
-
-            self.cache_projection_batch(
-                &child_path,
-                &entries,
-                &entry.sibling_files,
-                entry.exhaustive,
-            );
+            self.cache_lookup_projection(parent_path, entry);
         }
 
-        Ok(Self::strip_projected_files(result))
+        Ok(result)
     }
 
-    pub async fn call_list_children(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn call_list_children(&self, path: &str) -> Result<wit_types::OperationResult> {
         let result = self
             .coalesced(path, || {
-                self.call_provider_op(move |store, id| {
+                self.call_provider_op_with_handoff_path(Some(path), move |store, id| {
                     self.bindings
                         .omnifs_provider_browse()
                         .call_list_children(store, id, path)
@@ -63,15 +54,18 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if let wit_types::OpResult::List(wit_types::ListResult::Entries(ref listing)) = result {
-            self.cache_projection_batch(path, &listing.entries, &[], listing.exhaustive);
+        if let wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Entries(
+            ref listing,
+        )) = result
+        {
+            self.cache_projection_batch(path, &listing.entries, listing.exhaustive);
             self.touch_activity_for_relative_path(path);
         }
 
-        Ok(Self::strip_projected_files(result))
+        Ok(result)
     }
 
-    pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OperationResult> {
         let result = self
             .coalesced(path, || {
                 self.call_provider_op(move |store, id| {
@@ -82,20 +76,14 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if let wit_types::OpResult::Read(ref file_result) = result {
-            let parent_path = path.rsplit_once('/').map_or("", |(p, _)| p);
-            let sibling_files = match file_result {
-                wit_types::FileContentResult::Inline(inline) => &inline.sibling_files,
-                wit_types::FileContentResult::Blob(blob) => &blob.sibling_files,
-            };
-            self.cache_sibling_files(parent_path, sibling_files);
+        if matches!(result, wit_types::OperationResult::ReadFile(_)) {
             self.touch_activity_for_relative_path(path);
         }
 
         Ok(result)
     }
 
-    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OperationResult> {
         let result = self
             .call_provider_op(move |store, id| {
                 self.bindings
@@ -104,7 +92,7 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if matches!(result, wit_types::OpResult::OpenFile(_)) {
+        if matches!(result, wit_types::OperationResult::OpenFile(_)) {
             self.touch_activity_for_relative_path(path);
         }
 
@@ -116,7 +104,7 @@ impl CalloutRuntime {
         handle: u64,
         offset: u64,
         length: u32,
-    ) -> Result<wit_types::OpResult> {
+    ) -> Result<wit_types::OperationResult> {
         self.call_provider_op(move |store, id| {
             self.bindings
                 .omnifs_provider_browse()
@@ -125,10 +113,10 @@ impl CalloutRuntime {
         .await
     }
 
-    async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OpResult>
+    async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OperationResult>
     where
         F: Fn() -> Fu,
-        Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
+        Fu: std::future::Future<Output = Result<wit_types::OperationResult>>,
     {
         loop {
             match self.inflight.acquire(path) {
@@ -149,31 +137,52 @@ impl CalloutRuntime {
         }
     }
 
-    pub(super) async fn call_provider_op<F>(&self, f: F) -> Result<wit_types::OpResult>
+    pub(super) async fn call_provider_op<F>(&self, f: F) -> Result<wit_types::OperationResult>
     where
         F: FnOnce(
             &mut wasmtime::Store<super::HostState>,
             u64,
-        ) -> std::result::Result<wit_types::ProviderReturn, wasmtime::Error>,
+        ) -> std::result::Result<wit_types::ProviderStep, wasmtime::Error>,
+    {
+        self.call_provider_op_with_handoff_path(None, f).await
+    }
+
+    pub(super) async fn call_provider_op_with_handoff_path<F>(
+        &self,
+        expected_handoff_path: Option<&str>,
+        f: F,
+    ) -> Result<wit_types::OperationResult>
+    where
+        F: FnOnce(
+            &mut wasmtime::Store<super::HostState>,
+            u64,
+        ) -> std::result::Result<wit_types::ProviderStep, wasmtime::Error>,
     {
         let id = self.correlations.allocate();
 
-        let response = {
+        let step = {
             let mut store = self.store.lock();
             f(&mut store, id)?
         };
 
-        self.drive_callouts(id, response).await
+        self.drive_provider_step(id, step, expected_handoff_path)
+            .await
+    }
+
+    fn cache_lookup_projection(&self, parent_path: &str, entry: &wit_types::LookupEntry) {
+        let mut entries = Vec::with_capacity(1 + entry.siblings.len());
+        entries.push(entry.target.clone());
+        entries.extend(entry.siblings.iter().cloned());
+        self.cache_projection_batch(parent_path, &entries, entry.exhaustive);
     }
 
     fn cache_projection_batch(
         &self,
         parent_path: &str,
         entries: &[wit_types::DirEntry],
-        sibling_files: &[wit_types::ProjectedFile],
         exhaustive: bool,
     ) {
-        use cache::{AttrPayload, DirentRecord, DirentsPayload, EntryMeta, LookupPayload};
+        use cache::{DirentRecord, DirentsPayload, EntryMeta};
 
         let mut batch = Vec::new();
 
@@ -187,15 +196,6 @@ impl CalloutRuntime {
                     meta,
                 },
             );
-        }
-        for pf in sibling_files {
-            let meta = EntryMeta::file(cache::FileAttrsCache::from(&pf.attrs));
-            dirent_map
-                .entry(pf.name.clone())
-                .or_insert_with(|| DirentRecord {
-                    name: pf.name.clone(),
-                    meta,
-                });
         }
         let dirents_payload = DirentsPayload {
             entries: dirent_map.into_values().collect(),
@@ -216,37 +216,10 @@ impl CalloutRuntime {
             } else {
                 format!("{parent_path}/{}", entry.name)
             };
-
-            let meta = EntryMeta::from(&entry.kind);
-
-            let lookup = LookupPayload::Positive(meta.clone());
-            if let Some(payload) = lookup.serialize() {
-                batch.push(BatchRecord::new(
-                    child_path.clone(),
-                    RecordKind::Lookup,
-                    None,
-                    CacheRecord::new(RecordKind::Lookup, payload),
-                ));
+            Self::push_projected_entry(&mut batch, &child_path, &entry.kind);
+            if let wit_types::EntryKind::File(file) = &entry.kind {
+                Self::push_projected_file_content(&mut batch, &child_path, file);
             }
-
-            let attr = AttrPayload { meta };
-            if let Some(payload) = attr.serialize() {
-                batch.push(BatchRecord::new(
-                    child_path.clone(),
-                    RecordKind::Attr,
-                    None,
-                    CacheRecord::new(RecordKind::Attr, payload),
-                ));
-            }
-        }
-
-        for pf in sibling_files {
-            let file_path = if parent_path.is_empty() {
-                pf.name.clone()
-            } else {
-                format!("{parent_path}/{}", pf.name)
-            };
-            Self::push_projected_file(&mut batch, &file_path, &pf.attrs);
         }
 
         if !batch.is_empty() {
@@ -254,29 +227,7 @@ impl CalloutRuntime {
                 target: "omnifs_cache",
                 kind = "projection",
                 count = batch.len(),
-                "caching projection batch"
-            );
-            self.cache_put_batch(&batch);
-        }
-    }
-
-    fn cache_sibling_files(&self, parent_path: &str, sibling_files: &[wit_types::ProjectedFile]) {
-        let mut batch = Vec::new();
-        for pf in sibling_files {
-            let file_path = if parent_path.is_empty() {
-                pf.name.clone()
-            } else {
-                format!("{parent_path}/{}", pf.name)
-            };
-            Self::push_projected_file(&mut batch, &file_path, &pf.attrs);
-        }
-
-        if !batch.is_empty() {
-            debug!(
-                target: "omnifs_cache",
-                kind = "projection",
-                count = batch.len(),
-                "caching sibling files"
+                "caching direct projection result"
             );
             self.cache_put_batch(&batch);
         }
@@ -320,25 +271,5 @@ impl CalloutRuntime {
             return;
         }
         self.activity_table.lock().touch(touched);
-    }
-
-    /// Strip listing-carried preload data before the result is stored or
-    /// surfaced to the FUSE layer. These land at the response boundary via
-    /// `apply_terminal_boundary`; they do not belong in the cached form.
-    fn strip_projected_files(result: wit_types::OpResult) -> wit_types::OpResult {
-        match result {
-            wit_types::OpResult::List(wit_types::ListResult::Entries(listing)) => {
-                wit_types::OpResult::List(wit_types::ListResult::Entries(DirListing {
-                    entries: listing.entries,
-                    exhaustive: listing.exhaustive,
-                    preload: Vec::new(),
-                }))
-            },
-            wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(mut entry)) => {
-                entry.preload = Vec::new();
-                wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(entry))
-            },
-            other => other,
-        }
     }
 }

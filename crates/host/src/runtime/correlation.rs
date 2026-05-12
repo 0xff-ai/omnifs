@@ -1,6 +1,6 @@
-//! Async effect correlation ID tracking.
+//! Async callout correlation ID tracking.
 //!
-//! Assigns unique IDs to async effects so providers can correlate
+//! Assigns unique IDs to async callouts so providers can correlate
 //! resume calls with pending operations.
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -26,7 +26,6 @@ use crate::Provider;
 use crate::auth::AuthManager;
 use crate::cache;
 use crate::cache::blobs::BlobCache;
-use crate::cache::l2::Cache as L2Cache;
 use crate::cache::{BatchRecord, CacheRecord, EntryMeta, FilePayload, Key, RecordKind, SizeCache};
 use crate::config::InstanceConfig;
 use crate::config::schema;
@@ -46,7 +45,7 @@ use crate::runtime::tools::archive::{ArchiveExtractorComponent, ArchiveFormat};
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
 use parking_lot::Mutex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
@@ -73,7 +72,7 @@ pub struct CalloutRuntime {
     archive: Arc<ArchiveExecutor>,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRefs>,
-    l2: Option<L2Cache>,
+    l2: Option<cache::l2::Cache>,
     invalidation: InvalidationState,
     activity_table: Mutex<ActivityTable>,
     declared_handlers: Vec<DeclaredHandler>,
@@ -207,7 +206,7 @@ impl CalloutRuntime {
 
         let l2 = {
             let db_path = provider_cache_root.join("browse.redb");
-            match L2Cache::open(&db_path) {
+            match cache::l2::Cache::open(&db_path) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
                     warn!(mount = mount_name, error = %e, "failed to open L2 browse cache");
@@ -244,7 +243,7 @@ impl CalloutRuntime {
         })
     }
 
-    pub fn initialize(&self) -> Result<wit_types::OpResult> {
+    pub fn initialize(&self) -> Result<wit_types::OperationResult> {
         let response = {
             let mut store = self.store.lock();
             self.bindings
@@ -338,16 +337,12 @@ impl CalloutRuntime {
         self.activity_table.lock().active_path_sets()
     }
 
-    fn push_projected_file(
+    pub(super) fn push_projected_file_content(
         batch: &mut Vec<BatchRecord>,
         file_path: &str,
-        attrs: &wit_types::FileAttrs,
+        file: &wit_types::FileProj,
     ) {
-        use cache::{AttrPayload, EntryMeta, LookupPayload};
-
-        let attrs_cache = cache::FileAttrsCache::from(attrs);
-        let meta = EntryMeta::file(attrs_cache.clone());
-
+        let attrs_cache = cache::FileAttrsCache::from(file);
         if let Some(content) = attrs_cache.inline_bytes()
             && let Some(aux) = attrs_cache.durable_cache_aux()
         {
@@ -361,36 +356,20 @@ impl CalloutRuntime {
                 ));
             }
         }
-
-        let pf_lookup = LookupPayload::Positive(meta.clone());
-        if let Some(payload) = pf_lookup.serialize() {
-            batch.push(BatchRecord::new(
-                file_path,
-                RecordKind::Lookup,
-                None,
-                CacheRecord::new(RecordKind::Lookup, payload),
-            ));
-        }
-
-        let pf_attr = AttrPayload { meta };
-        if let Some(payload) = pf_attr.serialize() {
-            batch.push(BatchRecord::new(
-                file_path,
-                RecordKind::Attr,
-                None,
-                CacheRecord::new(RecordKind::Attr, payload),
-            ));
-        }
     }
 
-    fn push_preloaded_entry(batch: &mut Vec<BatchRecord>, entry: &wit_types::PreloadedEntry) {
+    pub(super) fn push_projected_entry(
+        batch: &mut Vec<BatchRecord>,
+        path: &str,
+        kind: &wit_types::EntryKind,
+    ) {
         use cache::{AttrPayload, EntryMeta, LookupPayload};
 
-        let meta = EntryMeta::from(&entry.kind);
+        let meta = EntryMeta::from(kind);
         let lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = lookup.serialize() {
             batch.push(BatchRecord::new(
-                entry.path.clone(),
+                path,
                 RecordKind::Lookup,
                 None,
                 CacheRecord::new(RecordKind::Lookup, payload),
@@ -400,7 +379,7 @@ impl CalloutRuntime {
         let attr = AttrPayload { meta };
         if let Some(payload) = attr.serialize() {
             batch.push(BatchRecord::new(
-                entry.path.clone(),
+                path,
                 RecordKind::Attr,
                 None,
                 CacheRecord::new(RecordKind::Attr, payload),
@@ -408,126 +387,107 @@ impl CalloutRuntime {
         }
     }
 
-    fn push_preloaded_file_content(
-        batch: &mut Vec<BatchRecord>,
-        file_path: &str,
-        attrs: &wit_types::FileAttrs,
-        content: &[u8],
-    ) {
-        let attrs_cache = cache::FileAttrsCache::from(attrs);
-        let Some(aux) = attrs_cache.durable_cache_aux() else {
-            return;
-        };
-        let payload = FilePayload::new(attrs_cache.version_token.clone(), content.to_vec());
-        if let Some(payload) = payload.serialize() {
-            batch.push(BatchRecord::new(
-                file_path,
-                RecordKind::File,
-                aux,
-                CacheRecord::new(RecordKind::File, payload),
-            ));
-        }
-    }
+    pub(super) fn apply_effects(&self, effects: &[wit_types::Effect]) -> Result<()> {
+        use cache::{DirentRecord, DirentsPayload};
 
-    pub(super) fn apply_preloads(&self, items: &[wit_types::PreloadItem]) {
-        use cache::{DirentRecord, DirentsPayload, EntryKindCache, EntryMeta};
-
-        if items.is_empty() {
-            return;
-        }
         let mut batch = Vec::new();
-        let mut child_records: BTreeMap<String, BTreeMap<String, DirentRecord>> = BTreeMap::new();
-        let mut preloaded_dirs = Vec::new();
-        for item in items {
-            match item {
-                wit_types::PreloadItem::File(file) => {
-                    Self::push_preloaded_file_content(
-                        &mut batch,
-                        &file.path,
-                        &file.attrs,
-                        &file.content,
-                    );
-                    Self::record_preload_child(
-                        &mut child_records,
-                        &file.path,
-                        EntryMeta::file(cache::FileAttrsCache::from(&file.attrs)),
-                    );
-                },
-                wit_types::PreloadItem::Entry(entry) => {
-                    Self::push_preloaded_entry(&mut batch, entry);
-                    let meta = EntryMeta::from(&entry.kind);
-                    if matches!(meta.kind, EntryKindCache::Directory) {
-                        preloaded_dirs.push(entry.path.clone());
+        let mut projected_dirs = BTreeSet::new();
+        let mut projected_children: BTreeMap<String, BTreeMap<String, DirentRecord>> =
+            BTreeMap::new();
+        for effect in effects {
+            match effect {
+                wit_types::Effect::Project(entry) => {
+                    if matches!(entry.kind, wit_types::EntryKind::Directory) {
+                        projected_dirs.insert(entry.path.clone());
                     }
-                    Self::record_preload_child(&mut child_records, &entry.path, meta);
+                    if let Some((parent, name)) = split_projected_path(&entry.path) {
+                        projected_children.entry(parent).or_default().insert(
+                            name.clone(),
+                            DirentRecord {
+                                name,
+                                meta: EntryMeta::from(&entry.kind),
+                            },
+                        );
+                    }
+                    Self::push_projected_entry(&mut batch, &entry.path, &entry.kind);
+                    if let wit_types::EntryKind::File(file) = &entry.kind {
+                        Self::push_projected_file_content(&mut batch, &entry.path, file);
+                    }
+                },
+                wit_types::Effect::InvalidatePath(path) => {
+                    self.cache_delete_path(path);
+                    self.invalidation.record_path(path.clone());
+                },
+                wit_types::Effect::InvalidatePrefix(prefix) => {
+                    self.cache_delete_prefix(prefix);
+                    self.invalidation.record_prefix(prefix.clone());
+                },
+                wit_types::Effect::DisownTree(handoff) => {
+                    if self.resolve_tree_ref(handoff.tree).is_none() {
+                        return Err(RuntimeError::ProviderError(format!(
+                            "disown-tree effect for {:?} references unknown tree {}",
+                            handoff.path, handoff.tree
+                        )));
+                    }
                 },
             }
         }
-        for path in preloaded_dirs {
-            let Some(children) = child_records.remove(&path) else {
+        for dir in projected_dirs {
+            let Some(children) = projected_children.remove(&dir) else {
                 continue;
             };
-            let dirents = DirentsPayload {
-                entries: children.into_values().collect(),
-                exhaustive: false,
-            };
-            if let Some(payload) = dirents.serialize() {
+            let (previously_exhaustive, mut existing_children) = self
+                .cache_get(&dir, RecordKind::Dirents)
+                .and_then(|record| DirentsPayload::deserialize(&record.payload))
+                .map_or_else(
+                    || (false, BTreeMap::new()),
+                    |payload| {
+                        (
+                            payload.exhaustive,
+                            payload
+                                .entries
+                                .into_iter()
+                                .map(|entry| (entry.name.clone(), entry))
+                                .collect::<BTreeMap<_, _>>(),
+                        )
+                    },
+                );
+
+            let introduced_child = children
+                .keys()
+                .any(|name| !existing_children.contains_key(name));
+            existing_children.extend(children);
+            if let Some(payload) = (DirentsPayload {
+                entries: existing_children.into_values().collect(),
+                exhaustive: previously_exhaustive && !introduced_child,
+            })
+            .serialize()
+            {
                 batch.push(BatchRecord::new(
-                    path,
+                    dir,
                     RecordKind::Dirents,
                     None,
                     CacheRecord::new(RecordKind::Dirents, payload),
                 ));
             }
         }
-
         if !batch.is_empty() {
             debug!(
                 target: "omnifs_cache",
-                kind = "preload",
+                kind = "project",
                 count = batch.len(),
-                "caching preloads"
+                "applying projection effects"
             );
             self.cache_put_batch(&batch);
         }
+        Ok(())
     }
 
-    fn record_preload_child(
-        child_records: &mut BTreeMap<String, BTreeMap<String, cache::DirentRecord>>,
-        path: &str,
-        meta: EntryMeta,
-    ) {
-        let Some((parent, name)) = path.rsplit_once('/') else {
-            return;
-        };
-        if parent.is_empty() || name.is_empty() {
-            return;
-        }
-        child_records.entry(parent.to_string()).or_default().insert(
-            name.to_string(),
-            cache::DirentRecord {
-                name: name.to_string(),
-                meta,
-            },
-        );
-    }
-
-    pub(super) fn apply_event_outcome(&self, outcome: &wit_types::EventOutcome) {
-        for path in &outcome.invalidate_paths {
-            self.cache_delete_path(path);
-            self.invalidation.record_path(path.clone());
-        }
-        for prefix in &outcome.invalidate_prefixes {
-            self.cache_delete_prefix(prefix);
-            self.invalidation.record_prefix(prefix.clone());
-        }
-    }
-
-    pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
+    pub async fn call_timer_tick(&self) -> Result<wit_types::OperationResult> {
         let id = self.correlations.allocate();
         let active_paths = self.activity_table.lock().active_path_sets();
 
-        let response = {
+        let step = {
             let mut store = self.store.lock();
             self.bindings.omnifs_provider_notify().call_on_event(
                 &mut *store,
@@ -536,70 +496,39 @@ impl CalloutRuntime {
             )?
         };
 
-        self.drive_callouts(id, response).await
+        self.drive_provider_step(id, step, None).await
     }
 
     /// Drive a provider call to completion.
-    ///
-    /// Applies terminal-embedded side effects (dir-listing preloads,
-    /// event-outcome invalidations) at the response boundary, before
-    /// handing the terminal back to the caller. Cases:
-    /// - `terminal = Some, callouts = []` → apply boundary, return terminal.
-    /// - `terminal = Some, callouts = [..]` → apply boundary, run trailing
-    ///   callouts, discard their results, return terminal.
-    /// - `terminal = None, callouts = [..]` → execute the batch, resume
-    ///   the guest with positionally aligned results, loop.
-    /// - `terminal = None, callouts = []` → protocol error.
-    async fn drive_callouts(
+    pub(super) async fn drive_provider_step(
         &self,
         id: u64,
-        mut response: wit_types::ProviderReturn,
-    ) -> Result<wit_types::OpResult> {
+        mut step: wit_types::ProviderStep,
+        expected_handoff_path: Option<&str>,
+    ) -> Result<wit_types::OperationResult> {
         loop {
-            let callouts = std::mem::take(&mut response.callouts);
-            match response.terminal.take() {
-                Some(terminal) => {
-                    validate_terminal_attrs(&terminal).map_err(RuntimeError::ProviderError)?;
-                    self.apply_terminal_boundary(&terminal);
-                    if !callouts.is_empty() {
-                        let _ = self.execute_batch(&callouts).await;
-                    }
-                    return Ok(terminal);
+            match step {
+                wit_types::ProviderStep::Returned(ret) => {
+                    validate_provider_return(&ret, expected_handoff_path)
+                        .map_err(RuntimeError::ProviderError)?;
+                    self.apply_effects(&ret.effects)?;
+                    return Ok(ret.result);
                 },
-                None if callouts.is_empty() => {
+                wit_types::ProviderStep::Suspended(callouts) if callouts.is_empty() => {
                     return Err(RuntimeError::ProviderError(
-                        "provider returned empty response".into(),
+                        "provider suspended with no callouts".into(),
                     ));
                 },
-                None => {
+                wit_types::ProviderStep::Suspended(callouts) => {
                     let results = self.execute_batch(&callouts).await;
                     let mut store = self.store.lock();
-                    response = self.bindings.omnifs_provider_resume().call_resume(
+                    step = self.bindings.omnifs_provider_continuation().call_resume(
                         &mut *store,
                         id,
                         &results,
                     )?;
                 },
             }
-        }
-    }
-
-    fn apply_terminal_boundary(&self, terminal: &wit_types::OpResult) {
-        match terminal {
-            wit_types::OpResult::List(wit_types::ListResult::Entries(listing)) => {
-                self.apply_preloads(&listing.preload);
-            },
-            wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(entry)) => {
-                // Directory lookups that hit a dir handler can stage
-                // preloads for the looked-up child's contents; surface
-                // them here so a subsequent FUSE walk observes a warm
-                // cache just like it would after an explicit listing.
-                self.apply_preloads(&entry.preload);
-            },
-            wit_types::OpResult::Event(outcome) => {
-                self.apply_event_outcome(outcome);
-            },
-            _ => {},
         }
     }
 
@@ -622,19 +551,11 @@ impl CalloutRuntime {
             .map_err(|e| RuntimeError::ProviderError(format!("read blob {blob_id}: {e}")))
     }
 
-    fn resolve_response_sync(response: wit_types::ProviderReturn) -> Result<wit_types::OpResult> {
-        if !response.callouts.is_empty() {
-            return Err(RuntimeError::ProviderError(
-                "initialize must not yield callouts".into(),
-            ));
-        }
-        response
-            .terminal
-            .ok_or_else(|| RuntimeError::ProviderError("initialize returned empty response".into()))
-            .and_then(|terminal| {
-                validate_terminal_attrs(&terminal).map_err(RuntimeError::ProviderError)?;
-                Ok(terminal)
-            })
+    fn resolve_response_sync(
+        response: wit_types::ProviderReturn,
+    ) -> Result<wit_types::OperationResult> {
+        validate_provider_return(&response, None).map_err(RuntimeError::ProviderError)?;
+        Ok(response.result)
     }
 
     async fn execute_single_callout(
@@ -731,53 +652,136 @@ impl CalloutRuntime {
     }
 }
 
-fn validate_terminal_attrs(terminal: &wit_types::OpResult) -> std::result::Result<(), String> {
+#[cfg(test)]
+fn validate_operation_result(
+    result: &wit_types::OperationResult,
+) -> std::result::Result<(), String> {
     let mut validator = AttrValidator::default();
-    match terminal {
-        wit_types::OpResult::List(wit_types::ListResult::Entries(listing)) => {
+    validate_operation_result_with(result, &mut validator)
+}
+
+fn validate_operation_result_with(
+    result: &wit_types::OperationResult,
+    validator: &mut AttrValidator,
+) -> std::result::Result<(), String> {
+    match result {
+        wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Entries(
+            listing,
+        )) => {
             for entry in &listing.entries {
                 validator.entry(&entry.kind)?;
             }
-            validator.preloads(&listing.preload)?;
         },
-        wit_types::OpResult::Lookup(wit_types::LookupResult::Entry(entry)) => {
+        wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) => {
             validator.entry(&entry.target.kind)?;
             for sibling in &entry.siblings {
                 validator.entry(&sibling.kind)?;
             }
-            for file in &entry.sibling_files {
-                validator.projected_file(file)?;
-            }
-            validator.preloads(&entry.preload)?;
         },
-        wit_types::OpResult::Read(result) => match result {
-            wit_types::FileContentResult::Inline(inline) => {
-                validator.file_attrs(&inline.attrs)?;
-                let attrs = cache::FileAttrsCache::from(&inline.attrs);
-                validate_complete_content(&attrs, inline.content.len())
-                    .map_err(|error| format!("read result: {error}"))?;
-                for file in &inline.sibling_files {
-                    validator.projected_file(file)?;
-                }
-            },
-            wit_types::FileContentResult::Blob(blob) => {
-                validator.file_attrs(&blob.attrs)?;
-                for file in &blob.sibling_files {
-                    validator.projected_file(file)?;
-                }
-            },
-        },
-        wit_types::OpResult::OpenFile(result) => {
-            validator.file_attrs(&result.attrs)?;
-            if !matches!(
-                &result.attrs.bytes,
-                wit_types::FileBytes::Deferred(wit_types::ReadMode::Ranged)
-            ) {
-                return Err("open-file requires Bytes::Deferred { read: ReadMode::Ranged }".into());
+        wit_types::OperationResult::ReadFile(result) => {
+            AttrValidator::file_attrs_metadata(&result.attrs)?;
+            match &result.bytes {
+                wit_types::ReadFileBytes::Inline(bytes) => {
+                    let attrs = cache::FileAttrsCache::from(&result.attrs);
+                    validate_complete_content(&attrs, bytes.len())
+                        .map_err(|error| format!("read-file result: {error}"))?;
+                    validator.add_eager_bytes(bytes.len())?;
+                },
+                wit_types::ReadFileBytes::Blob(_) => {},
             }
+        },
+        wit_types::OperationResult::OpenFile(result) => {
+            AttrValidator::file_attrs_metadata(&result.attrs)?;
         },
         _ => {},
     }
+    Ok(())
+}
+
+fn split_projected_path(path: &str) -> Option<(String, String)> {
+    if path.is_empty() {
+        return None;
+    }
+    match path.rsplit_once('/') {
+        Some((parent, name)) if !name.is_empty() => Some((parent.to_string(), name.to_string())),
+        None => Some((String::new(), path.to_string())),
+        _ => None,
+    }
+}
+
+fn validate_effects_with(
+    effects: &[wit_types::Effect],
+    validator: &mut AttrValidator,
+) -> std::result::Result<(), String> {
+    for effect in effects {
+        match effect {
+            wit_types::Effect::Project(entry) => validator
+                .entry(&entry.kind)
+                .map_err(|error| format!("project effect {:?}: {error}", entry.path))?,
+            wit_types::Effect::InvalidatePath(_)
+            | wit_types::Effect::InvalidatePrefix(_)
+            | wit_types::Effect::DisownTree(_) => {},
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_return(
+    ret: &wit_types::ProviderReturn,
+    expected_handoff_path: Option<&str>,
+) -> std::result::Result<(), String> {
+    if matches!(ret.result, wit_types::OperationResult::Error(_)) && !ret.effects.is_empty() {
+        return Err("provider error returns must not carry effects".to_string());
+    }
+    let mut validator = AttrValidator::default();
+    validate_operation_result_with(&ret.result, &mut validator)?;
+    validate_effects_with(&ret.effects, &mut validator)?;
+
+    let handoffs = ret
+        .effects
+        .iter()
+        .filter_map(|effect| {
+            if let wit_types::Effect::DisownTree(handoff) = effect {
+                Some(handoff)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let subtree = match &ret.result {
+        wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
+        | wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
+            Some(*tree)
+        },
+        _ => None,
+    };
+    match subtree {
+        Some(tree) => {
+            if handoffs.len() != 1 || handoffs[0].tree != tree {
+                return Err(format!(
+                    "subtree result for tree {tree} requires exactly one matching disown-tree effect"
+                ));
+            }
+            if let Some(expected_path) = expected_handoff_path {
+                let expected_path = expected_path.trim_matches('/');
+                if handoffs[0].path != expected_path {
+                    return Err(format!(
+                        "subtree result for tree {tree} requires disown-tree path {:?}, got {:?}",
+                        expected_path, handoffs[0].path
+                    ));
+                }
+            }
+        },
+        None if !handoffs.is_empty() => {
+            return Err(format!(
+                "disown-tree effects require a subtree result, got {} orphan effect(s)",
+                handoffs.len()
+            ));
+        },
+        None => {},
+    }
+
     Ok(())
 }
 
@@ -790,50 +794,27 @@ impl AttrValidator {
     fn entry(&mut self, kind: &wit_types::EntryKind) -> std::result::Result<(), String> {
         match kind {
             wit_types::EntryKind::Directory => Ok(()),
-            wit_types::EntryKind::File(attrs) => self.file_attrs(attrs),
+            wit_types::EntryKind::File(file) => self.file_proj(file),
         }
     }
 
-    fn projected_file(
-        &mut self,
-        file: &wit_types::ProjectedFile,
-    ) -> std::result::Result<(), String> {
-        self.file_attrs(&file.attrs)
-            .map_err(|error| format!("projected file {:?}: {error}", file.name))
-    }
-
-    fn file_attrs(&mut self, attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
-        let attrs = cache::FileAttrsCache::from(attrs);
+    fn file_proj(&mut self, file: &wit_types::FileProj) -> std::result::Result<(), String> {
+        let attrs = cache::FileAttrsCache::from(file);
         attrs.validate()?;
         self.add_eager_bytes(attrs.eager_byte_len())
     }
 
-    fn preloads(&mut self, items: &[wit_types::PreloadItem]) -> std::result::Result<(), String> {
-        for item in items {
-            let wit_types::PreloadItem::Entry(entry) = item else {
-                continue;
-            };
-            self.entry(&entry.kind)
-                .map_err(|error| format!("preloaded entry {:?}: {error}", entry.path))?;
-        }
-
-        for item in items {
-            let wit_types::PreloadItem::File(file) = item else {
-                continue;
-            };
-            let attrs = cache::FileAttrsCache::from(&file.attrs);
-            attrs
-                .validate()
-                .map_err(|error| format!("preloaded file {:?}: {error}", file.path))?;
-            validate_complete_content(&attrs, file.content.len())
-                .map_err(|error| format!("preloaded file {:?}: {error}", file.path))?;
-            if matches!(attrs.stability, cache::StabilityCache::Volatile) {
+    fn file_attrs_metadata(attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
+        if let Some(token) = &attrs.version_token {
+            if token.is_empty() {
+                return Err("version token must not be empty".to_string());
+            }
+            if token.len() > cache::MAX_VERSION_TOKEN_BYTES {
                 return Err(format!(
-                    "preloaded file {:?}: Stability::Volatile cannot carry whole-file preload bytes",
-                    file.path
+                    "version token exceeds {} bytes",
+                    cache::MAX_VERSION_TOKEN_BYTES
                 ));
             }
-            self.add_eager_bytes(file.content.len())?;
         }
         Ok(())
     }
@@ -864,131 +845,191 @@ fn validate_complete_content(
 mod attr_contract_tests {
     use super::*;
 
-    fn attrs(
-        size: wit_types::FileSize,
-        bytes: wit_types::FileBytes,
-        stability: wit_types::Stability,
-    ) -> wit_types::FileAttrs {
+    fn attrs(size: wit_types::FileSize, stability: wit_types::Stability) -> wit_types::FileAttrs {
         wit_types::FileAttrs {
             size,
-            bytes,
             stability,
             version_token: None,
         }
     }
 
-    fn deferred_exact(size: u64) -> wit_types::FileAttrs {
-        attrs(
+    fn file_proj(
+        size: wit_types::FileSize,
+        bytes: wit_types::ProjBytes,
+        stability: wit_types::Stability,
+    ) -> wit_types::FileProj {
+        wit_types::FileProj {
+            attrs: attrs(size, stability),
+            bytes,
+        }
+    }
+
+    fn deferred_exact(size: u64) -> wit_types::FileProj {
+        file_proj(
             wit_types::FileSize::Exact(size),
-            wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
+            wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full),
             wit_types::Stability::Immutable,
         )
     }
 
     #[test]
-    fn rejects_invalid_inline_attrs_in_entries() {
-        let terminal =
-            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+    fn rejects_invalid_inline_projection_in_entries() {
+        let result = wit_types::OperationResult::ListChildren(
+            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "bad".to_string(),
-                    kind: wit_types::EntryKind::File(attrs(
+                    kind: wit_types::EntryKind::File(file_proj(
                         wit_types::FileSize::Unknown,
-                        wit_types::FileBytes::Inline(b"bad".to_vec()),
+                        wit_types::ProjBytes::Inline(b"bad".to_vec()),
                         wit_types::Stability::Immutable,
                     )),
                 }],
                 exhaustive: true,
-                preload: Vec::new(),
-            }));
+            }),
+        );
 
-        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("inline bytes require Size::Exact"));
     }
 
     #[test]
     fn rejects_volatile_non_ranged_attrs() {
-        let terminal =
-            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+        let result = wit_types::OperationResult::ListChildren(
+            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "tail".to_string(),
-                    kind: wit_types::EntryKind::File(attrs(
+                    kind: wit_types::EntryKind::File(file_proj(
                         wit_types::FileSize::Unknown,
-                        wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
+                        wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full),
                         wit_types::Stability::Volatile,
                     )),
                 }],
                 exhaustive: true,
-                preload: Vec::new(),
-            }));
+            }),
+        );
 
-        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("Stability::Volatile requires"));
     }
 
     #[test]
-    fn rejects_bad_preload_size_and_aggregate_eager_cap() {
-        let bad_size =
-            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
-                entries: Vec::new(),
-                exhaustive: true,
-                preload: vec![wit_types::PreloadItem::File(wit_types::PreloadedFile {
-                    path: "bad".to_string(),
-                    attrs: deferred_exact(4),
-                    content: b"toolong".to_vec(),
-                })],
-            }));
-        let error = validate_terminal_attrs(&bad_size).unwrap_err();
-        assert!(error.contains("declares exact size 4"));
+    fn rejects_bad_project_effect_size_and_aggregate_eager_cap() {
+        let mut bad_size_file = deferred_exact(4);
+        bad_size_file.bytes = wit_types::ProjBytes::Inline(b"toolong".to_vec());
+        let bad_size = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::OnEvent,
+            effects: vec![wit_types::Effect::Project(wit_types::ProjEntry {
+                path: "bad".to_string(),
+                kind: wit_types::EntryKind::File(bad_size_file),
+            })],
+        };
+        let error = validate_provider_return(&bad_size, None).unwrap_err();
+        assert!(error.contains("declares size 4"));
 
-        let too_large =
-            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
-                entries: Vec::new(),
-                exhaustive: true,
-                preload: vec![wit_types::PreloadItem::File(wit_types::PreloadedFile {
-                    path: "large".to_string(),
-                    attrs: deferred_exact((cache::MAX_EAGER_RESPONSE_BYTES + 1) as u64),
-                    content: vec![0; cache::MAX_EAGER_RESPONSE_BYTES + 1],
-                })],
-            }));
-        let error = validate_terminal_attrs(&too_large).unwrap_err();
+        let too_large = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::OnEvent,
+            effects: (0..9)
+                .map(|index| {
+                    let bytes = vec![0; cache::MAX_PROJECTED_BYTES];
+                    wit_types::Effect::Project(wit_types::ProjEntry {
+                        path: format!("large-{index}"),
+                        kind: wit_types::EntryKind::File(wit_types::FileProj {
+                            attrs: attrs(
+                                wit_types::FileSize::Exact(bytes.len() as u64),
+                                wit_types::Stability::Immutable,
+                            ),
+                            bytes: wit_types::ProjBytes::Inline(bytes),
+                        }),
+                    })
+                })
+                .collect(),
+        };
+        let error = validate_provider_return(&too_large, None).unwrap_err();
         assert!(error.contains("aggregate eager byte limit"));
     }
 
     #[test]
     fn rejects_read_content_that_violates_declared_size() {
-        let terminal = wit_types::OpResult::Read(wit_types::FileContentResult::Inline(
-            wit_types::InlineFileContent {
-                attrs: attrs(
-                    wit_types::FileSize::NonZero,
-                    wit_types::FileBytes::Deferred(wit_types::ReadMode::Full),
-                    wit_types::Stability::Immutable,
-                ),
-                content: Vec::new(),
-                sibling_files: Vec::new(),
-            },
-        ));
+        let result = wit_types::OperationResult::ReadFile(wit_types::ReadFileResult {
+            attrs: attrs(
+                wit_types::FileSize::NonZero,
+                wit_types::Stability::Immutable,
+            ),
+            bytes: wit_types::ReadFileBytes::Inline(Vec::new()),
+        });
 
-        let error = validate_terminal_attrs(&terminal).unwrap_err();
-        assert!(error.contains("read result"));
+        let error = validate_operation_result(&result).unwrap_err();
+        assert!(error.contains("read-file result"));
         assert!(error.contains("Size::NonZero"));
     }
 
     #[test]
     fn rejects_empty_version_tokens() {
-        let mut file_attrs = deferred_exact(1);
-        file_attrs.version_token = Some(String::new());
-        let terminal =
-            wit_types::OpResult::List(wit_types::ListResult::Entries(wit_types::DirListing {
+        let mut file = deferred_exact(1);
+        file.attrs.version_token = Some(String::new());
+        let result = wit_types::OperationResult::ListChildren(
+            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "versioned".to_string(),
-                    kind: wit_types::EntryKind::File(file_attrs),
+                    kind: wit_types::EntryKind::File(file),
                 }],
                 exhaustive: true,
-                preload: Vec::new(),
-            }));
+            }),
+        );
 
-        let error = validate_terminal_attrs(&terminal).unwrap_err();
+        let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("version token must not be empty"));
+    }
+
+    #[test]
+    fn subtree_results_require_matching_disown_effect() {
+        let missing = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(
+                7,
+            )),
+            effects: Vec::new(),
+        };
+        let error = validate_provider_return(&missing, Some("checkout")).unwrap_err();
+        assert!(error.contains("requires exactly one matching disown-tree effect"));
+
+        let valid = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(
+                7,
+            )),
+            effects: vec![wit_types::Effect::DisownTree(wit_types::TreeHandoff {
+                path: "checkout".to_string(),
+                tree: 7,
+            })],
+        };
+        validate_provider_return(&valid, Some("checkout")).unwrap();
+
+        let error = validate_provider_return(&valid, Some("other")).unwrap_err();
+        assert!(error.contains("requires disown-tree path"));
+
+        let orphan = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::OnEvent,
+            effects: vec![wit_types::Effect::DisownTree(wit_types::TreeHandoff {
+                path: "checkout".to_string(),
+                tree: 7,
+            })],
+        };
+        let error = validate_provider_return(&orphan, None).unwrap_err();
+        assert!(error.contains("require a subtree result"));
+    }
+
+    #[test]
+    fn error_returns_reject_effects() {
+        let ret = wit_types::ProviderReturn {
+            result: wit_types::OperationResult::Error(wit_types::ProviderError {
+                kind: wit_types::ErrorKind::Internal,
+                message: "failed".to_string(),
+                retryable: false,
+            }),
+            effects: vec![wit_types::Effect::InvalidatePath("x".to_string())],
+        };
+
+        let error = validate_provider_return(&ret, None).unwrap_err();
+        assert!(error.contains("error returns must not carry effects"));
     }
 }
 
@@ -1037,11 +1078,22 @@ fn validate_instance_config(
     }
 }
 
+impl From<&wit_types::FileProj> for cache::FileAttrsCache {
+    fn from(file: &wit_types::FileProj) -> Self {
+        Self {
+            size: SizeCache::from(&file.attrs.size),
+            bytes: cache::BytesCache::from(&file.bytes),
+            stability: cache::StabilityCache::from(file.attrs.stability),
+            version_token: file.attrs.version_token.clone(),
+        }
+    }
+}
+
 impl From<&wit_types::FileAttrs> for cache::FileAttrsCache {
     fn from(attrs: &wit_types::FileAttrs) -> Self {
         Self {
             size: SizeCache::from(&attrs.size),
-            bytes: cache::BytesCache::from(&attrs.bytes),
+            bytes: cache::BytesCache::Deferred(cache::ReadModeCache::Full),
             stability: cache::StabilityCache::from(attrs.stability),
             version_token: attrs.version_token.clone(),
         }
@@ -1058,11 +1110,11 @@ impl From<&wit_types::FileSize> for SizeCache {
     }
 }
 
-impl From<&wit_types::FileBytes> for cache::BytesCache {
-    fn from(bytes: &wit_types::FileBytes) -> Self {
+impl From<&wit_types::ProjBytes> for cache::BytesCache {
+    fn from(bytes: &wit_types::ProjBytes) -> Self {
         match bytes {
-            wit_types::FileBytes::Inline(bytes) => Self::Inline(bytes.clone()),
-            wit_types::FileBytes::Deferred(mode) => {
+            wit_types::ProjBytes::Inline(bytes) => Self::Inline(bytes.clone()),
+            wit_types::ProjBytes::Deferred(mode) => {
                 Self::Deferred(cache::ReadModeCache::from(*mode))
             },
         }
@@ -1092,7 +1144,7 @@ impl From<&wit_types::EntryKind> for EntryMeta {
     fn from(kind: &wit_types::EntryKind) -> Self {
         match kind {
             wit_types::EntryKind::Directory => Self::directory(),
-            wit_types::EntryKind::File(attrs) => Self::file(cache::FileAttrsCache::from(attrs)),
+            wit_types::EntryKind::File(file) => Self::file(cache::FileAttrsCache::from(file)),
         }
     }
 }

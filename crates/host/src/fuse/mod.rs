@@ -13,7 +13,8 @@ use crate::cache::{
 };
 use crate::cache::{FileAttrsCache, Key};
 use crate::omnifs::provider::types::{
-    ErrorKind, FileContentResult, ListResult, LookupResult, OpResult, ProviderError,
+    ErrorKind, ListChildrenResult, LookupChildResult, OperationResult, ProviderError,
+    ReadFileBytes, ReadFileResult,
 };
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
@@ -350,6 +351,7 @@ impl FuseFs {
         name_str: &str,
     ) -> Result<Option<(FileAttr, Duration)>, Errno> {
         let child_path = join_child_path(parent_path, name_str);
+        self.drain_and_evict_pending(mount_name);
 
         // Dirents-implied negative: if parent dirents are cached and
         // exhaustive, trust the cache.
@@ -425,7 +427,7 @@ impl FuseFs {
             .rt
             .block_on(runtime.call_lookup_child(parent_path, name_str))
         {
-            Ok(OpResult::Lookup(LookupResult::Subtree(tree_ref))) => {
+            Ok(OperationResult::LookupChild(LookupChildResult::Subtree(tree_ref))) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -438,12 +440,11 @@ impl FuseFs {
                 );
                 Ok((self.dir_attr(ino), TTL))
             },
-            Ok(OpResult::Lookup(LookupResult::Entry(entry))) => {
+            Ok(OperationResult::LookupChild(LookupChildResult::Entry(entry))) => {
                 debug!(
                     target: "omnifs_lookup",
                     path = child_path,
                     siblings_count = entry.siblings.len(),
-                    sibling_files_count = entry.sibling_files.len(),
                     "received Lookup entry"
                 );
 
@@ -460,7 +461,7 @@ impl FuseFs {
                 }
                 Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
             },
-            Ok(OpResult::Lookup(LookupResult::NotFound)) => {
+            Ok(OperationResult::LookupChild(LookupChildResult::NotFound)) => {
                 let neg = cache::LookupPayload::Negative;
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
@@ -469,7 +470,7 @@ impl FuseFs {
                 }
                 Err(Errno::ENOENT)
             },
-            Ok(OpResult::Err(error)) => {
+            Ok(OperationResult::Error(error)) => {
                 warn!(
                     path = child_path,
                     kind = ?error.kind,
@@ -565,6 +566,8 @@ impl FuseFs {
         _ino: u64,
         path: &str,
     ) -> Result<Option<DirSnapshot>, Errno> {
+        self.drain_and_evict_pending(mount_name);
+
         // Only serve readdir from cache when the Dirents record was
         // marked exhaustive. Non-exhaustive records represent a partial
         // prefetched snapshot (e.g., from a Lookup that merged route-
@@ -598,9 +601,8 @@ impl FuseFs {
 
     /// List directory entries through the provider and cache the result.
     ///
-    /// Subtree handoff folds into the `List(ListResult::Subtree(..))`
-    /// variant returned from the provider; there is no separate
-    /// materialize step.
+    /// Subtree handoff folds into the `ListChildrenResult::Subtree(..)`
+    /// variant returned from the provider.
     fn opendir_via_provider(
         &self,
         runtime: &Arc<CalloutRuntime>,
@@ -609,7 +611,7 @@ impl FuseFs {
         path: &str,
     ) -> Result<DirSnapshot, Errno> {
         match self.rt.block_on(runtime.call_list_children(path)) {
-            Ok(OpResult::List(ListResult::Subtree(tree_ref))) => {
+            Ok(OperationResult::ListChildren(ListChildrenResult::Subtree(tree_ref))) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -620,7 +622,7 @@ impl FuseFs {
                 }
                 self.snapshot_from_fs(mount_name, path, &real_root)
             },
-            Ok(OpResult::List(ListResult::Entries(listing))) => {
+            Ok(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
                 let dir_entries = &listing.entries;
                 let mut snapshot = Vec::with_capacity(dir_entries.len());
                 let mut dirent_records = Vec::with_capacity(dir_entries.len());
@@ -650,7 +652,7 @@ impl FuseFs {
                 }
                 Ok(snapshot)
             },
-            Ok(OpResult::Err(error)) => {
+            Ok(OperationResult::Error(error)) => {
                 warn!(
                     path,
                     kind = ?error.kind,
@@ -696,7 +698,7 @@ impl FuseFs {
             .rt
             .block_on(runtime.call_read_chunk(ranged.provider_handle, offset, size))
         {
-            Ok(OpResult::ReadChunk(chunk)) => {
+            Ok(OperationResult::ReadChunk(chunk)) => {
                 if chunk.content.len() > size as usize {
                     warn!(
                         path = ranged.path.as_str(),
@@ -730,7 +732,7 @@ impl FuseFs {
                 }
                 reply.data(&chunk.content);
             },
-            Ok(OpResult::Err(error)) => {
+            Ok(OperationResult::Error(error)) => {
                 warn!(
                     path = ranged.path.as_str(),
                     kind = ?error.kind,
@@ -772,6 +774,8 @@ impl FuseFs {
             attrs: inode_entry.attrs.clone(),
         };
         drop(inode_entry);
+
+        self.drain_and_evict_pending(&target.mount_name);
 
         if let Some(attrs) = target.attrs.as_ref()
             && matches!(attrs.size, SizeCache::Exact(0))
@@ -845,10 +849,10 @@ impl FuseFs {
         debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OpResult::Read(result)) => {
+            Ok(OperationResult::ReadFile(result)) => {
                 self.finish_full_read(&target, &runtime, offset, size, result, reply);
             },
-            Ok(OpResult::Err(error)) => {
+            Ok(OperationResult::Error(error)) => {
                 warn!(
                     path = target.path.as_str(),
                     kind = ?error.kind,
@@ -875,12 +879,10 @@ impl FuseFs {
         runtime: &CalloutRuntime,
         offset: u64,
         size: u32,
-        result: FileContentResult,
+        result: ReadFileResult,
         reply: ReplyData,
     ) {
-        let Some((data, result_attrs, sibling_count)) =
-            resolve_read_payload(runtime, &target.path, result)
-        else {
+        let Some((data, result_attrs)) = resolve_read_payload(runtime, &target.path, result) else {
             reply.error(Errno::EIO);
             return;
         };
@@ -888,7 +890,6 @@ impl FuseFs {
             target: "omnifs_read",
             path = target.path.as_str(),
             content_len = data.len(),
-            sibling_files_count = sibling_count,
             "received Read result"
         );
         let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
@@ -949,14 +950,9 @@ impl FuseFs {
             return Err(Errno::ENOENT);
         };
         match self.rt.block_on(runtime.call_open_file(&target.path)) {
-            Ok(OpResult::OpenFile(opened)) => {
-                let opened_attrs = FileAttrsCache::from(&opened.attrs);
-                if !matches!(
-                    &opened_attrs.bytes,
-                    BytesCache::Deferred(ReadModeCache::Ranged)
-                ) {
-                    return Err(Errno::EIO);
-                }
+            Ok(OperationResult::OpenFile(opened)) => {
+                let opened_attrs =
+                    opened_file_attrs(&target.path, target.attrs.as_ref(), &opened.attrs)?;
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
                 self.ranged_handles.insert(
                     target.fh,
@@ -969,7 +965,7 @@ impl FuseFs {
                 );
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(OperationResult::Error(error)) => Err(provider_errno(&error)),
             Ok(other) => {
                 warn!(
                     path = target.path.as_str(),
@@ -1007,8 +1003,8 @@ impl FuseFs {
         };
         self.drain_and_evict_pending(&target.mount_name);
         match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OpResult::Read(result)) => {
-                let Some((data, result_attrs, _sibling_count)) =
+            Ok(OperationResult::ReadFile(result)) => {
+                let Some((data, result_attrs)) =
                     resolve_read_payload(&runtime, &target.path, result)
                 else {
                     return Err(Errno::EIO);
@@ -1033,7 +1029,7 @@ impl FuseFs {
                 self.file_cache.insert(target.fh, data);
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OpResult::Err(error)) => Err(provider_errno(&error)),
+            Ok(OperationResult::Error(error)) => Err(provider_errno(&error)),
             Ok(other) => {
                 warn!(
                     path = target.path.as_str(),
@@ -1434,19 +1430,13 @@ impl Filesystem for FuseFs {
 fn resolve_read_payload(
     runtime: &CalloutRuntime,
     path: &str,
-    result: FileContentResult,
-) -> Option<(Vec<u8>, FileAttrsCache, usize)> {
-    match result {
-        FileContentResult::Inline(inline) => {
-            let count = inline.sibling_files.len();
-            Some((inline.content, FileAttrsCache::from(&inline.attrs), count))
-        },
-        FileContentResult::Blob(blob) => match runtime.read_blob_full(blob.blob) {
-            Ok(bytes) => Some((
-                bytes,
-                FileAttrsCache::from(&blob.attrs),
-                blob.sibling_files.len(),
-            )),
+    result: ReadFileResult,
+) -> Option<(Vec<u8>, FileAttrsCache)> {
+    let attrs = FileAttrsCache::from(&result.attrs);
+    match result.bytes {
+        ReadFileBytes::Inline(bytes) => Some((bytes, attrs)),
+        ReadFileBytes::Blob(blob) => match runtime.read_blob_full(blob) {
+            Ok(bytes) => Some((bytes, attrs)),
             Err(e) => {
                 warn!(path, error = %e, "blob-backed read failed");
                 None
@@ -1489,6 +1479,33 @@ fn learned_ranged_eof_attrs(attrs: FileAttrsCache, eof_size: u64) -> Option<File
         SizeCache::Exact(_) => None,
         SizeCache::NonZero | SizeCache::Unknown => Some(attrs.with_exact_size(eof_size)),
     }
+}
+
+fn opened_file_attrs(
+    path: &str,
+    projected: Option<&FileAttrsCache>,
+    opened: &crate::omnifs::provider::types::FileAttrs,
+) -> Result<FileAttrsCache, Errno> {
+    let Some(projected) = projected else {
+        warn!(
+            path,
+            "open-file returned without a prior ranged file projection"
+        );
+        return Err(Errno::EIO);
+    };
+    if !matches!(projected.bytes, BytesCache::Deferred(ReadModeCache::Ranged)) {
+        warn!(
+            path,
+            "open-file requires proj-bytes::deferred(read-mode::ranged)"
+        );
+        return Err(Errno::EIO);
+    }
+    Ok(FileAttrsCache {
+        size: SizeCache::from(&opened.size),
+        bytes: projected.bytes.clone(),
+        stability: cache::StabilityCache::from(opened.stability),
+        version_token: opened.version_token.clone(),
+    })
 }
 
 fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {

@@ -17,7 +17,7 @@
   search/{query}/
 ```
 
-`{id}` accepts both the modern `2401.12345` and legacy `cs.LG/0512345` formats. `versions/v{n}/` re-projects the paper subtree at a specific version.
+`{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; `versions/v{n}/` re-projects the paper subtree at a specific version.
 
 ## Capabilities
 

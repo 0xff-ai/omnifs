@@ -281,10 +281,6 @@ record initialize-result {
     info: provider-info,
 }
 
-/// No-data result for event handling. Kept as a named alias so the operation
-/// arm still carries its matching result type without inventing fields.
-type on-event-result = tuple<>;
-
 record plan-mutations-result {
     mutations: list<planned-mutation>,
 }
@@ -306,7 +302,7 @@ variant operation-result {
     open-file(open-file-result),
     read-chunk(read-chunk-result),
     initialize(initialize-result),
-    on-event(on-event-result),
+    on-event,
     /// Cross-operation failure. Do not add `error-result`: future failure
     /// modes extend `provider-error`.
     error(provider-error),
@@ -408,6 +404,9 @@ interface continuation {
   Ranged deferred files use `open-file` plus `read-chunk`; inline projected
   files should be served from the projection cache without calling the
   provider.
+- `open-file` requires the path to have been projected earlier as
+  `proj-bytes::deferred(read-mode::ranged)`. The open result refreshes
+  metadata and returns a handle; it does not declare read mode.
 
 ## Shape shifts
 
@@ -462,7 +461,7 @@ interface continuation {
 | `ack` callout-result arm | removed | No fire-and-forget callouts remain. |
 | `not-materialized` action-result arm | `lookup-child-result::not-found` | Fold into owner operation. |
 | `disowned-tree(tree-ref)` action-result arm | `lookup-child-result::subtree`, `list-children-result::subtree`, plus matching `effect::disown-tree(tree-handoff)` | Result says what the path is; effect says what host state changes. |
-| `ok` action-result arm | `on-event(on-event-result)` | Event handling can complete with no effects. |
+| `ok` action-result arm | `on-event` | Event handling can complete with no effects. |
 | `browse.materialize` method | removed | Folds into `lookup-child` and `list-children`. |
 | `mutations-planned(...)` action-result arm | `plan-mutations(plan-mutations-result)` | Arm and result type match the operation. |
 | `mutation-executed(mutation-outcome)` action-result arm | `execute(execute-result)` | Arm and result type match the operation. |
@@ -499,7 +498,8 @@ pub struct Effects {
 
 impl Effects {
     pub fn new() -> Self;
-    pub fn project(&mut self, path: impl Into<String>, kind: EntryKind) -> &mut Self;
+    pub fn project_dir(&mut self, path: impl Into<String>) -> Result<&mut Self>;
+    pub fn project_file(&mut self, path: impl Into<String>, file: FileProj) -> Result<&mut Self>;
     pub fn invalidate_path(&mut self, path: impl Into<String>) -> &mut Self;
     pub fn invalidate_prefix(&mut self, prefix: impl Into<String>) -> &mut Self;
 
@@ -521,20 +521,16 @@ when the answer is accepted:
 
 ```rust
 impl Projection {
-    pub fn proj(
-        &mut self,
-        path: impl Into<String>,
-        kind: BrowseEntryKind,
-    );
-
+    pub fn proj(&mut self, path: impl Into<String>, content: impl Into<Vec<u8>>);
+    pub fn proj_dir(&mut self, path: impl Into<String>);
     pub fn proj_file(&mut self, path: impl Into<String>, file: FileProj);
 }
 ```
 
-`projection.preload(...)` and `projection.preload_many(...)` become
-`projection.proj_file(...)` calls using `ProjBytes::Inline`. The name now
-matches the data type: the provider is asking the host to install a projected
-file after the completed operation answer is accepted.
+Old preload helpers become `projection.proj(...)` for inline bytes or
+`projection.proj_file(...)` for an explicit `FileProj`. The name now matches
+the data type: the provider is asking the host to install a projection after
+the completed operation answer is accepted.
 
 ### `FileContent` can carry effects
 
@@ -542,8 +538,9 @@ file after the completed operation answer is accepted.
 uses the same effect channel:
 
 ```rust
-FileContent::bytes(bytes)
-    .with_effect(Effect::project(path, EntryKind::file(file_proj)))
+let mut effects = Effects::new();
+effects.project_file(path, file_proj)?;
+FileContent::new(bytes).with_effects(effects)
 ```
 
 The host no longer needs separate sibling-file plumbing for read terminals.
@@ -568,7 +565,7 @@ The macro wraps this as:
 
 ```rust
 ProviderStep::returned(ProviderReturn {
-    result: OperationResult::OnEvent(()),
+    result: OperationResult::OnEvent,
     effects: effects.into_wit(),
 })
 ```
@@ -598,8 +595,8 @@ internal yield/resume mechanics are unchanged, but the outer type now returns
 
 ### Provider call sites
 
-- `cx.preload_paths(...)` -> `projection.proj_file(...)` or
-  `effects.project(...)`.
+- Old preload helpers -> `projection.proj(...)`, `projection.proj_file(...)`,
+  or `effects.project_file(...)`.
 - `cx.invalidate_path(...)` / `cx.invalidate_prefix(...)` ->
   `effects.invalidate_path(...)` / `effects.invalidate_prefix(...)`.
 - `ProviderResponse::terminal(ActionResult::Ok)` in `on-event` ->
@@ -730,8 +727,7 @@ errors before FUSE receives data.
   `ProviderStep::Returned`.
 - `crates/omnifs-sdk-macros/tests/path_first_provider.rs`: subtree tests
   exercise `lookup-child` and `list-children`; no test calls `materialize`.
-- `on-event` tests assert invalidation effects, not fields on
-  `on-event-result`.
+- `on-event` tests assert invalidation effects, not result fields.
 - Projection tests assert `project` effects, not `preload` or `sibling-files`.
 
 ## Migration
@@ -761,8 +757,8 @@ Wasm artifacts after regenerating bindings.
 - **`lookup-child-result::not-found` drops siblings.** A not-found result is bare.
   If a future use case needs "target missing but here is parent context," add a
   dedicated result arm instead of smuggling cache updates through the miss.
-- **`on-event-result` is intentionally no-data.** Event completion is the
-  result; invalidation, projection, or no-op behavior belongs in `effects`.
+- **`on-event` is intentionally no-data.** Event completion is the result;
+  invalidation, projection, or no-op behavior belongs in `effects`.
 - **Effects on `error`.** `provider-return.result = error(...)` must carry no
   effects. Errors fail the operation and cannot commit host mutations.
 - **Project versus list.** A listing result says what immediate children the
@@ -866,8 +862,7 @@ Update `crates/omnifs-sdk-macros/src/provider_macro.rs` and related macro tests:
   `operation-result` arms after `continuation.resume`.
 - Stop generating `materialize`.
 - Generate `continuation` instead of `resume` exports.
-- Wrap `on-event` as `operation-result::on-event(on-event-result)` plus
-  effects.
+- Wrap `on-event` as `operation-result::on-event` plus effects.
 
 Validation gate:
 

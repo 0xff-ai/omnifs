@@ -6,18 +6,27 @@
 
 ```
 /github/{owner}/{repo}/
-  issues/{number}/
+  _issues/{open|all}/{number}/
     title
     body
     state
-    comments/{n}.md
-  pulls/{number}/
-    ... + diff, files/, checks/
-  actions/runs/{id}/
-  src/  ← bind-mounted clone (lazily cloned via SSH)
+    user
+    comments/{n}
+  _prs/{open|all}/{number}/
+    title
+    body
+    state
+    user
+    diff
+    comments/{n}
+  _actions/runs/{id}/
+    status
+    conclusion
+    log
+  _repo/  ← bind-mounted clone, lazily cloned via SSH
 ```
 
-Hybrid pagination across issues + PRs and cross-listing PR preload keep listings responsive without exhausting GitHub's API budget.
+Hybrid pagination across issues + PRs and cross-listing PR projection keep listings responsive without exhausting GitHub's API budget.
 
 ## Capabilities
 

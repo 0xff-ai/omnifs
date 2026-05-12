@@ -37,10 +37,10 @@ impl GithubProvider {
         }
     }
 
-    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<EventOutcome> {
+    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects> {
         match event {
             ProviderEvent::TimerTick(_) => timer_tick(cx).await,
-            _ => Ok(EventOutcome::new()),
+            _ => Ok(Effects::new()),
         }
     }
 }

@@ -59,7 +59,7 @@ impl GitExecutor {
     }
 
     /// Look up the local filesystem path for a `repo-id`.
-    /// Used by the runtime to resolve `subtree` op-results.
+    /// Used by the runtime to resolve `subtree` operation results.
     pub fn repo_path(&self, repo_id: u64) -> Option<PathBuf> {
         self.trees.resolve(repo_id)
     }

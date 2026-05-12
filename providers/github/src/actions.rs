@@ -34,10 +34,13 @@ impl ActionHandlers {
 
         for run in runs.workflow_runs {
             let run_prefix = format!("{repo_id}/_actions/runs/{}", run.id);
-            projection.preload(format!("{run_prefix}/status"), run.status);
-            projection.preload(
+            projection.proj_file(
+                format!("{run_prefix}/status"),
+                FileProj::inline(run.status, Stability::Mutable, None),
+            );
+            projection.proj_file(
                 format!("{run_prefix}/conclusion"),
-                run.conclusion.unwrap_or_default(),
+                FileProj::inline(run.conclusion.unwrap_or_default(), Stability::Mutable, None),
             );
             projection.dir(run.id.to_string());
         }
@@ -57,8 +60,17 @@ impl ActionHandlers {
             .github_json(format!("/repos/{repo_id}/actions/runs/{run_id}"))
             .await?;
         let mut projection = Projection::new();
-        projection.file_with_content("status", run.status);
-        projection.file_with_content("conclusion", run.conclusion.unwrap_or_default());
+        projection.file_with_content_attrs("status", run.status, Stability::Mutable, None);
+        projection.file_with_content_attrs(
+            "conclusion",
+            run.conclusion.unwrap_or_default(),
+            Stability::Mutable,
+            None,
+        );
+        projection.file(
+            "log",
+            FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Mutable),
+        );
         if matches!(
             cx.intent(),
             DirIntent::Lookup { .. } | DirIntent::List { .. }
@@ -81,7 +93,10 @@ impl ActionHandlers {
             .send()
             .await?;
         let body = github_check_status(resp)?.into_body();
-        Ok(FileContent::bytes(unzip_logs(&body)))
+        Ok(FileContent::bytes_with_attrs(
+            FileAttrs::new(Size::Unknown, Stability::Mutable),
+            unzip_logs(&body),
+        ))
     }
 }
 

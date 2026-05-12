@@ -34,16 +34,16 @@ mod hello_handlers {
         projection.deferred_file("projected");
         projection.file(
             "ranged",
-            FileAttrs::deferred(Size::Exact(26), ReadMode::Ranged, Stability::Mutable)
+            FileProj::deferred(Size::Exact(26), ReadMode::Ranged, Stability::Mutable)
                 .with_version("alphabet-v1"),
         );
         projection.file(
             "unknown-ranged",
-            FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Immutable),
+            FileProj::deferred(Size::Unknown, ReadMode::Ranged, Stability::Immutable),
         );
         projection.file(
             "volatile-tail",
-            FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Volatile),
+            FileProj::deferred(Size::Unknown, ReadMode::Ranged, Stability::Volatile),
         );
         projection.page(PageStatus::Exhaustive);
         projection
@@ -59,7 +59,7 @@ mod hello_handlers {
                 projection.file_with_content("body", b"body\n");
                 projection.file_with_content("state", b"open\n");
             },
-            _ => return Err(ProviderError::not_found("projected file not found")),
+            _ => return Err(ProviderError::not_found("file not found")),
         }
         Ok(projection)
     }
@@ -72,15 +72,15 @@ mod hello_handlers {
         #[allow(clippy::needless_pass_by_value, clippy::unused_async)]
         async fn hello(cx: &DirCx<State>) -> Result<Projection> {
             match cx.intent() {
-                DirIntent::ReadProjectedFile { name } => match name.as_str() {
+                DirIntent::ReadFile { name } => match name.as_str() {
                     "message" | "greeting" | "projected" => projected_file(name),
-                    _ => Err(ProviderError::not_found("projected file not found")),
+                    _ => Err(ProviderError::not_found("file not found")),
                 },
                 DirIntent::Lookup { .. } => Ok(hello_listing()),
                 DirIntent::List { .. } => {
                     let mut projection = hello_listing();
-                    projection.preload_dir("hello/bundle");
-                    projection.preload_many([
+                    projection.proj_dir("hello/bundle");
+                    projection.proj_many([
                         ("hello/bundle/title", b"title".to_vec()),
                         ("hello/bundle/body", b"body".to_vec()),
                         ("hello/bundle/empty", Vec::new()),
@@ -98,8 +98,7 @@ mod hello_handlers {
         #[file("/hello/ranged")]
         fn ranged() -> Result<FileContent> {
             Ok(FileContent::range_bytes(
-                FileAttrs::deferred(Size::Exact(26), ReadMode::Ranged, Stability::Mutable)
-                    .with_version("alphabet-v1"),
+                FileAttrs::new(Size::Exact(26), Stability::Mutable).with_version("alphabet-v1"),
                 b"abcdefghijklmnopqrstuvwxyz".to_vec(),
             ))
         }
@@ -107,7 +106,7 @@ mod hello_handlers {
         #[file("/hello/unknown-ranged")]
         fn unknown_ranged() -> Result<FileContent> {
             Ok(FileContent::range_bytes(
-                FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Immutable),
+                FileAttrs::new(Size::Unknown, Stability::Immutable),
                 b"unknown-size\n".to_vec(),
             ))
         }
@@ -115,7 +114,7 @@ mod hello_handlers {
         #[file("/hello/volatile-tail")]
         fn volatile_tail() -> Result<FileContent> {
             Ok(FileContent::ranged(
-                FileAttrs::deferred(Size::Unknown, ReadMode::Ranged, Stability::Volatile),
+                FileAttrs::new(Size::Unknown, Stability::Volatile),
                 LiveTailReader,
             ))
         }
@@ -226,16 +225,16 @@ impl TestProvider {
     }
 
     #[allow(clippy::unused_async)]
-    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<EventOutcome> {
+    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects> {
         let ProviderEvent::TimerTick(_) = event else {
-            return Ok(EventOutcome::new());
+            return Ok(Effects::new());
         };
-        let mut outcome = EventOutcome::new();
+        let mut effects = Effects::new();
         for path in cx.active_paths(crate::scoped_handlers::ScopedPath::MOUNT_ID, |path| {
             Some(path.to_string())
         }) {
-            outcome.invalidate_path(format!("{path}/item"));
+            effects.invalidate_path(format!("{path}/item"));
         }
-        Ok(outcome)
+        Ok(effects)
     }
 }

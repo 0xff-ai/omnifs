@@ -9,12 +9,12 @@ use crate::{Result, State};
 pub(crate) async fn project_paper_dir(cx: &Cx<State>, paper: &PaperKey) -> Result<Projection> {
     // `paper.pdf`, `source.tar.gz`, `links.json`, and `versions` are
     // auto-derived from sibling `#[file]`/`#[dir]` handlers in each
-    // scope module; we only project `metadata.json` here and preload
-    // `links.json` bytes for fast first read.
+    // scope module; this handler returns the two eager JSON children
+    // owned by this directory.
     let entry = load_entry(cx, paper).await?;
     let mut p = Projection::new();
     entry.write_metadata_json(&mut p, None);
-    p.preload("links.json", entry.links_json_bytes(None));
+    p.file_with_content("links.json", entry.links_json_bytes(None));
     p.page(PageStatus::Exhaustive);
     Ok(p)
 }
@@ -39,7 +39,7 @@ pub(crate) async fn project_version_dir(
     entry.validate_version(version)?;
     let mut p = Projection::new();
     entry.write_metadata_json(&mut p, Some(version));
-    p.preload("links.json", entry.links_json_bytes(Some(version)));
+    p.file_with_content("links.json", entry.links_json_bytes(Some(version)));
     p.page(PageStatus::Exhaustive);
     Ok(p)
 }

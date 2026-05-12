@@ -12,9 +12,7 @@
 pub mod auth;
 pub mod cache;
 pub mod config;
-#[cfg(target_os = "linux")]
 pub mod fuse;
-#[cfg(target_os = "linux")]
 pub mod mount;
 pub mod path_key;
 pub(crate) mod path_prefix;
@@ -34,29 +32,35 @@ pub(crate) mod extractor_bindings {
     });
 }
 
-impl omnifs::provider::types::ProviderReturn {
-    /// True when the provider needs the host to run the staged callouts
-    /// and call `resume` with their outcomes.
+impl omnifs::provider::types::ProviderStep {
+    /// True when the provider needs the host to run callouts and resume
+    /// the same operation.
     pub fn is_suspended(&self) -> bool {
-        self.terminal.is_none() && !self.callouts.is_empty()
+        matches!(self, Self::Suspended(callouts) if !callouts.is_empty())
     }
 
-    /// Unwrap the terminal result, panicking if the response is still
-    /// suspended. Intended for test assertions.
-    pub fn expect_terminal(self) -> omnifs::provider::types::OpResult {
-        match self.terminal {
-            Some(op) => op,
-            None => panic!("expected terminal, got callouts-only response"),
+    /// Unwrap the terminal result, panicking if the step is suspended.
+    /// Intended for test assertions.
+    pub fn expect_returned(self) -> omnifs::provider::types::ProviderReturn {
+        match self {
+            Self::Returned(ret) => ret,
+            Self::Suspended(_) => panic!("expected returned provider step, got suspended"),
         }
     }
 
-    /// Take the staged callouts, panicking if the response carries a
-    /// terminal. Intended for test assertions.
+    /// Take the staged callouts, panicking if the step is terminal.
+    /// Intended for test assertions.
     pub fn expect_callouts(self) -> Vec<omnifs::provider::types::Callout> {
-        assert!(
-            self.terminal.is_none(),
-            "expected callouts-only response, got terminal"
-        );
-        self.callouts
+        match self {
+            Self::Suspended(callouts) => callouts,
+            Self::Returned(_) => panic!("expected suspended provider step, got returned"),
+        }
+    }
+}
+
+impl omnifs::provider::types::ProviderReturn {
+    /// Unwrap the operation result. Intended for test assertions.
+    pub fn expect_result(self) -> omnifs::provider::types::OperationResult {
+        self.result
     }
 }

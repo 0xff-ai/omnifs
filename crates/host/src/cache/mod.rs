@@ -172,7 +172,7 @@ impl FileAttrsCache {
             }
             if bytes.len() > MAX_PROJECTED_BYTES {
                 return Err(format!(
-                    "projected file exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
+                    "inline projection exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
                 ));
             }
         }
