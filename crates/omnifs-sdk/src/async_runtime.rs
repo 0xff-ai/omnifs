@@ -1,7 +1,7 @@
 use crate::cx::Cx;
 use crate::error::ProviderError;
 use crate::hashbrown::HashMap;
-use crate::prelude::{CalloutResults, OperationResult, ProviderReturn, ProviderStep};
+use crate::prelude::{CalloutResults, OpResult, ProviderReturn, ProviderStep};
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
@@ -60,11 +60,9 @@ impl<S: 'static> AsyncRuntime<S> {
             Poll::Ready(response) => {
                 let callouts = cx.take_yielded_callouts();
                 if !callouts.is_empty() {
-                    return ProviderStep::returned(ProviderReturn::terminal(
-                        OperationResult::from(ProviderError::internal(
-                            "future returned while yielding callouts",
-                        )),
-                    ));
+                    return ProviderStep::returned(ProviderReturn::terminal(OpResult::from(
+                        ProviderError::internal("future returned while yielding callouts"),
+                    )));
                 }
                 ProviderStep::returned(response)
             },
@@ -73,11 +71,9 @@ impl<S: 'static> AsyncRuntime<S> {
                 if callouts.is_empty() {
                     // Stalled guest future with no staged work: cancel and
                     // surface an internal error rather than wedging the host.
-                    return ProviderStep::returned(ProviderReturn::terminal(
-                        OperationResult::from(ProviderError::internal(
-                            "future polled Pending without yielding callouts",
-                        )),
-                    ));
+                    return ProviderStep::returned(ProviderReturn::terminal(OpResult::from(
+                        ProviderError::internal("future polled Pending without yielding callouts"),
+                    )));
                 }
                 self.pending.borrow_mut().insert(id, (future, cx));
                 ProviderStep::suspend(callouts)

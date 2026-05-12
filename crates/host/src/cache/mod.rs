@@ -9,7 +9,7 @@
 // v4 adds FileAttrs payloads and version-token auxiliary file cache keys.
 pub const SCHEMA_VERSION: u8 = 4;
 
-pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
+pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 
@@ -170,9 +170,9 @@ impl FileAttrsCache {
                     "inline file declares size {size} but carries {len} bytes"
                 ));
             }
-            if bytes.len() > MAX_PROJECTED_BYTES {
+            if bytes.len() > MAX_INLINE_PROJECTABLE_BYTES {
                 return Err(format!(
-                    "inline projection exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
+                    "inline projection exceeds eager byte limit of {MAX_INLINE_PROJECTABLE_BYTES} bytes"
                 ));
             }
         }

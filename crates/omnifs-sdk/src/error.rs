@@ -1,12 +1,12 @@
 use crate::omnifs::provider::types::{
-    CalloutError, ErrorKind, OperationResult, ProviderError as WitProviderError, ProviderReturn,
+    CalloutError, ErrorKind, OpResult, ProviderError as WitProviderError, ProviderReturn,
 };
 use std::fmt;
 
 /// Provider result type alias used throughout the SDK and generated code.
 pub type Result<T> = core::result::Result<T, ProviderError>;
 
-/// Provider-side error that can be converted into WIT `OperationResult::Error`.
+/// Provider-side error that can be converted into WIT `OpResult::Error`.
 #[derive(Clone, Debug)]
 pub struct ProviderError {
     pub(crate) kind: ProviderErrorKind,
@@ -196,9 +196,9 @@ impl fmt::Display for ProviderError {
     }
 }
 
-impl From<ProviderError> for OperationResult {
+impl From<ProviderError> for OpResult {
     fn from(error: ProviderError) -> Self {
-        OperationResult::Error(WitProviderError {
+        OpResult::Error(WitProviderError {
             kind: error.kind.wit_kind(),
             message: error.message,
             retryable: error.retryable,
@@ -208,7 +208,7 @@ impl From<ProviderError> for OperationResult {
 
 impl From<ProviderError> for ProviderReturn {
     fn from(error: ProviderError) -> Self {
-        ProviderReturn::terminal(OperationResult::from(error))
+        ProviderReturn::terminal(OpResult::from(error))
     }
 }
 

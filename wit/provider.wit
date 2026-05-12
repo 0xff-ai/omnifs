@@ -24,13 +24,13 @@ interface types {
     /// Completed operation answer. This shape cannot carry callouts.
     /// `effects` is the only terminal host-mutation channel.
     record provider-return {
-        %result: operation-result,
+        %result: op-result,
         effects: list<effect>,
     }
 
     /// Completed operation answer. Arm names mirror provider operations;
     /// `error` is the cross-operation failure arm.
-    variant operation-result {
+    variant op-result {
         lookup-child(lookup-child-result),
         list-children(list-children-result),
         read-file(read-file-result),

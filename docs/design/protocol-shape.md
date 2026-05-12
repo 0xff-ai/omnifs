@@ -189,7 +189,7 @@ record dir-entry {
 /// Completed operation answer. This shape cannot carry callouts.
 /// `effects` is the only terminal host-mutation channel in the target WIT.
 record provider-return {
-    result: operation-result,
+    result: op-result,
     effects: list<effect>,
 }
 
@@ -295,7 +295,7 @@ record fetch-resource-result {
 
 /// Completed operation answer. Arm names mirror provider operations; `error`
 /// is the cross-operation failure arm.
-variant operation-result {
+variant op-result {
     lookup-child(lookup-child-result),
     list-children(list-children-result),
     read-file(read-file-result),
@@ -365,7 +365,7 @@ interface continuation {
 - A returned step never carries callouts, trailing or otherwise.
 - `error(provider-error)` must have an empty `effects` list. The host rejects
   errors with host mutations.
-- The `operation-result` arm returned by `continuation.resume(id, results)`
+- The `op-result` arm returned by `continuation.resume(id, results)`
   must match the operation originally suspended under `id`.
 - Only operations with a `correlation-id` may suspend. `initialize` remains
   terminal-only until the WIT deliberately gives it a correlation id and a
@@ -425,9 +425,9 @@ interface continuation {
   `list-children`. Every subtree result must include the matching
   `effect::disown-tree` so the host can commit routing state at the return
   boundary.
-- `action-result` becomes `operation-result`; every non-`error` arm corresponds
+- `action-result` becomes `op-result`; every non-`error` arm corresponds
   to an operation.
-- Every `operation-result` arm carries the matching `<operation>-result` type.
+- Every `op-result` arm carries the matching `<operation>-result` type.
   `error(provider-error)` is the only cross-operation arm.
 - `materialize` deletes. `#[subtree]` handlers dispatch from inside
   `lookup-child` and `list-children`.
@@ -448,7 +448,7 @@ interface continuation {
 | `effect-error` | `callout-error` | Error from host-run callout work. |
 | `effect-results` | `callout-results` | Continuation resume values for suspended callouts. |
 | `resume` interface | `continuation` interface | The interface owns both resume and cancellation of suspended operations. |
-| `action-result` | `operation-result` | The result arm corresponds to the provider operation. |
+| `action-result` | `op-result` | The result arm corresponds to the provider operation. |
 | `file-attrs.bytes` | `file-proj.bytes` | Bytes are projection data, not file metadata. |
 | `projected-entry` / `projected-file` | `proj-entry` / `file-proj` | `proj` is the projection data vocabulary; one `project` effect installs one path. |
 | `dir-entries(dir-listing)` | `list-children(list-children-result::entries(...))` | Arm and result type match the operation. |
@@ -565,7 +565,7 @@ The macro wraps this as:
 
 ```rust
 ProviderStep::returned(ProviderReturn {
-    result: OperationResult::OnEvent,
+    result: OpResult::OnEvent,
     effects: effects.into_wit(),
 })
 ```
@@ -621,7 +621,7 @@ callout path; they are applied once when a provider return is accepted.
 ### Driving provider steps
 
 ```rust
-async fn drive_provider_step(&self, id: u64, mut step: ProviderStep) -> Result<OperationResult> {
+async fn drive_provider_step(&self, id: u64, mut step: ProviderStep) -> Result<OpResult> {
     loop {
         match step {
             ProviderStep::Returned(ret) => {
@@ -810,7 +810,7 @@ Edit `wit/provider.wit` first:
 - Collapse projection mutation into `effect::project(proj-entry)`, rename the
   disown data to `tree-handoff`, and keep invalidation effects as terminal
   host mutations.
-- Replace `action-result` with the symmetric `operation-result` shape.
+- Replace `action-result` with the symmetric `op-result` shape.
 - Rename the `resume` interface to `continuation` and keep `resume` as the
   method that delivers `callout-results`.
 - Keep `initialize` terminal-only. If initialize-time callouts become necessary
@@ -859,10 +859,10 @@ Update `crates/omnifs-sdk-macros/src/provider_macro.rs` and related macro tests:
 - Generate `provider-step::suspended` for callout suspension and
   `provider-step::returned` for completed operation answers.
 - Track each resumable correlation id's originating operation and reject mismatched
-  `operation-result` arms after `continuation.resume`.
+  `op-result` arms after `continuation.resume`.
 - Stop generating `materialize`.
 - Generate `continuation` instead of `resume` exports.
-- Wrap `on-event` as `operation-result::on-event` plus effects.
+- Wrap `on-event` as `op-result::on-event` plus effects.
 
 Validation gate:
 
@@ -935,7 +935,7 @@ just build-providers
 ### Phase 7: Repo-wide cleanup and final validation
 
 Update docs, tests, and repo guidance so `callout`, `return`, `effect`, `proj`,
-and `operation-result` are used consistently.
+and `op-result` are used consistently.
 
 Cleanup is not a separate follow-up phase. During the migration, keep removing
 the old shape as soon as each replacement is in place. At the end, do a

@@ -23,6 +23,6 @@ pub use omnifs_sdk_macros::{
 
 // Curated WIT types that provider authors and generated code actually use.
 pub use crate::omnifs::provider::types::{
-    CalloutResults, FileChange, OperationResult, PlannedMutation, ProviderEvent, ProviderInfo,
+    CalloutResults, FileChange, OpResult, PlannedMutation, ProviderEvent, ProviderInfo,
     ProviderReturn, ProviderStep, RequestedCapabilities,
 };

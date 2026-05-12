@@ -60,7 +60,7 @@ impl omnifs::provider::types::ProviderStep {
 
 impl omnifs::provider::types::ProviderReturn {
     /// Unwrap the operation result. Intended for test assertions.
-    pub fn expect_result(self) -> omnifs::provider::types::OperationResult {
+    pub fn expect_result(self) -> omnifs::provider::types::OpResult {
         self.result
     }
 }

@@ -322,7 +322,7 @@ fn generate_lifecycle_impl(
                     *slot.borrow_mut() = Some(std::rc::Rc::new(core::cell::RefCell::new(state)));
                 });
                 omnifs_sdk::prelude::ProviderReturn::terminal(
-                    omnifs_sdk::prelude::OperationResult::Initialize(
+                    omnifs_sdk::prelude::OpResult::Initialize(
                         omnifs_sdk::omnifs::provider::types::InitializeResult { info }
                     )
                 )
@@ -416,7 +416,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Ok(lookup) => {
                                 let (result, effects) = lookup.into_result_and_effects();
                                 omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OperationResult::LookupChild(result),
+                                    omnifs_sdk::prelude::OpResult::LookupChild(result),
                                     effects,
                                 )
                             },
@@ -444,7 +444,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Ok(list) => {
                                 let (result, effects) = list.into_result_and_effects();
                                 omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OperationResult::ListChildren(result),
+                                    omnifs_sdk::prelude::OpResult::ListChildren(result),
                                     effects,
                                 )
                             },
@@ -472,7 +472,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Ok(file) => {
                                 let (result, effects) = file.into_result_and_effects();
                                 omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OperationResult::ReadFile(result),
+                                    omnifs_sdk::prelude::OpResult::ReadFile(result),
                                     effects,
                                 )
                             },
@@ -528,7 +528,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                                     );
                                 };
                                 omnifs_sdk::prelude::ProviderReturn::terminal(
-                                    omnifs_sdk::prelude::OperationResult::OpenFile(
+                                    omnifs_sdk::prelude::OpResult::OpenFile(
                                         omnifs_sdk::omnifs::provider::types::OpenFileResult {
                                             handle,
                                             attrs: opened.attrs.into(),
@@ -565,7 +565,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                     Box::pin(async move {
                         match reader.read_chunk(offset, length).await {
                             Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                                omnifs_sdk::prelude::OperationResult::ReadChunk(chunk.into())
+                                omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
                             ),
                             Err(error) => omnifs_sdk::prelude::err(error),
                         }
@@ -591,7 +591,7 @@ fn generate_notify_impl(
         quote! {
             match #type_name::on_event(future_cx, event).await {
                 Ok(effects) => omnifs_sdk::prelude::ProviderReturn::with_effects(
-                    omnifs_sdk::prelude::OperationResult::OnEvent,
+                    omnifs_sdk::prelude::OpResult::OnEvent,
                     effects,
                 ),
                 Err(error) => omnifs_sdk::prelude::err(error),
@@ -601,7 +601,7 @@ fn generate_notify_impl(
         quote! {
             let _ = (future_cx, event);
             omnifs_sdk::prelude::ProviderReturn::with_effects(
-                omnifs_sdk::prelude::OperationResult::OnEvent,
+                omnifs_sdk::prelude::OpResult::OnEvent,
                 omnifs_sdk::prelude::Effects::new(),
             )
         }

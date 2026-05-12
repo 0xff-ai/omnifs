@@ -8,7 +8,7 @@ use omnifs_host::cache::{
 };
 use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{
-    EntryKind, FileSize, ListChildrenResult, LookupChildResult, OperationResult, Stability,
+    EntryKind, FileSize, ListChildrenResult, LookupChildResult, OpResult, Stability,
 };
 use omnifs_host::runtime::CalloutRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
@@ -20,7 +20,7 @@ async fn test_initialize() {
     let harness = make_runtime(&engine);
     let result = harness.runtime.initialize().unwrap();
     match result {
-        OperationResult::Initialize(init) => {
+        OpResult::Initialize(init) => {
             assert_eq!(init.info.name, "test-provider");
             assert_eq!(init.info.version, "0.1.0");
         },
@@ -35,7 +35,7 @@ async fn test_list_root() {
     harness.runtime.initialize().unwrap();
     let result = harness.runtime.call_list_children("").await.unwrap();
     match result {
-        OperationResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             assert_eq!(listing.entries.len(), 3);
             let names: Vec<&str> = listing
                 .entries
@@ -63,7 +63,7 @@ async fn test_list_hello_dir() {
     harness.runtime.initialize().unwrap();
     let result = harness.runtime.call_list_children("hello").await.unwrap();
     match result {
-        OperationResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             assert_eq!(listing.entries.len(), 9);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"message"));
@@ -98,7 +98,7 @@ async fn test_list_projects_nested_files_into_cache() {
     assert!(
         matches!(
             result,
-            OperationResult::ListChildren(ListChildrenResult::Entries(_))
+            OpResult::ListChildren(ListChildrenResult::Entries(_))
         ),
         "expected list entries, got {result:?}"
     );
@@ -154,7 +154,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
         .await
         .unwrap();
     assert!(
-        matches!(result, OpResult::List(ListResult::Entries(_))),
+        matches!(result, OpResult::ListChildren(ListChildrenResult::Entries(_))),
         "expected DirEntries, got {result:?}"
     );
 
@@ -197,7 +197,7 @@ async fn test_read_file() {
         .await
         .unwrap();
     match result {
-        OperationResult::ReadFile(file_result) => {
+        OpResult::ReadFile(file_result) => {
             assert_eq!(support::inline_content(&file_result), b"Hello, world!");
         },
         other => panic!("expected File, got {other:?}"),
@@ -205,7 +205,7 @@ async fn test_read_file() {
 
     let exact = harness.runtime.call_read_file("hello/lazy").await.unwrap();
     match exact {
-        OperationResult::ReadFile(file_result) => {
+        OpResult::ReadFile(file_result) => {
             assert_eq!(support::inline_content(&file_result), b"lazy\n");
         },
         other => panic!("expected exact File, got {other:?}"),
@@ -228,7 +228,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 
     let listing = harness.runtime.call_list_children("hello").await.unwrap();
     match listing {
-        OperationResult::ListChildren(ListChildrenResult::Entries(_)) => {},
+        OpResult::ListChildren(ListChildrenResult::Entries(_)) => {},
         other => panic!("expected list entries, got {other:?}"),
     }
 
@@ -238,7 +238,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         .await
         .unwrap();
     match result {
-        OperationResult::ReadFile(file_result) => {
+        OpResult::ReadFile(file_result) => {
             assert_eq!(support::inline_content(&file_result), b"title\n");
         },
         other => panic!("expected File, got {other:?}"),
@@ -302,7 +302,7 @@ async fn test_ranged_open_read_chunk_contract() {
         .call_open_file("hello/ranged")
         .await
         .unwrap();
-    let OperationResult::OpenFile(opened) = open else {
+    let OpResult::OpenFile(opened) = open else {
         panic!("expected OpenFile, got {open:?}");
     };
     assert!(matches!(opened.attrs.size, FileSize::Exact(26)));
@@ -314,7 +314,7 @@ async fn test_ranged_open_read_chunk_contract() {
         .call_read_chunk(opened.handle, 2, 4)
         .await
         .unwrap();
-    let OperationResult::ReadChunk(chunk) = chunk else {
+    let OpResult::ReadChunk(chunk) = chunk else {
         panic!("expected ReadChunk, got {chunk:?}");
     };
     assert_eq!(chunk.content, b"cdef");
@@ -325,7 +325,7 @@ async fn test_ranged_open_read_chunk_contract() {
         .call_read_chunk(opened.handle, 26, 8)
         .await
         .unwrap();
-    let OperationResult::ReadChunk(eof) = eof else {
+    let OpResult::ReadChunk(eof) = eof else {
         panic!("expected ReadChunk EOF, got {eof:?}");
     };
     assert!(eof.content.is_empty());
@@ -353,7 +353,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .call_open_file("hello/unknown-ranged")
         .await
         .unwrap();
-    let OperationResult::OpenFile(opened) = open else {
+    let OpResult::OpenFile(opened) = open else {
         panic!("expected OpenFile, got {open:?}");
     };
     assert!(matches!(opened.attrs.size, FileSize::Unknown));
@@ -362,7 +362,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .call_read_chunk(opened.handle, 8, 32)
         .await
         .unwrap();
-    let OperationResult::ReadChunk(eof) = eof else {
+    let OpResult::ReadChunk(eof) = eof else {
         panic!("expected ReadChunk EOF, got {eof:?}");
     };
     assert_eq!(eof.content, b"size\n");
@@ -374,7 +374,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .call_open_file("hello/volatile-tail")
         .await
         .unwrap();
-    let OperationResult::OpenFile(opened) = open else {
+    let OpResult::OpenFile(opened) = open else {
         panic!("expected OpenFile, got {open:?}");
     };
     assert_eq!(opened.attrs.stability, Stability::Volatile);
@@ -384,7 +384,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .call_read_chunk(opened.handle, 42, 128)
         .await
         .unwrap();
-    let OperationResult::ReadChunk(chunk) = chunk else {
+    let OpResult::ReadChunk(chunk) = chunk else {
         panic!("expected live ReadChunk, got {chunk:?}");
     };
     assert_eq!(chunk.content, b"tail:42\n");
@@ -403,7 +403,7 @@ async fn test_lookup_child() {
         .await
         .unwrap();
     match result {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "hello");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -417,7 +417,7 @@ async fn test_lookup_child() {
         .await
         .unwrap();
     match exact_file {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "lazy");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -487,7 +487,7 @@ async fn test_lookup_projects_adjacent_files_into_cache() {
         .unwrap();
 
     match &result {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             assert_eq!(result.target.name, "bundle");
         },
         other => panic!("expected Lookup, got {other:?}"),
@@ -541,7 +541,7 @@ async fn test_lookup_projects_siblings_into_cache() {
         .unwrap();
 
     match &result {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let target = &result.target;
             assert_eq!(target.name, "snapshot");
 
@@ -706,7 +706,7 @@ async fn test_cache_isolated_by_mount_name() {
     let result = runtime_a.call_list_children("hello").await.unwrap();
     assert!(matches!(
         result,
-        OperationResult::ListChildren(ListChildrenResult::Entries(_))
+        OpResult::ListChildren(ListChildrenResult::Entries(_))
     ));
     assert!(runtime_a.cache_get("hello", RecordKind::Dirents).is_some());
     assert!(runtime_b.cache_get("hello", RecordKind::Dirents).is_none());
@@ -715,11 +715,11 @@ async fn test_cache_isolated_by_mount_name() {
     let scoped_b = runtime_b.call_list_children("scoped").await.unwrap();
     assert!(matches!(
         scoped_a,
-        OperationResult::ListChildren(ListChildrenResult::Entries(_))
+        OpResult::ListChildren(ListChildrenResult::Entries(_))
     ));
     assert!(matches!(
         scoped_b,
-        OperationResult::ListChildren(ListChildrenResult::Entries(_))
+        OpResult::ListChildren(ListChildrenResult::Entries(_))
     ));
     assert!(
         runtime_a
@@ -733,7 +733,7 @@ async fn test_cache_isolated_by_mount_name() {
     );
 
     let tick = runtime_a.call_timer_tick().await.unwrap();
-    assert!(matches!(tick, OperationResult::OnEvent));
+    assert!(matches!(tick, OpResult::OnEvent));
     assert!(
         runtime_a
             .cache_get("scoped/item", RecordKind::Lookup)

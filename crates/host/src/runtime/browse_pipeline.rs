@@ -10,7 +10,7 @@ impl CalloutRuntime {
         &self,
         parent_path: &str,
         name: &str,
-    ) -> Result<wit_types::OperationResult> {
+    ) -> Result<wit_types::OpResult> {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
@@ -33,7 +33,7 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if let wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
+        if let wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
             &result
         {
             self.touch_activity_for_relative_path(&child_path);
@@ -43,7 +43,7 @@ impl CalloutRuntime {
         Ok(result)
     }
 
-    pub async fn call_list_children(&self, path: &str) -> Result<wit_types::OperationResult> {
+    pub async fn call_list_children(&self, path: &str) -> Result<wit_types::OpResult> {
         let result = self
             .coalesced(path, || {
                 self.call_provider_op_with_handoff_path(Some(path), move |store, id| {
@@ -54,7 +54,7 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if let wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Entries(
+        if let wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
             ref listing,
         )) = result
         {
@@ -65,7 +65,7 @@ impl CalloutRuntime {
         Ok(result)
     }
 
-    pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OperationResult> {
+    pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OpResult> {
         let result = self
             .coalesced(path, || {
                 self.call_provider_op(move |store, id| {
@@ -76,14 +76,14 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if matches!(result, wit_types::OperationResult::ReadFile(_)) {
+        if matches!(result, wit_types::OpResult::ReadFile(_)) {
             self.touch_activity_for_relative_path(path);
         }
 
         Ok(result)
     }
 
-    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OperationResult> {
+    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OpResult> {
         let result = self
             .call_provider_op(move |store, id| {
                 self.bindings
@@ -92,7 +92,7 @@ impl CalloutRuntime {
             })
             .await?;
 
-        if matches!(result, wit_types::OperationResult::OpenFile(_)) {
+        if matches!(result, wit_types::OpResult::OpenFile(_)) {
             self.touch_activity_for_relative_path(path);
         }
 
@@ -104,7 +104,7 @@ impl CalloutRuntime {
         handle: u64,
         offset: u64,
         length: u32,
-    ) -> Result<wit_types::OperationResult> {
+    ) -> Result<wit_types::OpResult> {
         self.call_provider_op(move |store, id| {
             self.bindings
                 .omnifs_provider_browse()
@@ -113,10 +113,10 @@ impl CalloutRuntime {
         .await
     }
 
-    async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OperationResult>
+    async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OpResult>
     where
         F: Fn() -> Fu,
-        Fu: std::future::Future<Output = Result<wit_types::OperationResult>>,
+        Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
     {
         loop {
             match self.inflight.acquire(path) {
@@ -137,7 +137,7 @@ impl CalloutRuntime {
         }
     }
 
-    pub(super) async fn call_provider_op<F>(&self, f: F) -> Result<wit_types::OperationResult>
+    pub(super) async fn call_provider_op<F>(&self, f: F) -> Result<wit_types::OpResult>
     where
         F: FnOnce(
             &mut wasmtime::Store<super::HostState>,
@@ -151,7 +151,7 @@ impl CalloutRuntime {
         &self,
         expected_handoff_path: Option<&str>,
         f: F,
-    ) -> Result<wit_types::OperationResult>
+    ) -> Result<wit_types::OpResult>
     where
         F: FnOnce(
             &mut wasmtime::Store<super::HostState>,

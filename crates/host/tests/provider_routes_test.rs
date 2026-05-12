@@ -4,7 +4,7 @@ use omnifs_host::cache::RecordKind;
 use omnifs_host::omnifs::provider::log::Host as ProviderLogHost;
 use omnifs_host::omnifs::provider::types::{
     Callout, CalloutResult, Effect, EntryKind, ErrorKind, Header, Host as ProviderHost,
-    HttpRequest, HttpResponse, ListChildrenResult, LogEntry, LookupChildResult, OperationResult,
+    HttpRequest, HttpResponse, ListChildrenResult, LogEntry, LookupChildResult, OpResult,
     ProjBytes, ProviderEvent, ProviderStep, Stability,
 };
 use support::{
@@ -105,7 +105,7 @@ struct GithubProviderSession {
 
 #[derive(Debug)]
 struct StepOutcome {
-    result: Option<OperationResult>,
+    result: Option<OpResult>,
     effects: Vec<Effect>,
     callouts: Vec<Callout>,
 }
@@ -159,7 +159,7 @@ impl GithubProviderSession {
             .call_initialize(&mut store, b"{}")
             .unwrap();
         assert!(
-            matches!(init.result, OperationResult::Initialize(_)),
+            matches!(init.result, OpResult::Initialize(_)),
             "expected provider initialization, got {init:?}"
         );
 
@@ -344,7 +344,7 @@ fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
 
     let result = harness.runtime.initialize().unwrap();
     match result {
-        OperationResult::Error(error) => {
+        OpResult::Error(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("default resolver"),
@@ -376,7 +376,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_resolvers");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -386,7 +386,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
     match resolvers_file {
-        OperationResult::ReadFile(result) => {
+        OpResult::ReadFile(result) => {
             let body =
                 String::from_utf8(support::into_inline(result)).expect("utf8 resolvers file");
             assert!(
@@ -403,7 +403,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match reverse_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -417,7 +417,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "@cloudflare");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -431,7 +431,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_domain_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -445,7 +445,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_reverse_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -459,7 +459,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match reverse_ip_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -474,7 +474,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_reverse_ip_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -489,7 +489,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match invalid_reverse_lookup {
-        OperationResult::LookupChild(LookupChildResult::NotFound) => {},
+        OpResult::LookupChild(LookupChildResult::NotFound) => {},
         other => panic!("expected invalid reverse lookup NotFound, got {other:?}"),
     }
 
@@ -499,7 +499,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match invalid_resolver_reverse_lookup {
-        OperationResult::LookupChild(LookupChildResult::NotFound) => {},
+        OpResult::LookupChild(LookupChildResult::NotFound) => {},
         other => panic!("expected invalid resolver reverse lookup NotFound, got {other:?}"),
     }
 
@@ -509,7 +509,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match direct_ip_lookup {
-        OperationResult::LookupChild(LookupChildResult::NotFound) => {},
+        OpResult::LookupChild(LookupChildResult::NotFound) => {},
         other => panic!("expected root direct-IP lookup NotFound, got {other:?}"),
     }
 
@@ -519,7 +519,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_direct_ip_lookup {
-        OperationResult::LookupChild(LookupChildResult::NotFound) => {},
+        OpResult::LookupChild(LookupChildResult::NotFound) => {},
         other => panic!("expected resolver direct-IP lookup NotFound, got {other:?}"),
     }
 
@@ -529,7 +529,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match domain_lookup {
-        OperationResult::LookupChild(LookupChildResult::Entry(result)) => {
+        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -567,7 +567,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match listing {
-        OperationResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -586,7 +586,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match reverse_listing {
-        OperationResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             assert!(
                 listing.entries.is_empty(),
                 "reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -601,7 +601,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_reverse_listing {
-        OperationResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             assert!(
                 listing.entries.is_empty(),
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -626,24 +626,21 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     );
 
     let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
-    assert!(matches!(resolvers_file, OperationResult::ReadFile(_)));
+    assert!(matches!(resolvers_file, OpResult::ReadFile(_)));
 
     let resolver_domain_lookup = harness
         .runtime
         .call_lookup_child("@cloudflare", "example.com")
         .await
         .unwrap();
-    assert!(matches!(
-        resolver_domain_lookup,
-        OperationResult::LookupChild(_)
-    ));
+    assert!(matches!(resolver_domain_lookup, OpResult::LookupChild(_)));
 
     let reverse_ip_lookup = harness
         .runtime
         .call_lookup_child("_reverse", "8.8.8.8")
         .await
         .unwrap();
-    assert!(matches!(reverse_ip_lookup, OperationResult::LookupChild(_)));
+    assert!(matches!(reverse_ip_lookup, OpResult::LookupChild(_)));
 
     let resolver_reverse_ip_lookup = harness
         .runtime
@@ -652,7 +649,7 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
         .unwrap();
     assert!(matches!(
         resolver_reverse_ip_lookup,
-        OperationResult::LookupChild(_)
+        OpResult::LookupChild(_)
     ));
 
     let active = harness.runtime.__active_path_sets();
@@ -739,7 +736,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         .await
         .unwrap();
     match result {
-        OperationResult::Error(error) => {
+        OpResult::Error(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("unknown resolver specifier"),
@@ -770,7 +767,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .await
         .unwrap();
     match result {
-        OperationResult::Error(error) => {
+        OpResult::Error(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected unknown-record NotFound, got {other:?}"),
@@ -782,7 +779,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .await
         .unwrap();
     match result {
-        OperationResult::Error(error) => {
+        OpResult::Error(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected resolver unknown-record NotFound, got {other:?}"),
@@ -796,7 +793,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     let repo_listing = session.list_children(5, "octocat/Hello-World");
     match repo_listing {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let mut names: Vec<&str> = listing
@@ -834,7 +831,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     );
     match lookup {
         StepOutcome {
-            result: Some(OperationResult::LookupChild(LookupChildResult::Entry(result))),
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
             ..
         } => {
             let entry = &result.target;
@@ -914,7 +911,7 @@ fn github_issue_list_projects_files() {
         response.callouts
     );
     match &response.result {
-        Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let project_paths = project_paths(&response.effects);
             assert_eq!(
                 project_paths,
@@ -1031,7 +1028,7 @@ fn github_issue_list_scans_past_pr_only_pages() {
         })],
     );
     match &response.result {
-        Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1089,7 +1086,7 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
         })],
     );
     match &response.result {
-        Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let mut names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1150,7 +1147,7 @@ fn github_pr_list_projects_files() {
         response.callouts
     );
     match &response.result {
-        Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let project_paths = project_paths(&response.effects);
             assert_eq!(
                 project_paths,
@@ -1221,7 +1218,7 @@ fn github_action_run_list_projects_files() {
         response.callouts
     );
     match &response.result {
-        Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let project_paths = project_paths(&response.effects);
             assert_eq!(
                 project_paths,
@@ -1285,7 +1282,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
     );
     match lookup {
         StepOutcome {
-            result: Some(OperationResult::LookupChild(LookupChildResult::Entry(result))),
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
             effects,
             ..
         } => {
@@ -1326,7 +1323,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
 
     match listed {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(result))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(result))),
             ..
         } => {
             let names: Vec<&str> = result
@@ -1349,7 +1346,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         matches!(
             repo_listing,
             StepOutcome {
-                result: Some(OperationResult::ListChildren(_)),
+                result: Some(OpResult::ListChildren(_)),
                 ..
             }
         ),
@@ -1388,7 +1385,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     );
     match owner_listing {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1420,7 +1417,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
             matches!(
                 repo_listing,
                 StepOutcome {
-                    result: Some(OperationResult::ListChildren(_)),
+                    result: Some(OpResult::ListChildren(_)),
                     ..
                 }
             ),
@@ -1431,7 +1428,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     let root_listing = session.list_children(50, "");
     match root_listing {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1476,7 +1473,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     );
     match owner_listing {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1515,7 +1512,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
         .await
         .unwrap();
     match repo_listing {
-        OperationResult::ListChildren(ListChildrenResult::Subtree(tree_ref)) => {
+        OpResult::ListChildren(ListChildrenResult::Subtree(tree_ref)) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1532,7 +1529,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
         .await
         .unwrap();
     match repo_child {
-        OperationResult::LookupChild(LookupChildResult::Subtree(tree_ref)) => {
+        OpResult::LookupChild(LookupChildResult::Subtree(tree_ref)) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1594,7 +1591,7 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
 
     match response {
         StepOutcome {
-            result: Some(OperationResult::Error(error)),
+            result: Some(OpResult::Error(error)),
             ..
         } => {
             assert_eq!(error.kind, ErrorKind::NotFound);
@@ -1655,7 +1652,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     );
     match lookup {
         StepOutcome {
-            result: Some(OperationResult::LookupChild(LookupChildResult::Entry(result))),
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
             effects,
             ..
         } => {
@@ -1693,7 +1690,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
 
     match response {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(file)),
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
             assert_eq!(support::expect_inline(&file), b"diff --git a/file b/file\n");
@@ -1716,7 +1713,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     );
     match response {
         StepOutcome {
-            result: Some(OperationResult::Error(error)),
+            result: Some(OpResult::Error(error)),
             ..
         } => {
             assert_eq!(error.kind, ErrorKind::Network);
@@ -1771,7 +1768,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     );
     match pr_read {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(result)),
+            result: Some(OpResult::ReadFile(result)),
             effects,
             ..
         } => {
@@ -1809,7 +1806,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     );
     match run_read {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(result)),
+            result: Some(OpResult::ReadFile(result)),
             effects,
             ..
         } => {
@@ -1913,7 +1910,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         );
         match cached {
             StepOutcome {
-                result: Some(OperationResult::ReadFile(file)),
+                result: Some(OpResult::ReadFile(file)),
                 ..
             } => {
                 assert_eq!(
@@ -1943,7 +1940,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         );
         match error {
             StepOutcome {
-                result: Some(OperationResult::Error(err)),
+                result: Some(OpResult::Error(err)),
                 ..
             } => {
                 assert_eq!(
@@ -1995,7 +1992,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         );
         match session.resume(id, network_error()) {
             StepOutcome {
-                result: Some(OperationResult::Error(error)),
+                result: Some(OpResult::Error(error)),
                 ..
             } => {
                 assert_eq!(error.kind, ErrorKind::Network);
@@ -2007,7 +2004,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
     fn expect_not_found(response: StepOutcome) {
         match response {
             StepOutcome {
-                result: Some(OperationResult::Error(error)),
+                result: Some(OpResult::Error(error)),
                 ..
             } => {
                 assert_eq!(error.kind, ErrorKind::NotFound);
@@ -2042,7 +2039,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         ok_body(br#"[{"user":{"login":"octocat"},"body":"first issue comment"}]"#),
     ) {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -2074,7 +2071,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         ok_body(br#"[{"user":{"login":"octocat"},"body":"page two issue comment"}]"#),
     ) {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(file)),
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
             assert_eq!(file.attrs.stability, Stability::Mutable);
@@ -2095,7 +2092,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         ok_body(br#"[{"user":{"login":"hubot"},"body":"first pr comment"}]"#),
     ) {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(file)),
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
             assert_eq!(file.attrs.stability, Stability::Mutable);
@@ -2117,7 +2114,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         ok_body(br#"[{"user":{"login":"hubot"},"body":"page two pr comment"}]"#),
     ) {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(file)),
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
             assert_eq!(file.attrs.stability, Stability::Mutable);
@@ -2233,7 +2230,7 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     let final_response = session.resume(20, issue_pages);
     match final_response {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -2270,7 +2267,7 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     let final_response = session.resume(21, pr_pages);
     match final_response {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -2369,7 +2366,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     );
     match lookup {
         StepOutcome {
-            result: Some(OperationResult::LookupChild(LookupChildResult::Entry(result))),
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
             effects,
             ..
         } => {
@@ -2390,7 +2387,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     let root_listing = session.list_children(32, "");
     match root_listing {
         StepOutcome {
-            result: Some(OperationResult::ListChildren(ListChildrenResult::Entries(listing))),
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             assert!(
@@ -2478,7 +2475,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
     );
     match issue_cached {
         StepOutcome {
-            result: Some(OperationResult::ReadFile(file)),
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
             assert_eq!(support::expect_inline(&file), b"Cached issue title");
@@ -2524,7 +2521,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         first_tick_done.callouts
     );
     match &first_tick_done.result {
-        Some(OperationResult::OnEvent) => {
+        Some(OpResult::OnEvent) => {
             let prefixes = invalidate_prefixes(&first_tick_done.effects);
             assert_eq!(
                 prefixes,
@@ -2555,7 +2552,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         matches!(
             stale_after_invalidation,
             StepOutcome {
-                result: Some(OperationResult::Error(_)),
+                result: Some(OpResult::Error(_)),
                 ..
             }
         ),
@@ -2598,7 +2595,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         matches!(
             second_tick_done,
             StepOutcome {
-                result: Some(OperationResult::OnEvent),
+                result: Some(OpResult::OnEvent),
                 ..
             }
         ),
@@ -2641,7 +2638,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
 
     fn expect_denied(response: StepOutcome) {
         let StepOutcome {
-            result: Some(OperationResult::Error(error)),
+            result: Some(OpResult::Error(error)),
             ..
         } = response
         else {

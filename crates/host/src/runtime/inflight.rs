@@ -20,7 +20,7 @@ use crate::omnifs::provider::types as wit_types;
 /// Errors are shared as their `Display` form since `RuntimeError`
 /// wraps non-`Clone` sources; the unshared internal diagnostic is lost
 /// by waiters but still present for the leader's own return path.
-pub type SharedOutcome = std::result::Result<wit_types::OperationResult, String>;
+pub type SharedOutcome = std::result::Result<wit_types::OpResult, String>;
 
 /// Tracks paths with an in-flight provider call so concurrent callers
 /// coalesce instead of fanning out.
@@ -142,7 +142,7 @@ fn is_ancestor_or_equal(ancestor: &str, path: &str) -> bool {
 
 /// Wrap shareable outcomes so leaders and waiters see the same shape.
 pub fn share_outcome<E: std::fmt::Display>(
-    result: &std::result::Result<wit_types::OperationResult, E>,
+    result: &std::result::Result<wit_types::OpResult, E>,
 ) -> SharedOutcome {
     match result {
         Ok(v) => Ok(v.clone()),
@@ -151,11 +151,11 @@ pub fn share_outcome<E: std::fmt::Display>(
 }
 
 /// Convert a waiter's shared outcome back into the caller's expected
-/// `Result<OperationResult, E>` shape using the supplied error constructor.
+/// `Result<OpResult, E>` shape using the supplied error constructor.
 pub fn unshare_outcome<E>(
     outcome: SharedOutcome,
     make_err: impl FnOnce(String) -> E,
-) -> std::result::Result<wit_types::OperationResult, E> {
+) -> std::result::Result<wit_types::OpResult, E> {
     match outcome {
         Ok(v) => Ok(v),
         Err(msg) => Err(make_err(msg)),

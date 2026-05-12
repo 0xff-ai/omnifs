@@ -244,7 +244,7 @@ impl CalloutRuntime {
         })
     }
 
-    pub fn initialize(&self) -> Result<wit_types::OperationResult> {
+    pub fn initialize(&self) -> Result<wit_types::OpResult> {
         let response = {
             let mut store = self.store.lock();
             self.bindings
@@ -484,7 +484,7 @@ impl CalloutRuntime {
         Ok(())
     }
 
-    pub async fn call_timer_tick(&self) -> Result<wit_types::OperationResult> {
+    pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
         let id = self.correlations.allocate();
         let active_paths = self.activity_table.lock().active_path_sets();
 
@@ -506,7 +506,7 @@ impl CalloutRuntime {
         id: u64,
         mut step: wit_types::ProviderStep,
         expected_handoff_path: Option<&str>,
-    ) -> Result<wit_types::OperationResult> {
+    ) -> Result<wit_types::OpResult> {
         loop {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
@@ -552,9 +552,7 @@ impl CalloutRuntime {
             .map_err(|e| RuntimeError::ProviderError(format!("read blob {blob_id}: {e}")))
     }
 
-    fn resolve_response_sync(
-        response: wit_types::ProviderReturn,
-    ) -> Result<wit_types::OperationResult> {
+    fn resolve_response_sync(response: wit_types::ProviderReturn) -> Result<wit_types::OpResult> {
         validate_provider_return(&response, None).map_err(RuntimeError::ProviderError)?;
         Ok(response.result)
     }
@@ -989,32 +987,28 @@ mod callout_log_tests {
 }
 
 #[cfg(test)]
-fn validate_operation_result(
-    result: &wit_types::OperationResult,
-) -> std::result::Result<(), String> {
+fn validate_operation_result(result: &wit_types::OpResult) -> std::result::Result<(), String> {
     let mut validator = AttrValidator::default();
     validate_operation_result_with(result, &mut validator)
 }
 
 fn validate_operation_result_with(
-    result: &wit_types::OperationResult,
+    result: &wit_types::OpResult,
     validator: &mut AttrValidator,
 ) -> std::result::Result<(), String> {
     match result {
-        wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Entries(
-            listing,
-        )) => {
+        wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(listing)) => {
             for entry in &listing.entries {
                 validator.entry(&entry.kind)?;
             }
         },
-        wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) => {
+        wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) => {
             validator.entry(&entry.target.kind)?;
             for sibling in &entry.siblings {
                 validator.entry(&sibling.kind)?;
             }
         },
-        wit_types::OperationResult::ReadFile(result) => {
+        wit_types::OpResult::ReadFile(result) => {
             AttrValidator::file_attrs_metadata(&result.attrs)?;
             match &result.bytes {
                 wit_types::ReadFileBytes::Inline(bytes) => {
@@ -1026,7 +1020,7 @@ fn validate_operation_result_with(
                 wit_types::ReadFileBytes::Blob(_) => {},
             }
         },
-        wit_types::OperationResult::OpenFile(result) => {
+        wit_types::OpResult::OpenFile(result) => {
             AttrValidator::file_attrs_metadata(&result.attrs)?;
         },
         _ => {},
@@ -1066,7 +1060,7 @@ fn validate_provider_return(
     ret: &wit_types::ProviderReturn,
     expected_handoff_path: Option<&str>,
 ) -> std::result::Result<(), String> {
-    if matches!(ret.result, wit_types::OperationResult::Error(_)) && !ret.effects.is_empty() {
+    if matches!(ret.result, wit_types::OpResult::Error(_)) && !ret.effects.is_empty() {
         return Err("provider error returns must not carry effects".to_string());
     }
     let mut validator = AttrValidator::default();
@@ -1086,8 +1080,8 @@ fn validate_provider_return(
         .collect::<Vec<_>>();
 
     let subtree = match &ret.result {
-        wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
-        | wit_types::OperationResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
+        wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
+        | wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(tree)) => {
             Some(*tree)
         },
         _ => None,
@@ -1210,8 +1204,8 @@ mod attr_contract_tests {
 
     #[test]
     fn rejects_invalid_inline_projection_in_entries() {
-        let result = wit_types::OperationResult::ListChildren(
-            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
+        let result = wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "bad".to_string(),
                     kind: wit_types::EntryKind::File(file_proj(
@@ -1221,8 +1215,8 @@ mod attr_contract_tests {
                     )),
                 }],
                 exhaustive: true,
-            }),
-        );
+            },
+        ));
 
         let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("inline bytes require Size::Exact"));
@@ -1230,8 +1224,8 @@ mod attr_contract_tests {
 
     #[test]
     fn rejects_volatile_non_ranged_attrs() {
-        let result = wit_types::OperationResult::ListChildren(
-            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
+        let result = wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "tail".to_string(),
                     kind: wit_types::EntryKind::File(file_proj(
@@ -1241,8 +1235,8 @@ mod attr_contract_tests {
                     )),
                 }],
                 exhaustive: true,
-            }),
-        );
+            },
+        ));
 
         let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("Stability::Volatile requires"));
@@ -1253,7 +1247,7 @@ mod attr_contract_tests {
         let mut bad_size_file = deferred_exact(4);
         bad_size_file.bytes = wit_types::ProjBytes::Inline(b"toolong".to_vec());
         let bad_size = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::OnEvent,
+            result: wit_types::OpResult::OnEvent,
             effects: vec![wit_types::Effect::Project(wit_types::ProjEntry {
                 path: "bad".to_string(),
                 kind: wit_types::EntryKind::File(bad_size_file),
@@ -1263,10 +1257,10 @@ mod attr_contract_tests {
         assert!(error.contains("declares size 4"));
 
         let too_large = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::OnEvent,
+            result: wit_types::OpResult::OnEvent,
             effects: (0..9)
                 .map(|index| {
-                    let bytes = vec![0; cache::MAX_PROJECTED_BYTES];
+                    let bytes = vec![0; cache::MAX_INLINE_PROJECTABLE_BYTES];
                     wit_types::Effect::Project(wit_types::ProjEntry {
                         path: format!("large-{index}"),
                         kind: wit_types::EntryKind::File(wit_types::FileProj {
@@ -1286,7 +1280,7 @@ mod attr_contract_tests {
 
     #[test]
     fn rejects_read_content_that_violates_declared_size() {
-        let result = wit_types::OperationResult::ReadFile(wit_types::ReadFileResult {
+        let result = wit_types::OpResult::ReadFile(wit_types::ReadFileResult {
             attrs: attrs(
                 wit_types::FileSize::NonZero,
                 wit_types::Stability::Immutable,
@@ -1303,15 +1297,15 @@ mod attr_contract_tests {
     fn rejects_empty_version_tokens() {
         let mut file = deferred_exact(1);
         file.attrs.version_token = Some(String::new());
-        let result = wit_types::OperationResult::ListChildren(
-            wit_types::ListChildrenResult::Entries(wit_types::DirListing {
+        let result = wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
+            wit_types::DirListing {
                 entries: vec![wit_types::DirEntry {
                     name: "versioned".to_string(),
                     kind: wit_types::EntryKind::File(file),
                 }],
                 exhaustive: true,
-            }),
-        );
+            },
+        ));
 
         let error = validate_operation_result(&result).unwrap_err();
         assert!(error.contains("version token must not be empty"));
@@ -1320,18 +1314,14 @@ mod attr_contract_tests {
     #[test]
     fn subtree_results_require_matching_disown_effect() {
         let missing = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(
-                7,
-            )),
+            result: wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(7)),
             effects: Vec::new(),
         };
         let error = validate_provider_return(&missing, Some("checkout")).unwrap_err();
         assert!(error.contains("requires exactly one matching disown-tree effect"));
 
         let valid = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::LookupChild(wit_types::LookupChildResult::Subtree(
-                7,
-            )),
+            result: wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(7)),
             effects: vec![wit_types::Effect::DisownTree(wit_types::TreeHandoff {
                 path: "checkout".to_string(),
                 tree: 7,
@@ -1343,7 +1333,7 @@ mod attr_contract_tests {
         assert!(error.contains("requires disown-tree path"));
 
         let orphan = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::OnEvent,
+            result: wit_types::OpResult::OnEvent,
             effects: vec![wit_types::Effect::DisownTree(wit_types::TreeHandoff {
                 path: "checkout".to_string(),
                 tree: 7,
@@ -1356,7 +1346,7 @@ mod attr_contract_tests {
     #[test]
     fn error_returns_reject_effects() {
         let ret = wit_types::ProviderReturn {
-            result: wit_types::OperationResult::Error(wit_types::ProviderError {
+            result: wit_types::OpResult::Error(wit_types::ProviderError {
                 kind: wit_types::ErrorKind::Internal,
                 message: "failed".to_string(),
                 retryable: false,

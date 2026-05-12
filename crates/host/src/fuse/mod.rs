@@ -13,8 +13,8 @@ use crate::cache::{
 };
 use crate::cache::{FileAttrsCache, Key};
 use crate::omnifs::provider::types::{
-    ErrorKind, ListChildrenResult, LookupChildResult, OperationResult, ProviderError,
-    ReadFileBytes, ReadFileResult,
+    ErrorKind, ListChildrenResult, LookupChildResult, OpResult, ProviderError, ReadFileBytes,
+    ReadFileResult,
 };
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
@@ -427,7 +427,7 @@ impl FuseFs {
             .rt
             .block_on(runtime.call_lookup_child(parent_path, name_str))
         {
-            Ok(OperationResult::LookupChild(LookupChildResult::Subtree(tree_ref))) => {
+            Ok(OpResult::LookupChild(LookupChildResult::Subtree(tree_ref))) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -440,7 +440,7 @@ impl FuseFs {
                 );
                 Ok((self.dir_attr(ino), TTL))
             },
-            Ok(OperationResult::LookupChild(LookupChildResult::Entry(entry))) => {
+            Ok(OpResult::LookupChild(LookupChildResult::Entry(entry))) => {
                 debug!(
                     target: "omnifs_lookup",
                     path = child_path,
@@ -461,7 +461,7 @@ impl FuseFs {
                 }
                 Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
             },
-            Ok(OperationResult::LookupChild(LookupChildResult::NotFound)) => {
+            Ok(OpResult::LookupChild(LookupChildResult::NotFound)) => {
                 let neg = cache::LookupPayload::Negative;
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
@@ -470,7 +470,7 @@ impl FuseFs {
                 }
                 Err(Errno::ENOENT)
             },
-            Ok(OperationResult::Error(error)) => {
+            Ok(OpResult::Error(error)) => {
                 warn!(
                     path = child_path,
                     kind = ?error.kind,
@@ -611,7 +611,7 @@ impl FuseFs {
         path: &str,
     ) -> Result<DirSnapshot, Errno> {
         match self.rt.block_on(runtime.call_list_children(path)) {
-            Ok(OperationResult::ListChildren(ListChildrenResult::Subtree(tree_ref))) => {
+            Ok(OpResult::ListChildren(ListChildrenResult::Subtree(tree_ref))) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -622,7 +622,7 @@ impl FuseFs {
                 }
                 self.snapshot_from_fs(mount_name, path, &real_root)
             },
-            Ok(OperationResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+            Ok(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
                 let dir_entries = &listing.entries;
                 let mut snapshot = Vec::with_capacity(dir_entries.len());
                 let mut dirent_records = Vec::with_capacity(dir_entries.len());
@@ -652,7 +652,7 @@ impl FuseFs {
                 }
                 Ok(snapshot)
             },
-            Ok(OperationResult::Error(error)) => {
+            Ok(OpResult::Error(error)) => {
                 warn!(
                     path,
                     kind = ?error.kind,
@@ -698,7 +698,7 @@ impl FuseFs {
             .rt
             .block_on(runtime.call_read_chunk(ranged.provider_handle, offset, size))
         {
-            Ok(OperationResult::ReadChunk(chunk)) => {
+            Ok(OpResult::ReadChunk(chunk)) => {
                 if chunk.content.len() > size as usize {
                     warn!(
                         path = ranged.path.as_str(),
@@ -732,7 +732,7 @@ impl FuseFs {
                 }
                 reply.data(&chunk.content);
             },
-            Ok(OperationResult::Error(error)) => {
+            Ok(OpResult::Error(error)) => {
                 warn!(
                     path = ranged.path.as_str(),
                     kind = ?error.kind,
@@ -849,10 +849,10 @@ impl FuseFs {
         debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OperationResult::ReadFile(result)) => {
+            Ok(OpResult::ReadFile(result)) => {
                 self.finish_full_read(&target, &runtime, offset, size, result, reply);
             },
-            Ok(OperationResult::Error(error)) => {
+            Ok(OpResult::Error(error)) => {
                 warn!(
                     path = target.path.as_str(),
                     kind = ?error.kind,
@@ -950,7 +950,7 @@ impl FuseFs {
             return Err(Errno::ENOENT);
         };
         match self.rt.block_on(runtime.call_open_file(&target.path)) {
-            Ok(OperationResult::OpenFile(opened)) => {
+            Ok(OpResult::OpenFile(opened)) => {
                 let opened_attrs =
                     opened_file_attrs(&target.path, target.attrs.as_ref(), &opened.attrs)?;
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
@@ -965,7 +965,7 @@ impl FuseFs {
                 );
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OperationResult::Error(error)) => Err(provider_errno(&error)),
+            Ok(OpResult::Error(error)) => Err(provider_errno(&error)),
             Ok(other) => {
                 warn!(
                     path = target.path.as_str(),
@@ -1003,7 +1003,7 @@ impl FuseFs {
         };
         self.drain_and_evict_pending(&target.mount_name);
         match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OperationResult::ReadFile(result)) => {
+            Ok(OpResult::ReadFile(result)) => {
                 let Some((data, result_attrs)) =
                     resolve_read_payload(&runtime, &target.path, result)
                 else {
@@ -1029,7 +1029,7 @@ impl FuseFs {
                 self.file_cache.insert(target.fh, data);
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OperationResult::Error(error)) => Err(provider_errno(&error)),
+            Ok(OpResult::Error(error)) => Err(provider_errno(&error)),
             Ok(other) => {
                 warn!(
                     path = target.path.as_str(),
