@@ -145,7 +145,7 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 ```
                                                                       ┌────────────────┐
 ┌──────────────┐            ┌────────────────────────────┐            │ github.wasm    ├──▶ GitHub
-│  your shell  │    FUSE    │         omnifs host        │   effects  │ linear.wasm    ├──▶ Linear
+│  your shell  │    FUSE    │         omnifs host        │  callouts  │ linear.wasm    ├──▶ Linear
 │  or agent    │ ◀──────▶   │  /github  /linear  /arxiv  │ ◀-──────▶  │ arxiv.wasm     ├──▶ arXiv
 │              │   files    │             ...            │            │ ...            ├──▶ ...
 └──────────────┘            └────────────────────────────┘            │                │
@@ -154,7 +154,7 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 
 **Wasm providers** are plugins compiled to WebAssembly components. Each provider projects a domain (GitHub, Linear, S3, whatever) into the filesystem namespace. Drop a `.wasm` into `~/.omnifs/plugins/` and it mounts.
 
-**Effect-based runtime** means providers never touch the network or Git directly. They describe what they need ("fetch this API endpoint", "clone this repo"), and the host executes. This keeps providers sandboxed and lets the host manage caching, rate limits, and concurrency.
+**Callout runtime** means providers never touch the network or Git directly. They describe what they need ("fetch this API endpoint", "clone this repo"), and the host executes. This keeps providers sandboxed and lets the host manage caching, rate limits, and concurrency.
 
 **Git-backed reconciliation (WIP)** means writes work through Git. Edit files in a transaction directory, then rename it to `commit/` to execute. The provider translates that into API calls. Everything stays auditable, revertible, and familiar.
 
@@ -212,9 +212,9 @@ Per-paper subtrees under `/arxiv/papers/{id}/` are mirrored under every scope (c
 | `/arxiv/papers/{id}/metadata.json`                    | Title, authors, abstract, categories, comment, links          |
 | `/arxiv/papers/{id}/links.json`                       | Resolved arXiv URLs for this paper / version                  |
 | `/arxiv/papers/{id}/versions/v{n}/{paper.pdf,…}`      | Same files for a specific version                             |
-| `/arxiv/categories/{cat}/{YYYY-MM}/`                  | Papers in `cat` posted in that month (e.g. `cs.AI/2024-01`)   |
-| `/arxiv/categories/{cat}/new/{n}/`                    | Most-recent window `n ∈ 0..=14` (newest first by submitted date) |
-| `/arxiv/categories/{cat}/updated/{n}/`                | Most-recent window by last-updated date                       |
+| `/arxiv/categories/{cat}/{YYYY}/{MM}/{DD}/`           | Papers in `cat` posted on that UTC day (e.g. `cs.AI/2024/01/31`) |
+| `/arxiv/categories/{cat}/new/`                        | Most-recent papers in `cat` by submitted date                 |
+| `/arxiv/categories/{cat}/updated/`                    | Most-recent papers in `cat` by last-updated date              |
 | `/arxiv/categories/{cat}/by-author/{author}/`         | Papers in `cat` by `author`                                   |
 | `/arxiv/authors/{author}/`                            | Papers by author with the same `new`/`updated`/`by-category` axes |
 | `/arxiv/search/{query}/`                              | arXiv search results (URL-encoded query)                      |

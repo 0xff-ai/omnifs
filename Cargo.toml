@@ -42,7 +42,7 @@ http = "1"
 strum = { version = "0.27", features = ["derive"] }
 percent-encoding = "2"
 url = "2"
-time = { version = "0.3", default-features = false, features = ["std"] }
+time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
 tar = "0.4"
 flate2 = "1"

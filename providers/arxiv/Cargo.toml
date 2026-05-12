@@ -22,7 +22,6 @@ percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-strum = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
 
@@ -32,9 +31,6 @@ package = "omnifs:provider"
 [package.metadata.component.target]
 world = "provider"
 path = "../../wit"
-
-[lints.rust]
-unsafe_code = "allow"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -48,4 +44,3 @@ too_many_lines = "allow"
 trivially_copy_pass_by_ref = "allow"
 match_same_arms = "allow"
 needless_pass_by_value = "allow"
-unnecessary_wraps = "allow"

@@ -250,11 +250,28 @@ impl ResponseExt for Response<Vec<u8>> {
     fn error_for_status_ref(&self) -> Result<()> {
         let status = self.status();
         if status.is_client_error() || status.is_server_error() {
-            Err(ProviderError::from_http_status(status.as_u16()))
+            Err(status_error(self))
         } else {
             Ok(())
         }
     }
+}
+
+fn status_error(resp: &Response<Vec<u8>>) -> ProviderError {
+    let status = resp.status();
+    if status != StatusCode::TOO_MANY_REQUESTS {
+        return ProviderError::from_http_status(status.as_u16());
+    }
+
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok());
+    let message = match retry_after {
+        Some(value) => format!("HTTP 429; retry_after={value}"),
+        None => "HTTP 429".to_string(),
+    };
+    ProviderError::rate_limited(message)
 }
 
 pub enum CalloutFuture<'cx, S, T> {
@@ -565,5 +582,34 @@ mod tests {
             error.to_string().contains("invalid header name"),
             "expected first failure (header name), got {error}"
         );
+    }
+
+    #[test]
+    fn response_ext_maps_429_to_retryable_rate_limit() {
+        let resp = Response::builder()
+            .status(429)
+            .header("retry-after", "3")
+            .body(Vec::new())
+            .expect("response builder");
+
+        let error = resp.error_for_status_ref().unwrap_err();
+
+        assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
+        assert!(error.is_retryable());
+        assert_eq!(error.message(), "HTTP 429; retry_after=3");
+    }
+
+    #[test]
+    fn response_ext_maps_429_without_retry_after_to_rate_limit() {
+        let resp = Response::builder()
+            .status(429)
+            .body(Vec::new())
+            .expect("response builder");
+
+        let error = resp.error_for_status_ref().unwrap_err();
+
+        assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
+        assert!(error.is_retryable());
+        assert_eq!(error.message(), "HTTP 429");
     }
 }

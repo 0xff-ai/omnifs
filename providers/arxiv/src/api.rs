@@ -1,35 +1,47 @@
+use std::sync::LazyLock;
+
 use omnifs_sdk::Cx;
-use omnifs_sdk::http::ResponseExt;
+use omnifs_sdk::http::{Request, ResponseExt};
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
+use url::Url;
 
-use crate::State;
-use crate::http_ext::ArxivHttpExt;
-use crate::query::{
-    normalize_whitespace, paper_lookup_url, paper_pdf_url, paper_source_url, split_versioned_id,
+use crate::types::{
+    CategoryKey, CategoryPage, FeedSnapshot, PAGE_SIZE, PagePaper, ParsedEntry, RecentPage,
+    normalize_whitespace, split_versioned_id,
 };
-use crate::types::{ListedPaper, Listing, PaperKey, ParsedEntry};
+use crate::{Result, State};
 
 pub(crate) const API_BASE: &str = "https://export.arxiv.org/api/query";
-pub(crate) const ABS_BASE: &str = "https://arxiv.org/abs";
-pub(crate) const PDF_BASE: &str = "https://arxiv.org/pdf";
-pub(crate) const SOURCE_BASE: &str = "https://arxiv.org/e-print";
 
-pub(crate) async fn fetch_listing(cx: &Cx<State>, request_url: String) -> Result<Listing> {
+const SORT_ORDER_DESC: &str = "descending";
+const SORT_BY_SUBMITTED_DATE: &str = "submittedDate";
+
+static API_URL: LazyLock<Url> =
+    LazyLock::new(|| Url::parse(API_BASE).expect("static URL is valid"));
+
+pub(crate) async fn fetch_category_page(
+    cx: &Cx<State>,
+    category: &CategoryKey,
+    page: RecentPage,
+) -> Result<CategoryPage> {
+    let request_url = category_page_url(category, page);
     let feed_xml = fetch_bytes(cx, &request_url).await?;
-    let parsed = ParsedFeed::parse(&feed_xml)?;
-    Ok(Listing {
-        request_url,
-        total_results: parsed.total_results,
-        papers: parsed.entries.into_iter().map(ListedPaper::from).collect(),
-    })
+    parse_category_page(page, &feed_xml)
 }
 
-impl From<ParsedEntry> for ListedPaper {
-    fn from(entry: ParsedEntry) -> Self {
-        let encoded_key = PaperKey::encode_raw_id(&entry.raw_id);
-        Self { encoded_key, entry }
-    }
+pub(crate) fn category_page_url(category: &CategoryKey, page: RecentPage) -> String {
+    let mut url = API_URL.clone();
+    let search_query = format!("cat:{category}");
+    let start = page.start().to_string();
+    let max_results = PAGE_SIZE.to_string();
+    url.query_pairs_mut()
+        .append_pair("search_query", &search_query)
+        .append_pair("start", &start)
+        .append_pair("max_results", &max_results)
+        .append_pair("sortBy", SORT_BY_SUBMITTED_DATE)
+        .append_pair("sortOrder", SORT_ORDER_DESC);
+    url.to_string()
 }
 
 pub(crate) async fn fetch_paper_detail(cx: &Cx<State>, raw_id: &str) -> Result<ParsedEntry> {
@@ -48,7 +60,7 @@ pub(crate) async fn download_pdf(
     raw_id: &str,
     version: Option<u32>,
 ) -> Result<Vec<u8>> {
-    fetch_bytes(cx, &paper_pdf_url(raw_id, version)).await
+    fetch_bytes(cx, &crate::paper::paper_pdf_url(raw_id, version)).await
 }
 
 pub(crate) async fn download_source(
@@ -56,27 +68,54 @@ pub(crate) async fn download_source(
     raw_id: &str,
     version: Option<u32>,
 ) -> Result<Vec<u8>> {
-    fetch_bytes(cx, &paper_source_url(raw_id, version)).await
+    fetch_bytes(cx, &crate::paper::paper_source_url(raw_id, version)).await
+}
+
+fn parse_category_page(page: RecentPage, feed_xml: &[u8]) -> Result<CategoryPage> {
+    let parsed = ParsedFeed::parse(feed_xml)?;
+    let snapshot = parsed
+        .feed_updated
+        .ok_or_else(|| ProviderError::internal("arXiv feed missing updated timestamp"))?;
+    let papers = parsed
+        .entries
+        .into_iter()
+        .map(PagePaper::from_entry)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CategoryPage {
+        page,
+        snapshot,
+        total_results: parsed.total_results,
+        papers,
+    })
+}
+
+fn paper_lookup_url(raw_id: &str) -> String {
+    let mut url = API_URL.clone();
+    url.query_pairs_mut().append_pair("id_list", raw_id);
+    url.into()
+}
+
+fn arxiv_get(cx: &Cx<State>, url: impl Into<String>) -> Request<'_, State> {
+    cx.http()
+        .get(url)
+        .header("User-Agent", "omnifs-provider-arxiv/0.1.0")
 }
 
 async fn fetch_bytes(cx: &Cx<State>, url: &str) -> Result<Vec<u8>> {
-    let response = cx.arxiv_get(url).send().await?.error_for_status()?;
+    let response = arxiv_get(cx, url).send().await?.error_for_status()?;
     Ok(response.into_body())
 }
 
 #[derive(Debug)]
 struct ParsedFeed {
+    feed_updated: Option<FeedSnapshot>,
     total_results: u32,
     entries: Vec<ParsedEntry>,
 }
 
-// arXiv responds with an Atom 1.0 feed using two extension namespaces
-// (`arxiv:`, `opensearch:`). quick-xml's serde deserializer matches
-// element local names by default, so the renames below are local
-// names without prefix.
-
 #[derive(Debug, Deserialize)]
 struct AtomFeed {
+    updated: Option<String>,
     #[serde(rename = "totalResults", default)]
     total_results: Option<u32>,
     #[serde(rename = "entry", default)]
@@ -96,8 +135,6 @@ struct RawEntry {
     primary_category: Option<RawTerm>,
     #[serde(rename = "category", default)]
     categories: Vec<RawTerm>,
-    /// Some papers carry multiple DOIs (preprint + journal), so we
-    /// collect a `Vec` rather than a single value.
     #[serde(rename = "doi", default)]
     dois: Vec<String>,
     #[serde(rename = "journal_ref", default)]
@@ -126,7 +163,13 @@ impl ParsedFeed {
             .into_iter()
             .map(ParsedEntry::from_raw)
             .collect::<Result<Vec<_>>>()?;
+        let feed_updated = feed
+            .updated
+            .as_deref()
+            .map(FeedSnapshot::parse)
+            .transpose()?;
         Ok(Self {
+            feed_updated,
             total_results: feed.total_results.unwrap_or(0),
             entries,
         })
@@ -222,45 +265,83 @@ mod tests {
 </feed>"#;
 
     #[test]
-    fn parses_feed_metadata_and_entries() {
-        let parsed = ParsedFeed::parse(SAMPLE_FEED).expect("feed parse succeeds");
-        assert_eq!(parsed.total_results, 1234);
-        assert_eq!(parsed.entries.len(), 1);
+    fn category_page_url_uses_the_single_live_query_shape() {
+        let category: CategoryKey = "cs.AI".parse().unwrap();
+        let page = RecentPage::new(1);
 
-        let entry = &parsed.entries[0];
-        assert_eq!(entry.raw_id, "2501.12345");
-        assert_eq!(entry.latest_version, 2);
-        assert_eq!(entry.title, "Some Paper Title with & Ampersand");
+        let url = category_page_url(&category, page);
+        let parsed = Url::parse(&url).unwrap();
+        let pairs: Vec<_> = parsed.query_pairs().collect();
+
         assert_eq!(
-            entry.abstract_text,
-            "This paper studies the case where whitespace is collapsed."
+            pairs,
+            vec![
+                ("search_query".into(), "cat:cs.AI".into()),
+                ("start".into(), "100".into()),
+                ("max_results".into(), "100".into()),
+                ("sortBy".into(), "submittedDate".into()),
+                ("sortOrder".into(), "descending".into()),
+            ]
         );
-        assert_eq!(entry.authors, vec!["Alice Smith", "Bob Jones"]);
-        assert_eq!(entry.primary_category.as_deref(), Some("cs.AI"));
-        assert_eq!(entry.categories, vec!["cs.AI", "cs.LG", "stat.ML"]);
-        assert_eq!(entry.dois, vec!["10.1000/example.2501.12345"]);
+        assert!(
+            !pairs
+                .iter()
+                .any(|(key, value)| key == "search_query" && value.contains("Date"))
+        );
     }
 
     #[test]
-    fn listed_paper_preserves_parsed_entry_fields() {
-        let parsed = ParsedFeed::parse(SAMPLE_FEED).expect("feed parse succeeds");
-        let entry = parsed.entries.into_iter().next().unwrap();
-        let listed = ListedPaper::from(entry);
-        assert_eq!(listed.encoded_key, "2501.12345");
-        assert_eq!(listed.entry.raw_id, "2501.12345");
-        assert_eq!(listed.entry.latest_version, 2);
+    fn category_page_url_uses_start_zero_for_page_zero() {
+        let category: CategoryKey = "hep-th".parse().unwrap();
+
+        let url = category_page_url(&category, RecentPage::zero());
+        let parsed = Url::parse(&url).unwrap();
+        let pairs: Vec<_> = parsed.query_pairs().collect();
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("search_query".into(), "cat:hep-th".into()),
+                ("start".into(), "0".into()),
+                ("max_results".into(), "100".into()),
+                ("sortBy".into(), "submittedDate".into()),
+                ("sortOrder".into(), "descending".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_feed_snapshot_and_entry_submission_day() {
+        let parsed = parse_category_page(RecentPage::zero(), SAMPLE_FEED).unwrap();
+
+        assert_eq!(parsed.snapshot.as_utc_string(), "2025-01-15T05:00:00Z");
+        assert_eq!(parsed.total_results, 1234);
+        assert_eq!(parsed.papers.len(), 1);
+        assert_eq!(parsed.papers[0].key.as_ref(), "2501.12345");
+        assert_eq!(parsed.papers[0].submission.path_segment(), "20250110");
+        assert_eq!(parsed.papers[0].entry.latest_version, 2);
+        assert_eq!(
+            parsed.papers[0].entry.abstract_text,
+            "This paper studies the case where whitespace is collapsed."
+        );
+    }
+
+    #[test]
+    fn missing_feed_updated_is_rejected_for_category_pages() {
+        let feed = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">0</opensearch:totalResults>
+</feed>"#;
+
+        assert!(parse_category_page(RecentPage::zero(), feed).is_err());
     }
 
     #[test]
     fn parses_entry_with_non_contiguous_duplicate_doi() {
-        // Real arXiv feeds sometimes interleave elements between the
-        // duplicate `<arxiv:doi>` siblings. quick-xml's serde
-        // deserializer treats `Vec<T>` siblings as a sequence only
-        // when they are contiguous; otherwise it sees them as
-        // duplicate scalar fields and errors. This pins the workaround.
         let feed = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
       xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <updated>2026-04-02T00:00:00Z</updated>
   <entry>
     <id>http://arxiv.org/abs/2604.00002v1</id>
     <updated>2026-04-02T00:00:00Z</updated>
@@ -273,10 +354,9 @@ mod tests {
     <arxiv:doi>10.1234/journal.2026.002</arxiv:doi>
   </entry>
 </feed>"#;
-        let parsed = ParsedFeed::parse(feed.as_bytes()).expect("feed parse succeeds");
-        let entry = &parsed.entries[0];
+        let parsed = parse_category_page(RecentPage::zero(), feed.as_bytes()).unwrap();
         assert_eq!(
-            entry.dois,
+            parsed.papers[0].entry.dois,
             vec!["10.48550/arXiv.2604.00002", "10.1234/journal.2026.002"]
         );
     }

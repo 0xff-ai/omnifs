@@ -1,22 +1,20 @@
 use omnifs_sdk::prelude::*;
+use std::collections::HashMap;
 
 use crate::{Config, State};
 
-#[provider(mounts(
-    crate::root::RootHandlers,
-    crate::categories::CategoryHandlers,
-    crate::authors::AuthorHandlers,
-    crate::search::SearchHandlers,
-    crate::papers::PaperHandlers,
-))]
+#[provider(mounts(crate::categories::CategoryHandlers, crate::paper::PaperHandlers,))]
 impl ArxivProvider {
     fn init(config: Config) -> (State, ProviderInfo) {
         (
-            State { config },
+            State {
+                config,
+                recent: HashMap::default(),
+            },
             ProviderInfo {
                 name: "arxiv-provider".to_string(),
                 version: "0.1.0".to_string(),
-                description: "arXiv provider for omnifs".to_string(),
+                description: "arXiv recent submissions provider for omnifs".to_string(),
             },
         )
     }

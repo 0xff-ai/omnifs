@@ -47,15 +47,15 @@ impl GithubHttpExt for Cx<State> {
 /// rate-limited responses.
 pub(crate) fn github_check_status(resp: Response<Vec<u8>>) -> Result<Response<Vec<u8>>> {
     if is_rate_limited(&resp) {
-        return Err(ProviderError::rate_limited(format!(
-            "HTTP {}",
-            resp.status().as_u16()
-        )));
+        return Err(ProviderError::rate_limited(rate_limit_message(&resp)));
     }
     resp.error_for_status()
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {
+    if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
     if resp.status() != StatusCode::FORBIDDEN {
         return false;
     }
@@ -67,6 +67,27 @@ fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {
     }
     let body = String::from_utf8_lossy(resp.body()).to_ascii_lowercase();
     body.contains("rate limit") || body.contains("abuse detection")
+}
+
+fn rate_limit_message(resp: &Response<Vec<u8>>) -> String {
+    let mut message = format!("GitHub API rate limited: HTTP {}", resp.status().as_u16());
+    append_header_hint(resp, &mut message, "retry-after", "retry_after");
+    append_header_hint(resp, &mut message, "x-ratelimit-reset", "reset_epoch");
+    append_header_hint(resp, &mut message, "x-ratelimit-resource", "resource");
+    message
+}
+
+fn append_header_hint(resp: &Response<Vec<u8>>, message: &mut String, header: &str, label: &str) {
+    if let Some(value) = resp
+        .headers()
+        .get(header)
+        .and_then(|value| value.to_str().ok())
+    {
+        message.push_str("; ");
+        message.push_str(label);
+        message.push('=');
+        message.push_str(value);
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +117,32 @@ mod tests {
         let error = github_check_status(resp).unwrap_err();
         assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn http_429_is_rate_limited_with_retry_hint() {
+        let resp = response(429, &[("retry-after", "5")], b"slow down");
+        let error = github_check_status(resp).unwrap_err();
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+        assert!(error.message().contains("GitHub API rate limited"));
+        assert!(error.message().contains("retry_after=5"));
+    }
+
+    #[test]
+    fn primary_limit_includes_reset_hint() {
+        let resp = response(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1778500000"),
+                ("x-ratelimit-resource", "core"),
+            ],
+            br#"{"message":"forbidden"}"#,
+        );
+        let error = github_check_status(resp).unwrap_err();
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+        assert!(error.message().contains("reset_epoch=1778500000"));
+        assert!(error.message().contains("resource=core"));
     }
 
     #[test]

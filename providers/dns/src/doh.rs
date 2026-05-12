@@ -81,32 +81,6 @@ fn build_resolver_entries(
         .collect()
 }
 
-#[derive(Debug)]
-enum DohError {
-    Parse(String),
-    DnsResponse(ResponseCode),
-}
-
-impl DohError {
-    fn into_provider_error(self) -> ProviderError {
-        match self {
-            Self::Parse(message) => {
-                ProviderError::invalid_input(format!("invalid DoH DNS message: {message}"))
-            },
-            Self::DnsResponse(code) => {
-                let message = format!("DNS response code: {code}");
-                match code {
-                    ResponseCode::FormErr => ProviderError::invalid_input(message),
-                    ResponseCode::ServFail => ProviderError::network(message),
-                    ResponseCode::NXDomain => ProviderError::not_found(message),
-                    ResponseCode::Refused => ProviderError::denied(message),
-                    _ => ProviderError::internal(message),
-                }
-            },
-        }
-    }
-}
-
 /// Validated `DoH` endpoint URL (always HTTPS).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Endpoint(String);
@@ -301,23 +275,31 @@ fn query(
 }
 
 pub(super) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)> {
-    parse_doh_response(body).map_err(DohError::into_provider_error)
-}
+    const DEFAULT_TTL_SECS: u64 = 300;
 
-fn parse_doh_response(body: &[u8]) -> std::result::Result<(Vec<crate::DnsRecord>, u64), DohError> {
-    let response = Message::from_vec(body).map_err(|e| DohError::Parse(e.to_string()))?;
+    let response = Message::from_vec(body).map_err(|error| {
+        ProviderError::invalid_input(format!("invalid DoH DNS message: {error}"))
+    })?;
 
     if response.response_code != ResponseCode::NoError {
-        return Err(DohError::DnsResponse(response.response_code));
+        let message = format!("DNS response code: {}", response.response_code);
+        return Err(match response.response_code {
+            ResponseCode::FormErr => ProviderError::invalid_input(message),
+            ResponseCode::ServFail => ProviderError::network(message),
+            ResponseCode::NXDomain => ProviderError::not_found(message),
+            ResponseCode::Refused => ProviderError::denied(message),
+            _ => ProviderError::internal(message),
+        });
     }
 
-    let mut min_ttl = u64::MAX;
+    let mut min_ttl = None;
     let mut records = Vec::new();
 
     for answer in &response.answers {
         let maybe_type = RecordType::from_wire(u16::from(answer.record_type()));
         if let Some(rtype) = maybe_type {
-            min_ttl = min_ttl.min(u64::from(answer.ttl));
+            let ttl = u64::from(answer.ttl);
+            min_ttl = Some(min_ttl.unwrap_or(ttl).min(ttl));
             records.push(crate::DnsRecord {
                 rtype,
                 value: answer.data.to_string(),
@@ -325,7 +307,7 @@ fn parse_doh_response(body: &[u8]) -> std::result::Result<(Vec<crate::DnsRecord>
         }
     }
 
-    Ok((records, if min_ttl == u64::MAX { 300 } else { min_ttl }))
+    Ok((records, min_ttl.unwrap_or(DEFAULT_TTL_SECS)))
 }
 
 /// Build a reverse `DNS` query URL for the new async SDK (returns URL string).

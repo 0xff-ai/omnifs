@@ -2,34 +2,26 @@
 
 //! arxiv-provider: arXiv virtual filesystem provider for omnifs.
 //!
-//! Mirrors arXiv into a projected filesystem: browse papers by
-//! `categories/{cat}/{YYYY-MM}/`, `authors/{author}/`, or
-//! `search/{query}/`, plus `new/{N}` and `updated/{N}` windowed
-//! scrolls under each scope. Each paper exposes its PDF, tarball
-//! source, `metadata.json`, and `links.json`, with per-version
-//! variants under `versions/{vN}/`.
+//! Projects recent arXiv category submissions and direct paper lookups.
+//! Category traversal is rooted at `categories/{cat}/recent` and
+//! materialized submission-day buckets under `categories/{cat}/submissions`.
 
 pub(crate) use omnifs_sdk::prelude::Result;
+use std::collections::HashMap;
 
 mod api;
-mod authors;
 mod categories;
-mod http_ext;
 mod paper;
-mod paper_subtree;
-mod papers;
 mod provider;
-mod query;
-mod root;
-mod search;
-mod selector;
+mod recent;
 pub(crate) mod types;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[omnifs_sdk::config]
 pub struct Config {}
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct State {
     pub config: Config,
+    pub(crate) recent: HashMap<types::CategoryKey, recent::RecentIndex>,
 }

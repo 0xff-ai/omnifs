@@ -80,9 +80,9 @@ fn provider_errno(error: &ProviderError) -> Errno {
         ErrorKind::PermissionDenied | ErrorKind::Denied => Errno::EACCES,
         ErrorKind::InvalidInput => Errno::EINVAL,
         ErrorKind::TooLarge => Errno::EFBIG,
+        ErrorKind::RateLimited => Errno::EAGAIN,
         ErrorKind::Network
         | ErrorKind::Timeout
-        | ErrorKind::RateLimited
         | ErrorKind::VersionMismatch
         | ErrorKind::Internal => Errno::EIO,
     }
@@ -1540,4 +1540,20 @@ fn file_payload_for_attrs(
         return None;
     }
     Some(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limited_provider_errors_surface_as_try_again() {
+        let error = ProviderError {
+            kind: ErrorKind::RateLimited,
+            message: "rate limited".to_string(),
+            retryable: true,
+        };
+
+        assert_eq!(i32::from(provider_errno(&error)), i32::from(Errno::EAGAIN));
+    }
 }

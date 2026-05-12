@@ -15,6 +15,9 @@ fn provider_error_maps_http_statuses_to_typed_kinds() {
         ProviderError::from_http_status(404).kind(),
         ProviderErrorKind::NotFound
     );
+    let rate_limited = ProviderError::from_http_status(429);
+    assert_eq!(rate_limited.kind(), ProviderErrorKind::RateLimited);
+    assert!(rate_limited.is_retryable());
 }
 
 #[test]
