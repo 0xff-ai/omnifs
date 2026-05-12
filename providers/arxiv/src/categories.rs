@@ -1,265 +1,102 @@
 use omnifs_sdk::prelude::*;
 
-use crate::api::fetch_listing;
-use crate::paper_subtree::PaperSubtree;
-use crate::query::{
-    EARLIEST_YEAR, SortAxis, and, author_query, category_day_query, category_query,
-    current_date_utc, listing_url, window_start,
+use crate::paper::PaperSubtree;
+use crate::recent::{
+    project_fetched, project_recent, project_recent_page, project_recent_pages, project_submission,
+    project_submissions,
 };
-use crate::types::{
-    CategoryKey, DayKey, EncodedSelector, MonthKey, PaperKey, YearKey, YearMonthDay, days_in_month,
-};
+use crate::types::{CategoryKey, PaperKey, RecentPage, SubmissionDay};
 use crate::{Result, State};
 
 pub struct CategoryHandlers;
 
 #[handlers]
 impl CategoryHandlers {
-    /// `/categories/{cat}` projects year buckets newest-first
-    /// alongside the `new/`, `updated/`, and `by-author/` axes (which
-    /// auto-derive as static children from the routes below).
+    #[dir("/categories")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn categories_root(_cx: &DirCx<State>) -> Result<Projection> {
+        let mut p = Projection::new();
+        p.page(PageStatus::More(Cursor::Opaque("category".to_string())));
+        Ok(p)
+    }
+
     #[dir("/categories/{category}")]
+    #[allow(clippy::unnecessary_wraps)]
     fn category_root(_cx: &DirCx<State>, _category: CategoryKey) -> Result<Projection> {
-        let (current_year, _, _) = current_date_utc();
         let mut p = Projection::new();
-        for year in (EARLIEST_YEAR..=current_year).rev() {
-            p.dir(format!("{year:04}"));
-        }
+        p.dir("recent");
+        p.dir("submissions");
         p.page(PageStatus::Exhaustive);
         Ok(p)
     }
 
-    #[dir("/categories/{category}/{year}")]
-    fn category_year(
-        _cx: &DirCx<State>,
-        _category: CategoryKey,
-        year: YearKey,
-    ) -> Result<Projection> {
-        let (current_year, current_month, _) = current_date_utc();
-        let year = supported_year(year, current_year)?;
-        let max_month = if year == current_year {
-            current_month
-        } else {
-            12
-        };
-
-        let mut p = Projection::new();
-        for month in (1..=max_month).rev() {
-            p.dir(format!("{month:02}"));
-        }
-        p.page(PageStatus::Exhaustive);
-        Ok(p)
+    #[dir("/categories/{category}/recent")]
+    fn recent(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
+        project_recent(cx, category)
     }
 
-    #[dir("/categories/{category}/{year}/{month}")]
-    fn category_month(
-        _cx: &DirCx<State>,
-        _category: CategoryKey,
-        year: YearKey,
-        month: MonthKey,
-    ) -> Result<Projection> {
-        let (current_year, current_month, current_day) = current_date_utc();
-        let year = supported_year(year, current_year)?;
-        let month = supported_month(year, month, current_year, current_month)?;
-        let max_day = if year == current_year && month == current_month {
-            current_day
-        } else {
-            days_in_month(year, month)?
-        };
-
-        let mut p = Projection::new();
-        for day in (1..=max_day).rev() {
-            p.dir(format!("{day:02}"));
-        }
-        p.page(PageStatus::Exhaustive);
-        Ok(p)
+    #[dir("/categories/{category}/recent/_fetched")]
+    fn fetched(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
+        project_fetched(cx, category)
     }
 
-    #[dir("/categories/{category}/{year}/{month}/{day}")]
-    async fn category_day(
+    #[dir("/categories/{category}/recent/pages")]
+    fn recent_pages(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
+        project_recent_pages(cx, category)
+    }
+
+    #[dir("/categories/{category}/recent/pages/{page}")]
+    async fn recent_page(
         cx: &DirCx<State>,
         category: CategoryKey,
-        year: YearKey,
-        month: MonthKey,
-        day: DayKey,
+        page: RecentPage,
     ) -> Result<Projection> {
-        let ymd = supported_day(year, month, day)?;
-        let url = listing_url(&category_day_query(&category, ymd), SortAxis::Submitted, 0);
-        let listing = fetch_listing(cx, url).await?;
-        let YearMonthDay { year, month, day } = ymd;
-        let prefix = format!("categories/{category}/{year:04}/{month:02}/{day:02}");
-        Ok(listing.dir_projection(&prefix))
+        project_recent_page(cx, category, page).await
     }
 
-    #[bind("/categories/{category}/{year}/{month}/{day}/{paper}")]
-    fn category_day_paper(
+    #[bind("/categories/{category}/recent/pages/{page}/{paper}")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn recent_page_paper(
         _cx: &Cx<State>,
-        _category: CategoryKey,
-        _year: YearKey,
-        _month: MonthKey,
-        _day: DayKey,
+        category: CategoryKey,
+        _page: RecentPage,
         paper: PaperKey,
     ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
+        Ok(PaperSubtree::from_category(category, paper))
     }
 
-    #[dir("/categories/{category}/new")]
-    async fn category_new_index(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
-        let url = listing_url(&category_query(&category), SortAxis::Submitted, 0);
-        let listing = fetch_listing(cx, url).await?;
-        let prefix = format!("categories/{category}/new");
-        Ok(listing.dir_projection(&prefix))
-    }
-
-    #[bind("/categories/{category}/new/{paper}")]
-    fn category_new_index_paper(
+    #[bind("/categories/{category}/recent/_fetched/{paper}")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn fetched_paper(
         _cx: &Cx<State>,
-        _category: CategoryKey,
+        category: CategoryKey,
         paper: PaperKey,
     ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
+        Ok(PaperSubtree::from_category(category, paper))
     }
 
-    #[dir("/categories/{category}/new/{n}")]
-    async fn category_new_window(
+    #[dir("/categories/{category}/submissions")]
+    fn submissions(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
+        project_submissions(cx, category)
+    }
+
+    #[dir("/categories/{category}/submissions/{day}")]
+    fn submission_day(
         cx: &DirCx<State>,
         category: CategoryKey,
-        n: u32,
+        day: SubmissionDay,
     ) -> Result<Projection> {
-        let start = window_start(n)?;
-        let url = listing_url(&category_query(&category), SortAxis::Submitted, start);
-        let listing = fetch_listing(cx, url).await?;
-        let prefix = format!("categories/{category}/new/{n}");
-        Ok(listing.dir_projection(&prefix))
+        project_submission(cx, category, day)
     }
 
-    #[bind("/categories/{category}/new/{n}/{paper}")]
-    fn category_new_paper(
+    #[bind("/categories/{category}/submissions/{day}/{paper}")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn submission_paper(
         _cx: &Cx<State>,
-        _category: CategoryKey,
-        _n: u32,
-        paper: PaperKey,
-    ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
-    }
-
-    #[dir("/categories/{category}/updated")]
-    async fn category_updated_index(
-        cx: &DirCx<State>,
         category: CategoryKey,
-    ) -> Result<Projection> {
-        let url = listing_url(&category_query(&category), SortAxis::Updated, 0);
-        let listing = fetch_listing(cx, url).await?;
-        let prefix = format!("categories/{category}/updated");
-        Ok(listing.dir_projection(&prefix))
-    }
-
-    #[bind("/categories/{category}/updated/{paper}")]
-    fn category_updated_index_paper(
-        _cx: &Cx<State>,
-        _category: CategoryKey,
+        _day: SubmissionDay,
         paper: PaperKey,
     ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
-    }
-
-    #[dir("/categories/{category}/updated/{n}")]
-    async fn category_updated_window(
-        cx: &DirCx<State>,
-        category: CategoryKey,
-        n: u32,
-    ) -> Result<Projection> {
-        let start = window_start(n)?;
-        let url = listing_url(&category_query(&category), SortAxis::Updated, start);
-        let listing = fetch_listing(cx, url).await?;
-        let prefix = format!("categories/{category}/updated/{n}");
-        Ok(listing.dir_projection(&prefix))
-    }
-
-    #[bind("/categories/{category}/updated/{n}/{paper}")]
-    fn category_updated_paper(
-        _cx: &Cx<State>,
-        _category: CategoryKey,
-        _n: u32,
-        paper: PaperKey,
-    ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
-    }
-
-    // `/categories/{category}/by-author` is auto-navigable (literal
-    // segment under a captured parent); the SDK derives it from the
-    // `by-author/{author}` route below. No stub handler needed.
-
-    #[dir("/categories/{category}/by-author/{author}")]
-    async fn category_by_author(
-        cx: &DirCx<State>,
-        category: CategoryKey,
-        author: EncodedSelector,
-    ) -> Result<Projection> {
-        let decoded = author.decode()?;
-        let q = and(&category_query(&category), &author_query(&decoded));
-        let url = listing_url(&q, SortAxis::Submitted, 0);
-        let listing = fetch_listing(cx, url).await?;
-        let prefix = format!("categories/{category}/by-author/{author}");
-        Ok(listing.dir_projection(&prefix))
-    }
-
-    #[bind("/categories/{category}/by-author/{author}/{paper}")]
-    fn category_by_author_paper(
-        _cx: &Cx<State>,
-        _category: CategoryKey,
-        _author: EncodedSelector,
-        paper: PaperKey,
-    ) -> Result<PaperSubtree> {
-        Ok(PaperSubtree { paper })
-    }
-}
-
-fn supported_year(year: YearKey, current_year: u32) -> Result<u32> {
-    let year = year.value();
-    if !(EARLIEST_YEAR..=current_year).contains(&year) {
-        return Err(ProviderError::not_found("year is outside the arXiv range"));
-    }
-    Ok(year)
-}
-
-fn supported_month(
-    year: u32,
-    month: MonthKey,
-    current_year: u32,
-    current_month: u32,
-) -> Result<u32> {
-    let month = month.value();
-    if year == current_year && month > current_month {
-        return Err(ProviderError::not_found("month is in the future"));
-    }
-    Ok(month)
-}
-
-fn supported_day(year: YearKey, month: MonthKey, day: DayKey) -> Result<YearMonthDay> {
-    let (current_year, current_month, current_day) = current_date_utc();
-    let year = supported_year(year, current_year)?;
-    let month = supported_month(year, month, current_year, current_month)?;
-    let day = day.value();
-    if day > days_in_month(year, month)? {
-        return Err(ProviderError::not_found("day is outside the month"));
-    }
-    if year == current_year && month == current_month && day > current_day {
-        return Err(ProviderError::not_found("day is in the future"));
-    }
-    Ok(YearMonthDay { year, month, day })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn supported_day_rejects_impossible_dates() {
-        let year: YearKey = "2024".parse().unwrap();
-        let february: MonthKey = "02".parse().unwrap();
-        let bad_day: DayKey = "30".parse().unwrap();
-
-        assert!(supported_day(year, february, bad_day).is_err());
+        Ok(PaperSubtree::from_category(category, paper))
     }
 }

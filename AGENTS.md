@@ -119,6 +119,8 @@ docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
 docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
 ```
 
+For provider path-surface changes, test the whole shell traversal, not only the intended leaf paths. In the live container, run `ll`, `cd`, and `find` from the provider root through every intermediate directory and verify that parent directories do not synthesize duplicate root entries, route scaffolding names do not bind as dynamic captures, and control directories do not contain paper/item nodes unless the design explicitly says they should.
+
 The Dockerfile is intentionally cache-oriented:
 
 - multi-stage build

@@ -2,13 +2,21 @@ use core::fmt;
 use core::str::FromStr;
 
 use omnifs_sdk::prelude::{ProviderError, Result};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use time::{Date, Month, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+
+pub(crate) const PAGE_SIZE: u32 = 100;
+const FS_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b':');
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CategoryKey(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EncodedSelector(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaperKey(String);
@@ -16,37 +24,31 @@ pub struct PaperKey(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VersionKey(String);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct YearKey(u32);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct FeedSnapshot(OffsetDateTime);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MonthKey(u32);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct RecentPage(u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DayKey(u32);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct SubmissionDay(Date);
 
-/// Validated UTC calendar day for a bounded arXiv category listing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct YearMonthDay {
-    pub year: u32,
-    pub month: u32,
-    pub day: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CategoryPage {
+    pub(crate) page: RecentPage,
+    pub(crate) snapshot: FeedSnapshot,
+    pub(crate) total_results: u32,
+    pub(crate) papers: Vec<PagePaper>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Listing {
-    pub request_url: String,
-    pub total_results: u32,
-    pub papers: Vec<ListedPaper>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PagePaper {
+    pub(crate) key: PaperKey,
+    pub(crate) submission: SubmissionDay,
+    pub(crate) entry: ParsedEntry,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ListedPaper {
-    pub encoded_key: String,
-    pub entry: ParsedEntry,
-}
-
-/// Immutable view of one parsed arXiv Atom entry. Pure data.
+/// Immutable view of one parsed arXiv Atom entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ParsedEntry {
     pub raw_id: String,
@@ -65,29 +67,17 @@ pub(crate) struct ParsedEntry {
 
 impl CategoryKey {
     pub(crate) fn is_valid(value: &str) -> bool {
-        !value.is_empty()
+        !matches!(
+            value,
+            "categories" | "papers" | "recent" | "submissions" | "pages"
+        ) && !value.is_empty()
             && value
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
     }
 }
 
-impl EncodedSelector {
-    pub(crate) fn is_valid(value: &str) -> bool {
-        !value.is_empty()
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'%' | b':' | b'+' | b'@')
-            })
-    }
-}
-
 impl PaperKey {
-    /// Accept new-style ids (`YYMM.NNNNN[vN]`, contains `.` and digits)
-    /// and percent-encoded old-style ids (`archive(.sub)?%2FYYMMNNN[vN]`,
-    /// contains `%2F`). The shape requirement excludes reserved literal
-    /// path segments like `new`, `updated`, `by-author` from matching
-    /// the `{paper}` capture.
     pub(crate) fn is_valid(value: &str) -> bool {
         if value.is_empty() {
             return false;
@@ -99,6 +89,27 @@ impl PaperKey {
             && value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'%' | b':')
             })
+    }
+
+    pub(crate) fn encode_raw_id(raw_id: &str) -> Self {
+        Self(utf8_percent_encode(raw_id, FS_PATH_ENCODE_SET).to_string())
+    }
+
+    pub(crate) fn decode(&self) -> Result<String> {
+        let decoded = percent_decode_str(self.as_ref())
+            .decode_utf8()
+            .map_err(|_| ProviderError::not_found("paper id encoding was not valid UTF-8"))?
+            .into_owned();
+        if decoded.is_empty() {
+            return Err(ProviderError::not_found("paper id is empty"));
+        }
+        let (base, explicit_version) = split_versioned_id(&decoded);
+        if explicit_version.is_some() {
+            return Err(ProviderError::not_found(
+                "versioned paper ids must be accessed through versions/",
+            ));
+        }
+        Ok(base)
     }
 }
 
@@ -119,87 +130,115 @@ impl VersionKey {
     }
 }
 
-impl YearKey {
-    pub(crate) fn value(self) -> u32 {
+impl FeedSnapshot {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        Ok(Self(parse_atom_datetime(value)?))
+    }
+
+    pub(crate) fn utc_date(self) -> Date {
+        self.0.date()
+    }
+
+    pub(crate) fn as_utc_string(self) -> String {
+        format_atom_utc(self.0)
+    }
+}
+
+impl RecentPage {
+    pub(crate) fn new(index: u64) -> Self {
+        Self(index)
+    }
+
+    pub(crate) fn zero() -> Self {
+        Self(0)
+    }
+
+    pub(crate) fn index(self) -> u64 {
         self.0
     }
 
-    pub(crate) fn is_valid(value: &str) -> bool {
-        value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit())
+    pub(crate) fn start(self) -> u64 {
+        self.0 * u64::from(PAGE_SIZE)
+    }
+
+    pub(crate) fn next(self) -> Self {
+        Self(self.0 + 1)
     }
 }
 
-impl MonthKey {
-    pub(crate) fn value(self) -> u32 {
+impl SubmissionDay {
+    pub(crate) fn parse_path(segment: &str) -> Result<Self> {
+        let date = parse_compact_date(segment)?;
+        Ok(Self(date))
+    }
+
+    pub(crate) fn from_published(published: &str) -> Result<Self> {
+        Ok(Self(parse_atom_datetime(published)?.date()))
+    }
+
+    pub(crate) fn date(self) -> Date {
         self.0
     }
 
-    pub(crate) fn is_valid(value: &str) -> bool {
-        value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit()) && {
-            let month: u32 = value.parse().unwrap_or(0);
-            (1..=12).contains(&month)
-        }
+    pub(crate) fn path_segment(self) -> String {
+        let date = self.date();
+        format!(
+            "{:04}{:02}{:02}",
+            date.year(),
+            u8::from(date.month()),
+            date.day()
+        )
     }
 }
 
-impl DayKey {
-    pub(crate) fn value(self) -> u32 {
-        self.0
-    }
-
-    pub(crate) fn is_valid(value: &str) -> bool {
-        value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit()) && {
-            let day: u32 = value.parse().unwrap_or(0);
-            (1..=31).contains(&day)
-        }
+impl PagePaper {
+    pub(crate) fn from_entry(entry: ParsedEntry) -> Result<Self> {
+        let submission = SubmissionDay::from_published(&entry.published)?;
+        let key = PaperKey::encode_raw_id(&entry.raw_id);
+        Ok(Self {
+            key,
+            submission,
+            entry,
+        })
     }
 }
 
-pub(crate) fn days_in_month(year: u32, month: u32) -> Result<u32> {
-    let month_enum = time::Month::try_from(u8::try_from(month).unwrap_or(0))
-        .map_err(|_| ProviderError::not_found("invalid month"))?;
-    let year_i32 = i32::try_from(year).map_err(|_| ProviderError::not_found("invalid year"))?;
-    Ok(u32::from(month_enum.length(year_i32)))
-}
-
-impl FromStr for YearKey {
+impl FromStr for RecentPage {
     type Err = ();
+
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        if !Self::is_valid(value) {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(());
         }
-        Ok(Self(value.parse().map_err(|_| ())?))
+        Ok(Self::new(value.parse::<u64>().map_err(|_| ())?))
     }
 }
 
-impl fmt::Display for YearKey {
+impl FromStr for SubmissionDay {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse_path(value).map_err(|_| ())
+    }
+}
+
+impl fmt::Display for FeedSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04}", self.0)
+        self.as_utc_string().fmt(f)
     }
 }
 
-macro_rules! impl_two_digit_key {
-    ($name:ident) => {
-        impl FromStr for $name {
-            type Err = ();
-
-            fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-                Self::is_valid(value)
-                    .then(|| Self(value.parse().expect("validated decimal segment")))
-                    .ok_or(())
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{:02}", self.0)
-            }
-        }
-    };
+impl fmt::Display for RecentPage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
-impl_two_digit_key!(MonthKey);
-impl_two_digit_key!(DayKey);
+impl fmt::Display for SubmissionDay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.path_segment().fmt(f)
+    }
+}
 
 macro_rules! impl_string_newtype {
     ($name:ident) => {
@@ -228,24 +267,128 @@ macro_rules! impl_string_newtype {
 }
 
 impl_string_newtype!(CategoryKey);
-impl_string_newtype!(EncodedSelector);
 impl_string_newtype!(PaperKey);
 impl_string_newtype!(VersionKey);
+
+pub(crate) fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn split_versioned_id(raw_id: &str) -> (String, Option<u32>) {
+    let bytes = raw_id.as_bytes();
+    let mut split = bytes.len();
+    while split > 0 && bytes[split - 1].is_ascii_digit() {
+        split -= 1;
+    }
+    if split == bytes.len() || split == 0 || bytes[split - 1] != b'v' {
+        return (raw_id.to_string(), None);
+    }
+    match raw_id[split..].parse::<u32>() {
+        Ok(version) => (raw_id[..split - 1].to_string(), Some(version)),
+        Err(_) => (raw_id.to_string(), None),
+    }
+}
+
+pub(crate) fn pretty_json(payload: &Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(payload).expect("serializing json! is infallible");
+    bytes.push(b'\n');
+    bytes
+}
+
+fn parse_compact_date(value: &str) -> Result<Date> {
+    if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ProviderError::not_found("submission day must be YYYYMMDD"));
+    }
+    let year = value[0..4]
+        .parse::<i32>()
+        .map_err(|_| ProviderError::not_found("invalid submission year"))?;
+    let month = value[4..6]
+        .parse::<u8>()
+        .map_err(|_| ProviderError::not_found("invalid submission month"))?;
+    let day = value[6..8]
+        .parse::<u8>()
+        .map_err(|_| ProviderError::not_found("invalid submission day"))?;
+    let month =
+        Month::try_from(month).map_err(|_| ProviderError::not_found("invalid submission month"))?;
+    Date::from_calendar_date(year, month, day)
+        .map_err(|_| ProviderError::not_found("invalid submission date"))
+}
+
+fn parse_atom_datetime(value: &str) -> Result<OffsetDateTime> {
+    OffsetDateTime::parse(&normalize_whitespace(value), &Rfc3339)
+        .map(|timestamp| timestamp.to_offset(UtcOffset::UTC))
+        .map_err(|e| ProviderError::internal(format!("invalid arXiv timestamp: {e}")))
+}
+
+fn format_atom_utc(value: OffsetDateTime) -> String {
+    let value = value.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second()
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn calendar_segments_parse_fixed_width_values() {
-        let year: YearKey = "2026".parse().unwrap();
-        let month: MonthKey = "05".parse().unwrap();
-        let day: DayKey = "11".parse().unwrap();
+    fn recent_page_maps_to_start_offset() {
+        let page: RecentPage = "1".parse().unwrap();
+        assert_eq!(page.index(), 1);
+        assert_eq!(page.start(), 100);
+        assert_eq!("300".parse::<RecentPage>().unwrap().start(), 30_000);
+    }
 
-        assert_eq!(year.value(), 2026);
-        assert_eq!(month.value(), 5);
-        assert_eq!(day.value(), 11);
-        assert!("5".parse::<MonthKey>().is_err());
-        assert!("32".parse::<DayKey>().is_err());
+    #[test]
+    fn category_key_rejects_route_scaffolding_names() {
+        assert!("cs.AI".parse::<CategoryKey>().is_ok());
+        assert!("hep-th".parse::<CategoryKey>().is_ok());
+        assert!("math".parse::<CategoryKey>().is_ok());
+        assert!("categories".parse::<CategoryKey>().is_err());
+        assert!("papers".parse::<CategoryKey>().is_err());
+        assert!("recent".parse::<CategoryKey>().is_err());
+        assert!("submissions".parse::<CategoryKey>().is_err());
+    }
+
+    #[test]
+    fn submission_day_uses_utc_published_date() {
+        let day = SubmissionDay::from_published("2026-05-12T01:30:00+02:00").unwrap();
+        assert_eq!(day.path_segment(), "20260511");
+        assert_eq!(day.date().year(), 2026);
+    }
+
+    #[test]
+    fn feed_snapshot_formats_utc() {
+        let snapshot = FeedSnapshot::parse("2025-01-15T00:00:00-05:00").unwrap();
+        assert_eq!(snapshot.as_utc_string(), "2025-01-15T05:00:00Z");
+    }
+
+    #[test]
+    fn paper_key_round_trip_preserves_slash_ids() {
+        let encoded = PaperKey::encode_raw_id("hep-th/9901001");
+        assert_eq!(encoded.as_ref(), "hep-th%2F9901001");
+        assert_eq!(encoded.decode().unwrap(), "hep-th/9901001");
+    }
+
+    #[test]
+    fn split_versioned_id_handles_bare_and_versioned() {
+        assert_eq!(
+            split_versioned_id("2501.12345"),
+            ("2501.12345".to_string(), None)
+        );
+        assert_eq!(
+            split_versioned_id("2501.12345v3"),
+            ("2501.12345".to_string(), Some(3))
+        );
+        assert_eq!(
+            split_versioned_id("hep-th/9901001"),
+            ("hep-th/9901001".to_string(), None)
+        );
     }
 }

@@ -1,6 +1,6 @@
 # omnifs-provider-arxiv
 
-[omnifs](https://github.com/raulk/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Browse papers by id, by category, by author, or by free-text search; each paper materializes its PDF, source tarball, metadata, and version history as files.
+[omnifs](https://github.com/raulk/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Browse recent category submissions or direct paper ids; each paper materializes its PDF, source tarball, metadata, links, and version history as files.
 
 ## Mount layout
 
@@ -12,15 +12,20 @@
     metadata.json
     links.json
     versions/v{n}/
-  categories/{cat}/{YYYY}/{MM}/{DD}/
-  categories/{cat}/{new | updated | by-author}/
-  authors/{author}/{... | by-category}/
-  search/{query}/
+  categories/{cat}/recent/
+  categories/{cat}/recent/_fetched/
+  categories/{cat}/recent/pages/
+  categories/{cat}/recent/pages/{n}/
+  categories/{cat}/submissions/
+  categories/{cat}/submissions/{YYYYMMDD}/
 ```
 
 `{id}` accepts both the modern `2401.12345` and legacy `cs.LG/0512345` formats. `versions/v{n}/` re-projects the paper subtree at a specific version.
 
-Category calendar listings are day-bounded to keep each arXiv API query small. If a listing returns fewer papers than arXiv reports for that scope, the directory includes `_more` with a short `fetched listed/total` marker.
+Category traversal uses arXiv's recent category feed with `search_query=cat:{cat}` and `max_results=100`.
+Results are sorted descending by `sortBy=submittedDate`.
+`recent/pages/{n}` fetches upstream pages, while `recent/_fetched` is the deduped set discovered so far.
+Submission-day directories are materialized from already fetched recent pages and never issue date-range queries.
 
 ## Capabilities
 

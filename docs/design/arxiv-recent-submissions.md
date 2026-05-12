@@ -29,6 +29,7 @@ The provider has one live moving view per category:
 
 ```text
 /categories/{category}/recent
+/categories/{category}/recent/_fetched
 /categories/{category}/recent/pages
 /categories/{category}/recent/pages/{n}
 ```
@@ -46,8 +47,10 @@ Direct paper access remains available:
 /papers/{paper}
 ```
 
-`recent` is the current page-zero view. `recent/pages/{n}` is the explicit
-fetch-next interaction. `submissions/{YYYYMMDD}` is never backed by a
+`recent` is a control namespace. `recent/pages/{n}` is the explicit fetch-next
+interaction and upstream page view. `recent/_fetched` is the deduped set of
+papers discovered so far by traversing fetched pages; it is non-exhaustive
+until the scan exhausts. `submissions/{YYYYMMDD}` is never backed by a
 `submittedDate` query; it is a materialized bucket derived from already fetched
 recent pages.
 
@@ -154,7 +157,12 @@ The recent-scan module should expose projection functions that map directly to
 route handlers:
 
 ```rust
-pub(crate) async fn project_recent(
+pub(crate) fn project_recent(
+    cx: &Cx<State>,
+    category: CategoryKey,
+) -> Result<Projection>;
+
+pub(crate) fn project_fetched(
     cx: &Cx<State>,
     category: CategoryKey,
 ) -> Result<Projection>;
@@ -318,23 +326,29 @@ fetches plus paper resource links.
 
 ## Fetch and projection
 
-Listing `/categories/{category}/recent` fetches or reuses page zero for the
-current category scan and returns the page-zero paper nodes. It also writes
-those papers into the category's submission buckets.
+Listing `/categories/{category}/recent` does not fetch arXiv and does not mix
+papers with controls. It returns `_fetched`, `pages`, and a `_status.json` once
+the category has scan state.
+
+Listing `/categories/{category}/recent/_fetched` enumerates the deduped paper
+nodes discovered by fetched recent pages. It grows as users traverse
+`recent/pages/{n}`. It is non-exhaustive until the contiguous scan exhausts
+`total_results`.
 
 Listing `/categories/{category}/recent/pages/{n}` fetches or reuses page `n`,
 where `start = n * 100`, and returns that page's paper nodes. The page listing
 also records every returned paper in provider state and preloads the paper
-subtree under both paths:
+subtree under all derived paths:
 
 ```text
+/categories/{category}/recent/_fetched/{paper}
 /categories/{category}/recent/pages/{n}/{paper}
 /categories/{category}/submissions/{YYYYMMDD}/{paper}
 ```
 
-The semantic home for discovered papers is the paper node and its submission
-bucket. Page paths are the explicit fetch-next mechanism and a useful view of
-the upstream API page; they are not the only path where the paper appears.
+The semantic homes for discovered category papers are `_fetched` and their
+submission buckets. Page paths are the explicit fetch-next mechanism and a
+useful view of the upstream API page.
 
 Listing `/categories/{category}/submissions` enumerates submission-day
 directories already discovered in state. It is non-exhaustive because more days
@@ -367,7 +381,7 @@ complete buckets project with `PageStatus::Exhaustive`.
 Use a single `_status.json` control file. Do not keep the old `listing.json`
 and do not add a separate `_more` marker for this surface.
 
-For `recent`, status includes:
+For `recent` and `recent/_fetched`, status includes:
 
 ```json
 {
@@ -538,6 +552,7 @@ logs to prove that no `submittedDate` query was emitted:
 
 ```bash
 ls /arxiv/categories/cs.AI/recent
+ls /arxiv/categories/cs.AI/recent/_fetched
 ls /arxiv/categories/cs.AI/recent/pages/1
 ls /arxiv/categories/cs.AI/submissions
 find /arxiv/categories/cs.AI -maxdepth 4 -type d | head
@@ -599,11 +614,12 @@ this sequence so the risky logic is isolated before route churn.
 - [ ] Mark all open buckets complete when the contiguous scan exhausts
       `total_results`.
 - [ ] Add explicit handlers for `/categories/{category}/recent`.
+- [ ] Add explicit handlers for `/categories/{category}/recent/_fetched`.
 - [ ] Add explicit handlers for `/categories/{category}/recent/pages`.
 - [ ] Add explicit handlers for `/categories/{category}/recent/pages/{n}`.
 - [ ] Add explicit handlers for `/categories/{category}/submissions`.
 - [ ] Add explicit handlers for `/categories/{category}/submissions/{YYYYMMDD}`.
-- [ ] Bind paper subtrees under recent page paths.
+- [ ] Bind paper subtrees under recent `_fetched` and page paths.
 - [ ] Bind paper subtrees under submission bucket paths.
 - [ ] Project `_status.json` for recent and submission directories.
 - [ ] Return not found for undiscovered `submissions/{YYYYMMDD}`.
