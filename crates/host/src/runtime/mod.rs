@@ -1049,45 +1049,60 @@ fn split_projected_path(path: &str) -> Option<(&str, &str)> {
     (!name.is_empty()).then_some((parent, name))
 }
 
-fn validate_effects_with(
-    effects: &[wit_types::Effect],
-    validator: &mut AttrValidator,
-) -> std::result::Result<(), String> {
-    for effect in effects {
-        match effect {
-            wit_types::Effect::Project(entry) => validator
-                .entry(&entry.kind)
-                .map_err(|error| format!("project effect {:?}: {error}", entry.path))?,
-            wit_types::Effect::InvalidatePath(_)
-            | wit_types::Effect::InvalidatePrefix(_)
-            | wit_types::Effect::DisownTree(_) => {},
-        }
+struct Effects<'a> {
+    effects: &'a [wit_types::Effect],
+}
+
+impl<'a> Effects<'a> {
+    fn new(effects: &'a [wit_types::Effect]) -> Self {
+        Self { effects }
     }
-    Ok(())
+
+    fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+    }
+
+    fn validate(&self, validator: &mut AttrValidator) -> std::result::Result<(), String> {
+        for effect in self.effects {
+            match effect {
+                wit_types::Effect::Project(entry) => validator
+                    .entry(&entry.kind)
+                    .map_err(|error| format!("project effect {:?}: {error}", entry.path))?,
+                wit_types::Effect::InvalidatePath(_)
+                | wit_types::Effect::InvalidatePrefix(_)
+                | wit_types::Effect::DisownTree(_) => {},
+            }
+        }
+        Ok(())
+    }
+
+    fn disown_handoffs(&self) -> Vec<&'a wit_types::TreeHandoff> {
+        self.effects
+            .iter()
+            .filter_map(|effect| {
+                if let wit_types::Effect::DisownTree(handoff) = effect {
+                    Some(handoff)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 fn validate_provider_return(
     ret: &wit_types::ProviderReturn,
     expected_handoff_path: Option<&str>,
 ) -> std::result::Result<(), String> {
-    if matches!(ret.result, wit_types::OpResult::Error(_)) && !ret.effects.is_empty() {
+    let effects = Effects::new(&ret.effects);
+    if matches!(ret.result, wit_types::OpResult::Error(_)) && !effects.is_empty() {
         return Err("provider error returns must not carry effects".to_string());
     }
     let mut validator = AttrValidator::default();
     validate_operation_result_with(&ret.result, &mut validator)?;
-    validate_effects_with(&ret.effects, &mut validator)?;
+    effects.validate(&mut validator)?;
 
-    let handoffs = ret
-        .effects
-        .iter()
-        .filter_map(|effect| {
-            if let wit_types::Effect::DisownTree(handoff) = effect {
-                Some(handoff)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let handoffs = effects.disown_handoffs();
 
     let subtree = match &ret.result {
         wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(tree))
