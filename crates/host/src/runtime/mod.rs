@@ -126,7 +126,10 @@ pub enum RuntimeError {
     #[error("provider returned error: {0:?}")]
     ProviderError(wit_types::ProviderError),
     #[error("{op:?} returned unexpected result: {result:?}")]
-    UnexpectedOpResult { op: Op, result: wit_types::OpResult },
+    UnexpectedOpResult {
+        op: Box<Op>,
+        result: Box<wit_types::OpResult>,
+    },
     #[error("{0}")]
     InvalidConfig(String),
     #[error("unexpected response type")]
@@ -134,6 +137,15 @@ pub enum RuntimeError {
 }
 
 type Result<T> = std::result::Result<T, RuntimeError>;
+
+impl RuntimeError {
+    fn unexpected_op_result(op: Op, result: wit_types::OpResult) -> Self {
+        Self::UnexpectedOpResult {
+            op: Box::new(op),
+            result: Box::new(result),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Op {
@@ -453,7 +465,7 @@ impl ProviderRuntime {
         }
     }
 
-    pub(super) fn apply_effects(&self, effects: &[wit_types::Effect]) -> Result<()> {
+    pub(super) fn apply_effects(&self, effects: &[wit_types::Effect]) {
         let mut batch = Vec::new();
         let mut projected_dirs = BTreeSet::new();
         let mut projected_children: BTreeMap<String, BTreeMap<String, DirentRecord>> =
@@ -541,7 +553,6 @@ impl ProviderRuntime {
             );
             self.cache_put_batch(&batch);
         }
-        Ok(())
     }
 
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
@@ -574,6 +585,7 @@ impl ProviderRuntime {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // generated WIT binding requires &Vec
     fn resume_provider(
         &self,
         id: u64,
@@ -593,7 +605,7 @@ impl ProviderRuntime {
     ) -> Result<wit_types::OpResult> {
         Validator::returned(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
             .map_err(RuntimeError::ProviderProtocol)?;
-        self.apply_effects(&ret.effects)?;
+        self.apply_effects(&ret.effects);
         Ok(ret.result)
     }
 
@@ -620,7 +632,7 @@ impl ProviderRuntime {
 struct Callout<'a> {
     operation_id: u64,
     index: usize,
-    callout: &'a wit_types::Callout,
+    request: &'a wit_types::Callout,
 }
 
 impl<'a> Callout<'a> {
@@ -628,18 +640,18 @@ impl<'a> Callout<'a> {
         Self {
             operation_id,
             index,
-            callout,
+            request: callout,
         }
     }
 
     async fn execute(self, runtime: &ProviderRuntime) -> wit_types::CalloutResult {
-        match self.callout {
+        match self.request {
             wit_types::Callout::Fetch(req) => self.execute_fetch(runtime, req).await,
             wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(runtime, req),
             wit_types::Callout::FetchBlob(req) => self.execute_blob_fetch(runtime, req).await,
             wit_types::Callout::OpenArchive(req) => self.execute_archive_open(runtime, req).await,
             wit_types::Callout::ReadBlob(req) => self.execute_blob_read(runtime, req),
-            _ => self.unsupported(),
+            _ => Self::unsupported(),
         }
     }
 
@@ -812,7 +824,7 @@ impl<'a> Callout<'a> {
         blob_read_to_wit(resp)
     }
 
-    fn unsupported(&self) -> wit_types::CalloutResult {
+    fn unsupported() -> wit_types::CalloutResult {
         wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
             kind: wit_types::ErrorKind::Internal,
             message: "callout type not yet implemented".to_string(),
@@ -1189,9 +1201,19 @@ where
             },
             (
                 Op::LookupChild { .. },
-                wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Subtree(_))
-                | wit_types::OpResult::LookupChild(wit_types::LookupChildResult::NotFound),
-            ) => {},
+                wit_types::OpResult::LookupChild(
+                    wit_types::LookupChildResult::Subtree(_)
+                    | wit_types::LookupChildResult::NotFound,
+                ),
+            )
+            | (
+                Op::ListChildren { .. },
+                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(_)),
+            )
+            | (Op::ReadChunk { .. }, wit_types::OpResult::ReadChunk(_))
+            | (Op::Initialize, wit_types::OpResult::Initialize(_))
+            | (Op::OnEvent { .. }, wit_types::OpResult::OnEvent)
+            | (_, wit_types::OpResult::Error(_)) => {},
             (
                 Op::ListChildren { .. },
                 wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(listing)),
@@ -1200,20 +1222,12 @@ where
                     self.entry(&entry.kind)?;
                 }
             },
-            (
-                Op::ListChildren { .. },
-                wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Subtree(_)),
-            ) => {},
             (Op::ReadFile { .. }, wit_types::OpResult::ReadFile(result)) => {
                 self.read_file_result(result)?;
             },
             (Op::OpenFile { .. }, wit_types::OpResult::OpenFile(result)) => {
-                self.file_attrs_metadata(&result.attrs)?;
+                Self::file_attrs_metadata(&result.attrs)?;
             },
-            (Op::ReadChunk { .. }, wit_types::OpResult::ReadChunk(_)) => {},
-            (Op::Initialize, wit_types::OpResult::Initialize(_)) => {},
-            (Op::OnEvent { .. }, wit_types::OpResult::OnEvent) => {},
-            (_, wit_types::OpResult::Error(_)) => {},
             _ => {
                 return Err(format!(
                     "{:?} returned unexpected result: {:?}",
@@ -1320,7 +1334,7 @@ where
         &mut self,
         result: &wit_types::ReadFileResult,
     ) -> std::result::Result<(), String> {
-        self.file_attrs_metadata(&result.attrs)?;
+        Self::file_attrs_metadata(&result.attrs)?;
         match &result.bytes {
             wit_types::ReadFileBytes::Inline(bytes) => {
                 let attrs = cache::FileAttrsCache::from(&result.attrs);
@@ -1334,7 +1348,7 @@ where
         Ok(())
     }
 
-    fn file_attrs_metadata(&self, attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
+    fn file_attrs_metadata(attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
         if let Some(token) = &attrs.version_token {
             if token.is_empty() {
                 return Err("version token must not be empty".to_string());

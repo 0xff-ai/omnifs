@@ -30,7 +30,7 @@ impl ProviderRuntime {
         match result {
             wit_types::OpResult::LookupChild(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
+            result => Err(RuntimeError::unexpected_op_result(op, result)),
         }
     }
 
@@ -53,7 +53,7 @@ impl ProviderRuntime {
         match result {
             wit_types::OpResult::ListChildren(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
+            result => Err(RuntimeError::unexpected_op_result(op, result)),
         }
     }
 
@@ -72,7 +72,7 @@ impl ProviderRuntime {
         match result {
             wit_types::OpResult::ReadFile(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
+            result => Err(RuntimeError::unexpected_op_result(op, result)),
         }
     }
 
@@ -89,7 +89,7 @@ impl ProviderRuntime {
         match result {
             wit_types::OpResult::OpenFile(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
+            result => Err(RuntimeError::unexpected_op_result(op, result)),
         }
     }
 
@@ -109,7 +109,7 @@ impl ProviderRuntime {
         match result {
             wit_types::OpResult::ReadChunk(result) => Ok(result),
             wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
-            result => Err(RuntimeError::UnexpectedOpResult { op, result }),
+            result => Err(RuntimeError::unexpected_op_result(op, result)),
         }
     }
 

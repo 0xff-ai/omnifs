@@ -352,7 +352,7 @@ impl RecentIndex {
         let mut p = Projection::new();
         for key in self.fetched_papers() {
             p.dir(key.to_string());
-            p.preload_dir(format!("categories/{category}/recent/_fetched/{key}"));
+            p.proj_dir(format!("categories/{category}/recent/_fetched/{key}"));
         }
         self.write_scan_page_status(&mut p);
         p
@@ -374,7 +374,7 @@ impl RecentIndex {
         for key in view.papers {
             p.dir(key.to_string());
             let base = format!("categories/{category}/submissions/{day}/{key}");
-            p.preload_dir(base);
+            p.proj_dir(base);
         }
         p.file_with_content(
             "_status.json",
@@ -408,12 +408,12 @@ impl RecentIndex {
                 .get(key)
                 .ok_or_else(|| ProviderError::internal("recent page referenced missing paper"))?;
             let page_base = format!("{page_prefix}/{key}");
-            p.preload_dir(page_base);
-            p.preload_dir(format!("categories/{category}/recent/_fetched/{key}"));
+            p.proj_dir(page_base);
+            p.proj_dir(format!("categories/{category}/recent/_fetched/{key}"));
             let submission = SubmissionDay::from_published(&entry.published)?;
             let submission_base = format!("categories/{category}/submissions/{submission}");
-            p.preload_dir(&submission_base);
-            p.preload_dir(format!("{submission_base}/{key}"));
+            p.proj_dir(&submission_base);
+            p.proj_dir(format!("{submission_base}/{key}"));
         }
         self.write_scan_page_status(&mut p);
         Ok(p)
