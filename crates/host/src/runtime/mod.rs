@@ -117,8 +117,12 @@ pub enum RuntimeError {
     Wasmtime(#[from] wasmtime::Error),
     #[error("failed to build HTTP client: {0}")]
     HttpClient(#[from] reqwest::Error),
-    #[error("provider returned error: {0}")]
-    ProviderError(String),
+    #[error("provider protocol error: {0}")]
+    ProviderProtocol(String),
+    #[error("provider returned error: {0:?}")]
+    ProviderError(wit_types::ProviderError),
+    #[error("{op:?} returned unexpected result: {result:?}")]
+    UnexpectedOpResult { op: Op, result: wit_types::OpResult },
     #[error("{0}")]
     InvalidConfig(String),
     #[error("unexpected response type")]
@@ -126,6 +130,15 @@ pub enum RuntimeError {
 }
 
 type Result<T> = std::result::Result<T, RuntimeError>;
+
+#[derive(Clone, Debug)]
+pub enum Op {
+    LookupChild,
+    ListChildren,
+    ReadFile,
+    OpenFile,
+    ReadChunk,
+}
 
 impl CalloutRuntime {
     pub fn new(
@@ -168,14 +181,14 @@ impl CalloutRuntime {
             .call_get_config_schema(&mut store)?;
         validate_instance_config(wit_schema.as_deref(), config, mount_name)?;
         let config_bytes = config.config_bytes();
-        let auth = if config.auth.is_empty() {
-            Arc::new(AuthManager::none())
-        } else {
-            Arc::new(
-                AuthManager::from_configs(&config.auth)
-                    .map_err(|e| RuntimeError::ProviderError(format!("auth config error: {e}")))?,
-            )
-        };
+        let auth =
+            if config.auth.is_empty() {
+                Arc::new(AuthManager::none())
+            } else {
+                Arc::new(AuthManager::from_configs(&config.auth).map_err(|e| {
+                    RuntimeError::ProviderProtocol(format!("auth config error: {e}"))
+                })?)
+            };
 
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
@@ -425,7 +438,7 @@ impl CalloutRuntime {
                 },
                 wit_types::Effect::DisownTree(handoff) => {
                     if self.resolve_tree_ref(handoff.tree).is_none() {
-                        return Err(RuntimeError::ProviderError(format!(
+                        return Err(RuntimeError::ProviderProtocol(format!(
                             "disown-tree effect for {:?} references unknown tree {}",
                             handoff.path, handoff.tree
                         )));
@@ -511,12 +524,12 @@ impl CalloutRuntime {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
                     validate_provider_return(&ret, expected_handoff_path)
-                        .map_err(RuntimeError::ProviderError)?;
+                        .map_err(RuntimeError::ProviderProtocol)?;
                     self.apply_effects(&ret.effects)?;
                     return Ok(ret.result);
                 },
                 wit_types::ProviderStep::Suspended(callouts) if callouts.is_empty() => {
-                    return Err(RuntimeError::ProviderError(
+                    return Err(RuntimeError::ProviderProtocol(
                         "provider suspended with no callouts".into(),
                     ));
                 },
@@ -546,14 +559,14 @@ impl CalloutRuntime {
         let record = self
             .blob_cache
             .lookup_by_id(blob_id)
-            .ok_or_else(|| RuntimeError::ProviderError(format!("blob {blob_id} not found")))?;
+            .ok_or_else(|| RuntimeError::ProviderProtocol(format!("blob {blob_id} not found")))?;
         let path = self.blob_cache.blob_path(&record.cache_key);
         std::fs::read(path)
-            .map_err(|e| RuntimeError::ProviderError(format!("read blob {blob_id}: {e}")))
+            .map_err(|e| RuntimeError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
 
     fn resolve_response_sync(response: wit_types::ProviderReturn) -> Result<wit_types::OpResult> {
-        validate_provider_return(&response, None).map_err(RuntimeError::ProviderError)?;
+        validate_provider_return(&response, None).map_err(RuntimeError::ProviderProtocol)?;
         Ok(response.result)
     }
 
@@ -1398,7 +1411,7 @@ fn validate_instance_config(
         Err(schema::SchemaError::Validation(error)) => Err(RuntimeError::InvalidConfig(format!(
             "config for mount {mount_name} failed validation: {error}"
         ))),
-        Err(schema::SchemaError::InvalidSchema(error)) => Err(RuntimeError::ProviderError(
+        Err(schema::SchemaError::InvalidSchema(error)) => Err(RuntimeError::ProviderProtocol(
             format!("provider config schema for mount {mount_name} is invalid: {error}"),
         )),
     }

@@ -7,6 +7,7 @@ use omnifs_host::omnifs::provider::types::{
     HttpRequest, HttpResponse, ListChildrenResult, LogEntry, LookupChildResult, OpResult,
     ProjBytes, ProviderEvent, ProviderStep, Stability,
 };
+use omnifs_host::runtime::RuntimeError;
 use support::{
     create_test_repo, make_engine, make_initialized_runtime, make_runtime_from_config,
     provider_wasm_path,
@@ -372,11 +373,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let lookup = harness
         .runtime
-        .call_lookup_child("", "_resolvers")
+        .lookup_child("", "_resolvers")
         .await
         .unwrap();
     match lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_resolvers");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -384,26 +385,17 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
-    match resolvers_file {
-        OpResult::ReadFile(result) => {
-            let body =
-                String::from_utf8(support::into_inline(result)).expect("utf8 resolvers file");
-            assert!(
-                body.contains("cloudflare"),
-                "unexpected resolvers file: {body}"
-            );
-        },
-        other => panic!("expected File, got {other:?}"),
-    }
+    let resolvers_file = harness.runtime.read_file("_resolvers").await.unwrap();
+    let body =
+        String::from_utf8(support::into_inline(resolvers_file)).expect("utf8 resolvers file");
+    assert!(
+        body.contains("cloudflare"),
+        "unexpected resolvers file: {body}"
+    );
 
-    let reverse_lookup = harness
-        .runtime
-        .call_lookup_child("", "_reverse")
-        .await
-        .unwrap();
+    let reverse_lookup = harness.runtime.lookup_child("", "_reverse").await.unwrap();
     match reverse_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -413,11 +405,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_lookup = harness
         .runtime
-        .call_lookup_child("", "@cloudflare")
+        .lookup_child("", "@cloudflare")
         .await
         .unwrap();
     match resolver_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "@cloudflare");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -427,11 +419,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_domain_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com")
         .await
         .unwrap();
     match resolver_domain_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -441,11 +433,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "_reverse")
+        .lookup_child("@cloudflare", "_reverse")
         .await
         .unwrap();
     match resolver_reverse_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -455,11 +447,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_ip_lookup = harness
         .runtime
-        .call_lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8")
         .await
         .unwrap();
     match reverse_ip_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -470,11 +462,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_ip_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
         .await
         .unwrap();
     match resolver_reverse_ip_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -485,51 +477,47 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_reverse_lookup = harness
         .runtime
-        .call_lookup_child("_reverse", "not-an-ip")
+        .lookup_child("_reverse", "not-an-ip")
         .await
         .unwrap();
     match invalid_reverse_lookup {
-        OpResult::LookupChild(LookupChildResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected invalid reverse lookup NotFound, got {other:?}"),
     }
 
     let invalid_resolver_reverse_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "not-an-ip")
+        .lookup_child("@cloudflare/_reverse", "not-an-ip")
         .await
         .unwrap();
     match invalid_resolver_reverse_lookup {
-        OpResult::LookupChild(LookupChildResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected invalid resolver reverse lookup NotFound, got {other:?}"),
     }
 
-    let direct_ip_lookup = harness
-        .runtime
-        .call_lookup_child("", "8.8.8.8")
-        .await
-        .unwrap();
+    let direct_ip_lookup = harness.runtime.lookup_child("", "8.8.8.8").await.unwrap();
     match direct_ip_lookup {
-        OpResult::LookupChild(LookupChildResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected root direct-IP lookup NotFound, got {other:?}"),
     }
 
     let resolver_direct_ip_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "8.8.8.8")
+        .lookup_child("@cloudflare", "8.8.8.8")
         .await
         .unwrap();
     match resolver_direct_ip_lookup {
-        OpResult::LookupChild(LookupChildResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected resolver direct-IP lookup NotFound, got {other:?}"),
     }
 
     let domain_lookup = harness
         .runtime
-        .call_lookup_child("", "example.com")
+        .lookup_child("", "example.com")
         .await
         .unwrap();
     match domain_lookup {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -561,13 +549,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected domain lookup, got {other:?}"),
     }
 
-    let listing = harness
-        .runtime
-        .call_list_children("example.com")
-        .await
-        .unwrap();
+    let listing = harness.runtime.list_children("example.com").await.unwrap();
     match listing {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -580,13 +564,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected domain listing, got {other:?}"),
     }
 
-    let reverse_listing = harness
-        .runtime
-        .call_list_children("_reverse")
-        .await
-        .unwrap();
+    let reverse_listing = harness.runtime.list_children("_reverse").await.unwrap();
     match reverse_listing {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -597,11 +577,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_listing = harness
         .runtime
-        .call_list_children("@cloudflare/_reverse")
+        .list_children("@cloudflare/_reverse")
         .await
         .unwrap();
     match resolver_reverse_listing {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -625,32 +605,25 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     "#,
     );
 
-    let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
-    assert!(matches!(resolvers_file, OpResult::ReadFile(_)));
+    harness.runtime.read_file("_resolvers").await.unwrap();
 
-    let resolver_domain_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com")
         .await
         .unwrap();
-    assert!(matches!(resolver_domain_lookup, OpResult::LookupChild(_)));
 
-    let reverse_ip_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8")
         .await
         .unwrap();
-    assert!(matches!(reverse_ip_lookup, OpResult::LookupChild(_)));
 
-    let resolver_reverse_ip_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
         .await
         .unwrap();
-    assert!(matches!(
-        resolver_reverse_ip_lookup,
-        OpResult::LookupChild(_)
-    ));
 
     let active = harness.runtime.__active_path_sets();
 
@@ -730,13 +703,13 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
     "#,
     );
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("@missing/example.com/A")
+        .read_file("@missing/example.com/A")
         .await
-        .unwrap();
-    match result {
-        OpResult::Error(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("unknown resolver specifier"),
@@ -761,25 +734,25 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     "#,
     );
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("example.com/BOGUS")
+        .read_file("example.com/BOGUS")
         .await
-        .unwrap();
-    match result {
-        OpResult::Error(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected unknown-record NotFound, got {other:?}"),
     }
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("@cloudflare/example.com/BOGUS")
+        .read_file("@cloudflare/example.com/BOGUS")
         .await
-        .unwrap();
-    match result {
-        OpResult::Error(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected resolver unknown-record NotFound, got {other:?}"),
@@ -1508,11 +1481,11 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_listing = harness
         .runtime
-        .call_list_children("octocat/Hello-World/_repo")
+        .list_children("octocat/Hello-World/_repo")
         .await
         .unwrap();
     match repo_listing {
-        OpResult::ListChildren(ListChildrenResult::Subtree(tree_ref)) => {
+        ListChildrenResult::Subtree(tree_ref) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1525,11 +1498,11 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_child = harness
         .runtime
-        .call_lookup_child("octocat/Hello-World", "_repo")
+        .lookup_child("octocat/Hello-World", "_repo")
         .await
         .unwrap();
     match repo_child {
-        OpResult::LookupChild(LookupChildResult::Subtree(tree_ref)) => {
+        LookupChildResult::Subtree(tree_ref) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)

@@ -13,13 +13,12 @@ use crate::cache::{
 };
 use crate::cache::{FileAttrsCache, Key};
 use crate::omnifs::provider::types::{
-    ErrorKind, ListChildrenResult, LookupChildResult, OpResult, ProviderError, ReadFileBytes,
-    ReadFileResult,
+    ErrorKind, ListChildrenResult, LookupChildResult, ProviderError, ReadFileBytes, ReadFileResult,
 };
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use crate::registry::ProviderRegistry;
-use crate::runtime::{CalloutRuntime, NotifierHandle};
+use crate::runtime::{CalloutRuntime, NotifierHandle, RuntimeError};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo,
@@ -425,9 +424,9 @@ impl FuseFs {
 
         match self
             .rt
-            .block_on(runtime.call_lookup_child(parent_path, name_str))
+            .block_on(runtime.lookup_child(parent_path, name_str))
         {
-            Ok(OpResult::LookupChild(LookupChildResult::Subtree(tree_ref))) => {
+            Ok(LookupChildResult::Subtree(tree_ref)) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -440,7 +439,7 @@ impl FuseFs {
                 );
                 Ok((self.dir_attr(ino), TTL))
             },
-            Ok(OpResult::LookupChild(LookupChildResult::Entry(entry))) => {
+            Ok(LookupChildResult::Entry(entry)) => {
                 debug!(
                     target: "omnifs_lookup",
                     path = child_path,
@@ -461,7 +460,7 @@ impl FuseFs {
                 }
                 Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
             },
-            Ok(OpResult::LookupChild(LookupChildResult::NotFound)) => {
+            Ok(LookupChildResult::NotFound) => {
                 let neg = cache::LookupPayload::Negative;
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
@@ -470,7 +469,7 @@ impl FuseFs {
                 }
                 Err(Errno::ENOENT)
             },
-            Ok(OpResult::Error(error)) => {
+            Err(RuntimeError::ProviderError(error)) => {
                 warn!(
                     path = child_path,
                     kind = ?error.kind,
@@ -480,18 +479,10 @@ impl FuseFs {
                 );
                 Err(provider_errno(&error))
             },
-            Ok(other) => {
+            Err(error) => {
                 warn!(
                     path = child_path,
-                    result = ?other,
-                    "lookup_child returned unexpected result"
-                );
-                Err(Errno::EIO)
-            },
-            Err(e) => {
-                warn!(
-                    path = child_path,
-                    error = %e,
+                    error = %error,
                     "lookup_child runtime error"
                 );
                 Err(Errno::EIO)
@@ -610,8 +601,8 @@ impl FuseFs {
         ino: u64,
         path: &str,
     ) -> Result<DirSnapshot, Errno> {
-        match self.rt.block_on(runtime.call_list_children(path)) {
-            Ok(OpResult::ListChildren(ListChildrenResult::Subtree(tree_ref))) => {
+        match self.rt.block_on(runtime.list_children(path)) {
+            Ok(ListChildrenResult::Subtree(tree_ref)) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
                 };
@@ -622,7 +613,7 @@ impl FuseFs {
                 }
                 self.snapshot_from_fs(mount_name, path, &real_root)
             },
-            Ok(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+            Ok(ListChildrenResult::Entries(listing)) => {
                 let dir_entries = &listing.entries;
                 let mut snapshot = Vec::with_capacity(dir_entries.len());
                 let mut dirent_records = Vec::with_capacity(dir_entries.len());
@@ -652,7 +643,7 @@ impl FuseFs {
                 }
                 Ok(snapshot)
             },
-            Ok(OpResult::Error(error)) => {
+            Err(RuntimeError::ProviderError(error)) => {
                 warn!(
                     path,
                     kind = ?error.kind,
@@ -662,18 +653,10 @@ impl FuseFs {
                 );
                 Err(provider_errno(&error))
             },
-            Ok(other) => {
+            Err(error) => {
                 warn!(
                     path,
-                    result = ?other,
-                    "list_children returned unexpected result"
-                );
-                Err(Errno::EIO)
-            },
-            Err(e) => {
-                warn!(
-                    path,
-                    error = %e,
+                    error = %error,
                     "list_children runtime error"
                 );
                 Err(Errno::EIO)
@@ -696,9 +679,9 @@ impl FuseFs {
 
         match self
             .rt
-            .block_on(runtime.call_read_chunk(ranged.provider_handle, offset, size))
+            .block_on(runtime.read_chunk(ranged.provider_handle, offset, size))
         {
-            Ok(OpResult::ReadChunk(chunk)) => {
+            Ok(chunk) => {
                 if chunk.content.len() > size as usize {
                     warn!(
                         path = ranged.path.as_str(),
@@ -732,7 +715,7 @@ impl FuseFs {
                 }
                 reply.data(&chunk.content);
             },
-            Ok(OpResult::Error(error)) => {
+            Err(RuntimeError::ProviderError(error)) => {
                 warn!(
                     path = ranged.path.as_str(),
                     kind = ?error.kind,
@@ -742,12 +725,8 @@ impl FuseFs {
                 );
                 reply.error(provider_errno(&error));
             },
-            Ok(other) => {
-                warn!(path = ranged.path.as_str(), result = ?other, "read_chunk returned unexpected result");
-                reply.error(Errno::EIO);
-            },
-            Err(e) => {
-                warn!(path = ranged.path.as_str(), error = %e, "read_chunk runtime error");
+            Err(error) => {
+                warn!(path = ranged.path.as_str(), error = %error, "read_chunk runtime error");
                 reply.error(Errno::EIO);
             },
         }
@@ -848,11 +827,11 @@ impl FuseFs {
 
         debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
 
-        match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OpResult::ReadFile(result)) => {
+        match self.rt.block_on(runtime.read_file(&target.path)) {
+            Ok(result) => {
                 self.finish_full_read(&target, &runtime, offset, size, result, reply);
             },
-            Ok(OpResult::Error(error)) => {
+            Err(RuntimeError::ProviderError(error)) => {
                 warn!(
                     path = target.path.as_str(),
                     kind = ?error.kind,
@@ -862,12 +841,8 @@ impl FuseFs {
                 );
                 reply.error(provider_errno(&error));
             },
-            Ok(other) => {
-                warn!(path = target.path.as_str(), result = ?other, "read_file returned unexpected result");
-                reply.error(Errno::EIO);
-            },
-            Err(e) => {
-                warn!(path = target.path.as_str(), error = %e, "read_file runtime error");
+            Err(error) => {
+                warn!(path = target.path.as_str(), error = %error, "read_file runtime error");
                 reply.error(Errno::EIO);
             },
         }
@@ -949,8 +924,8 @@ impl FuseFs {
         let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
             return Err(Errno::ENOENT);
         };
-        match self.rt.block_on(runtime.call_open_file(&target.path)) {
-            Ok(OpResult::OpenFile(opened)) => {
+        match self.rt.block_on(runtime.open_file(&target.path)) {
+            Ok(opened) => {
                 let opened_attrs =
                     opened_file_attrs(&target.path, target.attrs.as_ref(), &opened.attrs)?;
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
@@ -965,19 +940,11 @@ impl FuseFs {
                 );
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OpResult::Error(error)) => Err(provider_errno(&error)),
-            Ok(other) => {
+            Err(RuntimeError::ProviderError(error)) => Err(provider_errno(&error)),
+            Err(error) => {
                 warn!(
                     path = target.path.as_str(),
-                    result = ?other,
-                    "open_file returned unexpected result"
-                );
-                Err(Errno::EIO)
-            },
-            Err(e) => {
-                warn!(
-                    path = target.path.as_str(),
-                    error = %e,
+                    error = %error,
                     "open_file runtime error"
                 );
                 Err(Errno::EIO)
@@ -1002,8 +969,8 @@ impl FuseFs {
             return Err(Errno::ENOENT);
         };
         self.drain_and_evict_pending(&target.mount_name);
-        match self.rt.block_on(runtime.call_read_file(&target.path)) {
-            Ok(OpResult::ReadFile(result)) => {
+        match self.rt.block_on(runtime.read_file(&target.path)) {
+            Ok(result) => {
                 let Some((data, result_attrs)) =
                     resolve_read_payload(&runtime, &target.path, result)
                 else {
@@ -1029,19 +996,11 @@ impl FuseFs {
                 self.file_cache.insert(target.fh, data);
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(OpResult::Error(error)) => Err(provider_errno(&error)),
-            Ok(other) => {
+            Err(RuntimeError::ProviderError(error)) => Err(provider_errno(&error)),
+            Err(error) => {
                 warn!(
                     path = target.path.as_str(),
-                    result = ?other,
-                    "read_file returned unexpected result during open"
-                );
-                Err(Errno::EIO)
-            },
-            Err(e) => {
-                warn!(
-                    path = target.path.as_str(),
-                    error = %e,
+                    error = %error,
                     "read_file runtime error during open"
                 );
                 Err(Errno::EIO)

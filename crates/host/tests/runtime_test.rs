@@ -33,9 +33,9 @@ async fn test_list_root() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
     harness.runtime.initialize().unwrap();
-    let result = harness.runtime.call_list_children("").await.unwrap();
+    let result = harness.runtime.list_children("").await.unwrap();
     match result {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert_eq!(listing.entries.len(), 3);
             let names: Vec<&str> = listing
                 .entries
@@ -61,9 +61,9 @@ async fn test_list_hello_dir() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
     harness.runtime.initialize().unwrap();
-    let result = harness.runtime.call_list_children("hello").await.unwrap();
+    let result = harness.runtime.list_children("hello").await.unwrap();
     match result {
-        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert_eq!(listing.entries.len(), 9);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"message"));
@@ -94,12 +94,9 @@ async fn test_list_projects_nested_files_into_cache() {
     "#,
     );
 
-    let result = harness.runtime.call_list_children("hello").await.unwrap();
+    let result = harness.runtime.list_children("hello").await.unwrap();
     assert!(
-        matches!(
-            result,
-            OpResult::ListChildren(ListChildrenResult::Entries(_))
-        ),
+        matches!(result, ListChildrenResult::Entries(_)),
         "expected list entries, got {result:?}"
     );
 
@@ -148,13 +145,9 @@ async fn test_list_projects_direct_file_content_into_cache() {
     "#,
     );
 
-    let result = harness
-        .runtime
-        .call_list_children("hello/bundle")
-        .await
-        .unwrap();
+    let result = harness.runtime.list_children("hello/bundle").await.unwrap();
     assert!(
-        matches!(result, OpResult::ListChildren(ListChildrenResult::Entries(_))),
+        matches!(result, ListChildrenResult::Entries(_)),
         "expected DirEntries, got {result:?}"
     );
 
@@ -191,25 +184,11 @@ async fn test_read_file() {
         }
     "#,
     );
-    let result = harness
-        .runtime
-        .call_read_file("hello/message")
-        .await
-        .unwrap();
-    match result {
-        OpResult::ReadFile(file_result) => {
-            assert_eq!(support::inline_content(&file_result), b"Hello, world!");
-        },
-        other => panic!("expected File, got {other:?}"),
-    }
+    let result = harness.runtime.read_file("hello/message").await.unwrap();
+    assert_eq!(support::inline_content(&result), b"Hello, world!");
 
-    let exact = harness.runtime.call_read_file("hello/lazy").await.unwrap();
-    match exact {
-        OpResult::ReadFile(file_result) => {
-            assert_eq!(support::inline_content(&file_result), b"lazy\n");
-        },
-        other => panic!("expected exact File, got {other:?}"),
-    }
+    let exact = harness.runtime.read_file("hello/lazy").await.unwrap();
+    assert_eq!(support::inline_content(&exact), b"lazy\n");
 }
 
 #[tokio::test]
@@ -226,23 +205,14 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     "#,
     );
 
-    let listing = harness.runtime.call_list_children("hello").await.unwrap();
+    let listing = harness.runtime.list_children("hello").await.unwrap();
     match listing {
-        OpResult::ListChildren(ListChildrenResult::Entries(_)) => {},
+        ListChildrenResult::Entries(_) => {},
         other => panic!("expected list entries, got {other:?}"),
     }
 
-    let result = harness
-        .runtime
-        .call_read_file("hello/projected")
-        .await
-        .unwrap();
-    match result {
-        OpResult::ReadFile(file_result) => {
-            assert_eq!(support::inline_content(&file_result), b"title\n");
-        },
-        other => panic!("expected File, got {other:?}"),
-    }
+    let result = harness.runtime.read_file("hello/projected").await.unwrap();
+    assert_eq!(support::inline_content(&result), b"title\n");
 
     let dirents_record = harness
         .runtime
@@ -297,37 +267,24 @@ async fn test_ranged_open_read_chunk_contract() {
     "#,
     );
 
-    let open = harness
-        .runtime
-        .call_open_file("hello/ranged")
-        .await
-        .unwrap();
-    let OpResult::OpenFile(opened) = open else {
-        panic!("expected OpenFile, got {open:?}");
-    };
+    let opened = harness.runtime.open_file("hello/ranged").await.unwrap();
     assert!(matches!(opened.attrs.size, FileSize::Exact(26)));
     assert_eq!(opened.attrs.stability, Stability::Mutable);
     assert_eq!(opened.attrs.version_token.as_deref(), Some("alphabet-v1"));
 
     let chunk = harness
         .runtime
-        .call_read_chunk(opened.handle, 2, 4)
+        .read_chunk(opened.handle, 2, 4)
         .await
         .unwrap();
-    let OpResult::ReadChunk(chunk) = chunk else {
-        panic!("expected ReadChunk, got {chunk:?}");
-    };
     assert_eq!(chunk.content, b"cdef");
     assert!(!chunk.eof);
 
     let eof = harness
         .runtime
-        .call_read_chunk(opened.handle, 26, 8)
+        .read_chunk(opened.handle, 26, 8)
         .await
         .unwrap();
-    let OpResult::ReadChunk(eof) = eof else {
-        panic!("expected ReadChunk EOF, got {eof:?}");
-    };
     assert!(eof.content.is_empty());
     assert!(eof.eof);
 
@@ -348,45 +305,33 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     "#,
     );
 
-    let open = harness
+    let opened = harness
         .runtime
-        .call_open_file("hello/unknown-ranged")
+        .open_file("hello/unknown-ranged")
         .await
         .unwrap();
-    let OpResult::OpenFile(opened) = open else {
-        panic!("expected OpenFile, got {open:?}");
-    };
     assert!(matches!(opened.attrs.size, FileSize::Unknown));
     let eof = harness
         .runtime
-        .call_read_chunk(opened.handle, 8, 32)
+        .read_chunk(opened.handle, 8, 32)
         .await
         .unwrap();
-    let OpResult::ReadChunk(eof) = eof else {
-        panic!("expected ReadChunk EOF, got {eof:?}");
-    };
     assert_eq!(eof.content, b"size\n");
     assert!(eof.eof);
     harness.runtime.call_close_file(opened.handle).unwrap();
 
-    let open = harness
+    let opened = harness
         .runtime
-        .call_open_file("hello/volatile-tail")
+        .open_file("hello/volatile-tail")
         .await
         .unwrap();
-    let OpResult::OpenFile(opened) = open else {
-        panic!("expected OpenFile, got {open:?}");
-    };
     assert_eq!(opened.attrs.stability, Stability::Volatile);
     assert!(matches!(opened.attrs.size, FileSize::Unknown));
     let chunk = harness
         .runtime
-        .call_read_chunk(opened.handle, 42, 128)
+        .read_chunk(opened.handle, 42, 128)
         .await
         .unwrap();
-    let OpResult::ReadChunk(chunk) = chunk else {
-        panic!("expected live ReadChunk, got {chunk:?}");
-    };
     assert_eq!(chunk.content, b"tail:42\n");
     assert!(!chunk.eof);
     harness.runtime.call_close_file(opened.handle).unwrap();
@@ -397,13 +342,9 @@ async fn test_lookup_child() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
     harness.runtime.initialize().unwrap();
-    let result = harness
-        .runtime
-        .call_lookup_child("", "hello")
-        .await
-        .unwrap();
+    let result = harness.runtime.lookup_child("", "hello").await.unwrap();
     match result {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "hello");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -411,13 +352,9 @@ async fn test_lookup_child() {
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let exact_file = harness
-        .runtime
-        .call_lookup_child("hello", "lazy")
-        .await
-        .unwrap();
+    let exact_file = harness.runtime.lookup_child("hello", "lazy").await.unwrap();
     match exact_file {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "lazy");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -442,7 +379,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
 
     let lookup_error = harness
         .runtime
-        .call_lookup_child("", "checkout")
+        .lookup_child("", "checkout")
         .await
         .unwrap_err();
     assert!(
@@ -452,11 +389,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
         "unexpected error: {lookup_error}"
     );
 
-    let listing_error = harness
-        .runtime
-        .call_list_children("checkout")
-        .await
-        .unwrap_err();
+    let listing_error = harness.runtime.list_children("checkout").await.unwrap_err();
     assert!(
         listing_error
             .to_string()
@@ -482,12 +415,12 @@ async fn test_lookup_projects_adjacent_files_into_cache() {
 
     let result = harness
         .runtime
-        .call_lookup_child("hello", "bundle")
+        .lookup_child("hello", "bundle")
         .await
         .unwrap();
 
     match &result {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             assert_eq!(result.target.name, "bundle");
         },
         other => panic!("expected Lookup, got {other:?}"),
@@ -536,12 +469,12 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let result = harness
         .runtime
-        .call_lookup_child("hello", "snapshot")
+        .lookup_child("hello", "snapshot")
         .await
         .unwrap();
 
     match &result {
-        OpResult::LookupChild(LookupChildResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let target = &result.target;
             assert_eq!(target.name, "snapshot");
 
@@ -703,24 +636,15 @@ async fn test_cache_isolated_by_mount_name() {
     runtime_a.initialize().unwrap();
     runtime_b.initialize().unwrap();
 
-    let result = runtime_a.call_list_children("hello").await.unwrap();
-    assert!(matches!(
-        result,
-        OpResult::ListChildren(ListChildrenResult::Entries(_))
-    ));
+    let result = runtime_a.list_children("hello").await.unwrap();
+    assert!(matches!(result, ListChildrenResult::Entries(_)));
     assert!(runtime_a.cache_get("hello", RecordKind::Dirents).is_some());
     assert!(runtime_b.cache_get("hello", RecordKind::Dirents).is_none());
 
-    let scoped_a = runtime_a.call_list_children("scoped").await.unwrap();
-    let scoped_b = runtime_b.call_list_children("scoped").await.unwrap();
-    assert!(matches!(
-        scoped_a,
-        OpResult::ListChildren(ListChildrenResult::Entries(_))
-    ));
-    assert!(matches!(
-        scoped_b,
-        OpResult::ListChildren(ListChildrenResult::Entries(_))
-    ));
+    let scoped_a = runtime_a.list_children("scoped").await.unwrap();
+    let scoped_b = runtime_b.list_children("scoped").await.unwrap();
+    assert!(matches!(scoped_a, ListChildrenResult::Entries(_)));
+    assert!(matches!(scoped_b, ListChildrenResult::Entries(_)));
     assert!(
         runtime_a
             .cache_get("scoped/item", RecordKind::Lookup)

@@ -1,4 +1,4 @@
-use super::{CalloutRuntime, Result, RuntimeError};
+use super::{CalloutRuntime, Op, Result, RuntimeError};
 use crate::cache::{self, BatchRecord, CacheRecord, RecordKind};
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
@@ -6,17 +6,12 @@ use std::collections::BTreeMap;
 use tracing::debug;
 
 impl CalloutRuntime {
-    pub async fn call_lookup_child(
+    pub async fn lookup_child(
         &self,
         parent_path: &str,
         name: &str,
-    ) -> Result<wit_types::OpResult> {
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
+    ) -> Result<wit_types::LookupChildResult> {
+        let child_path = child_path(parent_path, name);
         let result = self
             .coalesced(&child_path, || {
                 self.call_provider_op_with_handoff_path(
@@ -40,10 +35,17 @@ impl CalloutRuntime {
             self.cache_lookup_projection(parent_path, entry);
         }
 
-        Ok(result)
+        match result {
+            wit_types::OpResult::LookupChild(result) => Ok(result),
+            wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
+            result => Err(RuntimeError::UnexpectedOpResult {
+                op: Op::LookupChild,
+                result,
+            }),
+        }
     }
 
-    pub async fn call_list_children(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn list_children(&self, path: &str) -> Result<wit_types::ListChildrenResult> {
         let result = self
             .coalesced(path, || {
                 self.call_provider_op_with_handoff_path(Some(path), move |store, id| {
@@ -62,10 +64,17 @@ impl CalloutRuntime {
             self.touch_activity_for_relative_path(path);
         }
 
-        Ok(result)
+        match result {
+            wit_types::OpResult::ListChildren(result) => Ok(result),
+            wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
+            result => Err(RuntimeError::UnexpectedOpResult {
+                op: Op::ListChildren,
+                result,
+            }),
+        }
     }
 
-    pub async fn call_read_file(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn read_file(&self, path: &str) -> Result<wit_types::ReadFileResult> {
         let result = self
             .coalesced(path, || {
                 self.call_provider_op(move |store, id| {
@@ -80,10 +89,17 @@ impl CalloutRuntime {
             self.touch_activity_for_relative_path(path);
         }
 
-        Ok(result)
+        match result {
+            wit_types::OpResult::ReadFile(result) => Ok(result),
+            wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
+            result => Err(RuntimeError::UnexpectedOpResult {
+                op: Op::ReadFile,
+                result,
+            }),
+        }
     }
 
-    pub async fn call_open_file(&self, path: &str) -> Result<wit_types::OpResult> {
+    pub async fn open_file(&self, path: &str) -> Result<wit_types::OpenFileResult> {
         let result = self
             .call_provider_op(move |store, id| {
                 self.bindings
@@ -96,21 +112,38 @@ impl CalloutRuntime {
             self.touch_activity_for_relative_path(path);
         }
 
-        Ok(result)
+        match result {
+            wit_types::OpResult::OpenFile(result) => Ok(result),
+            wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
+            result => Err(RuntimeError::UnexpectedOpResult {
+                op: Op::OpenFile,
+                result,
+            }),
+        }
     }
 
-    pub async fn call_read_chunk(
+    pub async fn read_chunk(
         &self,
         handle: u64,
         offset: u64,
         length: u32,
-    ) -> Result<wit_types::OpResult> {
-        self.call_provider_op(move |store, id| {
-            self.bindings
-                .omnifs_provider_browse()
-                .call_read_chunk(store, id, handle, offset, length)
-        })
-        .await
+    ) -> Result<wit_types::ReadChunkResult> {
+        let result = self
+            .call_provider_op(move |store, id| {
+                self.bindings
+                    .omnifs_provider_browse()
+                    .call_read_chunk(store, id, handle, offset, length)
+            })
+            .await?;
+
+        match result {
+            wit_types::OpResult::ReadChunk(result) => Ok(result),
+            wit_types::OpResult::Error(error) => Err(RuntimeError::ProviderError(error)),
+            result => Err(RuntimeError::UnexpectedOpResult {
+                op: Op::ReadChunk,
+                result,
+            }),
+        }
     }
 
     async fn coalesced<F, Fu>(&self, path: &str, op: F) -> Result<wit_types::OpResult>
@@ -127,7 +160,7 @@ impl CalloutRuntime {
                 },
                 Acquired::ExactMatch { mut rx } => {
                     if let Ok(outcome) = rx.recv().await {
-                        return unshare_outcome(outcome, RuntimeError::ProviderError);
+                        return unshare_outcome(outcome, RuntimeError::ProviderProtocol);
                     }
                 },
                 Acquired::AncestorWait { mut rx } => {
@@ -271,5 +304,13 @@ impl CalloutRuntime {
             return;
         }
         self.activity_table.lock().touch(touched);
+    }
+}
+
+fn child_path(parent_path: &str, name: &str) -> String {
+    if parent_path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent_path}/{name}")
     }
 }
