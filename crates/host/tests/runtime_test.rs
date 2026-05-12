@@ -132,6 +132,50 @@ async fn test_list_preloads_nested_files_into_cache() {
 }
 
 #[tokio::test]
+async fn test_list_projects_direct_file_content_into_cache() {
+    let harness = make_initialized_runtime(
+        r#"
+        {
+            "plugin": "test_provider.wasm",
+            "mount": "test",
+            "capabilities": {
+                "domains": ["httpbin.org"]
+            }
+        }
+    "#,
+    );
+
+    let result = harness
+        .runtime
+        .call_list_children("hello/bundle")
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, OpResult::List(ListResult::Entries(_))),
+        "expected DirEntries, got {result:?}"
+    );
+
+    let title = harness
+        .runtime
+        .cache_get("hello/bundle/title", RecordKind::File)
+        .expect("projected title should be cached at its own path");
+    let body = harness
+        .runtime
+        .cache_get("hello/bundle/body", RecordKind::File)
+        .expect("projected body should be cached at its own path");
+
+    assert_eq!(file_payload(&title).content, b"title".to_vec());
+    assert_eq!(file_payload(&body).content, b"body".to_vec());
+    assert!(
+        harness
+            .runtime
+            .cache_get("hello/bundle/title/title", RecordKind::File)
+            .is_none(),
+        "projected file content must not be nested under itself"
+    );
+}
+
+#[tokio::test]
 async fn test_read_file() {
     let harness = make_initialized_runtime(
         r#"
