@@ -466,10 +466,10 @@ interface continuation {
 | `mutations-planned(...)` action-result arm | `plan-mutations(plan-mutations-result)` | Arm and result type match the operation. |
 | `mutation-executed(mutation-outcome)` action-result arm | `execute(execute-result)` | Arm and result type match the operation. |
 | `resource-files(list<file-entry>)` action-result arm | `fetch-resource(fetch-resource-result)` | Arm and result type match the operation. |
-| `EffectRuntime` | `CalloutRuntime` | Runtime still drives callouts. Effects are applied at the return boundary. |
+| `EffectRuntime` | `ProviderRuntime` | Runtime owns provider operation execution, callout suspension/resume, validation, and effects. |
 | `EffectFuture` | `CalloutFuture` | Futures suspend on callouts. |
-| `execute_single_effect` | `execute_single_callout` | Only callouts are executed and resumed. |
-| `drive_effects` | `drive_provider_step` | The host drives suspended steps until a return appears, then applies effects. |
+| `execute_single_effect` | `Callout::execute` | Per-callout dispatch lives on the local callout invocation model. |
+| `drive_effects` | `drive_provider` | The host drives suspended provider steps until a return appears, then validates and applies effects. |
 
 ## SDK impact
 
@@ -610,34 +610,34 @@ but updates old `Effect` imports and test strings to `Callout`.
 
 ### Runtime naming
 
-- `EffectRuntime` -> `CalloutRuntime`.
-- `execute_single_effect` -> `execute_single_callout`.
-- `execute_batch` stays named.
-- `drive_effects` -> `drive_provider_step`.
+- `EffectRuntime` -> `ProviderRuntime`.
+- `execute_single_effect` -> `Callout::execute`.
+- `execute_batch` -> `Callouts::execute`.
+- `drive_effects` -> `drive_provider`.
 
-The runtime still executes callouts. Effects are not executed through the
-callout path; they are applied once when a provider return is accepted.
+The runtime owns a mounted provider instance. `Op::execute` models the
+host-to-provider operation call, `Callouts::execute` models a suspended batch,
+and `Callout::execute` owns per-callout dispatch. Effects are not executed
+through the callout path; they are validated and applied once when a provider
+return is accepted.
 
 ### Driving provider steps
 
 ```rust
-async fn drive_provider_step(&self, id: u64, mut step: ProviderStep) -> Result<OpResult> {
+async fn drive_provider(
+    &self,
+    id: u64,
+    mut step: ProviderStep,
+    op: Op,
+) -> Result<OpResult> {
     loop {
         match step {
             ProviderStep::Returned(ret) => {
-                validate_return(&ret)?;
-                self.apply_effects(&ret.effects)?;
-                return Ok(ret.result);
-            }
-            ProviderStep::Suspended(callouts) if callouts.is_empty() => {
-                return Err(RuntimeError::ProviderError("empty suspended step".into()));
+                return self.finish_provider_return(&op, ret);
             }
             ProviderStep::Suspended(callouts) => {
-                let results = self.execute_batch(&callouts).await;
-                let mut store = self.store.lock();
-                step = self.bindings.omnifs_provider_continuation().call_resume(
-                    &mut *store, id, &results,
-                )?;
+                let results = Callouts::new(id, &callouts)?.execute(self).await;
+                step = self.resume_provider(id, results)?;
             }
         }
     }
@@ -706,7 +706,7 @@ errors before FUSE receives data.
 - `wit/provider.wit`: delete `git-list-tree`, `git-read-blob`, `git-head-ref`,
   and `git-list-cached-repos`; keep `git-open-repo`, `git-open-request`, and
   `git-repo-info`.
-- `crates/host/src/runtime/mod.rs::execute_single_callout`: delete the removed
+- `crates/host/src/runtime/mod.rs::Callout::execute`: delete the removed
   git match arms.
 - `crates/host/src/runtime/git.rs::GitExecutor`: delete `list_tree`,
   `read_blob`, `head_ref`, `list_cached_repos`, and their helpers. Keep
@@ -867,16 +867,18 @@ Update `crates/omnifs-sdk-macros/src/provider_macro.rs` and related macro tests:
 Validation gate:
 
 ```bash
-cargo test -p omnifs-sdk-macros
+cargo nextest run -p omnifs-sdk-macros
 ```
 
 ### Phase 4: Host runtime
 
 Update `crates/host/src/runtime/mod.rs` and runtime helpers:
 
-- Rename `EffectRuntime` to `CalloutRuntime` and
-  `execute_single_effect` to `execute_single_callout`.
-- Replace response driving with `drive_provider_step`.
+- Rename `EffectRuntime` to `ProviderRuntime` and
+  `execute_single_effect` to `Callout::execute`.
+- Replace response driving with `drive_provider`.
+- Model provider operation dispatch as `Op::execute` and suspended batches as
+  `Callouts::execute`.
 - Add `validate_return` for empty suspended steps, operation/result agreement,
   empty effects on `error`, direct result byte validity, blob id resolution,
   and subtree/disown pairing.
@@ -886,8 +888,8 @@ Update `crates/host/src/runtime/mod.rs` and runtime helpers:
 Validation gate:
 
 ```bash
-cargo test -p omnifs-host --test runtime_test
-cargo test -p omnifs-host --test provider_routes_test
+cargo nextest run -p omnifs-host --test runtime_test
+cargo nextest run -p omnifs-host --test provider_routes_test
 ```
 
 ### Phase 5: Host browse and FUSE integration
@@ -909,9 +911,9 @@ Update `crates/host/src/runtime/browse_pipeline.rs`,
 Validation gate:
 
 ```bash
-cargo test -p omnifs-host --test cache_l0_test
-cargo test -p omnifs-host --test cache_l2_test
-cargo test -p omnifs-host --test provider_routes_test
+cargo nextest run -p omnifs-host --test cache_l0_test
+cargo nextest run -p omnifs-host --test cache_l2_test
+cargo nextest run -p omnifs-host --test provider_routes_test
 ```
 
 ### Phase 6: Providers and tools
