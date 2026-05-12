@@ -1,13 +1,13 @@
 //! Provider registry: loading and lifecycle management for WASM providers.
 //!
-//! Scans the providers directory, instantiates providers via `CalloutRuntime`,
+//! Scans the providers directory, instantiates providers via `ProviderRuntime`,
 //! and manages timer-driven refresh tasks.
 
 use crate::config::InstanceConfig;
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::runtime::wasm;
-use crate::runtime::{CalloutRuntime, RuntimeError};
+use crate::runtime::{ProviderRuntime, RuntimeError};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 pub struct ProviderRegistry {
     #[allow(dead_code)] // stored for future use (hot-reloading providers)
     engine: wasmtime::Engine,
-    instances: HashMap<String, Arc<CalloutRuntime>>,
+    instances: HashMap<String, Arc<ProviderRuntime>>,
     root_mount: Option<String>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -116,7 +116,7 @@ impl ProviderRegistry {
         cloner: &Arc<GitCloner>,
         cache_dir: &Path,
         extractor: &Arc<ArchiveExtractorComponent>,
-    ) -> Result<(String, bool, CalloutRuntime), RegistryError> {
+    ) -> Result<(String, bool, ProviderRuntime), RegistryError> {
         let config = InstanceConfig::from_file(config_path)
             .map_err(|e| RegistryError::ConfigError(e.to_string()))?;
 
@@ -128,7 +128,7 @@ impl ProviderRegistry {
         }
 
         let is_root = config.root_mount;
-        let runtime = CalloutRuntime::new(
+        let runtime = ProviderRuntime::new(
             engine,
             &wasm_path,
             &config,
@@ -148,7 +148,7 @@ impl ProviderRegistry {
         Ok((config.mount, is_root, runtime))
     }
 
-    pub fn get(&self, mount: &str) -> Option<&Arc<CalloutRuntime>> {
+    pub fn get(&self, mount: &str) -> Option<&Arc<ProviderRuntime>> {
         self.instances.get(mount)
     }
 
@@ -156,7 +156,7 @@ impl ProviderRegistry {
         self.instances.keys().cloned().collect()
     }
 
-    pub fn runtime_entries(&self) -> Vec<(String, Arc<CalloutRuntime>)> {
+    pub fn runtime_entries(&self) -> Vec<(String, Arc<ProviderRuntime>)> {
         self.instances
             .iter()
             .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))

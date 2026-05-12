@@ -1,4 +1,4 @@
-use super::{CalloutRuntime, NotifierHandle};
+use super::{NotifierHandle, ProviderRuntime};
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use fuser::INodeNo;
@@ -53,7 +53,7 @@ impl InvalidationState {
     }
 }
 
-impl CalloutRuntime {
+impl ProviderRuntime {
     pub fn install_invalidation(
         &self,
         path_to_inode: Arc<PathToInode>,

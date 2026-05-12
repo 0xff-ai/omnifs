@@ -18,7 +18,7 @@ use crate::omnifs::provider::types::{
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use crate::registry::ProviderRegistry;
-use crate::runtime::{CalloutRuntime, NotifierHandle, RuntimeError};
+use crate::runtime::{NotifierHandle, ProviderRuntime, RuntimeError};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo,
@@ -190,7 +190,7 @@ impl FuseFs {
         config
     }
 
-    fn runtime_for_mount(&self, mount: &str) -> Option<Arc<CalloutRuntime>> {
+    fn runtime_for_mount(&self, mount: &str) -> Option<Arc<ProviderRuntime>> {
         self.registry.get(mount).cloned()
     }
 
@@ -415,7 +415,7 @@ impl FuseFs {
     /// Perform a provider-delegated lookup and write results through to caches.
     fn lookup_via_provider(
         &self,
-        runtime: &Arc<CalloutRuntime>,
+        runtime: &Arc<ProviderRuntime>,
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
@@ -596,7 +596,7 @@ impl FuseFs {
     /// variant returned from the provider.
     fn opendir_via_provider(
         &self,
-        runtime: &Arc<CalloutRuntime>,
+        runtime: &Arc<ProviderRuntime>,
         mount_name: &str,
         ino: u64,
         path: &str,
@@ -851,7 +851,7 @@ impl FuseFs {
     fn finish_full_read(
         &self,
         target: &FullReadTarget,
-        runtime: &CalloutRuntime,
+        runtime: &ProviderRuntime,
         offset: u64,
         size: u32,
         result: ReadFileResult,
@@ -1387,7 +1387,7 @@ impl Filesystem for FuseFs {
 /// pulled from the host's blob cache. Returns `None` when a blob-backed
 /// payload can't be resolved (logged at warn for diagnostics).
 fn resolve_read_payload(
-    runtime: &CalloutRuntime,
+    runtime: &ProviderRuntime,
     path: &str,
     result: ReadFileResult,
 ) -> Option<(Vec<u8>, FileAttrsCache)> {

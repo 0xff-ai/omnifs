@@ -1,6 +1,6 @@
 use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{ReadFileBytes, ReadFileResult};
-use omnifs_host::runtime::CalloutRuntime;
+use omnifs_host::runtime::ProviderRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
 use omnifs_host::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ pub struct RuntimeHarness {
     pub _engine: wasmtime::Engine,
     pub clone_dir: TempDir,
     pub _cache_dir: TempDir,
-    pub runtime: CalloutRuntime,
+    pub runtime: ProviderRuntime,
 }
 
 #[allow(dead_code)]
@@ -90,7 +90,7 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-    let runtime = CalloutRuntime::new(
+    let runtime = ProviderRuntime::new(
         engine,
         &provider_wasm_path(&config.plugin),
         &config,
@@ -116,7 +116,7 @@ pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-    let runtime = CalloutRuntime::new(
+    let runtime = ProviderRuntime::new(
         &engine,
         &provider_wasm_path(&config.plugin),
         &config,

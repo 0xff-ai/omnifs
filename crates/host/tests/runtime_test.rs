@@ -10,7 +10,7 @@ use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{
     EntryKind, FileSize, ListChildrenResult, LookupChildResult, OpResult, Stability,
 };
-use omnifs_host::runtime::CalloutRuntime;
+use omnifs_host::runtime::ProviderRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
 use support::{make_engine, make_initialized_runtime, make_runtime};
 
@@ -612,7 +612,7 @@ async fn test_cache_isolated_by_mount_name() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
     let extractor = support::make_extractor();
-    let runtime_a = CalloutRuntime::new(
+    let runtime_a = ProviderRuntime::new(
         &engine,
         &support::provider_wasm_path(&config.plugin),
         &config,
@@ -622,7 +622,7 @@ async fn test_cache_isolated_by_mount_name() {
         extractor.clone(),
     )
     .unwrap();
-    let runtime_b = CalloutRuntime::new(
+    let runtime_b = ProviderRuntime::new(
         &engine,
         &support::provider_wasm_path(&config.plugin),
         &config,

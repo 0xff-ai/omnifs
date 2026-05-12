@@ -819,7 +819,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     // dedicated provider lookup handlers; the host's FuseFs resolves
     // them positively from
     // the parent's cached sibling entries (see d4e9e98's
-    // dirents-implied positive path). `CalloutRuntime::call_lookup_child`
+    // dirents-implied positive path). `ProviderRuntime::call_lookup_child`
     // bypasses that cache and dispatches straight to the provider, so
     // it would return NotFound for them in isolation. Read-path
     // coverage for the same leaves lives in

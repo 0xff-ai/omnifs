@@ -1,11 +1,11 @@
-use super::{CalloutRuntime, Op, Result, RuntimeError};
+use super::{Op, ProviderRuntime, Result, RuntimeError};
 use crate::cache::{BatchRecord, CacheRecord, DirentRecord, DirentsPayload, EntryMeta, RecordKind};
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-impl CalloutRuntime {
+impl ProviderRuntime {
     pub async fn lookup_child(
         &self,
         parent_path: &str,

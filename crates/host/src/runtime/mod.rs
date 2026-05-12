@@ -1,4 +1,4 @@
-//! Callout runtime: WASM provider execution and callout handling.
+//! Provider runtime: WASM provider execution and callout handling.
 //!
 //! Manages the Wasmtime store, routes provider callouts to host
 //! implementations (HTTP, Git), and drives async continuations.
@@ -49,6 +49,7 @@ use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,11 +62,11 @@ const ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// FUSE notifier handle (only available on Linux with FUSE support).
 pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
 
-/// Runtime for executing WASM provider components.
+/// Runtime for one mounted WASM provider component.
 ///
 /// Manages the Wasmtime store, routes callouts, and handles async
 /// continuations with correlation tracking.
-pub struct CalloutRuntime {
+pub struct ProviderRuntime {
     store: Mutex<wasmtime::Store<HostState>>,
     bindings: Provider,
     config_bytes: Vec<u8>,
@@ -161,7 +162,7 @@ pub enum Op {
 }
 
 impl Op {
-    fn execute(&self, runtime: &CalloutRuntime, id: u64) -> Result<wit_types::ProviderStep> {
+    fn execute(&self, runtime: &ProviderRuntime, id: u64) -> Result<wit_types::ProviderStep> {
         let mut store = runtime.store.lock();
         let browse = runtime.bindings.omnifs_provider_browse();
         let step = match self {
@@ -193,7 +194,7 @@ impl Op {
     }
 }
 
-impl CalloutRuntime {
+impl ProviderRuntime {
     pub fn new(
         engine: &wasmtime::Engine,
         wasm_path: &Path,
@@ -489,14 +490,7 @@ impl CalloutRuntime {
                     self.cache_delete_prefix(prefix);
                     self.invalidation.record_prefix(prefix.clone());
                 },
-                wit_types::Effect::DisownTree(handoff) => {
-                    if self.resolve_tree_ref(handoff.tree).is_none() {
-                        return Err(RuntimeError::ProviderProtocol(format!(
-                            "disown-tree effect for {:?} references unknown tree {}",
-                            handoff.path, handoff.tree
-                        )));
-                    }
-                },
+                wit_types::Effect::DisownTree(_) => {},
             }
         }
         for dir in projected_dirs {
@@ -573,17 +567,23 @@ impl CalloutRuntime {
                     return self.finish_provider_return(&op, ret);
                 },
                 wit_types::ProviderStep::Suspended(callouts) => {
-                    Validator::suspended(&callouts).map_err(RuntimeError::ProviderProtocol)?;
-                    let results = self.execute_batch(id, &callouts).await;
-                    let mut store = self.store.lock();
-                    step = self.bindings.omnifs_provider_continuation().call_resume(
-                        &mut *store,
-                        id,
-                        &results,
-                    )?;
+                    let results = Callouts::new(id, &callouts)?.execute(self).await;
+                    step = self.resume_provider(id, results)?;
                 },
             }
         }
+    }
+
+    fn resume_provider(
+        &self,
+        id: u64,
+        results: Vec<wit_types::CalloutResult>,
+    ) -> Result<wit_types::ProviderStep> {
+        let mut store = self.store.lock();
+        Ok(self
+            .bindings
+            .omnifs_provider_continuation()
+            .call_resume(&mut *store, id, &results)?)
     }
 
     fn finish_provider_return(
@@ -591,7 +591,8 @@ impl CalloutRuntime {
         op: &Op,
         ret: wit_types::ProviderReturn,
     ) -> Result<wit_types::OpResult> {
-        Validator::returned(op, &ret).map_err(RuntimeError::ProviderProtocol)?;
+        Validator::returned(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
+            .map_err(RuntimeError::ProviderProtocol)?;
         self.apply_effects(&ret.effects)?;
         Ok(ret.result)
     }
@@ -614,67 +615,60 @@ impl CalloutRuntime {
         std::fs::read(path)
             .map_err(|e| RuntimeError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
+}
 
-    async fn execute_single_callout(
-        &self,
-        operation_id: u64,
-        callout_index: usize,
-        callout: &wit_types::Callout,
-    ) -> wit_types::CalloutResult {
-        match callout {
-            wit_types::Callout::Fetch(req) => {
-                self.execute_fetch_callout(operation_id, callout_index, req)
-                    .await
-            },
-            wit_types::Callout::GitOpenRepo(req) => {
-                self.execute_git_open_callout(operation_id, callout_index, req)
-            },
-            wit_types::Callout::FetchBlob(req) => {
-                self.execute_blob_fetch_callout(operation_id, callout_index, req)
-                    .await
-            },
-            wit_types::Callout::OpenArchive(req) => {
-                self.execute_archive_open_callout(operation_id, callout_index, req)
-                    .await
-            },
-            wit_types::Callout::ReadBlob(req) => {
-                self.execute_blob_read_callout(operation_id, callout_index, req)
-            },
-            _ => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-                kind: wit_types::ErrorKind::Internal,
-                message: "callout type not yet implemented".to_string(),
-                retryable: false,
-            }),
+struct Callout<'a> {
+    operation_id: u64,
+    index: usize,
+    callout: &'a wit_types::Callout,
+}
+
+impl<'a> Callout<'a> {
+    fn new(operation_id: u64, index: usize, callout: &'a wit_types::Callout) -> Self {
+        Self {
+            operation_id,
+            index,
+            callout,
         }
     }
 
-    async fn execute_fetch_callout(
+    async fn execute(self, runtime: &ProviderRuntime) -> wit_types::CalloutResult {
+        match self.callout {
+            wit_types::Callout::Fetch(req) => self.execute_fetch(runtime, req).await,
+            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(runtime, req),
+            wit_types::Callout::FetchBlob(req) => self.execute_blob_fetch(runtime, req).await,
+            wit_types::Callout::OpenArchive(req) => self.execute_archive_open(runtime, req).await,
+            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(runtime, req),
+            _ => self.unsupported(),
+        }
+    }
+
+    async fn execute_fetch(
         &self,
-        operation_id: u64,
-        callout_index: usize,
+        runtime: &ProviderRuntime,
         req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
         let headers = header_pairs(&req.headers);
         let callout_kind = "http.fetch";
         info!(
             target: "omnifs_callout",
-            operation_id,
-            callout_index,
+            operation_id = self.operation_id,
+            callout_index = self.index,
             callout_kind,
             method = req.method.as_str(),
-            url = %url_for_log(&req.url),
-            request_headers = %headers_for_log(&headers),
+            url = %LogUrl(&req.url),
+            request_headers = %LogHeaders(&headers),
             request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
             "callout started"
         );
         let start = Instant::now();
-        let resp = self
+        let resp = runtime
             .http
             .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
             .await;
         log_callout_response(
-            operation_id,
-            callout_index,
+            self.operation_id,
+            self.index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -682,29 +676,28 @@ impl CalloutRuntime {
         callout_response_to_wit(resp)
     }
 
-    fn execute_git_open_callout(
+    fn execute_git_open(
         &self,
-        operation_id: u64,
-        callout_index: usize,
+        runtime: &ProviderRuntime,
         req: &wit_types::GitOpenRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "git.open_repo";
         info!(
             target: "omnifs_callout",
-            operation_id,
-            callout_index,
+            operation_id = self.operation_id,
+            callout_index = self.index,
             callout_kind,
             method = "",
-            url = %url_for_log(&req.clone_url),
+            url = %LogUrl(&req.clone_url),
             request_headers = "",
             request_body_bytes = 0,
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.git.open_repo(&req.cache_key, &req.clone_url);
+        let resp = runtime.git.open_repo(&req.cache_key, &req.clone_url);
         log_callout_response(
-            operation_id,
-            callout_index,
+            self.operation_id,
+            self.index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -712,27 +705,26 @@ impl CalloutRuntime {
         git_response_to_wit(resp)
     }
 
-    async fn execute_blob_fetch_callout(
+    async fn execute_blob_fetch(
         &self,
-        operation_id: u64,
-        callout_index: usize,
+        runtime: &ProviderRuntime,
         req: &wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
         let headers = header_pairs(&req.headers);
         let callout_kind = "blob.fetch";
         info!(
             target: "omnifs_callout",
-            operation_id,
-            callout_index,
+            operation_id = self.operation_id,
+            callout_index = self.index,
             callout_kind,
             method = req.method.as_str(),
-            url = %url_for_log(&req.url),
-            request_headers = %headers_for_log(&headers),
+            url = %LogUrl(&req.url),
+            request_headers = %LogHeaders(&headers),
             request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
             "callout started"
         );
         let start = Instant::now();
-        let resp = self
+        let resp = runtime
             .blob
             .fetch_blob(
                 &req.method,
@@ -743,8 +735,8 @@ impl CalloutRuntime {
             )
             .await;
         log_callout_response(
-            operation_id,
-            callout_index,
+            self.operation_id,
+            self.index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -752,22 +744,17 @@ impl CalloutRuntime {
         blob_response_to_wit(resp)
     }
 
-    async fn execute_archive_open_callout(
+    async fn execute_archive_open(
         &self,
-        operation_id: u64,
-        callout_index: usize,
+        runtime: &ProviderRuntime,
         req: &wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
-        let format = match req.format {
-            wit_types::ArchiveFormat::TarGz => ArchiveFormat::TarGz,
-            wit_types::ArchiveFormat::Tar => ArchiveFormat::Tar,
-            wit_types::ArchiveFormat::Zip => ArchiveFormat::Zip,
-        };
+        let format = ArchiveFormat::from(req.format);
         let callout_kind = "archive.open";
         info!(
             target: "omnifs_callout",
-            operation_id,
-            callout_index,
+            operation_id = self.operation_id,
+            callout_index = self.index,
             callout_kind,
             blob = req.blob,
             format = ?format,
@@ -775,7 +762,7 @@ impl CalloutRuntime {
             "callout started"
         );
         let start = Instant::now();
-        let archive = Arc::clone(&self.archive);
+        let archive = Arc::clone(&runtime.archive);
         let blob = req.blob;
         let strip = req.strip_prefix.clone();
         let resp = tokio::task::spawn_blocking(move || {
@@ -788,8 +775,8 @@ impl CalloutRuntime {
             retryable: false,
         });
         log_callout_response(
-            operation_id,
-            callout_index,
+            self.operation_id,
+            self.index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -797,17 +784,16 @@ impl CalloutRuntime {
         archive_response_to_wit(resp)
     }
 
-    fn execute_blob_read_callout(
+    fn execute_blob_read(
         &self,
-        operation_id: u64,
-        callout_index: usize,
+        runtime: &ProviderRuntime,
         req: &wit_types::ReadBlobRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "blob.read";
         info!(
             target: "omnifs_callout",
-            operation_id,
-            callout_index,
+            operation_id = self.operation_id,
+            callout_index = self.index,
             callout_kind,
             blob = req.blob,
             offset = req.offset,
@@ -815,10 +801,10 @@ impl CalloutRuntime {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.blob.read_blob(req.blob, req.offset, req.len);
+        let resp = runtime.blob.read_blob(req.blob, req.offset, req.len);
         log_callout_response(
-            operation_id,
-            callout_index,
+            self.operation_id,
+            self.index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -826,26 +812,53 @@ impl CalloutRuntime {
         blob_read_to_wit(resp)
     }
 
-    /// Runs every callout in `callouts` concurrently and returns their
-    /// outcomes.
-    ///
-    /// The returned vector is positionally aligned with `callouts`:
-    /// outcome `i` is the result of callout `i`. The SDK's `join_all`
-    /// pops outcomes from a FIFO queue in yield order, so this ordering
-    /// is load-bearing — breaking it would feed results into the wrong
-    /// awaiting future. `futures::future::join_all` preserves input
-    /// order regardless of completion order, which is exactly what the
-    /// guest expects.
-    async fn execute_batch(
-        &self,
-        operation_id: u64,
-        callouts: &[wit_types::Callout],
-    ) -> Vec<wit_types::CalloutResult> {
-        let futures: Vec<_> = callouts
+    fn unsupported(&self) -> wit_types::CalloutResult {
+        wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: wit_types::ErrorKind::Internal,
+            message: "callout type not yet implemented".to_string(),
+            retryable: false,
+        })
+    }
+}
+
+impl From<wit_types::ArchiveFormat> for ArchiveFormat {
+    fn from(format: wit_types::ArchiveFormat) -> Self {
+        match format {
+            wit_types::ArchiveFormat::TarGz => Self::TarGz,
+            wit_types::ArchiveFormat::Tar => Self::Tar,
+            wit_types::ArchiveFormat::Zip => Self::Zip,
+        }
+    }
+}
+
+struct Callouts<'a> {
+    operation_id: u64,
+    callouts: &'a [wit_types::Callout],
+}
+
+impl<'a> Callouts<'a> {
+    fn new(operation_id: u64, callouts: &'a [wit_types::Callout]) -> Result<Self> {
+        if callouts.is_empty() {
+            return Err(RuntimeError::ProviderProtocol(
+                "provider suspended with no callouts".to_string(),
+            ));
+        }
+        Ok(Self {
+            operation_id,
+            callouts,
+        })
+    }
+
+    /// Runs every callout concurrently and returns positionally aligned
+    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
+    /// yield order, so this ordering is load-bearing.
+    async fn execute(&self, runtime: &ProviderRuntime) -> Vec<wit_types::CalloutResult> {
+        let futures: Vec<_> = self
+            .callouts
             .iter()
             .enumerate()
             .map(|(callout_index, callout)| {
-                self.execute_single_callout(operation_id, callout_index, callout)
+                Callout::new(self.operation_id, callout_index, callout).execute(runtime)
             })
             .collect();
         futures::future::join_all(futures).await
@@ -879,7 +892,7 @@ fn log_callout_response(
                 callout_index,
                 callout_kind,
                 status,
-                response_headers = %headers_for_log(headers),
+                response_headers = %LogHeaders(headers),
                 response_body_bytes = body.len(),
                 elapsed_us,
                 "callout response"
@@ -905,7 +918,7 @@ fn log_callout_response(
                 blob = record.id,
                 cache_key = %record.cache_key,
                 status = record.status,
-                response_headers = %headers_for_log(&record.response_headers),
+                response_headers = %LogHeaders(&record.response_headers),
                 response_body_bytes = record.size,
                 elapsed_us,
                 "callout response"
@@ -942,58 +955,65 @@ fn log_callout_response(
     }
 }
 
-fn url_for_log(url: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.to_string();
-    };
+struct LogUrl<'a>(&'a str);
 
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
+impl fmt::Display for LogUrl<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Ok(mut parsed) = url::Url::parse(self.0) else {
+            return f.write_str(self.0);
+        };
 
-    let query_pairs = parsed.query_pairs().into_owned().collect::<Vec<_>>();
-    if !query_pairs.is_empty() {
-        parsed.set_query(None);
-        {
-            let mut pairs = parsed.query_pairs_mut();
-            for (name, value) in query_pairs {
-                let logged_value = if is_sensitive_query_param(&name) {
-                    "redacted"
-                } else {
-                    value.as_str()
-                };
-                pairs.append_pair(&name, logged_value);
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+
+        let query_pairs = parsed.query_pairs().into_owned().collect::<Vec<_>>();
+        if !query_pairs.is_empty() {
+            parsed.set_query(None);
+            {
+                let mut pairs = parsed.query_pairs_mut();
+                for (name, value) in query_pairs {
+                    let logged_value = if is_sensitive_query_param(&name) {
+                        "redacted"
+                    } else {
+                        value.as_str()
+                    };
+                    pairs.append_pair(&name, logged_value);
+                }
             }
         }
+
+        write!(f, "{parsed}")
     }
-
-    parsed.to_string()
 }
 
-fn headers_for_log(headers: &[(String, String)]) -> String {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            let value = if is_sensitive_header(name) {
-                "<redacted>".to_string()
+struct LogHeaders<'a>(&'a [(String, String)]);
+
+impl fmt::Display for LogHeaders<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, (name, value)) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_char(',')?;
+            }
+            write!(f, "{name}=")?;
+            if is_sensitive_header(name) {
+                f.write_str("<redacted>")?;
             } else {
-                truncate_for_log(value, 256)
-            };
-            format!("{name}={value}")
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+                write_truncated_for_log(f, value, 256)?;
+            }
+        }
+        Ok(())
+    }
 }
 
-fn truncate_for_log(value: &str, max: usize) -> String {
-    let mut output = String::new();
+fn write_truncated_for_log(f: &mut fmt::Formatter<'_>, value: &str, max: usize) -> fmt::Result {
     for (index, ch) in value.chars().enumerate() {
         if index == max {
-            output.push_str("...");
-            return output;
+            f.write_str("...")?;
+            return Ok(());
         }
-        output.push(ch);
+        f.write_char(ch)?;
     }
-    output
+    Ok(())
 }
 
 fn is_sensitive_header(name: &str) -> bool {
@@ -1018,9 +1038,10 @@ mod callout_log_tests {
 
     #[test]
     fn url_for_log_preserves_diagnostic_query_and_redacts_secrets() {
-        let logged = url_for_log(
+        let logged = LogUrl(
             "https://user:pass@example.com/api?search_query=cat%3Acs.AI&access_token=secret",
-        );
+        )
+        .to_string();
 
         assert!(logged.contains("search_query=cat%3Acs.AI"));
         assert!(logged.contains("access_token=redacted"));
@@ -1030,13 +1051,14 @@ mod callout_log_tests {
 
     #[test]
     fn headers_for_log_redacts_credentials() {
-        let logged = headers_for_log(&[
+        let logged = LogHeaders(&[
             (
                 "User-Agent".to_string(),
                 "omnifs-provider-arxiv/0.1.0".to_string(),
             ),
             ("Authorization".to_string(), "Bearer secret".to_string()),
-        ]);
+        ])
+        .to_string();
 
         assert!(logged.contains("User-Agent=omnifs-provider-arxiv/0.1.0"));
         assert!(logged.contains("Authorization=<redacted>"));
@@ -1080,12 +1102,12 @@ fn validate_operation_result(result: &wit_types::OpResult) -> std::result::Resul
         result: result.clone(),
         effects: Vec::new(),
     };
-    Validator::returned(&op, &ret)
+    Validator::returned(&op, &ret, |_| true)
 }
 
 #[cfg(test)]
 fn validate_return(op: &Op, ret: &wit_types::ProviderReturn) -> std::result::Result<(), String> {
-    Validator::returned(op, ret)
+    Validator::returned(op, ret, |_| true)
 }
 
 fn split_projected_path(path: &str) -> Option<(&str, &str)> {
@@ -1093,25 +1115,27 @@ fn split_projected_path(path: &str) -> Option<(&str, &str)> {
     (!name.is_empty()).then_some((parent, name))
 }
 
-struct Validator<'a> {
+struct Validator<'a, F> {
     op: &'a Op,
     ret: &'a wit_types::ProviderReturn,
     eager_bytes: usize,
+    tree_exists: F,
 }
 
-impl<'a> Validator<'a> {
-    fn suspended(callouts: &[wit_types::Callout]) -> std::result::Result<(), String> {
-        if callouts.is_empty() {
-            return Err("provider suspended with no callouts".to_string());
-        }
-        Ok(())
-    }
-
-    fn returned(op: &'a Op, ret: &'a wit_types::ProviderReturn) -> std::result::Result<(), String> {
+impl<'a, F> Validator<'a, F>
+where
+    F: Fn(u64) -> bool,
+{
+    fn returned(
+        op: &'a Op,
+        ret: &'a wit_types::ProviderReturn,
+        tree_exists: F,
+    ) -> std::result::Result<(), String> {
         Self {
             op,
             ret,
             eager_bytes: 0,
+            tree_exists,
         }
         .validate_return()
     }
@@ -1138,9 +1162,15 @@ impl<'a> Validator<'a> {
                 wit_types::Effect::Project(entry) => self
                     .entry(&entry.kind)
                     .map_err(|error| format!("project effect {:?}: {error}", entry.path))?,
-                wit_types::Effect::InvalidatePath(_)
-                | wit_types::Effect::InvalidatePrefix(_)
-                | wit_types::Effect::DisownTree(_) => {},
+                wit_types::Effect::InvalidatePath(_) | wit_types::Effect::InvalidatePrefix(_) => {},
+                wit_types::Effect::DisownTree(handoff) => {
+                    if !(self.tree_exists)(handoff.tree) {
+                        return Err(format!(
+                            "disown-tree effect for {:?} references unknown tree {}",
+                            handoff.path, handoff.tree
+                        ));
+                    }
+                },
             }
         }
         Ok(())
