@@ -8,7 +8,9 @@
 //! unsupported variant.
 
 use omnifs_host::omnifs::provider::types as wit_types;
-use omnifs_host::runtime::__test_support::{LogUrl, WitHeaders, kind_label, record_outcome};
+use omnifs_host::runtime::__test_support::{
+    LogUrl, WitHeaders, kind_label, record_outcome, unsupported_callout_variant,
+};
 use std::io;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -389,6 +391,30 @@ async fn archive_open_span_records_tree_ref_at_close() {
     assert_present_on_new_and_close(&output, "callout_index=4");
 }
 
+/// Mirror of `Callouts::unsupported_callout`: an inner instrumented span
+/// that emits `warn!` with the variant name and records a `callout-error`.
+#[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+    unsupported_variant = unsupported_callout_variant(callout),
+    error.kind = tracing::field::Empty,
+    error.message = tracing::field::Empty,
+    error.retryable = tracing::field::Empty,
+))]
+fn fake_unsupported_callout(callout: &wit_types::Callout) -> wit_types::CalloutResult {
+    let variant = unsupported_callout_variant(callout);
+    tracing::warn!(
+        target: "omnifs_callout",
+        variant,
+        "callout variant not implemented",
+    );
+    let result = wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+        kind: wit_types::ErrorKind::Internal,
+        message: "callout type not yet implemented".to_string(),
+        retryable: false,
+    });
+    record_outcome(&result);
+    result
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn unsupported_callout_emits_kind_unsupported_and_returns_callout_error() {
     let callout = wit_types::Callout::StreamOpen(wit_types::HttpRequest {
@@ -401,16 +427,7 @@ async fn unsupported_callout_emits_kind_unsupported_and_returns_callout_error() 
     let mut returned: Option<wit_types::CalloutResult> = None;
     let returned_ref = &mut returned;
     let output = run_with_capture_async(|| async move {
-        let result = dispatch_one(16, 5, &callout, async {
-            // Mirror `Callouts::run_callout`'s unsupported fallback: produce
-            // a typed internal CalloutError without an inner executor span.
-            wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-                kind: wit_types::ErrorKind::Internal,
-                message: "callout type not yet implemented".to_string(),
-                retryable: false,
-            })
-        })
-        .await;
+        let result = dispatch_one_sync(16, 5, &callout, || fake_unsupported_callout(&callout));
         *returned_ref = Some(result);
     })
     .await;
@@ -421,6 +438,14 @@ async fn unsupported_callout_emits_kind_unsupported_and_returns_callout_error() 
     );
     assert!(output.contains("operation_id=16"));
     assert!(output.contains("callout_index=5"));
+    assert!(
+        output.contains("unsupported_variant=\"stream.open\""),
+        "inner span must record the variant name: {output}"
+    );
+    assert!(
+        output.contains("callout variant not implemented"),
+        "warn! must appear in output: {output}"
+    );
     match returned.expect("returned a result") {
         wit_types::CalloutResult::CalloutError(err) => {
             assert!(matches!(err.kind, wit_types::ErrorKind::Internal));

@@ -749,8 +749,46 @@ impl<'a> Callouts<'a> {
             wit_types::Callout::GitOpenRepo(req) => self.runtime.git.open_repo(req),
             wit_types::Callout::OpenArchive(req) => self.runtime.archive.open(req).await,
             wit_types::Callout::ReadBlob(req) => self.runtime.blob.read(req),
-            _ => callout_internal("callout type not yet implemented"),
+            wit_types::Callout::StreamOpen(_)
+            | wit_types::Callout::StreamRecv(_)
+            | wit_types::Callout::StreamClose(_)
+            | wit_types::Callout::WsConnect(_)
+            | wit_types::Callout::WsSend(_)
+            | wit_types::Callout::WsRecv(_)
+            | wit_types::Callout::WsClose(_) => self.unsupported_callout(callout),
         }
+    }
+
+    #[allow(clippy::unused_self)]
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        unsupported_variant = unsupported_callout_variant(callout),
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
+    fn unsupported_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
+        let variant = unsupported_callout_variant(callout);
+        tracing::warn!(
+            target: "omnifs_callout",
+            variant,
+            "callout variant not implemented",
+        );
+        let result = callout_internal("callout type not yet implemented");
+        record_outcome(&result);
+        result
+    }
+}
+
+fn unsupported_callout_variant(callout: &wit_types::Callout) -> &'static str {
+    match callout {
+        wit_types::Callout::StreamOpen(_) => "stream.open",
+        wit_types::Callout::StreamRecv(_) => "stream.recv",
+        wit_types::Callout::StreamClose(_) => "stream.close",
+        wit_types::Callout::WsConnect(_) => "ws.connect",
+        wit_types::Callout::WsSend(_) => "ws.send",
+        wit_types::Callout::WsRecv(_) => "ws.recv",
+        wit_types::Callout::WsClose(_) => "ws.close",
+        _ => "unknown",
     }
 }
 
@@ -1579,5 +1617,12 @@ pub mod __test_support {
     /// callout result, exactly as the production executor methods do.
     pub fn record_outcome(result: &wit_types::CalloutResult) {
         inner_record(result);
+    }
+
+    /// Returns the variant label for an unsupported callout, mirroring
+    /// the production `unsupported_callout_variant` used by the inner
+    /// instrumented helper.
+    pub fn unsupported_callout_variant(callout: &wit_types::Callout) -> &'static str {
+        super::unsupported_callout_variant(callout)
     }
 }
