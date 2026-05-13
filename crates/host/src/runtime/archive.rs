@@ -22,7 +22,7 @@ use crate::runtime::tools::archive::{
     ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
 };
 use crate::runtime::tree_refs::TreeRefs;
-use crate::runtime::{callout_error, callout_internal, callout_not_found};
+use crate::runtime::{callout_error, callout_internal, callout_not_found, record_outcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -120,19 +120,28 @@ impl ArchiveExecutor {
         }
     }
 
-    pub(crate) async fn open_archive(
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        blob = req.blob,
+        format = ?req.format,
+        strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
+        tree_ref = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
+    pub(crate) async fn open(
         self: &Arc<Self>,
-        blob_id: u64,
-        format: ArchiveFormat,
-        strip_prefix: Option<&str>,
+        req: &wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
         let this = Arc::clone(self);
-        let strip = strip_prefix.map(str::to_string);
-        let result = tokio::task::spawn_blocking(move || {
+        let blob_id = req.blob;
+        let format = ArchiveFormat::from(req.format);
+        let strip = req.strip_prefix.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
             this.open_archive_blocking(blob_id, format, strip.as_deref())
         })
         .await;
-        match result {
+        let result = match outcome {
             Ok(Ok(tree)) => {
                 wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree })
             },
@@ -140,7 +149,9 @@ impl ArchiveExecutor {
             Err(join_err) => {
                 ArchiveError::JoinFailed(format!("extract task join: {join_err}")).into()
             },
-        }
+        };
+        record_outcome(&result);
+        result
     }
 
     fn open_archive_blocking(
@@ -207,6 +218,16 @@ impl ArchiveExecutor {
                 },
             };
         Ok(stats)
+    }
+}
+
+impl From<wit_types::ArchiveFormat> for ArchiveFormat {
+    fn from(format: wit_types::ArchiveFormat) -> Self {
+        match format {
+            wit_types::ArchiveFormat::TarGz => Self::TarGz,
+            wit_types::ArchiveFormat::Tar => Self::Tar,
+            wit_types::ArchiveFormat::Zip => Self::Zip,
+        }
     }
 }
 
@@ -303,6 +324,14 @@ mod tests {
         assert!(base.dir_name().starts_with("targz-"));
     }
 
+    fn open_request_targz(blob: u64, strip_prefix: &str) -> wit_types::ArchiveOpenRequest {
+        wit_types::ArchiveOpenRequest {
+            blob,
+            format: wit_types::ArchiveFormat::TarGz,
+            strip_prefix: Some(strip_prefix.to_string()),
+        }
+    }
+
     fn insert_archive_blob(
         cache: &BlobCache,
         cache_key: &str,
@@ -348,7 +377,7 @@ mod tests {
         ));
 
         let response = executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
             .await;
         let tree = match response {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree: t }) => t,
@@ -387,10 +416,7 @@ mod tests {
             extractor,
         ));
 
-        let alpha = match executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/"))
-            .await
-        {
+        let alpha = match executor.open(&open_request_targz(blob_id, "alpha/")).await {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected alpha response: {other:?}"),
         };
@@ -400,10 +426,7 @@ mod tests {
             "alpha\n"
         );
 
-        let beta = match executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/"))
-            .await
-        {
+        let beta = match executor.open(&open_request_targz(blob_id, "beta/")).await {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected beta response: {other:?}"),
         };
@@ -452,7 +475,7 @@ mod tests {
         ));
 
         let tree = match executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
             .await
         {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
@@ -522,7 +545,7 @@ mod tests {
         ));
 
         let tree = match executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
             .await
         {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
@@ -541,7 +564,7 @@ mod tests {
         ));
 
         let tree = match second_executor
-            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
             .await
         {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,

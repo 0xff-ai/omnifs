@@ -10,7 +10,7 @@ use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::{CapabilityChecker, CapabilityError};
 use crate::runtime::cloner::{CloneError, GitCloner};
 use crate::runtime::tree_refs::TreeRefs;
-use crate::runtime::{callout_denied, callout_network};
+use crate::runtime::{LogUrl, callout_denied, callout_network, record_outcome};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
@@ -34,14 +34,23 @@ impl GitExecutor {
         }
     }
 
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        url = %LogUrl(&req.clone_url),
+        tree_ref = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
     pub fn open_repo(&self, req: &wit_types::GitOpenRequest) -> wit_types::CalloutResult {
-        match self.open_repo_inner(req) {
+        let result = match self.open_repo_inner(req) {
             Ok(id) => wit_types::CalloutResult::GitRepoOpened(wit_types::GitRepoInfo {
                 repo: id,
                 tree: id,
             }),
             Err(e) => e.into(),
-        }
+        };
+        record_outcome(&result);
+        result
     }
 
     fn open_repo_inner(&self, req: &wit_types::GitOpenRequest) -> Result<u64, GitError> {

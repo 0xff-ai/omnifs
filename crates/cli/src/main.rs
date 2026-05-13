@@ -453,12 +453,18 @@ fn print_status(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
+        // NEW = span constructed (boundary marker for "started").
+        // CLOSE = span dropped (boundary marker for "completed"), carrying
+        // the framework's own elapsed time and any fields recorded over
+        // the lifetime of the span.
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .init();
 
     let cli = Cli::parse();

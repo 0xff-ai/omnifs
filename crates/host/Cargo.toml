@@ -38,6 +38,7 @@ omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 [dev-dependencies]
 http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
 wasmtime = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }

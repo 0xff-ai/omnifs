@@ -8,7 +8,9 @@ use crate::auth::AuthManager;
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
-use crate::runtime::{callout_denied, callout_internal, callout_network};
+use crate::runtime::{
+    LogUrl, WitHeaders, callout_denied, callout_internal, callout_network, record_outcome,
+};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +50,25 @@ impl HttpExecutor {
         })
     }
 
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        method = req.method.as_str(),
+        url = %LogUrl(&req.url),
+        request_headers = %WitHeaders(&req.headers),
+        request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
+        status = tracing::field::Empty,
+        response_headers = tracing::field::Empty,
+        response_body_bytes = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
     pub async fn fetch(&self, req: &wit_types::HttpRequest) -> wit_types::CalloutResult {
+        let result = self.fetch_inner(req).await;
+        record_outcome(&result);
+        result
+    }
+
+    async fn fetch_inner(&self, req: &wit_types::HttpRequest) -> wit_types::CalloutResult {
         if let Err(e) = self.capability.check_url(&req.url) {
             return callout_denied(e.to_string());
         }

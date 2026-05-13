@@ -16,8 +16,8 @@ use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use crate::runtime::{
-    callout_denied, callout_internal, callout_invalid, callout_network, callout_not_found,
-    callout_too_large,
+    LogUrl, WitHeaders, callout_denied, callout_internal, callout_invalid, callout_network,
+    callout_not_found, callout_too_large, record_outcome,
 };
 use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -147,11 +147,27 @@ impl BlobExecutor {
     ///
     /// The body is streamed to a temporary file and atomically renamed
     /// into place once it has stayed within the configured fetch cap.
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        cache_key = %req.cache_key,
+        method = req.method.as_str(),
+        url = %LogUrl(&req.url),
+        request_headers = %WitHeaders(&req.headers),
+        request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
+        blob = tracing::field::Empty,
+        status = tracing::field::Empty,
+        response_headers = tracing::field::Empty,
+        response_body_bytes = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
     pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> wit_types::CalloutResult {
-        match self.fetch_inner(req).await {
+        let result = match self.fetch_inner(req).await {
             Ok(record) => blob_fetched_to_wit(&record),
             Err(e) => e.into(),
-        }
+        };
+        record_outcome(&result);
+        result
     }
 
     async fn fetch_inner(
@@ -250,19 +266,25 @@ impl BlobExecutor {
     /// `offset` may point past EOF, which returns an empty byte vector.
     /// The configured read cap applies to the number of bytes returned
     /// by this call, not to the absolute offset.
-    pub fn read_blob(
-        &self,
-        blob_id: u64,
-        offset: u64,
-        len: Option<u32>,
-    ) -> wit_types::CalloutResult {
-        match self.read_blob_inner(blob_id, offset, len) {
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        blob = req.blob,
+        offset = req.offset,
+        len = ?req.len,
+        response_body_bytes = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
+    pub fn read(&self, req: &wit_types::ReadBlobRequest) -> wit_types::CalloutResult {
+        let result = match self.read_inner(req.blob, req.offset, req.len) {
             Ok(bytes) => wit_types::CalloutResult::BlobRead(bytes),
             Err(e) => e.into(),
-        }
+        };
+        record_outcome(&result);
+        result
     }
 
-    fn read_blob_inner(
+    fn read_inner(
         &self,
         blob_id: u64,
         offset: u64,
@@ -500,7 +522,11 @@ mod tests {
         )
         .unwrap();
 
-        match executor.read_blob(record.id, 0, None) {
+        match executor.read(&wit_types::ReadBlobRequest {
+            blob: record.id,
+            offset: 0,
+            len: None,
+        }) {
             wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
                 kind: wit_types::ErrorKind::TooLarge,
                 retryable: false,

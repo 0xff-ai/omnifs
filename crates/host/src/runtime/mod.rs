@@ -44,7 +44,7 @@ use crate::runtime::inflight::InFlight;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
 use crate::runtime::operation_ids::OperationIds;
-use crate::runtime::tools::archive::{ArchiveExtractorComponent, ArchiveFormat};
+use crate::runtime::tools::archive::ArchiveExtractorComponent;
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
 use parking_lot::Mutex;
@@ -52,8 +52,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{Instrument, debug, error, info, trace, warn};
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -719,311 +718,87 @@ impl<'a> Callouts<'a> {
             .requests
             .iter()
             .enumerate()
-            .map(|(callout_index, callout)| self.execute_one(callout_index, callout))
+            .map(|(callout_index, callout)| {
+                self.dispatch_one(self.operation_id, callout_index, callout)
+            })
             .collect();
         futures::future::join_all(futures).await
     }
 
-    async fn execute_one(
+    async fn dispatch_one(
         &self,
+        op_id: u64,
         index: usize,
-        request: &wit_types::Callout,
-    ) -> wit_types::CalloutResult {
-        match request {
-            wit_types::Callout::Fetch(req) => self.execute_fetch(index, request, req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(index, request, req),
-            wit_types::Callout::FetchBlob(req) => {
-                self.execute_blob_fetch(index, request, req).await
-            },
-            wit_types::Callout::OpenArchive(req) => {
-                self.execute_archive_open(index, request, req).await
-            },
-            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(index, request, req),
-            _ => {
-                let kind = CalloutKind::of(request);
-                debug_assert_eq!(
-                    kind.as_str(),
-                    "unsupported",
-                    "unimplemented callout variant reached unsupported arm"
-                );
-                Self::unsupported()
-            },
-        }
-    }
-
-    async fn execute_fetch(
-        &self,
-        callout_index: usize,
         callout: &wit_types::Callout,
-        req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
-        let kind = CalloutKind::HttpFetch;
-        info!(
-            target: "omnifs_callout",
-            operation_id = self.operation_id,
-            callout_index,
-            callout_kind = kind.as_str(),
-            method = req.method.as_str(),
-            url = %LogUrl(&req.url),
-            request_headers = %WitHeaders(&req.headers),
-            request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
-            "callout started"
-        );
-        let start = Instant::now();
-        let result = self.runtime.http.fetch(req).await;
-        log_callout_response(
-            self.operation_id,
-            callout_index,
-            kind,
-            callout,
-            start.elapsed(),
-            &result,
-        );
-        result
+        self.run_callout(callout)
+            .instrument(tracing::info_span!(
+                target: "omnifs_callout",
+                "callout",
+                operation_id = op_id,
+                callout_index = index,
+                kind = CalloutKind::of(callout).as_str(),
+            ))
+            .await
     }
 
-    fn execute_git_open(
-        &self,
-        callout_index: usize,
-        callout: &wit_types::Callout,
-        req: &wit_types::GitOpenRequest,
-    ) -> wit_types::CalloutResult {
-        let kind = CalloutKind::GitOpenRepo;
-        info!(
-            target: "omnifs_callout",
-            operation_id = self.operation_id,
-            callout_index,
-            callout_kind = kind.as_str(),
-            method = "",
-            url = %LogUrl(&req.clone_url),
-            request_headers = "",
-            request_body_bytes = 0,
-            "callout started"
-        );
-        let start = Instant::now();
-        let result = self.runtime.git.open_repo(req);
-        log_callout_response(
-            self.operation_id,
-            callout_index,
-            kind,
-            callout,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    async fn execute_blob_fetch(
-        &self,
-        callout_index: usize,
-        callout: &wit_types::Callout,
-        req: &wit_types::BlobFetchRequest,
-    ) -> wit_types::CalloutResult {
-        let kind = CalloutKind::BlobFetch;
-        info!(
-            target: "omnifs_callout",
-            operation_id = self.operation_id,
-            callout_index,
-            callout_kind = kind.as_str(),
-            method = req.method.as_str(),
-            url = %LogUrl(&req.url),
-            request_headers = %WitHeaders(&req.headers),
-            request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
-            "callout started"
-        );
-        let start = Instant::now();
-        let result = self.runtime.blob.fetch(req).await;
-        log_callout_response(
-            self.operation_id,
-            callout_index,
-            kind,
-            callout,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    async fn execute_archive_open(
-        &self,
-        callout_index: usize,
-        callout: &wit_types::Callout,
-        req: &wit_types::ArchiveOpenRequest,
-    ) -> wit_types::CalloutResult {
-        let format = ArchiveFormat::from(req.format);
-        let kind = CalloutKind::OpenArchive;
-        info!(
-            target: "omnifs_callout",
-            operation_id = self.operation_id,
-            callout_index,
-            callout_kind = kind.as_str(),
-            blob = req.blob,
-            format = ?format,
-            strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
-            "callout started"
-        );
-        let start = Instant::now();
-        let result = self
-            .runtime
-            .archive
-            .open_archive(req.blob, format, req.strip_prefix.as_deref())
-            .await;
-        log_callout_response(
-            self.operation_id,
-            callout_index,
-            kind,
-            callout,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    fn execute_blob_read(
-        &self,
-        callout_index: usize,
-        callout: &wit_types::Callout,
-        req: &wit_types::ReadBlobRequest,
-    ) -> wit_types::CalloutResult {
-        let kind = CalloutKind::ReadBlob;
-        info!(
-            target: "omnifs_callout",
-            operation_id = self.operation_id,
-            callout_index,
-            callout_kind = kind.as_str(),
-            blob = req.blob,
-            offset = req.offset,
-            len = req.len,
-            "callout started"
-        );
-        let start = Instant::now();
-        let result = self.runtime.blob.read_blob(req.blob, req.offset, req.len);
-        log_callout_response(
-            self.operation_id,
-            callout_index,
-            kind,
-            callout,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    fn unsupported() -> wit_types::CalloutResult {
-        callout_internal("callout type not yet implemented")
-    }
-}
-
-impl From<wit_types::ArchiveFormat> for ArchiveFormat {
-    fn from(format: wit_types::ArchiveFormat) -> Self {
-        match format {
-            wit_types::ArchiveFormat::TarGz => Self::TarGz,
-            wit_types::ArchiveFormat::Tar => Self::Tar,
-            wit_types::ArchiveFormat::Zip => Self::Zip,
+    async fn run_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
+        match callout {
+            wit_types::Callout::Fetch(req) => self.runtime.http.fetch(req).await,
+            wit_types::Callout::FetchBlob(req) => self.runtime.blob.fetch(req).await,
+            wit_types::Callout::GitOpenRepo(req) => self.runtime.git.open_repo(req),
+            wit_types::Callout::OpenArchive(req) => self.runtime.archive.open(req).await,
+            wit_types::Callout::ReadBlob(req) => self.runtime.blob.read(req),
+            _ => callout_internal("callout type not yet implemented"),
         }
     }
 }
 
-fn log_callout_response(
-    operation_id: u64,
-    callout_index: usize,
-    kind: CalloutKind,
-    callout: &wit_types::Callout,
-    elapsed: std::time::Duration,
-    response: &wit_types::CalloutResult,
-) {
-    let callout_kind = kind.as_str();
-    let elapsed_us = elapsed.as_micros();
-    match response {
+/// Records outcome-side span fields on `Span::current()` for the active
+/// instrumented executor span. Called once per callout method before
+/// it returns the `CalloutResult`. Each field touched here must be
+/// pre-declared in the corresponding `#[instrument]` `fields(...)` (use
+/// `tracing::field::Empty` for late-bound fields); span fields not
+/// declared up front are silently dropped.
+pub(super) fn record_outcome(result: &wit_types::CalloutResult) {
+    let span = tracing::Span::current();
+    match result {
         wit_types::CalloutResult::HttpResponse(r) => {
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                status = r.status,
-                response_headers = %WitHeaders(&r.headers),
-                response_body_bytes = r.body.len(),
-                elapsed_us,
-                "callout response"
+            span.record("status", r.status);
+            span.record(
+                "response_headers",
+                tracing::field::display(WitHeaders(&r.headers)),
             );
-        },
-        wit_types::CalloutResult::GitRepoOpened(r) => {
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                tree_ref = r.tree,
-                elapsed_us,
-                "callout response"
-            );
-        },
-        wit_types::CalloutResult::ArchiveOpened(r) => {
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                tree_ref = r.tree,
-                elapsed_us,
-                "callout response"
-            );
+            span.record("response_body_bytes", r.body.len());
         },
         wit_types::CalloutResult::BlobFetched(r) => {
-            let cache_key = match callout {
-                wit_types::Callout::FetchBlob(req) => req.cache_key.as_str(),
-                _ => "",
-            };
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                blob = r.blob,
-                cache_key,
-                status = r.status,
-                response_headers = %WitHeaders(&r.response_headers),
-                response_body_bytes = r.size,
-                elapsed_us,
-                "callout response"
+            span.record("blob", r.blob);
+            span.record("status", r.status);
+            span.record(
+                "response_headers",
+                tracing::field::display(WitHeaders(&r.response_headers)),
             );
+            span.record("response_body_bytes", r.size);
         },
         wit_types::CalloutResult::BlobRead(bytes) => {
-            info!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                response_body_bytes = bytes.len(),
-                elapsed_us,
-                "callout response"
-            );
+            span.record("response_body_bytes", bytes.len());
+        },
+        wit_types::CalloutResult::GitRepoOpened(r) => {
+            span.record("tree_ref", r.tree);
+        },
+        wit_types::CalloutResult::ArchiveOpened(r) => {
+            span.record("tree_ref", r.tree);
         },
         wit_types::CalloutResult::CalloutError(e) => {
-            warn!(
-                target: "omnifs_callout",
-                operation_id,
-                callout_index,
-                callout_kind,
-                kind = ?e.kind,
-                retryable = e.retryable,
-                error = %e.message,
-                elapsed_us,
-                "callout error"
-            );
+            span.record("error.kind", tracing::field::debug(&e.kind));
+            span.record("error.message", e.message.as_str());
+            span.record("error.retryable", e.retryable);
         },
-        _ => warn!(
-            target: "omnifs_callout",
-            operation_id,
-            callout_index,
-            callout_kind,
-            "unhandled callout result variant"
-        ),
+        _ => {},
     }
 }
 
-struct LogUrl<'a>(&'a str);
+pub(crate) struct LogUrl<'a>(pub(crate) &'a str);
 
 impl fmt::Display for LogUrl<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1764,5 +1539,45 @@ fn absolute_mount_path(path: &str) -> String {
         path.to_string()
     } else {
         format!("/{path}")
+    }
+}
+
+/// Test-only re-exports used by the `callout_tracing` integration test
+/// to drive canned futures/results through the same instrumentation
+/// pattern as `dispatch_one` without spinning up real executors.
+#[doc(hidden)]
+pub mod __test_support {
+    use super::{
+        LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders, record_outcome as inner_record,
+    };
+    use crate::omnifs::provider::types as wit_types;
+    use std::fmt;
+
+    /// Stable kind labels used by the outer dispatch span. Kept in lockstep
+    /// with the internal `CalloutKind::as_str()` values.
+    pub fn kind_label(callout: &wit_types::Callout) -> &'static str {
+        super::CalloutKind::of(callout).as_str()
+    }
+
+    /// Public re-display wrapper for redacting URLs in log output.
+    pub struct LogUrl<'a>(pub &'a str);
+    impl fmt::Display for LogUrl<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            InternalLogUrl(self.0).fmt(f)
+        }
+    }
+
+    /// Public re-display wrapper for redacting WIT headers in log output.
+    pub struct WitHeaders<'a>(pub &'a [wit_types::Header]);
+    impl fmt::Display for WitHeaders<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            InternalWitHeaders(self.0).fmt(f)
+        }
+    }
+
+    /// Records the outcome fields on `Span::current()` for the given
+    /// callout result, exactly as the production executor methods do.
+    pub fn record_outcome(result: &wit_types::CalloutResult) {
+        inner_record(result);
     }
 }
