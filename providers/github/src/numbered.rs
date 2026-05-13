@@ -172,28 +172,11 @@ pub(crate) fn project_common_fields(
     );
 }
 
-pub(crate) fn mutable_file_content(
-    bytes: impl Into<Vec<u8>>,
-    version: Option<&str>,
-) -> FileContent {
-    let bytes = bytes.into();
-    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    FileContent::bytes_with_attrs(mutable_attrs(size, version), bytes)
-}
-
 pub(crate) fn mutable_deferred_file(size: Size, version: Option<&str>) -> FileProj {
     let file = FileProj::deferred(size, ReadMode::Full, Stability::Mutable);
     match version.filter(|version| !version.is_empty()) {
         Some(version) => file.with_version(version),
         None => file,
-    }
-}
-
-fn mutable_attrs(size: Size, version: Option<&str>) -> FileAttrs {
-    let attrs = FileAttrs::new(size, Stability::Mutable);
-    match version.filter(|version| !version.is_empty()) {
-        Some(version) => attrs.with_version(version),
-        None => attrs,
     }
 }
 

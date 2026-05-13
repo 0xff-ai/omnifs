@@ -1577,7 +1577,8 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
 #[allow(clippy::too_many_lines)]
 fn github_pr_lookup_validates_and_exposes_diff() {
     use omnifs_host::omnifs::provider::types::{
-        Callout, CalloutError, CalloutResult, ErrorKind, HttpRequest, HttpResponse,
+        BlobFetchRequest, BlobFetched, Callout, CalloutError, CalloutResult, ErrorKind,
+        HttpRequest, HttpResponse, ReadFileBytes,
     };
 
     #[allow(clippy::needless_pass_by_value)]
@@ -1592,6 +1593,22 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         };
         let [Callout::Fetch(request)] = callouts.as_slice() else {
             panic!("expected fetch callout, got {response:?}");
+        };
+        request.clone()
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn expect_blob_fetch(response: StepOutcome) -> BlobFetchRequest {
+        let StepOutcome {
+            result: None,
+            callouts,
+            ..
+        } = &response
+        else {
+            panic!("expected callouts response, got {response:?}");
+        };
+        let [Callout::FetchBlob(request)] = callouts.as_slice() else {
+            panic!("expected fetch-blob callout, got {response:?}");
         };
         request.clone()
     }
@@ -1646,18 +1663,34 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         other => panic!("expected validated PR lookup result, got {other:?}"),
     }
 
-    let read = session.read_file(70, "octocat/Hello-World/_prs/_open/7/diff");
+    let diff_fetch =
+        expect_blob_fetch(session.read_file(70, "octocat/Hello-World/_prs/_open/7/diff"));
     assert!(
-        read.is_suspended(),
-        "expected PR diff read to dispatch fetch, got {read:?}"
+        diff_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7"),
+        "unexpected PR diff fetch URL: {}",
+        diff_fetch.url
+    );
+    assert!(
+        diff_fetch
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("accept")
+                && h.value == "application/vnd.github.diff"),
+        "expected diff Accept header, got {:?}",
+        diff_fetch.headers
     );
 
     let response = session.resume(
         70,
-        vec![CalloutResult::HttpResponse(HttpResponse {
+        vec![CalloutResult::BlobFetched(BlobFetched {
+            blob: 1,
+            size: 25,
+            content_type: Some("application/octet-stream".to_string()),
+            etag: None,
             status: 200,
-            headers: Vec::new(),
-            body: b"diff --git a/file b/file\n".to_vec(),
+            response_headers: Vec::new(),
         })],
     );
 
@@ -1665,8 +1698,9 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         StepOutcome {
             result: Some(OpResult::ReadFile(file)),
             ..
-        } => {
-            assert_eq!(support::expect_inline(&file), b"diff --git a/file b/file\n");
+        } => match &file.bytes {
+            ReadFileBytes::Blob(blob) => assert_eq!(*blob, 1),
+            ReadFileBytes::Inline(_) => panic!("expected blob-backed diff, got inline"),
         },
         other => panic!("expected PR diff file after read, got {other:?}"),
     }
@@ -1831,6 +1865,9 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         expected_content: &'static [u8],
     }
 
+    // PR diff is covered separately by `github_pr_lookup_validates_and_exposes_diff`
+    // because it dispatches a fetch-blob callout (and returns a blob-backed
+    // ReadFileBytes) rather than an inline HttpResponse.
     let cases = [
         Case {
             name: "issue title",
@@ -1847,13 +1884,6 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
                 "user": {"login": "octocat"}
             }"#,
             expected_content: b"Cached issue title",
-        },
-        Case {
-            name: "pr diff",
-            path: "octocat/Hello-World/_prs/_open/7/diff",
-            ok_headers: Vec::new(),
-            ok_body: b"diff --git a/file b/file\n",
-            expected_content: b"diff --git a/file b/file\n",
         },
         Case {
             name: "action status",

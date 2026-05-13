@@ -293,6 +293,11 @@ pub enum FileContent {
         attrs: FileAttrs,
         bytes: Vec<u8>,
     },
+    Blob(crate::blob::BlobId),
+    BlobWithAttrs {
+        attrs: FileAttrs,
+        blob: crate::blob::BlobId,
+    },
     Stream(StreamHandle),
     Range {
         file: FileProj,
@@ -309,6 +314,20 @@ impl FileContent {
         Self::BytesWithAttrs {
             attrs,
             bytes: bytes.into(),
+        }
+    }
+
+    /// Serve a `#[file]` handler's bytes verbatim from a host-resident
+    /// blob. No bytes cross the WIT boundary; use this for content
+    /// that exceeds the inline eager-response cap.
+    pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
+        Self::Blob(blob.into())
+    }
+
+    pub fn blob_with_attrs(attrs: FileAttrs, blob: impl Into<crate::blob::BlobId>) -> Self {
+        Self::BlobWithAttrs {
+            attrs,
+            blob: blob.into(),
         }
     }
 
@@ -341,6 +360,12 @@ impl std::fmt::Debug for FileContent {
                 .debug_struct("BytesWithAttrs")
                 .field("attrs", attrs)
                 .field("bytes", bytes)
+                .finish(),
+            Self::Blob(blob) => f.debug_tuple("Blob").field(blob).finish(),
+            Self::BlobWithAttrs { attrs, blob } => f
+                .debug_struct("BlobWithAttrs")
+                .field("attrs", attrs)
+                .field("blob", blob)
                 .finish(),
             Self::Stream(handle) => f.debug_tuple("Stream").field(handle).finish(),
             Self::Range { file, .. } => f.debug_struct("Range").field("file", file).finish(),
@@ -792,6 +817,10 @@ impl<S> MountRegistry<S> {
                 FileContent::BytesWithAttrs { attrs, bytes } => {
                     Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
                 },
+                FileContent::Blob(blob) => Ok(crate::browse::FileContent::blob(blob)),
+                FileContent::BlobWithAttrs { attrs, blob } => {
+                    Ok(crate::browse::FileContent::blob(blob).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -1174,6 +1203,10 @@ impl<S, B> SubtreeRegistry<S, B> {
                 FileContent::BytesWithAttrs { attrs, bytes } => {
                     Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
                 },
+                FileContent::Blob(blob) => Ok(crate::browse::FileContent::blob(blob)),
+                FileContent::BlobWithAttrs { attrs, blob } => {
+                    Ok(crate::browse::FileContent::blob(blob).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -1445,11 +1478,12 @@ fn projected_file_from_projection(
 
 fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
     match content {
-        FileContent::Bytes(_) | FileContent::BytesWithAttrs { .. } => {
-            Err(ProviderError::invalid_input(
-                "open-file requires FileContent::ranged or FileContent::range_bytes",
-            ))
-        },
+        FileContent::Bytes(_)
+        | FileContent::BytesWithAttrs { .. }
+        | FileContent::Blob(_)
+        | FileContent::BlobWithAttrs { .. } => Err(ProviderError::invalid_input(
+            "open-file requires FileContent::ranged or FileContent::range_bytes",
+        )),
         FileContent::Range { file, reader } => {
             file.validate()
                 .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
