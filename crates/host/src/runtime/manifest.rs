@@ -51,6 +51,44 @@ impl DeclaredHandler {
     pub fn specificity(&self) -> &[(u8, usize)] {
         self.pattern.specificity()
     }
+
+    pub fn resolve_touched(
+        handlers: &[DeclaredHandler],
+        absolute: &str,
+    ) -> Vec<crate::runtime::activity::ActivePathTouch> {
+        let mut best_by_depth = std::collections::BTreeMap::new();
+        for mount in handlers {
+            let Some(concrete_path) = mount.concrete_path_for(absolute) else {
+                continue;
+            };
+            match best_by_depth.entry(mount.pattern_len()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((mount, concrete_path));
+                },
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let current = slot.get().0;
+                    if mount
+                        .specificity()
+                        .iter()
+                        .cmp(current.specificity().iter())
+                        .is_gt()
+                    {
+                        slot.insert((mount, concrete_path));
+                    }
+                },
+            }
+        }
+        best_by_depth
+            .into_values()
+            .map(
+                |(mount, concrete_path)| crate::runtime::activity::ActivePathTouch {
+                    mount_id: mount.mount_id.clone(),
+                    mount_name: mount.mount_name.clone(),
+                    path: concrete_path,
+                },
+            )
+            .collect()
+    }
 }
 
 pub fn read_declared_handlers_from_wasm(path: &Path) -> Result<Vec<DeclaredHandler>, String> {

@@ -8,6 +8,13 @@ struct ActiveMountEntry {
     paths: HashMap<String, Instant>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActivePathTouch {
+    pub mount_id: String,
+    pub mount_name: String,
+    pub path: String,
+}
+
 pub struct ActivityTable {
     ttl: Duration,
     entries: HashMap<String, ActiveMountEntry>,
@@ -23,10 +30,15 @@ impl ActivityTable {
 
     pub fn touch<I>(&mut self, touched: I)
     where
-        I: IntoIterator<Item = (String, String, String)>,
+        I: IntoIterator<Item = ActivePathTouch>,
     {
         let now = Instant::now();
-        for (mount_id, mount_name, path) in touched {
+        for ActivePathTouch {
+            mount_id,
+            mount_name,
+            path,
+        } in touched
+        {
             self.entries
                 .entry(mount_id)
                 .or_insert_with(|| ActiveMountEntry {
@@ -88,23 +100,23 @@ impl ActivityTable {
 
 #[cfg(test)]
 mod tests {
-    use super::ActivityTable;
+    use super::{ActivePathTouch, ActivityTable};
     use std::time::Duration;
 
     #[test]
     fn activity_table_tracks_and_prunes_paths_by_type() {
         let mut table = ActivityTable::new(Duration::from_secs(60));
         table.touch([
-            (
-                "/{owner}/{repo}".to_string(),
-                "Repo".to_string(),
-                "/openai/gvfs".to_string(),
-            ),
-            (
-                "/{owner}/{repo}/_issues/_open/{number}".to_string(),
-                "Issue".to_string(),
-                "/openai/gvfs/_issues/_open/7".to_string(),
-            ),
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}".to_string(),
+                mount_name: "Repo".to_string(),
+                path: "/openai/gvfs".to_string(),
+            },
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+                mount_name: "Issue".to_string(),
+                path: "/openai/gvfs/_issues/_open/7".to_string(),
+            },
         ]);
 
         let active = table.active_path_sets();
@@ -125,21 +137,21 @@ mod tests {
     fn activity_table_removes_exact_paths_and_prefixes() {
         let mut table = ActivityTable::new(Duration::from_secs(60));
         table.touch([
-            (
-                "/{owner}/{repo}".to_string(),
-                "Repo".to_string(),
-                "/openai/gvfs".to_string(),
-            ),
-            (
-                "/{owner}/{repo}/_issues/_open/{number}".to_string(),
-                "Issue".to_string(),
-                "/openai/gvfs/_issues/_open/7".to_string(),
-            ),
-            (
-                "/{owner}/{repo}/_issues/_open/{number}".to_string(),
-                "Issue".to_string(),
-                "/openai/gvfs/_issues/_open/8".to_string(),
-            ),
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}".to_string(),
+                mount_name: "Repo".to_string(),
+                path: "/openai/gvfs".to_string(),
+            },
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+                mount_name: "Issue".to_string(),
+                path: "/openai/gvfs/_issues/_open/7".to_string(),
+            },
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+                mount_name: "Issue".to_string(),
+                path: "/openai/gvfs/_issues/_open/8".to_string(),
+            },
         ]);
 
         table.remove_path("/openai/gvfs/_issues/_open/7");
@@ -158,16 +170,16 @@ mod tests {
     fn activity_table_prefix_delete_respects_boundaries_and_root() {
         let mut table = ActivityTable::new(Duration::from_secs(60));
         table.touch([
-            (
-                "/{owner}/{repo}".to_string(),
-                "Repo".to_string(),
-                "/openai/gvfs".to_string(),
-            ),
-            (
-                "/{owner}/{repo}".to_string(),
-                "Repo".to_string(),
-                "/openai/gvfs-tools".to_string(),
-            ),
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}".to_string(),
+                mount_name: "Repo".to_string(),
+                path: "/openai/gvfs".to_string(),
+            },
+            ActivePathTouch {
+                mount_id: "/{owner}/{repo}".to_string(),
+                mount_name: "Repo".to_string(),
+                path: "/openai/gvfs-tools".to_string(),
+            },
         ]);
 
         table.remove_prefix("/openai/gvfs");
@@ -181,11 +193,11 @@ mod tests {
     #[test]
     fn activity_table_prunes_zero_ttl_entries() {
         let mut table = ActivityTable::new(Duration::ZERO);
-        table.touch([(
-            "/{owner}/{repo}".to_string(),
-            "Repo".to_string(),
-            "/openai/gvfs".to_string(),
-        )]);
+        table.touch([ActivePathTouch {
+            mount_id: "/{owner}/{repo}".to_string(),
+            mount_name: "Repo".to_string(),
+            path: "/openai/gvfs".to_string(),
+        }]);
         assert!(table.active_path_sets().is_empty());
     }
 }

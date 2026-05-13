@@ -207,42 +207,13 @@ impl ProviderRuntime {
 
     fn touch_activity_for_relative_path(&self, path: &str) {
         let absolute = super::absolute_mount_path(path);
-        let mut best_by_depth = BTreeMap::new();
-        for mount in &self.declared_handlers {
-            let Some(concrete_path) = mount.concrete_path_for(&absolute) else {
-                continue;
-            };
-            match best_by_depth.entry(mount.pattern_len()) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert((mount, concrete_path));
-                },
-                std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    let current = slot.get().0;
-                    if mount
-                        .specificity()
-                        .iter()
-                        .cmp(current.specificity().iter())
-                        .is_gt()
-                    {
-                        slot.insert((mount, concrete_path));
-                    }
-                },
-            }
+        let touched = crate::runtime::manifest::DeclaredHandler::resolve_touched(
+            &self.declared_handlers,
+            &absolute,
+        );
+        if !touched.is_empty() {
+            self.activity_table.lock().touch(touched);
         }
-        let touched = best_by_depth
-            .into_values()
-            .map(|(mount, concrete_path)| {
-                (
-                    mount.mount_id.clone(),
-                    mount.mount_name.clone(),
-                    concrete_path,
-                )
-            })
-            .collect::<Vec<_>>();
-        if touched.is_empty() {
-            return;
-        }
-        self.activity_table.lock().touch(touched);
     }
 }
 
