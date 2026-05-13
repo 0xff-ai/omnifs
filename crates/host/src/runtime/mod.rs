@@ -578,7 +578,7 @@ impl ProviderRuntime {
                     return self.finish_provider_return(&op, ret);
                 },
                 wit_types::ProviderStep::Suspended(callouts) => {
-                    let results = Callouts::new(id, &callouts)?.execute(self).await;
+                    let results = Callouts::new(self, id, &callouts)?.execute().await;
                     step = self.resume_provider(id, results)?;
                 },
             }
@@ -629,35 +629,61 @@ impl ProviderRuntime {
     }
 }
 
-struct Callout<'a> {
+struct Callouts<'a> {
+    runtime: &'a ProviderRuntime,
     operation_id: u64,
-    index: usize,
-    request: &'a wit_types::Callout,
+    callouts: &'a [wit_types::Callout],
 }
 
-impl<'a> Callout<'a> {
-    fn new(operation_id: u64, index: usize, callout: &'a wit_types::Callout) -> Self {
-        Self {
-            operation_id,
-            index,
-            request: callout,
+impl<'a> Callouts<'a> {
+    fn new(
+        runtime: &'a ProviderRuntime,
+        operation_id: u64,
+        callouts: &'a [wit_types::Callout],
+    ) -> Result<Self> {
+        if callouts.is_empty() {
+            return Err(RuntimeError::ProviderProtocol(
+                "provider suspended with no callouts".to_string(),
+            ));
         }
+        Ok(Self {
+            runtime,
+            operation_id,
+            callouts,
+        })
     }
 
-    async fn execute(self, runtime: &ProviderRuntime) -> wit_types::CalloutResult {
-        match self.request {
-            wit_types::Callout::Fetch(req) => self.execute_fetch(runtime, req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(runtime, req),
-            wit_types::Callout::FetchBlob(req) => self.execute_blob_fetch(runtime, req).await,
-            wit_types::Callout::OpenArchive(req) => self.execute_archive_open(runtime, req).await,
-            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(runtime, req),
+    /// Runs every callout concurrently and returns positionally aligned
+    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
+    /// yield order, so this ordering is load-bearing.
+    async fn execute(&self) -> Vec<wit_types::CalloutResult> {
+        let futures: Vec<_> = self
+            .callouts
+            .iter()
+            .enumerate()
+            .map(|(callout_index, callout)| self.execute_one(callout_index, callout))
+            .collect();
+        futures::future::join_all(futures).await
+    }
+
+    async fn execute_one(
+        &self,
+        index: usize,
+        request: &wit_types::Callout,
+    ) -> wit_types::CalloutResult {
+        match request {
+            wit_types::Callout::Fetch(req) => self.execute_fetch(index, req).await,
+            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(index, req),
+            wit_types::Callout::FetchBlob(req) => self.execute_blob_fetch(index, req).await,
+            wit_types::Callout::OpenArchive(req) => self.execute_archive_open(index, req).await,
+            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(index, req),
             _ => Self::unsupported(),
         }
     }
 
     async fn execute_fetch(
         &self,
-        runtime: &ProviderRuntime,
+        callout_index: usize,
         req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
         let headers = header_pairs(&req.headers);
@@ -665,7 +691,7 @@ impl<'a> Callout<'a> {
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
-            callout_index = self.index,
+            callout_index,
             callout_kind,
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
@@ -674,13 +700,14 @@ impl<'a> Callout<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = runtime
+        let resp = self
+            .runtime
             .http
             .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
             .await;
         log_callout_response(
             self.operation_id,
-            self.index,
+            callout_index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -690,14 +717,14 @@ impl<'a> Callout<'a> {
 
     fn execute_git_open(
         &self,
-        runtime: &ProviderRuntime,
+        callout_index: usize,
         req: &wit_types::GitOpenRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "git.open_repo";
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
-            callout_index = self.index,
+            callout_index,
             callout_kind,
             method = "",
             url = %LogUrl(&req.clone_url),
@@ -706,10 +733,10 @@ impl<'a> Callout<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = runtime.git.open_repo(&req.cache_key, &req.clone_url);
+        let resp = self.runtime.git.open_repo(&req.cache_key, &req.clone_url);
         log_callout_response(
             self.operation_id,
-            self.index,
+            callout_index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -719,7 +746,7 @@ impl<'a> Callout<'a> {
 
     async fn execute_blob_fetch(
         &self,
-        runtime: &ProviderRuntime,
+        callout_index: usize,
         req: &wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
         let headers = header_pairs(&req.headers);
@@ -727,7 +754,7 @@ impl<'a> Callout<'a> {
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
-            callout_index = self.index,
+            callout_index,
             callout_kind,
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
@@ -736,7 +763,8 @@ impl<'a> Callout<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = runtime
+        let resp = self
+            .runtime
             .blob
             .fetch_blob(
                 &req.method,
@@ -748,7 +776,7 @@ impl<'a> Callout<'a> {
             .await;
         log_callout_response(
             self.operation_id,
-            self.index,
+            callout_index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -758,7 +786,7 @@ impl<'a> Callout<'a> {
 
     async fn execute_archive_open(
         &self,
-        runtime: &ProviderRuntime,
+        callout_index: usize,
         req: &wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
         let format = ArchiveFormat::from(req.format);
@@ -766,7 +794,7 @@ impl<'a> Callout<'a> {
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
-            callout_index = self.index,
+            callout_index,
             callout_kind,
             blob = req.blob,
             format = ?format,
@@ -774,7 +802,7 @@ impl<'a> Callout<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let archive = Arc::clone(&runtime.archive);
+        let archive = Arc::clone(&self.runtime.archive);
         let blob = req.blob;
         let strip = req.strip_prefix.clone();
         let resp = tokio::task::spawn_blocking(move || {
@@ -788,7 +816,7 @@ impl<'a> Callout<'a> {
         });
         log_callout_response(
             self.operation_id,
-            self.index,
+            callout_index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -798,14 +826,14 @@ impl<'a> Callout<'a> {
 
     fn execute_blob_read(
         &self,
-        runtime: &ProviderRuntime,
+        callout_index: usize,
         req: &wit_types::ReadBlobRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "blob.read";
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
-            callout_index = self.index,
+            callout_index,
             callout_kind,
             blob = req.blob,
             offset = req.offset,
@@ -813,10 +841,10 @@ impl<'a> Callout<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = runtime.blob.read_blob(req.blob, req.offset, req.len);
+        let resp = self.runtime.blob.read_blob(req.blob, req.offset, req.len);
         log_callout_response(
             self.operation_id,
-            self.index,
+            callout_index,
             callout_kind,
             start.elapsed(),
             &resp,
@@ -840,40 +868,6 @@ impl From<wit_types::ArchiveFormat> for ArchiveFormat {
             wit_types::ArchiveFormat::Tar => Self::Tar,
             wit_types::ArchiveFormat::Zip => Self::Zip,
         }
-    }
-}
-
-struct Callouts<'a> {
-    operation_id: u64,
-    callouts: &'a [wit_types::Callout],
-}
-
-impl<'a> Callouts<'a> {
-    fn new(operation_id: u64, callouts: &'a [wit_types::Callout]) -> Result<Self> {
-        if callouts.is_empty() {
-            return Err(RuntimeError::ProviderProtocol(
-                "provider suspended with no callouts".to_string(),
-            ));
-        }
-        Ok(Self {
-            operation_id,
-            callouts,
-        })
-    }
-
-    /// Runs every callout concurrently and returns positionally aligned
-    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
-    /// yield order, so this ordering is load-bearing.
-    async fn execute(&self, runtime: &ProviderRuntime) -> Vec<wit_types::CalloutResult> {
-        let futures: Vec<_> = self
-            .callouts
-            .iter()
-            .enumerate()
-            .map(|(callout_index, callout)| {
-                Callout::new(self.operation_id, callout_index, callout).execute(runtime)
-            })
-            .collect();
-        futures::future::join_all(futures).await
     }
 }
 
