@@ -12,6 +12,7 @@ use crate::cache::blobs::BLOB_META_DIR;
 use crate::cache::blobs::{
     BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobMetadata, is_safe_path_segment,
 };
+use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind};
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
@@ -121,14 +122,8 @@ impl BlobExecutor {
     ///
     /// The body is streamed to a temporary file and atomically renamed
     /// into place once it has stayed within the configured fetch cap.
-    pub async fn fetch_blob(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: Option<&[u8]>,
-        cache_key: &str,
-    ) -> CalloutResponse {
+    pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> CalloutResponse {
+        let cache_key = req.cache_key.as_str();
         if !is_safe_path_segment(cache_key) {
             return error(
                 ErrorKind::InvalidInput,
@@ -136,7 +131,7 @@ impl BlobExecutor {
                 false,
             );
         }
-        if let Err(e) = self.capability.check_url(url) {
+        if let Err(e) = self.capability.check_url(&req.url) {
             return error(ErrorKind::Denied, e.to_string(), false);
         }
 
@@ -150,32 +145,40 @@ impl BlobExecutor {
         }
 
         // Resolve auth + headers.
-        let auth_headers = self.auth.headers_for_url(url);
-        if auth_headers.is_empty() && self.auth.requires_auth_for_url(url) {
+        let auth_headers = self.auth.headers_for_url(&req.url);
+        if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
             return error(
                 ErrorKind::Denied,
-                format!("no credentials for {url}"),
+                format!("no credentials for {}", req.url),
                 false,
             );
         }
-        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
+        let Ok(reqwest_method) = reqwest::Method::from_str(&req.method) else {
             return error(
                 ErrorKind::Denied,
-                format!("unsupported HTTP method: {method}"),
+                format!("unsupported HTTP method: {}", req.method),
                 false,
             );
         };
-        let header_map = match build_header_map(&auth_headers, headers) {
+        let header_map = match build_header_map(
+            auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
+            req.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str())),
+        ) {
             Ok(h) => h,
             Err(message) => return error(ErrorKind::Internal, message, false),
         };
 
-        let mut req = self.client.request(reqwest_method, url).headers(header_map);
-        if let Some(body) = body {
-            req = req.body(body.to_vec());
+        let mut request = self
+            .client
+            .request(reqwest_method, &req.url)
+            .headers(header_map);
+        if let Some(body) = req.body.as_deref() {
+            request = request.body(body.to_vec());
         }
 
-        let response = match req.send().await {
+        let response = match request.send().await {
             Ok(r) => r,
             Err(e) => return error(ErrorKind::Network, e.to_string(), true),
         };

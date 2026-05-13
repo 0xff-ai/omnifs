@@ -6,6 +6,7 @@
 //! mounts over the cloned repo directory.
 
 use crate::auth::AuthManager;
+use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use std::str::FromStr;
@@ -65,14 +66,8 @@ impl HttpExecutor {
         })
     }
 
-    pub async fn execute_fetch(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: Option<&[u8]>,
-    ) -> CalloutResponse {
-        if let Err(e) = self.capability.check_url(url) {
+    pub async fn fetch(&self, req: &wit_types::HttpRequest) -> CalloutResponse {
+        if let Err(e) = self.capability.check_url(&req.url) {
             return CalloutResponse::Error {
                 kind: ErrorKind::Denied,
                 message: e.to_string(),
@@ -80,25 +75,29 @@ impl HttpExecutor {
             };
         }
 
-        let auth_headers = self.auth.headers_for_url(url);
-        if auth_headers.is_empty() && self.auth.requires_auth_for_url(url) {
+        let auth_headers = self.auth.headers_for_url(&req.url);
+        if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
             return CalloutResponse::Error {
                 kind: ErrorKind::Denied,
-                message: format!("no credentials for {url}"),
+                message: format!("no credentials for {}", req.url),
                 retryable: false,
             };
         }
 
-        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
+        let Ok(reqwest_method) = reqwest::Method::from_str(&req.method) else {
             return CalloutResponse::Error {
                 kind: ErrorKind::Denied,
-                message: format!("unsupported HTTP method: {method}"),
+                message: format!("unsupported HTTP method: {}", req.method),
                 retryable: false,
             };
         };
 
-        let mut req = self.client.request(reqwest_method, url);
-        let header_map = match build_header_map(&auth_headers, headers) {
+        let header_map = match build_header_map(
+            auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
+            req.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str())),
+        ) {
             Ok(header_map) => header_map,
             Err(message) => {
                 return CalloutResponse::Error {
@@ -108,12 +107,14 @@ impl HttpExecutor {
                 };
             },
         };
-        req = req.headers(header_map);
-        if let Some(body) = body {
-            req = req.body(owned_body(body));
+
+        let mut request = self.client.request(reqwest_method, &req.url);
+        request = request.headers(header_map);
+        if let Some(body) = req.body.as_deref() {
+            request = request.body(owned_body(body));
         }
 
-        match req.send().await {
+        match request.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let resp_headers = decode_response_headers(response.headers());

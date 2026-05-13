@@ -667,7 +667,6 @@ impl<'a> Callouts<'a> {
         callout_index: usize,
         req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
-        let headers = header_pairs(&req.headers);
         let callout_kind = "http.fetch";
         info!(
             target: "omnifs_callout",
@@ -676,16 +675,12 @@ impl<'a> Callouts<'a> {
             callout_kind,
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
-            request_headers = %LogHeaders(&headers),
+            request_headers = %WitHeaders(&req.headers),
             request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
             "callout started"
         );
         let start = Instant::now();
-        let resp = self
-            .runtime
-            .http
-            .execute_fetch(&req.method, &req.url, &headers, req.body.as_deref())
-            .await;
+        let resp = self.runtime.http.fetch(req).await;
         log_callout_response(
             self.operation_id,
             callout_index,
@@ -730,7 +725,6 @@ impl<'a> Callouts<'a> {
         callout_index: usize,
         req: &wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
-        let headers = header_pairs(&req.headers);
         let callout_kind = "blob.fetch";
         info!(
             target: "omnifs_callout",
@@ -739,22 +733,12 @@ impl<'a> Callouts<'a> {
             callout_kind,
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
-            request_headers = %LogHeaders(&headers),
+            request_headers = %WitHeaders(&req.headers),
             request_body_bytes = req.body.as_ref().map_or(0, Vec::len),
             "callout started"
         );
         let start = Instant::now();
-        let resp = self
-            .runtime
-            .blob
-            .fetch_blob(
-                &req.method,
-                &req.url,
-                &headers,
-                req.body.as_deref(),
-                &req.cache_key,
-            )
-            .await;
+        let resp = self.runtime.blob.fetch(req).await;
         log_callout_response(
             self.operation_id,
             callout_index,
@@ -843,13 +827,6 @@ impl From<wit_types::ArchiveFormat> for ArchiveFormat {
             wit_types::ArchiveFormat::Zip => Self::Zip,
         }
     }
-}
-
-fn header_pairs(headers: &[wit_types::Header]) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .map(|header| (header.name.clone(), header.value.clone()))
-        .collect()
 }
 
 fn log_callout_response(
@@ -979,6 +956,25 @@ impl fmt::Display for LogHeaders<'_> {
                 f.write_str("<redacted>")?;
             } else {
                 write_truncated_for_log(f, value, 256)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct WitHeaders<'a>(pub(crate) &'a [wit_types::Header]);
+
+impl fmt::Display for WitHeaders<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, header) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_char(',')?;
+            }
+            write!(f, "{}=", header.name)?;
+            if is_sensitive_header(&header.name) {
+                f.write_str("<redacted>")?;
+            } else {
+                write_truncated_for_log(f, &header.value, 256)?;
             }
         }
         Ok(())

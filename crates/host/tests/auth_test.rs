@@ -2,6 +2,7 @@
 
 use omnifs_host::auth::AuthManager;
 use omnifs_host::config::AuthConfig;
+use omnifs_host::omnifs::provider::types as wit_types;
 use omnifs_host::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use omnifs_host::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
 use std::ffi::OsString;
@@ -169,10 +170,13 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
     }));
     let executor = HttpExecutor::new(auth, capability).unwrap();
 
-    match executor
-        .execute_fetch("GET", "https://api.github.com/repos", &[], None)
-        .await
-    {
+    let req = wit_types::HttpRequest {
+        method: "GET".to_string(),
+        url: "https://api.github.com/repos".to_string(),
+        headers: Vec::new(),
+        body: None,
+    };
+    match executor.fetch(&req).await {
         CalloutResponse::Error {
             kind: ErrorKind::Denied,
             retryable: false,
