@@ -1,3 +1,85 @@
+//! Per-callout dispatch and the tracing surface for provider callouts.
+//!
+//! # Dispatch
+//!
+//! `ProviderRuntime::dispatch_callouts` walks the suspended callout
+//! batch, routes each variant to its executor, and returns the matching
+//! `CalloutResult` list to `continuation.resume`. `run_callout`'s match
+//! is exhaustive; the WIT-defined arms the runtime does not yet
+//! implement (`stream-*`, `ws-*`) route through `unsupported_callout`
+//! and return `callout-error{kind=internal, retryable=false}`.
+//!
+//! # Layering: only the public boundary builds `CalloutResult`
+//!
+//! Each executor module (this one's dispatch, `http_stack.rs`,
+//! `blob.rs`, `git.rs`, `archive.rs`) exposes a public callout entry
+//! method that returns `wit_types::CalloutResult`. Everything below
+//! that method uses typed `Result<T, ExecutorError>` (`BlobError`,
+//! `ArchiveError`, `GitError`, …) and propagates with `?`. The
+//! conversion happens at exactly one place per executor: the public
+//! method's outermost `match` or `From<ExecutorError> for CalloutResult`.
+//!
+//! This keeps internal helpers free to use the regular Rust error
+//! plumbing and concentrates the `CalloutError { kind, message,
+//! retryable }` decisions in one auditable spot per executor.
+//!
+//! # Tracing surface
+//!
+//! All callout spans use `target = "omnifs_callout"` so
+//! `RUST_LOG=omnifs_callout=info` filters everything in this layer
+//! without bringing in unrelated host tracing.
+//!
+//! Each callout produces two spans:
+//!
+//! 1. The outer `callout` span entered by `dispatch_one`, carrying
+//!    cross-cutting context:
+//!    - `operation_id`: the host-allocated u64 for the in-flight op
+//!    - `callout_index`: position of this callout in the batch
+//!    - `kind`: the `CalloutKind::as_str()` value
+//!      (`"http.fetch"`, `"git.open_repo"`, `"blob.fetch"`,
+//!      `"archive.open"`, `"blob.read"`, or `"unsupported"`)
+//!
+//! 2. The inner executor span (`#[tracing::instrument]` on the
+//!    public method itself), carrying kind-specific fields. Late-bound
+//!    fields are declared as `tracing::field::Empty` and populated by
+//!    `record_outcome(&result)` before the method returns. The full
+//!    field set per kind is:
+//!
+//!    | Span | Request-side fields at NEW | Response/error fields at CLOSE |
+//!    |---|---|---|
+//!    | `HttpStack::fetch` | `method`, `url`, `request_headers`, `request_body_bytes` | `status`, `response_headers`, `response_body_bytes`, `error.{kind,message,retryable}` |
+//!    | `BlobExecutor::fetch` | `cache_key`, `method`, `url`, `request_headers`, `request_body_bytes` | `blob`, `status`, `response_headers`, `response_body_bytes`, `error.{kind,message,retryable}` |
+//!    | `BlobExecutor::read` | `blob`, `offset`, `len` | `response_body_bytes`, `error.{kind,message,retryable}` |
+//!    | `GitExecutor::open_repo` | `url` | `tree_ref`, `error.{kind,message,retryable}` |
+//!    | `ArchiveExecutor::open` | `blob`, `format`, `strip_prefix` | `tree_ref`, `error.{kind,message,retryable}` |
+//!    | `unsupported_callout` | `unsupported_variant` | `error.{kind,message,retryable}` |
+//!
+//! URL and header fields render through `LogUrl` and `WitHeaders`,
+//! which redact credentials and sensitive query/header values lazily
+//! at `Display` time.
+//!
+//! Every field a span ever records via `Span::record` must appear in
+//! its `#[instrument(fields(...))]` declaration. `tracing` silently
+//! drops `record` calls for unknown fields, so adding a new outcome
+//! field requires both: declaring it as `Empty` in `fields(...)` and
+//! recording it from `record_outcome`.
+//!
+//! Span timing is reported by the subscriber's `FmtSpan::NEW |
+//! FmtSpan::CLOSE` configuration. There is no manually-recorded
+//! `elapsed_us` field; the framework emits it on span close.
+//!
+//! # Adding a callout
+//!
+//! 1. Add the WIT `callout` variant and `callout-result` arm.
+//! 2. Add a new `CalloutKind` variant + `as_str` mapping in this file.
+//! 3. Extend `CalloutKind::of` exhaustively (no wildcard arm).
+//! 4. Add the executor public method with
+//!    `#[tracing::instrument(target = "omnifs_callout", skip_all,
+//!    fields(...))]` listing all fields (use `field::Empty` for
+//!    late-bound ones) and calling `record_outcome(&result)` before
+//!    return.
+//! 5. Add a `run_callout` arm dispatching to it.
+
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::ProviderRuntime;
 use crate::runtime::log_redaction::WitHeaders;

@@ -5,11 +5,14 @@
 //! eviction is driven purely by capacity and explicit invalidation
 //! (via `delete_prefix` or provider-driven cache-invalidate effects).
 
-// Bump on-disk records when browse metadata or file payload encoding changes.
-// v5 collapses the cache re-skin enums (`SizeCache`, `BytesCache`,
-// `StabilityCache`, `ReadModeCache`, `EntryKindCache`) into the WIT types they
-// mirrored; the EntryKind::File variant now embeds FileProj data, so payloads
-// produced by v4 must be invalidated.
+/// On-disk schema version for L2 records. Bump on any encoding-affecting
+/// change to the cached payload types (`LookupPayload`, `DirentsPayload`,
+/// `FilePayload`, `AttrPayload`, or the WIT types they embed). The cache
+/// reader rejects records whose first byte does not match this constant,
+/// so a bump invalidates stale entries without an explicit purge.
+///
+/// Any PR that touches the on-disk encoding must include a postcard
+/// fixture round-trip test against the new version.
 pub const SCHEMA_VERSION: u8 = 5;
 
 pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;

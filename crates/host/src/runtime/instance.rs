@@ -89,10 +89,17 @@ impl ProviderInstance {
                 .omnifs_provider_notify()
                 .call_on_event(&mut *store, id, event)
                 .map_err(Into::into),
-            Op::Initialize => unreachable!(
-                "Op::Initialize is driven directly through ProviderInstance::initialize; \
-                 start_op never receives it"
-            ),
+            // `Op::Initialize` is driven directly through
+            // `ProviderInstance::initialize`: the WIT lifecycle method
+            // returns a `provider-return`, never suspends, and has no
+            // correlation id. The variant remains in the `Op` enum so
+            // `finish_provider_return` and `Validator` can tag the
+            // initialize result with the operation that produced it.
+            Op::Initialize => {
+                unreachable!(
+                    "Op::Initialize never reaches start_op; see ProviderInstance::initialize"
+                )
+            },
         }
     }
 
