@@ -39,9 +39,6 @@ interface types {
         initialize(initialize-result),
         on-event,
         error(provider-error),
-        plan-mutations(plan-mutations-result),
-        execute(execute-result),
-        fetch-resource(fetch-resource-result),
     }
 
     // --- Callouts (provider -> host, request/response) ---
@@ -260,18 +257,6 @@ interface types {
         info: provider-info,
     }
 
-    record plan-mutations-result {
-        mutations: list<planned-mutation>,
-    }
-
-    record execute-result {
-        outcome: mutation-outcome,
-    }
-
-    record fetch-resource-result {
-        files: list<file-entry>,
-    }
-
     // --- Data types ---
 
     record http-request {
@@ -387,55 +372,6 @@ interface types {
         error,
     }
 
-    record file-entry {
-        path: string,
-        content: list<u8>,
-        mode: u32,
-        version-token: option<string>,
-    }
-
-    record file-change {
-        path: string,
-        kind: change-kind,
-        old-content: option<list<u8>>,
-        new-content: option<list<u8>>,
-    }
-
-    enum change-kind {
-        added,
-        modified,
-        deleted,
-    }
-
-    record planned-mutation {
-        id: string,
-        description: string,
-        depends-on: list<string>,
-        version-token: option<string>,
-        payload: list<u8>,
-    }
-
-    record mutation-outcome {
-        post-actions: list<post-action>,
-    }
-
-    variant post-action {
-        rename-path(rename-action),
-        write-file(file-entry),
-        delete-path(string),
-        set-mode(mode-action),
-    }
-
-    record rename-action {
-        source: string,
-        dest: string,
-    }
-
-    record mode-action {
-        path: string,
-        mode: u32,
-    }
-
     record provider-info {
         name: string,
         version: string,
@@ -500,17 +436,6 @@ interface browse {
     close-file: func(handle: file-handle);
 }
 
-interface reconcile {
-    use types.{correlation-id, file-change, planned-mutation, provider-step};
-
-    plan-mutations: func(id: correlation-id, changes: list<file-change>)
-        -> provider-step;
-    execute: func(id: correlation-id, mutation: planned-mutation)
-        -> provider-step;
-    fetch-resource: func(id: correlation-id, resource-path: string)
-        -> provider-step;
-}
-
 interface continuation {
     use types.{callout-results, correlation-id, provider-step};
 
@@ -546,6 +471,5 @@ world provider {
     export lifecycle;
     export browse;
     export continuation;
-    export reconcile;
     export notify;
 }

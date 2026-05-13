@@ -308,9 +308,6 @@ pub(super) fn validate_operation_result(
             }),
         },
         wit_types::OpResult::Error(_) => Op::Initialize,
-        wit_types::OpResult::PlanMutations(_)
-        | wit_types::OpResult::Execute(_)
-        | wit_types::OpResult::FetchResource(_) => Op::Initialize,
     };
     let ret = wit_types::ProviderReturn {
         result: result.clone(),

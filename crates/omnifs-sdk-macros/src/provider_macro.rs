@@ -627,43 +627,6 @@ fn generate_notify_impl(
     }
 }
 
-fn generate_reconcile_impl(type_name: &syn::Ident) -> TokenStream2 {
-    quote! {
-        impl omnifs_sdk::exports::omnifs::provider::reconcile::Guest for #type_name {
-            fn plan_mutations(
-                _id: u64,
-                _changes: Vec<omnifs_sdk::prelude::FileChange>,
-            ) -> omnifs_sdk::prelude::ProviderStep {
-                omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "mutation handlers are reserved but not implemented"
-                    )
-                )
-            }
-
-            fn execute(
-                _id: u64,
-                _mutation: omnifs_sdk::prelude::PlannedMutation,
-            ) -> omnifs_sdk::prelude::ProviderStep {
-                omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "mutation handlers are reserved but not implemented"
-                    )
-                )
-            }
-
-            fn fetch_resource(
-                _id: u64,
-                _resource_path: String,
-            ) -> omnifs_sdk::prelude::ProviderStep {
-                omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::unimplemented("reconcile not implemented")
-                )
-            }
-        }
-    }
-}
-
 pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result<TokenStream2> {
     reject_removed_route_surface(&input.items)?;
 
@@ -718,7 +681,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     );
     let browse_impl = generate_browse_impl(&type_name, &state_type);
     let notify_impl = generate_notify_impl(&type_name, &state_type, classified.on_event.is_some());
-    let reconcile_impl = generate_reconcile_impl(&type_name);
 
     Ok(quote! {
         struct #type_name;
@@ -740,7 +702,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         #resume_impl
         #browse_impl
         #notify_impl
-        #reconcile_impl
 
         #[cfg(target_arch = "wasm32")]
         omnifs_sdk::export!(#type_name with_types_in omnifs_sdk);
