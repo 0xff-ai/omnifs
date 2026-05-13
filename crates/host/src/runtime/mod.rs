@@ -263,17 +263,17 @@ impl ProviderRuntime {
             .map_err(RuntimeBuildError::InvalidConfig)?;
 
         let blob_limits = BlobLimits::from_config(config);
-        let blob = BlobExecutor::new(
-            auth.clone(),
-            capability.clone(),
-            blob_cache.clone(),
-            blob_limits,
-        )?;
         let http = Arc::new(HttpStack::new(
             auth.clone(),
             capability.clone(),
             std::time::Duration::from_secs(30),
         )?);
+        let blob_http = Arc::new(HttpStack::new(
+            auth.clone(),
+            capability.clone(),
+            std::time::Duration::from_secs(120),
+        )?);
+        let blob = BlobExecutor::new(blob_http, blob_cache.clone(), blob_limits);
         Ok(Self {
             instance,
             operation_ids: OperationIds::new(),

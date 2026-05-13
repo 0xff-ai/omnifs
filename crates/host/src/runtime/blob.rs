@@ -6,7 +6,6 @@
 //! extraction) consumes the file in place, so the bytes never
 //! round-trip back through the provider.
 
-use crate::auth::AuthManager;
 #[cfg(test)]
 use crate::cache::blobs::BLOB_META_DIR;
 use crate::cache::blobs::{
@@ -14,20 +13,17 @@ use crate::cache::blobs::{
 };
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::callouts::{
-    callout_denied, callout_internal, callout_invalid, callout_network, callout_not_found,
-    callout_too_large, record_outcome,
+    callout_internal, callout_invalid, callout_network, callout_not_found, callout_too_large,
+    record_outcome,
 };
-use crate::runtime::capability::CapabilityChecker;
-use crate::runtime::http_headers::{build_header_map, decode_response_headers};
+use crate::runtime::http_headers::decode_response_headers;
+use crate::runtime::http_stack::HttpStack;
 use crate::runtime::log_redaction::{LogUrl, WitHeaders};
 use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MAX_FETCH_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READ_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -82,11 +78,7 @@ enum BlobError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
-    Denied(String),
-    #[error("{0}")]
     NotFound(String),
-    #[error("{0}")]
-    InvalidInput(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -105,9 +97,7 @@ impl From<BlobError> for wit_types::CalloutResult {
             BlobError::TooLarge { .. } => callout_too_large(error.to_string()),
             BlobError::Network(_) => callout_network(error.to_string()),
             BlobError::Io(_) => callout_internal(error.to_string()),
-            BlobError::Denied(msg) => callout_denied(msg),
             BlobError::NotFound(msg) => callout_not_found(msg),
-            BlobError::InvalidInput(msg) => callout_invalid(msg),
             BlobError::Internal(msg) => callout_internal(msg),
         }
     }
@@ -115,33 +105,19 @@ impl From<BlobError> for wit_types::CalloutResult {
 
 /// Executes provider blob callouts against a host-owned disk cache.
 pub struct BlobExecutor {
-    client: reqwest::Client,
-    auth: Arc<AuthManager>,
-    capability: Arc<CapabilityChecker>,
+    http: Arc<HttpStack>,
     cache: Arc<BlobCache>,
     limits: BlobLimits,
 }
 
 impl BlobExecutor {
     /// Construct an executor with explicit host blob limits.
-    pub fn new(
-        auth: Arc<AuthManager>,
-        capability: Arc<CapabilityChecker>,
-        cache: Arc<BlobCache>,
-        limits: BlobLimits,
-    ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent("omnifs")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(FETCH_TIMEOUT)
-            .build()?;
-        Ok(Self {
-            client,
-            auth,
-            capability,
+    pub fn new(http: Arc<HttpStack>, cache: Arc<BlobCache>, limits: BlobLimits) -> Self {
+        Self {
+            http,
             cache,
             limits,
-        })
+        }
     }
 
     /// Fetch an HTTP response body into the blob cache.
@@ -163,71 +139,47 @@ impl BlobExecutor {
         error.retryable = tracing::field::Empty,
     ))]
     pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> wit_types::CalloutResult {
-        let result = match self.fetch_inner(req).await {
-            Ok(record) => blob_fetched_to_wit(&record),
-            Err(e) => e.into(),
+        let result = if is_safe_path_segment(&req.cache_key) {
+            let lock = self.cache.key_lock(&req.cache_key);
+            let _guard = lock.lock().await;
+            if let Some(record) = self.cache.lookup_by_key(&req.cache_key) {
+                blob_fetched_to_wit(&record)
+            } else {
+                // HttpStack::send already returns a fully-formed CalloutResult on
+                // pre-flight or network failure — pass it through unchanged.
+                match self
+                    .http
+                    .send(&req.method, &req.url, &req.headers, req.body.as_deref())
+                    .await
+                {
+                    Ok(response) => match self.materialize(&req.cache_key, response).await {
+                        Ok(record) => blob_fetched_to_wit(&record),
+                        Err(e) => e.into(),
+                    },
+                    Err(early) => early,
+                }
+            }
+        } else {
+            callout_invalid(format!("cache key {} is unsafe", req.cache_key))
         };
         record_outcome(&result);
         result
     }
 
-    async fn fetch_inner(
+    /// Stream the response body to disk and persist the cache record.
+    /// Internal helper that keeps `BlobError` typed up to the public
+    /// `fetch` boundary so the `?` operator and `From` impls stay in
+    /// play here.
+    async fn materialize(
         &self,
-        req: &wit_types::BlobFetchRequest,
+        cache_key: &str,
+        response: reqwest::Response,
     ) -> Result<BlobRecord, BlobError> {
-        let cache_key = req.cache_key.as_str();
-        if !is_safe_path_segment(cache_key) {
-            return Err(BlobError::InvalidInput(format!(
-                "cache key {cache_key} is unsafe"
-            )));
-        }
-        self.capability
-            .check_url(&req.url)
-            .map_err(|e| BlobError::Denied(e.to_string()))?;
-
-        // Coalesce concurrent fetches of the same key.
-        let lock = self.cache.key_lock(cache_key);
-        let _guard = lock.lock().await;
-
-        // Fast path: another caller already populated the cache.
-        if let Some(record) = self.cache.lookup_by_key(cache_key) {
-            return Ok((*record).clone());
-        }
-
-        // Resolve auth + headers.
-        let auth_headers = self.auth.headers_for_url(&req.url);
-        if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
-            return Err(BlobError::Denied(format!("no credentials for {}", req.url)));
-        }
-        let reqwest_method = reqwest::Method::from_str(&req.method)
-            .map_err(|_| BlobError::Denied(format!("unsupported HTTP method: {}", req.method)))?;
-        let header_map = build_header_map(
-            auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
-            req.headers
-                .iter()
-                .map(|h| (h.name.as_str(), h.value.as_str())),
-        )
-        .map_err(BlobError::Internal)?;
-
-        let mut request = self
-            .client
-            .request(reqwest_method, &req.url)
-            .headers(header_map);
-        if let Some(body) = req.body.as_deref() {
-            request = request.body(body.to_vec());
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| BlobError::Network(e.to_string()))?;
-
         let status = response.status().as_u16();
         let response_headers = decode_response_headers(response.headers());
         let etag = lookup_header(&response_headers, "etag");
         let content_type = lookup_header(&response_headers, "content-type");
 
-        // Persist to disk.
         let blob_path = self.cache.blob_path(cache_key);
         if let Some(parent) = blob_path.parent() {
             std::fs::create_dir_all(parent)
@@ -433,6 +385,7 @@ mod tests {
     use super::*;
     use crate::auth::AuthManager;
     use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
+    use std::time::Duration;
 
     #[test]
     fn safe_path_segment_rejects_traversal() {
@@ -512,16 +465,22 @@ mod tests {
             max_memory_mb: 16,
             needs_git: false,
         });
+        let http = Arc::new(
+            HttpStack::new(
+                Arc::new(AuthManager::none()),
+                Arc::new(capability),
+                Duration::from_secs(120),
+            )
+            .unwrap(),
+        );
         let executor = BlobExecutor::new(
-            Arc::new(AuthManager::none()),
-            Arc::new(capability),
+            http,
             cache,
             BlobLimits {
                 max_fetch_blob_bytes: DEFAULT_MAX_FETCH_BLOB_BYTES,
                 max_read_blob_bytes: 4,
             },
-        )
-        .unwrap();
+        );
 
         match executor.read(&wit_types::ReadBlobRequest {
             blob: record.id,
