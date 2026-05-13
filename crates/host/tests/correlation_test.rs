@@ -1,11 +1,11 @@
-use omnifs_host::runtime::correlation::CorrelationTracker;
+use omnifs_host::runtime::operation_ids::OperationIds;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
 #[test]
 fn test_allocate_unique_ids() {
-    let tracker = CorrelationTracker::new();
+    let tracker = OperationIds::new();
     let id1 = tracker.allocate();
     let id2 = tracker.allocate();
     assert_ne!(id1, id2);
@@ -13,7 +13,7 @@ fn test_allocate_unique_ids() {
 
 #[test]
 fn test_allocate_ids_without_pending_map() {
-    let tracker = CorrelationTracker::new();
+    let tracker = OperationIds::new();
     let id1 = tracker.allocate();
     let id2 = tracker.allocate();
     assert!(id2 > id1);
@@ -21,7 +21,7 @@ fn test_allocate_ids_without_pending_map() {
 
 #[test]
 fn test_allocate_ids_are_unique_across_threads() {
-    let tracker = Arc::new(CorrelationTracker::new());
+    let tracker = Arc::new(OperationIds::new());
     let mut handles = Vec::new();
     let thread_count = 8;
     let ids_per_thread = 256;

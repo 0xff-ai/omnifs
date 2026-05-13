@@ -138,7 +138,7 @@ impl ProviderRuntime {
     }
 
     pub(super) async fn call_provider_op(&self, op: Op) -> Result<wit_types::OpResult> {
-        let id = self.correlations.allocate();
+        let id = self.operation_ids.allocate();
         let step = op.execute(self, id)?;
         self.drive_provider(id, step, op).await
     }

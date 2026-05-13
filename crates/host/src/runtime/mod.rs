@@ -9,7 +9,6 @@ pub mod blob;
 mod browse_pipeline;
 pub mod capability;
 pub mod cloner;
-pub mod correlation;
 pub mod coverage;
 pub mod executor;
 pub mod git;
@@ -17,6 +16,7 @@ pub mod http_headers;
 pub mod inflight;
 mod invalidation;
 pub mod manifest;
+pub mod operation_ids;
 pub(crate) mod sandbox;
 pub mod tools;
 pub mod tree_refs;
@@ -39,11 +39,11 @@ use crate::runtime::archive::ArchiveExecutor;
 use crate::runtime::blob::{BlobExecutor, BlobLimits};
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
-use crate::runtime::correlation::CorrelationTracker;
 use crate::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
 use crate::runtime::inflight::InFlight;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
+use crate::runtime::operation_ids::OperationIds;
 use crate::runtime::tools::archive::{ArchiveExtractorComponent, ArchiveFormat};
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
@@ -65,12 +65,12 @@ pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
 /// Runtime for one mounted WASM provider component.
 ///
 /// Manages the Wasmtime store, routes callouts, and handles async
-/// continuations with correlation tracking.
+/// continuations with operation ID allocation.
 pub struct ProviderRuntime {
     store: Mutex<wasmtime::Store<HostState>>,
     bindings: Provider,
     config_bytes: Vec<u8>,
-    correlations: CorrelationTracker,
+    operation_ids: OperationIds,
     http: HttpExecutor,
     git: git::GitExecutor,
     blob: BlobExecutor,
@@ -306,7 +306,7 @@ impl ProviderRuntime {
             store: Mutex::new(store),
             bindings,
             config_bytes,
-            correlations: CorrelationTracker::new(),
+            operation_ids: OperationIds::new(),
             http: HttpExecutor::new(auth, capability)?,
             git,
             blob,
@@ -322,7 +322,7 @@ impl ProviderRuntime {
     }
 
     pub fn initialize(&self) -> Result<wit_types::OpResult> {
-        let id = self.correlations.allocate();
+        let id = self.operation_ids.allocate();
         let op = Op::Initialize;
         match op.execute(self, id)? {
             wit_types::ProviderStep::Returned(ret) => self.finish_provider_return(&op, ret),
