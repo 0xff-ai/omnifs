@@ -17,7 +17,7 @@ impl ProviderRuntime {
         };
         let child_path = child_path(parent_path, name);
         let result = self
-            .coalesced(&child_path, || self.call_provider_op(op.clone()))
+            .coalesced(&child_path, || self.run_op(op.clone()))
             .await?;
 
         if let wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
@@ -38,9 +38,7 @@ impl ProviderRuntime {
         let op = Op::ListChildren {
             path: path.to_string(),
         };
-        let result = self
-            .coalesced(path, || self.call_provider_op(op.clone()))
-            .await?;
+        let result = self.coalesced(path, || self.run_op(op.clone())).await?;
 
         if let wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
             ref listing,
@@ -61,9 +59,7 @@ impl ProviderRuntime {
         let op = Op::ReadFile {
             path: path.to_string(),
         };
-        let result = self
-            .coalesced(path, || self.call_provider_op(op.clone()))
-            .await?;
+        let result = self.coalesced(path, || self.run_op(op.clone())).await?;
 
         if matches!(result, wit_types::OpResult::ReadFile(_)) {
             self.touch_activity_for_relative_path(path);
@@ -80,7 +76,7 @@ impl ProviderRuntime {
         let op = Op::OpenFile {
             path: path.to_string(),
         };
-        let result = self.call_provider_op(op.clone()).await?;
+        let result = self.run_op(op.clone()).await?;
 
         if matches!(result, wit_types::OpResult::OpenFile(_)) {
             self.touch_activity_for_relative_path(path);
@@ -104,7 +100,7 @@ impl ProviderRuntime {
             offset,
             length,
         };
-        let result = self.call_provider_op(op.clone()).await?;
+        let result = self.run_op(op.clone()).await?;
 
         match result {
             wit_types::OpResult::ReadChunk(result) => Ok(result),
@@ -135,12 +131,6 @@ impl ProviderRuntime {
                 },
             }
         }
-    }
-
-    pub(super) async fn call_provider_op(&self, op: Op) -> Result<wit_types::OpResult> {
-        let id = self.operation_ids.allocate();
-        let step = op.execute(self, id)?;
-        self.drive_provider(id, step, op).await
     }
 
     fn cache_lookup_projection(&self, parent_path: &str, entry: &wit_types::LookupEntry) {

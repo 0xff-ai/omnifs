@@ -170,39 +170,6 @@ pub enum Op {
     },
 }
 
-impl Op {
-    fn execute(&self, runtime: &ProviderRuntime, id: u64) -> Result<wit_types::ProviderStep> {
-        let mut store = runtime.store.lock();
-        let browse = runtime.bindings.omnifs_provider_browse();
-        let step = match self {
-            Op::LookupChild { parent_path, name } => {
-                browse.call_lookup_child(&mut *store, id, parent_path, name)
-            },
-            Op::ListChildren { path } => browse.call_list_children(&mut *store, id, path),
-            Op::ReadFile { path } => browse.call_read_file(&mut *store, id, path),
-            Op::OpenFile { path } => browse.call_open_file(&mut *store, id, path),
-            Op::ReadChunk {
-                handle,
-                offset,
-                length,
-            } => browse.call_read_chunk(&mut *store, id, *handle, *offset, *length),
-            Op::Initialize => Ok(wit_types::ProviderStep::Returned(
-                runtime
-                    .bindings
-                    .omnifs_provider_lifecycle()
-                    .call_initialize(&mut *store, &runtime.config_bytes)?,
-            )),
-            Op::OnEvent { event } => {
-                runtime
-                    .bindings
-                    .omnifs_provider_notify()
-                    .call_on_event(&mut *store, id, event)
-            },
-        }?;
-        Ok(step)
-    }
-}
-
 impl ProviderRuntime {
     pub fn new(
         engine: &wasmtime::Engine,
@@ -323,7 +290,7 @@ impl ProviderRuntime {
     pub fn initialize(&self) -> Result<wit_types::OpResult> {
         let id = self.operation_ids.allocate();
         let op = Op::Initialize;
-        match op.execute(self, id)? {
+        match self.start_op(&op, id)? {
             wit_types::ProviderStep::Returned(ret) => self.finish_provider_return(&op, ret),
             wit_types::ProviderStep::Suspended(_) => Err(RuntimeError::ProviderProtocol(
                 "initialize suspended with callouts".to_string(),
@@ -537,21 +504,53 @@ impl ProviderRuntime {
 
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
         let active_paths = self.activity_table.lock().active_path_sets();
-        let op = Op::OnEvent {
+        self.run_op(Op::OnEvent {
             event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
                 active_paths,
             }),
-        };
-        self.call_provider_op(op).await
+        })
+        .await
     }
 
-    /// Drive a provider call to completion.
-    pub(super) async fn drive_provider(
-        &self,
-        id: u64,
-        mut step: wit_types::ProviderStep,
-        op: Op,
-    ) -> Result<wit_types::OpResult> {
+    fn start_op(&self, op: &Op, id: u64) -> Result<wit_types::ProviderStep> {
+        let mut store = self.store.lock();
+        let browse = self.bindings.omnifs_provider_browse();
+        match op {
+            Op::LookupChild { parent_path, name } => browse
+                .call_lookup_child(&mut *store, id, parent_path, name)
+                .map_err(Into::into),
+            Op::ListChildren { path } => browse
+                .call_list_children(&mut *store, id, path)
+                .map_err(Into::into),
+            Op::ReadFile { path } => browse
+                .call_read_file(&mut *store, id, path)
+                .map_err(Into::into),
+            Op::OpenFile { path } => browse
+                .call_open_file(&mut *store, id, path)
+                .map_err(Into::into),
+            Op::ReadChunk {
+                handle,
+                offset,
+                length,
+            } => browse
+                .call_read_chunk(&mut *store, id, *handle, *offset, *length)
+                .map_err(Into::into),
+            Op::Initialize => Ok(wit_types::ProviderStep::Returned(
+                self.bindings
+                    .omnifs_provider_lifecycle()
+                    .call_initialize(&mut *store, &self.config_bytes)?,
+            )),
+            Op::OnEvent { event } => self
+                .bindings
+                .omnifs_provider_notify()
+                .call_on_event(&mut *store, id, event)
+                .map_err(Into::into),
+        }
+    }
+
+    pub(super) async fn run_op(&self, op: Op) -> Result<wit_types::OpResult> {
+        let id = self.operation_ids.allocate();
+        let mut step = self.start_op(&op, id)?;
         loop {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
