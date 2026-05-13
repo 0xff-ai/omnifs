@@ -59,16 +59,28 @@ pub(crate) async fn download_pdf(
     cx: &Cx<State>,
     raw_id: &str,
     version: Option<u32>,
-) -> Result<Vec<u8>> {
-    fetch_bytes(cx, &crate::paper::paper_pdf_url(raw_id, version)).await
+) -> Result<omnifs_sdk::blob::BlobRef> {
+    let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
+    fetch_blob(
+        cx,
+        &crate::paper::paper_pdf_url(raw_id, version),
+        format!("arxiv/papers/{raw_id}/{version_tag}/paper.pdf"),
+    )
+    .await
 }
 
 pub(crate) async fn download_source(
     cx: &Cx<State>,
     raw_id: &str,
     version: Option<u32>,
-) -> Result<Vec<u8>> {
-    fetch_bytes(cx, &crate::paper::paper_source_url(raw_id, version)).await
+) -> Result<omnifs_sdk::blob::BlobRef> {
+    let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
+    fetch_blob(
+        cx,
+        &crate::paper::paper_source_url(raw_id, version),
+        format!("arxiv/papers/{raw_id}/{version_tag}/source.tar.gz"),
+    )
+    .await
 }
 
 fn parse_category_page(page: RecentPage, feed_xml: &[u8]) -> Result<CategoryPage> {
@@ -104,6 +116,19 @@ fn arxiv_get(cx: &Cx<State>, url: impl Into<String>) -> Request<'_, State> {
 async fn fetch_bytes(cx: &Cx<State>, url: &str) -> Result<Vec<u8>> {
     let response = arxiv_get(cx, url).send().await?.error_for_status()?;
     Ok(response.into_body())
+}
+
+async fn fetch_blob(
+    cx: &Cx<State>,
+    url: &str,
+    cache_key: String,
+) -> Result<omnifs_sdk::blob::BlobRef> {
+    arxiv_get(cx, url)
+        .into_blob()
+        .with_cache_key(cache_key)
+        .send()
+        .await?
+        .error_for_status()
 }
 
 #[derive(Debug)]

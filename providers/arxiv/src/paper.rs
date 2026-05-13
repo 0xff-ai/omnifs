@@ -159,8 +159,11 @@ async fn read_paper_pdf(
     version: Option<u32>,
 ) -> Result<FileContent> {
     let raw_id = paper.decode()?;
-    let bytes = download_pdf(cx, &raw_id, version).await?;
-    Ok(FileContent::bytes(bytes))
+    let blob = download_pdf(cx, &raw_id, version).await?;
+    Ok(FileContent::blob_with_attrs(
+        FileAttrs::new(Size::Exact(blob.size), Stability::Immutable),
+        blob.id(),
+    ))
 }
 
 async fn read_paper_source(
@@ -169,8 +172,11 @@ async fn read_paper_source(
     version: Option<u32>,
 ) -> Result<FileContent> {
     let raw_id = paper.decode()?;
-    let bytes = download_source(cx, &raw_id, version).await?;
-    Ok(FileContent::bytes(bytes))
+    let blob = download_source(cx, &raw_id, version).await?;
+    Ok(FileContent::blob_with_attrs(
+        FileAttrs::new(Size::Exact(blob.size), Stability::Immutable),
+        blob.id(),
+    ))
 }
 
 async fn read_paper_links(
