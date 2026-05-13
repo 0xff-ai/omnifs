@@ -13,7 +13,6 @@
 use crate::cache::blobs::BlobMetadata;
 use crate::cache::blobs::{BlobCache, BlobRecord};
 use crate::omnifs::provider::types as wit_types;
-use crate::runtime::executor::{ErrorKind, callout_error};
 use crate::runtime::sandbox::tree_cache::{
     MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
 };
@@ -23,6 +22,7 @@ use crate::runtime::tools::archive::{
     ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
 };
 use crate::runtime::tree_refs::TreeRefs;
+use crate::runtime::{callout_error, callout_internal, callout_not_found};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -100,10 +100,8 @@ impl From<ArchiveError> for wit_types::CalloutResult {
     fn from(error: ArchiveError) -> Self {
         match error {
             ArchiveError::Extract(e) => callout_error(error_kind_for(&e), e.to_string(), false),
-            ArchiveError::NotFound(msg) => callout_error(ErrorKind::NotFound, msg, false),
-            ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => {
-                callout_error(ErrorKind::Internal, msg, false)
-            },
+            ArchiveError::NotFound(msg) => callout_not_found(msg),
+            ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => callout_internal(msg),
         }
     }
 }
@@ -222,14 +220,14 @@ fn hex_prefix(bytes: &[u8], len: usize) -> String {
     out
 }
 
-fn error_kind_for(error: &ExtractError) -> ErrorKind {
+fn error_kind_for(error: &ExtractError) -> wit_types::ErrorKind {
     match error {
         ExtractError::UnsafePath(_)
         | ExtractError::PathTooDeep(_)
         | ExtractError::PathTooLong(_)
         | ExtractError::UnsupportedEntryKind(_)
-        | ExtractError::Malformed(_) => ErrorKind::InvalidInput,
-        _ => ErrorKind::Internal,
+        | ExtractError::Malformed(_) => wit_types::ErrorKind::InvalidInput,
+        _ => wit_types::ErrorKind::Internal,
     }
 }
 

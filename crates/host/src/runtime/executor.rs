@@ -8,6 +8,7 @@ use crate::auth::AuthManager;
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
+use crate::runtime::{callout_denied, callout_internal, callout_network};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,24 +50,16 @@ impl HttpExecutor {
 
     pub async fn fetch(&self, req: &wit_types::HttpRequest) -> wit_types::CalloutResult {
         if let Err(e) = self.capability.check_url(&req.url) {
-            return callout_error(ErrorKind::Denied, e.to_string(), false);
+            return callout_denied(e.to_string());
         }
 
         let auth_headers = self.auth.headers_for_url(&req.url);
         if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
-            return callout_error(
-                ErrorKind::Denied,
-                format!("no credentials for {}", req.url),
-                false,
-            );
+            return callout_denied(format!("no credentials for {}", req.url));
         }
 
         let Ok(reqwest_method) = reqwest::Method::from_str(&req.method) else {
-            return callout_error(
-                ErrorKind::Denied,
-                format!("unsupported HTTP method: {}", req.method),
-                false,
-            );
+            return callout_denied(format!("unsupported HTTP method: {}", req.method));
         };
 
         let header_map = match build_header_map(
@@ -76,7 +69,7 @@ impl HttpExecutor {
                 .map(|h| (h.name.as_str(), h.value.as_str())),
         ) {
             Ok(header_map) => header_map,
-            Err(message) => return callout_error(ErrorKind::Internal, message, false),
+            Err(message) => return callout_internal(message),
         };
 
         let mut request = self.client.request(reqwest_method, &req.url);
@@ -98,24 +91,12 @@ impl HttpExecutor {
                             .collect(),
                         body: body.to_vec(),
                     }),
-                    Err(e) => callout_error(ErrorKind::Network, e.to_string(), true),
+                    Err(e) => callout_network(e.to_string()),
                 }
             },
-            Err(e) => callout_error(ErrorKind::Network, e.to_string(), true),
+            Err(e) => callout_network(e.to_string()),
         }
     }
-}
-
-pub(crate) fn callout_error(
-    kind: ErrorKind,
-    message: String,
-    retryable: bool,
-) -> wit_types::CalloutResult {
-    wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-        kind: kind.into(),
-        message,
-        retryable,
-    })
 }
 
 fn owned_body(body: &[u8]) -> reqwest::Body {

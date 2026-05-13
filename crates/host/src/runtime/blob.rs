@@ -14,8 +14,11 @@ use crate::cache::blobs::{
 };
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
-use crate::runtime::executor::{ErrorKind, callout_error};
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
+use crate::runtime::{
+    callout_denied, callout_internal, callout_invalid, callout_network, callout_not_found,
+    callout_too_large,
+};
 use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -98,15 +101,13 @@ impl From<BlobCacheError> for BlobError {
 impl From<BlobError> for wit_types::CalloutResult {
     fn from(error: BlobError) -> Self {
         match error {
-            BlobError::TooLarge { .. } => {
-                callout_error(ErrorKind::TooLarge, error.to_string(), false)
-            },
-            BlobError::Network(_) => callout_error(ErrorKind::Network, error.to_string(), true),
-            BlobError::Io(_) => callout_error(ErrorKind::Internal, error.to_string(), false),
-            BlobError::Denied(msg) => callout_error(ErrorKind::Denied, msg, false),
-            BlobError::NotFound(msg) => callout_error(ErrorKind::NotFound, msg, false),
-            BlobError::InvalidInput(msg) => callout_error(ErrorKind::InvalidInput, msg, false),
-            BlobError::Internal(msg) => callout_error(ErrorKind::Internal, msg, false),
+            BlobError::TooLarge { .. } => callout_too_large(error.to_string()),
+            BlobError::Network(_) => callout_network(error.to_string()),
+            BlobError::Io(_) => callout_internal(error.to_string()),
+            BlobError::Denied(msg) => callout_denied(msg),
+            BlobError::NotFound(msg) => callout_not_found(msg),
+            BlobError::InvalidInput(msg) => callout_invalid(msg),
+            BlobError::Internal(msg) => callout_internal(msg),
         }
     }
 }

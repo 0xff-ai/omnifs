@@ -9,8 +9,8 @@
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::{CapabilityChecker, CapabilityError};
 use crate::runtime::cloner::{CloneError, GitCloner};
-use crate::runtime::executor::{ErrorKind, callout_error};
 use crate::runtime::tree_refs::TreeRefs;
+use crate::runtime::{callout_denied, callout_network};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
@@ -96,11 +96,11 @@ impl From<CloneError> for GitError {
 impl From<GitError> for wit_types::CalloutResult {
     fn from(error: GitError) -> Self {
         match error {
-            GitError::Denied(msg) => callout_error(ErrorKind::Denied, msg, false),
+            GitError::Denied(msg) => callout_denied(msg),
             // Preserve today's behavior: clone failures map to Network +
             // retryable=true. Transient network blips during git clone
             // are common and the runtime trusts the WIT-level retry hint.
-            GitError::Clone(msg) => callout_error(ErrorKind::Network, msg, true),
+            GitError::Clone(msg) => callout_network(msg),
         }
     }
 }

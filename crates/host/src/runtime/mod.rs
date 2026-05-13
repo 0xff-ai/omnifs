@@ -610,6 +610,37 @@ impl ProviderRuntime {
     }
 }
 
+pub(super) fn callout_error(
+    kind: wit_types::ErrorKind,
+    message: impl Into<String>,
+    retryable: bool,
+) -> wit_types::CalloutResult {
+    wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+        kind,
+        message: message.into(),
+        retryable,
+    })
+}
+
+pub(super) fn callout_internal(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::Internal, message, false)
+}
+pub(super) fn callout_denied(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::Denied, message, false)
+}
+pub(super) fn callout_not_found(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::NotFound, message, false)
+}
+pub(super) fn callout_too_large(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::TooLarge, message, false)
+}
+pub(super) fn callout_invalid(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::InvalidInput, message, false)
+}
+pub(super) fn callout_network(message: impl Into<String>) -> wit_types::CalloutResult {
+    callout_error(wit_types::ErrorKind::Network, message, true)
+}
+
 struct Callouts<'a> {
     runtime: &'a ProviderRuntime,
     operation_id: u64,
@@ -825,11 +856,7 @@ impl<'a> Callouts<'a> {
     }
 
     fn unsupported() -> wit_types::CalloutResult {
-        wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: wit_types::ErrorKind::Internal,
-            message: "callout type not yet implemented".to_string(),
-            retryable: false,
-        })
+        callout_internal("callout type not yet implemented")
     }
 }
 
