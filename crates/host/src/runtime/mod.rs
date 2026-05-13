@@ -558,11 +558,84 @@ impl ProviderRuntime {
                     return self.finish_provider_return(&op, ret);
                 },
                 wit_types::ProviderStep::Suspended(callouts) => {
-                    let results = Callouts::new(self, id, &callouts)?.execute().await;
+                    if callouts.is_empty() {
+                        return Err(RuntimeError::ProviderProtocol(
+                            "provider suspended with no callouts".to_string(),
+                        ));
+                    }
+                    let results = self.dispatch_callouts(id, &callouts).await;
                     step = self.resume_provider(id, results)?;
                 },
             }
         }
+    }
+
+    /// Runs every callout concurrently and returns positionally aligned
+    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
+    /// yield order, so this ordering is load-bearing.
+    async fn dispatch_callouts(
+        &self,
+        operation_id: u64,
+        callouts: &[wit_types::Callout],
+    ) -> Vec<wit_types::CalloutResult> {
+        let futures = callouts
+            .iter()
+            .enumerate()
+            .map(|(index, callout)| self.dispatch_one(operation_id, index, callout));
+        futures::future::join_all(futures).await
+    }
+
+    async fn dispatch_one(
+        &self,
+        op_id: u64,
+        index: usize,
+        callout: &wit_types::Callout,
+    ) -> wit_types::CalloutResult {
+        self.run_callout(callout)
+            .instrument(tracing::info_span!(
+                target: "omnifs_callout",
+                "callout",
+                operation_id = op_id,
+                callout_index = index,
+                kind = CalloutKind::of(callout).as_str(),
+            ))
+            .await
+    }
+
+    async fn run_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
+        match callout {
+            wit_types::Callout::Fetch(req) => self.http.fetch(req).await,
+            wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
+            wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req),
+            wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
+            wit_types::Callout::ReadBlob(req) => self.blob.read(req),
+            wit_types::Callout::StreamOpen(_)
+            | wit_types::Callout::StreamRecv(_)
+            | wit_types::Callout::StreamClose(_)
+            | wit_types::Callout::WsConnect(_)
+            | wit_types::Callout::WsSend(_)
+            | wit_types::Callout::WsRecv(_)
+            | wit_types::Callout::WsClose(_) => self.unsupported_callout(callout),
+        }
+    }
+
+    #[allow(clippy::unused_self)]
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        unsupported_variant = unsupported_callout_variant(callout),
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
+    fn unsupported_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
+        let variant = unsupported_callout_variant(callout);
+        tracing::warn!(
+            target: "omnifs_callout",
+            variant,
+            "callout variant not implemented",
+        );
+        let result = callout_internal("callout type not yet implemented");
+        record_outcome(&result);
+        result
     }
 
     #[allow(clippy::needless_pass_by_value)] // generated WIT binding requires &Vec
@@ -684,99 +757,6 @@ pub(super) fn callout_invalid(message: impl Into<String>) -> wit_types::CalloutR
 }
 pub(super) fn callout_network(message: impl Into<String>) -> wit_types::CalloutResult {
     callout_error(wit_types::ErrorKind::Network, message, true)
-}
-
-struct Callouts<'a> {
-    runtime: &'a ProviderRuntime,
-    operation_id: u64,
-    requests: &'a [wit_types::Callout],
-}
-
-impl<'a> Callouts<'a> {
-    fn new(
-        runtime: &'a ProviderRuntime,
-        operation_id: u64,
-        callouts: &'a [wit_types::Callout],
-    ) -> Result<Self> {
-        if callouts.is_empty() {
-            return Err(RuntimeError::ProviderProtocol(
-                "provider suspended with no callouts".to_string(),
-            ));
-        }
-        Ok(Self {
-            runtime,
-            operation_id,
-            requests: callouts,
-        })
-    }
-
-    /// Runs every callout concurrently and returns positionally aligned
-    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
-    /// yield order, so this ordering is load-bearing.
-    async fn execute(&self) -> Vec<wit_types::CalloutResult> {
-        let futures: Vec<_> = self
-            .requests
-            .iter()
-            .enumerate()
-            .map(|(callout_index, callout)| {
-                self.dispatch_one(self.operation_id, callout_index, callout)
-            })
-            .collect();
-        futures::future::join_all(futures).await
-    }
-
-    async fn dispatch_one(
-        &self,
-        op_id: u64,
-        index: usize,
-        callout: &wit_types::Callout,
-    ) -> wit_types::CalloutResult {
-        self.run_callout(callout)
-            .instrument(tracing::info_span!(
-                target: "omnifs_callout",
-                "callout",
-                operation_id = op_id,
-                callout_index = index,
-                kind = CalloutKind::of(callout).as_str(),
-            ))
-            .await
-    }
-
-    async fn run_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
-        match callout {
-            wit_types::Callout::Fetch(req) => self.runtime.http.fetch(req).await,
-            wit_types::Callout::FetchBlob(req) => self.runtime.blob.fetch(req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.runtime.git.open_repo(req),
-            wit_types::Callout::OpenArchive(req) => self.runtime.archive.open(req).await,
-            wit_types::Callout::ReadBlob(req) => self.runtime.blob.read(req),
-            wit_types::Callout::StreamOpen(_)
-            | wit_types::Callout::StreamRecv(_)
-            | wit_types::Callout::StreamClose(_)
-            | wit_types::Callout::WsConnect(_)
-            | wit_types::Callout::WsSend(_)
-            | wit_types::Callout::WsRecv(_)
-            | wit_types::Callout::WsClose(_) => self.unsupported_callout(callout),
-        }
-    }
-
-    #[allow(clippy::unused_self)]
-    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
-        unsupported_variant = unsupported_callout_variant(callout),
-        error.kind = tracing::field::Empty,
-        error.message = tracing::field::Empty,
-        error.retryable = tracing::field::Empty,
-    ))]
-    fn unsupported_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
-        let variant = unsupported_callout_variant(callout);
-        tracing::warn!(
-            target: "omnifs_callout",
-            variant,
-            "callout variant not implemented",
-        );
-        let result = callout_internal("callout type not yet implemented");
-        record_outcome(&result);
-        result
-    }
 }
 
 fn unsupported_callout_variant(callout: &wit_types::Callout) -> &'static str {
