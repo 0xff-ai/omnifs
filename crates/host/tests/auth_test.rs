@@ -4,7 +4,7 @@ use omnifs_host::auth::AuthManager;
 use omnifs_host::config::AuthConfig;
 use omnifs_host::omnifs::provider::types as wit_types;
 use omnifs_host::runtime::capability::{CapabilityChecker, CapabilityGrants};
-use omnifs_host::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
+use omnifs_host::runtime::executor::HttpExecutor;
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -177,11 +177,11 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         body: None,
     };
     match executor.fetch(&req).await {
-        CalloutResponse::Error {
-            kind: ErrorKind::Denied,
+        wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: wit_types::ErrorKind::Denied,
             retryable: false,
             ..
-        } => {},
+        }) => {},
         other => panic!("expected denied error, got {other:?}"),
     }
 }

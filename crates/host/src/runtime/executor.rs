@@ -1,9 +1,8 @@
-//! Callout request/response types and HTTP executor.
+//! HTTP fetch executor and shared callout error taxonomy.
 //!
-//! Defines the internal protocol between the host and providers for
-//! running a single callout. Only HTTP fetch and git-open-repo are live
-//! today; the remaining host-side git operations happen through bind
-//! mounts over the cloned repo directory.
+//! `ErrorKind` is the host-internal classification of callout failures
+//! that each executor returns through `wit_types::CalloutResult`. The
+//! HTTP executor owns the request/response path for `Callout::Fetch`.
 
 use crate::auth::AuthManager;
 use crate::omnifs::provider::types as wit_types;
@@ -23,24 +22,6 @@ pub enum ErrorKind {
     InvalidInput,
     TooLarge,
     Internal,
-}
-
-#[derive(Debug, Clone)]
-pub enum CalloutResponse {
-    HttpResponse {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    },
-    GitRepoOpened(u64),
-    BlobFetched(crate::cache::blobs::BlobRecord),
-    ArchiveOpened(u64),
-    BlobRead(Vec<u8>),
-    Error {
-        kind: ErrorKind,
-        message: String,
-        retryable: bool,
-    },
 }
 
 pub struct HttpExecutor {
@@ -66,30 +47,26 @@ impl HttpExecutor {
         })
     }
 
-    pub async fn fetch(&self, req: &wit_types::HttpRequest) -> CalloutResponse {
+    pub async fn fetch(&self, req: &wit_types::HttpRequest) -> wit_types::CalloutResult {
         if let Err(e) = self.capability.check_url(&req.url) {
-            return CalloutResponse::Error {
-                kind: ErrorKind::Denied,
-                message: e.to_string(),
-                retryable: false,
-            };
+            return callout_error(ErrorKind::Denied, e.to_string(), false);
         }
 
         let auth_headers = self.auth.headers_for_url(&req.url);
         if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
-            return CalloutResponse::Error {
-                kind: ErrorKind::Denied,
-                message: format!("no credentials for {}", req.url),
-                retryable: false,
-            };
+            return callout_error(
+                ErrorKind::Denied,
+                format!("no credentials for {}", req.url),
+                false,
+            );
         }
 
         let Ok(reqwest_method) = reqwest::Method::from_str(&req.method) else {
-            return CalloutResponse::Error {
-                kind: ErrorKind::Denied,
-                message: format!("unsupported HTTP method: {}", req.method),
-                retryable: false,
-            };
+            return callout_error(
+                ErrorKind::Denied,
+                format!("unsupported HTTP method: {}", req.method),
+                false,
+            );
         };
 
         let header_map = match build_header_map(
@@ -99,13 +76,7 @@ impl HttpExecutor {
                 .map(|h| (h.name.as_str(), h.value.as_str())),
         ) {
             Ok(header_map) => header_map,
-            Err(message) => {
-                return CalloutResponse::Error {
-                    kind: ErrorKind::Internal,
-                    message,
-                    retryable: false,
-                };
-            },
+            Err(message) => return callout_error(ErrorKind::Internal, message, false),
         };
 
         let mut request = self.client.request(reqwest_method, &req.url);
@@ -117,27 +88,34 @@ impl HttpExecutor {
         match request.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
-                let resp_headers = decode_response_headers(response.headers());
+                let response_headers = decode_response_headers(response.headers());
                 match response.bytes().await {
-                    Ok(body) => CalloutResponse::HttpResponse {
+                    Ok(body) => wit_types::CalloutResult::HttpResponse(wit_types::HttpResponse {
                         status,
-                        headers: resp_headers,
+                        headers: response_headers
+                            .into_iter()
+                            .map(|(name, value)| wit_types::Header { name, value })
+                            .collect(),
                         body: body.to_vec(),
-                    },
-                    Err(e) => CalloutResponse::Error {
-                        kind: ErrorKind::Network,
-                        message: e.to_string(),
-                        retryable: true,
-                    },
+                    }),
+                    Err(e) => callout_error(ErrorKind::Network, e.to_string(), true),
                 }
             },
-            Err(e) => CalloutResponse::Error {
-                kind: ErrorKind::Network,
-                message: e.to_string(),
-                retryable: true,
-            },
+            Err(e) => callout_error(ErrorKind::Network, e.to_string(), true),
         }
     }
+}
+
+pub(crate) fn callout_error(
+    kind: ErrorKind,
+    message: String,
+    retryable: bool,
+) -> wit_types::CalloutResult {
+    wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+        kind: kind.into(),
+        message,
+        retryable,
+    })
 }
 
 fn owned_body(body: &[u8]) -> reqwest::Body {

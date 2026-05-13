@@ -10,11 +10,11 @@ use crate::auth::AuthManager;
 #[cfg(test)]
 use crate::cache::blobs::BLOB_META_DIR;
 use crate::cache::blobs::{
-    BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobMetadata, is_safe_path_segment,
+    BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobMetadata, BlobRecord, is_safe_path_segment,
 };
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::capability::CapabilityChecker;
-use crate::runtime::executor::{CalloutResponse, ErrorKind};
+use crate::runtime::executor::{ErrorKind, callout_error};
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -77,12 +77,36 @@ enum BlobError {
     Network(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Denied(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    InvalidInput(String),
+    #[error("{0}")]
+    Internal(String),
 }
 
 impl From<BlobCacheError> for BlobError {
     fn from(error: BlobCacheError) -> Self {
         match error {
             BlobCacheError::Io(error) => Self::Io(error),
+        }
+    }
+}
+
+impl From<BlobError> for wit_types::CalloutResult {
+    fn from(error: BlobError) -> Self {
+        match error {
+            BlobError::TooLarge { .. } => {
+                callout_error(ErrorKind::TooLarge, error.to_string(), false)
+            },
+            BlobError::Network(_) => callout_error(ErrorKind::Network, error.to_string(), true),
+            BlobError::Io(_) => callout_error(ErrorKind::Internal, error.to_string(), false),
+            BlobError::Denied(msg) => callout_error(ErrorKind::Denied, msg, false),
+            BlobError::NotFound(msg) => callout_error(ErrorKind::NotFound, msg, false),
+            BlobError::InvalidInput(msg) => callout_error(ErrorKind::InvalidInput, msg, false),
+            BlobError::Internal(msg) => callout_error(ErrorKind::Internal, msg, false),
         }
     }
 }
@@ -122,18 +146,26 @@ impl BlobExecutor {
     ///
     /// The body is streamed to a temporary file and atomically renamed
     /// into place once it has stayed within the configured fetch cap.
-    pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> CalloutResponse {
+    pub async fn fetch(&self, req: &wit_types::BlobFetchRequest) -> wit_types::CalloutResult {
+        match self.fetch_inner(req).await {
+            Ok(record) => blob_fetched_to_wit(&record),
+            Err(e) => e.into(),
+        }
+    }
+
+    async fn fetch_inner(
+        &self,
+        req: &wit_types::BlobFetchRequest,
+    ) -> Result<BlobRecord, BlobError> {
         let cache_key = req.cache_key.as_str();
         if !is_safe_path_segment(cache_key) {
-            return error(
-                ErrorKind::InvalidInput,
-                format!("cache key {cache_key} is unsafe"),
-                false,
-            );
+            return Err(BlobError::InvalidInput(format!(
+                "cache key {cache_key} is unsafe"
+            )));
         }
-        if let Err(e) = self.capability.check_url(&req.url) {
-            return error(ErrorKind::Denied, e.to_string(), false);
-        }
+        self.capability
+            .check_url(&req.url)
+            .map_err(|e| BlobError::Denied(e.to_string()))?;
 
         // Coalesce concurrent fetches of the same key.
         let lock = self.cache.key_lock(cache_key);
@@ -141,34 +173,23 @@ impl BlobExecutor {
 
         // Fast path: another caller already populated the cache.
         if let Some(record) = self.cache.lookup_by_key(cache_key) {
-            return CalloutResponse::BlobFetched((*record).clone());
+            return Ok((*record).clone());
         }
 
         // Resolve auth + headers.
         let auth_headers = self.auth.headers_for_url(&req.url);
         if auth_headers.is_empty() && self.auth.requires_auth_for_url(&req.url) {
-            return error(
-                ErrorKind::Denied,
-                format!("no credentials for {}", req.url),
-                false,
-            );
+            return Err(BlobError::Denied(format!("no credentials for {}", req.url)));
         }
-        let Ok(reqwest_method) = reqwest::Method::from_str(&req.method) else {
-            return error(
-                ErrorKind::Denied,
-                format!("unsupported HTTP method: {}", req.method),
-                false,
-            );
-        };
-        let header_map = match build_header_map(
+        let reqwest_method = reqwest::Method::from_str(&req.method)
+            .map_err(|_| BlobError::Denied(format!("unsupported HTTP method: {}", req.method)))?;
+        let header_map = build_header_map(
             auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
             req.headers
                 .iter()
                 .map(|h| (h.name.as_str(), h.value.as_str())),
-        ) {
-            Ok(h) => h,
-            Err(message) => return error(ErrorKind::Internal, message, false),
-        };
+        )
+        .map_err(BlobError::Internal)?;
 
         let mut request = self
             .client
@@ -178,10 +199,10 @@ impl BlobExecutor {
             request = request.body(body.to_vec());
         }
 
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(e) => return error(ErrorKind::Network, e.to_string(), true),
-        };
+        let response = request
+            .send()
+            .await
+            .map_err(|e| BlobError::Network(e.to_string()))?;
 
         let status = response.status().as_u16();
         let response_headers = decode_response_headers(response.headers());
@@ -190,21 +211,17 @@ impl BlobExecutor {
 
         // Persist to disk.
         let blob_path = self.cache.blob_path(cache_key);
-        if let Some(parent) = blob_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return error(ErrorKind::Internal, format!("create blob dir: {e}"), false);
+        if let Some(parent) = blob_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| BlobError::Internal(format!("create blob dir: {e}")))?;
         }
-        let staged = match stream_response_body(
+        let staged = stream_response_body(
             response,
             self.cache.cache_dir(),
             self.limits.max_fetch_blob_bytes,
         )
         .await
-        {
-            Ok(staged) => staged,
-            Err(e) => return blob_error("fetch blob", e),
-        };
+        .map_err(|e| io_context_into("fetch blob", e))?;
         let size = staged.size;
 
         let metadata = BlobMetadata {
@@ -214,17 +231,17 @@ impl BlobExecutor {
             response_headers,
             size,
         };
-        if let Err(error) = self.cache.store_metadata(cache_key, &metadata) {
-            return blob_error("store blob metadata", error.into());
-        }
+        self.cache
+            .store_metadata(cache_key, &metadata)
+            .map_err(|e| io_context_into("store blob metadata", e.into()))?;
         if let Err(error) = staged.persist(&blob_path) {
             // Best-effort: stranded metadata is overwritten by the next fetch for this key.
             let _ = std::fs::remove_file(self.cache.metadata_path(cache_key));
-            return blob_error("publish blob", error);
+            return Err(io_context_into("publish blob", error));
         }
         let record = self.cache.store(cache_key.to_string(), metadata);
 
-        CalloutResponse::BlobFetched((*record).clone())
+        Ok((*record).clone())
     }
 
     /// Read a range from a cached blob back into provider memory.
@@ -232,19 +249,58 @@ impl BlobExecutor {
     /// `offset` may point past EOF, which returns an empty byte vector.
     /// The configured read cap applies to the number of bytes returned
     /// by this call, not to the absolute offset.
-    pub fn read_blob(&self, blob_id: u64, offset: u64, len: Option<u32>) -> CalloutResponse {
-        let Some(record) = self.cache.lookup_by_id(blob_id) else {
-            return error(
-                ErrorKind::NotFound,
-                format!("blob {blob_id} not found"),
-                false,
-            );
-        };
-        let path = self.cache.blob_path(&record.cache_key);
-        match read_range(&path, offset, len, self.limits.max_read_blob_bytes) {
-            Ok(bytes) => CalloutResponse::BlobRead(bytes),
-            Err(e) => blob_error("read blob", e),
+    pub fn read_blob(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        len: Option<u32>,
+    ) -> wit_types::CalloutResult {
+        match self.read_blob_inner(blob_id, offset, len) {
+            Ok(bytes) => wit_types::CalloutResult::BlobRead(bytes),
+            Err(e) => e.into(),
         }
+    }
+
+    fn read_blob_inner(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        len: Option<u32>,
+    ) -> Result<Vec<u8>, BlobError> {
+        let record = self
+            .cache
+            .lookup_by_id(blob_id)
+            .ok_or_else(|| BlobError::NotFound(format!("blob {blob_id} not found")))?;
+        let path = self.cache.blob_path(&record.cache_key);
+        read_range(&path, offset, len, self.limits.max_read_blob_bytes)
+            .map_err(|e| io_context_into("read blob", e))
+    }
+}
+
+fn blob_fetched_to_wit(record: &BlobRecord) -> wit_types::CalloutResult {
+    wit_types::CalloutResult::BlobFetched(wit_types::BlobFetched {
+        blob: record.id,
+        size: record.size,
+        content_type: record.content_type.clone(),
+        etag: record.etag.clone(),
+        status: record.status,
+        response_headers: record
+            .response_headers
+            .iter()
+            .map(|(name, value)| wit_types::Header {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Attach an io-context prefix to a `BlobError::Io` so the
+/// provider-visible message keeps today's `"{context}: {io}"` shape.
+fn io_context_into(context: &'static str, error: BlobError) -> BlobError {
+    match error {
+        BlobError::Io(e) => BlobError::Internal(format!("{context}: {e}")),
+        other => other,
     }
 }
 
@@ -348,22 +404,6 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-fn error(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
-    CalloutResponse::Error {
-        kind,
-        message,
-        retryable,
-    }
-}
-
-fn blob_error(context: &str, blob_error: BlobError) -> CalloutResponse {
-    match blob_error {
-        e @ BlobError::TooLarge { .. } => error(ErrorKind::TooLarge, e.to_string(), false),
-        e @ BlobError::Network(_) => error(ErrorKind::Network, e.to_string(), true),
-        BlobError::Io(e) => error(ErrorKind::Internal, format!("{context}: {e}"), false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,11 +500,11 @@ mod tests {
         .unwrap();
 
         match executor.read_blob(record.id, 0, None) {
-            CalloutResponse::Error {
-                kind: ErrorKind::TooLarge,
+            wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+                kind: wit_types::ErrorKind::TooLarge,
                 retryable: false,
                 ..
-            } => {},
+            }) => {},
             other => panic!("expected TooLarge read-blob error, got {other:?}"),
         }
     }

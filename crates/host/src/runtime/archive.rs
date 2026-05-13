@@ -12,7 +12,8 @@
 #[cfg(test)]
 use crate::cache::blobs::BlobMetadata;
 use crate::cache::blobs::{BlobCache, BlobRecord};
-use crate::runtime::executor::{CalloutResponse, ErrorKind};
+use crate::omnifs::provider::types as wit_types;
+use crate::runtime::executor::{ErrorKind, callout_error};
 use crate::runtime::sandbox::tree_cache::{
     MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
 };
@@ -87,6 +88,24 @@ impl TreeKey for ExtractKey {
 enum ArchiveError {
     #[error("{0}")]
     Extract(#[from] ExtractError),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Internal(String),
+    #[error("{0}")]
+    JoinFailed(String),
+}
+
+impl From<ArchiveError> for wit_types::CalloutResult {
+    fn from(error: ArchiveError) -> Self {
+        match error {
+            ArchiveError::Extract(e) => callout_error(error_kind_for(&e), e.to_string(), false),
+            ArchiveError::NotFound(msg) => callout_error(ErrorKind::NotFound, msg, false),
+            ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => {
+                callout_error(ErrorKind::Internal, msg, false)
+            },
+        }
+    }
 }
 
 impl ArchiveExecutor {
@@ -108,18 +127,22 @@ impl ArchiveExecutor {
         blob_id: u64,
         format: ArchiveFormat,
         strip_prefix: Option<&str>,
-    ) -> CalloutResponse {
+    ) -> wit_types::CalloutResult {
         let this = Arc::clone(self);
         let strip = strip_prefix.map(str::to_string);
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             this.open_archive_blocking(blob_id, format, strip.as_deref())
         })
-        .await
-        .unwrap_or_else(|join_err| CalloutResponse::Error {
-            kind: ErrorKind::Internal,
-            message: format!("extract task join: {join_err}"),
-            retryable: false,
-        })
+        .await;
+        match result {
+            Ok(Ok(tree)) => {
+                wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree })
+            },
+            Ok(Err(e)) => e.into(),
+            Err(join_err) => {
+                ArchiveError::JoinFailed(format!("extract task join: {join_err}")).into()
+            },
+        }
     }
 
     fn open_archive_blocking(
@@ -127,21 +150,18 @@ impl ArchiveExecutor {
         blob_id: u64,
         format: ArchiveFormat,
         strip_prefix: Option<&str>,
-    ) -> CalloutResponse {
+    ) -> Result<u64, ArchiveError> {
         let strip_prefix = strip_prefix.filter(|s| !s.is_empty()).map(str::to_string);
-        let Some(record) = self.cache.lookup_by_id(blob_id) else {
-            return error_response(
-                ErrorKind::NotFound,
-                format!("blob {blob_id} not found"),
-                false,
-            );
-        };
+        let record = self
+            .cache
+            .lookup_by_id(blob_id)
+            .ok_or_else(|| ArchiveError::NotFound(format!("blob {blob_id} not found")))?;
         let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
 
-        let result = self
+        let tree = match self
             .materializer
-            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record));
-        let tree = match result {
+            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record))
+        {
             Ok(MaterializedTree::Cached { tree }) => tree,
             Ok(MaterializedTree::Fresh {
                 tree,
@@ -155,23 +175,19 @@ impl ArchiveExecutor {
                 );
                 tree
             },
-            Err(MaterializeError::Run(e)) => return archive_error(e),
+            Err(MaterializeError::Run(e)) => return Err(e),
             Err(MaterializeError::Prepare(e)) => {
-                return error_response(
-                    ErrorKind::Internal,
-                    format!("prepare archive extraction: {e}"),
-                    false,
-                );
+                return Err(ArchiveError::Internal(format!(
+                    "prepare archive extraction: {e}"
+                )));
             },
             Err(MaterializeError::Publish(e)) => {
-                return error_response(
-                    ErrorKind::Internal,
-                    format!("publish archive extraction: {e}"),
-                    false,
-                );
+                return Err(ArchiveError::Internal(format!(
+                    "publish archive extraction: {e}"
+                )));
             },
         };
-        CalloutResponse::ArchiveOpened(tree)
+        Ok(tree)
     }
 
     fn extract_to(
@@ -214,22 +230,6 @@ fn error_kind_for(error: &ExtractError) -> ErrorKind {
         | ExtractError::UnsupportedEntryKind(_)
         | ExtractError::Malformed(_) => ErrorKind::InvalidInput,
         _ => ErrorKind::Internal,
-    }
-}
-
-fn archive_error(error: ArchiveError) -> CalloutResponse {
-    match error {
-        ArchiveError::Extract(error) => {
-            error_response(error_kind_for(&error), error.to_string(), false)
-        },
-    }
-}
-
-fn error_response(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
-    CalloutResponse::Error {
-        kind,
-        message,
-        retryable,
     }
 }
 
@@ -353,7 +353,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
             .await;
         let tree = match response {
-            CalloutResponse::ArchiveOpened(t) => t,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree: t }) => t,
             other => panic!("unexpected response: {other:?}"),
         };
 
@@ -393,7 +393,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/"))
             .await
         {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected alpha response: {other:?}"),
         };
         let alpha_root = trees.resolve(alpha).expect("alpha tree-ref resolves");
@@ -406,7 +406,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/"))
             .await
         {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected beta response: {other:?}"),
         };
         let beta_root = trees.resolve(beta).expect("beta tree-ref resolves");
@@ -457,7 +457,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
             .await
         {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
         let root = trees.resolve(tree).expect("tree-ref resolves");
@@ -527,7 +527,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
             .await
         {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
         let first_root = trees.resolve(tree).expect("tree-ref resolves");
@@ -546,7 +546,7 @@ mod tests {
             .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
             .await
         {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
         let second_root = second_trees.resolve(tree).expect("tree-ref resolves");

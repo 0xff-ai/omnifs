@@ -39,7 +39,7 @@ use crate::runtime::archive::ArchiveExecutor;
 use crate::runtime::blob::{BlobExecutor, BlobLimits};
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
-use crate::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
+use crate::runtime::executor::{ErrorKind, HttpExecutor};
 use crate::runtime::inflight::InFlight;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
@@ -653,11 +653,15 @@ impl<'a> Callouts<'a> {
         request: &wit_types::Callout,
     ) -> wit_types::CalloutResult {
         match request {
-            wit_types::Callout::Fetch(req) => self.execute_fetch(index, req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(index, req),
-            wit_types::Callout::FetchBlob(req) => self.execute_blob_fetch(index, req).await,
-            wit_types::Callout::OpenArchive(req) => self.execute_archive_open(index, req).await,
-            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(index, req),
+            wit_types::Callout::Fetch(req) => self.execute_fetch(index, request, req).await,
+            wit_types::Callout::GitOpenRepo(req) => self.execute_git_open(index, request, req),
+            wit_types::Callout::FetchBlob(req) => {
+                self.execute_blob_fetch(index, request, req).await
+            },
+            wit_types::Callout::OpenArchive(req) => {
+                self.execute_archive_open(index, request, req).await
+            },
+            wit_types::Callout::ReadBlob(req) => self.execute_blob_read(index, request, req),
             _ => Self::unsupported(),
         }
     }
@@ -665,6 +669,7 @@ impl<'a> Callouts<'a> {
     async fn execute_fetch(
         &self,
         callout_index: usize,
+        callout: &wit_types::Callout,
         req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "http.fetch";
@@ -680,20 +685,22 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.runtime.http.fetch(req).await;
+        let result = self.runtime.http.fetch(req).await;
         log_callout_response(
             self.operation_id,
             callout_index,
             callout_kind,
+            callout,
             start.elapsed(),
-            &resp,
+            &result,
         );
-        callout_response_to_wit(resp)
+        result
     }
 
     fn execute_git_open(
         &self,
         callout_index: usize,
+        callout: &wit_types::Callout,
         req: &wit_types::GitOpenRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "git.open_repo";
@@ -709,20 +716,22 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.runtime.git.open_repo(&req.cache_key, &req.clone_url);
+        let result = self.runtime.git.open_repo(req);
         log_callout_response(
             self.operation_id,
             callout_index,
             callout_kind,
+            callout,
             start.elapsed(),
-            &resp,
+            &result,
         );
-        git_response_to_wit(resp)
+        result
     }
 
     async fn execute_blob_fetch(
         &self,
         callout_index: usize,
+        callout: &wit_types::Callout,
         req: &wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "blob.fetch";
@@ -738,20 +747,22 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.runtime.blob.fetch(req).await;
+        let result = self.runtime.blob.fetch(req).await;
         log_callout_response(
             self.operation_id,
             callout_index,
             callout_kind,
+            callout,
             start.elapsed(),
-            &resp,
+            &result,
         );
-        blob_response_to_wit(resp)
+        result
     }
 
     async fn execute_archive_open(
         &self,
         callout_index: usize,
+        callout: &wit_types::Callout,
         req: &wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
         let format = ArchiveFormat::from(req.format);
@@ -767,7 +778,7 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self
+        let result = self
             .runtime
             .archive
             .open_archive(req.blob, format, req.strip_prefix.as_deref())
@@ -776,15 +787,17 @@ impl<'a> Callouts<'a> {
             self.operation_id,
             callout_index,
             callout_kind,
+            callout,
             start.elapsed(),
-            &resp,
+            &result,
         );
-        archive_response_to_wit(resp)
+        result
     }
 
     fn execute_blob_read(
         &self,
         callout_index: usize,
+        callout: &wit_types::Callout,
         req: &wit_types::ReadBlobRequest,
     ) -> wit_types::CalloutResult {
         let callout_kind = "blob.read";
@@ -799,15 +812,16 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let resp = self.runtime.blob.read_blob(req.blob, req.offset, req.len);
+        let result = self.runtime.blob.read_blob(req.blob, req.offset, req.len);
         log_callout_response(
             self.operation_id,
             callout_index,
             callout_kind,
+            callout,
             start.elapsed(),
-            &resp,
+            &result,
         );
-        blob_read_to_wit(resp)
+        result
     }
 
     fn unsupported() -> wit_types::CalloutResult {
@@ -833,55 +847,67 @@ fn log_callout_response(
     operation_id: u64,
     callout_index: usize,
     callout_kind: &str,
+    callout: &wit_types::Callout,
     elapsed: std::time::Duration,
-    response: &CalloutResponse,
+    response: &wit_types::CalloutResult,
 ) {
     let elapsed_us = elapsed.as_micros();
     match response {
-        CalloutResponse::HttpResponse {
-            status,
-            headers,
-            body,
-        } => {
+        wit_types::CalloutResult::HttpResponse(r) => {
             info!(
                 target: "omnifs_callout",
                 operation_id,
                 callout_index,
                 callout_kind,
-                status,
-                response_headers = %LogHeaders(headers),
-                response_body_bytes = body.len(),
+                status = r.status,
+                response_headers = %WitHeaders(&r.headers),
+                response_body_bytes = r.body.len(),
                 elapsed_us,
                 "callout response"
             );
         },
-        CalloutResponse::GitRepoOpened(tree_ref) | CalloutResponse::ArchiveOpened(tree_ref) => {
+        wit_types::CalloutResult::GitRepoOpened(r) => {
             info!(
                 target: "omnifs_callout",
                 operation_id,
                 callout_index,
                 callout_kind,
-                tree_ref,
+                tree_ref = r.tree,
                 elapsed_us,
                 "callout response"
             );
         },
-        CalloutResponse::BlobFetched(record) => {
+        wit_types::CalloutResult::ArchiveOpened(r) => {
             info!(
                 target: "omnifs_callout",
                 operation_id,
                 callout_index,
                 callout_kind,
-                blob = record.id,
-                cache_key = %record.cache_key,
-                status = record.status,
-                response_headers = %LogHeaders(&record.response_headers),
-                response_body_bytes = record.size,
+                tree_ref = r.tree,
                 elapsed_us,
                 "callout response"
             );
         },
-        CalloutResponse::BlobRead(bytes) => {
+        wit_types::CalloutResult::BlobFetched(r) => {
+            let cache_key = match callout {
+                wit_types::Callout::FetchBlob(req) => req.cache_key.as_str(),
+                _ => "",
+            };
+            info!(
+                target: "omnifs_callout",
+                operation_id,
+                callout_index,
+                callout_kind,
+                blob = r.blob,
+                cache_key,
+                status = r.status,
+                response_headers = %WitHeaders(&r.response_headers),
+                response_body_bytes = r.size,
+                elapsed_us,
+                "callout response"
+            );
+        },
+        wit_types::CalloutResult::BlobRead(bytes) => {
             info!(
                 target: "omnifs_callout",
                 operation_id,
@@ -892,23 +918,26 @@ fn log_callout_response(
                 "callout response"
             );
         },
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => {
+        wit_types::CalloutResult::CalloutError(e) => {
             warn!(
                 target: "omnifs_callout",
                 operation_id,
                 callout_index,
                 callout_kind,
-                kind = ?kind,
-                retryable,
-                error = %message,
+                kind = ?e.kind,
+                retryable = e.retryable,
+                error = %e.message,
                 elapsed_us,
                 "callout error"
             );
         },
+        _ => warn!(
+            target: "omnifs_callout",
+            operation_id,
+            callout_index,
+            callout_kind,
+            "unhandled callout result variant"
+        ),
     }
 }
 
@@ -940,25 +969,6 @@ impl fmt::Display for LogUrl<'_> {
         }
 
         write!(f, "{parsed}")
-    }
-}
-
-struct LogHeaders<'a>(&'a [(String, String)]);
-
-impl fmt::Display for LogHeaders<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, (name, value)) in self.0.iter().enumerate() {
-            if index > 0 {
-                f.write_char(',')?;
-            }
-            write!(f, "{name}=")?;
-            if is_sensitive_header(name) {
-                f.write_str("<redacted>")?;
-            } else {
-                write_truncated_for_log(f, value, 256)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1027,12 +1037,15 @@ mod callout_log_tests {
 
     #[test]
     fn headers_for_log_redacts_credentials() {
-        let logged = LogHeaders(&[
-            (
-                "User-Agent".to_string(),
-                "omnifs-provider-arxiv/0.1.0".to_string(),
-            ),
-            ("Authorization".to_string(), "Bearer secret".to_string()),
+        let logged = WitHeaders(&[
+            wit_types::Header {
+                name: "User-Agent".to_string(),
+                value: "omnifs-provider-arxiv/0.1.0".to_string(),
+            },
+            wit_types::Header {
+                name: "Authorization".to_string(),
+                value: "Bearer secret".to_string(),
+            },
         ])
         .to_string();
 
@@ -1670,120 +1683,4 @@ fn absolute_mount_path(path: &str) -> String {
     } else {
         format!("/{path}")
     }
-}
-
-fn callout_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
-    match resp {
-        CalloutResponse::HttpResponse {
-            status,
-            headers,
-            body,
-        } => wit_types::CalloutResult::HttpResponse(wit_types::HttpResponse {
-            status,
-            headers: headers
-                .into_iter()
-                .map(|(name, value)| wit_types::Header { name, value })
-                .collect(),
-            body,
-        }),
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: kind.into(),
-            message,
-            retryable,
-        }),
-        _ => unexpected("unexpected non-http response in http callout"),
-    }
-}
-
-fn git_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
-    match resp {
-        CalloutResponse::GitRepoOpened(id) => {
-            wit_types::CalloutResult::GitRepoOpened(wit_types::GitRepoInfo { repo: id, tree: id })
-        },
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: kind.into(),
-            message,
-            retryable,
-        }),
-        _ => unexpected("unexpected response in git callout"),
-    }
-}
-
-fn blob_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
-    match resp {
-        CalloutResponse::BlobFetched(record) => {
-            wit_types::CalloutResult::BlobFetched(wit_types::BlobFetched {
-                blob: record.id,
-                size: record.size,
-                content_type: record.content_type,
-                etag: record.etag,
-                status: record.status,
-                response_headers: record
-                    .response_headers
-                    .into_iter()
-                    .map(|(name, value)| wit_types::Header { name, value })
-                    .collect(),
-            })
-        },
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: kind.into(),
-            message,
-            retryable,
-        }),
-        _ => unexpected("unexpected response in fetch-blob callout"),
-    }
-}
-
-fn archive_response_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
-    match resp {
-        CalloutResponse::ArchiveOpened(tree) => {
-            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree })
-        },
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: kind.into(),
-            message,
-            retryable,
-        }),
-        _ => unexpected("unexpected response in open-archive callout"),
-    }
-}
-
-fn blob_read_to_wit(resp: CalloutResponse) -> wit_types::CalloutResult {
-    match resp {
-        CalloutResponse::BlobRead(bytes) => wit_types::CalloutResult::BlobRead(bytes),
-        CalloutResponse::Error {
-            kind,
-            message,
-            retryable,
-        } => wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-            kind: kind.into(),
-            message,
-            retryable,
-        }),
-        _ => unexpected("unexpected response in read-blob callout"),
-    }
-}
-
-fn unexpected(message: &str) -> wit_types::CalloutResult {
-    wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
-        kind: wit_types::ErrorKind::Internal,
-        message: message.to_string(),
-        retryable: false,
-    })
 }
