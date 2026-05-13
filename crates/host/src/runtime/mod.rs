@@ -14,6 +14,7 @@ pub mod executor;
 pub mod git;
 pub mod http_headers;
 pub mod inflight;
+mod instance;
 mod invalidation;
 pub mod manifest;
 pub mod operation_ids;
@@ -22,7 +23,6 @@ pub mod tools;
 pub mod tree_refs;
 pub(crate) mod wasm;
 
-use crate::Provider;
 use crate::auth::AuthManager;
 use crate::cache;
 use crate::cache::blobs::BlobCache;
@@ -41,6 +41,7 @@ use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::executor::{ErrorKind, HttpExecutor};
 use crate::runtime::inflight::InFlight;
+use crate::runtime::instance::ProviderInstance;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
 use crate::runtime::operation_ids::OperationIds;
@@ -52,8 +53,8 @@ use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{Instrument, debug, error, info, trace, warn};
-use wasmtime::component::{Component, HasData, Linker, ResourceTable};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime::component::{HasData, ResourceTable};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 const ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -65,9 +66,7 @@ pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
 /// Manages the Wasmtime store, routes callouts, and handles async
 /// continuations with operation ID allocation.
 pub struct ProviderRuntime {
-    store: Mutex<wasmtime::Store<HostState>>,
-    bindings: Provider,
-    config_bytes: Vec<u8>,
+    instance: ProviderInstance,
     operation_ids: OperationIds,
     http: HttpExecutor,
     git: git::GitExecutor,
@@ -151,6 +150,21 @@ impl RuntimeError {
     }
 }
 
+impl From<RuntimeError> for RuntimeBuildError {
+    fn from(err: RuntimeError) -> Self {
+        match err {
+            RuntimeError::Wasmtime(e) => Self::Wasmtime(e),
+            RuntimeError::ProviderProtocol(msg) => Self::ProviderProtocol(msg),
+            RuntimeError::ProviderError(e) => {
+                Self::ProviderProtocol(format!("provider error during build: {e:?}"))
+            },
+            RuntimeError::UnexpectedOpResult { op, result } => Self::ProviderProtocol(format!(
+                "{op:?} returned unexpected result during build: {result:?}"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Op {
     LookupChild {
@@ -215,37 +229,18 @@ impl ProviderRuntime {
         mount_name: &str,
         extractor: Arc<ArchiveExtractorComponent>,
     ) -> std::result::Result<Self, RuntimeBuildError> {
-        let mut linker = Linker::<HostState>::new(engine);
-
-        wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
-        Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
-
-        let component = Component::from_file(engine, wasm_path)?;
-        let wasi = WasiCtxBuilder::new().build();
-        let mut store = wasmtime::Store::new(
-            engine,
-            HostState {
-                wasi,
-                table: ResourceTable::new(),
-            },
-        );
-
-        let bindings = Provider::instantiate(&mut store, &component, &linker)?;
+        let config_bytes = config.config_bytes();
+        let instance = ProviderInstance::new(engine, wasm_path, config_bytes)?;
 
         // Query the provider's declared capabilities and incorporate needs_git.
-        let provider_caps = bindings
-            .omnifs_provider_lifecycle()
-            .call_capabilities(&mut store)?;
+        let provider_caps = instance.capabilities()?;
 
         let grants = CapabilityGrants::from_config(config, provider_caps.needs_git);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
         // Validate instance config against the provider's declared schema.
-        let wit_schema = bindings
-            .omnifs_provider_lifecycle()
-            .call_get_config_schema(&mut store)?;
+        let wit_schema = instance.config_schema()?;
         validate_instance_config(wit_schema.as_deref(), config, mount_name)?;
-        let config_bytes = config.config_bytes();
         let auth = if config.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
@@ -303,9 +298,7 @@ impl ProviderRuntime {
             blob_limits,
         )?;
         Ok(Self {
-            store: Mutex::new(store),
-            bindings,
-            config_bytes,
+            instance,
             operation_ids: OperationIds::new(),
             http: HttpExecutor::new(auth, capability)?,
             git,
@@ -322,46 +315,24 @@ impl ProviderRuntime {
     }
 
     pub fn initialize(&self) -> Result<wit_types::OpResult> {
-        let id = self.operation_ids.allocate();
-        let op = Op::Initialize;
-        match self.start_op(&op, id)? {
-            wit_types::ProviderStep::Returned(ret) => self.finish_provider_return(&op, ret),
-            wit_types::ProviderStep::Suspended(_) => Err(RuntimeError::ProviderProtocol(
-                "initialize suspended with callouts".to_string(),
-            )),
-        }
+        let ret = self.instance.initialize()?;
+        self.finish_provider_return(&Op::Initialize, ret)
     }
 
     pub fn shutdown(&self) -> Result<()> {
-        let mut store = self.store.lock();
-        self.bindings
-            .omnifs_provider_lifecycle()
-            .call_shutdown(&mut *store)?;
-        Ok(())
+        self.instance.shutdown()
     }
 
     pub fn config_schema(&self) -> Result<Option<String>> {
-        let mut store = self.store.lock();
-        Ok(self
-            .bindings
-            .omnifs_provider_lifecycle()
-            .call_get_config_schema(&mut *store)?)
+        self.instance.config_schema()
     }
 
     pub fn capabilities(&self) -> Result<wit_types::RequestedCapabilities> {
-        let mut store = self.store.lock();
-        Ok(self
-            .bindings
-            .omnifs_provider_lifecycle()
-            .call_capabilities(&mut *store)?)
+        self.instance.capabilities()
     }
 
     pub fn call_close_file(&self, handle: u64) -> Result<()> {
-        let mut store = self.store.lock();
-        self.bindings
-            .omnifs_provider_browse()
-            .call_close_file(&mut *store, handle)?;
-        Ok(())
+        self.instance.close_file(handle)
     }
 
     pub fn cache_get(
@@ -526,45 +497,9 @@ impl ProviderRuntime {
         .await
     }
 
-    fn start_op(&self, op: &Op, id: u64) -> Result<wit_types::ProviderStep> {
-        let mut store = self.store.lock();
-        let browse = self.bindings.omnifs_provider_browse();
-        match op {
-            Op::LookupChild { parent_path, name } => browse
-                .call_lookup_child(&mut *store, id, parent_path, name)
-                .map_err(Into::into),
-            Op::ListChildren { path } => browse
-                .call_list_children(&mut *store, id, path)
-                .map_err(Into::into),
-            Op::ReadFile { path } => browse
-                .call_read_file(&mut *store, id, path)
-                .map_err(Into::into),
-            Op::OpenFile { path } => browse
-                .call_open_file(&mut *store, id, path)
-                .map_err(Into::into),
-            Op::ReadChunk {
-                handle,
-                offset,
-                length,
-            } => browse
-                .call_read_chunk(&mut *store, id, *handle, *offset, *length)
-                .map_err(Into::into),
-            Op::Initialize => Ok(wit_types::ProviderStep::Returned(
-                self.bindings
-                    .omnifs_provider_lifecycle()
-                    .call_initialize(&mut *store, &self.config_bytes)?,
-            )),
-            Op::OnEvent { event } => self
-                .bindings
-                .omnifs_provider_notify()
-                .call_on_event(&mut *store, id, event)
-                .map_err(Into::into),
-        }
-    }
-
     pub(super) async fn run_op(&self, op: Op) -> Result<wit_types::OpResult> {
         let id = self.operation_ids.allocate();
-        let mut step = self.start_op(&op, id)?;
+        let mut step = self.instance.start_op(&op, id)?;
         loop {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
@@ -577,7 +512,7 @@ impl ProviderRuntime {
                         ));
                     }
                     let results = self.dispatch_callouts(id, &callouts).await;
-                    step = self.resume_provider(id, results)?;
+                    step = self.instance.resume(id, results)?;
                 },
             }
         }
@@ -649,19 +584,6 @@ impl ProviderRuntime {
         let result = callout_internal("callout type not yet implemented");
         record_outcome(&result);
         result
-    }
-
-    #[allow(clippy::needless_pass_by_value)] // generated WIT binding requires &Vec
-    fn resume_provider(
-        &self,
-        id: u64,
-        results: Vec<wit_types::CalloutResult>,
-    ) -> Result<wit_types::ProviderStep> {
-        let mut store = self.store.lock();
-        Ok(self
-            .bindings
-            .omnifs_provider_continuation()
-            .call_resume(&mut *store, id, &results)?)
     }
 
     fn finish_provider_return(
