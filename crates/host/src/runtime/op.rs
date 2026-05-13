@@ -387,7 +387,7 @@ mod attr_contract_tests {
         ));
 
         let error = validate_operation_result(&result).unwrap_err();
-        assert!(error.contains("inline bytes require Size::Exact"));
+        assert!(error.contains("inline bytes require FileSize::Exact"));
     }
 
     #[test]

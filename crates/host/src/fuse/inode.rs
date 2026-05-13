@@ -3,8 +3,9 @@
 //! Manages the mapping from virtual paths to inode numbers with
 //! deduplication and stale entry updates.
 
-use crate::cache::{EntryKindCache, EntryMeta, FileAttrsCache};
+use crate::cache::{EntryMeta, FileAttrsCache};
 use crate::fuse::FuseFs;
+use crate::omnifs::provider::types as wit_types;
 use crate::path_key::PathKey;
 use fuser::{FileAttr, FileType, INodeNo};
 use std::path::PathBuf;
@@ -26,7 +27,7 @@ fn current_gid() -> u32 {
 pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
     pub(crate) path: String,
-    pub(crate) kind: EntryKindCache,
+    pub(crate) kind: wit_types::EntryKind,
     pub(crate) attrs: Option<FileAttrsCache>,
     pub(crate) size: u64,
     /// When set, FUSE operations for this inode serve directly from the backing
@@ -47,7 +48,7 @@ impl FuseFs {
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKindCache,
+        kind: wit_types::EntryKind,
         size: u64,
     ) -> u64 {
         self.get_or_alloc_ino_inner(mount_name, path, kind, None, size, None)
@@ -67,7 +68,7 @@ impl FuseFs {
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKindCache,
+        kind: wit_types::EntryKind,
         size: u64,
         backing_path: PathBuf,
     ) -> u64 {
@@ -78,7 +79,7 @@ impl FuseFs {
         &self,
         mount_name: &str,
         path: &str,
-        kind: EntryKindCache,
+        kind: wit_types::EntryKind,
         attrs: Option<FileAttrsCache>,
         size: u64,
         backing_path: Option<PathBuf>,
@@ -96,7 +97,7 @@ impl FuseFs {
                     let merged_attrs =
                         merge_inode_attrs(entry.attrs.as_ref(), incoming_attrs.clone());
                     let merged_size = merged_attrs.as_ref().map_or(size, FileAttrsCache::st_size);
-                    entry.kind = kind;
+                    entry.kind = kind.clone();
                     entry.attrs = merged_attrs;
                     entry.size = merged_size;
                     if backing_path.is_some() {
@@ -217,71 +218,91 @@ fn should_preserve_learned_exact_size(
     existing: &FileAttrsCache,
     incoming: &FileAttrsCache,
 ) -> bool {
-    matches!(existing.size, crate::cache::SizeCache::Exact(_))
-        && !matches!(incoming.size, crate::cache::SizeCache::Exact(_))
-        && existing.bytes == incoming.bytes
+    matches!(existing.size, wit_types::FileSize::Exact(_))
+        && !matches!(incoming.size, wit_types::FileSize::Exact(_))
+        && proj_bytes_equal(&existing.bytes, &incoming.bytes)
         && existing.stability == incoming.stability
         && existing.version_token == incoming.version_token
-        && (matches!(existing.stability, crate::cache::StabilityCache::Immutable)
-            || (matches!(existing.stability, crate::cache::StabilityCache::Mutable)
+        && (matches!(existing.stability, wit_types::Stability::Immutable)
+            || (matches!(existing.stability, wit_types::Stability::Mutable)
                 && existing.version_token.is_some()))
+}
+
+// `wit_types::ProjBytes` does not derive `PartialEq` (bindgen `additional_derives`
+// would need to opt every variant in). Compare structurally for the cache's
+// learned-size promotion check.
+fn proj_bytes_equal(a: &wit_types::ProjBytes, b: &wit_types::ProjBytes) -> bool {
+    match (a, b) {
+        (wit_types::ProjBytes::Inline(x), wit_types::ProjBytes::Inline(y)) => x == y,
+        (wit_types::ProjBytes::Deferred(x), wit_types::ProjBytes::Deferred(y)) => x == y,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{BytesCache, ReadModeCache, SizeCache, StabilityCache};
 
-    fn attrs(size: SizeCache, version_token: Option<&str>) -> FileAttrsCache {
+    fn attrs(size: wit_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
         FileAttrsCache {
             size,
-            bytes: BytesCache::Deferred(ReadModeCache::Full),
-            stability: StabilityCache::Mutable,
+            bytes: wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full),
+            stability: wit_types::Stability::Mutable,
             version_token: version_token.map(str::to_string),
         }
     }
 
+    // `wit_types::FileSize` doesn't derive PartialEq; compare structurally for tests.
+    fn size_eq(a: &wit_types::FileSize, b: &wit_types::FileSize) -> bool {
+        matches!(
+            (a, b),
+            (wit_types::FileSize::Exact(x), wit_types::FileSize::Exact(y)) if x == y
+        ) || matches!(
+            (a, b),
+            (wit_types::FileSize::NonZero, wit_types::FileSize::NonZero)
+                | (wit_types::FileSize::Unknown, wit_types::FileSize::Unknown)
+        )
+    }
+
+    fn attrs_eq(a: &FileAttrsCache, b: &FileAttrsCache) -> bool {
+        size_eq(&a.size, &b.size)
+            && a.stability == b.stability
+            && a.version_token == b.version_token
+    }
+
     #[test]
     fn learned_exact_survives_same_version_non_exact_refresh() {
-        let existing = attrs(SizeCache::Exact(42), Some("v1"));
-        let incoming = attrs(SizeCache::Unknown, Some("v1"));
+        let existing = attrs(wit_types::FileSize::Exact(42), Some("v1"));
+        let incoming = attrs(wit_types::FileSize::Unknown, Some("v1"));
 
-        assert_eq!(
-            merge_inode_attrs(Some(&existing), Some(incoming)),
-            Some(existing)
-        );
+        let merged = merge_inode_attrs(Some(&existing), Some(incoming)).unwrap();
+        assert!(attrs_eq(&merged, &existing));
     }
 
     #[test]
     fn incoming_exact_replaces_learned_exact() {
-        let existing = attrs(SizeCache::Exact(42), Some("v1"));
-        let incoming = attrs(SizeCache::Exact(7), Some("v1"));
+        let existing = attrs(wit_types::FileSize::Exact(42), Some("v1"));
+        let incoming = attrs(wit_types::FileSize::Exact(7), Some("v1"));
 
-        assert_eq!(
-            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
-            Some(incoming)
-        );
+        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
+        assert!(attrs_eq(&merged, &incoming));
     }
 
     #[test]
     fn version_change_drops_learned_exact() {
-        let existing = attrs(SizeCache::Exact(42), Some("v1"));
-        let incoming = attrs(SizeCache::Unknown, Some("v2"));
+        let existing = attrs(wit_types::FileSize::Exact(42), Some("v1"));
+        let incoming = attrs(wit_types::FileSize::Unknown, Some("v2"));
 
-        assert_eq!(
-            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
-            Some(incoming)
-        );
+        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
+        assert!(attrs_eq(&merged, &incoming));
     }
 
     #[test]
     fn unversioned_mutable_refresh_drops_learned_exact() {
-        let existing = attrs(SizeCache::Exact(42), None);
-        let incoming = attrs(SizeCache::Unknown, None);
+        let existing = attrs(wit_types::FileSize::Exact(42), None);
+        let incoming = attrs(wit_types::FileSize::Unknown, None);
 
-        assert_eq!(
-            merge_inode_attrs(Some(&existing), Some(incoming.clone())),
-            Some(incoming)
-        );
+        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
+        assert!(attrs_eq(&merged, &incoming));
     }
 }

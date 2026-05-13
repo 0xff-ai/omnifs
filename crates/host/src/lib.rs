@@ -22,7 +22,7 @@ pub mod runtime;
 wasmtime::component::bindgen!({
     path: "../../wit",
     world: "provider",
-    additional_derives: [Clone],
+    additional_derives: [Clone, serde::Serialize, serde::Deserialize],
 });
 
 pub(crate) mod extractor_bindings {

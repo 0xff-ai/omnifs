@@ -3,8 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use omnifs_host::cache::{
-    AttrPayload, CacheRecord, DirentsPayload, EntryKindCache, FilePayload, LookupPayload,
-    RecordKind,
+    AttrPayload, CacheRecord, DirentsPayload, FilePayload, LookupPayload, RecordKind,
 };
 use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{
@@ -523,7 +522,7 @@ async fn test_lookup_projects_siblings_into_cache() {
     else {
         panic!("expected positive status lookup");
     };
-    assert_eq!(status_meta.kind, EntryKindCache::File);
+    assert!(status_meta.is_file());
     assert_eq!(status_meta.st_size(), 5);
 
     let status_attr = harness
@@ -534,7 +533,7 @@ async fn test_lookup_projects_siblings_into_cache() {
     else {
         panic!("expected status attr payload");
     };
-    assert_eq!(status_meta.kind, EntryKindCache::File);
+    assert!(status_meta.is_file());
     assert_eq!(status_meta.st_size(), 5);
 
     let comments_lookup = harness
@@ -546,7 +545,7 @@ async fn test_lookup_projects_siblings_into_cache() {
     else {
         panic!("expected positive comments lookup");
     };
-    assert_eq!(comments_meta.kind, EntryKindCache::Directory);
+    assert!(comments_meta.is_directory());
     assert_eq!(comments_meta.st_size(), 0);
 }
 

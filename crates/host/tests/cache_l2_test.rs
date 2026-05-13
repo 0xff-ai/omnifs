@@ -1,6 +1,7 @@
 use omnifs_host::cache::l2::Cache;
 use omnifs_host::cache::{
     AttrPayload, BatchRecord, CacheRecord, EntryMeta, Key, LookupPayload, RecordKind,
+    SCHEMA_VERSION,
 };
 
 #[test]
@@ -26,6 +27,37 @@ fn l2_put_get_metadata() {
     let got = got.unwrap();
     assert_eq!(got.kind, RecordKind::Attr);
     assert_eq!(got.payload, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
+}
+
+#[test]
+fn l2_drops_records_from_prior_schema_version() {
+    // Manually write a record whose header advertises the prior schema
+    // (v4). The reader must treat it as a miss so the runtime re-fetches
+    // from the provider.
+    use redb::{Database, TableDefinition};
+    const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("browse.redb");
+
+    {
+        let db = Database::create(&db_path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(METADATA_TABLE).unwrap();
+            // schema_version byte=4, kind byte=Attr=1, no payload.
+            let stale = [SCHEMA_VERSION - 1, 1u8];
+            table.insert("ghost/path", stale.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let l2 = Cache::open(&db_path).unwrap();
+    let got = l2.get(&Key::new("ghost/path", RecordKind::Attr)).unwrap();
+    assert!(
+        got.is_none(),
+        "stale schema records must be treated as miss"
+    );
 }
 
 #[test]

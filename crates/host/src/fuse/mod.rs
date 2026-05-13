@@ -7,11 +7,9 @@
 pub(crate) mod inode;
 
 use crate::cache::l0::Cache as L0Cache;
-use crate::cache::{
-    self, BytesCache, CacheRecord, EntryKindCache, EntryMeta, FilePayload, ReadModeCache,
-    RecordKind, SizeCache,
-};
+use crate::cache::{self, CacheRecord, EntryMeta, FilePayload, RecordKind};
 use crate::cache::{FileAttrsCache, Key};
+use crate::omnifs::provider::types as wit_types;
 use crate::omnifs::provider::types::{
     ErrorKind, ListChildrenResult, LookupChildResult, ProviderError, ReadFileBytes, ReadFileResult,
 };
@@ -43,7 +41,23 @@ const TTL: Duration = Duration::from_secs(u32::MAX as u64);
 const TTL_DYNAMIC: Duration = Duration::from_secs(0);
 const ROOT_INO: u64 = 1;
 
-type DirSnapshot = Vec<(u64, String, EntryKindCache)>;
+type DirSnapshot = Vec<(u64, String, wit_types::EntryKind)>;
+
+/// Construct a placeholder `wit_types::EntryKind::File(FileProj)` for FUSE
+/// snapshot/inode use where only the kind discriminator matters and no
+/// real projection data is available (e.g. from a backing-path read or a
+/// pre-projection allocation). The embedded `FileProj` is never inspected;
+/// only the variant tag is used for `FileType` resolution.
+fn file_kind_placeholder() -> wit_types::EntryKind {
+    wit_types::EntryKind::File(wit_types::FileProj {
+        attrs: wit_types::FileAttrs {
+            size: wit_types::FileSize::Unknown,
+            stability: wit_types::Stability::Mutable,
+            version_token: None,
+        },
+        bytes: wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full),
+    })
+}
 
 #[derive(Clone)]
 struct RangedFileHandle {
@@ -163,7 +177,7 @@ impl FuseFs {
         let root_entry = NodeEntry {
             mount_name: registry.root_mount_name().unwrap_or("").to_string(),
             path: String::new(),
-            kind: EntryKindCache::Directory,
+            kind: wit_types::EntryKind::Directory,
             attrs: None,
             size: 0,
             backing_path: None,
@@ -274,21 +288,21 @@ impl FuseFs {
         });
     }
 
-    fn attr_for_kind(&self, ino: u64, kind: EntryKindCache, size: u64) -> FileAttr {
+    fn attr_for_kind(&self, ino: u64, kind: &wit_types::EntryKind, size: u64) -> FileAttr {
         match kind {
-            EntryKindCache::Directory => self.dir_attr(ino),
-            EntryKindCache::File => self.file_attr(ino, size),
+            wit_types::EntryKind::Directory => self.dir_attr(ino),
+            wit_types::EntryKind::File(_) => self.file_attr(ino, size),
         }
     }
 
     fn attr_for_inode_or_meta(
         &self,
         ino: u64,
-        fallback_kind: EntryKindCache,
+        fallback_kind: &wit_types::EntryKind,
         fallback_size: u64,
     ) -> FileAttr {
         if let Some(entry) = self.inodes.get(&ino) {
-            return self.attr_for_kind(ino, entry.kind, entry.size);
+            return self.attr_for_kind(ino, &entry.kind, entry.size);
         }
         self.attr_for_kind(ino, fallback_kind, fallback_size)
     }
@@ -297,8 +311,8 @@ impl FuseFs {
         let Some(attrs) = attrs else {
             return TTL;
         };
-        if !matches!(attrs.size, SizeCache::Exact(_))
-            || !matches!(attrs.stability, cache::StabilityCache::Immutable)
+        if !matches!(attrs.size, wit_types::FileSize::Exact(_))
+            || !matches!(attrs.stability, wit_types::Stability::Immutable)
         {
             return TTL_DYNAMIC;
         }
@@ -332,7 +346,7 @@ impl FuseFs {
                 debug!(target: "omnifs_cache", kind = tier, op = "lookup", mount = mount_name, "cache hit");
                 let ino = self.get_or_alloc_ino_meta(mount_name, child_path, meta.clone());
                 Ok((
-                    self.attr_for_inode_or_meta(ino, meta.kind, meta.st_size()),
+                    self.attr_for_inode_or_meta(ino, &meta.kind, meta.st_size()),
                     Self::ttl_for_meta(meta),
                 ))
             },
@@ -367,7 +381,7 @@ impl FuseFs {
                 // handler at the per-child path.
                 let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, dirent.meta.clone());
                 return Ok(Some((
-                    self.attr_for_inode_or_meta(ino, dirent.meta.kind, dirent.meta.st_size()),
+                    self.attr_for_inode_or_meta(ino, &dirent.meta.kind, dirent.meta.st_size()),
                     Self::ttl_for_meta(&dirent.meta),
                 )));
             }
@@ -403,7 +417,7 @@ impl FuseFs {
             let ino = *ino_ref;
             drop(ino_ref);
             if let Some(entry) = self.inodes.get(&ino) {
-                let attr = self.attr_for_kind(ino, entry.kind, entry.size);
+                let attr = self.attr_for_kind(ino, &entry.kind, entry.size);
                 let ttl = Self::ttl_for_entry(&entry);
                 return Ok(Some((attr, ttl)));
             }
@@ -433,7 +447,7 @@ impl FuseFs {
                 let ino = self.get_or_alloc_ino_backing(
                     mount_name,
                     &child_path,
-                    EntryKindCache::Directory,
+                    wit_types::EntryKind::Directory,
                     0,
                     real_root,
                 );
@@ -449,7 +463,7 @@ impl FuseFs {
 
                 let meta = EntryMeta::from(&entry.target.kind);
                 let size = meta.st_size();
-                let kind = meta.kind;
+                let kind = meta.kind.clone();
                 let ttl = Self::ttl_for_meta(&meta);
                 let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, meta.clone());
                 let payload = cache::LookupPayload::Positive(meta);
@@ -458,7 +472,7 @@ impl FuseFs {
                     runtime.cache_put(&child_path, RecordKind::Lookup, None, &record);
                     self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
-                Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
+                Ok((self.attr_for_inode_or_meta(ino, &kind, size), ttl))
             },
             Ok(LookupChildResult::NotFound) => {
                 let neg = cache::LookupPayload::Negative;
@@ -509,17 +523,22 @@ impl FuseFs {
                 continue;
             };
             let kind = if meta.is_dir() {
-                EntryKindCache::Directory
+                wit_types::EntryKind::Directory
             } else {
-                EntryKindCache::File
+                file_kind_placeholder()
             };
             let child_path = if path.is_empty() {
                 fname_str.to_string()
             } else {
                 format!("{path}/{fname_str}")
             };
-            let child_ino =
-                self.get_or_alloc_ino_backing(mount_name, &child_path, kind, meta.len(), child_rp);
+            let child_ino = self.get_or_alloc_ino_backing(
+                mount_name,
+                &child_path,
+                kind.clone(),
+                meta.len(),
+                child_rp,
+            );
             snapshot.push((child_ino, fname_str.to_string(), kind));
         }
         Ok(snapshot)
@@ -542,7 +561,7 @@ impl FuseFs {
                     format!("{path}/{}", e.name)
                 };
                 let child_ino = self.get_or_alloc_ino_meta(mount_name, &child_path, e.meta.clone());
-                (child_ino, e.name.clone(), e.meta.kind)
+                (child_ino, e.name.clone(), e.meta.kind.clone())
             })
             .collect()
     }
@@ -626,7 +645,7 @@ impl FuseFs {
                     let meta = EntryMeta::from(&e.kind);
                     let child_ino =
                         self.get_or_alloc_ino_meta(mount_name, &child_path, meta.clone());
-                    snapshot.push((child_ino, e.name.clone(), meta.kind));
+                    snapshot.push((child_ino, e.name.clone(), meta.kind.clone()));
                     dirent_records.push(cache::DirentRecord {
                         name: e.name.clone(),
                         meta,
@@ -757,7 +776,7 @@ impl FuseFs {
         self.drain_and_evict_pending(&target.mount_name);
 
         if let Some(attrs) = target.attrs.as_ref()
-            && matches!(attrs.size, SizeCache::Exact(0))
+            && matches!(attrs.size, wit_types::FileSize::Exact(0))
         {
             reply.data(&[]);
             return;
@@ -914,7 +933,10 @@ impl FuseFs {
     fn open_ranged_file(&self, target: &FullReadTarget) -> Result<Option<FopenFlags>, Errno> {
         if target.backing_path.is_some()
             || !target.attrs.as_ref().is_some_and(|attrs| {
-                matches!(&attrs.bytes, BytesCache::Deferred(ReadModeCache::Ranged))
+                matches!(
+                    &attrs.bytes,
+                    wit_types::ProjBytes::Deferred(wit_types::ReadMode::Ranged)
+                )
             })
         {
             return Ok(None);
@@ -1008,7 +1030,7 @@ impl FuseFs {
     }
 
     fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
-        if matches!(attrs.stability, cache::StabilityCache::Volatile) {
+        if matches!(attrs.stability, wit_types::Stability::Volatile) {
             return;
         }
         let Some(mut entry) = self.inodes.get_mut(&ino) else {
@@ -1031,7 +1053,7 @@ impl Filesystem for FuseFs {
         // Synthetic root (no root_mount): mount points are children.
         if parent.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
             if self.registry.get(name_str).is_some() {
-                let ino = self.get_or_alloc_ino(name_str, "", EntryKindCache::Directory, 0);
+                let ino = self.get_or_alloc_ino(name_str, "", wit_types::EntryKind::Directory, 0);
                 reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
                 return;
             }
@@ -1056,9 +1078,9 @@ impl Filesystem for FuseFs {
             match std::fs::symlink_metadata(&child_rp) {
                 Ok(meta) => {
                     let kind = if meta.is_dir() {
-                        EntryKindCache::Directory
+                        wit_types::EntryKind::Directory
                     } else {
-                        EntryKindCache::File
+                        file_kind_placeholder()
                     };
                     let ino = self.get_or_alloc_ino_backing(
                         &mount_name,
@@ -1130,9 +1152,9 @@ impl Filesystem for FuseFs {
             return;
         }
 
-        let attr = match entry.kind {
-            EntryKindCache::Directory => self.dir_attr(ino.0),
-            EntryKindCache::File => self.file_attr(ino.0, entry.size),
+        let attr = match &entry.kind {
+            wit_types::EntryKind::Directory => self.dir_attr(ino.0),
+            wit_types::EntryKind::File(_) => self.file_attr(ino.0, entry.size),
         };
         let ttl = Self::ttl_for_entry(&entry);
         reply.attr(&ttl, &attr);
@@ -1149,8 +1171,8 @@ impl Filesystem for FuseFs {
             let mounts = self.registry.mounts();
             let mut entries = Vec::new();
             for m in mounts {
-                let child_ino = self.get_or_alloc_ino(&m, "", EntryKindCache::Directory, 0);
-                entries.push((child_ino, m, EntryKindCache::Directory));
+                let child_ino = self.get_or_alloc_ino(&m, "", wit_types::EntryKind::Directory, 0);
+                entries.push((child_ino, m, wit_types::EntryKind::Directory));
             }
             self.dir_snapshots.insert(fh, entries);
             reply.opened(FuseFileHandle(fh), FopenFlags::empty());
@@ -1228,8 +1250,8 @@ impl Filesystem for FuseFs {
         let skip = offset as usize;
         for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(skip) {
             let ftype = match kind {
-                EntryKindCache::Directory => fuser::FileType::Directory,
-                EntryKindCache::File => fuser::FileType::RegularFile,
+                wit_types::EntryKind::Directory => fuser::FileType::Directory,
+                wit_types::EntryKind::File(_) => fuser::FileType::RegularFile,
             };
             let buffer_full = reply.add(INodeNo(*ino), (index + 1) as u64, ftype, name.as_str());
             if buffer_full {
@@ -1413,8 +1435,10 @@ fn data_slice(data: &[u8], offset: u64, size: u32) -> &[u8] {
 }
 
 fn should_prefetch_full_on_open(attrs: &FileAttrsCache) -> bool {
-    matches!(attrs.bytes, BytesCache::Deferred(ReadModeCache::Full))
-        && !matches!(attrs.size, SizeCache::Exact(_))
+    matches!(
+        attrs.bytes,
+        wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full)
+    ) && !matches!(attrs.size, wit_types::FileSize::Exact(_))
 }
 
 fn learned_full_read_attrs(attrs: FileAttrsCache, content_len: usize) -> FileAttrsCache {
@@ -1422,8 +1446,8 @@ fn learned_full_read_attrs(attrs: FileAttrsCache, content_len: usize) -> FileAtt
         return attrs;
     }
     match attrs.size {
-        SizeCache::Exact(_) => attrs,
-        SizeCache::NonZero | SizeCache::Unknown => {
+        wit_types::FileSize::Exact(_) => attrs,
+        wit_types::FileSize::NonZero | wit_types::FileSize::Unknown => {
             attrs.with_exact_size(u64::try_from(content_len).unwrap_or(u64::MAX))
         },
     }
@@ -1434,8 +1458,10 @@ fn learned_ranged_eof_attrs(attrs: FileAttrsCache, eof_size: u64) -> Option<File
         return None;
     }
     match attrs.size {
-        SizeCache::Exact(_) => None,
-        SizeCache::NonZero | SizeCache::Unknown => Some(attrs.with_exact_size(eof_size)),
+        wit_types::FileSize::Exact(_) => None,
+        wit_types::FileSize::NonZero | wit_types::FileSize::Unknown => {
+            Some(attrs.with_exact_size(eof_size))
+        },
     }
 }
 
@@ -1451,7 +1477,10 @@ fn opened_file_attrs(
         );
         return Err(Errno::EIO);
     };
-    if !matches!(projected.bytes, BytesCache::Deferred(ReadModeCache::Ranged)) {
+    if !matches!(
+        projected.bytes,
+        wit_types::ProjBytes::Deferred(wit_types::ReadMode::Ranged)
+    ) {
         warn!(
             path,
             "open-file requires proj-bytes::deferred(read-mode::ranged)"
@@ -1459,27 +1488,27 @@ fn opened_file_attrs(
         return Err(Errno::EIO);
     }
     Ok(FileAttrsCache {
-        size: SizeCache::from(&opened.size),
+        size: opened.size,
         bytes: projected.bytes.clone(),
-        stability: cache::StabilityCache::from(opened.stability),
+        stability: opened.stability,
         version_token: opened.version_token.clone(),
     })
 }
 
 fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
     match attrs.stability {
-        cache::StabilityCache::Immutable | cache::StabilityCache::Mutable => true,
-        cache::StabilityCache::Volatile => false,
+        wit_types::Stability::Immutable | wit_types::Stability::Mutable => true,
+        wit_types::Stability::Volatile => false,
     }
 }
 
 fn full_read_matches_attrs(attrs: &FileAttrsCache, content_len: usize) -> bool {
     match attrs.size {
-        SizeCache::Exact(size) => {
+        wit_types::FileSize::Exact(size) => {
             u64::try_from(content_len).is_ok_and(|content_len| content_len == size)
         },
-        SizeCache::NonZero => content_len > 0,
-        SizeCache::Unknown => true,
+        wit_types::FileSize::NonZero => content_len > 0,
+        wit_types::FileSize::Unknown => true,
     }
 }
 
@@ -1489,7 +1518,7 @@ fn file_payload_for_attrs(
 ) -> Option<FilePayload> {
     let payload = FilePayload::deserialize(&record.payload)?;
     let attrs = attrs?;
-    if matches!(attrs.stability, cache::StabilityCache::Mutable)
+    if matches!(attrs.stability, wit_types::Stability::Mutable)
         && payload.version_token != attrs.version_token
     {
         return None;
