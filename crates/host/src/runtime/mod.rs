@@ -322,8 +322,9 @@ impl ProviderRuntime {
     }
 
     pub fn initialize(&self) -> Result<wit_types::OpResult> {
+        let id = self.correlations.allocate();
         let op = Op::Initialize;
-        match op.execute(self, 0)? {
+        match op.execute(self, id)? {
             wit_types::ProviderStep::Returned(ret) => self.finish_provider_return(&op, ret),
             wit_types::ProviderStep::Suspended(_) => Err(RuntimeError::ProviderProtocol(
                 "initialize suspended with callouts".to_string(),
