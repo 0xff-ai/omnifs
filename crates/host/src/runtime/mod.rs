@@ -783,18 +783,11 @@ impl<'a> Callouts<'a> {
             "callout started"
         );
         let start = Instant::now();
-        let archive = Arc::clone(&self.runtime.archive);
-        let blob = req.blob;
-        let strip = req.strip_prefix.clone();
-        let resp = tokio::task::spawn_blocking(move || {
-            archive.open_archive(blob, format, strip.as_deref())
-        })
-        .await
-        .unwrap_or_else(|join_err| CalloutResponse::Error {
-            kind: ErrorKind::Internal,
-            message: format!("extract task join: {join_err}"),
-            retryable: false,
-        });
+        let resp = self
+            .runtime
+            .archive
+            .open_archive(req.blob, format, req.strip_prefix.as_deref())
+            .await;
         log_callout_response(
             self.operation_id,
             callout_index,

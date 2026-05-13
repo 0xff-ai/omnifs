@@ -103,7 +103,26 @@ impl ArchiveExecutor {
         }
     }
 
-    pub(crate) fn open_archive(
+    pub(crate) async fn open_archive(
+        self: &Arc<Self>,
+        blob_id: u64,
+        format: ArchiveFormat,
+        strip_prefix: Option<&str>,
+    ) -> CalloutResponse {
+        let this = Arc::clone(self);
+        let strip = strip_prefix.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            this.open_archive_blocking(blob_id, format, strip.as_deref())
+        })
+        .await
+        .unwrap_or_else(|join_err| CalloutResponse::Error {
+            kind: ErrorKind::Internal,
+            message: format!("extract task join: {join_err}"),
+            retryable: false,
+        })
+    }
+
+    fn open_archive_blocking(
         &self,
         blob_id: u64,
         format: ArchiveFormat,
@@ -306,8 +325,8 @@ mod tests {
         record.id
     }
 
-    #[test]
-    fn open_archive_returns_tree_ref_resolving_to_extracted_dir() {
+    #[tokio::test]
+    async fn open_archive_returns_tree_ref_resolving_to_extracted_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -323,9 +342,16 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let response = executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"));
+        let response = executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .await;
         let tree = match response {
             CalloutResponse::ArchiveOpened(t) => t,
             other => panic!("unexpected response: {other:?}"),
@@ -336,8 +362,8 @@ mod tests {
         assert!(cargo.contains("name = \"pkg\""));
     }
 
-    #[test]
-    fn same_blob_with_distinct_strip_prefixes_keeps_stable_tree_refs() {
+    #[tokio::test]
+    async fn same_blob_with_distinct_strip_prefixes_keeps_stable_tree_refs() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -356,9 +382,17 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let alpha = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/")) {
+        let alpha = match executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/"))
+            .await
+        {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected alpha response: {other:?}"),
         };
@@ -368,7 +402,10 @@ mod tests {
             "alpha\n"
         );
 
-        let beta = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/")) {
+        let beta = match executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/"))
+            .await
+        {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected beta response: {other:?}"),
         };
@@ -389,8 +426,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolved_archive_tree_ref_supports_nested_traversal() {
+    #[tokio::test]
+    async fn resolved_archive_tree_ref_supports_nested_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -409,9 +446,17 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
+        let tree = match executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .await
+        {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
@@ -451,8 +496,8 @@ mod tests {
         assert!(keep.exists());
     }
 
-    #[test]
-    fn fresh_materializer_reuses_existing_extracted_tree_after_restart() {
+    #[tokio::test]
+    async fn fresh_materializer_reuses_existing_extracted_tree_after_restart() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -471,14 +516,17 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(
+        let executor = Arc::new(ArchiveExecutor::new(
             cache.clone(),
             trees.clone(),
             archive_root.clone(),
             extractor.clone(),
-        );
+        ));
 
-        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
+        let tree = match executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .await
+        {
             CalloutResponse::ArchiveOpened(tree) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
@@ -487,14 +535,20 @@ mod tests {
         std::fs::write(&marker, b"stable").unwrap();
 
         let second_trees = Arc::new(TreeRefs::new());
-        let second_executor =
-            ArchiveExecutor::new(cache, second_trees.clone(), archive_root.clone(), extractor);
+        let second_executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            second_trees.clone(),
+            archive_root.clone(),
+            extractor,
+        ));
 
-        let tree =
-            match second_executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
-                CalloutResponse::ArchiveOpened(tree) => tree,
-                other => panic!("unexpected response: {other:?}"),
-            };
+        let tree = match second_executor
+            .open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"))
+            .await
+        {
+            CalloutResponse::ArchiveOpened(tree) => tree,
+            other => panic!("unexpected response: {other:?}"),
+        };
         let second_root = second_trees.resolve(tree).expect("tree-ref resolves");
         assert_eq!(first_root, second_root);
         assert!(marker.exists());
