@@ -16,7 +16,11 @@ impl ProviderRuntime {
             parent_path: parent_path.to_string(),
             name: name.to_string(),
         };
-        let child_path = child_path(parent_path, name);
+        let child_path = if parent_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{parent_path}/{name}")
+        };
         let result = self
             .coalesced(&child_path, || self.run_op(op.clone()))
             .await?;
@@ -135,22 +139,21 @@ impl ProviderRuntime {
     }
 
     fn cache_lookup_projection(&self, parent_path: &str, entry: &wit_types::LookupEntry) {
-        let mut entries = Vec::with_capacity(1 + entry.siblings.len());
-        entries.push(entry.target.clone());
-        entries.extend(entry.siblings.iter().cloned());
-        self.cache_projection_batch(parent_path, &entries, entry.exhaustive);
+        self.cache_projection_batch(
+            parent_path,
+            std::iter::once(&entry.target).chain(entry.siblings.iter()),
+            entry.exhaustive,
+        );
     }
 
-    fn cache_projection_batch(
-        &self,
-        parent_path: &str,
-        entries: &[wit_types::DirEntry],
-        exhaustive: bool,
-    ) {
+    fn cache_projection_batch<'a, I>(&self, parent_path: &str, entries: I, exhaustive: bool)
+    where
+        I: IntoIterator<Item = &'a wit_types::DirEntry> + Clone,
+    {
         let mut batch = Vec::new();
 
         let mut dirent_map = BTreeMap::new();
-        for entry in entries {
+        for entry in entries.clone() {
             let meta = EntryMeta::from(&entry.kind);
             dirent_map.insert(
                 entry.name.clone(),
@@ -174,14 +177,14 @@ impl ProviderRuntime {
         }
 
         for entry in entries {
-            let child_path = if parent_path.is_empty() {
+            let path = if parent_path.is_empty() {
                 entry.name.clone()
             } else {
                 format!("{parent_path}/{}", entry.name)
             };
-            push_projected_entry(&mut batch, &child_path, &entry.kind);
+            push_projected_entry(&mut batch, &path, &entry.kind);
             if let wit_types::EntryKind::File(file) = &entry.kind {
-                push_projected_file_content(&mut batch, &child_path, file);
+                push_projected_file_content(&mut batch, &path, file);
             }
         }
 
@@ -205,13 +208,5 @@ impl ProviderRuntime {
         if !touched.is_empty() {
             self.activity_table.lock().touch(touched);
         }
-    }
-}
-
-fn child_path(parent_path: &str, name: &str) -> String {
-    if parent_path.is_empty() {
-        name.to_string()
-    } else {
-        format!("{parent_path}/{name}")
     }
 }

@@ -67,10 +67,16 @@ pub(crate) fn write_truncated_for_log(
 }
 
 pub(crate) fn is_sensitive_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
-    )
+    const SENSITIVE: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+    ];
+    SENSITIVE
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 pub(crate) fn is_sensitive_query_param(name: &str) -> bool {
