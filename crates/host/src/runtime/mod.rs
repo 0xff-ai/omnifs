@@ -610,6 +610,52 @@ impl ProviderRuntime {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CalloutKind {
+    HttpFetch,
+    GitOpenRepo,
+    BlobFetch,
+    OpenArchive,
+    ReadBlob,
+    /// A WIT-defined callout the runtime knowingly does not implement
+    /// yet (`stream-open`, `stream-recv`, `stream-close`, `ws-connect`,
+    /// `ws-send`, `ws-recv`, `ws-close`). The provider gets a typed
+    /// `callout-error{kind=internal, retryable=false}` back; the
+    /// dispatch logs this as a known-unsupported variant, not as an
+    /// unknown enum.
+    Unsupported,
+}
+
+impl CalloutKind {
+    pub(super) fn of(callout: &wit_types::Callout) -> Self {
+        match callout {
+            wit_types::Callout::Fetch(_) => Self::HttpFetch,
+            wit_types::Callout::GitOpenRepo(_) => Self::GitOpenRepo,
+            wit_types::Callout::FetchBlob(_) => Self::BlobFetch,
+            wit_types::Callout::OpenArchive(_) => Self::OpenArchive,
+            wit_types::Callout::ReadBlob(_) => Self::ReadBlob,
+            wit_types::Callout::StreamOpen(_)
+            | wit_types::Callout::StreamRecv(_)
+            | wit_types::Callout::StreamClose(_)
+            | wit_types::Callout::WsConnect(_)
+            | wit_types::Callout::WsSend(_)
+            | wit_types::Callout::WsRecv(_)
+            | wit_types::Callout::WsClose(_) => Self::Unsupported,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpFetch => "http.fetch",
+            Self::GitOpenRepo => "git.open_repo",
+            Self::BlobFetch => "blob.fetch",
+            Self::OpenArchive => "archive.open",
+            Self::ReadBlob => "blob.read",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 pub(super) fn callout_error(
     kind: wit_types::ErrorKind,
     message: impl Into<String>,
@@ -693,7 +739,15 @@ impl<'a> Callouts<'a> {
                 self.execute_archive_open(index, request, req).await
             },
             wit_types::Callout::ReadBlob(req) => self.execute_blob_read(index, request, req),
-            _ => Self::unsupported(),
+            _ => {
+                let kind = CalloutKind::of(request);
+                debug_assert_eq!(
+                    kind.as_str(),
+                    "unsupported",
+                    "unimplemented callout variant reached unsupported arm"
+                );
+                Self::unsupported()
+            },
         }
     }
 
@@ -703,12 +757,12 @@ impl<'a> Callouts<'a> {
         callout: &wit_types::Callout,
         req: &wit_types::HttpRequest,
     ) -> wit_types::CalloutResult {
-        let callout_kind = "http.fetch";
+        let kind = CalloutKind::HttpFetch;
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
             callout_index,
-            callout_kind,
+            callout_kind = kind.as_str(),
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
             request_headers = %WitHeaders(&req.headers),
@@ -720,7 +774,7 @@ impl<'a> Callouts<'a> {
         log_callout_response(
             self.operation_id,
             callout_index,
-            callout_kind,
+            kind,
             callout,
             start.elapsed(),
             &result,
@@ -734,12 +788,12 @@ impl<'a> Callouts<'a> {
         callout: &wit_types::Callout,
         req: &wit_types::GitOpenRequest,
     ) -> wit_types::CalloutResult {
-        let callout_kind = "git.open_repo";
+        let kind = CalloutKind::GitOpenRepo;
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
             callout_index,
-            callout_kind,
+            callout_kind = kind.as_str(),
             method = "",
             url = %LogUrl(&req.clone_url),
             request_headers = "",
@@ -751,7 +805,7 @@ impl<'a> Callouts<'a> {
         log_callout_response(
             self.operation_id,
             callout_index,
-            callout_kind,
+            kind,
             callout,
             start.elapsed(),
             &result,
@@ -765,12 +819,12 @@ impl<'a> Callouts<'a> {
         callout: &wit_types::Callout,
         req: &wit_types::BlobFetchRequest,
     ) -> wit_types::CalloutResult {
-        let callout_kind = "blob.fetch";
+        let kind = CalloutKind::BlobFetch;
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
             callout_index,
-            callout_kind,
+            callout_kind = kind.as_str(),
             method = req.method.as_str(),
             url = %LogUrl(&req.url),
             request_headers = %WitHeaders(&req.headers),
@@ -782,7 +836,7 @@ impl<'a> Callouts<'a> {
         log_callout_response(
             self.operation_id,
             callout_index,
-            callout_kind,
+            kind,
             callout,
             start.elapsed(),
             &result,
@@ -797,12 +851,12 @@ impl<'a> Callouts<'a> {
         req: &wit_types::ArchiveOpenRequest,
     ) -> wit_types::CalloutResult {
         let format = ArchiveFormat::from(req.format);
-        let callout_kind = "archive.open";
+        let kind = CalloutKind::OpenArchive;
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
             callout_index,
-            callout_kind,
+            callout_kind = kind.as_str(),
             blob = req.blob,
             format = ?format,
             strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
@@ -817,7 +871,7 @@ impl<'a> Callouts<'a> {
         log_callout_response(
             self.operation_id,
             callout_index,
-            callout_kind,
+            kind,
             callout,
             start.elapsed(),
             &result,
@@ -831,12 +885,12 @@ impl<'a> Callouts<'a> {
         callout: &wit_types::Callout,
         req: &wit_types::ReadBlobRequest,
     ) -> wit_types::CalloutResult {
-        let callout_kind = "blob.read";
+        let kind = CalloutKind::ReadBlob;
         info!(
             target: "omnifs_callout",
             operation_id = self.operation_id,
             callout_index,
-            callout_kind,
+            callout_kind = kind.as_str(),
             blob = req.blob,
             offset = req.offset,
             len = req.len,
@@ -847,7 +901,7 @@ impl<'a> Callouts<'a> {
         log_callout_response(
             self.operation_id,
             callout_index,
-            callout_kind,
+            kind,
             callout,
             start.elapsed(),
             &result,
@@ -873,11 +927,12 @@ impl From<wit_types::ArchiveFormat> for ArchiveFormat {
 fn log_callout_response(
     operation_id: u64,
     callout_index: usize,
-    callout_kind: &str,
+    kind: CalloutKind,
     callout: &wit_types::Callout,
     elapsed: std::time::Duration,
     response: &wit_types::CalloutResult,
 ) {
+    let callout_kind = kind.as_str();
     let elapsed_us = elapsed.as_micros();
     match response {
         wit_types::CalloutResult::HttpResponse(r) => {
