@@ -23,6 +23,9 @@ use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 const DEFAULT_MAX_FETCH_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READ_BLOB_BYTES: u64 = 16 * 1024 * 1024;
@@ -149,7 +152,13 @@ impl BlobExecutor {
                 // pre-flight or network failure — pass it through unchanged.
                 match self
                     .http
-                    .send(&req.method, &req.url, &req.headers, req.body.as_deref())
+                    .send(
+                        &req.method,
+                        &req.url,
+                        &req.headers,
+                        req.body.as_deref(),
+                        BLOB_FETCH_TIMEOUT,
+                    )
                     .await
                 {
                     Ok(response) => match self.materialize(&req.cache_key, response).await {
@@ -385,7 +394,6 @@ mod tests {
     use super::*;
     use crate::auth::AuthManager;
     use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
-    use std::time::Duration;
 
     #[test]
     fn safe_path_segment_rejects_traversal() {
@@ -465,14 +473,8 @@ mod tests {
             max_memory_mb: 16,
             needs_git: false,
         });
-        let http = Arc::new(
-            HttpStack::new(
-                Arc::new(AuthManager::none()),
-                Arc::new(capability),
-                Duration::from_secs(120),
-            )
-            .unwrap(),
-        );
+        let http =
+            Arc::new(HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability)).unwrap());
         let executor = BlobExecutor::new(
             http,
             cache,

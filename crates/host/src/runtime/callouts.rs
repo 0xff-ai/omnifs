@@ -172,7 +172,7 @@ impl ProviderRuntime {
 
     async fn run_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
         match callout {
-            wit_types::Callout::Fetch(req) => self.http.fetch(req).await,
+            wit_types::Callout::Fetch(req) => self.http.fetch(req, super::HTTP_FETCH_TIMEOUT).await,
             wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
             wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req),
             wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,

@@ -33,12 +33,10 @@ impl HttpStack {
     pub fn new(
         auth: Arc<AuthManager>,
         capability: Arc<CapabilityChecker>,
-        timeout: Duration,
     ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .user_agent("omnifs")
             .connect_timeout(Duration::from_secs(10))
-            .timeout(timeout)
             .build()?;
         Ok(Self {
             client,
@@ -58,6 +56,7 @@ impl HttpStack {
         url: &str,
         headers: &[wit_types::Header],
         body: Option<&[u8]>,
+        timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
         if let Err(e) = self.capability.check_url(url) {
             return Err(callout_denied(e.to_string()));
@@ -80,7 +79,11 @@ impl HttpStack {
             Err(message) => return Err(callout_internal(message)),
         };
 
-        let mut request = self.client.request(reqwest_method, url).headers(header_map);
+        let mut request = self
+            .client
+            .request(reqwest_method, url)
+            .headers(header_map)
+            .timeout(timeout);
         if let Some(body) = body {
             request = request.body(body.to_vec());
         }
@@ -105,9 +108,19 @@ impl HttpStack {
         error.message = tracing::field::Empty,
         error.retryable = tracing::field::Empty,
     ))]
-    pub async fn fetch(&self, req: &wit_types::HttpRequest) -> wit_types::CalloutResult {
+    pub async fn fetch(
+        &self,
+        req: &wit_types::HttpRequest,
+        timeout: Duration,
+    ) -> wit_types::CalloutResult {
         let result = match self
-            .send(&req.method, &req.url, &req.headers, req.body.as_deref())
+            .send(
+                &req.method,
+                &req.url,
+                &req.headers,
+                req.body.as_deref(),
+                timeout,
+            )
             .await
         {
             Ok(response) => {

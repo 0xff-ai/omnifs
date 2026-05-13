@@ -61,6 +61,7 @@ pub use op::Op;
 use op::Validator;
 
 const ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// FUSE notifier handle (only available on Linux with FUSE support).
 pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
@@ -241,17 +242,8 @@ impl ProviderRuntime {
             .map_err(RuntimeBuildError::InvalidConfig)?;
 
         let blob_limits = BlobLimits::from_config(config);
-        let http = Arc::new(HttpStack::new(
-            auth.clone(),
-            capability.clone(),
-            std::time::Duration::from_secs(30),
-        )?);
-        let blob_http = Arc::new(HttpStack::new(
-            auth.clone(),
-            capability.clone(),
-            std::time::Duration::from_secs(120),
-        )?);
-        let blob = BlobExecutor::new(blob_http, blob_cache.clone(), blob_limits);
+        let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
+        let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
         Ok(Self {
             instance,
             operation_ids: OperationIds::new(),
