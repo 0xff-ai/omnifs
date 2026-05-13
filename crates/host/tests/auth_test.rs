@@ -4,10 +4,11 @@ use omnifs_host::auth::AuthManager;
 use omnifs_host::config::AuthConfig;
 use omnifs_host::omnifs::provider::types as wit_types;
 use omnifs_host::runtime::capability::{CapabilityChecker, CapabilityGrants};
-use omnifs_host::runtime::executor::HttpExecutor;
+use omnifs_host::runtime::http_stack::HttpStack;
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::Duration;
 
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -168,7 +169,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         max_memory_mb: 64,
         needs_git: false,
     }));
-    let executor = HttpExecutor::new(auth, capability).unwrap();
+    let stack = HttpStack::new(auth, capability, Duration::from_secs(30)).unwrap();
 
     let req = wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -176,7 +177,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         headers: Vec::new(),
         body: None,
     };
-    match executor.fetch(&req).await {
+    match stack.fetch(&req).await {
         wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
             kind: wit_types::ErrorKind::Denied,
             retryable: false,

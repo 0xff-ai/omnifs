@@ -12,9 +12,9 @@ pub mod capability;
 pub mod cloner;
 pub mod coverage;
 pub(crate) mod effects;
-pub mod executor;
 pub mod git;
 pub mod http_headers;
+pub mod http_stack;
 pub mod inflight;
 mod instance;
 mod invalidation;
@@ -40,7 +40,7 @@ use crate::runtime::archive::ArchiveExecutor;
 use crate::runtime::blob::{BlobExecutor, BlobLimits};
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
-use crate::runtime::executor::HttpExecutor;
+use crate::runtime::http_stack::HttpStack;
 use crate::runtime::inflight::InFlight;
 use crate::runtime::instance::ProviderInstance;
 use crate::runtime::invalidation::InvalidationState;
@@ -68,7 +68,7 @@ pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
 pub struct ProviderRuntime {
     instance: ProviderInstance,
     operation_ids: OperationIds,
-    http: HttpExecutor,
+    http: Arc<HttpStack>,
     git: git::GitExecutor,
     blob: BlobExecutor,
     archive: Arc<ArchiveExecutor>,
@@ -269,10 +269,15 @@ impl ProviderRuntime {
             blob_cache.clone(),
             blob_limits,
         )?;
+        let http = Arc::new(HttpStack::new(
+            auth.clone(),
+            capability.clone(),
+            std::time::Duration::from_secs(30),
+        )?);
         Ok(Self {
             instance,
             operation_ids: OperationIds::new(),
-            http: HttpExecutor::new(auth, capability)?,
+            http,
             git,
             blob,
             archive,

@@ -1,6 +1,5 @@
 use crate::cache::{self, EntryMeta, SizeCache};
 use crate::omnifs::provider::types as wit_types;
-use crate::runtime::executor::ErrorKind;
 
 impl From<&wit_types::FileProj> for cache::FileAttrsCache {
     fn from(file: &wit_types::FileProj) -> Self {
@@ -78,21 +77,6 @@ impl From<&wit_types::EntryKind> for cache::EntryKindCache {
         match kind {
             wit_types::EntryKind::Directory => Self::Directory,
             wit_types::EntryKind::File(_) => Self::File,
-        }
-    }
-}
-
-impl From<ErrorKind> for wit_types::ErrorKind {
-    fn from(kind: ErrorKind) -> Self {
-        match kind {
-            ErrorKind::Network => Self::Network,
-            ErrorKind::Timeout => Self::Timeout,
-            ErrorKind::Denied => Self::Denied,
-            ErrorKind::NotFound => Self::NotFound,
-            ErrorKind::RateLimited => Self::RateLimited,
-            ErrorKind::InvalidInput => Self::InvalidInput,
-            ErrorKind::TooLarge => Self::TooLarge,
-            ErrorKind::Internal => Self::Internal,
         }
     }
 }

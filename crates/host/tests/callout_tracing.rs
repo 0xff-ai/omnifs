@@ -49,7 +49,7 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
 // --- Canned instrumented executor methods --------------------------------
 //
 // Each helper mirrors the production `#[instrument]` annotations on
-// `HttpExecutor::fetch`, `BlobExecutor::fetch`, `BlobExecutor::read`,
+// `HttpStack::fetch`, `BlobExecutor::fetch`, `BlobExecutor::read`,
 // `GitExecutor::open_repo`, and `ArchiveExecutor::open`. The function
 // bodies do not perform real I/O; they synthesize a `CalloutResult` and
 // call `record_outcome` so the late-bound span fields land before the
