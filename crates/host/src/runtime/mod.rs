@@ -48,7 +48,6 @@ use crate::runtime::tools::archive::ArchiveExtractorComponent;
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,6 +167,34 @@ pub enum Op {
     OnEvent {
         event: wit_types::ProviderEvent,
     },
+}
+
+#[derive(Default)]
+struct ProjectionAccumulator {
+    dirs: std::collections::BTreeSet<String>,
+    children: std::collections::BTreeMap<String, std::collections::BTreeMap<String, DirentRecord>>,
+}
+
+impl ProjectionAccumulator {
+    fn add(&mut self, entry: &wit_types::ProjEntry, batch: &mut Vec<BatchRecord>) {
+        if matches!(entry.kind, wit_types::EntryKind::Directory) {
+            self.dirs.insert(entry.path.clone());
+        }
+        if let Some((parent, name)) = split_projected_path(&entry.path) {
+            let name = name.to_string();
+            self.children.entry(parent.to_string()).or_default().insert(
+                name.clone(),
+                DirentRecord {
+                    name,
+                    meta: EntryMeta::from(&entry.kind),
+                },
+            );
+        }
+        ProviderRuntime::push_projected_entry(batch, &entry.path, &entry.kind);
+        if let wit_types::EntryKind::File(file) = &entry.kind {
+            ProviderRuntime::push_projected_file_content(batch, &entry.path, file);
+        }
+    }
 }
 
 impl ProviderRuntime {
@@ -414,33 +441,10 @@ impl ProviderRuntime {
 
     pub(super) fn apply_effects(&self, effects: &[wit_types::Effect]) {
         let mut batch = Vec::new();
-        let mut projected_dirs = BTreeSet::new();
-        let mut projected_children: BTreeMap<String, BTreeMap<String, DirentRecord>> =
-            BTreeMap::new();
+        let mut projections = ProjectionAccumulator::default();
         for effect in effects {
             match effect {
-                wit_types::Effect::Project(entry) => {
-                    if matches!(entry.kind, wit_types::EntryKind::Directory) {
-                        projected_dirs.insert(entry.path.clone());
-                    }
-                    if let Some((parent, name)) = split_projected_path(&entry.path) {
-                        let name = name.to_string();
-                        projected_children
-                            .entry(parent.to_string())
-                            .or_default()
-                            .insert(
-                                name.clone(),
-                                DirentRecord {
-                                    name,
-                                    meta: EntryMeta::from(&entry.kind),
-                                },
-                            );
-                    }
-                    Self::push_projected_entry(&mut batch, &entry.path, &entry.kind);
-                    if let wit_types::EntryKind::File(file) = &entry.kind {
-                        Self::push_projected_file_content(&mut batch, &entry.path, file);
-                    }
-                },
+                wit_types::Effect::Project(entry) => projections.add(entry, &mut batch),
                 wit_types::Effect::InvalidatePath(path) => {
                     self.cache_delete_path(path);
                     self.invalidation.record_path(path.clone());
@@ -452,34 +456,44 @@ impl ProviderRuntime {
                 wit_types::Effect::DisownTree(_) => {},
             }
         }
-        for dir in projected_dirs {
-            let Some(children) = projected_children.remove(&dir) else {
+        self.merge_projected_dirs(projections, &mut batch);
+        if !batch.is_empty() {
+            tracing::debug!(target: "omnifs_cache", kind = "project", count = batch.len(), "applying projection effects");
+            self.cache_put_batch(&batch);
+        }
+    }
+
+    fn merge_projected_dirs(
+        &self,
+        projections: ProjectionAccumulator,
+        batch: &mut Vec<BatchRecord>,
+    ) {
+        let ProjectionAccumulator { dirs, mut children } = projections;
+        for dir in dirs {
+            let Some(new_children) = children.remove(&dir) else {
                 continue;
             };
-            let (previously_exhaustive, mut existing_children) = self
+            let (previously_exhaustive, mut existing) = self
                 .cache_get(&dir, RecordKind::Dirents, None)
                 .and_then(|record| DirentsPayload::deserialize(&record.payload))
                 .map_or_else(
-                    || (false, BTreeMap::new()),
+                    || (false, std::collections::BTreeMap::new()),
                     |payload| {
                         (
                             payload.exhaustive,
                             payload
                                 .entries
                                 .into_iter()
-                                .map(|entry| (entry.name.clone(), entry))
-                                .collect::<BTreeMap<_, _>>(),
+                                .map(|e| (e.name.clone(), e))
+                                .collect(),
                         )
                     },
                 );
-
-            let introduced_child = children
-                .keys()
-                .any(|name| !existing_children.contains_key(name));
-            existing_children.extend(children);
+            let introduced = new_children.keys().any(|n| !existing.contains_key(n));
+            existing.extend(new_children);
             if let Some(payload) = (DirentsPayload {
-                entries: existing_children.into_values().collect(),
-                exhaustive: previously_exhaustive && !introduced_child,
+                entries: existing.into_values().collect(),
+                exhaustive: previously_exhaustive && !introduced,
             })
             .serialize()
             {
@@ -491,17 +505,10 @@ impl ProviderRuntime {
                 ));
             }
         }
-        if !batch.is_empty() {
-            debug!(
-                target: "omnifs_cache",
-                kind = "project",
-                count = batch.len(),
-                "applying projection effects"
-            );
-            self.cache_put_batch(&batch);
-        }
     }
+}
 
+impl ProviderRuntime {
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
         let active_paths = self.activity_table.lock().active_path_sets();
         self.run_op(Op::OnEvent {
