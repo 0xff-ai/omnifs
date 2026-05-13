@@ -102,19 +102,19 @@ async fn test_list_projects_nested_files_into_cache() {
 
     let title = harness
         .runtime
-        .cache_get("hello/bundle/title", RecordKind::File)
+        .cache_get("hello/bundle/title", RecordKind::File, None)
         .expect("bundle title should be projected");
     let body = harness
         .runtime
-        .cache_get("hello/bundle/body", RecordKind::File)
+        .cache_get("hello/bundle/body", RecordKind::File, None)
         .expect("bundle body should be projected");
     let empty = harness
         .runtime
-        .cache_get("hello/bundle/empty", RecordKind::File)
+        .cache_get("hello/bundle/empty", RecordKind::File, None)
         .expect("bundle empty file should be projected");
     let bundle_dirents = harness
         .runtime
-        .cache_get("hello/bundle", RecordKind::Dirents)
+        .cache_get("hello/bundle", RecordKind::Dirents, None)
         .expect("bundle dirents should be projected");
     assert_eq!(file_payload(&title).content, b"title".to_vec());
     assert_eq!(file_payload(&body).content, b"body".to_vec());
@@ -153,11 +153,11 @@ async fn test_list_projects_direct_file_content_into_cache() {
 
     let title = harness
         .runtime
-        .cache_get("hello/bundle/title", RecordKind::File)
+        .cache_get("hello/bundle/title", RecordKind::File, None)
         .expect("projected title should be cached at its own path");
     let body = harness
         .runtime
-        .cache_get("hello/bundle/body", RecordKind::File)
+        .cache_get("hello/bundle/body", RecordKind::File, None)
         .expect("projected body should be cached at its own path");
 
     assert_eq!(file_payload(&title).content, b"title".to_vec());
@@ -165,7 +165,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
     assert!(
         harness
             .runtime
-            .cache_get("hello/bundle/title/title", RecordKind::File)
+            .cache_get("hello/bundle/title/title", RecordKind::File, None)
             .is_none(),
         "projected file content must not be nested under itself"
     );
@@ -216,7 +216,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 
     let dirents_record = harness
         .runtime
-        .cache_get("hello", RecordKind::Dirents)
+        .cache_get("hello", RecordKind::Dirents, None)
         .expect("hello dirents should stay cached");
     let dirents = DirentsPayload::deserialize(&dirents_record.payload)
         .expect("dirents payload should deserialize");
@@ -243,11 +243,11 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 
     let body = harness
         .runtime
-        .cache_get("hello/body", RecordKind::File)
+        .cache_get("hello/body", RecordKind::File, None)
         .expect("body sibling projection should be cached");
     let state = harness
         .runtime
-        .cache_get("hello/state", RecordKind::File)
+        .cache_get("hello/state", RecordKind::File, None)
         .expect("state sibling projection should be cached");
     assert_eq!(file_payload(&body).content, b"body\n");
     assert_eq!(file_payload(&state).content, b"open\n");
@@ -429,15 +429,15 @@ async fn test_lookup_projects_adjacent_files_into_cache() {
     // Verify the projection effects were cached.
     let title = harness
         .runtime
-        .cache_get("hello/bundle/title", RecordKind::File)
+        .cache_get("hello/bundle/title", RecordKind::File, None)
         .expect("title should be in cache");
     let body = harness
         .runtime
-        .cache_get("hello/bundle/body", RecordKind::File)
+        .cache_get("hello/bundle/body", RecordKind::File, None)
         .expect("body should be in cache");
     let bundle_dirents = harness
         .runtime
-        .cache_get("hello/bundle", RecordKind::Dirents)
+        .cache_get("hello/bundle", RecordKind::Dirents, None)
         .expect("bundle dirents should be in cache");
 
     assert_eq!(file_payload(&title).content, b"title".to_vec());
@@ -500,7 +500,7 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let dirents_record = harness
         .runtime
-        .cache_get("hello/snapshot", RecordKind::Dirents)
+        .cache_get("hello/snapshot", RecordKind::Dirents, None)
         .expect("snapshot dirents should be cached");
 
     let dirents = DirentsPayload::deserialize(&dirents_record.payload)
@@ -516,7 +516,7 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let status_lookup = harness
         .runtime
-        .cache_get("hello/snapshot/status", RecordKind::Lookup)
+        .cache_get("hello/snapshot/status", RecordKind::Lookup, None)
         .expect("status lookup should be cached");
     let Some(LookupPayload::Positive(status_meta)) =
         LookupPayload::deserialize(&status_lookup.payload)
@@ -528,7 +528,7 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let status_attr = harness
         .runtime
-        .cache_get("hello/snapshot/status", RecordKind::Attr)
+        .cache_get("hello/snapshot/status", RecordKind::Attr, None)
         .expect("status attr should be cached");
     let Some(AttrPayload { meta: status_meta }) = AttrPayload::deserialize(&status_attr.payload)
     else {
@@ -539,7 +539,7 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let comments_lookup = harness
         .runtime
-        .cache_get("hello/snapshot/comments", RecordKind::Lookup)
+        .cache_get("hello/snapshot/comments", RecordKind::Lookup, None)
         .expect("comments lookup should be cached");
     let Some(LookupPayload::Positive(comments_meta)) =
         LookupPayload::deserialize(&comments_lookup.payload)
@@ -562,32 +562,32 @@ fn cache_delete_prefix_respects_segment_boundaries() {
 
     harness
         .runtime
-        .cache_put("owner/repo", RecordKind::Attr, &record);
+        .cache_put("owner/repo", RecordKind::Attr, None, &record);
     harness
         .runtime
-        .cache_put("owner/repo/issues", RecordKind::Attr, &record);
+        .cache_put("owner/repo/issues", RecordKind::Attr, None, &record);
     harness
         .runtime
-        .cache_put("owner/repobaz", RecordKind::Attr, &record);
+        .cache_put("owner/repobaz", RecordKind::Attr, None, &record);
 
     harness.runtime.cache_delete_prefix("owner/repo");
 
     assert!(
         harness
             .runtime
-            .cache_get("owner/repo", RecordKind::Attr)
+            .cache_get("owner/repo", RecordKind::Attr, None)
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cache_get("owner/repo/issues", RecordKind::Attr)
+            .cache_get("owner/repo/issues", RecordKind::Attr, None)
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cache_get("owner/repobaz", RecordKind::Attr)
+            .cache_get("owner/repobaz", RecordKind::Attr, None)
             .is_some()
     );
 }
@@ -638,8 +638,16 @@ async fn test_cache_isolated_by_mount_name() {
 
     let result = runtime_a.list_children("hello").await.unwrap();
     assert!(matches!(result, ListChildrenResult::Entries(_)));
-    assert!(runtime_a.cache_get("hello", RecordKind::Dirents).is_some());
-    assert!(runtime_b.cache_get("hello", RecordKind::Dirents).is_none());
+    assert!(
+        runtime_a
+            .cache_get("hello", RecordKind::Dirents, None)
+            .is_some()
+    );
+    assert!(
+        runtime_b
+            .cache_get("hello", RecordKind::Dirents, None)
+            .is_none()
+    );
 
     let scoped_a = runtime_a.list_children("scoped").await.unwrap();
     let scoped_b = runtime_b.list_children("scoped").await.unwrap();
@@ -647,12 +655,12 @@ async fn test_cache_isolated_by_mount_name() {
     assert!(matches!(scoped_b, ListChildrenResult::Entries(_)));
     assert!(
         runtime_a
-            .cache_get("scoped/item", RecordKind::Lookup)
+            .cache_get("scoped/item", RecordKind::Lookup, None)
             .is_some()
     );
     assert!(
         runtime_b
-            .cache_get("scoped/item", RecordKind::Lookup)
+            .cache_get("scoped/item", RecordKind::Lookup, None)
             .is_some()
     );
 
@@ -660,12 +668,12 @@ async fn test_cache_isolated_by_mount_name() {
     assert!(matches!(tick, OpResult::OnEvent));
     assert!(
         runtime_a
-            .cache_get("scoped/item", RecordKind::Lookup)
+            .cache_get("scoped/item", RecordKind::Lookup, None)
             .is_none()
     );
     assert!(
         runtime_b
-            .cache_get("scoped/item", RecordKind::Lookup)
+            .cache_get("scoped/item", RecordKind::Lookup, None)
             .is_some()
     );
     assert!(

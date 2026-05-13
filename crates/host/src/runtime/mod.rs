@@ -364,11 +364,7 @@ impl ProviderRuntime {
         Ok(())
     }
 
-    pub fn cache_get(&self, path: &str, kind: RecordKind) -> Option<CacheRecord> {
-        self.l2.as_ref()?.get(&Key::new(path, kind)).ok().flatten()
-    }
-
-    pub fn cache_get_with_aux(
+    pub fn cache_get(
         &self,
         path: &str,
         kind: RecordKind,
@@ -381,21 +377,7 @@ impl ProviderRuntime {
             .flatten()
     }
 
-    pub fn cache_put(&self, path: &str, kind: RecordKind, record: &CacheRecord) {
-        if let Some(ref l2) = self.l2
-            && let Err(e) = l2.put(&Key::new(path, kind), record)
-        {
-            debug!(path, error = %e, "L2 cache put failed");
-        }
-    }
-
-    pub fn cache_put_with_aux(
-        &self,
-        path: &str,
-        kind: RecordKind,
-        aux: Option<&str>,
-        record: &CacheRecord,
-    ) {
+    pub fn cache_put(&self, path: &str, kind: RecordKind, aux: Option<&str>, record: &CacheRecord) {
         if let Some(ref l2) = self.l2
             && let Err(e) = l2.put(&Key::with_aux(path, kind, aux), record)
         {
@@ -509,7 +491,7 @@ impl ProviderRuntime {
                 continue;
             };
             let (previously_exhaustive, mut existing_children) = self
-                .cache_get(&dir, RecordKind::Dirents)
+                .cache_get(&dir, RecordKind::Dirents, None)
                 .and_then(|record| DirentsPayload::deserialize(&record.payload))
                 .map_or_else(
                     || (false, BTreeMap::new()),

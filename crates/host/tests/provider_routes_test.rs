@@ -524,25 +524,25 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/A", RecordKind::Lookup)
+                    .cache_get("example.com/A", RecordKind::Lookup, None)
                     .is_some()
             );
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/AAAA", RecordKind::Lookup)
+                    .cache_get("example.com/AAAA", RecordKind::Lookup, None)
                     .is_some()
             );
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/_all", RecordKind::Lookup)
+                    .cache_get("example.com/_all", RecordKind::Lookup, None)
                     .is_some()
             );
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/_raw", RecordKind::Lookup)
+                    .cache_get("example.com/_raw", RecordKind::Lookup, None)
                     .is_some()
             );
         },

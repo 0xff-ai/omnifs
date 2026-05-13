@@ -387,7 +387,7 @@ impl FuseFs {
         let Some(runtime) = self.runtime_for_mount(mount_name) else {
             return Err(Errno::ENOENT);
         };
-        if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup)
+        if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup, None)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
             self.l0_put(mount_name, &child_path, RecordKind::Lookup, record.clone());
@@ -455,7 +455,7 @@ impl FuseFs {
                 let payload = cache::LookupPayload::Positive(meta);
                 if let Some(encoded) = payload.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
-                    runtime.cache_put(&child_path, RecordKind::Lookup, &record);
+                    runtime.cache_put(&child_path, RecordKind::Lookup, None, &record);
                     self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
                 Ok((self.attr_for_inode_or_meta(ino, kind, size), ttl))
@@ -464,7 +464,7 @@ impl FuseFs {
                 let neg = cache::LookupPayload::Negative;
                 if let Some(encoded) = neg.serialize() {
                     let record = CacheRecord::new(RecordKind::Lookup, encoded);
-                    runtime.cache_put(&child_path, RecordKind::Lookup, &record);
+                    runtime.cache_put(&child_path, RecordKind::Lookup, None, &record);
                     self.l0_put(mount_name, &child_path, RecordKind::Lookup, record);
                 }
                 Err(Errno::ENOENT)
@@ -575,7 +575,7 @@ impl FuseFs {
 
         // L2
         if let Some(runtime) = self.runtime_for_mount(mount_name) {
-            if let Some(record) = runtime.cache_get(path, RecordKind::Dirents)
+            if let Some(record) = runtime.cache_get(path, RecordKind::Dirents, None)
                 && let Some(dirents) = cache::DirentsPayload::deserialize(&record.payload)
                 && dirents.exhaustive
             {
@@ -638,7 +638,7 @@ impl FuseFs {
                 };
                 if let Some(encoded) = dirents_payload.serialize() {
                     let dirents_record = CacheRecord::new(RecordKind::Dirents, encoded);
-                    runtime.cache_put(path, RecordKind::Dirents, &dirents_record);
+                    runtime.cache_put(path, RecordKind::Dirents, None, &dirents_record);
                     self.l0_put(mount_name, path, RecordKind::Dirents, dirents_record);
                 }
                 Ok(snapshot)
@@ -786,8 +786,7 @@ impl FuseFs {
         if target.backing_path.is_none()
             && let Some(aux) = durable_aux.clone()
             && let Some(runtime) = self.runtime_for_mount(&target.mount_name)
-            && let Some(record) =
-                runtime.cache_get_with_aux(&target.path, RecordKind::File, aux.as_deref())
+            && let Some(record) = runtime.cache_get(&target.path, RecordKind::File, aux.as_deref())
             && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
         {
             debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
@@ -906,7 +905,7 @@ impl FuseFs {
         };
         let file_record = CacheRecord::new(RecordKind::File, payload);
         if let Some(rt) = self.runtime_for_mount(mount_name) {
-            rt.cache_put_with_aux(path, RecordKind::File, aux.as_deref(), &file_record);
+            rt.cache_put(path, RecordKind::File, aux.as_deref(), &file_record);
         }
         self.l0_put_with_aux(mount_name, path, RecordKind::File, aux, file_record);
         Ok(())
