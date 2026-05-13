@@ -236,7 +236,7 @@ impl ProviderRuntime {
             .omnifs_provider_lifecycle()
             .call_capabilities(&mut store)?;
 
-        let grants = build_grants(config, provider_caps.needs_git);
+        let grants = CapabilityGrants::from_config(config, provider_caps.needs_git);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
         // Validate instance config against the provider's declared schema.
@@ -295,7 +295,7 @@ impl ProviderRuntime {
         let declared_handlers =
             read_declared_handlers_from_wasm(wasm_path).map_err(RuntimeError::InvalidConfig)?;
 
-        let blob_limits = blob_limits_from_config(config);
+        let blob_limits = BlobLimits::from_config(config);
         let blob = BlobExecutor::new(
             auth.clone(),
             capability.clone(),
@@ -1553,29 +1553,6 @@ mod attr_contract_tests {
 
         let error = validate_return(&on_event_op(), &ret).unwrap_err();
         assert!(error.contains("error returns must not carry effects"));
-    }
-}
-
-fn build_grants(config: &InstanceConfig, needs_git: bool) -> CapabilityGrants {
-    let caps = config.capabilities.as_ref();
-    CapabilityGrants {
-        domains: caps.and_then(|c| c.domains.clone()).unwrap_or_default(),
-        git_repos: caps.and_then(|c| c.git_repos.clone()).unwrap_or_default(),
-        max_memory_mb: caps.and_then(|c| c.max_memory_mb).unwrap_or(64),
-        needs_git,
-    }
-}
-
-fn blob_limits_from_config(config: &InstanceConfig) -> BlobLimits {
-    let defaults = BlobLimits::default();
-    let caps = config.capabilities.as_ref();
-    BlobLimits {
-        max_fetch_blob_bytes: caps
-            .and_then(|c| c.max_fetch_blob_bytes)
-            .unwrap_or(defaults.max_fetch_blob_bytes),
-        max_read_blob_bytes: caps
-            .and_then(|c| c.max_read_blob_bytes)
-            .unwrap_or(defaults.max_read_blob_bytes),
     }
 }
 

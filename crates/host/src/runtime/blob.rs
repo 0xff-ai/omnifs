@@ -48,6 +48,21 @@ impl Default for BlobLimits {
     }
 }
 
+impl BlobLimits {
+    pub fn from_config(config: &crate::config::InstanceConfig) -> Self {
+        let defaults = Self::default();
+        let caps = config.capabilities.as_ref();
+        Self {
+            max_fetch_blob_bytes: caps
+                .and_then(|c| c.max_fetch_blob_bytes)
+                .unwrap_or(defaults.max_fetch_blob_bytes),
+            max_read_blob_bytes: caps
+                .and_then(|c| c.max_read_blob_bytes)
+                .unwrap_or(defaults.max_read_blob_bytes),
+        }
+    }
+}
+
 /// Errors raised while fetching, storing, or reading host-resident blobs.
 #[derive(Debug, thiserror::Error)]
 enum BlobError {
