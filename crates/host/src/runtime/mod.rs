@@ -132,8 +132,6 @@ pub enum RuntimeError {
     },
     #[error("{0}")]
     InvalidConfig(String),
-    #[error("unexpected response type")]
-    UnexpectedResponse,
 }
 
 type Result<T> = std::result::Result<T, RuntimeError>;
@@ -632,7 +630,7 @@ impl ProviderRuntime {
 struct Callouts<'a> {
     runtime: &'a ProviderRuntime,
     operation_id: u64,
-    callouts: &'a [wit_types::Callout],
+    requests: &'a [wit_types::Callout],
 }
 
 impl<'a> Callouts<'a> {
@@ -649,7 +647,7 @@ impl<'a> Callouts<'a> {
         Ok(Self {
             runtime,
             operation_id,
-            callouts,
+            requests: callouts,
         })
     }
 
@@ -658,7 +656,7 @@ impl<'a> Callouts<'a> {
     /// yield order, so this ordering is load-bearing.
     async fn execute(&self) -> Vec<wit_types::CalloutResult> {
         let futures: Vec<_> = self
-            .callouts
+            .requests
             .iter()
             .enumerate()
             .map(|(callout_index, callout)| self.execute_one(callout_index, callout))
