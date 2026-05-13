@@ -1,6 +1,7 @@
 use super::{Op, ProviderRuntime, Result, RuntimeError};
 use crate::cache::{BatchRecord, CacheRecord, DirentRecord, DirentsPayload, EntryMeta, RecordKind};
 use crate::omnifs::provider::types as wit_types;
+use crate::runtime::effects::{push_projected_entry, push_projected_file_content};
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -178,9 +179,9 @@ impl ProviderRuntime {
             } else {
                 format!("{parent_path}/{}", entry.name)
             };
-            Self::push_projected_entry(&mut batch, &child_path, &entry.kind);
+            push_projected_entry(&mut batch, &child_path, &entry.kind);
             if let wit_types::EntryKind::File(file) = &entry.kind {
-                Self::push_projected_file_content(&mut batch, &child_path, file);
+                push_projected_file_content(&mut batch, &child_path, file);
             }
         }
 
