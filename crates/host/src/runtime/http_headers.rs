@@ -9,21 +9,24 @@ use tracing::warn;
 /// header names or values are reported with their source so the
 /// caller's diagnostics distinguish a bad provider header from a bad
 /// host-injected auth header.
-pub(crate) fn build_header_map(
-    auth_headers: &[(String, String)],
-    request_headers: &[(String, String)],
-) -> Result<HeaderMap, String> {
+pub(crate) fn build_header_map<'a, A, R>(
+    auth_headers: A,
+    request_headers: R,
+) -> Result<HeaderMap, String>
+where
+    A: IntoIterator<Item = (&'a str, &'a str)>,
+    R: IntoIterator<Item = (&'a str, &'a str)>,
+{
     let mut header_map = HeaderMap::new();
     append_headers(&mut header_map, auth_headers, "auth")?;
     append_headers(&mut header_map, request_headers, "request")?;
     Ok(header_map)
 }
 
-fn append_headers(
-    header_map: &mut HeaderMap,
-    headers: &[(String, String)],
-    source: &str,
-) -> Result<(), String> {
+fn append_headers<'a, I>(header_map: &mut HeaderMap, headers: I, source: &str) -> Result<(), String>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
     for (name, value) in headers {
         let header_name = HeaderName::from_str(name)
             .map_err(|error| format!("invalid {source} header name `{name}`: {error}"))?;
@@ -64,8 +67,11 @@ mod tests {
 
     #[test]
     fn build_header_map_rejects_invalid_header_name() {
-        let error =
-            build_header_map(&[], &[("bad header".to_string(), "value".to_string())]).unwrap_err();
+        let error = build_header_map(
+            std::iter::empty::<(&str, &str)>(),
+            [("bad header", "value")],
+        )
+        .unwrap_err();
         assert!(error.contains("invalid request header name"));
     }
 

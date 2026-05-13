@@ -8,30 +8,14 @@ pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileAttrs {
     pub size: Size,
-    pub bytes: Bytes,
     pub stability: Stability,
     pub version: Option<VersionToken>,
 }
 
 impl FileAttrs {
-    pub fn inline(
-        bytes: impl Into<Vec<u8>>,
-        stability: Stability,
-        version: Option<VersionToken>,
-    ) -> Self {
-        let bytes = bytes.into();
-        Self {
-            size: Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-            bytes: Bytes::Inline(bytes),
-            stability,
-            version,
-        }
-    }
-
-    pub fn deferred(size: Size, read: ReadMode, stability: Stability) -> Self {
+    pub fn new(size: Size, stability: Stability) -> Self {
         Self {
             size,
-            bytes: Bytes::Deferred { read },
             stability,
             version: None,
         }
@@ -47,50 +31,7 @@ impl FileAttrs {
         self.size.st_size()
     }
 
-    pub fn inline_bytes(&self) -> Option<&[u8]> {
-        match &self.bytes {
-            Bytes::Inline(bytes) => Some(bytes),
-            Bytes::Deferred { .. } => None,
-        }
-    }
-
     pub fn validate(&self) -> Result<()> {
-        if self.stability == Stability::Volatile
-            && !matches!(
-                self.bytes,
-                Bytes::Deferred {
-                    read: ReadMode::Ranged
-                }
-            )
-        {
-            return Err(ProviderError::invalid_input(
-                "Stability::Volatile requires Bytes::Deferred { read: ReadMode::Ranged }",
-            ));
-        }
-
-        match (&self.bytes, &self.size) {
-            (Bytes::Inline(bytes), Size::Exact(size)) => {
-                let len = u64::try_from(bytes.len())
-                    .map_err(|_| ProviderError::too_large("inline file length does not fit u64"))?;
-                if *size != len {
-                    return Err(ProviderError::invalid_input(format!(
-                        "inline file declares size {size} but carries {len} bytes"
-                    )));
-                }
-                if bytes.len() > MAX_PROJECTED_BYTES {
-                    return Err(ProviderError::too_large(format!(
-                        "projected file exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
-                    )));
-                }
-            },
-            (Bytes::Inline(_), Size::NonZero | Size::Unknown) => {
-                return Err(ProviderError::invalid_input(
-                    "inline bytes require Size::Exact(bytes.len())",
-                ));
-            },
-            (Bytes::Deferred { .. }, _) => {},
-        }
-
         if let Some(version) = &self.version {
             version.validate()?;
         }
@@ -151,9 +92,101 @@ impl Size {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Bytes {
+pub struct FileProj {
+    pub attrs: FileAttrs,
+    pub bytes: ProjBytes,
+}
+
+impl FileProj {
+    pub fn inline(
+        bytes: impl Into<Vec<u8>>,
+        stability: Stability,
+        version: Option<VersionToken>,
+    ) -> Self {
+        let bytes = bytes.into();
+        Self {
+            attrs: FileAttrs {
+                size: Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                stability,
+                version,
+            },
+            bytes: ProjBytes::Inline(bytes),
+        }
+    }
+
+    pub fn deferred(size: Size, read: ReadMode, stability: Stability) -> Self {
+        Self {
+            attrs: FileAttrs::new(size, stability),
+            bytes: ProjBytes::Deferred { read },
+        }
+    }
+
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<VersionToken>) -> Self {
+        self.attrs.version = Some(version.into());
+        self
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.attrs.validate()?;
+
+        if self.attrs.stability == Stability::Volatile
+            && !matches!(
+                self.bytes,
+                ProjBytes::Deferred {
+                    read: ReadMode::Ranged
+                }
+            )
+        {
+            return Err(ProviderError::invalid_input(
+                "Stability::Volatile requires ProjBytes::Deferred { read: ReadMode::Ranged }",
+            ));
+        }
+
+        match (&self.bytes, &self.attrs.size) {
+            (ProjBytes::Inline(bytes), Size::Exact(size)) => {
+                let len = u64::try_from(bytes.len())
+                    .map_err(|_| ProviderError::too_large("inline file length does not fit u64"))?;
+                if *size != len {
+                    return Err(ProviderError::invalid_input(format!(
+                        "inline projection declares size {size} but carries {len} bytes"
+                    )));
+                }
+                if bytes.len() > MAX_PROJECTED_BYTES {
+                    return Err(ProviderError::too_large(format!(
+                        "inline projection exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
+                    )));
+                }
+            },
+            (ProjBytes::Inline(_), Size::NonZero | Size::Unknown) => {
+                return Err(ProviderError::invalid_input(
+                    "inline projection bytes require Size::Exact(bytes.len())",
+                ));
+            },
+            (ProjBytes::Deferred { .. }, _) => {},
+        }
+
+        Ok(())
+    }
+
+    pub fn inline_bytes(&self) -> Option<&[u8]> {
+        match &self.bytes {
+            ProjBytes::Inline(bytes) => Some(bytes),
+            ProjBytes::Deferred { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjBytes {
     Inline(Vec<u8>),
     Deferred { read: ReadMode },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadFileBytes {
+    Inline(Vec<u8>),
+    Blob(crate::blob::BlobId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,11 +221,20 @@ impl From<ReadMode> for wit_types::ReadMode {
     }
 }
 
-impl From<Bytes> for wit_types::FileBytes {
-    fn from(bytes: Bytes) -> Self {
+impl From<ProjBytes> for wit_types::ProjBytes {
+    fn from(bytes: ProjBytes) -> Self {
         match bytes {
-            Bytes::Inline(bytes) => Self::Inline(bytes),
-            Bytes::Deferred { read } => Self::Deferred(read.into()),
+            ProjBytes::Inline(bytes) => Self::Inline(bytes),
+            ProjBytes::Deferred { read } => Self::Deferred(read.into()),
+        }
+    }
+}
+
+impl From<ReadFileBytes> for wit_types::ReadFileBytes {
+    fn from(bytes: ReadFileBytes) -> Self {
+        match bytes {
+            ReadFileBytes::Inline(bytes) => Self::Inline(bytes),
+            ReadFileBytes::Blob(blob) => Self::Blob(blob.raw()),
         }
     }
 }
@@ -211,9 +253,17 @@ impl From<FileAttrs> for wit_types::FileAttrs {
     fn from(attrs: FileAttrs) -> Self {
         Self {
             size: attrs.size.into(),
-            bytes: attrs.bytes.into(),
             stability: attrs.stability.into(),
             version_token: attrs.version.map(|version| version.0),
+        }
+    }
+}
+
+impl From<FileProj> for wit_types::FileProj {
+    fn from(file: FileProj) -> Self {
+        Self {
+            attrs: file.attrs.into(),
+            bytes: file.bytes.into(),
         }
     }
 }

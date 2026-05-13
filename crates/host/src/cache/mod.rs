@@ -5,11 +5,17 @@
 //! eviction is driven purely by capacity and explicit invalidation
 //! (via `delete_prefix` or provider-driven cache-invalidate effects).
 
-// Bump on-disk records when browse metadata or file payload encoding changes.
-// v4 adds FileAttrs payloads and version-token auxiliary file cache keys.
-pub const SCHEMA_VERSION: u8 = 4;
+/// On-disk schema version for L2 records. Bump on any encoding-affecting
+/// change to the cached payload types (`LookupPayload`, `DirentsPayload`,
+/// `FilePayload`, `AttrPayload`, or the WIT types they embed). The cache
+/// reader rejects records whose first byte does not match this constant,
+/// so a bump invalidates stale entries without an explicit purge.
+///
+/// Any PR that touches the on-disk encoding must include a postcard
+/// fixture round-trip test against the new version.
+pub const SCHEMA_VERSION: u8 = 5;
 
-pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
+pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 
@@ -23,6 +29,8 @@ pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
 pub mod blobs;
 pub mod l0;
 pub mod l2;
+
+use crate::omnifs::provider::types as wit_types;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -76,45 +84,36 @@ impl Key {
     }
 }
 
-/// Mirror of WIT `EntryKind` for cache payloads, avoiding a dependency
-/// on the generated WIT types in the cache module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[repr(u8)]
-pub enum EntryKindCache {
-    Directory = 0,
-    File = 1,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileAttrsCache {
-    pub size: SizeCache,
-    pub bytes: BytesCache,
-    pub stability: StabilityCache,
+    pub size: wit_types::FileSize,
+    pub bytes: wit_types::ProjBytes,
+    pub stability: wit_types::Stability,
     pub version_token: Option<String>,
 }
 
 impl FileAttrsCache {
     pub fn st_size(&self) -> u64 {
         match self.size {
-            SizeCache::Exact(size) => size,
-            SizeCache::NonZero | SizeCache::Unknown => 1,
+            wit_types::FileSize::Exact(size) => size,
+            wit_types::FileSize::NonZero | wit_types::FileSize::Unknown => 1,
         }
     }
 
     pub fn should_direct_io(&self) -> bool {
-        !matches!(self.size, SizeCache::Exact(_))
-            || !matches!(self.stability, StabilityCache::Immutable)
+        !matches!(self.size, wit_types::FileSize::Exact(_))
+            || !matches!(self.stability, wit_types::Stability::Immutable)
     }
 
     pub fn inline_bytes(&self) -> Option<&[u8]> {
         match &self.bytes {
-            BytesCache::Inline(bytes) => Some(bytes),
-            BytesCache::Deferred(_) => None,
+            wit_types::ProjBytes::Inline(bytes) => Some(bytes),
+            wit_types::ProjBytes::Deferred(_) => None,
         }
     }
 
     pub fn cache_key_aux(&self) -> Option<String> {
-        if matches!(self.stability, StabilityCache::Mutable) {
+        if matches!(self.stability, wit_types::Stability::Mutable) {
             self.version_token
                 .as_ref()
                 .map(|token| format!("version:{token}"))
@@ -125,23 +124,23 @@ impl FileAttrsCache {
 
     pub fn durable_cache_aux(&self) -> Option<Option<String>> {
         match self.stability {
-            StabilityCache::Immutable => Some(None),
-            StabilityCache::Mutable => self.cache_key_aux().map(Some),
-            StabilityCache::Volatile => None,
+            wit_types::Stability::Immutable => Some(None),
+            wit_types::Stability::Mutable => self.cache_key_aux().map(Some),
+            wit_types::Stability::Volatile => None,
         }
     }
 
     pub fn durable_content_cacheable(&self) -> bool {
         match self.stability {
-            StabilityCache::Immutable => true,
-            StabilityCache::Mutable => self.version_token.is_some(),
-            StabilityCache::Volatile => false,
+            wit_types::Stability::Immutable => true,
+            wit_types::Stability::Mutable => self.version_token.is_some(),
+            wit_types::Stability::Volatile => false,
         }
     }
 
     #[must_use]
     pub fn with_exact_size(mut self, size: u64) -> Self {
-        self.size = SizeCache::Exact(size);
+        self.size = wit_types::FileSize::Exact(size);
         self
     }
 
@@ -150,18 +149,20 @@ impl FileAttrsCache {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if matches!(self.stability, StabilityCache::Volatile)
-            && !matches!(&self.bytes, BytesCache::Deferred(ReadModeCache::Ranged))
+        if matches!(self.stability, wit_types::Stability::Volatile)
+            && !matches!(
+                &self.bytes,
+                wit_types::ProjBytes::Deferred(wit_types::ReadMode::Ranged)
+            )
         {
             return Err(
-                "Stability::Volatile requires Bytes::Deferred { read: ReadMode::Ranged }"
-                    .to_string(),
+                "Stability::Volatile requires ProjBytes::Deferred(ReadMode::Ranged)".to_string(),
             );
         }
 
-        if let BytesCache::Inline(bytes) = &self.bytes {
-            let SizeCache::Exact(size) = self.size else {
-                return Err("inline bytes require Size::Exact(bytes.len())".to_string());
+        if let wit_types::ProjBytes::Inline(bytes) = &self.bytes {
+            let wit_types::FileSize::Exact(size) = self.size else {
+                return Err("inline bytes require FileSize::Exact(bytes.len())".to_string());
             };
             let len = u64::try_from(bytes.len())
                 .map_err(|_| "inline byte length does not fit u64".to_string())?;
@@ -170,9 +171,9 @@ impl FileAttrsCache {
                     "inline file declares size {size} but carries {len} bytes"
                 ));
             }
-            if bytes.len() > MAX_PROJECTED_BYTES {
+            if bytes.len() > MAX_INLINE_PROJECTABLE_BYTES {
                 return Err(format!(
-                    "projected file exceeds eager byte limit of {MAX_PROJECTED_BYTES} bytes"
+                    "inline projection exceeds eager byte limit of {MAX_INLINE_PROJECTABLE_BYTES} bytes"
                 ));
             }
         }
@@ -193,7 +194,7 @@ impl FileAttrsCache {
 
     pub fn validate_observed_size(&self, observed_size: u64) -> Result<(), String> {
         match self.size {
-            SizeCache::Exact(size) => {
+            wit_types::FileSize::Exact(size) => {
                 if size == observed_size {
                     Ok(())
                 } else {
@@ -202,10 +203,10 @@ impl FileAttrsCache {
                     ))
                 }
             },
-            SizeCache::NonZero if observed_size == 0 => {
-                Err("declares Size::NonZero but observed zero bytes".to_string())
+            wit_types::FileSize::NonZero if observed_size == 0 => {
+                Err("declares FileSize::NonZero but observed zero bytes".to_string())
             },
-            SizeCache::NonZero | SizeCache::Unknown => Ok(()),
+            wit_types::FileSize::NonZero | wit_types::FileSize::Unknown => Ok(()),
         }
     }
 
@@ -216,51 +217,47 @@ impl FileAttrsCache {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SizeCache {
-    Exact(u64),
-    NonZero,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum BytesCache {
-    Inline(Vec<u8>),
-    Deferred(ReadModeCache),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ReadModeCache {
-    Full,
-    Ranged,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum StabilityCache {
-    Immutable,
-    Mutable,
-    Volatile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// `EntryMeta` carries the kind discriminator and (for files) the projected
+/// attributes used by the FUSE layer. The `kind` field is the full WIT
+/// `EntryKind`; for File entries it embeds the same `FileProj` data that
+/// gets summarized into `attrs`, which is redundant but kept so the
+/// dirents and inode layers can read attributes without re-matching the
+/// variant.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntryMeta {
-    pub kind: EntryKindCache,
+    pub kind: wit_types::EntryKind,
     pub attrs: Option<FileAttrsCache>,
 }
 
 impl EntryMeta {
     pub fn directory() -> Self {
         Self {
-            kind: EntryKindCache::Directory,
+            kind: wit_types::EntryKind::Directory,
             attrs: None,
         }
     }
 
     pub fn file(attrs: FileAttrsCache) -> Self {
+        let proj = wit_types::FileProj {
+            attrs: wit_types::FileAttrs {
+                size: attrs.size,
+                stability: attrs.stability,
+                version_token: attrs.version_token.clone(),
+            },
+            bytes: attrs.bytes.clone(),
+        };
         Self {
-            kind: EntryKindCache::File,
+            kind: wit_types::EntryKind::File(proj),
             attrs: Some(attrs),
         }
+    }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self.kind, wit_types::EntryKind::Directory)
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind, wit_types::EntryKind::File(_))
     }
 
     pub fn st_size(&self) -> u64 {
@@ -336,7 +333,7 @@ impl CacheRecord {
 
 // --- Payload types (serialized via postcard) ---
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LookupPayload {
     Positive(EntryMeta),
     Negative,
@@ -352,7 +349,7 @@ impl LookupPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttrPayload {
     pub meta: EntryMeta,
 }
@@ -367,13 +364,13 @@ impl AttrPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirentRecord {
     pub name: String,
     pub meta: EntryMeta,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirentsPayload {
     pub entries: Vec<DirentRecord>,
     /// Whether the listing is exhaustive (every child is present).

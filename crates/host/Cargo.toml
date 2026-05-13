@@ -26,6 +26,7 @@ anyhow = { workspace = true }
 dirs-next = "2"
 futures = "0.3"
 gix = { version = "0.72", default-features = false, features = ["blocking-network-client"] }
+fuser = { version = "0.17", features = ["macos-no-mount"] }
 url = "2"
 wasmtime-wasi = "43"
 redb = { workspace = true }
@@ -34,12 +35,10 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-fuser = "0.17"
-
 [dev-dependencies]
 http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
 wasmtime = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }

@@ -61,13 +61,13 @@ impl Parse for ProviderArgs {
     }
 }
 
-fn reject_legacy_surface(items: &[ImplItem]) -> syn::Result<()> {
+fn reject_removed_route_surface(items: &[ImplItem]) -> syn::Result<()> {
     for item in items {
         match item {
             ImplItem::Macro(mac) if mac.mac.path.is_ident("routes") => {
                 return Err(syn::Error::new(
                     mac.mac.span(),
-                    "legacy route macros are removed; use free-function #[dir]/#[file]/#[subtree] handlers and #[omnifs_sdk::provider(mounts(...))]",
+                    "route macros are removed; use free-function #[dir]/#[file]/#[subtree] handlers and #[omnifs_sdk::provider(mounts(...))]",
                 ));
             },
             ImplItem::Fn(func)
@@ -79,7 +79,7 @@ fn reject_legacy_surface(items: &[ImplItem]) -> syn::Result<()> {
             {
                 return Err(syn::Error::new(
                     func.sig.span(),
-                    "legacy #[lookup]/#[list]/#[read] handlers are removed; use free-function #[dir]/#[file]/#[subtree] handlers",
+                    "#[lookup]/#[list]/#[read] handlers are removed; use free-function #[dir]/#[file]/#[subtree] handlers",
                 ));
             },
             _ => {},
@@ -322,7 +322,9 @@ fn generate_lifecycle_impl(
                     *slot.borrow_mut() = Some(std::rc::Rc::new(core::cell::RefCell::new(state)));
                 });
                 omnifs_sdk::prelude::ProviderReturn::terminal(
-                    omnifs_sdk::prelude::OpResult::Init(info)
+                    omnifs_sdk::prelude::OpResult::Initialize(
+                        omnifs_sdk::omnifs::provider::types::InitializeResult { info }
+                    )
                 )
             }
 
@@ -360,16 +362,16 @@ fn generate_resume_impl(
     );
 
     quote! {
-        impl omnifs_sdk::exports::omnifs::provider::resume::Guest for #type_name {
+        impl omnifs_sdk::exports::omnifs::provider::continuation::Guest for #type_name {
             fn resume(
                 id: u64,
                 outcome: omnifs_sdk::prelude::CalloutResults,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
+            ) -> omnifs_sdk::prelude::ProviderStep {
                 if let Some(response) = ASYNC_RUNTIME.with(|runtime| runtime.resume(id, outcome.clone())) {
                     return response;
                 }
                 #resume_notify_body
-                omnifs_sdk::prelude::err(
+                omnifs_sdk::prelude::err_step(
                     omnifs_sdk::error::ProviderError::internal(format!("no pending future for id {id}"))
                 )
             }
@@ -396,9 +398,9 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 id: u64,
                 parent_path: String,
                 name: String,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
+            ) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -411,18 +413,22 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Err(error) => return omnifs_sdk::prelude::err(error),
                         };
                         match registry.lookup_child(&future_cx, &parent_path, &name).await {
-                            Ok(lookup) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                                omnifs_sdk::prelude::OpResult::Lookup(lookup.into())
-                            ),
+                            Ok(lookup) => {
+                                let (result, effects) = lookup.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::LookupChild(result),
+                                    effects,
+                                )
+                            },
                             Err(error) => omnifs_sdk::prelude::err(error),
                         }
                     });
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn list_children(id: u64, path: String) -> omnifs_sdk::prelude::ProviderReturn {
+            fn list_children(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -435,18 +441,22 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Err(error) => return omnifs_sdk::prelude::err(error),
                         };
                         match registry.list_children(&future_cx, &path).await {
-                            Ok(list) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                                omnifs_sdk::prelude::OpResult::List(list.into())
-                            ),
+                            Ok(list) => {
+                                let (result, effects) = list.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::ListChildren(result),
+                                    effects,
+                                )
+                            },
                             Err(error) => omnifs_sdk::prelude::err(error),
                         }
                     });
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn read_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderReturn {
+            fn read_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -459,18 +469,22 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                             Err(error) => return omnifs_sdk::prelude::err(error),
                         };
                         match registry.read_file(&future_cx, &path).await {
-                            Ok(file) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                                omnifs_sdk::prelude::OpResult::Read(file.into())
-                            ),
+                            Ok(file) => {
+                                let (result, effects) = file.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::ReadFile(result),
+                                    effects,
+                                )
+                            },
                             Err(error) => omnifs_sdk::prelude::err(error),
                         }
                     });
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderReturn {
+            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -515,7 +529,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                                 };
                                 omnifs_sdk::prelude::ProviderReturn::terminal(
                                     omnifs_sdk::prelude::OpResult::OpenFile(
-                                        omnifs_sdk::omnifs::provider::types::FileOpenResult {
+                                        omnifs_sdk::omnifs::provider::types::OpenFileResult {
                                             handle,
                                             attrs: opened.attrs.into(),
                                         },
@@ -533,16 +547,16 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 handle: u64,
                 offset: u64,
                 length: u32,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
+            ) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
                 let Some(reader) = RANGE_READERS.with(|readers| {
                     readers.borrow().get(&handle).cloned()
                 }) else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::not_found(format!("unknown file handle {handle}"))
                     );
                 };
@@ -576,8 +590,9 @@ fn generate_notify_impl(
     let dispatch_body = if has_on_event {
         quote! {
             match #type_name::on_event(future_cx, event).await {
-                Ok(outcome) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                    omnifs_sdk::prelude::OpResult::Event(outcome.into()),
+                Ok(effects) => omnifs_sdk::prelude::ProviderReturn::with_effects(
+                    omnifs_sdk::prelude::OpResult::OnEvent,
+                    effects,
                 ),
                 Err(error) => omnifs_sdk::prelude::err(error),
             }
@@ -585,10 +600,9 @@ fn generate_notify_impl(
     } else {
         quote! {
             let _ = (future_cx, event);
-            omnifs_sdk::prelude::ProviderReturn::terminal(
-                omnifs_sdk::prelude::OpResult::Event(
-                    omnifs_sdk::prelude::EventOutcome::new().into(),
-                ),
+            omnifs_sdk::prelude::ProviderReturn::with_effects(
+                omnifs_sdk::prelude::OpResult::OnEvent,
+                omnifs_sdk::prelude::Effects::new(),
             )
         }
     };
@@ -597,9 +611,9 @@ fn generate_notify_impl(
             fn on_event(
                 id: u64,
                 event: omnifs_sdk::prelude::ProviderEvent,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
+            ) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err(
+                    return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -613,45 +627,8 @@ fn generate_notify_impl(
     }
 }
 
-fn generate_reconcile_impl(type_name: &syn::Ident) -> TokenStream2 {
-    quote! {
-        impl omnifs_sdk::exports::omnifs::provider::reconcile::Guest for #type_name {
-            fn plan_mutations(
-                _id: u64,
-                _changes: Vec<omnifs_sdk::prelude::FileChange>,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
-                omnifs_sdk::prelude::err(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "mutation handlers are reserved but not implemented"
-                    )
-                )
-            }
-
-            fn execute(
-                _id: u64,
-                _mutation: omnifs_sdk::prelude::PlannedMutation,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
-                omnifs_sdk::prelude::err(
-                    omnifs_sdk::error::ProviderError::unimplemented(
-                        "mutation handlers are reserved but not implemented"
-                    )
-                )
-            }
-
-            fn fetch_resource(
-                _id: u64,
-                _resource_path: String,
-            ) -> omnifs_sdk::prelude::ProviderReturn {
-                omnifs_sdk::prelude::err(
-                    omnifs_sdk::error::ProviderError::unimplemented("reconcile not implemented")
-                )
-            }
-        }
-    }
-}
-
 pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result<TokenStream2> {
-    reject_legacy_surface(&input.items)?;
+    reject_removed_route_surface(&input.items)?;
 
     let type_name = match &*input.self_ty {
         Type::Path(path) => path
@@ -704,7 +681,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     );
     let browse_impl = generate_browse_impl(&type_name, &state_type);
     let notify_impl = generate_notify_impl(&type_name, &state_type, classified.on_event.is_some());
-    let reconcile_impl = generate_reconcile_impl(&type_name);
 
     Ok(quote! {
         struct #type_name;
@@ -726,7 +702,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         #resume_impl
         #browse_impl
         #notify_impl
-        #reconcile_impl
 
         #[cfg(target_arch = "wasm32")]
         omnifs_sdk::export!(#type_name with_types_in omnifs_sdk);

@@ -170,10 +170,22 @@ async fn registry_uses_path_first_handlers() {
     assert_eq!(projected.content(), Some(&b"bundle title\n"[..]));
 
     let checkout_list = registry.list_children(&cx, "/checkout").await.unwrap();
-    assert!(matches!(checkout_list, List::Subtree(42)));
+    assert!(matches!(
+        checkout_list,
+        List::Subtree {
+            path,
+            tree: 42,
+        } if path == "checkout"
+    ));
 
     let checkout_lookup = registry.lookup_child(&cx, "/", "checkout").await.unwrap();
-    assert!(matches!(checkout_lookup, Lookup::Subtree(42)));
+    assert!(matches!(
+        checkout_lookup,
+        Lookup::Subtree {
+            path,
+            tree: 42,
+        } if path == "checkout"
+    ));
 
     // Rest-capture dispatch: multi-segment tails decode to the joined string.
     let rest_empty = registry.read_file(&cx, "/root/alpha").await.unwrap();
@@ -359,7 +371,6 @@ async fn bind_exact_match_lookup_is_not_exhaustive() {
         "bind exact-match must not claim an exhaustive sibling set"
     );
     assert!(entry.siblings().is_empty());
-    assert!(entry.sibling_files().is_empty());
 }
 
 #[tokio::test]

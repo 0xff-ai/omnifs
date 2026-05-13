@@ -1,6 +1,6 @@
 use omnifs_host::config::InstanceConfig;
-use omnifs_host::omnifs::provider::types::{FileContentResult, InlineFileContent};
-use omnifs_host::runtime::CalloutRuntime;
+use omnifs_host::omnifs::provider::types::{ReadFileBytes, ReadFileResult};
+use omnifs_host::runtime::ProviderRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
 use omnifs_host::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use std::path::{Path, PathBuf};
@@ -13,27 +13,27 @@ pub fn make_extractor() -> Arc<ArchiveExtractorComponent> {
     Arc::new(ArchiveExtractorComponent::new(DEFAULT_LIMITS).expect("build extractor"))
 }
 
-/// Borrow the inline payload of a `FileContentResult`, panicking if the
+/// Borrow the inline payload of a `ReadFileResult`, panicking if the
 /// terminal returned a blob-backed file. Tests that intentionally
 /// exercise the blob path must match on the variant directly.
 #[allow(dead_code)]
-pub fn expect_inline(result: &FileContentResult) -> &InlineFileContent {
-    match result {
-        FileContentResult::Inline(inline) => inline,
-        FileContentResult::Blob(_) => panic!("expected inline file content, got blob-backed"),
+pub fn expect_inline(result: &ReadFileResult) -> &[u8] {
+    match &result.bytes {
+        ReadFileBytes::Inline(bytes) => bytes,
+        ReadFileBytes::Blob(_) => panic!("expected inline file content, got blob-backed"),
     }
 }
 
 #[allow(dead_code)]
-pub fn inline_content(result: &FileContentResult) -> &[u8] {
-    expect_inline(result).content.as_slice()
+pub fn inline_content(result: &ReadFileResult) -> &[u8] {
+    expect_inline(result)
 }
 
 #[allow(dead_code)]
-pub fn into_inline(result: FileContentResult) -> InlineFileContent {
-    match result {
-        FileContentResult::Inline(inline) => inline,
-        FileContentResult::Blob(_) => panic!("expected inline file content, got blob-backed"),
+pub fn into_inline(result: ReadFileResult) -> Vec<u8> {
+    match result.bytes {
+        ReadFileBytes::Inline(bytes) => bytes,
+        ReadFileBytes::Blob(_) => panic!("expected inline file content, got blob-backed"),
     }
 }
 
@@ -42,7 +42,7 @@ pub struct RuntimeHarness {
     pub _engine: wasmtime::Engine,
     pub clone_dir: TempDir,
     pub _cache_dir: TempDir,
-    pub runtime: CalloutRuntime,
+    pub runtime: ProviderRuntime,
 }
 
 #[allow(dead_code)]
@@ -90,7 +90,7 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-    let runtime = CalloutRuntime::new(
+    let runtime = ProviderRuntime::new(
         engine,
         &provider_wasm_path(&config.plugin),
         &config,
@@ -116,7 +116,7 @@ pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-    let runtime = CalloutRuntime::new(
+    let runtime = ProviderRuntime::new(
         &engine,
         &provider_wasm_path(&config.plugin),
         &config,

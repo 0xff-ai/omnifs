@@ -2,11 +2,13 @@
 
 use omnifs_host::auth::AuthManager;
 use omnifs_host::config::AuthConfig;
+use omnifs_host::omnifs::provider::types as wit_types;
 use omnifs_host::runtime::capability::{CapabilityChecker, CapabilityGrants};
-use omnifs_host::runtime::executor::{CalloutResponse, ErrorKind, HttpExecutor};
+use omnifs_host::runtime::http_stack::HttpStack;
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::Duration;
 
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -167,17 +169,20 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         max_memory_mb: 64,
         needs_git: false,
     }));
-    let executor = HttpExecutor::new(auth, capability).unwrap();
+    let stack = HttpStack::new(auth, capability).unwrap();
 
-    match executor
-        .execute_fetch("GET", "https://api.github.com/repos", &[], None)
-        .await
-    {
-        CalloutResponse::Error {
-            kind: ErrorKind::Denied,
+    let req = wit_types::HttpRequest {
+        method: "GET".to_string(),
+        url: "https://api.github.com/repos".to_string(),
+        headers: Vec::new(),
+        body: None,
+    };
+    match stack.fetch(&req, Duration::from_secs(30)).await {
+        wit_types::CalloutResult::CalloutError(wit_types::CalloutError {
+            kind: wit_types::ErrorKind::Denied,
             retryable: false,
             ..
-        } => {},
+        }) => {},
         other => panic!("expected denied error, got {other:?}"),
     }
 }

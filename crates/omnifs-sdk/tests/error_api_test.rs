@@ -25,7 +25,7 @@ fn provider_error_into_response_preserves_retryable_flag() {
     let response: ProviderReturn = ProviderError::denied("final denial").into();
 
     let ProviderReturn {
-        terminal: Some(OpResult::Err(error)),
+        result: OpResult::Error(error),
         ..
     } = response
     else {

@@ -1,15 +1,15 @@
-//! Async callout correlation ID tracking.
+//! Operation ID allocation.
 //!
-//! Assigns unique IDs to async callouts so providers can correlate
-//! resume calls with pending operations.
+//! Assigns unique monotonic IDs to provider operations so that callout
+//! resume calls can be correlated with the originating operation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub struct CorrelationTracker {
+pub struct OperationIds {
     next: AtomicU64,
 }
 
-impl CorrelationTracker {
+impl OperationIds {
     pub const fn new() -> Self {
         Self {
             next: AtomicU64::new(1),
@@ -21,7 +21,7 @@ impl CorrelationTracker {
     }
 }
 
-impl Default for CorrelationTracker {
+impl Default for OperationIds {
     fn default() -> Self {
         Self::new()
     }

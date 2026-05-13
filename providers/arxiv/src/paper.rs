@@ -123,7 +123,7 @@ async fn project_paper_dir(cx: &Cx<State>, paper: &PaperSubtree) -> Result<Proje
     let entry = paper.load_entry(cx).await?;
     let mut p = Projection::new();
     entry.write_metadata_json(&mut p, None);
-    p.preload("links.json", entry.links_json_bytes(None));
+    p.file_with_content("links.json", entry.links_json_bytes(None));
     p.page(PageStatus::Exhaustive);
     Ok(p)
 }
@@ -148,7 +148,7 @@ async fn project_version_dir(
     entry.validate_version(version)?;
     let mut p = Projection::new();
     entry.write_metadata_json(&mut p, Some(version));
-    p.preload("links.json", entry.links_json_bytes(Some(version)));
+    p.file_with_content("links.json", entry.links_json_bytes(Some(version)));
     p.page(PageStatus::Exhaustive);
     Ok(p)
 }
@@ -159,8 +159,11 @@ async fn read_paper_pdf(
     version: Option<u32>,
 ) -> Result<FileContent> {
     let raw_id = paper.decode()?;
-    let bytes = download_pdf(cx, &raw_id, version).await?;
-    Ok(FileContent::bytes(bytes))
+    let blob = download_pdf(cx, &raw_id, version).await?;
+    Ok(FileContent::blob_with_attrs(
+        FileAttrs::new(Size::Exact(blob.size), Stability::Immutable),
+        blob.id(),
+    ))
 }
 
 async fn read_paper_source(
@@ -169,8 +172,11 @@ async fn read_paper_source(
     version: Option<u32>,
 ) -> Result<FileContent> {
     let raw_id = paper.decode()?;
-    let bytes = download_source(cx, &raw_id, version).await?;
-    Ok(FileContent::bytes(bytes))
+    let blob = download_source(cx, &raw_id, version).await?;
+    Ok(FileContent::blob_with_attrs(
+        FileAttrs::new(Size::Exact(blob.size), Stability::Immutable),
+        blob.id(),
+    ))
 }
 
 async fn read_paper_links(

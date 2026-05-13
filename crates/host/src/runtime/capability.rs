@@ -15,6 +15,18 @@ pub struct CapabilityGrants {
     pub needs_git: bool,
 }
 
+impl CapabilityGrants {
+    pub fn from_config(config: &crate::config::InstanceConfig, needs_git: bool) -> Self {
+        let caps = config.capabilities.as_ref();
+        Self {
+            domains: caps.and_then(|c| c.domains.clone()).unwrap_or_default(),
+            git_repos: caps.and_then(|c| c.git_repos.clone()).unwrap_or_default(),
+            max_memory_mb: caps.and_then(|c| c.max_memory_mb).unwrap_or(64),
+            needs_git,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CapabilityError {
     #[error("domain not in allowlist: {domain}")]

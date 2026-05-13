@@ -1,4 +1,4 @@
-use super::{CalloutRuntime, NotifierHandle};
+use super::{NotifierHandle, ProviderRuntime};
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use fuser::INodeNo;
@@ -53,7 +53,7 @@ impl InvalidationState {
     }
 }
 
-impl CalloutRuntime {
+impl ProviderRuntime {
     pub fn install_invalidation(
         &self,
         path_to_inode: Arc<PathToInode>,
@@ -85,7 +85,7 @@ impl CalloutRuntime {
             if key.mount != handles.mount || !path_prefix_matches(prefix, &key.path) {
                 continue;
             }
-            let Some((parent_path, child_name)) = key.path.rsplit_once('/') else {
+            let Some((parent_path, child_name)) = parent_child_for_notify(&key.path) else {
                 continue;
             };
             let parent_ino = handles
@@ -118,15 +118,12 @@ impl CalloutRuntime {
         let Some(handles) = self.invalidation.handles() else {
             return;
         };
-        let Some((parent_path, child_name)) = path.rsplit_once('/') else {
+        let Some((parent_path, child_name)) = parent_child_for_notify(path) else {
             return;
         };
         let parent_ino = handles
             .path_to_inode
-            .get(&PathKey::new(
-                handles.mount.clone(),
-                parent_path.to_string(),
-            ))
+            .get(&PathKey::new(handles.mount.clone(), parent_path))
             .map_or(1, |r| *r.value());
         if let Some(notifier) = handles.notifier.lock().as_ref() {
             let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
@@ -139,5 +136,32 @@ impl CalloutRuntime {
 
     pub fn drain_invalidated_paths(&self) -> Vec<String> {
         self.invalidation.drain_paths()
+    }
+}
+
+fn parent_child_for_notify(path: &str) -> Option<(String, &str)> {
+    if path.is_empty() {
+        return None;
+    }
+    match path.rsplit_once('/') {
+        Some((parent, child)) if !child.is_empty() => Some((parent.to_string(), child)),
+        None => Some((String::new(), path)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_child_for_notify;
+
+    #[test]
+    fn parent_child_for_notify_maps_top_level_entries_to_root() {
+        assert_eq!(parent_child_for_notify("foo"), Some((String::new(), "foo")));
+        assert_eq!(
+            parent_child_for_notify("owner/repo"),
+            Some(("owner".to_string(), "repo"))
+        );
+        assert_eq!(parent_child_for_notify("owner/"), None);
+        assert_eq!(parent_child_for_notify(""), None);
     }
 }

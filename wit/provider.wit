@@ -10,11 +10,43 @@ interface types {
     type file-handle = u64;
     type blob-id = u64;
 
+    // --- Provider progress and terminal return ---
+
+    /// One provider progress step. `suspended` is not a return: the host
+    /// must run a non-empty callout batch and resume the same operation.
+    /// `returned` is the completed operation answer plus host-side
+    /// effects to commit.
+    variant provider-step {
+        suspended(list<callout>),
+        returned(provider-return),
+    }
+
+    /// Completed operation answer. This shape cannot carry callouts.
+    /// `effects` is the only terminal host-mutation channel.
+    record provider-return {
+        %result: op-result,
+        effects: list<effect>,
+    }
+
+    /// Completed operation answer. Arm names mirror provider operations;
+    /// `error` is the cross-operation failure arm.
+    variant op-result {
+        lookup-child(lookup-child-result),
+        list-children(list-children-result),
+        read-file(read-file-result),
+        open-file(open-file-result),
+        read-chunk(read-chunk-result),
+        initialize(initialize-result),
+        on-event,
+        error(provider-error),
+    }
+
     // --- Callouts (provider -> host, request/response) ---
 
     /// Work the host runs on the provider's behalf. Every callout expects
     /// a matching `callout-result` back via `resume`; there are no
-    /// fire-and-forget callouts.
+    /// fire-and-forget callouts, and provider returns never carry
+    /// trailing callouts.
     variant callout {
         fetch(http-request),
         stream-open(http-request),
@@ -28,49 +60,17 @@ interface types {
         /// HTTP fetch whose response body lands in the host's disk-backed
         /// blob cache instead of crossing the WIT boundary. Returns a
         /// `blob-id` plus response metadata; the bytes can later be served
-        /// verbatim as file content (`file-content-result.blob`) or
-        /// mounted as a directory tree (`open-archive`).
+        /// verbatim as read bytes (`read-file-bytes.blob`) or mounted as a
+        /// directory tree (`open-archive`).
         fetch-blob(blob-fetch-request),
         /// Mount a stored blob as a directory tree, with the host
         /// performing decompression and walk based on the requested
-        /// archive format. Returns a `tree-ref` resolved by the host's
-        /// existing tree-serving path (the same one git-open-repo uses).
+        /// archive format.
         open-archive(archive-open-request),
         /// Bring a (range of a) stored blob across the WIT boundary so
         /// the provider can parse it. Use sparingly; the point of blobs
         /// is to keep large bytes host-side.
         read-blob(read-blob-request),
-    }
-
-    /// Unified provider return value. A handler may return:
-    ///
-    /// - `terminal = some(...), callouts = []` — pure terminal.
-    /// - `terminal = none, callouts = [..]` — suspension: host runs the
-    ///   callouts and calls `resume(id, results)`.
-    /// - `terminal = some(...), callouts = [..]` — terminal with trailing
-    ///   callouts (rare; host executes them, discards results, returns the
-    ///   terminal).
-    /// - Both empty is a protocol error.
-    record provider-return {
-        callouts: list<callout>,
-        terminal: option<op-result>,
-    }
-
-    /// Top-level terminal. Every non-`err` variant is 1:1 with a handler
-    /// operation; the arm name matches the operation, not the payload
-    /// shape.
-    variant op-result {
-        lookup(lookup-result),
-        %list(list-result),
-        read(file-content-result),
-        open-file(file-open-result),
-        read-chunk(file-chunk),
-        init(provider-info),
-        event(event-outcome),
-        err(provider-error),
-        plan-mutations(list<planned-mutation>),
-        execute(mutation-outcome),
-        fetch-resource(list<file-entry>),
     }
 
     // --- Callout results (host -> provider, non-recursive) ---
@@ -89,6 +89,44 @@ interface types {
         blob-read(list<u8>),
         callout-error(callout-error),
     }
+
+    type callout-results = list<callout-result>;
+
+    // --- Terminal host mutations ---
+
+    /// Host-side mutation committed at the return boundary.
+    variant effect {
+        project(proj-entry),
+        invalidate-path(string),
+        invalidate-prefix(string),
+        disown-tree(tree-handoff),
+    }
+
+    /// Provider-relative path metadata to install into the host
+    /// projection cache.
+    ///
+    /// When `kind` is `directory` and `listing-exhaustive` is true, the
+    /// host treats the children projected at `<path>/<name>` in the same
+    /// batch as the authoritative listing of `path`: the resulting
+    /// dirents record is marked exhaustive, and a subsequent readdir on
+    /// `path` serves from cache without re-invoking `list-children`.
+    /// Ignored when `kind` is `file`.
+    record proj-entry {
+        path: string,
+        kind: entry-kind,
+        listing-exhaustive: bool,
+    }
+
+    /// Host routing state for a tree handoff. The operation result says
+    /// that the path is a subtree; this effect says the host should
+    /// install that tree as disowned or passthrough state after accepting
+    /// the return.
+    record tree-handoff {
+        path: string,
+        tree: tree-ref,
+    }
+
+    // --- Error types ---
 
     record callout-error {
         kind: error-kind,
@@ -111,13 +149,13 @@ interface types {
         internal,
     }
 
-    type callout-results = list<callout-result>;
-
     record provider-error {
         kind: error-kind,
         message: string,
         retryable: bool,
     }
+
+    // --- File metadata and projection data ---
 
     type version-token = string;
 
@@ -132,108 +170,99 @@ interface types {
         ranged,
     }
 
-    variant file-bytes {
-        inline(list<u8>),
-        deferred(read-mode),
-    }
-
     enum stability {
         immutable,
         mutable,
         volatile,
     }
 
+    /// File metadata. Bytes are deliberately not attributes.
     record file-attrs {
         size: file-size,
-        bytes: file-bytes,
         stability: stability,
         version-token: option<version-token>,
     }
 
+    /// Byte availability declared by projection.
+    variant proj-bytes {
+        inline(list<u8>),
+        deferred(read-mode),
+    }
+
+    /// File projection data: metadata plus byte availability.
+    record file-proj {
+        attrs: file-attrs,
+        bytes: proj-bytes,
+    }
+
     variant entry-kind {
         directory,
-        file(file-attrs),
+        file(file-proj),
+    }
+
+    record dir-entry {
+        name: string,
+        kind: entry-kind,
     }
 
     // --- Terminal payloads ---
 
-    /// Lookup terminal. `subtree(tree-ref)` lets `lookup-child` return a
-    /// subtree handoff directly. `not-found` is bare by design; it carries
-    /// no siblings or sibling-files.
-    variant lookup-result {
+    /// Lookup-child result. `subtree(tree-ref)` answers the lookup/list
+    /// operation. It is result data, not itself the host mutation.
+    variant lookup-child-result {
         entry(lookup-entry),
         subtree(tree-ref),
         not-found,
     }
 
     /// The non-subtree, non-miss shape of a lookup: the found entry plus
-    /// cache-adjacent data. `target` is non-optional because the miss
-    /// case is the `not-found` arm of `lookup-result`, not a null target.
+    /// cache-adjacent sibling data.
     record lookup-entry {
         target: dir-entry,
         siblings: list<dir-entry>,
-        sibling-files: list<projected-file>,
-
-        /// Whether the siblings list is exhaustive.
-        ///
-        /// When true, the host treats absence from `siblings` as
-        /// authoritative negative: any lookup for a name not listed
-        /// returns ENOENT without another provider call. Set false
-        /// when siblings come from a paginated or capped source that
-        /// may omit valid children.
         exhaustive: bool,
-
-        /// Content the provider already has in hand for named paths
-        /// nested under the looked-up entry. Equivalent to
-        /// `dir-listing.preload` and applied at the same boundary:
-        /// when a directory lookup hits a dir handler that staged
-        /// preloads for its children, those preloads flow out with
-        /// the lookup terminal rather than being dropped.
-        preload: list<preload-item>,
     }
 
-    /// List terminal. `subtree(tree-ref)` lets `list-children` return a
-    /// subtree handoff directly.
-    variant list-result {
+    variant list-children-result {
         entries(dir-listing),
         subtree(tree-ref),
     }
 
-    /// Event handler terminal. Carries invalidations the host must apply
-    /// at the response boundary. Empty lists are valid (no-op terminal).
-    record event-outcome {
-        invalidate-paths: list<string>,
-        invalidate-prefixes: list<string>,
+    /// A directory listing returned by a provider, pairing child entries
+    /// with a signal about how the host should interpret absence.
+    record dir-listing {
+        entries: list<dir-entry>,
+        exhaustive: bool,
     }
 
-    /// Read terminal payload. Inline content travels in the WIT; blob
-    /// content stays in the host's blob cache and is streamed straight
-    /// to FUSE without a round trip through the provider.
-    variant file-content-result {
-        inline(inline-file-content),
-        blob(blob-file-content),
+    /// Materialized byte source returned by `read-file`.
+    variant read-file-bytes {
+        inline(list<u8>),
+        blob(blob-id),
     }
 
-    record inline-file-content {
+    /// Completed full-read result. `read-file` is only valid for files
+    /// projected with `proj-bytes::deferred(read-mode::full)`.
+    record read-file-result {
         attrs: file-attrs,
-        content: list<u8>,
-        sibling-files: list<projected-file>,
+        bytes: read-file-bytes,
     }
 
-    record blob-file-content {
-        attrs: file-attrs,
-        blob: blob-id,
-        sibling-files: list<projected-file>,
-    }
-
-    record file-open-result {
+    /// Opened ranged-read handle. `open-file` is only valid for files
+    /// projected with `proj-bytes::deferred(read-mode::ranged)`.
+    record open-file-result {
         handle: file-handle,
         attrs: file-attrs,
     }
 
-    record file-chunk {
+    /// Chunk bytes for an `open-file` handle.
+    record read-chunk-result {
         content: list<u8>,
         eof: bool,
+    }
+
+    record initialize-result {
+        info: provider-info,
     }
 
     // --- Data types ---
@@ -286,8 +315,7 @@ interface types {
     /// HTTP fetch that lands its response body in the host's disk-backed
     /// blob cache. `cache-key` is provider-scoped: two providers may
     /// reuse the same key safely. Reusing the same `cache-key` from the
-    /// same provider deduplicates the fetch — the host returns the
-    /// existing `blob-id` without re-downloading.
+    /// same provider deduplicates the fetch.
     record blob-fetch-request {
         method: string,
         url: string,
@@ -309,9 +337,7 @@ interface types {
 
     /// Mount a stored blob as a directory tree. `format` tells the host
     /// how to decompress and walk the bytes. `strip-prefix`, when set,
-    /// is removed from every entry's path at mount time — useful for
-    /// archives whose tarball wraps everything in a single top-level
-    /// directory (e.g. crates.io's `serde-1.0.197/`).
+    /// is removed from every entry's path at mount time.
     record archive-open-request {
         blob: blob-id,
         format: archive-format,
@@ -324,11 +350,7 @@ interface types {
 
     /// Bring (a range of) a stored blob across the WIT. The host caps
     /// this path to a small policy window because bytes cross into the
-    /// guest. Ranged reads may start anywhere in the blob, but the
-    /// returned byte count must stay inside the cap; `len = none` reads
-    /// to end only when the remaining bytes stay inside that cap.
-    /// Mostly an escape hatch; prefer `open-archive` or blob-backed
-    /// file content.
+    /// guest.
     record read-blob-request {
         blob: blob-id,
         offset: u64,
@@ -345,29 +367,6 @@ interface types {
         tree: tree-ref,
     }
 
-    /// File content the provider hands to the host so that a later read
-    /// of provider-relative `path` can be served without another provider
-    /// round trip. Used to fan out adjacent data from an upstream payload
-    /// the handler has already fetched.
-    record preloaded-file {
-        path: string,
-        attrs: file-attrs,
-        content: list<u8>,
-    }
-
-    /// Entry metadata the provider hands to the host so that a later
-    /// lookup of provider-relative `path` can be served without another
-    /// provider round trip.
-    record preloaded-entry {
-        path: string,
-        kind: entry-kind,
-    }
-
-    variant preload-item {
-        file(preloaded-file),
-        entry(preloaded-entry),
-    }
-
     record log-entry {
         level: log-level,
         message: string,
@@ -379,106 +378,6 @@ interface types {
         info,
         warn,
         error,
-    }
-
-    /// A directory listing returned by a provider, pairing the child
-    /// entries with a signal about how the host should interpret absence.
-    ///
-    /// The host caches listings to accelerate readdir and lookup. On a
-    /// lookup for "does child X exist in directory D?", the host can
-    /// answer ENOENT from a cached listing of D without a provider
-    /// round-trip, but only when the listing is known to be exhaustive.
-    /// This matters because FUSE clients (shells, editors, ripgrep)
-    /// routinely stat names that cannot exist in a projected filesystem,
-    /// and each miss would otherwise be a blocking call into the
-    /// provider.
-    record dir-listing {
-        entries: list<dir-entry>,
-
-        /// Whether every immediate child of this directory is present
-        /// in `entries`.
-        ///
-        /// When true, absence from the entry list is a sound negative
-        /// lookup: the host may return ENOENT for any name not listed
-        /// without consulting the provider. This property applies only
-        /// to immediate child names; it says nothing about metadata
-        /// accuracy or recursive subtree completeness. Freshness is
-        /// governed by explicit invalidation; cached listings do not
-        /// expire on time.
-        ///
-        /// Set true when the set of children is structurally known
-        /// (fixed schemas, confirmed empties). Set false when the
-        /// listing comes from a paginated API, a capped query, or any
-        /// source that may omit valid children. The host still caches
-        /// non-exhaustive entries for readdir; it just will not use
-        /// them to deny lookups.
-        exhaustive: bool,
-
-        /// Content or entry metadata the provider already has in hand
-        /// for any path under this provider. The host caches these so a
-        /// later lookup or read of each path is served without another
-        /// provider round trip. Consumed at the response boundary; the
-        /// cached listing carries an empty preload list.
-        preload: list<preload-item>,
-    }
-
-    record dir-entry {
-        name: string,
-        kind: entry-kind,
-    }
-
-    record projected-file {
-        name: string,
-        attrs: file-attrs,
-    }
-
-    record file-entry {
-        path: string,
-        content: list<u8>,
-        mode: u32,
-        version-token: option<string>,
-    }
-
-    record file-change {
-        path: string,
-        kind: change-kind,
-        old-content: option<list<u8>>,
-        new-content: option<list<u8>>,
-    }
-
-    enum change-kind {
-        added,
-        modified,
-        deleted,
-    }
-
-    record planned-mutation {
-        id: string,
-        description: string,
-        depends-on: list<string>,
-        version-token: option<string>,
-        payload: list<u8>,
-    }
-
-    record mutation-outcome {
-        post-actions: list<post-action>,
-    }
-
-    variant post-action {
-        rename-path(rename-action),
-        write-file(file-entry),
-        delete-path(string),
-        set-mode(mode-action),
-    }
-
-    record rename-action {
-        source: string,
-        dest: string,
-    }
-
-    record mode-action {
-        path: string,
-        mode: u32,
     }
 
     record provider-info {
@@ -520,6 +419,9 @@ interface types {
 interface lifecycle {
     use types.{provider-return, requested-capabilities};
 
+    /// Terminal-only in this iteration. It has no correlation id, so it
+    /// cannot suspend on callouts unless the interface is explicitly
+    /// changed later.
     initialize: func(config: list<u8>) -> provider-return;
     shutdown: func();
     get-config-schema: func() -> option<string>;
@@ -527,45 +429,32 @@ interface lifecycle {
 }
 
 interface browse {
-    use types.{provider-return, correlation-id};
+    use types.{correlation-id, file-handle, provider-step};
 
     lookup-child: func(id: correlation-id, parent-path: string, name: string)
-        -> provider-return;
+        -> provider-step;
     list-children: func(id: correlation-id, path: string)
-        -> provider-return;
+        -> provider-step;
     read-file: func(id: correlation-id, path: string)
-        -> provider-return;
+        -> provider-step;
     open-file: func(id: correlation-id, path: string)
-        -> provider-return;
-    read-chunk: func(id: correlation-id, handle: u64, offset: u64, len: u32)
-        -> provider-return;
-    close-file: func(handle: u64);
+        -> provider-step;
+    read-chunk: func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
+        -> provider-step;
+    close-file: func(handle: file-handle);
 }
 
-interface reconcile {
-    use types.{provider-return, correlation-id, file-change, planned-mutation};
+interface continuation {
+    use types.{callout-results, correlation-id, provider-step};
 
-    plan-mutations: func(id: correlation-id, changes: list<file-change>)
-        -> provider-return;
-    execute: func(id: correlation-id, mutation: planned-mutation)
-        -> provider-return;
-    fetch-resource: func(id: correlation-id, resource-path: string)
-        -> provider-return;
-}
-
-interface resume {
-    use types.{provider-return, correlation-id, callout-results};
-
-    resume: func(id: correlation-id, callout-outcome: callout-results)
-        -> provider-return;
+    resume: func(id: correlation-id, results: callout-results) -> provider-step;
     cancel: func(id: correlation-id);
 }
 
 interface notify {
-    use types.{provider-return, correlation-id, provider-event};
+    use types.{correlation-id, provider-event, provider-step};
 
-    on-event: func(id: correlation-id, event: provider-event)
-        -> provider-return;
+    on-event: func(id: correlation-id, event: provider-event) -> provider-step;
 }
 
 // === Host import ===
@@ -582,14 +471,13 @@ world provider-core {
     import log;
     export lifecycle;
     export browse;
-    export resume;
+    export continuation;
 }
 
 world provider {
     import log;
     export lifecycle;
     export browse;
-    export resume;
-    export reconcile;
+    export continuation;
     export notify;
 }

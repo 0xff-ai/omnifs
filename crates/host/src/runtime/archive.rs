@@ -12,7 +12,10 @@
 #[cfg(test)]
 use crate::cache::blobs::BlobMetadata;
 use crate::cache::blobs::{BlobCache, BlobRecord};
-use crate::runtime::executor::{CalloutResponse, ErrorKind};
+use crate::omnifs::provider::types as wit_types;
+use crate::runtime::callouts::{
+    callout_error, callout_internal, callout_not_found, record_outcome,
+};
 use crate::runtime::sandbox::tree_cache::{
     MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
 };
@@ -87,6 +90,22 @@ impl TreeKey for ExtractKey {
 enum ArchiveError {
     #[error("{0}")]
     Extract(#[from] ExtractError),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Internal(String),
+    #[error("{0}")]
+    JoinFailed(String),
+}
+
+impl From<ArchiveError> for wit_types::CalloutResult {
+    fn from(error: ArchiveError) -> Self {
+        match error {
+            ArchiveError::Extract(e) => callout_error(error_kind_for(&e), e.to_string(), false),
+            ArchiveError::NotFound(msg) => callout_not_found(msg),
+            ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => callout_internal(msg),
+        }
+    }
 }
 
 impl ArchiveExecutor {
@@ -103,26 +122,57 @@ impl ArchiveExecutor {
         }
     }
 
-    pub(crate) fn open_archive(
+    #[tracing::instrument(target = "omnifs_callout", skip_all, fields(
+        blob = req.blob,
+        format = ?req.format,
+        strip_prefix = req.strip_prefix.as_deref().unwrap_or(""),
+        tree_ref = tracing::field::Empty,
+        error.kind = tracing::field::Empty,
+        error.message = tracing::field::Empty,
+        error.retryable = tracing::field::Empty,
+    ))]
+    pub(crate) async fn open(
+        self: &Arc<Self>,
+        req: &wit_types::ArchiveOpenRequest,
+    ) -> wit_types::CalloutResult {
+        let this = Arc::clone(self);
+        let blob_id = req.blob;
+        let format = ArchiveFormat::from(req.format);
+        let strip = req.strip_prefix.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            this.open_archive_blocking(blob_id, format, strip.as_deref())
+        })
+        .await;
+        let result = match outcome {
+            Ok(Ok(tree)) => {
+                wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree })
+            },
+            Ok(Err(e)) => e.into(),
+            Err(join_err) => {
+                ArchiveError::JoinFailed(format!("extract task join: {join_err}")).into()
+            },
+        };
+        record_outcome(&result);
+        result
+    }
+
+    fn open_archive_blocking(
         &self,
         blob_id: u64,
         format: ArchiveFormat,
         strip_prefix: Option<&str>,
-    ) -> CalloutResponse {
+    ) -> Result<u64, ArchiveError> {
         let strip_prefix = strip_prefix.filter(|s| !s.is_empty()).map(str::to_string);
-        let Some(record) = self.cache.lookup_by_id(blob_id) else {
-            return error_response(
-                ErrorKind::NotFound,
-                format!("blob {blob_id} not found"),
-                false,
-            );
-        };
+        let record = self
+            .cache
+            .lookup_by_id(blob_id)
+            .ok_or_else(|| ArchiveError::NotFound(format!("blob {blob_id} not found")))?;
         let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
 
-        let result = self
+        let tree = match self
             .materializer
-            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record));
-        let tree = match result {
+            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record))
+        {
             Ok(MaterializedTree::Cached { tree }) => tree,
             Ok(MaterializedTree::Fresh {
                 tree,
@@ -136,23 +186,19 @@ impl ArchiveExecutor {
                 );
                 tree
             },
-            Err(MaterializeError::Run(e)) => return archive_error(e),
+            Err(MaterializeError::Run(e)) => return Err(e),
             Err(MaterializeError::Prepare(e)) => {
-                return error_response(
-                    ErrorKind::Internal,
-                    format!("prepare archive extraction: {e}"),
-                    false,
-                );
+                return Err(ArchiveError::Internal(format!(
+                    "prepare archive extraction: {e}"
+                )));
             },
             Err(MaterializeError::Publish(e)) => {
-                return error_response(
-                    ErrorKind::Internal,
-                    format!("publish archive extraction: {e}"),
-                    false,
-                );
+                return Err(ArchiveError::Internal(format!(
+                    "publish archive extraction: {e}"
+                )));
             },
         };
-        CalloutResponse::ArchiveOpened(tree)
+        Ok(tree)
     }
 
     fn extract_to(
@@ -177,6 +223,16 @@ impl ArchiveExecutor {
     }
 }
 
+impl From<wit_types::ArchiveFormat> for ArchiveFormat {
+    fn from(format: wit_types::ArchiveFormat) -> Self {
+        match format {
+            wit_types::ArchiveFormat::TarGz => Self::TarGz,
+            wit_types::ArchiveFormat::Tar => Self::Tar,
+            wit_types::ArchiveFormat::Zip => Self::Zip,
+        }
+    }
+}
+
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(len * 2);
@@ -187,31 +243,14 @@ fn hex_prefix(bytes: &[u8], len: usize) -> String {
     out
 }
 
-fn error_kind_for(error: &ExtractError) -> ErrorKind {
-    use ExtractError as E;
+fn error_kind_for(error: &ExtractError) -> wit_types::ErrorKind {
     match error {
-        E::UnsafePath(_)
-        | E::PathTooDeep(_)
-        | E::PathTooLong(_)
-        | E::UnsupportedEntryKind(_)
-        | E::Malformed(_) => ErrorKind::InvalidInput,
-        _ => ErrorKind::Internal,
-    }
-}
-
-fn archive_error(error: ArchiveError) -> CalloutResponse {
-    match error {
-        ArchiveError::Extract(error) => {
-            error_response(error_kind_for(&error), error.to_string(), false)
-        },
-    }
-}
-
-fn error_response(kind: ErrorKind, message: String, retryable: bool) -> CalloutResponse {
-    CalloutResponse::Error {
-        kind,
-        message,
-        retryable,
+        ExtractError::UnsafePath(_)
+        | ExtractError::PathTooDeep(_)
+        | ExtractError::PathTooLong(_)
+        | ExtractError::UnsupportedEntryKind(_)
+        | ExtractError::Malformed(_) => wit_types::ErrorKind::InvalidInput,
+        _ => wit_types::ErrorKind::Internal,
     }
 }
 
@@ -287,6 +326,14 @@ mod tests {
         assert!(base.dir_name().starts_with("targz-"));
     }
 
+    fn open_request_targz(blob: u64, strip_prefix: &str) -> wit_types::ArchiveOpenRequest {
+        wit_types::ArchiveOpenRequest {
+            blob,
+            format: wit_types::ArchiveFormat::TarGz,
+            strip_prefix: Some(strip_prefix.to_string()),
+        }
+    }
+
     fn insert_archive_blob(
         cache: &BlobCache,
         cache_key: &str,
@@ -307,8 +354,8 @@ mod tests {
         record.id
     }
 
-    #[test]
-    fn open_archive_returns_tree_ref_resolving_to_extracted_dir() {
+    #[tokio::test]
+    async fn open_archive_returns_tree_ref_resolving_to_extracted_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -324,11 +371,18 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let response = executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/"));
+        let response = executor
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
+            .await;
         let tree = match response {
-            CalloutResponse::ArchiveOpened(t) => t,
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree: t }) => t,
             other => panic!("unexpected response: {other:?}"),
         };
 
@@ -337,8 +391,8 @@ mod tests {
         assert!(cargo.contains("name = \"pkg\""));
     }
 
-    #[test]
-    fn same_blob_with_distinct_strip_prefixes_keeps_stable_tree_refs() {
+    #[tokio::test]
+    async fn same_blob_with_distinct_strip_prefixes_keeps_stable_tree_refs() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -357,10 +411,15 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let alpha = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("alpha/")) {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+        let alpha = match executor.open(&open_request_targz(blob_id, "alpha/")).await {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected alpha response: {other:?}"),
         };
         let alpha_root = trees.resolve(alpha).expect("alpha tree-ref resolves");
@@ -369,8 +428,8 @@ mod tests {
             "alpha\n"
         );
 
-        let beta = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("beta/")) {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+        let beta = match executor.open(&open_request_targz(blob_id, "beta/")).await {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected beta response: {other:?}"),
         };
         let beta_root = trees.resolve(beta).expect("beta tree-ref resolves");
@@ -390,8 +449,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolved_archive_tree_ref_supports_nested_traversal() {
+    #[tokio::test]
+    async fn resolved_archive_tree_ref_supports_nested_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -410,10 +469,18 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(cache, trees.clone(), archive_root, extractor);
+        let executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            trees.clone(),
+            archive_root,
+            extractor,
+        ));
 
-        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+        let tree = match executor
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
+            .await
+        {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
         let root = trees.resolve(tree).expect("tree-ref resolves");
@@ -452,8 +519,8 @@ mod tests {
         assert!(keep.exists());
     }
 
-    #[test]
-    fn fresh_materializer_reuses_existing_extracted_tree_after_restart() {
+    #[tokio::test]
+    async fn fresh_materializer_reuses_existing_extracted_tree_after_restart() {
         let tmp = tempfile::tempdir().unwrap();
         let blob_cache_dir = tmp.path().join("blobs");
         let archive_root = tmp.path().join("archives");
@@ -472,15 +539,18 @@ mod tests {
         let extractor = Arc::new(
             ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
         );
-        let executor = ArchiveExecutor::new(
+        let executor = Arc::new(ArchiveExecutor::new(
             cache.clone(),
             trees.clone(),
             archive_root.clone(),
             extractor.clone(),
-        );
+        ));
 
-        let tree = match executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
-            CalloutResponse::ArchiveOpened(tree) => tree,
+        let tree = match executor
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
+            .await
+        {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
             other => panic!("unexpected response: {other:?}"),
         };
         let first_root = trees.resolve(tree).expect("tree-ref resolves");
@@ -488,14 +558,20 @@ mod tests {
         std::fs::write(&marker, b"stable").unwrap();
 
         let second_trees = Arc::new(TreeRefs::new());
-        let second_executor =
-            ArchiveExecutor::new(cache, second_trees.clone(), archive_root.clone(), extractor);
+        let second_executor = Arc::new(ArchiveExecutor::new(
+            cache,
+            second_trees.clone(),
+            archive_root.clone(),
+            extractor,
+        ));
 
-        let tree =
-            match second_executor.open_archive(blob_id, ArchiveFormat::TarGz, Some("pkg-1.0/")) {
-                CalloutResponse::ArchiveOpened(tree) => tree,
-                other => panic!("unexpected response: {other:?}"),
-            };
+        let tree = match second_executor
+            .open(&open_request_targz(blob_id, "pkg-1.0/"))
+            .await
+        {
+            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
+            other => panic!("unexpected response: {other:?}"),
+        };
         let second_root = second_trees.resolve(tree).expect("tree-ref resolves");
         assert_eq!(first_root, second_root);
         assert!(marker.exists());

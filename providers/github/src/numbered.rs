@@ -119,13 +119,13 @@ pub(crate) async fn list_hybrid<T: Listable>(
     })
 }
 
-/// Preload the projected files every numbered resource exposes.
+/// Project the files every numbered resource exposes.
 ///
 /// List responses can include many large issue/PR bodies, so `body` is
 /// projected as deferred metadata and fetched from the single resource
 /// handler on read.
 /// `base` must end in `/` so callers can append the file name.
-pub(crate) fn preload_common_fields(
+pub(crate) fn project_common_field_effects(
     projection: &mut Projection,
     base: &str,
     title: String,
@@ -134,14 +134,13 @@ pub(crate) fn preload_common_fields(
     user: Option<User>,
     version: Option<&str>,
 ) {
-    mutable_preload(projection, format!("{base}title"), title, version);
-    projection.preload_entry(
+    project_mutable_inline(projection, format!("{base}title"), title, version);
+    projection.proj_file(
         format!("{base}body"),
-        EntryKind::File,
-        Some(mutable_deferred_attrs(Size::Unknown, version)),
+        mutable_deferred_file(Size::Unknown, version),
     );
-    mutable_preload(projection, format!("{base}state"), state, version);
-    mutable_preload(
+    project_mutable_inline(projection, format!("{base}state"), state, version);
+    project_mutable_inline(
         projection,
         format!("{base}user"),
         user.map(|u| u.login).unwrap_or_default(),
@@ -173,32 +172,25 @@ pub(crate) fn project_common_fields(
     );
 }
 
-pub(crate) fn mutable_file_content(
-    bytes: impl Into<Vec<u8>>,
-    version: Option<&str>,
-) -> FileContent {
-    let bytes = bytes.into();
-    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    FileContent::bytes_with_attrs(mutable_deferred_attrs(size, version), bytes)
-}
-
-pub(crate) fn mutable_deferred_attrs(size: Size, version: Option<&str>) -> FileAttrs {
-    let attrs = FileAttrs::deferred(size, ReadMode::Full, Stability::Mutable);
+pub(crate) fn mutable_deferred_file(size: Size, version: Option<&str>) -> FileProj {
+    let file = FileProj::deferred(size, ReadMode::Full, Stability::Mutable);
     match version.filter(|version| !version.is_empty()) {
-        Some(version) => attrs.with_version(version),
-        None => attrs,
+        Some(version) => file.with_version(version),
+        None => file,
     }
 }
 
-fn mutable_preload(
+fn project_mutable_inline(
     projection: &mut Projection,
     path: impl Into<String>,
     content: impl Into<Vec<u8>>,
     version: Option<&str>,
 ) {
     let content = content.into();
-    let size = Size::Exact(u64::try_from(content.len()).unwrap_or(u64::MAX));
-    projection.preload_with_attrs(path, mutable_deferred_attrs(size, version), content);
+    projection.proj_file(
+        path,
+        FileProj::inline(content, Stability::Mutable, version_token(version)),
+    );
 }
 
 fn version_token(version: Option<&str>) -> Option<VersionToken> {
@@ -215,7 +207,7 @@ pub(crate) async fn comments_projection(
     intent: &DirIntent,
 ) -> Result<Projection> {
     match intent {
-        DirIntent::ReadProjectedFile { name } => {
+        DirIntent::ReadFile { name } => {
             let idx = name
                 .parse::<u64>()
                 .map_err(|_| ProviderError::not_found("comment not found"))?;
@@ -234,8 +226,12 @@ pub(crate) async fn comments_projection(
                 .ok_or_else(|| ProviderError::not_found("comment not found"))?;
             let body = comment.body.as_deref().unwrap_or("");
             let mut projection = Projection::new();
-            projection
-                .file_with_content(name.clone(), format!("{}:\n{body}\n", comment.user.login));
+            projection.file_with_content_attrs(
+                name.clone(),
+                format!("{}:\n{body}\n", comment.user.login),
+                Stability::Mutable,
+                None,
+            );
             Ok(projection)
         },
         DirIntent::Lookup { .. } | DirIntent::List { .. } => {
@@ -246,7 +242,10 @@ pub(crate) async fn comments_projection(
                 .await?;
             let mut projection = Projection::new();
             for idx in 1..=comments.len() {
-                projection.deferred_file(idx.to_string());
+                projection.file(
+                    idx.to_string(),
+                    FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Mutable),
+                );
             }
             let exhaustive = u64::try_from(comments.len()).unwrap_or(u64::MAX) < COMMENT_PAGE_SIZE;
             if exhaustive {

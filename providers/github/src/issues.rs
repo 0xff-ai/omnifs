@@ -87,12 +87,12 @@ fn ingest_issue_items(
     for item in items {
         let version = item.updated_at.clone();
         if item.pull_request.is_some() {
-            preload_pr_from_issue(projection, owner, repo, filter, item);
+            project_pr_from_issue(projection, owner, repo, filter, item);
             continue;
         }
         let number = item.number;
         let base = format!("{owner}/{repo}/_issues/{}/{number}/", filter.as_ref());
-        numbered::preload_common_fields(
+        numbered::project_common_field_effects(
             projection,
             &base,
             item.title,
@@ -105,7 +105,7 @@ fn ingest_issue_items(
     }
 }
 
-fn preload_pr_from_issue(
+fn project_pr_from_issue(
     projection: &mut Projection,
     owner: &OwnerName,
     repo: &RepoName,
@@ -114,8 +114,8 @@ fn preload_pr_from_issue(
 ) {
     let version = item.updated_at.clone();
     let base = format!("{owner}/{repo}/_prs/{}/{}/", filter.as_ref(), item.number);
-    projection.preload_dir(base.trim_end_matches('/'));
-    numbered::preload_common_fields(
+    projection.proj_dir(base.trim_end_matches('/'));
+    numbered::project_common_field_effects(
         projection,
         &base,
         item.title,
@@ -124,14 +124,10 @@ fn preload_pr_from_issue(
         item.user,
         version.as_deref(),
     );
-    projection.preload_dir(format!("{base}comments").trim_end_matches('/'));
-    projection.preload_entry(
+    projection.proj_dir(format!("{base}comments").trim_end_matches('/'));
+    projection.proj_file(
         format!("{base}diff"),
-        EntryKind::File,
-        Some(numbered::mutable_deferred_attrs(
-            Size::Unknown,
-            version.as_deref(),
-        )),
+        numbered::mutable_deferred_file(Size::Unknown, version.as_deref()),
     );
 }
 

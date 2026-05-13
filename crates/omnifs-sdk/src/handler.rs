@@ -1,12 +1,11 @@
 use crate::browse::{
-    Entry as BrowseEntry, EntryKind as BrowseEntryKind, List as BrowseList,
-    Listing as BrowseListing, Lookup as BrowseLookup, Preload as BrowsePreload, ProjectedFile,
+    Effects, Entry as BrowseEntry, EntryKind as BrowseEntryKind, List as BrowseList,
+    Listing as BrowseListing, Lookup as BrowseLookup,
 };
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{Bytes, FileAttrs, ReadMode, Size, Stability};
+use crate::file_attrs::{FileAttrs, FileProj, ReadMode, Size, Stability};
 use omnifs_mount_schema::{PathPattern, PathSegment, split_path};
-use serde::Serialize;
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
@@ -26,12 +25,12 @@ pub enum Cursor {
 pub enum DirIntent {
     Lookup { child: String },
     List { cursor: Option<Cursor> },
-    ReadProjectedFile { name: String },
+    ReadFile { name: String },
 }
 
 /// Directory handler context: a `Cx<S>` paired with the request intent.
 ///
-/// Dir handlers serve three operations (lookup, list, read-projected-file);
+/// Dir handlers serve three operations (lookup, list, read-file);
 /// `DirCx` carries which one the host asked for. Derefs to `Cx<S>` so all
 /// the usual context methods (`.http()`, `.git()`, `.state()`) work directly.
 pub struct DirCx<S> {
@@ -142,26 +141,26 @@ impl FileStat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectionKind {
-    Directory,
-    File,
+#[derive(Clone, Debug)]
+enum ProjectionEntry {
+    Directory { name: String },
+    File { name: String, file: FileProj },
 }
 
-#[derive(Clone, Debug)]
-struct ProjectionEntry {
-    name: String,
-    kind: ProjectionKind,
-    attrs: Option<FileAttrs>,
+impl ProjectionEntry {
+    fn name(&self) -> &str {
+        match self {
+            Self::Directory { name } | Self::File { name, .. } => name,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Projection {
     entries: Vec<ProjectionEntry>,
     page: Option<PageStatus>,
-    preload: Vec<BrowsePreload>,
-    error: Option<String>,
+    effects: Effects,
+    errors: Vec<String>,
 }
 
 impl Projection {
@@ -170,30 +169,29 @@ impl Projection {
     }
 
     pub fn dir(&mut self, name: impl Into<String>) {
-        let _ = self.push_entry(name.into(), ProjectionKind::Directory, None);
+        let _ = self.push_dir(name.into());
     }
 
-    pub fn file(&mut self, name: impl Into<String>, attrs: FileAttrs) {
-        let _ = self.push_entry(name.into(), ProjectionKind::File, Some(attrs));
+    pub fn file(&mut self, name: impl Into<String>, file: FileProj) {
+        let _ = self.push_file(name.into(), file);
     }
 
     pub fn deferred_file(&mut self, name: impl Into<String>) {
         self.file(
             name,
-            FileAttrs::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable),
+            FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable),
         );
     }
 
     pub fn file_with_stat(&mut self, name: impl Into<String>, stat: FileStat) {
         self.file(
             name,
-            FileAttrs::deferred(Size::Exact(stat.size), ReadMode::Full, Stability::Immutable),
+            FileProj::deferred(Size::Exact(stat.size), ReadMode::Full, Stability::Immutable),
         );
     }
 
     pub fn file_with_content(&mut self, name: impl Into<String>, bytes: impl Into<Vec<u8>>) {
-        let bytes = bytes.into();
-        self.file(name, FileAttrs::inline(bytes, Stability::Immutable, None));
+        self.file(name, FileProj::inline(bytes, Stability::Immutable, None));
     }
 
     pub fn file_with_content_attrs(
@@ -204,111 +202,82 @@ impl Projection {
         version: Option<crate::file_attrs::VersionToken>,
     ) {
         let bytes = bytes.into();
-        self.file(name, FileAttrs::inline(bytes, stability, version));
+        self.file(name, FileProj::inline(bytes, stability, version));
     }
 
     pub fn page(&mut self, status: PageStatus) {
         self.page = Some(status);
     }
 
-    /// Hand file content to the host so a later read of `path` can be
-    /// served without another provider round trip. Accumulates into the
-    /// `preload` field of the eventual `dir-listing`. Empty paths are
-    /// dropped silently. Empty content is preserved as a valid file.
-    pub fn preload(&mut self, path: impl Into<String>, content: impl Into<Vec<u8>>) {
+    /// Project file content for `path` when the operation return is
+    /// accepted. Empty paths are dropped silently. Empty content is
+    /// preserved as a valid file.
+    pub fn proj(&mut self, path: impl Into<String>, content: impl Into<Vec<u8>>) {
         let path = path.into();
         let content = content.into();
-        if path.is_empty() {
-            return;
-        }
-        self.preload.push(BrowsePreload::file(path, content));
+        self.proj_file(path, FileProj::inline(content, Stability::Immutable, None));
     }
 
-    pub fn preload_with_attrs(
-        &mut self,
-        path: impl Into<String>,
-        attrs: FileAttrs,
-        content: impl Into<Vec<u8>>,
-    ) {
+    pub fn proj_file(&mut self, path: impl Into<String>, file: FileProj) {
         let path = path.into();
-        if path.is_empty() {
-            return;
+        if let Err(error) = self.effects.project_file(path, file) {
+            self.record_error(error.message().to_string());
         }
-        self.preload
-            .push(BrowsePreload::file_with_attrs(path, attrs, content));
     }
 
-    /// Hand a batch of file contents to the host so later reads of each
-    /// path are served without provider round trips.
-    pub fn preload_many<I, P, B>(&mut self, files: I)
+    /// Project a batch of inline file contents.
+    pub fn proj_many<I, P, B>(&mut self, files: I)
     where
         I: IntoIterator<Item = (P, B)>,
         P: Into<String>,
         B: Into<Vec<u8>>,
     {
         for (path, content) in files {
-            self.preload(path, content);
+            self.proj(path, content);
         }
     }
 
-    /// Hand entry metadata to the host so a later lookup of `path` can
-    /// be served without another provider round trip.
-    ///
-    /// If the same preload batch also contains direct children under
-    /// this directory entry, the host may materialize a partial cached
-    /// listing from those children. A directory preload by itself does
-    /// not cache an empty listing.
-    pub fn preload_entry(
-        &mut self,
-        path: impl Into<String>,
-        kind: BrowseEntryKind,
-        attrs: Option<FileAttrs>,
-    ) {
-        let path = path.into();
-        if path.is_empty() {
-            return;
+    /// Project directory metadata for `path`.
+    pub fn proj_dir(&mut self, path: impl Into<String>) {
+        if let Err(error) = self.effects.project_dir(path) {
+            self.record_error(error.message().to_string());
         }
-        self.preload.push(BrowsePreload::entry(path, kind, attrs));
-    }
-
-    /// Hand directory metadata to the host so a later lookup of `path`
-    /// can be served without another provider round trip.
-    pub fn preload_dir(&mut self, path: impl Into<String>) {
-        self.preload_entry(path, BrowseEntryKind::Directory, None);
     }
 
     pub fn into_error(self) -> Option<String> {
-        self.error
+        if self.errors.is_empty() {
+            None
+        } else {
+            Some(self.errors.join("; "))
+        }
     }
 
-    fn push_entry(
-        &mut self,
-        name: String,
-        kind: ProjectionKind,
-        attrs: Option<FileAttrs>,
-    ) -> Result<()> {
-        if !is_valid_rel_segment(&name) {
+    fn push_dir(&mut self, name: String) -> Result<()> {
+        self.validate_child_name(&name)?;
+        self.entries.push(ProjectionEntry::Directory { name });
+        Ok(())
+    }
+
+    fn push_file(&mut self, name: String, file: FileProj) -> Result<()> {
+        self.validate_child_name(&name)?;
+        file.validate()
+            .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
+        self.entries.push(ProjectionEntry::File { name, file });
+        Ok(())
+    }
+
+    fn validate_child_name(&mut self, name: &str) -> Result<()> {
+        if !is_valid_rel_segment(name) {
             return self.reject(format!("invalid child name {name:?}"));
         }
-        if self.entries.iter().any(|entry| entry.name == name) {
+        if self.entries.iter().any(|entry| entry.name() == name) {
             return self.reject(format!("duplicate child name {name:?}"));
         }
-        if matches!(kind, ProjectionKind::File) {
-            let Some(attrs) = &attrs else {
-                return self.reject(format!("file child {name:?} is missing attributes"));
-            };
-            if let Err(error) = attrs.validate() {
-                return self.reject(error.message().to_string());
-            }
-        }
-        self.entries.push(ProjectionEntry { name, kind, attrs });
         Ok(())
     }
 
     fn record_error(&mut self, message: String) {
-        if self.error.is_none() {
-            self.error = Some(message);
-        }
+        self.errors.push(message);
     }
 
     fn reject<T>(&mut self, message: String) -> Result<T> {
@@ -324,9 +293,14 @@ pub enum FileContent {
         attrs: FileAttrs,
         bytes: Vec<u8>,
     },
+    Blob(crate::blob::BlobId),
+    BlobWithAttrs {
+        attrs: FileAttrs,
+        blob: crate::blob::BlobId,
+    },
     Stream(StreamHandle),
     Range {
-        attrs: FileAttrs,
+        file: FileProj,
         reader: Rc<dyn RangeReader>,
     },
 }
@@ -343,13 +317,32 @@ impl FileContent {
         }
     }
 
+    /// Serve a `#[file]` handler's bytes verbatim from a host-resident
+    /// blob. No bytes cross the WIT boundary; use this for content
+    /// that exceeds the inline eager-response cap.
+    pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
+        Self::Blob(blob.into())
+    }
+
+    pub fn blob_with_attrs(attrs: FileAttrs, blob: impl Into<crate::blob::BlobId>) -> Self {
+        Self::BlobWithAttrs {
+            attrs,
+            blob: blob.into(),
+        }
+    }
+
     pub fn stream(handle: StreamHandle) -> Self {
         Self::Stream(handle)
     }
 
     pub fn ranged(attrs: FileAttrs, reader: impl RangeReader + 'static) -> Self {
         Self::Range {
-            attrs,
+            file: FileProj {
+                attrs,
+                bytes: crate::file_attrs::ProjBytes::Deferred {
+                    read: ReadMode::Ranged,
+                },
+            },
             reader: Rc::new(reader),
         }
     }
@@ -368,8 +361,14 @@ impl std::fmt::Debug for FileContent {
                 .field("attrs", attrs)
                 .field("bytes", bytes)
                 .finish(),
+            Self::Blob(blob) => f.debug_tuple("Blob").field(blob).finish(),
+            Self::BlobWithAttrs { attrs, blob } => f
+                .debug_struct("BlobWithAttrs")
+                .field("attrs", attrs)
+                .field("blob", blob)
+                .finish(),
             Self::Stream(handle) => f.debug_tuple("Stream").field(handle).finish(),
-            Self::Range { attrs, .. } => f.debug_struct("Range").field("attrs", attrs).finish(),
+            Self::Range { file, .. } => f.debug_struct("Range").field("file", file).finish(),
         }
     }
 }
@@ -389,7 +388,7 @@ impl FileChunk {
     }
 }
 
-impl From<FileChunk> for crate::omnifs::provider::types::FileChunk {
+impl From<FileChunk> for crate::omnifs::provider::types::ReadChunkResult {
     fn from(chunk: FileChunk) -> Self {
         Self {
             content: chunk.content,
@@ -719,13 +718,31 @@ impl<S> MountRegistry<S> {
 
         if let Some((route, parsed)) = self.match_treeref(&child_abs) {
             let tree_ref = (route.call)(cx, parsed).await?.tree_ref;
-            return Ok(BrowseLookup::subtree(tree_ref));
+            return Ok(BrowseLookup::subtree(child_abs, tree_ref));
         }
 
         if let Some((route, parsed)) = self.match_dir(&child_abs) {
             // Exact dir lookups can warm the looked-up directory's adjacent cache shape.
             let projection = (route.call)(cx, parsed, DirIntent::List { cursor: None }).await?;
             return projection_exact_lookup(&projection, &child_abs, BrowseEntry::dir(name), self);
+        }
+
+        if let Some((route, parsed)) = self.match_dir(&parent_abs) {
+            let projection = (route.call)(
+                cx,
+                parsed,
+                DirIntent::Lookup {
+                    child: name.to_string(),
+                },
+            )
+            .await?;
+            return projection_lookup(
+                &projection,
+                &parent_abs,
+                name,
+                self.exact_entry_for_path(&child_abs),
+                self,
+            );
         }
 
         if let Some(target) = self.exact_entry_for_path(&child_abs) {
@@ -736,18 +753,7 @@ impl<S> MountRegistry<S> {
                 .exhaustive(exhaustive));
         }
 
-        let Some((route, parsed)) = self.match_dir(&parent_abs) else {
-            return Ok(BrowseLookup::not_found());
-        };
-        let projection = (route.call)(
-            cx,
-            parsed,
-            DirIntent::Lookup {
-                child: name.to_string(),
-            },
-        )
-        .await?;
-        projection_lookup(&projection, &parent_abs, name, None, self)
+        Ok(BrowseLookup::not_found())
     }
 
     pub async fn list_children(&self, cx: &Cx<S>, path: &str) -> Result<BrowseList> {
@@ -766,7 +772,7 @@ impl<S> MountRegistry<S> {
 
         if let Some((route, parsed)) = self.match_treeref(&abs) {
             let tree_ref = (route.call)(cx, parsed).await?.tree_ref;
-            return Ok(BrowseList::subtree(tree_ref));
+            return Ok(BrowseList::subtree(abs, tree_ref));
         }
 
         let static_entries = self.static_entries_for_parent(&abs);
@@ -811,6 +817,10 @@ impl<S> MountRegistry<S> {
                 FileContent::BytesWithAttrs { attrs, bytes } => {
                     Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
                 },
+                FileContent::Blob(blob) => Ok(crate::browse::FileContent::blob(blob)),
+                FileContent::BlobWithAttrs { attrs, blob } => {
+                    Ok(crate::browse::FileContent::blob(blob).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -828,12 +838,12 @@ impl<S> MountRegistry<S> {
         let projection = (route.call)(
             cx,
             parsed,
-            DirIntent::ReadProjectedFile {
+            DirIntent::ReadFile {
                 name: name.to_string(),
             },
         )
         .await?;
-        projected_file_from_projection(&projection, name)
+        projected_file_from_projection(&projection, parent_rel, name)
     }
 
     pub async fn open_file(&self, cx: &Cx<S>, path: &str) -> Result<OpenedFile> {
@@ -1125,6 +1135,25 @@ impl<S, B> SubtreeRegistry<S, B> {
             return projection_exact_lookup(&projection, &child_abs, BrowseEntry::dir(name), self);
         }
 
+        if let Some((route, parsed)) = self.match_dir(&parent_abs) {
+            let projection = (route.call)(
+                cx,
+                bindings,
+                parsed,
+                DirIntent::Lookup {
+                    child: name.to_string(),
+                },
+            )
+            .await?;
+            return projection_lookup(
+                &projection,
+                &parent_abs,
+                name,
+                self.exact_entry_for_path(&child_abs),
+                self,
+            );
+        }
+
         if let Some(target) = self.exact_entry_for_path(&child_abs) {
             let siblings = self.static_entries_for_parent(&parent_abs);
             let exhaustive = !self.has_capture_child_under(&parent_abs);
@@ -1133,19 +1162,7 @@ impl<S, B> SubtreeRegistry<S, B> {
                 .exhaustive(exhaustive));
         }
 
-        let Some((route, parsed)) = self.match_dir(&parent_abs) else {
-            return Ok(BrowseLookup::not_found());
-        };
-        let projection = (route.call)(
-            cx,
-            bindings,
-            parsed,
-            DirIntent::Lookup {
-                child: name.to_string(),
-            },
-        )
-        .await?;
-        projection_lookup(&projection, &parent_abs, name, None, self)
+        Ok(BrowseLookup::not_found())
     }
 
     pub async fn list_children(&self, cx: &Cx<S>, bindings: &B, path: &str) -> Result<BrowseList> {
@@ -1186,6 +1203,10 @@ impl<S, B> SubtreeRegistry<S, B> {
                 FileContent::BytesWithAttrs { attrs, bytes } => {
                     Ok(crate::browse::FileContent::new(bytes).with_attrs(attrs))
                 },
+                FileContent::Blob(blob) => Ok(crate::browse::FileContent::blob(blob)),
+                FileContent::BlobWithAttrs { attrs, blob } => {
+                    Ok(crate::browse::FileContent::blob(blob).with_attrs(attrs))
+                },
                 FileContent::Stream(_) | FileContent::Range { .. } => {
                     Err(ProviderError::unimplemented(
                         "streamed and ranged file reads are reserved but not wired through the current host runtime",
@@ -1204,12 +1225,12 @@ impl<S, B> SubtreeRegistry<S, B> {
             cx,
             bindings,
             parsed,
-            DirIntent::ReadProjectedFile {
+            DirIntent::ReadFile {
                 name: name.to_string(),
             },
         )
         .await?;
-        projected_file_from_projection(&projection, name)
+        projected_file_from_projection(&projection, parent_rel, name)
     }
 
     pub async fn open_file(&self, cx: &Cx<S>, bindings: &B, path: &str) -> Result<OpenedFile> {
@@ -1302,7 +1323,7 @@ impl<S, B> StaticChildren for SubtreeRegistry<S, B> {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name.as_str())
                 } else {
-                    BrowseEntry::file(name.as_str(), default_static_file_attrs())
+                    BrowseEntry::file(name.as_str(), default_static_file_proj())
                 }
             });
         }
@@ -1323,7 +1344,7 @@ impl<S, B> StaticChildren for SubtreeRegistry<S, B> {
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, default_static_file_attrs()));
+            return Some(BrowseEntry::file(name, default_static_file_proj()));
         }
         if self.is_implicit_prefix_dir(absolute_path) {
             let name = child_name(absolute_path)?;
@@ -1354,7 +1375,7 @@ impl<S> StaticChildren for MountRegistry<S> {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name.as_str())
                 } else {
-                    BrowseEntry::file(name.as_str(), default_static_file_attrs())
+                    BrowseEntry::file(name.as_str(), default_static_file_proj())
                 }
             });
         }
@@ -1381,7 +1402,7 @@ impl<S> StaticChildren for MountRegistry<S> {
         }
         if self.match_file(absolute_path).is_some() {
             let name = child_name(absolute_path)?;
-            return Some(BrowseEntry::file(name, default_static_file_attrs()));
+            return Some(BrowseEntry::file(name, default_static_file_proj()));
         }
         if self.is_implicit_prefix_dir(absolute_path) {
             let name = child_name(absolute_path)?;
@@ -1394,98 +1415,79 @@ impl<S> StaticChildren for MountRegistry<S> {
 fn merge_projection_entries(
     projection: &Projection,
     static_entries: Vec<BrowseEntry>,
-) -> Result<(
-    std::collections::BTreeMap<String, BrowseEntry>,
-    Vec<ProjectedFile>,
-)> {
+) -> std::collections::BTreeMap<String, BrowseEntry> {
     let mut entries = static_entries
         .into_iter()
         .map(|entry| (entry.name().to_string(), entry))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut sibling_files = Vec::new();
 
     for entry in &projection.entries {
-        let browse_entry = match entry.kind {
-            ProjectionKind::Directory => BrowseEntry::dir(&entry.name),
-            ProjectionKind::File => {
-                let attrs = entry
-                    .attrs
-                    .clone()
-                    .ok_or_else(|| ProviderError::internal("file projection missing attrs"))?;
-                if matches!(&attrs.bytes, Bytes::Inline(_)) {
-                    sibling_files.push(ProjectedFile::new(&entry.name, attrs.clone()));
-                }
-                BrowseEntry::file(&entry.name, attrs)
-            },
+        let browse_entry = match entry {
+            ProjectionEntry::Directory { name } => BrowseEntry::dir(name),
+            ProjectionEntry::File { name, file } => BrowseEntry::file(name, file.clone()),
         };
 
-        entries.insert(entry.name.clone(), browse_entry);
+        entries.insert(entry.name().to_string(), browse_entry);
     }
 
-    Ok((entries, sibling_files))
+    entries
 }
 
 fn projected_file_from_projection(
     projection: &Projection,
+    parent_path: &str,
     name: &str,
 ) -> Result<crate::browse::FileContent> {
-    if let Some(error) = projection.error.as_deref() {
-        return Err(ProviderError::invalid_input(error.to_string()));
+    if !projection.errors.is_empty() {
+        return Err(ProviderError::invalid_input(projection.errors.join("; ")));
     }
     let entry = projection
         .entries
         .iter()
-        .find(|entry| entry.name == name)
+        .find(|entry| entry.name() == name)
         .ok_or_else(|| ProviderError::not_found(format!("path not found: {name}")))?;
-    let attrs = entry
-        .attrs
-        .as_ref()
-        .ok_or_else(|| ProviderError::internal("projected file missing attrs"))?;
-    let Some(bytes) = attrs.inline_bytes() else {
-        return Err(ProviderError::not_found(format!(
-            "projected file {name} has no eager bytes"
+    let ProjectionEntry::File { file, .. } = entry else {
+        return Err(ProviderError::not_a_file(format!(
+            "path is not a file: {name}"
         )));
     };
-    let sibling_files = projection
+    let Some(bytes) = file.inline_bytes() else {
+        return Err(ProviderError::not_found(format!(
+            "projection entry {name} has no eager bytes"
+        )));
+    };
+    let mut effects = projection.effects.clone();
+    for entry in projection
         .entries
         .iter()
-        .filter(|entry| entry.name != name)
-        .filter_map(|entry| {
-            let attrs = entry.attrs.as_ref()?;
-            if matches!(&attrs.bytes, Bytes::Inline(_)) {
-                Some(ProjectedFile::new(&entry.name, attrs.clone()))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+        .filter(|entry| entry.name() != name)
+    {
+        match entry {
+            ProjectionEntry::Directory { name } => {
+                effects.project_dir(join_provider_path(parent_path, name))?;
+            },
+            ProjectionEntry::File { name, file } => {
+                effects.project_file(join_provider_path(parent_path, name), file.clone())?;
+            },
+        }
+    }
     Ok(crate::browse::FileContent::new(bytes.to_vec())
-        .with_attrs(read_result_attrs(attrs))
-        .with_sibling_files(sibling_files))
+        .with_attrs(crate::browse::deferred_full_attrs_for_read(file))
+        .with_effects(effects))
 }
 
 fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
     match content {
-        FileContent::Bytes(_) | FileContent::BytesWithAttrs { .. } => {
-            Err(ProviderError::invalid_input(
-                "open-file requires FileContent::ranged or FileContent::range_bytes",
-            ))
-        },
-        FileContent::Range { attrs, reader } => {
-            attrs
-                .validate()
+        FileContent::Bytes(_)
+        | FileContent::BytesWithAttrs { .. }
+        | FileContent::Blob(_)
+        | FileContent::BlobWithAttrs { .. } => Err(ProviderError::invalid_input(
+            "open-file requires FileContent::ranged or FileContent::range_bytes",
+        )),
+        FileContent::Range { file, reader } => {
+            file.validate()
                 .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
-            if !matches!(
-                attrs.bytes,
-                Bytes::Deferred {
-                    read: ReadMode::Ranged
-                }
-            ) {
-                return Err(ProviderError::invalid_input(
-                    "ranged file content requires Bytes::Deferred { read: ReadMode::Ranged }",
-                ));
-            }
-            Ok(OpenedFile::new(attrs, reader))
+            Ok(OpenedFile::new(file.attrs, reader))
         },
         FileContent::Stream(_) => Err(ProviderError::unimplemented(
             "streamed file reads are not wired through the current host runtime",
@@ -1493,33 +1495,14 @@ fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
     }
 }
 
-fn read_result_attrs(attrs: &FileAttrs) -> FileAttrs {
-    match &attrs.bytes {
-        Bytes::Inline(_) => FileAttrs {
-            size: attrs.size.clone(),
-            bytes: Bytes::Deferred {
-                read: ReadMode::Full,
-            },
-            stability: attrs.stability,
-            version: attrs.version.clone(),
-        },
-        Bytes::Deferred { .. } => attrs.clone(),
-    }
-}
-
 fn projection_listing(
     projection: &Projection,
     static_entries: Vec<BrowseEntry>,
 ) -> Result<BrowseListing> {
-    if let Some(error) = projection.error.as_deref() {
-        return Err(ProviderError::invalid_input(error.to_string()));
+    if !projection.errors.is_empty() {
+        return Err(ProviderError::invalid_input(projection.errors.join("; ")));
     }
-    let (mut entries, sibling_files) = merge_projection_entries(projection, static_entries)?;
-    for projected in sibling_files {
-        if let Some(entry) = entries.get_mut(projected.name()) {
-            *entry = entry.clone().with_attrs(projected.attrs().clone());
-        }
-    }
+    let entries = merge_projection_entries(projection, static_entries);
 
     let exhaustive = match projection.page.as_ref() {
         Some(PageStatus::More(_)) => false,
@@ -1531,7 +1514,7 @@ fn projection_listing(
     } else {
         BrowseListing::partial(entries.into_values())
     };
-    Ok(listing.with_preload(projection.preload.iter().cloned()))
+    Ok(listing.with_effects(projection.effects.clone()))
 }
 
 /// Source of statically-derived sibling/exact-entry information for a
@@ -1550,15 +1533,15 @@ fn projection_lookup<R: StaticChildren>(
     fallback_target: Option<BrowseEntry>,
     registry: &R,
 ) -> Result<BrowseLookup> {
-    if let Some(error) = projection.error.as_deref() {
-        return Err(ProviderError::invalid_input(error.to_string()));
+    if !projection.errors.is_empty() {
+        return Err(ProviderError::invalid_input(projection.errors.join("; ")));
     }
 
     let reserved = registry.reserved_static_names(absolute_parent);
-    let (siblings, sibling_files) = merge_projection_entries(
+    let siblings = merge_projection_entries(
         projection,
         registry.static_entries_for_parent(absolute_parent),
-    )?;
+    );
     let target = if let Some(entry) = siblings.get(target_name).cloned() {
         Some(entry)
     } else if reserved.contains(target_name) {
@@ -1576,8 +1559,7 @@ fn projection_lookup<R: StaticChildren>(
     let lookup = target.map_or_else(BrowseLookup::not_found, BrowseLookup::entry);
     Ok(lookup
         .with_siblings(siblings.into_values())
-        .with_sibling_files(sibling_files)
-        .with_preload(projection.preload.iter().cloned())
+        .with_effects(projection.effects.clone())
         .exhaustive(exhaustive))
 }
 
@@ -1587,21 +1569,47 @@ fn projection_exact_lookup<R: StaticChildren>(
     target: BrowseEntry,
     registry: &R,
 ) -> Result<BrowseLookup> {
-    if let Some(error) = projection.error.as_deref() {
-        return Err(ProviderError::invalid_input(error.to_string()));
+    if !projection.errors.is_empty() {
+        return Err(ProviderError::invalid_input(projection.errors.join("; ")));
     }
 
-    let (siblings, sibling_files) = merge_projection_entries(
+    let (parent_abs, target_name) = split_parent_name(absolute_path)
+        .ok_or_else(|| ProviderError::internal("exact lookup path has no parent"))?;
+    let mut siblings = registry.static_entries_for_parent(&to_absolute_path(parent_abs));
+    siblings.retain(|entry| entry.name() != target_name);
+
+    let inner_exhaustive = matches!(projection.page.as_ref(), Some(PageStatus::Exhaustive));
+
+    let mut effects = projection.effects.clone();
+    if inner_exhaustive {
+        effects.project_dir_exhaustive(absolute_path)?;
+    } else {
+        effects.project_dir(absolute_path)?;
+    }
+    let projected_children = merge_projection_entries(
         projection,
         registry.static_entries_for_parent(absolute_path),
-    )?;
-    let exhaustive = !matches!(projection.page.as_ref(), Some(PageStatus::More(_)));
+    );
+    for entry in projected_children.into_values() {
+        let path = join_provider_path(absolute_path, entry.name());
+        match entry.kind() {
+            BrowseEntryKind::Directory => {
+                effects.project_dir(path)?;
+            },
+            BrowseEntryKind::File => {
+                let file = entry
+                    .file_proj()
+                    .cloned()
+                    .ok_or_else(|| ProviderError::internal("file projection missing data"))?;
+                effects.project_file(path, file)?;
+            },
+        }
+    }
 
     Ok(BrowseLookup::entry(target)
-        .with_siblings(siblings.into_values())
-        .with_sibling_files(sibling_files)
-        .with_preload(projection.preload.iter().cloned())
-        .exhaustive(exhaustive))
+        .with_siblings(siblings)
+        .with_effects(effects)
+        .exhaustive(false))
 }
 
 /// Whether `inner`'s segment sequence starts with all of `outer`'s
@@ -1744,8 +1752,8 @@ where
     Ok(())
 }
 
-fn default_static_file_attrs() -> FileAttrs {
-    FileAttrs::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable)
+fn default_static_file_proj() -> FileProj {
+    FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable)
 }
 
 fn is_valid_rel_segment(segment: &str) -> bool {
@@ -1765,6 +1773,15 @@ fn to_absolute_path(path: &str) -> String {
 fn join_absolute_path(parent: &str, child: &str) -> String {
     if parent == "/" {
         format!("/{child}")
+    } else {
+        format!("{parent}/{child}")
+    }
+}
+
+fn join_provider_path(parent: &str, child: &str) -> String {
+    let parent = parent.trim_matches('/');
+    if parent.is_empty() {
+        child.to_string()
     } else {
         format!("{parent}/{child}")
     }

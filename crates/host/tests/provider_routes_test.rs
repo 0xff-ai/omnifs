@@ -1,10 +1,13 @@
 mod support;
 
+use omnifs_host::cache::RecordKind;
 use omnifs_host::omnifs::provider::log::Host as ProviderLogHost;
 use omnifs_host::omnifs::provider::types::{
-    Callout, CalloutResult, EntryKind, ErrorKind, Header, Host as ProviderHost, HttpRequest,
-    HttpResponse, ListResult, LogEntry, LookupResult, OpResult, ProviderEvent, ProviderReturn,
+    Callout, CalloutResult, Effect, EntryKind, ErrorKind, Header, Host as ProviderHost,
+    HttpRequest, HttpResponse, ListChildrenResult, LogEntry, LookupChildResult, OpResult,
+    ProjBytes, ProviderEvent, ProviderStep, Stability,
 };
+use omnifs_host::runtime::RuntimeError;
 use support::{
     create_test_repo, make_engine, make_initialized_runtime, make_runtime_from_config,
     provider_wasm_path,
@@ -13,23 +16,47 @@ use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-fn preload_path(preload: &omnifs_host::omnifs::provider::types::PreloadItem) -> &str {
-    match preload {
-        omnifs_host::omnifs::provider::types::PreloadItem::File(file) => file.path.as_str(),
-        omnifs_host::omnifs::provider::types::PreloadItem::Entry(entry) => entry.path.as_str(),
-    }
+fn project_paths(effects: &[Effect]) -> Vec<&str> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Project(entry) => Some(entry.path.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
-fn preload_file_content<'a>(
-    preloads: &'a [omnifs_host::omnifs::provider::types::PreloadItem],
-    path: &str,
-) -> Option<&'a [u8]> {
-    preloads.iter().find_map(|preload| match preload {
-        omnifs_host::omnifs::provider::types::PreloadItem::File(file) if file.path == path => {
-            Some(file.content.as_slice())
+fn project_inline_content<'a>(effects: &'a [Effect], path: &str) -> Option<&'a [u8]> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Project(entry) if entry.path == path => match &entry.kind {
+            EntryKind::File(file) => match &file.bytes {
+                ProjBytes::Inline(bytes) => Some(bytes.as_slice()),
+                ProjBytes::Deferred(_) => None,
+            },
+            EntryKind::Directory => None,
         },
         _ => None,
     })
+}
+
+fn project_file_stability(effects: &[Effect], path: &str) -> Option<Stability> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Project(entry) if entry.path == path => match &entry.kind {
+            EntryKind::File(file) => Some(file.attrs.stability),
+            EntryKind::Directory => None,
+        },
+        _ => None,
+    })
+}
+
+fn invalidate_prefixes(effects: &[Effect]) -> Vec<&str> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::InvalidatePrefix(prefix) => Some(prefix.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn seed_github_repo_cache(harness: &support::RuntimeHarness, owner: &str, repo: &str) {
@@ -77,6 +104,34 @@ struct GithubProviderSession {
     bindings: omnifs_host::Provider,
 }
 
+#[derive(Debug)]
+struct StepOutcome {
+    result: Option<OpResult>,
+    effects: Vec<Effect>,
+    callouts: Vec<Callout>,
+}
+
+impl StepOutcome {
+    fn from_step(step: ProviderStep) -> Self {
+        match step {
+            ProviderStep::Returned(ret) => Self {
+                result: Some(ret.result),
+                effects: ret.effects,
+                callouts: Vec::new(),
+            },
+            ProviderStep::Suspended(callouts) => Self {
+                result: None,
+                effects: Vec::new(),
+                callouts,
+            },
+        }
+    }
+
+    fn is_suspended(&self) -> bool {
+        self.result.is_none() && !self.callouts.is_empty()
+    }
+}
+
 impl GithubProviderSession {
     fn new() -> Self {
         let engine = make_engine();
@@ -105,13 +160,7 @@ impl GithubProviderSession {
             .call_initialize(&mut store, b"{}")
             .unwrap();
         assert!(
-            matches!(
-                init,
-                ProviderReturn {
-                    terminal: Some(OpResult::Init(_)),
-                    ..
-                }
-            ),
+            matches!(init.result, OpResult::Initialize(_)),
             "expected provider initialization, got {init:?}"
         );
 
@@ -122,62 +171,72 @@ impl GithubProviderSession {
         }
     }
 
-    fn read_file(&mut self, id: u64, path: &str) -> ProviderReturn {
-        self.bindings
-            .omnifs_provider_browse()
-            .call_read_file(&mut self.store, id, path)
-            .unwrap()
+    fn read_file(&mut self, id: u64, path: &str) -> StepOutcome {
+        StepOutcome::from_step(
+            self.bindings
+                .omnifs_provider_browse()
+                .call_read_file(&mut self.store, id, path)
+                .unwrap(),
+        )
     }
 
-    fn list_children(&mut self, id: u64, path: &str) -> ProviderReturn {
-        self.bindings
-            .omnifs_provider_browse()
-            .call_list_children(&mut self.store, id, path)
-            .unwrap()
+    fn list_children(&mut self, id: u64, path: &str) -> StepOutcome {
+        StepOutcome::from_step(
+            self.bindings
+                .omnifs_provider_browse()
+                .call_list_children(&mut self.store, id, path)
+                .unwrap(),
+        )
     }
 
-    fn lookup_child(&mut self, id: u64, parent_path: &str, name: &str) -> ProviderReturn {
-        self.bindings
-            .omnifs_provider_browse()
-            .call_lookup_child(&mut self.store, id, parent_path, name)
-            .unwrap()
+    fn lookup_child(&mut self, id: u64, parent_path: &str, name: &str) -> StepOutcome {
+        StepOutcome::from_step(
+            self.bindings
+                .omnifs_provider_browse()
+                .call_lookup_child(&mut self.store, id, parent_path, name)
+                .unwrap(),
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn resume(&mut self, id: u64, outcomes: Vec<CalloutResult>) -> ProviderReturn {
-        self.bindings
-            .omnifs_provider_resume()
-            .call_resume(&mut self.store, id, &outcomes)
-            .unwrap()
+    fn resume(&mut self, id: u64, outcomes: Vec<CalloutResult>) -> StepOutcome {
+        StepOutcome::from_step(
+            self.bindings
+                .omnifs_provider_continuation()
+                .call_resume(&mut self.store, id, &outcomes)
+                .unwrap(),
+        )
     }
 
     fn timer_tick_with_paths(
         &mut self,
         id: u64,
         active_paths: Vec<omnifs_host::omnifs::provider::types::ActivePathSet>,
-    ) -> ProviderReturn {
-        self.bindings
-            .omnifs_provider_notify()
-            .call_on_event(
-                &mut self.store,
-                id,
-                &ProviderEvent::TimerTick(omnifs_host::omnifs::provider::types::TimerTickContext {
-                    active_paths,
-                }),
-            )
-            .unwrap()
+    ) -> StepOutcome {
+        StepOutcome::from_step(
+            self.bindings
+                .omnifs_provider_notify()
+                .call_on_event(
+                    &mut self.store,
+                    id,
+                    &ProviderEvent::TimerTick(
+                        omnifs_host::omnifs::provider::types::TimerTickContext { active_paths },
+                    ),
+                )
+                .unwrap(),
+        )
     }
 }
 
-fn invoke_github_read_route(path: &str) -> ProviderReturn {
+fn invoke_github_read_route(path: &str) -> StepOutcome {
     let mut session = GithubProviderSession::new();
     session.read_file(1, path)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-    let ProviderReturn {
-        terminal: None,
+fn expect_fetch(response: StepOutcome) -> HttpRequest {
+    let StepOutcome {
+        result: None,
         callouts,
         ..
     } = &response
@@ -286,7 +345,7 @@ fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
 
     let result = harness.runtime.initialize().unwrap();
     match result {
-        OpResult::Err(error) => {
+        OpResult::Error(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("default resolver"),
@@ -314,11 +373,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let lookup = harness
         .runtime
-        .call_lookup_child("", "_resolvers")
+        .lookup_child("", "_resolvers")
         .await
         .unwrap();
     match lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_resolvers");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -326,26 +385,17 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
-    match resolvers_file {
-        OpResult::Read(result) => {
-            let body = String::from_utf8(support::into_inline(result).content)
-                .expect("utf8 resolvers file");
-            assert!(
-                body.contains("cloudflare"),
-                "unexpected resolvers file: {body}"
-            );
-        },
-        other => panic!("expected File, got {other:?}"),
-    }
+    let resolvers_file = harness.runtime.read_file("_resolvers").await.unwrap();
+    let body =
+        String::from_utf8(support::into_inline(resolvers_file)).expect("utf8 resolvers file");
+    assert!(
+        body.contains("cloudflare"),
+        "unexpected resolvers file: {body}"
+    );
 
-    let reverse_lookup = harness
-        .runtime
-        .call_lookup_child("", "_reverse")
-        .await
-        .unwrap();
+    let reverse_lookup = harness.runtime.lookup_child("", "_reverse").await.unwrap();
     match reverse_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -355,11 +405,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_lookup = harness
         .runtime
-        .call_lookup_child("", "@cloudflare")
+        .lookup_child("", "@cloudflare")
         .await
         .unwrap();
     match resolver_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "@cloudflare");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -369,11 +419,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_domain_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com")
         .await
         .unwrap();
     match resolver_domain_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -383,11 +433,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "_reverse")
+        .lookup_child("@cloudflare", "_reverse")
         .await
         .unwrap();
     match resolver_reverse_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "_reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
@@ -397,11 +447,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_ip_lookup = harness
         .runtime
-        .call_lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8")
         .await
         .unwrap();
     match reverse_ip_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -412,11 +462,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_ip_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
         .await
         .unwrap();
     match resolver_reverse_ip_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "8.8.8.8");
             assert!(matches!(entry.kind, EntryKind::File(_)));
@@ -427,74 +477,81 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_reverse_lookup = harness
         .runtime
-        .call_lookup_child("_reverse", "not-an-ip")
+        .lookup_child("_reverse", "not-an-ip")
         .await
         .unwrap();
     match invalid_reverse_lookup {
-        OpResult::Lookup(LookupResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected invalid reverse lookup NotFound, got {other:?}"),
     }
 
     let invalid_resolver_reverse_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "not-an-ip")
+        .lookup_child("@cloudflare/_reverse", "not-an-ip")
         .await
         .unwrap();
     match invalid_resolver_reverse_lookup {
-        OpResult::Lookup(LookupResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected invalid resolver reverse lookup NotFound, got {other:?}"),
     }
 
-    let direct_ip_lookup = harness
-        .runtime
-        .call_lookup_child("", "8.8.8.8")
-        .await
-        .unwrap();
+    let direct_ip_lookup = harness.runtime.lookup_child("", "8.8.8.8").await.unwrap();
     match direct_ip_lookup {
-        OpResult::Lookup(LookupResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected root direct-IP lookup NotFound, got {other:?}"),
     }
 
     let resolver_direct_ip_lookup = harness
         .runtime
-        .call_lookup_child("@cloudflare", "8.8.8.8")
+        .lookup_child("@cloudflare", "8.8.8.8")
         .await
         .unwrap();
     match resolver_direct_ip_lookup {
-        OpResult::Lookup(LookupResult::NotFound) => {},
+        LookupChildResult::NotFound => {},
         other => panic!("expected resolver direct-IP lookup NotFound, got {other:?}"),
     }
 
     let domain_lookup = harness
         .runtime
-        .call_lookup_child("", "example.com")
+        .lookup_child("", "example.com")
         .await
         .unwrap();
     match domain_lookup {
-        OpResult::Lookup(LookupResult::Entry(result)) => {
+        LookupChildResult::Entry(result) => {
             let entry = &result.target;
             assert_eq!(entry.name, "example.com");
             assert!(matches!(entry.kind, EntryKind::Directory));
-            let names: Vec<&str> = result
-                .siblings
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
-            assert!(names.contains(&"A"));
-            assert!(names.contains(&"AAAA"));
-            assert!(names.contains(&"_all"));
-            assert!(names.contains(&"_raw"));
+            assert!(
+                harness
+                    .runtime
+                    .cache_get("example.com/A", RecordKind::Lookup, None)
+                    .is_some()
+            );
+            assert!(
+                harness
+                    .runtime
+                    .cache_get("example.com/AAAA", RecordKind::Lookup, None)
+                    .is_some()
+            );
+            assert!(
+                harness
+                    .runtime
+                    .cache_get("example.com/_all", RecordKind::Lookup, None)
+                    .is_some()
+            );
+            assert!(
+                harness
+                    .runtime
+                    .cache_get("example.com/_raw", RecordKind::Lookup, None)
+                    .is_some()
+            );
         },
         other => panic!("expected domain lookup, got {other:?}"),
     }
 
-    let listing = harness
-        .runtime
-        .call_list_children("example.com")
-        .await
-        .unwrap();
+    let listing = harness.runtime.list_children("example.com").await.unwrap();
     match listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -507,13 +564,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected domain listing, got {other:?}"),
     }
 
-    let reverse_listing = harness
-        .runtime
-        .call_list_children("_reverse")
-        .await
-        .unwrap();
+    let reverse_listing = harness.runtime.list_children("_reverse").await.unwrap();
     match reverse_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -524,11 +577,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_listing = harness
         .runtime
-        .call_list_children("@cloudflare/_reverse")
+        .list_children("@cloudflare/_reverse")
         .await
         .unwrap();
     match resolver_reverse_listing {
-        OpResult::List(ListResult::Entries(listing)) => {
+        ListChildrenResult::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -552,29 +605,25 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     "#,
     );
 
-    let resolvers_file = harness.runtime.call_read_file("_resolvers").await.unwrap();
-    assert!(matches!(resolvers_file, OpResult::Read(_)));
+    harness.runtime.read_file("_resolvers").await.unwrap();
 
-    let resolver_domain_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com")
         .await
         .unwrap();
-    assert!(matches!(resolver_domain_lookup, OpResult::Lookup(_)));
 
-    let reverse_ip_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8")
         .await
         .unwrap();
-    assert!(matches!(reverse_ip_lookup, OpResult::Lookup(_)));
 
-    let resolver_reverse_ip_lookup = harness
+    harness
         .runtime
-        .call_lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
         .await
         .unwrap();
-    assert!(matches!(resolver_reverse_ip_lookup, OpResult::Lookup(_)));
 
     let active = harness.runtime.__active_path_sets();
 
@@ -654,13 +703,13 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
     "#,
     );
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("@missing/example.com/A")
+        .read_file("@missing/example.com/A")
         .await
-        .unwrap();
-    match result {
-        OpResult::Err(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("unknown resolver specifier"),
@@ -685,25 +734,25 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     "#,
     );
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("example.com/BOGUS")
+        .read_file("example.com/BOGUS")
         .await
-        .unwrap();
-    match result {
-        OpResult::Err(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected unknown-record NotFound, got {other:?}"),
     }
 
-    let result = harness
+    let error = harness
         .runtime
-        .call_read_file("@cloudflare/example.com/BOGUS")
+        .read_file("@cloudflare/example.com/BOGUS")
         .await
-        .unwrap();
-    match result {
-        OpResult::Err(error) => {
+        .unwrap_err();
+    match error {
+        RuntimeError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected resolver unknown-record NotFound, got {other:?}"),
@@ -716,8 +765,8 @@ fn github_provider_routes_namespace_and_numeric_paths() {
 
     let repo_listing = session.list_children(5, "octocat/Hello-World");
     match repo_listing {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let mut names: Vec<&str> = listing
@@ -754,8 +803,8 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         })],
     );
     match lookup {
-        ProviderReturn {
-            terminal: Some(OpResult::Lookup(LookupResult::Entry(result))),
+        StepOutcome {
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
             ..
         } => {
             let entry = &result.target;
@@ -765,12 +814,12 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         other => panic!("expected Lookup(runs), got {other:?}"),
     }
 
-    // Note: projected sibling-file lookups (`.../1/title`, `.../1/diff`)
+    // Note: projection-derived file lookups (`.../1/title`, `.../1/diff`)
     // are intentionally not asserted here. These files do not have
     // dedicated provider lookup handlers; the host's FuseFs resolves
     // them positively from
     // the parent's cached sibling entries (see d4e9e98's
-    // dirents-implied positive path). `CalloutRuntime::call_lookup_child`
+    // dirents-implied positive path). `ProviderRuntime::call_lookup_child`
     // bypasses that cache and dispatches straight to the provider, so
     // it would return NotFound for them in isolation. Read-path
     // coverage for the same leaves lives in
@@ -779,7 +828,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
 }
 
 #[test]
-fn github_issue_list_preloads_projected_files() {
+fn github_issue_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
@@ -789,7 +838,7 @@ fn github_issue_list_preloads_projected_files() {
         "expected suspended response, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
-        panic!("expected fetch effect, got {:?}", response.callouts);
+        panic!("expected fetch callout, got {:?}", response.callouts);
     };
     assert!(
         fetch.url.ends_with(
@@ -828,17 +877,17 @@ fn github_issue_list_preloads_projected_files() {
         })],
     );
 
-    // Preloads now ride alongside the terminal listing, not as callouts.
+    // Projection effects ride alongside the terminal listing, not as callouts.
     assert!(
         response.callouts.is_empty(),
         "list terminal should carry no callouts, got {:?}",
         response.callouts
     );
-    match response.terminal {
-        Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
+    match &response.result {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+            let project_paths = project_paths(&response.effects);
             assert_eq!(
-                preload_paths,
+                project_paths,
                 vec![
                     "octocat/Hello-World/_prs/_open/6",
                     "octocat/Hello-World/_prs/_open/6/title",
@@ -854,19 +903,25 @@ fn github_issue_list_preloads_projected_files() {
                 ]
             );
             assert_eq!(
-                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/body"),
+                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/6/body"),
                 None
             );
             assert_eq!(
-                preload_file_content(&listing.preload, "octocat/Hello-World/_issues/_open/7/body"),
+                project_inline_content(
+                    &response.effects,
+                    "octocat/Hello-World/_issues/_open/7/body"
+                ),
                 None
             );
             assert_eq!(
-                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/6/user"),
+                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/6/user"),
                 Some(&[][..])
             );
             assert_eq!(
-                preload_file_content(&listing.preload, "octocat/Hello-World/_issues/_open/7/user"),
+                project_inline_content(
+                    &response.effects,
+                    "octocat/Hello-World/_issues/_open/7/user"
+                ),
                 Some(&[][..])
             );
             let names: Vec<&str> = listing
@@ -945,17 +1000,17 @@ fn github_issue_list_scans_past_pr_only_pages() {
             .to_vec(),
         })],
     );
-    match response.terminal {
-        Some(OpResult::List(ListResult::Entries(listing))) => {
+    match &response.result {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names, vec!["7"]);
-            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
-            assert!(preload_paths.contains(&"octocat/Hello-World/_prs/_all/6"));
-            assert!(preload_paths.contains(&"octocat/Hello-World/_issues/_all/7/title"));
+            let project_paths = project_paths(&response.effects);
+            assert!(project_paths.contains(&"octocat/Hello-World/_prs/_all/6"));
+            assert!(project_paths.contains(&"octocat/Hello-World/_issues/_all/7/title"));
             assert!(listing.exhaustive);
         },
         other => panic!("expected issue listing terminal, got {other:?}"),
@@ -1003,8 +1058,8 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
             .to_vec(),
         })],
     );
-    match response.terminal {
-        Some(OpResult::List(ListResult::Entries(listing))) => {
+    match &response.result {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
             let mut names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -1018,7 +1073,7 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
 }
 
 #[test]
-fn github_pr_list_preloads_projected_files() {
+fn github_pr_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
@@ -1028,7 +1083,7 @@ fn github_pr_list_preloads_projected_files() {
         "expected suspended response, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
-        panic!("expected fetch effect, got {:?}", response.callouts);
+        panic!("expected fetch callout, got {:?}", response.callouts);
     };
     assert!(
         fetch.url.ends_with(
@@ -1064,11 +1119,11 @@ fn github_pr_list_preloads_projected_files() {
         "list terminal should carry no callouts, got {:?}",
         response.callouts
     );
-    match response.terminal {
-        Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
+    match &response.result {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+            let project_paths = project_paths(&response.effects);
             assert_eq!(
-                preload_paths,
+                project_paths,
                 vec![
                     "octocat/Hello-World/_prs/_open/7/title",
                     "octocat/Hello-World/_prs/_open/7/body",
@@ -1077,7 +1132,7 @@ fn github_pr_list_preloads_projected_files() {
                 ]
             );
             assert_eq!(
-                preload_file_content(&listing.preload, "octocat/Hello-World/_prs/_open/7/body"),
+                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/7/body"),
                 None
             );
             let names: Vec<&str> = listing
@@ -1092,7 +1147,7 @@ fn github_pr_list_preloads_projected_files() {
 }
 
 #[test]
-fn github_action_run_list_preloads_projected_files() {
+fn github_action_run_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
@@ -1102,7 +1157,7 @@ fn github_action_run_list_preloads_projected_files() {
         "expected suspended response, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
-        panic!("expected fetch effect, got {:?}", response.callouts);
+        panic!("expected fetch callout, got {:?}", response.callouts);
     };
     assert!(
         fetch
@@ -1135,11 +1190,11 @@ fn github_action_run_list_preloads_projected_files() {
         "list terminal should carry no callouts, got {:?}",
         response.callouts
     );
-    match response.terminal {
-        Some(OpResult::List(ListResult::Entries(listing))) => {
-            let preload_paths: Vec<&str> = listing.preload.iter().map(preload_path).collect();
+    match &response.result {
+        Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))) => {
+            let project_paths = project_paths(&response.effects);
             assert_eq!(
-                preload_paths,
+                project_paths,
                 vec![
                     "octocat/Hello-World/_actions/runs/123/status",
                     "octocat/Hello-World/_actions/runs/123/conclusion",
@@ -1163,9 +1218,9 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -1199,33 +1254,25 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
         })],
     );
     match lookup {
-        ProviderReturn {
-            terminal: Some(OpResult::Lookup(LookupResult::Entry(result))),
+        StepOutcome {
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
+            effects,
             ..
         } => {
             let entry = &result.target;
             assert_eq!(entry.name, "123");
             assert!(matches!(entry.kind, EntryKind::Directory));
-            let child_names: Vec<&str> = result
-                .siblings
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
-            let sibling_file_names: Vec<&str> = result
-                .sibling_files
-                .iter()
-                .map(|file| file.name.as_str())
-                .collect();
+            let child_names = project_paths(&effects);
             assert!(
-                sibling_file_names.contains(&"status"),
-                "missing status in {sibling_file_names:?}"
+                child_names.contains(&"octocat/Hello-World/_actions/runs/123/status"),
+                "missing status in {child_names:?}"
             );
             assert!(
-                sibling_file_names.contains(&"conclusion"),
-                "missing conclusion in {sibling_file_names:?}"
+                child_names.contains(&"octocat/Hello-World/_actions/runs/123/conclusion"),
+                "missing conclusion in {child_names:?}"
             );
             assert!(
-                child_names.contains(&"log"),
+                child_names.contains(&"octocat/Hello-World/_actions/runs/123/log"),
                 "missing log in {child_names:?}"
             );
         },
@@ -1248,8 +1295,8 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
     );
 
     match listed {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(result))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(result))),
             ..
         } => {
             let names: Vec<&str> = result
@@ -1259,7 +1306,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
                 .collect();
             assert!(names.contains(&"log"), "missing log in {names:?}");
         },
-        other => panic!("expected DirEntries(123) after 200, got {other:?}"),
+        other => panic!("expected list entries(123) after 200, got {other:?}"),
     }
 }
 
@@ -1271,8 +1318,8 @@ fn github_owner_listing_tracks_browsed_repos() {
     assert!(
         matches!(
             repo_listing,
-            ProviderReturn {
-                terminal: Some(OpResult::List(_)),
+            StepOutcome {
+                result: Some(OpResult::ListChildren(_)),
                 ..
             }
         ),
@@ -1310,8 +1357,8 @@ fn github_owner_listing_tracks_browsed_repos() {
         })],
     );
     match owner_listing {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1342,8 +1389,8 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         assert!(
             matches!(
                 repo_listing,
-                ProviderReturn {
-                    terminal: Some(OpResult::List(_)),
+                StepOutcome {
+                    result: Some(OpResult::ListChildren(_)),
                     ..
                 }
             ),
@@ -1353,8 +1400,8 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
 
     let root_listing = session.list_children(50, "");
     match root_listing {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1398,8 +1445,8 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         })],
     );
     match owner_listing {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1434,11 +1481,11 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_listing = harness
         .runtime
-        .call_list_children("octocat/Hello-World/_repo")
+        .list_children("octocat/Hello-World/_repo")
         .await
         .unwrap();
     match repo_listing {
-        OpResult::List(ListResult::Subtree(tree_ref)) => {
+        ListChildrenResult::Subtree(tree_ref) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1451,11 +1498,11 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_child = harness
         .runtime
-        .call_lookup_child("octocat/Hello-World", "_repo")
+        .lookup_child("octocat/Hello-World", "_repo")
         .await
         .unwrap();
     match repo_child {
-        OpResult::Lookup(LookupResult::Subtree(tree_ref)) => {
+        LookupChildResult::Subtree(tree_ref) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1479,9 +1526,9 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -1516,8 +1563,8 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
     );
 
     match response {
-        ProviderReturn {
-            terminal: Some(OpResult::Err(error)),
+        StepOutcome {
+            result: Some(OpResult::Error(error)),
             ..
         } => {
             assert_eq!(error.kind, ErrorKind::NotFound);
@@ -1530,13 +1577,14 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
 #[allow(clippy::too_many_lines)]
 fn github_pr_lookup_validates_and_exposes_diff() {
     use omnifs_host::omnifs::provider::types::{
-        Callout, CalloutError, CalloutResult, ErrorKind, HttpRequest, HttpResponse,
+        BlobFetchRequest, BlobFetched, Callout, CalloutError, CalloutResult, ErrorKind,
+        HttpRequest, HttpResponse, ReadFileBytes,
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -1545,6 +1593,22 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         };
         let [Callout::Fetch(request)] = callouts.as_slice() else {
             panic!("expected fetch callout, got {response:?}");
+        };
+        request.clone()
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn expect_blob_fetch(response: StepOutcome) -> BlobFetchRequest {
+        let StepOutcome {
+            result: None,
+            callouts,
+            ..
+        } = &response
+        else {
+            panic!("expected callouts response, got {response:?}");
+        };
+        let [Callout::FetchBlob(request)] = callouts.as_slice() else {
+            panic!("expected fetch-blob callout, got {response:?}");
         };
         request.clone()
     }
@@ -1577,55 +1641,66 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         })],
     );
     match lookup {
-        ProviderReturn {
-            terminal: Some(OpResult::Lookup(LookupResult::Entry(result))),
+        StepOutcome {
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
+            effects,
             ..
         } => {
             let target = &result.target;
             assert_eq!(target.name, "7");
             assert!(matches!(target.kind, EntryKind::Directory));
 
-            let names: Vec<&str> = result
-                .siblings
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
+            let names = project_paths(&effects);
             assert!(
-                names.contains(&"diff"),
-                "lookup siblings should include diff, got {names:?}"
+                names.contains(&"octocat/Hello-World/_prs/_open/7/diff"),
+                "lookup effects should project diff, got {names:?}"
             );
             assert!(
-                names.contains(&"comments"),
-                "lookup siblings should include comments, got {names:?}"
+                names.contains(&"octocat/Hello-World/_prs/_open/7/comments"),
+                "lookup effects should project comments, got {names:?}"
             );
         },
         other => panic!("expected validated PR lookup result, got {other:?}"),
     }
 
-    let read = session.read_file(70, "octocat/Hello-World/_prs/_open/7/diff");
+    let diff_fetch =
+        expect_blob_fetch(session.read_file(70, "octocat/Hello-World/_prs/_open/7/diff"));
     assert!(
-        read.is_suspended(),
-        "expected PR diff read to dispatch fetch, got {read:?}"
+        diff_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/pulls/7"),
+        "unexpected PR diff fetch URL: {}",
+        diff_fetch.url
+    );
+    assert!(
+        diff_fetch
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("accept")
+                && h.value == "application/vnd.github.diff"),
+        "expected diff Accept header, got {:?}",
+        diff_fetch.headers
     );
 
     let response = session.resume(
         70,
-        vec![CalloutResult::HttpResponse(HttpResponse {
+        vec![CalloutResult::BlobFetched(BlobFetched {
+            blob: 1,
+            size: 25,
+            content_type: Some("application/octet-stream".to_string()),
+            etag: None,
             status: 200,
-            headers: Vec::new(),
-            body: b"diff --git a/file b/file\n".to_vec(),
+            response_headers: Vec::new(),
         })],
     );
 
     match response {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(file)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(file)),
             ..
-        } => {
-            assert_eq!(
-                support::expect_inline(&file).content,
-                b"diff --git a/file b/file\n"
-            );
+        } => match &file.bytes {
+            ReadFileBytes::Blob(blob) => assert_eq!(*blob, 1),
+            ReadFileBytes::Inline(_) => panic!("expected blob-backed diff, got inline"),
         },
         other => panic!("expected PR diff file after read, got {other:?}"),
     }
@@ -1644,8 +1719,8 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         })],
     );
     match response {
-        ProviderReturn {
-            terminal: Some(OpResult::Err(error)),
+        StepOutcome {
+            result: Some(OpResult::Error(error)),
             ..
         } => {
             assert_eq!(error.kind, ErrorKind::Network);
@@ -1659,9 +1734,9 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpRequest, HttpResponse};
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -1699,22 +1774,23 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
         })],
     );
     match pr_read {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(result)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(result)),
+            effects,
             ..
         } => {
+            assert_eq!(support::expect_inline(&result), b"PR title".to_vec());
+            let project_paths = project_paths(&effects);
             assert_eq!(
-                support::expect_inline(&result).content,
-                b"PR title".to_vec()
+                project_paths,
+                vec![
+                    "octocat/Hello-World/_prs/_open/7/body",
+                    "octocat/Hello-World/_prs/_open/7/state",
+                    "octocat/Hello-World/_prs/_open/7/user",
+                ]
             );
-            let sibling_names: Vec<&str> = support::expect_inline(&result)
-                .sibling_files
-                .iter()
-                .map(|file| file.name.as_str())
-                .collect();
-            assert_eq!(sibling_names, vec!["body", "state", "user"]);
         },
-        other => panic!("expected PR file result with sibling files, got {other:?}"),
+        other => panic!("expected PR file result with project effects, got {other:?}"),
     }
 
     let run_fetch =
@@ -1736,22 +1812,26 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
         })],
     );
     match run_read {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(result)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(result)),
+            effects,
             ..
         } => {
+            assert_eq!(support::expect_inline(&result), b"completed".to_vec());
+            let project_paths = project_paths(&effects);
             assert_eq!(
-                support::expect_inline(&result).content,
-                b"completed".to_vec()
+                project_paths,
+                vec![
+                    "octocat/Hello-World/_actions/runs/123/conclusion",
+                    "octocat/Hello-World/_actions/runs/123/log",
+                ]
             );
-            let sibling_names: Vec<&str> = support::expect_inline(&result)
-                .sibling_files
-                .iter()
-                .map(|file| file.name.as_str())
-                .collect();
-            assert_eq!(sibling_names, vec!["conclusion"]);
+            assert_eq!(
+                project_file_stability(&effects, "octocat/Hello-World/_actions/runs/123/log"),
+                Some(Stability::Mutable)
+            );
         },
-        other => panic!("expected action run file result with sibling files, got {other:?}"),
+        other => panic!("expected action run file result with project effects, got {other:?}"),
     }
 }
 
@@ -1765,7 +1845,7 @@ fn github_provider_read_routes_dispatch_async_handlers() {
         let response = invoke_github_read_route(path);
         assert!(
             response.is_suspended(),
-            "expected async effect dispatch for {path}, got {response:?}"
+            "expected suspended provider step for {path}, got {response:?}"
         );
     }
 }
@@ -1785,6 +1865,9 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         expected_content: &'static [u8],
     }
 
+    // PR diff is covered separately by `github_pr_lookup_validates_and_exposes_diff`
+    // because it dispatches a fetch-blob callout (and returns a blob-backed
+    // ReadFileBytes) rather than an inline HttpResponse.
     let cases = [
         Case {
             name: "issue title",
@@ -1803,13 +1886,6 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
             expected_content: b"Cached issue title",
         },
         Case {
-            name: "pr diff",
-            path: "octocat/Hello-World/_prs/_open/7/diff",
-            ok_headers: Vec::new(),
-            ok_body: b"diff --git a/file b/file\n",
-            expected_content: b"diff --git a/file b/file\n",
-        },
-        Case {
             name: "action status",
             path: "octocat/Hello-World/_actions/runs/99/status",
             ok_headers: Vec::new(),
@@ -1824,7 +1900,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         let first = session.read_file(id, case.path);
         assert!(
             first.is_suspended(),
-            "{name}: expected fetch effect on first read, got {first:?}",
+            "{name}: expected fetch callout on first read, got {first:?}",
             name = case.name
         );
         let cached = session.resume(
@@ -1836,12 +1912,12 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
             })],
         );
         match cached {
-            ProviderReturn {
-                terminal: Some(OpResult::Read(file)),
+            StepOutcome {
+                result: Some(OpResult::ReadFile(file)),
                 ..
             } => {
                 assert_eq!(
-                    support::expect_inline(&file).content,
+                    support::expect_inline(&file),
                     case.expected_content,
                     "{name}: unexpected cached content",
                     name = case.name
@@ -1854,7 +1930,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         let second = session.read_file(id, case.path);
         assert!(
             second.is_suspended(),
-            "{name}: expected fetch effect on second read (no provider cache), got {second:?}",
+            "{name}: expected fetch callout on second read (no provider cache), got {second:?}",
             name = case.name
         );
         let error = session.resume(
@@ -1866,8 +1942,8 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
             })],
         );
         match error {
-            ProviderReturn {
-                terminal: Some(OpResult::Err(err)),
+            StepOutcome {
+                result: Some(OpResult::Error(err)),
                 ..
             } => {
                 assert_eq!(
@@ -1910,16 +1986,16 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
     fn expect_network_error_on_refetch(
         session: &mut GithubProviderSession,
         id: u64,
-        dispatch: impl FnOnce(&mut GithubProviderSession, u64) -> ProviderReturn,
+        dispatch: impl FnOnce(&mut GithubProviderSession, u64) -> StepOutcome,
     ) {
         let first = dispatch(session, id);
         assert!(
             first.is_suspended(),
-            "expected fetch effect on refetch, got {first:?}"
+            "expected fetch callout on refetch, got {first:?}"
         );
         match session.resume(id, network_error()) {
-            ProviderReturn {
-                terminal: Some(OpResult::Err(error)),
+            StepOutcome {
+                result: Some(OpResult::Error(error)),
                 ..
             } => {
                 assert_eq!(error.kind, ErrorKind::Network);
@@ -1928,10 +2004,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         }
     }
 
-    fn expect_not_found(response: ProviderReturn) {
+    fn expect_not_found(response: StepOutcome) {
         match response {
-            ProviderReturn {
-                terminal: Some(OpResult::Err(error)),
+            StepOutcome {
+                result: Some(OpResult::Error(error)),
                 ..
             } => {
                 assert_eq!(error.kind, ErrorKind::NotFound);
@@ -1940,9 +2016,9 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         }
     }
 
-    fn expect_fetch_url(response: ProviderReturn) -> String {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch_url(response: StepOutcome) -> String {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = response
@@ -1965,8 +2041,8 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         50,
         ok_body(br#"[{"user":{"login":"octocat"},"body":"first issue comment"}]"#),
     ) {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -1975,6 +2051,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names, vec!["1"]);
+            let EntryKind::File(file) = &listing.entries[0].kind else {
+                panic!("expected comment entry to be a file");
+            };
+            assert_eq!(file.attrs.stability, Stability::Mutable);
         },
         other => panic!("expected issue comment listing, got {other:?}"),
     }
@@ -1993,12 +2073,13 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         56,
         ok_body(br#"[{"user":{"login":"octocat"},"body":"page two issue comment"}]"#),
     ) {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(file)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
+            assert_eq!(file.attrs.stability, Stability::Mutable);
             assert_eq!(
-                support::expect_inline(&file).content,
+                support::expect_inline(&file),
                 b"octocat:\npage two issue comment\n"
             );
         },
@@ -2013,14 +2094,12 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         53,
         ok_body(br#"[{"user":{"login":"hubot"},"body":"first pr comment"}]"#),
     ) {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(file)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
-            assert_eq!(
-                support::expect_inline(&file).content,
-                b"hubot:\nfirst pr comment\n"
-            );
+            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(support::expect_inline(&file), b"hubot:\nfirst pr comment\n");
         },
         other => panic!("expected PR comment content, got {other:?}"),
     }
@@ -2037,12 +2116,13 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         57,
         ok_body(br#"[{"user":{"login":"hubot"},"body":"page two pr comment"}]"#),
     ) {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(file)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
+            assert_eq!(file.attrs.stability, Stability::Mutable);
             assert_eq!(
-                support::expect_inline(&file).content,
+                support::expect_inline(&file),
                 b"hubot:\npage two pr comment\n"
             );
         },
@@ -2058,9 +2138,9 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -2140,9 +2220,10 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
         first_issue_page.url
     );
     let issue_parallel = session.resume(20, vec![search_page(1500, 1)]);
-    let ProviderReturn {
-        terminal: None,
+    let StepOutcome {
+        result: None,
         callouts,
+        ..
     } = &issue_parallel
     else {
         panic!("expected parallel issue page fetches, got {issue_parallel:?}");
@@ -2151,8 +2232,8 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     let issue_pages = (2..=10).map(|page| rest_page(page * 100)).collect();
     let final_response = session.resume(20, issue_pages);
     match final_response {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -2176,9 +2257,10 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
         "/search/issues?q=repo:octocat/Hello-World+is:pr&sort=created&order=desc&per_page=100"
     ));
     let pr_parallel = session.resume(21, vec![search_page(1500, 7)]);
-    let ProviderReturn {
-        terminal: None,
+    let StepOutcome {
+        result: None,
         callouts,
+        ..
     } = &pr_parallel
     else {
         panic!("expected parallel PR page fetches, got {pr_parallel:?}");
@@ -2187,8 +2269,8 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     let pr_pages = (2..=10).map(|page| rest_page(page * 100 + 7)).collect();
     let final_response = session.resume(21, pr_pages);
     match final_response {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             let names: Vec<&str> = listing
@@ -2216,9 +2298,9 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -2286,21 +2368,18 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         })],
     );
     match lookup {
-        ProviderReturn {
-            terminal: Some(OpResult::Lookup(LookupResult::Entry(result))),
+        StepOutcome {
+            result: Some(OpResult::LookupChild(LookupChildResult::Entry(result))),
+            effects,
             ..
         } => {
             let entry = &result.target;
             assert_eq!(entry.name, "openai");
             assert!(matches!(entry.kind, EntryKind::Directory));
-            let names: Vec<&str> = result
-                .siblings
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect();
+            let names = project_paths(&effects);
             assert!(
-                names.contains(&"api"),
-                "expected repo lookup siblings after owner classification, got {names:?}"
+                names.contains(&"openai/api"),
+                "expected repo lookup projection after owner classification, got {names:?}"
             );
         },
         other => panic!("expected owner lookup result, got {other:?}"),
@@ -2310,8 +2389,8 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     // of which owners have been resolved in prior calls.
     let root_listing = session.list_children(32, "");
     match root_listing {
-        ProviderReturn {
-            terminal: Some(OpResult::List(ListResult::Entries(listing))),
+        StepOutcome {
+            result: Some(OpResult::ListChildren(ListChildrenResult::Entries(listing))),
             ..
         } => {
             assert!(
@@ -2333,9 +2412,9 @@ fn github_provider_polls_events_and_invalidates_caches() {
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -2348,9 +2427,9 @@ fn github_provider_polls_events_and_invalidates_caches() {
         request.clone()
     }
 
-    fn expect_callouts(response: ProviderReturn) -> Vec<Callout> {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_callouts(response: StepOutcome) -> Vec<Callout> {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = response
@@ -2398,11 +2477,11 @@ fn github_provider_polls_events_and_invalidates_caches() {
         })],
     );
     match issue_cached {
-        ProviderReturn {
-            terminal: Some(OpResult::Read(file)),
+        StepOutcome {
+            result: Some(OpResult::ReadFile(file)),
             ..
         } => {
-            assert_eq!(support::expect_inline(&file).content, b"Cached issue title");
+            assert_eq!(support::expect_inline(&file), b"Cached issue title");
         },
         other => panic!("expected cached issue file content, got {other:?}"),
     }
@@ -2444,13 +2523,13 @@ fn github_provider_polls_events_and_invalidates_caches() {
         "event-outcome terminals should not carry callouts, got {:?}",
         first_tick_done.callouts
     );
-    match &first_tick_done.terminal {
-        Some(OpResult::Event(outcome)) => {
+    match &first_tick_done.result {
+        Some(OpResult::OnEvent) => {
+            let prefixes = invalidate_prefixes(&first_tick_done.effects);
             assert_eq!(
-                outcome.invalidate_prefixes,
-                vec!["octocat/Hello-World/_issues".to_string()],
-                "unexpected invalidate_prefixes: {:?}",
-                outcome.invalidate_prefixes
+                prefixes,
+                vec!["octocat/Hello-World/_issues"],
+                "unexpected invalidate_prefixes: {prefixes:?}"
             );
         },
         other => panic!("expected Event terminal with invalidations, got {other:?}"),
@@ -2475,8 +2554,8 @@ fn github_provider_polls_events_and_invalidates_caches() {
     assert!(
         matches!(
             stale_after_invalidation,
-            ProviderReturn {
-                terminal: Some(OpResult::Err(_)),
+            StepOutcome {
+                result: Some(OpResult::Error(_)),
                 ..
             }
         ),
@@ -2518,8 +2597,8 @@ fn github_provider_polls_events_and_invalidates_caches() {
     assert!(
         matches!(
             second_tick_done,
-            ProviderReturn {
-                terminal: Some(OpResult::Event(_)),
+            StepOutcome {
+                result: Some(OpResult::OnEvent),
                 ..
             }
         ),
@@ -2534,9 +2613,9 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
     };
 
     #[allow(clippy::needless_pass_by_value)]
-    fn expect_fetch(response: ProviderReturn) -> HttpRequest {
-        let ProviderReturn {
-            terminal: None,
+    fn expect_fetch(response: StepOutcome) -> HttpRequest {
+        let StepOutcome {
+            result: None,
             callouts,
             ..
         } = &response
@@ -2560,9 +2639,9 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
         })]
     }
 
-    fn expect_denied(response: ProviderReturn) {
-        let ProviderReturn {
-            terminal: Some(OpResult::Err(error)),
+    fn expect_denied(response: StepOutcome) {
+        let StepOutcome {
+            result: Some(OpResult::Error(error)),
             ..
         } = response
         else {

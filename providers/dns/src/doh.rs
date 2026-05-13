@@ -39,7 +39,6 @@ struct RawConfig {
     resolvers: BTreeMap<String, RawResolver>,
 }
 
-// TODO: can't BUILTIN_DEFAULTS_JSON just be here?
 impl Default for RawConfig {
     fn default() -> Self {
         Self {
@@ -255,7 +254,7 @@ pub(super) fn query_url(
     Ok(url)
 }
 
-/// Legacy effect-based query function (kept for potential test usage).
+/// Callout-based query function (kept for potential test usage).
 #[cfg(test)]
 fn query(
     config: &ResolverConfig,
@@ -327,7 +326,7 @@ pub(super) fn reverse_query_url(
     query_url(config, resolver, &ptr_domain, RecordType::PTR)
 }
 
-/// Legacy effect-based reverse query function (kept for potential test usage).
+/// Callout-based reverse query function (kept for potential test usage).
 #[cfg(test)]
 fn reverse_query(config: &ResolverConfig, resolver: Option<&str>, ip: &str) -> Result<Callout> {
     let addr = ip
@@ -571,7 +570,7 @@ mod tests {
     fn query_uses_dns_wireformat_parameter() {
         let cfg = default_config();
         let Ok(Callout::Fetch(request)) = query(&cfg, None, "ibm.com", RecordType::A) else {
-            panic!("expected fetch effect");
+            panic!("expected fetch callout");
         };
 
         assert_eq!(request.method, "GET");
