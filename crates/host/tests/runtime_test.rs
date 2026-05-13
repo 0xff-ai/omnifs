@@ -511,7 +511,13 @@ async fn test_lookup_projects_siblings_into_cache() {
         .collect();
     entry_names.sort_unstable();
     assert_eq!(entry_names, vec!["comments", "status"]);
-    assert!(!dirents.exhaustive);
+    assert!(
+        dirents.exhaustive,
+        "lookup of a #[dir]-handled path runs the handler with DirIntent::List \
+         and propagates PageStatus::Exhaustive through proj-entry::listing-exhaustive, \
+         so the resulting dirents record must be exhaustive and a subsequent readdir \
+         must hit the cache without re-invoking list_children",
+    );
 
     let status_lookup = harness
         .runtime

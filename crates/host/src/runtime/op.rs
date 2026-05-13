@@ -419,6 +419,7 @@ mod attr_contract_tests {
             effects: vec![wit_types::Effect::Project(wit_types::ProjEntry {
                 path: "bad".to_string(),
                 kind: wit_types::EntryKind::File(bad_size_file),
+                listing_exhaustive: false,
             })],
         };
         let error = validate_return(&on_event_op(), &bad_size).unwrap_err();
@@ -438,6 +439,7 @@ mod attr_contract_tests {
                             ),
                             bytes: wit_types::ProjBytes::Inline(bytes),
                         }),
+                        listing_exhaustive: false,
                     })
                 })
                 .collect(),

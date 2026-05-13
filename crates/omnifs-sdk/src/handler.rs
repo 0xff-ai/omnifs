@@ -1578,8 +1578,14 @@ fn projection_exact_lookup<R: StaticChildren>(
     let mut siblings = registry.static_entries_for_parent(&to_absolute_path(parent_abs));
     siblings.retain(|entry| entry.name() != target_name);
 
+    let inner_exhaustive = matches!(projection.page.as_ref(), Some(PageStatus::Exhaustive));
+
     let mut effects = projection.effects.clone();
-    effects.project_dir(absolute_path)?;
+    if inner_exhaustive {
+        effects.project_dir_exhaustive(absolute_path)?;
+    } else {
+        effects.project_dir(absolute_path)?;
+    }
     let projected_children = merge_projection_entries(
         projection,
         registry.static_entries_for_parent(absolute_path),

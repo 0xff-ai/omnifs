@@ -7,14 +7,23 @@ use crate::runtime::ProviderRuntime;
 
 #[derive(Default)]
 pub(super) struct ProjectionAccumulator {
-    dirs: std::collections::BTreeSet<String>,
+    /// Per-dir flag indicating whether the children projected in this
+    /// batch constitute the authoritative listing of that dir. `true`
+    /// here causes `merge_projected_dirs` to write the resulting dirents
+    /// record with `exhaustive: true` (and to replace any pre-existing
+    /// entries) rather than carrying forward stale listings.
+    dirs: std::collections::BTreeMap<String, bool>,
     children: std::collections::BTreeMap<String, std::collections::BTreeMap<String, DirentRecord>>,
 }
 
 impl ProjectionAccumulator {
     pub(super) fn add(&mut self, entry: &wit_types::ProjEntry, batch: &mut Vec<BatchRecord>) {
         if matches!(entry.kind, wit_types::EntryKind::Directory) {
-            self.dirs.insert(entry.path.clone());
+            // `listing_exhaustive` is sticky once true within a batch: a
+            // later non-exhaustive projection of the same dir must not
+            // demote an earlier exhaustive declaration.
+            let existing = self.dirs.entry(entry.path.clone()).or_insert(false);
+            *existing = *existing || entry.listing_exhaustive;
         }
         if let Some((parent, name)) = split_projected_path(&entry.path) {
             let name = name.to_string();
@@ -117,31 +126,39 @@ impl ProviderRuntime {
         batch: &mut Vec<BatchRecord>,
     ) {
         let ProjectionAccumulator { dirs, mut children } = projections;
-        for dir in dirs {
+        for (dir, listing_exhaustive) in dirs {
             let Some(new_children) = children.remove(&dir) else {
                 continue;
             };
-            let (previously_exhaustive, mut existing) = self
-                .cache_get(&dir, RecordKind::Dirents, None)
-                .and_then(|record| DirentsPayload::deserialize(&record.payload))
-                .map_or_else(
-                    || (false, std::collections::BTreeMap::new()),
-                    |payload| {
-                        (
-                            payload.exhaustive,
-                            payload
-                                .entries
-                                .into_iter()
-                                .map(|e| (e.name.clone(), e))
-                                .collect(),
-                        )
-                    },
-                );
-            let introduced = new_children.keys().any(|n| !existing.contains_key(n));
-            existing.extend(new_children);
+            let (entries, exhaustive) = if listing_exhaustive {
+                // The provider asserted this batch fully describes the
+                // dir's children. Drop any stale pre-existing entries
+                // and mark the record exhaustive.
+                (new_children, true)
+            } else {
+                let (previously_exhaustive, mut existing) = self
+                    .cache_get(&dir, RecordKind::Dirents, None)
+                    .and_then(|record| DirentsPayload::deserialize(&record.payload))
+                    .map_or_else(
+                        || (false, std::collections::BTreeMap::new()),
+                        |payload| {
+                            (
+                                payload.exhaustive,
+                                payload
+                                    .entries
+                                    .into_iter()
+                                    .map(|e| (e.name.clone(), e))
+                                    .collect(),
+                            )
+                        },
+                    );
+                let introduced = new_children.keys().any(|n| !existing.contains_key(n));
+                existing.extend(new_children);
+                (existing, previously_exhaustive && !introduced)
+            };
             if let Some(payload) = (DirentsPayload {
-                entries: existing.into_values().collect(),
-                exhaustive: previously_exhaustive && !introduced,
+                entries: entries.into_values().collect(),
+                exhaustive,
             })
             .serialize()
             {

@@ -104,9 +104,17 @@ interface types {
 
     /// Provider-relative path metadata to install into the host
     /// projection cache.
+    ///
+    /// When `kind` is `directory` and `listing-exhaustive` is true, the
+    /// host treats the children projected at `<path>/<name>` in the same
+    /// batch as the authoritative listing of `path`: the resulting
+    /// dirents record is marked exhaustive, and a subsequent readdir on
+    /// `path` serves from cache without re-invoking `list-children`.
+    /// Ignored when `kind` is `file`.
     record proj-entry {
         path: string,
         kind: entry-kind,
+        listing-exhaustive: bool,
     }
 
     /// Host routing state for a tree handoff. The operation result says

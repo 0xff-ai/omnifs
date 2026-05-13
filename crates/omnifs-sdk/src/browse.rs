@@ -89,6 +89,21 @@ impl Effects {
             .push(wit_types::Effect::Project(wit_types::ProjEntry {
                 path: normalize_project_path(path.into())?,
                 kind: wit_types::EntryKind::Directory,
+                listing_exhaustive: false,
+            }));
+        Ok(self)
+    }
+
+    /// Project a directory whose children appearing in the same effects
+    /// batch constitute the authoritative listing. The host marks the
+    /// resulting dirents record exhaustive so subsequent readdirs serve
+    /// from cache without re-invoking `list_children`.
+    pub fn project_dir_exhaustive(&mut self, path: impl Into<String>) -> Result<&mut Self> {
+        self.effects
+            .push(wit_types::Effect::Project(wit_types::ProjEntry {
+                path: normalize_project_path(path.into())?,
+                kind: wit_types::EntryKind::Directory,
+                listing_exhaustive: true,
             }));
         Ok(self)
     }
@@ -99,6 +114,7 @@ impl Effects {
             .push(wit_types::Effect::Project(wit_types::ProjEntry {
                 path: normalize_project_path(path.into())?,
                 kind: wit_types::EntryKind::File(file.into()),
+                listing_exhaustive: false,
             }));
         Ok(self)
     }
