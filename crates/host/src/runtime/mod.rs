@@ -114,12 +114,22 @@ impl LogHost for HostState {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RuntimeError {
-    #[error("wasmtime error: {0}")]
+pub enum RuntimeBuildError {
+    #[error("wasmtime: {0}")]
     Wasmtime(#[from] wasmtime::Error),
-    #[error("failed to build HTTP client: {0}")]
+    #[error("http client: {0}")]
     HttpClient(#[from] reqwest::Error),
-    #[error("provider protocol error: {0}")]
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+    #[error("provider protocol: {0}")]
+    ProviderProtocol(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error("wasmtime: {0}")]
+    Wasmtime(#[from] wasmtime::Error),
+    #[error("provider protocol: {0}")]
     ProviderProtocol(String),
     #[error("provider returned error: {0:?}")]
     ProviderError(wit_types::ProviderError),
@@ -128,8 +138,6 @@ pub enum RuntimeError {
         op: Box<Op>,
         result: Box<wit_types::OpResult>,
     },
-    #[error("{0}")]
-    InvalidConfig(String),
 }
 
 type Result<T> = std::result::Result<T, RuntimeError>;
@@ -206,7 +214,7 @@ impl ProviderRuntime {
         cache_dir: &Path,
         mount_name: &str,
         extractor: Arc<ArchiveExtractorComponent>,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, RuntimeBuildError> {
         let mut linker = Linker::<HostState>::new(engine);
 
         wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
@@ -238,14 +246,13 @@ impl ProviderRuntime {
             .call_get_config_schema(&mut store)?;
         validate_instance_config(wit_schema.as_deref(), config, mount_name)?;
         let config_bytes = config.config_bytes();
-        let auth =
-            if config.auth.is_empty() {
-                Arc::new(AuthManager::none())
-            } else {
-                Arc::new(AuthManager::from_configs(&config.auth).map_err(|e| {
-                    RuntimeError::ProviderProtocol(format!("auth config error: {e}"))
-                })?)
-            };
+        let auth = if config.auth.is_empty() {
+            Arc::new(AuthManager::none())
+        } else {
+            Arc::new(AuthManager::from_configs(&config.auth).map_err(|e| {
+                RuntimeBuildError::ProviderProtocol(format!("auth config error: {e}"))
+            })?)
+        };
 
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
@@ -285,8 +292,8 @@ impl ProviderRuntime {
                 },
             }
         };
-        let declared_handlers =
-            read_declared_handlers_from_wasm(wasm_path).map_err(RuntimeError::InvalidConfig)?;
+        let declared_handlers = read_declared_handlers_from_wasm(wasm_path)
+            .map_err(RuntimeBuildError::InvalidConfig)?;
 
         let blob_limits = BlobLimits::from_config(config);
         let blob = BlobExecutor::new(
@@ -1443,7 +1450,7 @@ fn validate_instance_config(
     schema_json: Option<&str>,
     config: &InstanceConfig,
     mount_name: &str,
-) -> Result<()> {
+) -> std::result::Result<(), RuntimeBuildError> {
     let Some(schema_json) = schema_json else {
         return Ok(());
     };
@@ -1452,10 +1459,10 @@ fn validate_instance_config(
     let config_value = config.config_raw.as_ref().unwrap_or(&empty_config);
     match schema::validate_config(schema_json, config_value) {
         Ok(()) => Ok(()),
-        Err(schema::SchemaError::Validation(error)) => Err(RuntimeError::InvalidConfig(format!(
-            "config for mount {mount_name} failed validation: {error}"
-        ))),
-        Err(schema::SchemaError::InvalidSchema(error)) => Err(RuntimeError::ProviderProtocol(
+        Err(schema::SchemaError::Validation(error)) => Err(RuntimeBuildError::InvalidConfig(
+            format!("config for mount {mount_name} failed validation: {error}"),
+        )),
+        Err(schema::SchemaError::InvalidSchema(error)) => Err(RuntimeBuildError::ProviderProtocol(
             format!("provider config schema for mount {mount_name} is invalid: {error}"),
         )),
     }

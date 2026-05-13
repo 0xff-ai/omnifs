@@ -7,7 +7,7 @@ use crate::config::InstanceConfig;
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::runtime::wasm;
-use crate::runtime::{ProviderRuntime, RuntimeError};
+use crate::runtime::{ProviderRuntime, RuntimeBuildError};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -138,7 +138,7 @@ impl ProviderRegistry {
             extractor.clone(),
         )
         .map_err(|e| match e {
-            RuntimeError::InvalidConfig(message) => RegistryError::ConfigError(format!(
+            RuntimeBuildError::InvalidConfig(message) => RegistryError::ConfigError(format!(
                 "config file {}: {message}",
                 config_path.display()
             )),
