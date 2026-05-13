@@ -6,11 +6,10 @@
 
 use crate::auth::AuthManager;
 use crate::omnifs::provider::types as wit_types;
+use crate::runtime::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
-use crate::runtime::{
-    LogUrl, WitHeaders, callout_denied, callout_internal, callout_network, record_outcome,
-};
+use crate::runtime::log_redaction::{LogUrl, WitHeaders};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;

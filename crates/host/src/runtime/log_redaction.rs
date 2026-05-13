@@ -1,7 +1,7 @@
 use crate::omnifs::provider::types as wit_types;
 use std::fmt::{self, Write as _};
 
-pub(super) struct LogUrl<'a>(pub(super) &'a str);
+pub(crate) struct LogUrl<'a>(pub(crate) &'a str);
 
 impl fmt::Display for LogUrl<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,7 +32,7 @@ impl fmt::Display for LogUrl<'_> {
     }
 }
 
-pub(super) struct WitHeaders<'a>(pub(super) &'a [wit_types::Header]);
+pub(crate) struct WitHeaders<'a>(pub(crate) &'a [wit_types::Header]);
 
 impl fmt::Display for WitHeaders<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -51,7 +51,7 @@ impl fmt::Display for WitHeaders<'_> {
     }
 }
 
-pub(super) fn write_truncated_for_log(
+pub(crate) fn write_truncated_for_log(
     f: &mut fmt::Formatter<'_>,
     value: &str,
     max: usize,
@@ -66,14 +66,14 @@ pub(super) fn write_truncated_for_log(
     Ok(())
 }
 
-pub(super) fn is_sensitive_header(name: &str) -> bool {
+pub(crate) fn is_sensitive_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
     )
 }
 
-pub(super) fn is_sensitive_query_param(name: &str) -> bool {
+pub(crate) fn is_sensitive_query_param(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.contains("token")
         || name.contains("secret")

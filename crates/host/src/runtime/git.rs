@@ -7,10 +7,11 @@
 //! clone directory, not through the WIT.
 
 use crate::omnifs::provider::types as wit_types;
+use crate::runtime::callouts::{callout_denied, callout_network, record_outcome};
 use crate::runtime::capability::{CapabilityChecker, CapabilityError};
 use crate::runtime::cloner::{CloneError, GitCloner};
+use crate::runtime::log_redaction::LogUrl;
 use crate::runtime::tree_refs::TreeRefs;
-use crate::runtime::{LogUrl, callout_denied, callout_network, record_outcome};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;

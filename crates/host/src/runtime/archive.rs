@@ -13,6 +13,9 @@
 use crate::cache::blobs::BlobMetadata;
 use crate::cache::blobs::{BlobCache, BlobRecord};
 use crate::omnifs::provider::types as wit_types;
+use crate::runtime::callouts::{
+    callout_error, callout_internal, callout_not_found, record_outcome,
+};
 use crate::runtime::sandbox::tree_cache::{
     MaterializeError, MaterializedTree, TreeKey, TreeMaterializer,
 };
@@ -22,7 +25,6 @@ use crate::runtime::tools::archive::{
     ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats,
 };
 use crate::runtime::tree_refs::TreeRefs;
-use crate::runtime::{callout_error, callout_internal, callout_not_found, record_outcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

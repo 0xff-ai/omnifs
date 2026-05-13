@@ -13,12 +13,13 @@ use crate::cache::blobs::{
     BLOB_TMP_DIR, BlobCache, BlobCacheError, BlobMetadata, BlobRecord, is_safe_path_segment,
 };
 use crate::omnifs::provider::types as wit_types;
+use crate::runtime::callouts::{
+    callout_denied, callout_internal, callout_invalid, callout_network, callout_not_found,
+    callout_too_large, record_outcome,
+};
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
-use crate::runtime::{
-    LogUrl, WitHeaders, callout_denied, callout_internal, callout_invalid, callout_network,
-    callout_not_found, callout_too_large, record_outcome,
-};
+use crate::runtime::log_redaction::{LogUrl, WitHeaders};
 use futures::StreamExt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
