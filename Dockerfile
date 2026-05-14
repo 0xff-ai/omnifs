@@ -5,7 +5,7 @@ FROM rust:1-bookworm AS toolchain
 COPY rust-toolchain.toml .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        fuse3 libfuse3-dev pkg-config \
+        clang fuse3 libfuse3-dev mold pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked \
     && rustup target add wasm32-wasip2
@@ -20,6 +20,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM toolchain AS deps
 WORKDIR /src
 COPY --from=planner /src/recipe.json recipe.json
+COPY .cargo .cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     cargo chef cook --release --recipe-path recipe.json
