@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Smallest possible eval: run the same task across a 2x2 of cells:
+"""Smallest possible eval: run the same task across a 2x2 of cells, plus
+a per-install baseline so the system-prompt overhead can be subtracted
+out and the marginal task cost reported on its own.
 
   axis 1 — payload shape: 'omnifs' (projected files) vs 'api' (REST envelope)
   axis 2 — install: 'bare' (minimal scaffolding) vs 'full' (default Claude
            Code system prompt + default tool surface)
 
-Bare cells isolate payload-shape effects from system-prompt noise. Full
-cells show what those effects look like on top of the real ~25k-token
-default scaffolding a normal Claude Code user pays on every turn.
+Baseline cells run a trivial no-op task ("reply with 'ok'") under each
+install. Subtracting their total_input from each fixture cell yields
+`marginal` — what the agent actually spent on the task, free of
+scaffolding overhead.
 
 Usage:  python3 run.py
 """
@@ -18,7 +21,7 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -31,8 +34,8 @@ TASK_BASE = "What is the title of GitHub issue #1 in raulk/omnifs?"
 
 ORIENT_OMNIFS = (
     " The data is on the local filesystem at the working directory. "
-    "For issue N: title is at 'issues/N/title', body at 'issues/N/body', "
-    "state at 'issues/N/state'. Reply with only the title text, no commentary."
+    "For issue N, the title is at 'issues/N/title'. "
+    "Reply with only the title text, no commentary."
 )
 ORIENT_API = (
     " The data is on the local filesystem at the working directory. "
@@ -40,22 +43,36 @@ ORIENT_API = (
     "Reply with only the title text, no commentary."
 )
 
+BASELINE_TASK = (
+    "Reply with exactly the two-letter word 'ok' and nothing else. "
+    "Do not use any tools."
+)
+BASELINE_TRUTH = "ok"
+
 
 @dataclass
 class Cell:
     name: str
     fixture: Path
-    bare: bool        # bare = minimal --system-prompt, --tools Read only,
-                      # --setting-sources "" so default ~25k scaffolding is skipped.
-                      # full = no overrides; default Claude Code surface.
-    orientation: str  # appended to the user-facing task prompt
+    bare: bool       # bare = strip system prompt + restrict tools to Read.
+                     # full = default Claude Code system prompt + tool surface.
+    task: str        # complete task prompt sent as the user message
+    ground_truth: str
 
 
 CELLS: list[Cell] = [
-    Cell("omnifs.bare", FIXTURES / "omnifs", bare=True,  orientation=ORIENT_OMNIFS),
-    Cell("omnifs.full", FIXTURES / "omnifs", bare=False, orientation=ORIENT_OMNIFS),
-    Cell("api.bare",    FIXTURES / "api",    bare=True,  orientation=ORIENT_API),
-    Cell("api.full",    FIXTURES / "api",    bare=False, orientation=ORIENT_API),
+    Cell("baseline.bare", FIXTURES / "omnifs", bare=True,
+         task=BASELINE_TASK, ground_truth=BASELINE_TRUTH),
+    Cell("baseline.full", FIXTURES / "omnifs", bare=False,
+         task=BASELINE_TASK, ground_truth=BASELINE_TRUTH),
+    Cell("omnifs.bare",   FIXTURES / "omnifs", bare=True,
+         task=TASK_BASE + ORIENT_OMNIFS, ground_truth=GROUND_TRUTH),
+    Cell("omnifs.full",   FIXTURES / "omnifs", bare=False,
+         task=TASK_BASE + ORIENT_OMNIFS, ground_truth=GROUND_TRUTH),
+    Cell("api.bare",      FIXTURES / "api",    bare=True,
+         task=TASK_BASE + ORIENT_API, ground_truth=GROUND_TRUTH),
+    Cell("api.full",      FIXTURES / "api",    bare=False,
+         task=TASK_BASE + ORIENT_API, ground_truth=GROUND_TRUTH),
 ]
 
 
@@ -73,18 +90,19 @@ class Run:
     turns: int
     answer: str
     denials: int
+    ground_truth: str
 
     @property
     def passed(self) -> bool:
-        return GROUND_TRUTH.lower() in self.answer.lower()
+        return self.ground_truth.lower() in self.answer.lower()
 
 
-def build_cmd(cell: Cell, prompt: str) -> list[str]:
-    # Both modes skip user/local/project settings so the host
-    # environment's hooks and CLAUDE.md don't contaminate the measurement.
-    # The bare-vs-full axis varies system prompt and tool surface only.
+def build_cmd(cell: Cell) -> list[str]:
+    # Both modes skip user/local/project settings so host hooks and
+    # CLAUDE.md don't contaminate the measurement. The bare-vs-full axis
+    # varies system prompt and tool surface only.
     cmd = [
-        "claude", "-p", prompt,
+        "claude", "-p", cell.task,
         "--model", MODEL,
         "--output-format", "json",
         "--setting-sources", "",
@@ -100,8 +118,8 @@ def build_cmd(cell: Cell, prompt: str) -> list[str]:
     else:
         # Default Claude Code install: default ~25k-token system prompt
         # and default tool surface. Pre-approve common reads so
-        # non-interactive runs don't stall on permission prompts; block
-        # network tools so the comparison stays offline-deterministic.
+        # non-interactive runs don't stall; block network tools so the
+        # comparison stays offline-deterministic.
         cmd += [
             "--allowedTools", "Read,Bash,Glob,Grep",
             "--disallowedTools", "WebFetch,WebSearch",
@@ -110,10 +128,9 @@ def build_cmd(cell: Cell, prompt: str) -> list[str]:
 
 
 def invoke(cell: Cell, trial: int) -> Run:
-    prompt = TASK_BASE + cell.orientation
     t0 = time.monotonic()
     proc = subprocess.run(
-        build_cmd(cell, prompt),
+        build_cmd(cell),
         cwd=cell.fixture,
         capture_output=True,
         text=True,
@@ -142,6 +159,7 @@ def invoke(cell: Cell, trial: int) -> Run:
         turns=data.get("num_turns", 0),
         answer=(data.get("result") or "").strip(),
         denials=len(data.get("permission_denials") or []),
+        ground_truth=cell.ground_truth,
     )
 
 
@@ -159,7 +177,7 @@ def main() -> None:
     print(f"task: {TASK_BASE}")
     print(f"model: {MODEL}   trials per cell: {TRIALS}   cells: {len(CELLS)}")
     print()
-    hdr = (f"{'cell':<12} {'tr':<3} {'in':>5} {'cc':>7} {'cr':>7} "
+    hdr = (f"{'cell':<14} {'tr':<3} {'in':>5} {'cc':>7} {'cr':>7} "
            f"{'tot_in':>7} {'out':>5} {'wall_s':>7} {'turn':>4} "
            f"{'den':>3} {'$':>8}  pass")
     print(hdr)
@@ -170,16 +188,32 @@ def main() -> None:
         for t in range(1, TRIALS + 1):
             r = invoke(cell, t)
             runs.append(r)
-            print(f"{r.cell:<12} {r.trial:<3} {r.input_tokens:>5} "
+            print(f"{r.cell:<14} {r.trial:<3} {r.input_tokens:>5} "
                   f"{r.cache_creation:>7} {r.cache_read:>7} "
                   f"{r.total_input:>7} {r.output_tokens:>5} "
                   f"{r.wall_s:>7.2f} {r.turns:>4} {r.denials:>3} "
                   f"{r.cost_usd:>8.4f}  {'OK' if r.passed else 'FAIL'}")
 
+    # Per-install baselines: the cost of the scaffolding alone.
+    base = {
+        "bare": median([r.total_input for r in runs if r.cell == "baseline.bare"]),
+        "full": median([r.total_input for r in runs if r.cell == "baseline.full"]),
+    }
+    base_wall = {
+        "bare": median([r.wall_s for r in runs if r.cell == "baseline.bare"]),
+        "full": median([r.wall_s for r in runs if r.cell == "baseline.full"]),
+    }
+
     print()
-    print("medians per cell:")
-    print(f"{'cell':<12} {'tot_in':>7} {'out':>5} {'wall_s':>7} {'$':>8}  pass")
-    print("-" * 50)
+    print(f"baselines (scaffolding cost):  "
+          f"bare={int(base['bare'])} tokens, "
+          f"full={int(base['full'])} tokens")
+    print()
+
+    print("medians per cell (marginal = tot_in − baseline-of-this-install):")
+    print(f"{'cell':<14} {'tot_in':>7} {'marginal':>9} {'mwall_s':>8} "
+          f"{'out':>5} {'$':>8}  pass")
+    print("-" * 62)
     cell_med = {}
     for cell in CELLS:
         rs = [r for r in runs if r.cell == cell.name]
@@ -187,25 +221,27 @@ def main() -> None:
         m_out = median([r.output_tokens for r in rs])
         m_wall = median([r.wall_s for r in rs])
         m_cost = median([r.cost_usd for r in rs])
-        cell_med[cell.name] = (m_in, m_wall, m_cost)
-        print(f"{cell.name:<12} {int(m_in):>7} {int(m_out):>5} "
-              f"{m_wall:>7.2f} {m_cost:>8.4f}  "
+        install = "bare" if cell.bare else "full"
+        marginal_in = max(0, m_in - base[install])
+        marginal_wall = max(0.0, m_wall - base_wall[install])
+        cell_med[cell.name] = (m_in, marginal_in, m_wall, marginal_wall, m_cost)
+        print(f"{cell.name:<14} {int(m_in):>7} {int(marginal_in):>9} "
+              f"{marginal_wall:>8.2f} {int(m_out):>5} "
+              f"{m_cost:>8.4f}  "
               f"{sum(r.passed for r in rs)}/{len(rs)}")
 
     print()
-    print("deltas:")
+    print("deltas (marginal — scaffolding offset removed):")
     pairs = [
         ("omnifs vs api  (bare)", "omnifs.bare", "api.bare"),
         ("omnifs vs api  (full)", "omnifs.full", "api.full"),
-        ("bare vs full  (omnifs)", "omnifs.bare", "omnifs.full"),
-        ("bare vs full  (api)",    "api.bare",    "api.full"),
     ]
     for label, a, b in pairs:
         if a in cell_med and b in cell_med:
-            ai, aw, _ = cell_med[a]
-            bi, bw, _ = cell_med[b]
-            print(f"  {label:<24}  tot_in {pct(ai, bi):>5}   "
-                  f"wall {pct(aw, bw):>5}")
+            _, ai, _, aw, _ = cell_med[a]
+            _, bi, _, bw, _ = cell_med[b]
+            print(f"  {label:<24}  marginal_in {pct(ai, bi):>5}   "
+                  f"marginal_wall {pct(aw, bw):>5}")
 
     out = ROOT / "results.json"
     out.write_text(json.dumps([asdict(r) for r in runs], indent=2))
