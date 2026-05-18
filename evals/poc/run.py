@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Smallest possible eval: run the same task twice through `claude -p`,
-once in 'omnifs' mode (fixture is plain projected files) and once in
-'builtin' mode (fixture is the GitHub API JSON envelope). Print a table.
+"""Smallest possible eval: run the same task across a 2x2 of cells:
 
-Same model, same task, same tool (Read). Only the payload shape varies
-— and each mode's system prompt orients the agent to its own data
-source (the equivalent of CLAUDE.md telling the agent where omnifs
-mounts, or how to use `gh`).
+  axis 1 — payload shape: 'omnifs' (projected files) vs 'api' (REST envelope)
+  axis 2 — install: 'bare' (minimal scaffolding) vs 'full' (default Claude
+           Code system prompt + default tool surface)
+
+Bare cells isolate payload-shape effects from system-prompt noise. Full
+cells show what those effects look like on top of the real ~25k-token
+default scaffolding a normal Claude Code user pays on every turn.
 
 Usage:  python3 run.py
 """
@@ -17,91 +18,119 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 FIXTURES = ROOT / "fixtures"
-TASK = "What is the title of GitHub issue #1 in raulk/omnifs?"
 GROUND_TRUTH = "Provider clippy regressions when WIT bindgen emits unused imports"
 MODEL = "claude-haiku-4-5-20251001"
 TRIALS = 3
 
-MODES = {
-    "omnifs": {
-        "dir": FIXTURES / "omnifs",
-        "system_prompt": (
-            "You answer questions by reading local files. The user's "
-            "GitHub data is projected onto the filesystem at the working "
-            "directory. For issue N, the title is in 'issues/N/title', "
-            "body in 'issues/N/body', and state in 'issues/N/state'. "
-            "Reply with only the requested value, no commentary."
-        ),
-    },
-    "builtin": {
-        "dir": FIXTURES / "api",
-        "system_prompt": (
-            "You answer questions by reading local files. The user's "
-            "working directory contains GitHub REST API responses. For "
-            "issue N, the response is in 'issue_N.json' — the same JSON "
-            "envelope the GitHub API returns. Reply with only the "
-            "requested value, no commentary."
-        ),
-    },
-}
+TASK_BASE = "What is the title of GitHub issue #1 in raulk/omnifs?"
+
+ORIENT_OMNIFS = (
+    " The data is on the local filesystem at the working directory. "
+    "For issue N: title is at 'issues/N/title', body at 'issues/N/body', "
+    "state at 'issues/N/state'. Reply with only the title text, no commentary."
+)
+ORIENT_API = (
+    " The data is on the local filesystem at the working directory. "
+    "For issue N, the GitHub REST API response is in 'issue_N.json'. "
+    "Reply with only the title text, no commentary."
+)
+
+
+@dataclass
+class Cell:
+    name: str
+    fixture: Path
+    bare: bool        # bare = minimal --system-prompt, --tools Read only,
+                      # --setting-sources "" so default ~25k scaffolding is skipped.
+                      # full = no overrides; default Claude Code surface.
+    orientation: str  # appended to the user-facing task prompt
+
+
+CELLS: list[Cell] = [
+    Cell("omnifs.bare", FIXTURES / "omnifs", bare=True,  orientation=ORIENT_OMNIFS),
+    Cell("omnifs.full", FIXTURES / "omnifs", bare=False, orientation=ORIENT_OMNIFS),
+    Cell("api.bare",    FIXTURES / "api",    bare=True,  orientation=ORIENT_API),
+    Cell("api.full",    FIXTURES / "api",    bare=False, orientation=ORIENT_API),
+]
 
 
 @dataclass
 class Run:
-    mode: str
+    cell: str
     trial: int
-    input_tokens: int          # uncached input on this request
-    cache_creation: int        # written to prompt cache
-    cache_read: int            # re-read from prompt cache (across turns)
-    total_input: int           # sum of the three above
+    input_tokens: int
+    cache_creation: int
+    cache_read: int
+    total_input: int
     output_tokens: int
     wall_s: float
     cost_usd: float
     turns: int
     answer: str
-    denials: int               # tool-use denials (mode gate caught a reach)
+    denials: int
 
     @property
     def passed(self) -> bool:
         return GROUND_TRUTH.lower() in self.answer.lower()
 
 
-def invoke(mode: str, cfg: dict, trial: int) -> Run:
-    t0 = time.monotonic()
-    proc = subprocess.run(
-        [
-            "claude", "-p", TASK,
-            "--system-prompt", cfg["system_prompt"],
-            "--model", MODEL,
-            "--output-format", "json",
+def build_cmd(cell: Cell, prompt: str) -> list[str]:
+    # Both modes skip user/local/project settings so the host
+    # environment's hooks and CLAUDE.md don't contaminate the measurement.
+    # The bare-vs-full axis varies system prompt and tool surface only.
+    cmd = [
+        "claude", "-p", prompt,
+        "--model", MODEL,
+        "--output-format", "json",
+        "--setting-sources", "",
+        "--no-session-persistence",
+        "--permission-mode", "default",
+    ]
+    if cell.bare:
+        cmd += [
+            "--system-prompt", "You answer concisely.",
             "--tools", "Read",
             "--allowedTools", "Read",
-            "--setting-sources", "",
-            "--no-session-persistence",
-            "--permission-mode", "default",
-        ],
-        cwd=cfg["dir"],
+        ]
+    else:
+        # Default Claude Code install: default ~25k-token system prompt
+        # and default tool surface. Pre-approve common reads so
+        # non-interactive runs don't stall on permission prompts; block
+        # network tools so the comparison stays offline-deterministic.
+        cmd += [
+            "--allowedTools", "Read,Bash,Glob,Grep",
+            "--disallowedTools", "WebFetch,WebSearch",
+        ]
+    return cmd
+
+
+def invoke(cell: Cell, trial: int) -> Run:
+    prompt = TASK_BASE + cell.orientation
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        build_cmd(cell, prompt),
+        cwd=cell.fixture,
         capture_output=True,
         text=True,
         check=False,
     )
     wall = time.monotonic() - t0
     if proc.returncode != 0:
-        sys.exit(f"[{mode}] claude exited {proc.returncode}:\n{proc.stderr}")
+        sys.exit(f"[{cell.name}] claude exited {proc.returncode}:\n{proc.stderr}")
     data = json.loads(proc.stdout)
     if data.get("is_error"):
-        sys.exit(f"[{mode}] claude returned error:\n{data.get('result')}")
+        sys.exit(f"[{cell.name}] claude returned error:\n{data.get('result')}")
     u = data.get("usage", {})
     ci = u.get("input_tokens", 0)
     cc = u.get("cache_creation_input_tokens", 0)
     cr = u.get("cache_read_input_tokens", 0)
     return Run(
-        mode=mode,
+        cell=cell.name,
         trial=trial,
         input_tokens=ci,
         cache_creation=cc,
@@ -122,48 +151,61 @@ def median(xs):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def pct(new, base):
+    return f"{(new - base) / base * 100:+.0f}%" if base else "n/a"
+
+
 def main() -> None:
-    print(f"task: {TASK}")
-    print(f"model: {MODEL}   trials per mode: {TRIALS}")
+    print(f"task: {TASK_BASE}")
+    print(f"model: {MODEL}   trials per cell: {TRIALS}   cells: {len(CELLS)}")
     print()
-    hdr = (f"{'mode':<8} {'tr':<3} {'in':>5} {'cc':>7} {'cr':>7} "
+    hdr = (f"{'cell':<12} {'tr':<3} {'in':>5} {'cc':>7} {'cr':>7} "
            f"{'tot_in':>7} {'out':>5} {'wall_s':>7} {'turn':>4} "
            f"{'den':>3} {'$':>8}  pass")
     print(hdr)
     print("-" * len(hdr))
 
     runs: list[Run] = []
-    for mode, cfg in MODES.items():
+    for cell in CELLS:
         for t in range(1, TRIALS + 1):
-            r = invoke(mode, cfg, t)
+            r = invoke(cell, t)
             runs.append(r)
-            print(f"{r.mode:<8} {r.trial:<3} {r.input_tokens:>5} "
+            print(f"{r.cell:<12} {r.trial:<3} {r.input_tokens:>5} "
                   f"{r.cache_creation:>7} {r.cache_read:>7} "
                   f"{r.total_input:>7} {r.output_tokens:>5} "
                   f"{r.wall_s:>7.2f} {r.turns:>4} {r.denials:>3} "
                   f"{r.cost_usd:>8.4f}  {'OK' if r.passed else 'FAIL'}")
 
     print()
-    print("medians per mode:")
-    print(f"{'mode':<8} {'tot_in':>7} {'out':>5} {'wall_s':>7} {'$':>8}  pass")
-    print("-" * 46)
-    for mode in MODES:
-        rs = [r for r in runs if r.mode == mode]
-        print(f"{mode:<8} "
-              f"{int(median([r.total_input for r in rs])):>7} "
-              f"{int(median([r.output_tokens for r in rs])):>5} "
-              f"{median([r.wall_s for r in rs]):>7.2f} "
-              f"{median([r.cost_usd for r in rs]):>8.4f}  "
+    print("medians per cell:")
+    print(f"{'cell':<12} {'tot_in':>7} {'out':>5} {'wall_s':>7} {'$':>8}  pass")
+    print("-" * 50)
+    cell_med = {}
+    for cell in CELLS:
+        rs = [r for r in runs if r.cell == cell.name]
+        m_in = median([r.total_input for r in rs])
+        m_out = median([r.output_tokens for r in rs])
+        m_wall = median([r.wall_s for r in rs])
+        m_cost = median([r.cost_usd for r in rs])
+        cell_med[cell.name] = (m_in, m_wall, m_cost)
+        print(f"{cell.name:<12} {int(m_in):>7} {int(m_out):>5} "
+              f"{m_wall:>7.2f} {m_cost:>8.4f}  "
               f"{sum(r.passed for r in rs)}/{len(rs)}")
 
-    # Delta: what does choosing omnifs save you?
-    o_in  = median([r.total_input for r in runs if r.mode == "omnifs"])
-    b_in  = median([r.total_input for r in runs if r.mode == "builtin"])
-    o_w   = median([r.wall_s      for r in runs if r.mode == "omnifs"])
-    b_w   = median([r.wall_s      for r in runs if r.mode == "builtin"])
-    if b_in:
-        print(f"\nomnifs vs builtin: input {(o_in-b_in)/b_in*100:+.0f}%, "
-              f"wall {(o_w-b_w)/b_w*100:+.0f}%")
+    print()
+    print("deltas:")
+    pairs = [
+        ("omnifs vs api  (bare)", "omnifs.bare", "api.bare"),
+        ("omnifs vs api  (full)", "omnifs.full", "api.full"),
+        ("bare vs full  (omnifs)", "omnifs.bare", "omnifs.full"),
+        ("bare vs full  (api)",    "api.bare",    "api.full"),
+    ]
+    for label, a, b in pairs:
+        if a in cell_med and b in cell_med:
+            ai, aw, _ = cell_med[a]
+            bi, bw, _ = cell_med[b]
+            print(f"  {label:<24}  tot_in {pct(ai, bi):>5}   "
+                  f"wall {pct(aw, bw):>5}")
 
     out = ROOT / "results.json"
     out.write_text(json.dumps([asdict(r) for r in runs], indent=2))

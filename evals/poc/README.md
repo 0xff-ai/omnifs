@@ -1,37 +1,59 @@
 # PoC: token-efficiency eval
 
-The smallest runnable version of the eval framework proposed in
-`docs/design/eval-token-efficiency.md`. One task, two modes, one
-metric table.
+The smallest runnable version of the framework from
+`docs/design/eval-token-efficiency.md`. One task, **four cells**
+(2×2), one metric table.
 
-## What it does
+## What it compares
 
-Runs the same prompt twice through `claude -p`:
+A 2×2 of conditions on the same task ("title of issue #1"):
 
-- **omnifs mode** — agent's working dir is `fixtures/omnifs/`, which
-  mimics what an omnifs mount projects: `issues/1/title` is plain
-  text holding only the title, `issues/1/body` holds only the body.
-- **builtin mode** — agent's working dir is `fixtures/api/`, holding
-  the full GitHub REST envelope (`issue_1.json`) — the same payload
-  `gh api /repos/.../issues/1` would return.
+|                | **fixture: omnifs**       | **fixture: api**          |
+|----------------|---------------------------|---------------------------|
+| **bare** install | `omnifs.bare`           | `api.bare`                |
+| **full** install | `omnifs.full`           | `api.full`                |
 
-Same model, same task, same allowed tool (`Read` only), same system
-prompt structure (oriented to each mode's data source — the analog of
-a CLAUDE.md telling the agent where omnifs mounts or how to use `gh`).
-The only variable is the **shape of the bytes** the agent has to ingest.
+Axis 1 — **payload shape:**
 
-This isolates the design doc's central hypothesis: that projected-file
-payloads are cheaper in tokens than API envelopes.
+- **omnifs** fixture: `fixtures/omnifs/issues/1/title` is plain text
+  holding only the title. The shape an omnifs FUSE mount projects.
+- **api** fixture: `fixtures/api/issue_1.json` is the full GitHub
+  REST envelope — the same payload `gh api /repos/.../issues/1`
+  returns.
 
-This PoC deliberately skips:
+Axis 2 — **install:**
 
-- a live omnifs mount (replaced by a fixture that mimics its output)
-- a live GitHub API call (replaced by a captured envelope)
-- the third "skill" mode
-- multiple tasks, tiers, cold/warm splits, statistical variance budgets
+- **bare**: `--system-prompt "You answer concisely."` (replaces the
+  default ~25k-token system prompt), `--tools Read` (only Read
+  available). Isolates the payload-shape variable from scaffolding
+  cost.
+- **full**: no `--system-prompt` override (full default Claude Code
+  system prompt), no `--tools` restriction (default tool surface:
+  Read, Bash, Glob, Grep, ...). What a normal `claude` invocation
+  pays on every turn. `WebFetch`/`WebSearch` are denied to keep the
+  comparison offline-deterministic.
 
-All of those are real features the full framework needs; none of them
-are needed to produce a first number.
+Both modes use `--setting-sources ""` so host-specific user/project
+settings (hooks, CLAUDE.md, plugins) don't pollute the measurement.
+A real local install will be *more* expensive than `full` reports
+here, since real users have their own settings layered on top.
+
+Same model, same task prompt, same fixture content per axis. Only
+the system prompt and the tool surface vary across the install axis;
+only the bytes the `Read` tool returns vary across the payload axis.
+
+## What the four cells tell you
+
+- **`omnifs.bare` vs `api.bare`** — pure payload-shape effect.
+  Isolates the design doc's central hypothesis with no scaffolding
+  in the way.
+- **`omnifs.full` vs `api.full`** — payload shape on top of the real
+  Claude Code install. Shows whether the bare-mode advantage
+  survives once the default scaffolding is loaded, or whether it
+  gets swamped.
+- **`omnifs.bare` vs `omnifs.full`** (and `api.bare` vs `api.full`)
+  — the cost of the default scaffolding itself, holding payload
+  shape constant.
 
 ## Run
 
@@ -41,51 +63,62 @@ python3 run.py
 ```
 
 Needs the `claude` CLI on `PATH` and a working `claude` login (or
-`ANTHROPIC_API_KEY`). Defaults to `claude-haiku-4-5-20251001` and 3
-trials per mode. Edit constants at the top of `run.py` to change.
+`ANTHROPIC_API_KEY`). Defaults to `claude-haiku-4-5-20251001` and
+3 trials per cell (12 runs total). Edit constants at the top of
+`run.py` to change.
 
 ## Output
 
 ```
 task: What is the title of GitHub issue #1 in raulk/omnifs?
-model: claude-haiku-4-5-20251001   trials per mode: 3
+model: claude-haiku-4-5-20251001   trials per cell: 3   cells: 4
 
-mode     tr     in      cc      cr  tot_in   out  wall_s turn den        $  pass
----------------------------------------------------------------------------------
-omnifs   1      66   24379  163497  187942  1058   17.68   8    2   0.0527  OK
-omnifs   2     ...
-builtin  1     ...
+cell         tr     in      cc      cr  tot_in   out  wall_s turn den        $  pass
+------------------------------------------------------------------------------------
+omnifs.bare  1    ...
+omnifs.full  1    ...    2541   46758   49317   ...
+api.bare     1    ...
+api.full     1    ...    3953   46741   50712   ...
 ...
 
-medians per mode:
-mode      tot_in   out  wall_s        $  pass
-----------------------------------------------
-omnifs    ...      ...    ...      ...   3/3
-builtin   ...      ...    ...      ...   3/3
+medians per cell:
+cell          tot_in   out  wall_s        $  pass
+--------------------------------------------------
+omnifs.bare    ...
+omnifs.full    ...
+api.bare       ...
+api.full       ...
 
-omnifs vs builtin: input -XX%, wall -YY%
+deltas:
+  omnifs vs api  (bare)     tot_in  ...    wall  ...
+  omnifs vs api  (full)     tot_in  ...    wall  ...
+  bare vs full  (omnifs)    tot_in  ...    wall  ...
+  bare vs full  (api)       tot_in  ...    wall  ...
 ```
 
 Columns:
 
 - `in` — uncached input tokens this turn
-- `cc` — bytes written to prompt cache (mostly system-prompt scaffolding,
-  comparable across modes)
-- `cr` — bytes re-read from prompt cache across the agent loop (grows
-  with turn count)
-- `tot_in` — `in + cc + cr`, the gross input volume the model billed against
-- `out` — assistant output tokens (all turns, including tool calls)
+- `cc` — bytes written to prompt cache (large in `full` cells —
+  that's the default system prompt landing in cache on first use)
+- `cr` — bytes re-read from prompt cache across the agent loop
+- `tot_in` — `in + cc + cr`, the gross input volume billed
+- `out` — assistant output tokens across all turns
 - `turn` — agent loop turns
-- `den` — tool-use denials (the agent reached for something the mode
-  gate blocked; high count = mode is unergonomic for this task)
+- `den` — tool-use denials
 
-The interesting columns are `tot_in` and `wall_s`. Payload shape drives
-input volume; turn count drives wall clock.
+## Caveats
+
+- 3 trials per cell isn't enough for tight CIs; this is a PoC.
+- Real-user installs pay extra for their own CLAUDE.md, hooks, and
+  any plugins. The PoC's `full` mode is a floor for the real cost.
+- Fixtures are stand-ins for a real omnifs mount and a real `gh`
+  call. Replace them with live sources to get production numbers.
 
 ## Next steps (not in this PoC)
 
-- Add real tasks from each tier in the corpus.
-- Add the third mode (skill) once a `github-read` skill exists.
+- Add a third install column (skill) once a `github-read` skill exists.
+- Add tier-2 and tier-3 tasks (multi-fetch, exploration).
 - Replace fixtures with a real omnifs mount and a real `gh` call.
 - Add cold/warm cache runs and a proper variance budget.
 - Emit the markdown table + pareto plot the design doc describes.
