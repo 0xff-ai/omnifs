@@ -1,0 +1,6 @@
+After bumping wit-bindgen, every provider crate fails `cargo clippy
+--target wasm32-wasip2 -- -D warnings` with `unused_imports` on the
+generated `bindings::exports::*` re-exports. The macro output is correct
+but clippy sees the exports as dead. Suppressing at the macro site is
+the obvious fix but it hides real dead code in handler bodies. Looking
+for a narrower allow.
