@@ -30,6 +30,11 @@ services:
       # checker, which only allows `unix:///var/run/docker.sock` for
       # this mount. Reconsider before enabling write paths.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The db provider's baked config (docker/providers/db.json) points
+      # at /data/test.db. Both `just dev` and the CI smoke job populate
+      # OMNIFS_DB_FIXTURE before invoking compose; running compose
+      # directly without setting it errors out with a clear message.
+      - ${OMNIFS_DB_FIXTURE:?set OMNIFS_DB_FIXTURE to a SQLite fixture path (just dev and CI handle this automatically)}:/data/test.db:ro
 
 secrets:
   github_token:
