@@ -77,6 +77,49 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
 
+# --- Lint and test (CI targets) ---
+#
+# `lint` and `test` are CI-only stages that share the cooked deps from
+# `deps`. CI invokes them via `docker/build-push-action` with
+# `target: lint` / `target: test`; the BuildKit cache mounts on the
+# cargo registry and target dir mean repeated runs are incremental
+# inside the stage, and the registry-backed buildx cache shares the
+# `toolchain` and `deps` layers with the runtime build so nothing
+# duplicates work across jobs.
+
+FROM deps AS lint
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    cargo fmt --all --check; \
+    # The host links pre-built `omnifs-tool-*` wasm components via
+    # `include_bytes!`; clippy on the host crate cannot compile until
+    # those artifacts exist in the target dir.
+    cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
+    cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk \
+        -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings; \
+    cargo clippy -p 'omnifs-provider-*' -p test-provider \
+        -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
+
+FROM deps AS test
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    # The host's runtime tests load `test_provider.wasm` (and other
+    # provider components) from the target dir at run time; the same
+    # build step also satisfies the `include_bytes!` constraint on
+    # `omnifs-tool-*` that the host crate has at compile time.
+    cargo build --release --target wasm32-wasip2 \
+        -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'; \
+    cargo test --release -p omnifs-cli -p omnifs-host -p omnifs-sdk \
+        -p omnifs-sdk-macros -p omnifs-mount-schema; \
+    cargo test -p 'omnifs-provider-*' -p test-provider \
+        --target wasm32-wasip2 --no-run
+
 # --- Runtime ---
 
 FROM ubuntu:25.10 AS runtime-base
@@ -117,12 +160,6 @@ SHELL ["/bin/zsh", "-c"]
 ENV SHELL=/bin/zsh
 WORKDIR /
 ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
-
-FROM runtime-base AS runtime-prebuilt
-
-COPY dist/omnifs /usr/local/bin/omnifs
-COPY dist/omnifs_provider_*.wasm /root/.omnifs/plugins/
-RUN chmod 0755 /usr/local/bin/omnifs
 
 FROM runtime-base AS runtime
 

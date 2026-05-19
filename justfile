@@ -37,7 +37,14 @@ dev:
       umask 077
       gh auth token > .secrets/github_token
     fi
+    mkdir -p .secrets/db
+    if [[ ! -s .secrets/db/test.db ]]; then
+      umask 077
+      curl -fsSL -o .secrets/db/test.db \
+        https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
+    fi
     export GITHUB_TOKEN_FILE="$(pwd)/.secrets/github_token"
+    export OMNIFS_DB_FIXTURE_DIR="$(pwd)/.secrets/db"
     docker compose up --build -d
 
 start:

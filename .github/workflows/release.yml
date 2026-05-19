@@ -308,6 +308,34 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip2
+      - name: Install wasi-sdk
+        # The db provider links rusqlite-bundled, which needs a
+        # wasi-sysroot for its C compilation. The Dockerfile installs
+        # wasi-sdk in its toolchain stage; release.yml does not go
+        # through Docker, so install it inline. Pinned to the same
+        # version the Dockerfile uses.
+        env:
+          WASI_SDK_VERSION: "25"
+          WASI_SDK_RELEASE: "25.0"
+          WASI_SDK_HOME: /opt/wasi-sdk
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) tarball="wasi-sdk-${WASI_SDK_RELEASE}-x86_64-linux.tar.gz" ;;
+            aarch64|arm64) tarball="wasi-sdk-${WASI_SDK_RELEASE}-arm64-linux.tar.gz" ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o /tmp/wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/${tarball}"
+          sudo mkdir -p "${WASI_SDK_HOME}"
+          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C "${WASI_SDK_HOME}" --strip-components=1
+          {
+            echo "WASI_SDK_HOME=${WASI_SDK_HOME}"
+            echo "WASI_SYSROOT=${WASI_SDK_HOME}/share/wasi-sysroot"
+            echo "CC_wasm32_wasip2=${WASI_SDK_HOME}/bin/clang"
+            echo "CFLAGS_wasm32_wasip2=--sysroot=${WASI_SDK_HOME}/share/wasi-sysroot"
+            echo "AR_wasm32_wasip2=${WASI_SDK_HOME}/bin/llvm-ar"
+          } >> "${GITHUB_ENV}"
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.1
         with:
