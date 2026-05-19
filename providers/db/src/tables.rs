@@ -1,4 +1,4 @@
-//! `/_tables/` index + per-table bind site.
+//! `/tables/` index + per-table bind site.
 
 use omnifs_sdk::prelude::*;
 
@@ -9,7 +9,7 @@ pub struct TableHandlers;
 
 #[handlers]
 impl TableHandlers {
-    #[dir("/_tables")]
+    #[dir("/tables")]
     fn list(cx: &DirCx<State>) -> Result<Projection> {
         let names = cx.state(|state| {
             state
@@ -26,7 +26,7 @@ impl TableHandlers {
         Ok(p)
     }
 
-    #[bind("/_tables/{name}")]
+    #[bind("/tables/{name}")]
     fn table(_cx: &Cx<State>, name: TableName) -> Result<TableSubtree> {
         Ok(TableSubtree {
             name: name.into_inner(),

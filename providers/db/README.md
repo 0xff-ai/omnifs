@@ -30,18 +30,18 @@ preopen for the kernel to allow writes through. Use it sparingly.
 ## Path tree (v1)
 
 ```
-/db/_meta/version.txt              # rusqlite::version()
-/db/_meta/path.txt                 # the configured file path
-/db/_meta/info.json                # size, page_size, page_count, app_id, user_version, journal_mode
-/db/_tables/                       # one directory per user table
-/db/_tables/{table}/_schema.sql    # CREATE TABLE statement from sqlite_master
-/db/_tables/{table}/_schema.json   # columns from PRAGMA table_info
-/db/_tables/{table}/_indexes.json  # PRAGMA index_list + index_info
-/db/_tables/{table}/_count.txt     # SELECT count(*)
-/db/_tables/{table}/_sample.json   # SELECT * LIMIT sample_limit (default 20)
+/db/meta/version.txt              # rusqlite::version()
+/db/meta/path.txt                 # the configured file path
+/db/meta/info.json                # size, page_size, page_count, app_id, user_version, journal_mode
+/db/tables/                       # one directory per user table
+/db/tables/{table}/schema.sql    # CREATE TABLE statement from sqlite_master
+/db/tables/{table}/schema.json   # columns from PRAGMA table_info
+/db/tables/{table}/indexes.json  # PRAGMA index_list + index_info
+/db/tables/{table}/count.txt     # SELECT count(*)
+/db/tables/{table}/sample.json   # SELECT * LIMIT sample_limit (default 20)
 ```
 
-Views and global `/_indexes/` are deferred to a v2 surface. Per-row
+Views and global `/indexes/` are deferred to a v2 surface. Per-row
 directories (`_rows/{pk}/...`) are out of scope: composite PKs,
 non-integer PKs, and tables without a primary key all need design
 work that has not happened.
@@ -96,8 +96,8 @@ curl -sL -o providers/db/testdata/chinook.sqlite \
 just build
 just db_test_data=$(pwd)/providers/db/testdata/chinook.sqlite container=omnifs-db image=omnifs-db:dev start
 docker exec -it omnifs-db /bin/zsh
-ls /omnifs/db/_tables
-cat /omnifs/db/_tables/Album/_schema.sql
+ls /omnifs/db/tables
+cat /omnifs/db/tables/Album/schema.sql
 ```
 
 ## Build notes
@@ -118,7 +118,7 @@ calling `cargo build --target wasm32-wasip2`.
 
 ## What's deferred
 
-- Views (`/_views/...`) and global `/_indexes/` directories.
+- Views (`/views/...`) and global `/indexes/` directories.
 - Per-row paths (`_rows/{pk}/...`); needs design for composite,
   non-integer, and missing-PK tables.
 - PostgreSQL backend (a network callout, plus a connection-pool

@@ -1,4 +1,4 @@
-//! `/_meta` files: library version, configured path, and rich
+//! `/meta` files: library version, configured path, and rich
 //! header info.
 
 use omnifs_sdk::prelude::*;
@@ -9,7 +9,7 @@ pub struct MetaHandlers;
 
 #[handlers]
 impl MetaHandlers {
-    #[file("/_meta/version.txt")]
+    #[file("/meta/version.txt")]
     fn version(cx: &Cx<State>) -> Result<FileContent> {
         let (bytes, version) = cx.state(|state| {
             let backend = state.backend.borrow();
@@ -21,7 +21,7 @@ impl MetaHandlers {
         Ok(file_with_meta_version(bytes, version))
     }
 
-    #[file("/_meta/path.txt")]
+    #[file("/meta/path.txt")]
     fn path(cx: &Cx<State>) -> Result<FileContent> {
         let (bytes, version) = cx.state(|state| {
             let backend = state.backend.borrow();
@@ -33,7 +33,7 @@ impl MetaHandlers {
         Ok(file_with_meta_version(bytes, version))
     }
 
-    #[file("/_meta/info.json")]
+    #[file("/meta/info.json")]
     fn info(cx: &Cx<State>) -> Result<FileContent> {
         let (bytes, version) = cx.state(|state| {
             let backend = state.backend.borrow();

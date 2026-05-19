@@ -7,7 +7,7 @@ use omnifs_sdk::prelude::*;
 use crate::sqlite_backend::SqliteBackend;
 use crate::{Result, State};
 
-/// Bind capture for `/_tables/{name}`. Only validates that the
+/// Bind capture for `/tables/{name}`. Only validates that the
 /// name is non-empty and contains no NUL/slash/backslash; existence
 /// in the database is checked when handlers actually run.
 #[derive(Clone, Debug)]
@@ -53,7 +53,7 @@ impl TableSubtree {
         Ok(p)
     }
 
-    #[file("/_schema.sql")]
+    #[file("/schema.sql")]
     fn schema_sql(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
         let (bytes, version) = with_backend(cx, |backend, table| {
             let sql = backend
@@ -66,7 +66,7 @@ impl TableSubtree {
         Ok(file_with_table_version(bytes, version))
     }
 
-    #[file("/_schema.json")]
+    #[file("/schema.json")]
     fn schema_json(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
         let (bytes, version) = with_backend(cx, |backend, table| {
             if !backend
@@ -89,7 +89,7 @@ impl TableSubtree {
         Ok(file_with_table_version(bytes, version))
     }
 
-    #[file("/_indexes.json")]
+    #[file("/indexes.json")]
     fn indexes_json(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
         let (bytes, version) = with_backend(cx, |backend, table| {
             if !backend
@@ -112,7 +112,7 @@ impl TableSubtree {
         Ok(file_with_table_version(bytes, version))
     }
 
-    #[file("/_count.txt")]
+    #[file("/count.txt")]
     fn count(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
         let (bytes, version) = with_backend(cx, |backend, table| {
             if !backend
@@ -134,7 +134,7 @@ impl TableSubtree {
         Ok(file_with_table_version(bytes, version))
     }
 
-    #[file("/_sample.json")]
+    #[file("/sample.json")]
     fn sample(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
         let limit = cx.state(|state| state.config.sample_limit);
         let (bytes, version) = with_backend(cx, |backend, table| {
