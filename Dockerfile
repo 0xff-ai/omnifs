@@ -109,8 +109,12 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     set -eux; \
-    # Same `include_bytes!` constraint as the lint stage.
-    cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
+    # The host's runtime tests load `test_provider.wasm` (and other
+    # provider components) from the target dir at run time; the same
+    # build step also satisfies the `include_bytes!` constraint on
+    # `omnifs-tool-*` that the host crate has at compile time.
+    cargo build --release --target wasm32-wasip2 \
+        -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'; \
     cargo test --release -p omnifs-cli -p omnifs-host -p omnifs-sdk \
         -p omnifs-sdk-macros -p omnifs-mount-schema; \
     cargo test -p 'omnifs-provider-*' -p test-provider \
