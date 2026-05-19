@@ -94,6 +94,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     set -eux; \
     cargo fmt --all --check; \
+    # The host links pre-built `omnifs-tool-*` wasm components via
+    # `include_bytes!`; clippy on the host crate cannot compile until
+    # those artifacts exist in the target dir.
+    cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
     cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk \
         -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings; \
     cargo clippy -p 'omnifs-provider-*' -p test-provider \
@@ -105,6 +109,8 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     set -eux; \
+    # Same `include_bytes!` constraint as the lint stage.
+    cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
     cargo test --release -p omnifs-cli -p omnifs-host -p omnifs-sdk \
         -p omnifs-sdk-macros -p omnifs-mount-schema; \
     cargo test -p 'omnifs-provider-*' -p test-provider \
