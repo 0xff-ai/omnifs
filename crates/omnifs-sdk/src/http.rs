@@ -613,3 +613,141 @@ mod tests {
         assert_eq!(error.message(), "HTTP 429");
     }
 }
+
+/// Endpoint a provider talks to via HTTP callouts.
+///
+/// `Tcp` is a normal HTTP base URL (host plus optional port and a
+/// stable scheme: `https://api.example.com`). `Unix` carries an
+/// absolute socket path; the SDK encodes it into the `unix://` URL
+/// shape the host's executor recognises, so the provider author
+/// never builds the encoded URL by hand.
+#[derive(Clone, Debug)]
+pub enum HttpEndpoint {
+    Tcp(String),
+    Unix(std::path::PathBuf),
+}
+
+impl HttpEndpoint {
+    /// Parse an endpoint from a string. `unix:///absolute/path`
+    /// produces `HttpEndpoint::Unix`; anything else is treated as a
+    /// TCP base URL.
+    pub fn parse(s: impl AsRef<str>) -> Self {
+        let s = s.as_ref();
+        if let Some(rest) = s.strip_prefix("unix://") {
+            return Self::Unix(std::path::PathBuf::from(rest));
+        }
+        Self::Tcp(s.to_string())
+    }
+
+    /// Build a callout URL by combining the endpoint with an HTTP
+    /// `path` and an optional query, ready to hand to `cx.http().get(..)`.
+    ///
+    /// `path` should start with `/`. `query` is a slice of `(name, value)`
+    /// pairs that are percent-encoded as a standard `application/x-www-form-urlencoded`
+    /// query string (no leading `?`; the helper adds it).
+    pub fn build_url(&self, path: &str, query: &[(&str, &str)]) -> String {
+        let qs = render_query(query);
+        match self {
+            Self::Tcp(base) => {
+                let mut url = base.trim_end_matches('/').to_string();
+                if !path.starts_with('/') {
+                    url.push('/');
+                }
+                url.push_str(path);
+                if !qs.is_empty() {
+                    url.push('?');
+                    url.push_str(&qs);
+                }
+                url
+            },
+            Self::Unix(socket) => {
+                // Encode the absolute socket path as hex bytes so the
+                // URL has a stable host segment and the host's
+                // executor decodes it the same way `hyperlocal` does.
+                let socket_str = socket.to_string_lossy();
+                let host = hex::encode(socket_str.as_bytes());
+                let mut url = format!("unix://{host}");
+                if !path.starts_with('/') {
+                    url.push('/');
+                }
+                url.push_str(path);
+                if !qs.is_empty() {
+                    url.push('?');
+                    url.push_str(&qs);
+                }
+                url
+            },
+        }
+    }
+}
+
+fn render_query(query: &[(&str, &str)]) -> String {
+    // Standard `application/x-www-form-urlencoded` encoding via the
+    // `url` crate's serializer: the unreserved set passes through,
+    // ` ` becomes `+`, everything else is percent-encoded.
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in query {
+        serializer.append_pair(k, v);
+    }
+    serializer.finish()
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::HttpEndpoint;
+
+    #[test]
+    fn tcp_endpoint_appends_path_and_query() {
+        let ep = HttpEndpoint::parse("https://api.example.com");
+        assert_eq!(
+            ep.build_url("/v1/things", &[("limit", "10"), ("type", "a")]),
+            "https://api.example.com/v1/things?limit=10&type=a"
+        );
+    }
+
+    #[test]
+    fn tcp_endpoint_normalises_trailing_slash() {
+        let ep = HttpEndpoint::parse("https://api.example.com/");
+        assert_eq!(
+            ep.build_url("/v1/things", &[]),
+            "https://api.example.com/v1/things"
+        );
+    }
+
+    #[test]
+    fn unix_endpoint_hex_encodes_socket_in_host_segment() {
+        let ep = HttpEndpoint::parse("unix:///var/run/docker.sock");
+        let url = ep.build_url("/v1.43/containers/json", &[("all", "true")]);
+        assert!(
+            url.starts_with("unix://"),
+            "url should keep unix scheme: {url}"
+        );
+        let after = &url["unix://".len()..];
+        let (host, rest) = after.split_once('/').expect("host and path");
+        let path_bytes = hex::decode(host).expect("unix URL host must be hex-decodable");
+        let path = String::from_utf8(path_bytes).expect("socket path should be UTF-8");
+        assert_eq!(path, "/var/run/docker.sock");
+        assert_eq!(rest, "v1.43/containers/json?all=true");
+    }
+
+    #[test]
+    fn parse_routes_unix_prefix_to_unix_variant() {
+        match HttpEndpoint::parse("unix:///var/run/docker.sock") {
+            HttpEndpoint::Unix(p) => {
+                assert_eq!(p, std::path::PathBuf::from("/var/run/docker.sock"))
+            },
+            HttpEndpoint::Tcp(_) => panic!("expected unix variant"),
+        }
+        match HttpEndpoint::parse("https://api.example.com") {
+            HttpEndpoint::Tcp(s) => assert_eq!(s, "https://api.example.com"),
+            HttpEndpoint::Unix(_) => panic!("expected tcp variant"),
+        }
+    }
+
+    #[test]
+    fn query_components_are_percent_encoded() {
+        let ep = HttpEndpoint::parse("https://api.example.com");
+        let url = ep.build_url("/q", &[("k", "a b/c?d&e")]);
+        assert_eq!(url, "https://api.example.com/q?k=a+b%2Fc%3Fd%26e");
+    }
+}

@@ -15,7 +15,8 @@ use std::mem;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    FnArg, GenericArgument, ImplItem, ItemImpl, Pat, PatType, PathArguments, Signature, Type,
+    Attribute, FnArg, GenericArgument, ImplItem, ItemImpl, Pat, PatType, PathArguments, Signature,
+    Type,
 };
 
 use crate::handler_macro::{
@@ -77,6 +78,12 @@ pub fn expand_subtree(_args: &SubtreeArgs, mut input: ItemImpl) -> syn::Result<T
                 "subtree handlers can only have one path attribute (`dir` or `file`)",
             ));
         }
+        let cfg_attrs = method
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .cloned()
+            .collect::<Vec<_>>();
         let (index, kind) = marked[0];
         let attr = method.attrs.remove(index);
         let handler_args: HandlerArgs = attr.parse_args()?;
@@ -108,12 +115,14 @@ pub fn expand_subtree(_args: &SubtreeArgs, mut input: ItemImpl) -> syn::Result<T
             &self_ty,
             &item_state,
             &signature.captures,
+            &cfg_attrs,
         )?;
         generated_items.push(generated);
-        register_calls.push(format_ident!(
-            "__omnifs_subtree_register_{}",
-            method.sig.ident
-        ));
+        let register_name = format_ident!("__omnifs_subtree_register_{}", method.sig.ident);
+        register_calls.push(quote! {
+            #(#cfg_attrs)*
+            #register_name(&mut registry);
+        });
         methods.push(ImplItem::Fn(method));
     }
 
@@ -126,11 +135,6 @@ pub fn expand_subtree(_args: &SubtreeArgs, mut input: ItemImpl) -> syn::Result<T
         )
     })?;
 
-    let register_bodies: Vec<TokenStream2> = register_calls
-        .iter()
-        .map(|name| quote! { #name(&mut registry); })
-        .collect();
-
     let handler_impl = quote! {
         impl #self_ty {
             fn __omnifs_subtree_registry()
@@ -140,7 +144,7 @@ pub fn expand_subtree(_args: &SubtreeArgs, mut input: ItemImpl) -> syn::Result<T
                     omnifs_sdk::__internal::SubtreeRegistry<#state_ty, #self_ty>
                 > = std::sync::LazyLock::new(|| {
                     let mut registry = omnifs_sdk::__internal::SubtreeRegistry::new();
-                    #(#register_bodies)*
+                    #(#register_calls)*
                     registry.validate().expect("subtree registry validation failed");
                     registry
                 });
@@ -318,6 +322,7 @@ fn expand_subtree_handler_items(
     self_ty: &Type,
     state_ty: &Type,
     captures: &[(String, Type)],
+    cfg_attrs: &[Attribute],
 ) -> syn::Result<TokenStream2> {
     let template = args.template();
     let fn_name = &sig.ident;
@@ -483,16 +488,19 @@ fn expand_subtree_handler_items(
     );
 
     Ok(quote! {
+        #(#cfg_attrs)*
         #[cfg(target_arch = "wasm32")]
         #[unsafe(link_section = "omnifs.provider-manifest.v1")]
         #[used]
         static #manifest_ident: [u8; #manifest_len] = [ #(#manifest_bytes),* ];
 
+        #(#cfg_attrs)*
         #[derive(Clone, Debug)]
         pub struct #path_struct {
             #(#path_struct_fields,)*
         }
 
+        #(#cfg_attrs)*
         fn #parse_name(__omnifs_path: &str) -> Option<Box<dyn std::any::Any>> {
             #len_check
             #(#parse_stmts)*
@@ -501,7 +509,9 @@ fn expand_subtree_handler_items(
             }) as Box<dyn std::any::Any>)
         }
 
+        #(#cfg_attrs)*
         #call_body
+        #(#cfg_attrs)*
         #register_body
     })
 }

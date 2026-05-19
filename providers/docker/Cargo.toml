@@ -1,0 +1,49 @@
+[package]
+name = "omnifs-provider-docker"
+version = "0.1.0"
+edition = "2024"
+description = "omnifs provider for browsing the local Docker daemon"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raulk/omnifs"
+homepage = "https://github.com/raulk/omnifs"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+omnifs-sdk = { path = "../../crates/omnifs-sdk" }
+# Pinned exactly: see comment at the top of src/wire.rs. The upstream
+# README warns that these stubs may change shape between versions, and
+# `bollard` itself does not build for `wasm32-wasip2` (its non-optional
+# `tokio` dep requires the `net` feature which `compile_error!`s on
+# wasm). We accept the trade by treating each version bump as a small
+# migration, not a routine `cargo update`.
+bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
+hashbrown = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[package.metadata.component]
+package = "omnifs:provider"
+
+[package.metadata.component.target]
+world = "provider"
+path = "../../wit"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+wildcard_imports = "allow"
+too_many_lines = "allow"
+trivially_copy_pass_by_ref = "allow"
+match_same_arms = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"

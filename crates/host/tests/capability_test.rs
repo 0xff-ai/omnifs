@@ -6,6 +6,7 @@ fn grants(domains: &[&str]) -> CapabilityGrants {
         git_repos: vec![],
         max_memory_mb: 64,
         needs_git: false,
+        unix_sockets: Vec::new(),
     }
 }
 
@@ -61,6 +62,7 @@ fn test_git_repo_allowed() {
         git_repos: vec!["github.com/*".to_string()],
         max_memory_mb: 64,
         needs_git: true,
+        unix_sockets: Vec::new(),
     };
     let checker = CapabilityChecker::new(grants);
     assert!(checker.check_git_url("github.com/rust-lang/rust").is_ok());
@@ -73,6 +75,7 @@ fn test_git_repo_denied() {
         git_repos: vec!["github.com/myorg/*".to_string()],
         max_memory_mb: 64,
         needs_git: true,
+        unix_sockets: Vec::new(),
     };
     let checker = CapabilityChecker::new(grants);
     let result = checker.check_git_url("github.com/other/repo");

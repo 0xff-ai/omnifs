@@ -168,6 +168,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         git_repos: Vec::new(),
         max_memory_mb: 64,
         needs_git: false,
+        unix_sockets: Vec::new(),
     }));
     let stack = HttpStack::new(auth, capability).unwrap();
 

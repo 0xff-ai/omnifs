@@ -20,6 +20,7 @@ impl DnsProvider {
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: Vec::new(),
+            unix_sockets: Vec::new(),
             auth_types: vec![],
             max_memory_mb: 32,
             needs_git: false,

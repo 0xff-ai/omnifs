@@ -13,6 +13,7 @@ keywords = ["omnifs", "fuse", "wasm", "wasmtime", "filesystem"]
 wasmtime = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = { workspace = true }

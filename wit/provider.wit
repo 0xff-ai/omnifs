@@ -398,6 +398,11 @@ interface types {
 
     record requested-capabilities {
         domains: list<string>,
+        /// Absolute unix socket paths the provider may open via the
+        /// `unix:` URL scheme. The host grants the union of these
+        /// provider-declared sockets and any instance-configured
+        /// sockets.
+        unix-sockets: list<string>,
         auth-types: list<string>,
         max-memory-mb: u32,
         needs-git: bool,

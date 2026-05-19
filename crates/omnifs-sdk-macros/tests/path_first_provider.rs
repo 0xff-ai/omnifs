@@ -124,6 +124,7 @@ impl TestProvider {
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: Vec::new(),
+            unix_sockets: Vec::new(),
             auth_types: Vec::new(),
             max_memory_mb: 16,
             needs_git: false,
@@ -335,11 +336,83 @@ impl omnifs_sdk::handler::Handler<State> for StubSubtree {
     }
 }
 
+struct StateSubtree;
+
+impl omnifs_sdk::handler::Handler<State> for StateSubtree {
+    fn lookup_child<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        parent_path: &'a str,
+        name: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::Lookup> {
+        Box::pin(async move {
+            if (parent_path.is_empty() || parent_path == "/") && name == "state" {
+                Ok(omnifs_sdk::browse::Lookup::file(
+                    "state",
+                    b"running\n".to_vec(),
+                ))
+            } else {
+                Ok(omnifs_sdk::browse::Lookup::not_found())
+            }
+        })
+    }
+
+    fn list_children<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::List> {
+        Box::pin(async move {
+            if path.is_empty() || path == "/" {
+                let listing =
+                    omnifs_sdk::browse::Listing::complete(vec![omnifs_sdk::browse::Entry::file(
+                        "state",
+                        FileProj::inline(b"running\n".to_vec(), Stability::Volatile, None),
+                    )]);
+                Ok(omnifs_sdk::browse::List::entries(listing))
+            } else {
+                Ok(omnifs_sdk::browse::List::entries(
+                    omnifs_sdk::browse::Listing::empty_complete(),
+                ))
+            }
+        })
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::browse::FileContent> {
+        Box::pin(async move {
+            if path == "/state" {
+                Ok(omnifs_sdk::browse::FileContent::new(b"running\n".to_vec()))
+            } else {
+                Err(ProviderError::not_found("path not found"))
+            }
+        })
+    }
+
+    fn open_file<'a>(
+        &'a self,
+        _cx: &'a Cx<State>,
+        _path: &'a str,
+    ) -> omnifs_sdk::handler::BoxFuture<'a, omnifs_sdk::handler::OpenedFile> {
+        Box::pin(async { Err(ProviderError::not_found("path not found")) })
+    }
+}
+
 fn call_bind_stub<'a>(
     _cx: &'a Cx<State>,
     _parsed: Box<dyn std::any::Any>,
 ) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
     Box::pin(async { Ok(Box::new(StubSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
+}
+
+fn call_state_bind_stub<'a>(
+    _cx: &'a Cx<State>,
+    _parsed: Box<dyn std::any::Any>,
+) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
+    Box::pin(async { Ok(Box::new(StateSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
 }
 
 // Regression: looking up a path that exactly matches a bind template must
@@ -371,6 +444,32 @@ async fn bind_exact_match_lookup_is_not_exhaustive() {
         "bind exact-match must not claim an exhaustive sibling set"
     );
     assert!(entry.siblings().is_empty());
+}
+
+#[tokio::test]
+async fn bind_root_parent_lookup_dispatches_into_subtree() {
+    use omnifs_sdk::browse::Lookup;
+
+    let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
+    registry
+        .add_bind(
+            "/containers/_running/{name}",
+            parse_path_only,
+            call_state_bind_stub,
+        )
+        .unwrap();
+    registry.validate().unwrap();
+
+    let cx = Cx::new(12, Rc::new(RefCell::new(State)));
+    let lookup = registry
+        .lookup_child(&cx, "/containers/_running/omnifs", "state")
+        .await
+        .unwrap();
+
+    let Lookup::Entry(entry) = &lookup else {
+        panic!("expected lookup entry, got {lookup:?}");
+    };
+    assert_eq!(entry.target().name(), "state");
 }
 
 #[tokio::test]
