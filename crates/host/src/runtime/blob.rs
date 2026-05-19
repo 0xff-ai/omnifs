@@ -472,6 +472,7 @@ mod tests {
             git_repos: Vec::new(),
             max_memory_mb: 16,
             needs_git: false,
+            unix_sockets: Vec::new(),
         });
         let http =
             Arc::new(HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability)).unwrap());

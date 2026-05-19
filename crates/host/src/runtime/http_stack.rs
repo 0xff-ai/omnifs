@@ -19,12 +19,16 @@ use crate::runtime::callouts::{callout_denied, callout_internal, callout_network
 use crate::runtime::capability::CapabilityChecker;
 use crate::runtime::http_headers::{build_header_map, decode_response_headers};
 use crate::runtime::log_redaction::{LogUrl, WitHeaders};
+use dashmap::DashMap;
+use reqwest::Url;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub struct HttpStack {
-    client: reqwest::Client,
+    https_client: reqwest::Client,
+    unix_clients: DashMap<PathBuf, reqwest::Client>,
     auth: Arc<AuthManager>,
     capability: Arc<CapabilityChecker>,
 }
@@ -34,12 +38,10 @@ impl HttpStack {
         auth: Arc<AuthManager>,
         capability: Arc<CapabilityChecker>,
     ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .user_agent("omnifs")
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+        let https_client = base_client_builder().build()?;
         Ok(Self {
-            client,
+            https_client,
+            unix_clients: DashMap::new(),
             auth,
             capability,
         })
@@ -58,6 +60,9 @@ impl HttpStack {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<reqwest::Response, wit_types::CalloutResult> {
+        let parsed =
+            Url::parse(url).map_err(|e| callout_denied(format!("invalid URL `{url}`: {e}")))?;
+
         if let Err(e) = self.capability.check_url(url) {
             return Err(callout_denied(e.to_string()));
         }
@@ -79,9 +84,9 @@ impl HttpStack {
             Err(message) => return Err(callout_internal(message)),
         };
 
-        let mut request = self
-            .client
-            .request(reqwest_method, url)
+        let (client, request_url) = self.client_and_url_for(&parsed)?;
+        let mut request = client
+            .request(reqwest_method, request_url)
             .headers(header_map)
             .timeout(timeout);
         if let Some(body) = body {
@@ -92,6 +97,41 @@ impl HttpStack {
             .send()
             .await
             .map_err(|e| callout_network(e.to_string()))
+    }
+
+    fn client_and_url_for(
+        &self,
+        parsed: &Url,
+    ) -> Result<(reqwest::Client, Url), wit_types::CalloutResult> {
+        match parsed.scheme() {
+            "https" => Ok((self.https_client.clone(), parsed.clone())),
+            "unix" => {
+                let socket = CapabilityChecker::decode_unix_socket(parsed.as_str())
+                    .map_err(|e| callout_denied(e.to_string()))?;
+                let client = self.unix_client_for(&socket).map_err(|e| {
+                    callout_internal(format!(
+                        "failed to build unix client for {}: {e}",
+                        socket.display()
+                    ))
+                })?;
+                Ok((client, unix_request_url(parsed)?))
+            },
+            other => Err(callout_denied(format!("unsupported URL scheme `{other}`"))),
+        }
+    }
+
+    fn unix_client_for(&self, socket: &Path) -> Result<reqwest::Client, reqwest::Error> {
+        if let Some(existing) = self.unix_clients.get(socket) {
+            return Ok(existing.clone());
+        }
+        let client = base_client_builder()
+            .unix_socket(socket.to_path_buf())
+            .build()?;
+        Ok(self
+            .unix_clients
+            .entry(socket.to_path_buf())
+            .or_insert(client)
+            .clone())
     }
 
     /// In-memory HTTP fetch: dispatch the request and decode the
@@ -143,4 +183,24 @@ impl HttpStack {
         record_outcome(&result);
         result
     }
+}
+
+fn base_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent("omnifs")
+        .connect_timeout(Duration::from_secs(10))
+}
+
+fn unix_request_url(parsed: &Url) -> Result<Url, wit_types::CalloutResult> {
+    let mut rewritten = String::from("http://localhost");
+    rewritten.push_str(parsed.path());
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Url::parse(&rewritten).map_err(|e| {
+        callout_internal(format!(
+            "could not rewrite unix URL {parsed} to http form: {e}"
+        ))
+    })
 }

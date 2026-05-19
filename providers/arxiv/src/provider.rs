@@ -22,6 +22,7 @@ impl ArxivProvider {
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: vec!["export.arxiv.org".to_string(), "arxiv.org".to_string()],
+            unix_sockets: Vec::new(),
             auth_types: vec![],
             max_memory_mb: 64,
             needs_git: false,

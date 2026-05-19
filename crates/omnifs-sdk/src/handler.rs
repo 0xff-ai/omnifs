@@ -709,9 +709,12 @@ impl<S> MountRegistry<S> {
             return Ok(BrowseLookup::entry(BrowseEntry::dir(name)).exhaustive(false));
         }
 
-        // Bind prefix is a strict ancestor of the path: dispatch
-        // through the typed handler with the relative suffix.
-        if let Some((route, parsed, suffix)) = self.match_bind_prefix(&parent_abs) {
+        // The parent is at or below a bind root: dispatch the child
+        // lookup through the typed subtree handler with the parent's
+        // relative suffix. Exact bind-root parents matter for shells
+        // parked inside a bound directory after a readdir snapshot has
+        // been invalidated.
+        if let Some((route, parsed, suffix)) = self.match_bind_at_or_below(&parent_abs) {
             let handler = (route.call)(cx, parsed).await?;
             return handler.lookup_child(cx, &suffix, name).await;
         }

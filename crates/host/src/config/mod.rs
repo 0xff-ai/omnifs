@@ -66,6 +66,9 @@ pub struct CapabilitiesConfig {
     pub domains: Option<Vec<String>>,
     /// Git remotes the provider may open.
     pub git_repos: Option<Vec<String>>,
+    /// Absolute unix socket paths the provider may open via `unix:`
+    /// URLs.
+    pub unix_sockets: Option<Vec<String>>,
     /// Maximum memory granted to the provider component, in MiB.
     pub max_memory_mb: Option<u32>,
     /// Maximum response-body bytes accepted by a `fetch-blob` callout.

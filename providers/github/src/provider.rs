@@ -28,6 +28,7 @@ impl GithubProvider {
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: vec!["api.github.com".to_string()],
+            unix_sockets: Vec::new(),
             auth_types: vec!["bearer-token".to_string()],
             max_memory_mb: 128,
             needs_git: true,

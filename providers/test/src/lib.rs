@@ -215,6 +215,7 @@ impl TestProvider {
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: vec!["httpbin.org".into()],
+            unix_sockets: Vec::new(),
             auth_types: vec![],
             max_memory_mb: 16,
             needs_git: false,

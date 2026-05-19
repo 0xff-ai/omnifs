@@ -20,6 +20,16 @@ services:
     volumes:
       - ${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK on the host}:/ssh-agent
       - ./scripts/demo.sh:/tmp/demo.sh:ro
+      # Bind-mount the host's docker socket so the omnifs container's
+      # docker provider can talk to the host daemon over the
+      # capability-checked `unix:` transport. The bind mount is the
+      # *transport* surface, not a trust boundary: write access to
+      # the daemon would still let the provider create/delete/exec on
+      # the host's containers. The trust boundary is the provider's
+      # source code (currently read-only) and the host's capability
+      # checker, which only allows `unix:///var/run/docker.sock` for
+      # this mount. Reconsider before enabling write paths.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 secrets:
   github_token:

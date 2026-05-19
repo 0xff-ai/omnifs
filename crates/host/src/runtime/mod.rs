@@ -186,7 +186,7 @@ impl ProviderRuntime {
         // Query the provider's declared capabilities and incorporate needs_git.
         let provider_caps = instance.capabilities()?;
 
-        let grants = CapabilityGrants::from_config(config, provider_caps.needs_git);
+        let grants = CapabilityGrants::from_config(config, &provider_caps);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
         // Validate instance config against the provider's declared schema.

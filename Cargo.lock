@@ -247,6 +247,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bollard-stubs"
+version = "1.53.1-rc.29.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce412eb6f7096743011dc3cb5c674caeb24ced61d8c498fe07cf7998a4fea889"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_repr",
+]
+
+[[package]]
 name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2164,6 +2175,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hickory-proto"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3113,6 +3130,7 @@ dependencies = [
  "fuser",
  "futures",
  "gix",
+ "hex",
  "http",
  "jsonschema",
  "libc",
@@ -3174,6 +3192,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-provider-docker"
+version = "0.1.0"
+dependencies = [
+ "bollard-stubs",
+ "hashbrown 0.15.5",
+ "hex",
+ "omnifs-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omnifs-provider-github"
 version = "0.1.0"
 dependencies = [
@@ -3191,6 +3221,7 @@ name = "omnifs-sdk"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "hex",
  "http",
  "lru",
  "omnifs-mount-schema",
@@ -3199,6 +3230,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "url",
  "wit-bindgen 0.41.0",
 ]
 
@@ -4234,6 +4266,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_repr"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

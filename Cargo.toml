@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/*",
     "providers/arxiv",
+    "providers/docker",
     "providers/github",
     "providers/dns",
     "providers/test",
@@ -21,6 +22,7 @@ readme = "README.md"
 wasmtime = { version = "43", features = ["component-model", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
