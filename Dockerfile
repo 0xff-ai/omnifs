@@ -10,6 +10,32 @@ RUN apt-get update \
 RUN cargo install cargo-chef --locked \
     && rustup target add wasm32-wasip2
 
+# wasi-sdk supplies the wasi-sysroot headers + clang that the
+# `libsqlite3-sys` build script needs to compile bundled SQLite for
+# `wasm32-wasip2`. The Rust toolchain ships precompiled
+# `wasi-libc.a` but no headers, so any C dependency reaches for a
+# sysroot via `--sysroot=`. We expose the sysroot through
+# `WASI_SYSROOT` and target-specific `CC_*` / `CFLAGS_*` env vars so
+# `cc-rs` invokes the right clang with the right `--sysroot`.
+ARG WASI_SDK_VERSION=25
+ARG WASI_SDK_RELEASE=25.0
+ENV WASI_SDK_HOME=/opt/wasi-sdk
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) tarball="wasi-sdk-${WASI_SDK_RELEASE}-x86_64-linux.tar.gz" ;; \
+        arm64) tarball="wasi-sdk-${WASI_SDK_RELEASE}-arm64-linux.tar.gz" ;; \
+        *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/wasi-sdk.tar.gz \
+        "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/${tarball}"; \
+    mkdir -p "${WASI_SDK_HOME}"; \
+    tar -xzf /tmp/wasi-sdk.tar.gz -C "${WASI_SDK_HOME}" --strip-components=1; \
+    rm -f /tmp/wasi-sdk.tar.gz
+ENV WASI_SYSROOT=${WASI_SDK_HOME}/share/wasi-sysroot \
+    CC_wasm32_wasip2=${WASI_SDK_HOME}/bin/clang \
+    CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK_HOME}/share/wasi-sysroot"
+
 # --- Dependency cache (host crates) ---
 
 FROM toolchain AS planner

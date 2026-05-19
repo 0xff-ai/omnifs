@@ -181,7 +181,12 @@ impl ProviderRuntime {
         extractor: Arc<ArchiveExtractorComponent>,
     ) -> std::result::Result<Self, RuntimeBuildError> {
         let config_bytes = config.config_bytes();
-        let instance = ProviderInstance::new(engine, wasm_path, config_bytes)?;
+        let preopens = config
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.preopened_paths.as_deref())
+            .unwrap_or(&[]);
+        let instance = ProviderInstance::new(engine, wasm_path, config_bytes, preopens)?;
 
         // Query the provider's declared capabilities and incorporate needs_git.
         let provider_caps = instance.capabilities()?;

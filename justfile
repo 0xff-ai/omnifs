@@ -1,5 +1,6 @@
 image := "ghcr.io/raulk/omnifs:latest"
 container := "omnifs"
+db_test_data := ""
 
 check: build-providers
     cargo fmt --all --check
@@ -8,15 +9,15 @@ check: build-providers
     just check-providers
 
 check-providers:
-    cargo check -p omnifs-provider-arxiv -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2
-    cargo clippy -p omnifs-provider-arxiv -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
-    cargo test -p omnifs-provider-arxiv -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider --target wasm32-wasip2 --no-run
+    cargo check -p omnifs-provider-arxiv -p omnifs-provider-db -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2
+    cargo clippy -p omnifs-provider-arxiv -p omnifs-provider-db -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
+    cargo test -p omnifs-provider-arxiv -p omnifs-provider-db -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider --target wasm32-wasip2 --no-run
 
 build-providers:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --target wasm32-wasip2 --release \
-        -p omnifs-provider-arxiv -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider \
+        -p omnifs-provider-arxiv -p omnifs-provider-db -p omnifs-provider-docker -p omnifs-provider-github -p omnifs-provider-dns -p omnifs-provider-linear -p test-provider \
         -p 'omnifs-tool-*'
 
 test: build-providers
@@ -45,6 +46,10 @@ start:
     export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
     : "${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must be set on the host}"
     docker rm -f {{container}} >/dev/null 2>&1 || true
+    db_mount=()
+    if [[ -n "{{db_test_data}}" ]]; then
+      db_mount=(-v "{{db_test_data}}:/data/test.db:ro")
+    fi
     docker run -d \
       --name {{container}} \
       --device /dev/fuse \
@@ -55,6 +60,7 @@ start:
       -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
       -v "$SSH_AUTH_SOCK:/ssh-agent" \
       -v "$(pwd)/scripts/demo.sh:/tmp/demo.sh:ro" \
+      "${db_mount[@]}" \
       {{image}}
     for _ in $(seq 1 60); do
       if docker exec {{container}} sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
