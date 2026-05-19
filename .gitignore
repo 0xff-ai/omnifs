@@ -18,6 +18,9 @@ demo.mp4
 # Generated WIT bindings (cargo component build artifacts)
 providers/*/src/bindings.rs
 
+# Test fixtures pulled at build time (binary blobs not in source)
+providers/db/testdata/
+
 # Internal design docs (not published)
 docs/internal/
 docs/superpowers/plans/

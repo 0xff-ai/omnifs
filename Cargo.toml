@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/*",
     "providers/arxiv",
+    "providers/db",
     "providers/docker",
     "providers/github",
     "providers/dns",
