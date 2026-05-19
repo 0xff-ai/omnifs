@@ -17,14 +17,44 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Single registry-backed buildx cache shared across every job that
-  # touches the Dockerfile. mode=max keeps intermediate layers (deps,
-  # providers, builder) so each job only rebuilds what actually changed.
-  BUILD_CACHE_REF: ghcr.io/${{ github.repository }}:buildcache
+  # Registry-backed buildx cache refs. Jobs read the deps cache plus
+  # their own target cache, then write only their own ref. That keeps
+  # cache reuse broad without making parallel jobs overwrite one
+  # shared manifest.
+  BUILD_CACHE_BASE: ghcr.io/${{ github.repository }}:buildcache
 
 jobs:
+  deps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Warm cargo-chef deps cache
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          target: deps
+          push: false
+          load: false
+          cache-from: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps
+          cache-to: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps,mode=max
+
   lint:
     runs-on: ubuntu-latest
+    needs: deps
     permissions:
       contents: read
       packages: write
@@ -48,11 +78,14 @@ jobs:
           target: lint
           push: false
           load: false
-          cache-from: type=registry,ref=${{ env.BUILD_CACHE_REF }}
-          cache-to: type=registry,ref=${{ env.BUILD_CACHE_REF }},mode=max
+          cache-from: |
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-lint
+          cache-to: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-lint,mode=max
 
   build-test:
     runs-on: ubuntu-latest
+    needs: deps
     permissions:
       contents: read
       packages: write
@@ -76,8 +109,74 @@ jobs:
           target: test
           push: false
           load: false
-          cache-from: type=registry,ref=${{ env.BUILD_CACHE_REF }}
-          cache-to: type=registry,ref=${{ env.BUILD_CACHE_REF }},mode=max
+          cache-from: |
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-test
+          cache-to: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-test,mode=max
+
+  runtime-amd64:
+    name: docker-build (linux/amd64)
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
+        contains(github.event.pull_request.labels.*.name, 'ci-full')
+      ))
+    runs-on: ubuntu-latest
+    needs: deps
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract Docker labels
+        id: meta
+        uses: docker/metadata-action@v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push amd64 image by digest
+        id: build
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-runtime-amd64
+          cache-to: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-runtime-amd64,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Export image digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: docker-digest-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   smoke:
     if: >-
@@ -87,18 +186,17 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'ci-full')
       ))
     runs-on: ubuntu-latest
-    needs: docker-build
+    needs: runtime-amd64
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
+      packages: read
     # compose.yaml interpolates these on every `docker compose ...`
     # invocation (up, exec, down). Setting them at the job level
     # avoids per-step exports and keeps cleanup working even when an
     # earlier step short-circuited.
     env:
       GITHUB_TOKEN_FILE: ${{ github.workspace }}/.secrets/github_token
-      OMNIFS_DB_FIXTURE: ${{ github.workspace }}/.secrets/chinook.sqlite
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -123,11 +221,12 @@ jobs:
         # across smoke and docker-build.
         run: |
           set -euo pipefail
-          digest_file=$(ls /tmp/digests | head -1)
-          if [ -z "$digest_file" ]; then
+          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
+          if [ -z "$digest_path" ]; then
             echo "no digest artifact found" >&2
             exit 1
           fi
+          digest_file="${digest_path##*/}"
           ref="${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}"
           docker pull "$ref"
           docker tag "$ref" "${REGISTRY}/${IMAGE_NAME}:latest"
@@ -144,14 +243,14 @@ jobs:
       - name: Create fixtures
         run: |
           set -euo pipefail
-          mkdir -p .secrets
+          mkdir -p .secrets/db
           # GitHub token for the github provider.
           printf '%s' "${{ github.token }}" > .secrets/github_token
           # Chinook SQLite fixture for the db provider. The image bakes
           # docker/providers/db.json with path /data/test.db; compose
-          # mounts this file there. Pinned to the lerocha master copy;
+          # mounts .secrets/db there. Pinned to the lerocha master copy;
           # the database has not changed in years.
-          curl -fsSL -o .secrets/chinook.sqlite \
+          curl -fsSL -o .secrets/db/test.db \
             https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
 
       - name: Start stack
@@ -196,15 +295,10 @@ jobs:
         if: always()
         run: docker compose down --remove-orphans --volumes
 
-  docker-build:
-    name: docker-build (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
+  runtime-arm64:
+    name: docker-build (linux/arm64)
+    runs-on: ubuntu-24.04-arm
     needs: [lint, build-test]
-    # docker-build runs before smoke now (smoke pulls the amd64
-    # digest it produces). The push-by-digest output is unreferenced
-    # by any tag, so failing image bytes that get pushed here are
-    # invisible to consumers; only docker-publish creates user-facing
-    # tags, and it gates on smoke passing.
     if: >-
       (github.event_name == 'push' && (
         github.ref == 'refs/heads/main' ||
@@ -214,16 +308,6 @@ jobs:
         contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
         contains(github.event.pull_request.labels.*.name, 'ci-full')
       ))
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            artifact-name: docker-digest-amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            artifact-name: docker-digest-arm64
     permissions:
       contents: read
       packages: write
@@ -247,19 +331,19 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Build and push image by digest
+      - name: Build and push arm64 image by digest
         id: build
         uses: docker/build-push-action@v7.1.0
         with:
           context: .
           target: runtime
-          platforms: ${{ matrix.platform }}
+          platforms: linux/arm64
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          # The registry cache is shared with lint, build-test, and smoke,
-          # so the matrix legs reuse cooked deps and provider builds.
-          cache-from: type=registry,ref=${{ env.BUILD_CACHE_REF }}
-          cache-to: type=registry,ref=${{ env.BUILD_CACHE_REF }},mode=max
+          cache-from: |
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-deps
+            type=registry,ref=${{ env.BUILD_CACHE_BASE }}-runtime-arm64
+          cache-to: type=registry,ref=${{ env.BUILD_CACHE_BASE }}-runtime-arm64,mode=max
           # In-manifest SLSA provenance + SPDX SBOM, attached to the
           # image manifest by buildkit and verifiable with cosign.
           provenance: mode=max
@@ -275,14 +359,14 @@ jobs:
       - name: Upload image digest
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ${{ matrix.artifact-name }}
+          name: docker-digest-arm64
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   docker-publish:
     runs-on: ubuntu-latest
-    needs: [docker-build, smoke]
+    needs: [lint, build-test, runtime-amd64, runtime-arm64, smoke]
     if: >-
       (github.event_name == 'push' && (
         github.ref == 'refs/heads/main' ||
