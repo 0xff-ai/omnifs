@@ -6,6 +6,7 @@ members = [
     "providers/docker",
     "providers/github",
     "providers/dns",
+    "providers/linear",
     "providers/test",
 ]
 default-members = ["crates/cli", "crates/host"]

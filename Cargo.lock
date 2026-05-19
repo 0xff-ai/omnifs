@@ -3217,6 +3217,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-provider-linear"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "http",
+ "omnifs-sdk",
+ "serde",
+ "serde_json",
+ "strum",
+]
+
+[[package]]
 name = "omnifs-sdk"
 version = "0.1.0"
 dependencies = [
