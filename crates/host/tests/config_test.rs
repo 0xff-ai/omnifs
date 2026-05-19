@@ -1,4 +1,4 @@
-use omnifs_host::config::InstanceConfig;
+use omnifs_host::config::{InstanceConfig, PreopenMode};
 
 #[test]
 fn test_parse_minimal_config() {
@@ -86,4 +86,47 @@ fn test_auth_bearer_token_from_file() {
         auth.token_file.as_deref(),
         Some("/run/secrets/github_token")
     );
+}
+
+#[test]
+fn test_parse_preopened_paths_defaults_to_ro() {
+    let json = r#"{
+        "plugin": "db.wasm",
+        "mount": "db",
+        "capabilities": {
+            "preopened_paths": [
+                { "host": "/data", "guest": "/data" }
+            ]
+        }
+    }"#;
+    let config = InstanceConfig::parse(json).unwrap();
+    let preopens = config
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.preopened_paths.as_ref())
+        .expect("preopened_paths present");
+    assert_eq!(preopens.len(), 1);
+    assert_eq!(preopens[0].host, "/data");
+    assert_eq!(preopens[0].guest, "/data");
+    assert_eq!(preopens[0].mode, PreopenMode::Ro);
+}
+
+#[test]
+fn test_parse_preopened_paths_explicit_rw() {
+    let json = r#"{
+        "plugin": "db.wasm",
+        "mount": "db",
+        "capabilities": {
+            "preopened_paths": [
+                { "host": "/data", "guest": "/data", "mode": "rw" }
+            ]
+        }
+    }"#;
+    let config = InstanceConfig::parse(json).unwrap();
+    let preopens = config
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.preopened_paths.as_ref())
+        .expect("preopened_paths present");
+    assert_eq!(preopens[0].mode, PreopenMode::Rw);
 }

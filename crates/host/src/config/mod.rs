@@ -69,12 +69,42 @@ pub struct CapabilitiesConfig {
     /// Absolute unix socket paths the provider may open via `unix:`
     /// URLs.
     pub unix_sockets: Option<Vec<String>>,
+    /// Host directories exposed to the provider component through
+    /// Wasmtime's WASI preopens. Each entry maps an absolute host
+    /// path onto a guest path with read-only or read-write
+    /// permissions. The empty default grants no filesystem access.
+    pub preopened_paths: Option<Vec<PreopenedPath>>,
     /// Maximum memory granted to the provider component, in MiB.
     pub max_memory_mb: Option<u32>,
     /// Maximum response-body bytes accepted by a `fetch-blob` callout.
     pub max_fetch_blob_bytes: Option<u64>,
     /// Maximum bytes returned by one `read-blob` callout.
     pub max_read_blob_bytes: Option<u64>,
+}
+
+/// A single preopen mapping host path -> guest path, with the
+/// requested access mode. The host validates absolute-path and
+/// no-parent-escape invariants at provider build time.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreopenedPath {
+    /// Absolute host path to expose.
+    pub host: String,
+    /// Path that the guest sees (also absolute).
+    pub guest: String,
+    /// Access mode for both directory and file operations.
+    #[serde(default)]
+    pub mode: PreopenMode,
+}
+
+/// Access mode for a preopened path. `Ro` (read-only) is the default
+/// and grants `DirPerms::READ + FilePerms::READ`. `Rw` grants
+/// `READ | MUTATE` for both.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PreopenMode {
+    #[default]
+    Ro,
+    Rw,
 }
 
 impl InstanceConfig {
