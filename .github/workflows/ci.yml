@@ -92,6 +92,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # compose.yaml interpolates these on every `docker compose ...`
+    # invocation (up, exec, down). Setting them at the job level
+    # avoids per-step exports and keeps cleanup working even when an
+    # earlier step short-circuited.
+    env:
+      GITHUB_TOKEN_FILE: ${{ github.workspace }}/.secrets/github_token
+      OMNIFS_DB_FIXTURE: ${{ github.workspace }}/.secrets/chinook.sqlite
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -140,8 +147,6 @@ jobs:
       - name: Start stack
         run: |
           set -euo pipefail
-          export GITHUB_TOKEN_FILE="$(pwd)/.secrets/github_token"
-          export OMNIFS_DB_FIXTURE="$(pwd)/.secrets/chinook.sqlite"
           docker compose up -d
 
           for _ in $(seq 1 60); do
@@ -179,8 +184,6 @@ jobs:
 
       - name: Clean up compose stack
         if: always()
-        env:
-          OMNIFS_DB_FIXTURE: ${{ github.workspace }}/.secrets/chinook.sqlite
         run: docker compose down --remove-orphans --volumes
 
   docker-build:
