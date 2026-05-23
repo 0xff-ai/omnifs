@@ -16,8 +16,10 @@ wit_bindgen::generate!({
 
 pub mod archives;
 mod async_runtime;
+pub mod auth;
 pub mod blob;
 pub mod browse;
+mod capabilities;
 
 pub mod cx;
 pub mod error;
@@ -28,7 +30,7 @@ pub mod helpers;
 pub mod http;
 pub mod init;
 pub mod prelude;
-pub mod schema;
+mod range_handles;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
 pub use file_attrs::{
@@ -48,7 +50,6 @@ pub use omnifs_sdk_macros::treeref;
 // Re-export deps that generated code references, so providers don't need
 // direct dependencies on them.
 pub use hashbrown;
-pub use schemars;
 pub use serde;
 pub use serde_json;
 
@@ -60,6 +61,7 @@ pub mod __internal {
     pub use crate::async_runtime::AsyncRuntime;
     pub use crate::cx::Cx;
     pub use crate::handler::{MountRegistry, SubtreeRegistry};
+    pub use crate::range_handles::RangeReaders;
 }
 
 #[cfg(doctest)]

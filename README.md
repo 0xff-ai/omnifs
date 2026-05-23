@@ -22,49 +22,44 @@ Plan 9 was right, just 40 years early. Everything is a file. The world moved to 
 
 ### Prerequisites
 
-- Docker
-- SSH agent running with a GitHub key loaded
-- `gh` CLI (for generating a token)
+- Node.js and npm for the packaged CLI path
+- Docker on Linux, or Docker Desktop on macOS
+- SSH agent running with a GitHub key loaded if you want repo clone paths under `/github`
 
-### Published Docker image
+### CLI-managed container
 
-Run the published image directly:
+The normal user flow is owned by the `omnifs` CLI. The CLI stores credentials on the host, generates thin mount configs under `~/.omnifs/config/mounts`, starts the runtime container, and opens a shell into it.
 
 ```bash
-# Run the container
-# Automatically picks up your GitHub auth token from the gh cli, and wires the SSH auth sock for git ssh clones
-docker run -d \
-  --name omnifs \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor:unconfined \
-  -e GITHUB_TOKEN="$(gh auth token)" \
-  -e SSH_AUTH_SOCK=/ssh-agent \
-  -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-  -v "$SSH_AUTH_SOCK:/ssh-agent" \
-  ghcr.io/raulk/omnifs:latest
-
-# Enter the container's shell
-docker exec -it omnifs /bin/zsh
+npm install -g @0xff-ai/omnifs
+omnifs init github
+omnifs init linear
+omnifs status
+omnifs up
+omnifs shell
 ```
 
-Use `docker logs omnifs` to inspect logs and `docker rm -f omnifs` to stop the container.
+GitHub uses device-code OAuth with the bundled public client id and no default write scopes. Linear uses browser PKCE OAuth with the bundled public client id and `read` scope. You do not need to edit configs, copy provider wasm into `~/.omnifs/data/providers`, or set OAuth client id environment variables for the bundled providers. `omnifs up` uses the version-matched runtime image unless you override it with `--image` or `OMNIFS_IMAGE`.
 
-### Local Docker image with Compose
+The npm package installs only the native host CLI. It does not pull the Docker image during install; `omnifs up` pulls and starts the matching runtime image. On macOS, the mount is available inside the Docker Desktop Linux container through `omnifs shell`, not as a native Finder or host-shell mount.
+
+Use `omnifs logs`, `omnifs logs -f`, and `omnifs down` to inspect and stop the container.
+
+### Contributor sandbox
+
+`omnifs dev` is the development workflow for this repo. It captures your `gh` token, fetches the Chinook SQLite fixture, builds the image tagged at the current commit, synthesizes dev mount configs from the built-in provider manifests, and launches the container directly:
 
 ```bash
 # Clone the repo
 git clone https://github.com/raulk/omnifs
 cd omnifs
 
-# Feed secrets
-mkdir -p .secrets
-gh auth token > .secrets/github_token
-
-# Run docker compose
-docker compose up --build -d
-docker compose exec omnifs /bin/zsh
+# Build, materialize, and start the dev container
+omnifs dev
+omnifs shell
 ```
+
+`-y` skips the session confirmation prompt.
 
 ### Explore
 
@@ -117,7 +112,7 @@ one.one.one.one.
 ## poke around!
 ```
 
-Use `docker compose logs omnifs` to inspect logs and `docker compose down` to stop the source-built container.
+Use `omnifs logs` (`-f` to follow) and `omnifs down` to inspect and stop the dev container.
 
 <details>
 <summary>SSH agent troubleshooting</summary>
@@ -152,7 +147,7 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
                                                                       └────────────────┘
 ```
 
-**Wasm providers** are plugins compiled to WebAssembly components. Each provider projects a domain (GitHub, Linear, S3, whatever) into the filesystem namespace. Drop a `.wasm` into `~/.omnifs/plugins/` and it mounts.
+**Wasm providers** are WebAssembly components. Each provider projects a domain (GitHub, Linear, S3, whatever) into the filesystem namespace. Drop a `.wasm` into `~/.omnifs/data/providers/` and it mounts.
 
 **Callout runtime** means providers never touch the network or Git directly. They describe what they need ("fetch this API endpoint", "clone this repo"), and the host executes. This keeps providers sandboxed and lets the host manage caching, rate limits, and concurrency.
 

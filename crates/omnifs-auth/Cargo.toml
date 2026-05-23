@@ -1,0 +1,30 @@
+[package]
+name = "omnifs-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Generic host-side OAuth protocol engine for omnifs."
+readme = "README.md"
+
+[dependencies]
+omnifs-creds = { version = "0.1.0", path = "../omnifs-creds" }
+omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
+oauth2 = { workspace = true }
+reqwest = { workspace = true }
+secrecy = "0.10"
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+webbrowser = { workspace = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-rustls = "0.26"
+
+[lints]
+workspace = true

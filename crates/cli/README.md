@@ -5,30 +5,53 @@ The `omnifs` command-line tool: mount [omnifs](https://github.com/raulk/omnifs) 
 ## Install
 
 ```bash
-cargo install omnifs-cli
+npm install -g @0xff-ai/omnifs
 ```
 
-Binary releases for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` are also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). A Docker image is available at `ghcr.io/raulk/omnifs`.
+The npm package installs the native host CLI for Linux and macOS. The CLI then pulls the version-matched runtime image from `ghcr.io/raulk/omnifs` when you run `omnifs up`.
 
-Requires `fuse3` and `libfuse3-dev` on the host (`apt install fuse3 libfuse3-dev` on Debian / Ubuntu).
+Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases).
+
+From source, use:
+
+```bash
+cargo install omnifs-cli
+```
 
 ## Quick start
 
 ```bash
-omnifs mount ~/.omnifs/config.json /omnifs
-ls /omnifs/github/raulk/omnifs/issues/
-cat /omnifs/dns/google.com/A
+omnifs init github
+omnifs up
+omnifs shell
 ```
 
-Mount config is JSON, one entry per provider, with the provider's wasm path, mount prefix, and provider-specific config.
+The CLI stores credentials and thin mount configs on the host, starts the Docker runtime container, and opens a shell where `/omnifs` is mounted.
 
 ## Platform
 
-Linux only today. macOS (macFUSE) and Windows (WinFsp) targets are tracked as follow-up work.
+The host CLI ships for Linux and macOS. The runtime filesystem is Linux FUSE inside Docker. On macOS, `omnifs shell` is the supported access path; omnifs does not install a native macOS Finder mount.
 
 ## Status
 
 Pre-1.0. CLI surface and config format may evolve before v1.
+
+## Configuration file
+
+Optional. Lives at `~/.omnifs/config/config.toml` by default, or `$OMNIFS_HOME/config/config.toml` when `OMNIFS_HOME` is set.
+
+Precedence: CLI flag > env var > config file > built-in default.
+
+```toml
+container_name = "omnifs"
+image = "ghcr.io/raulk/omnifs:0.4"
+
+[paths]
+mounts_dir = "~/work/omnifs-mounts"
+providers_dir = "~/.omnifs/data/providers"
+```
+
+`~/` in path values expands against `$HOME`.
 
 ## License
 

@@ -6,7 +6,7 @@ This crate is the engine inside `omnifs-cli`. Embed it directly to host omnifs p
 
 ## What it does
 
-- **Component loading**: validates the `omnifs.provider-manifest.v1` custom section against the host's WIT world, instantiates the component, and calls `initialize()` with the JSON config.
+- **Component loading**: validates the `omnifs.provider-manifest.v1` custom section against the host's WIT world, instantiates the component, and initializes it with the JSON config during `ProviderRuntime::new`, caching the returned capabilities for sandbox grants and timer setup.
 - **FUSE bridge**: implements `lookup_child`, `list_children`, `read_file` (plus mutation paths) on top of the provider's path handlers. Subtree handoffs (`#[treeref]`) resolve to bind-mounted clones on disk.
 - **Callout dispatcher**: when a provider suspends with a list of HTTP / git callouts, the host runs them, then calls `resume(id, results)`. No fire-and-forget; everything is request/response.
 - **Capacity-bounded cache**: listings, lookups, and file content land in capacity-bounded caches; entries leave on capacity eviction or explicit invalidation from `event-outcome` fields or the FUSE notifier. No TTLs.

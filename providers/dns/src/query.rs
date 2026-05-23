@@ -5,11 +5,11 @@ use std::fmt::Write;
 
 use crate::doh;
 use crate::http_ext::DnsHttpExt;
-use crate::types::{DomainName, RecordType, ResolverName};
+use crate::types::{DomainName, ResolverName, SupportedRecordType};
 use crate::{DnsRecord, State};
 
 pub(crate) fn record_names() -> Vec<String> {
-    let mut names: Vec<String> = RecordType::all()
+    let mut names: Vec<String> = SupportedRecordType::all()
         .iter()
         .map(|rt| rt.as_ref().to_string())
         .collect();
@@ -41,8 +41,8 @@ pub(crate) async fn read_record_bytes(
         "_raw" => query_raw(cx, resolver, domain).await,
         other => {
             let record_type = other
-                .parse::<RecordType>()
-                .map_err(|_| ProviderError::not_found("record not found"))?;
+                .parse::<SupportedRecordType>()
+                .map_err(|()| ProviderError::not_found("record not found"))?;
             let domain_str = domain.to_string();
             let resolver_name = resolver.map(ResolverName::as_ref);
             let url = cx
@@ -65,8 +65,8 @@ pub(crate) async fn query_all(
     let domain_str = domain.to_string();
     let resolver_ref = resolver.map(ResolverName::as_ref);
 
-    let mut requests = Vec::with_capacity(RecordType::common().len());
-    for record_type in RecordType::common() {
+    let mut requests = Vec::with_capacity(SupportedRecordType::common().len());
+    for record_type in SupportedRecordType::common() {
         let url =
             cx.state(|s| doh::query_url(&s.resolvers, resolver_ref, &domain_str, *record_type))?;
         requests.push(cx.dns_message_get(url).send());
@@ -94,8 +94,14 @@ pub(crate) async fn query_raw(
 ) -> Result<Vec<u8>> {
     let domain_str = domain.to_string();
     let resolver_ref = resolver.map(ResolverName::as_ref);
-    let url =
-        cx.state(|s| doh::query_url(&s.resolvers, resolver_ref, &domain_str, RecordType::A))?;
+    let url = cx.state(|s| {
+        doh::query_url(
+            &s.resolvers,
+            resolver_ref,
+            &domain_str,
+            SupportedRecordType::A,
+        )
+    })?;
     let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
     let (records, _) = doh::parse_response(resp.body())?;
 
@@ -156,11 +162,11 @@ fn format_record_lines(records: &[DnsRecord]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::RecordType;
+    use crate::types::SupportedRecordType;
 
     fn a_record(value: &str) -> DnsRecord {
         DnsRecord {
-            rtype: RecordType::A,
+            rtype: SupportedRecordType::A,
             value: value.to_string(),
         }
     }

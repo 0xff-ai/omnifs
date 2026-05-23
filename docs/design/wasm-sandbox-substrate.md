@@ -189,7 +189,7 @@ The substrate owns:
 ## Non-goals
 
 - A provider-visible generic tool runner.
-- A dynamic plugin registry for sandbox tools.
+- A dynamic provider registry for sandbox tools.
 - An IPC RPC layer between OS containers.
 - A single trait that erases all tool input and output types.
 - Moving provider lifecycle, callout handling, or cache invalidation

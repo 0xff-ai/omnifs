@@ -1,5 +1,9 @@
 //! Single-import module for providers: `use omnifs_sdk::prelude::*;`
 
+pub use crate::auth::{
+    AuthManifest, AuthScheme, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme,
+    PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod,
+};
 pub use crate::browse::{Effects, EntryKind};
 pub use crate::cx::Cx;
 pub use crate::cx::join_all;

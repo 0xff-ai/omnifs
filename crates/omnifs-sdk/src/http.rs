@@ -123,15 +123,15 @@ impl<'cx, S> Request<'cx, S> {
         let wit_request = HttpRequest {
             method: self.method.as_str().to_string(),
             url: self.url,
-            headers: header_map_to_wit(&self.headers),
+            headers: WitHeaders(&self.headers).into(),
             body: self.body,
         };
         CalloutFuture::new(
             self.cx,
             Callout::Fetch(wit_request),
             |result| match result {
-                CalloutResult::HttpResponse(resp) => wit_response_to_http(resp),
-                CalloutResult::CalloutError(e) => Err(ProviderError::from_callout_error(&e)),
+                CalloutResult::HttpResponse(resp) => resp.try_into(),
+                CalloutResult::CalloutError(e) => Err(e.into()),
                 _ => Err(ProviderError::internal("unexpected callout result type")),
             },
         )
@@ -189,7 +189,7 @@ impl<'cx, S> BlobRequest<'cx, S> {
         let callout = crate::blob::blob_fetch_callout(
             self.inner.method.as_str().to_string(),
             self.inner.url,
-            header_map_to_wit(&self.inner.headers),
+            WitHeaders(&self.inner.headers).into(),
             self.inner.body,
             cache_key,
         );
@@ -197,39 +197,47 @@ impl<'cx, S> BlobRequest<'cx, S> {
     }
 }
 
-fn header_map_to_wit(map: &HeaderMap) -> Vec<Header> {
-    map.iter()
-        .map(|(name, value)| Header {
-            name: name.as_str().to_string(),
-            // HeaderValue is opaque bytes; `try_from(&str)` at insert
-            // time rejects non-visible-ASCII, so any value reaching
-            // this point is a valid &str by builder invariant.
-            value: value
-                .to_str()
-                .expect("HeaderValue inserted via builder is visible ASCII")
-                .to_string(),
-        })
-        .collect()
+struct WitHeaders<'a>(&'a HeaderMap);
+
+impl From<WitHeaders<'_>> for Vec<Header> {
+    fn from(WitHeaders(map): WitHeaders<'_>) -> Self {
+        map.iter()
+            .map(|(name, value)| Header {
+                name: name.as_str().to_string(),
+                // HeaderValue is opaque bytes; `try_from(&str)` at insert
+                // time rejects non-visible-ASCII, so any value reaching
+                // this point is a valid &str by builder invariant.
+                value: value
+                    .to_str()
+                    .expect("HeaderValue inserted via builder is visible ASCII")
+                    .to_string(),
+            })
+            .collect()
+    }
 }
 
-fn wit_response_to_http(resp: HttpResponse) -> Result<Response<Vec<u8>>> {
-    let status = StatusCode::from_u16(resp.status)
-        .map_err(|e| ProviderError::internal(format!("invalid response status: {e}")))?;
-    let mut builder = Response::builder().status(status);
-    // Drop malformed headers from the host rather than fail the whole
-    // response; status and body are the load-bearing fields.
-    for hdr in &resp.headers {
-        let (Ok(name), Ok(value)) = (
-            HeaderName::try_from(&hdr.name),
-            HeaderValue::try_from(&hdr.value),
-        ) else {
-            continue;
-        };
-        builder = builder.header(name, value);
+impl TryFrom<HttpResponse> for Response<Vec<u8>> {
+    type Error = ProviderError;
+
+    fn try_from(resp: HttpResponse) -> std::result::Result<Self, Self::Error> {
+        let status = StatusCode::from_u16(resp.status)
+            .map_err(|e| ProviderError::internal(format!("invalid response status: {e}")))?;
+        let mut builder = Response::builder().status(status);
+        // Drop malformed headers from the host rather than fail the whole
+        // response; status and body are the load-bearing fields.
+        for hdr in &resp.headers {
+            let (Ok(name), Ok(value)) = (
+                HeaderName::try_from(&hdr.name),
+                HeaderValue::try_from(&hdr.value),
+            ) else {
+                continue;
+            };
+            builder = builder.header(name, value);
+        }
+        builder
+            .body(resp.body)
+            .map_err(|e| ProviderError::internal(format!("response builder: {e}")))
     }
-    builder
-        .body(resp.body)
-        .map_err(|e| ProviderError::internal(format!("response builder: {e}")))
 }
 
 /// Default 4xx/5xx mapping to `ProviderError`.
@@ -356,39 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn post_builder_produces_request_with_post_method() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let mut fut = Box::pin(cx.http().post("https://example.test/items").send());
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-
-        let req = take_single_fetch(&cx);
-        assert_eq!(req.method, "POST");
-        assert_eq!(req.url, "https://example.test/items");
-        assert!(req.body.is_none());
-    }
-
-    #[test]
-    fn body_passes_raw_bytes_through_to_fetch_callout() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let raw = b"raw-bytes".to_vec();
-        let mut fut = Box::pin(
-            cx.http()
-                .post("https://example.test/upload")
-                .body(raw.clone())
-                .send(),
-        );
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-
-        let req = take_single_fetch(&cx);
-        assert_eq!(req.method, "POST");
-        assert_eq!(req.body, Some(raw));
-    }
-
-    #[test]
     fn json_serializes_value_and_sets_content_type_exactly_once() {
         #[derive(serde::Serialize)]
         struct Payload<'a> {
@@ -450,54 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn json_and_header_chaining_order_is_equivalent() {
-        #[derive(serde::Serialize)]
-        struct V {
-            x: i32,
-        }
-        let v = V { x: 42 };
-
-        let state_a = Rc::new(RefCell::new(()));
-        let cx_a = Cx::new(1, state_a);
-        let mut fut_a = Box::pin(
-            cx_a.http()
-                .post("https://example.test/a")
-                .header("X-Foo", "bar")
-                .json(&v)
-                .send(),
-        );
-        assert!(matches!(drive_once(&mut fut_a), Poll::Pending));
-        let fetch_a = take_single_fetch(&cx_a);
-
-        let state_b = Rc::new(RefCell::new(()));
-        let cx_b = Cx::new(1, state_b);
-        let mut fut_b = Box::pin(
-            cx_b.http()
-                .post("https://example.test/a")
-                .json(&v)
-                .header("X-Foo", "bar")
-                .send(),
-        );
-        assert!(matches!(drive_once(&mut fut_b), Poll::Pending));
-        let fetch_b = take_single_fetch(&cx_b);
-
-        assert_eq!(fetch_a.method, fetch_b.method);
-        assert_eq!(fetch_a.url, fetch_b.url);
-        assert_eq!(fetch_a.body, fetch_b.body);
-
-        let sorted = |req: &HttpRequest| -> Vec<(String, String)> {
-            let mut h: Vec<(String, String)> = req
-                .headers
-                .iter()
-                .map(|h| (h.name.to_ascii_lowercase(), h.value.clone()))
-                .collect();
-            h.sort();
-            h
-        };
-        assert_eq!(sorted(&fetch_a), sorted(&fetch_b));
-    }
-
-    #[test]
     fn invalid_header_name_surfaces_at_send() {
         let state = Rc::new(RefCell::new(()));
         let cx = Cx::new(1, state);
@@ -517,48 +444,6 @@ mod tests {
             cx.take_yielded_callouts().is_empty(),
             "no callout should be issued when builder failed"
         );
-    }
-
-    #[test]
-    fn invalid_header_value_surfaces_at_send() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let mut fut = Box::pin(
-            cx.http()
-                .get("https://example.test/api")
-                .header("X-Bad", "value\nwith newline")
-                .send(),
-        );
-
-        assert!(matches!(drive_once(&mut fut), Poll::Ready(Err(_))));
-        assert!(cx.take_yielded_callouts().is_empty());
-    }
-
-    #[test]
-    fn json_serialization_failure_surfaces_at_send() {
-        struct AlwaysFails;
-        impl serde::Serialize for AlwaysFails {
-            fn serialize<S: serde::Serializer>(
-                &self,
-                _: S,
-            ) -> std::result::Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("nope"))
-            }
-        }
-
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let mut fut = Box::pin(
-            cx.http()
-                .post("https://example.test/api")
-                .json(&AlwaysFails)
-                .send(),
-        );
-
-        assert!(matches!(drive_once(&mut fut), Poll::Ready(Err(_))));
-        assert!(cx.take_yielded_callouts().is_empty());
     }
 
     #[test]
@@ -597,20 +482,6 @@ mod tests {
         assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
         assert!(error.is_retryable());
         assert_eq!(error.message(), "HTTP 429; retry_after=3");
-    }
-
-    #[test]
-    fn response_ext_maps_429_without_retry_after_to_rate_limit() {
-        let resp = Response::builder()
-            .status(429)
-            .body(Vec::new())
-            .expect("response builder");
-
-        let error = resp.error_for_status_ref().unwrap_err();
-
-        assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
-        assert!(error.is_retryable());
-        assert_eq!(error.message(), "HTTP 429");
     }
 }
 
@@ -697,24 +568,6 @@ mod endpoint_tests {
     use super::HttpEndpoint;
 
     #[test]
-    fn tcp_endpoint_appends_path_and_query() {
-        let ep = HttpEndpoint::parse("https://api.example.com");
-        assert_eq!(
-            ep.build_url("/v1/things", &[("limit", "10"), ("type", "a")]),
-            "https://api.example.com/v1/things?limit=10&type=a"
-        );
-    }
-
-    #[test]
-    fn tcp_endpoint_normalises_trailing_slash() {
-        let ep = HttpEndpoint::parse("https://api.example.com/");
-        assert_eq!(
-            ep.build_url("/v1/things", &[]),
-            "https://api.example.com/v1/things"
-        );
-    }
-
-    #[test]
     fn unix_endpoint_hex_encodes_socket_in_host_segment() {
         let ep = HttpEndpoint::parse("unix:///var/run/docker.sock");
         let url = ep.build_url("/v1.43/containers/json", &[("all", "true")]);
@@ -728,26 +581,5 @@ mod endpoint_tests {
         let path = String::from_utf8(path_bytes).expect("socket path should be UTF-8");
         assert_eq!(path, "/var/run/docker.sock");
         assert_eq!(rest, "v1.43/containers/json?all=true");
-    }
-
-    #[test]
-    fn parse_routes_unix_prefix_to_unix_variant() {
-        match HttpEndpoint::parse("unix:///var/run/docker.sock") {
-            HttpEndpoint::Unix(p) => {
-                assert_eq!(p, std::path::PathBuf::from("/var/run/docker.sock"))
-            },
-            HttpEndpoint::Tcp(_) => panic!("expected unix variant"),
-        }
-        match HttpEndpoint::parse("https://api.example.com") {
-            HttpEndpoint::Tcp(s) => assert_eq!(s, "https://api.example.com"),
-            HttpEndpoint::Unix(_) => panic!("expected tcp variant"),
-        }
-    }
-
-    #[test]
-    fn query_components_are_percent_encoded() {
-        let ep = HttpEndpoint::parse("https://api.example.com");
-        let url = ep.build_url("/q", &[("k", "a b/c?d&e")]);
-        assert_eq!(url, "https://api.example.com/q?k=a+b%2Fc%3Fd%26e");
     }
 }

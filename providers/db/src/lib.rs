@@ -18,7 +18,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use omnifs_sdk::prelude::Result;
-use omnifs_sdk::schemars::JsonSchema;
 use omnifs_sdk::serde::Deserialize;
 
 mod meta;
@@ -32,9 +31,8 @@ use sqlite_backend::SqliteBackend;
 
 /// Database backend discriminator. `Sqlite` is the only variant
 /// today; future backends slot in as additional arms.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(crate = "omnifs_sdk::serde", rename_all = "lowercase")]
-#[schemars(crate = "omnifs_sdk::schemars")]
 pub(crate) enum DatabaseType {
     Sqlite,
 }

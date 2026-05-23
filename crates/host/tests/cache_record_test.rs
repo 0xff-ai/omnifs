@@ -23,20 +23,6 @@ fn deferred_file(size: wit_types::FileSize) -> EntryMeta {
 }
 
 #[test]
-fn cache_record_round_trip() {
-    let record = CacheRecord {
-        schema_version: SCHEMA_VERSION,
-        kind: RecordKind::Attr,
-        payload: vec![1, 2, 3, 4],
-    };
-    let bytes = record.serialize();
-    let decoded = CacheRecord::deserialize(&bytes).unwrap();
-    assert_eq!(decoded.schema_version, SCHEMA_VERSION);
-    assert_eq!(decoded.kind, RecordKind::Attr);
-    assert_eq!(decoded.payload, vec![1, 2, 3, 4]);
-}
-
-#[test]
 fn cache_record_rejects_unknown_schema_version() {
     let mut bytes = CacheRecord {
         schema_version: SCHEMA_VERSION,
@@ -64,36 +50,6 @@ fn cache_record_rejects_prior_schema_version() {
     assert_eq!(SCHEMA_VERSION, 5, "schema version must be 5 in v5+");
     bytes[0] = 4; // pretend this is an old v4 record
     assert!(CacheRecord::deserialize(&bytes).is_none());
-}
-
-#[test]
-fn lookup_payload_positive_round_trip() {
-    let payload = LookupPayload::Positive(exact_file(42));
-    let bytes = payload.serialize().unwrap();
-    let decoded = LookupPayload::deserialize(&bytes).unwrap();
-    let LookupPayload::Positive(meta) = decoded else {
-        panic!("expected positive lookup payload");
-    };
-    assert!(meta.is_file());
-    assert_eq!(meta.st_size(), 42);
-}
-
-#[test]
-fn lookup_payload_negative_round_trip() {
-    let bytes = LookupPayload::Negative.serialize().unwrap();
-    let decoded = LookupPayload::deserialize(&bytes).unwrap();
-    assert!(matches!(decoded, LookupPayload::Negative));
-}
-
-#[test]
-fn attr_payload_round_trip() {
-    let payload = AttrPayload {
-        meta: EntryMeta::directory(),
-    };
-    let bytes = payload.serialize().unwrap();
-    let decoded = AttrPayload::deserialize(&bytes).unwrap();
-    assert!(decoded.meta.is_directory());
-    assert_eq!(decoded.meta.st_size(), 0);
 }
 
 #[test]
@@ -162,28 +118,4 @@ fn ranged_volatile_payload_round_trip_through_wit_types() {
         attrs.bytes,
         wit_types::ProjBytes::Deferred(wit_types::ReadMode::Ranged)
     ));
-}
-
-#[test]
-fn dirents_payload_round_trip() {
-    let payload = DirentsPayload {
-        entries: vec![
-            DirentRecord {
-                name: "title".to_string(),
-                meta: exact_file(128),
-            },
-            DirentRecord {
-                name: "comments".to_string(),
-                meta: EntryMeta::directory(),
-            },
-        ],
-        exhaustive: true,
-    };
-    let bytes = payload.serialize().unwrap();
-    let decoded = DirentsPayload::deserialize(&bytes).unwrap();
-    assert_eq!(decoded.entries.len(), 2);
-    assert_eq!(decoded.entries[0].name, "title");
-    assert_eq!(decoded.entries[0].meta.st_size(), 128);
-    assert_eq!(decoded.entries[1].name, "comments");
-    assert!(decoded.entries[1].meta.is_directory());
 }

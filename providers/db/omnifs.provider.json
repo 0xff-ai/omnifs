@@ -1,0 +1,53 @@
+{
+  "id": "db",
+  "displayName": "Database",
+  "provider": "omnifs_provider_db.wasm",
+  "defaultMount": "db",
+  "capabilities": [
+    {
+      "kind": "memoryMb",
+      "value": 128,
+      "why": "Leave room for SQLite schema inspection and bounded sample result encoding."
+    },
+    {
+      "kind": "preopenedPath",
+      "value": { "host": "/data", "guest": "/data", "mode": "ro" },
+      "why": "Expose the configured database file to the sandbox as a read-only WASI preopen."
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": ["database_type", "path"],
+    "additionalProperties": false,
+    "properties": {
+      "database_type": {
+        "type": "string",
+        "enum": ["sqlite"],
+        "default": "sqlite",
+        "description": "Database type"
+      },
+      "path": {
+        "type": "string",
+        "default": "/data/test.db",
+        "description": "SQLite database file",
+        "x-omnifs-init": {
+          "input": "host-file",
+          "guestDir": "/data",
+          "preopenMode": "ro",
+          "preopenStrategy": "replace"
+        }
+      },
+      "read_only": {
+        "type": "boolean",
+        "default": true,
+        "description": "Open the database read-only"
+      },
+      "sample_limit": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 20,
+        "description": "Maximum sample rows per table"
+      }
+    }
+  }
+}

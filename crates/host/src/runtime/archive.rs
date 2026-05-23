@@ -101,7 +101,9 @@ enum ArchiveError {
 impl From<ArchiveError> for wit_types::CalloutResult {
     fn from(error: ArchiveError) -> Self {
         match error {
-            ArchiveError::Extract(e) => callout_error(error_kind_for(&e), e.to_string(), false),
+            ArchiveError::Extract(e) => {
+                callout_error(wit_types::ErrorKind::from(&e), e.to_string(), false)
+            },
             ArchiveError::NotFound(msg) => callout_not_found(msg),
             ArchiveError::Internal(msg) | ArchiveError::JoinFailed(msg) => callout_internal(msg),
         }
@@ -243,14 +245,16 @@ fn hex_prefix(bytes: &[u8], len: usize) -> String {
     out
 }
 
-fn error_kind_for(error: &ExtractError) -> wit_types::ErrorKind {
-    match error {
-        ExtractError::UnsafePath(_)
-        | ExtractError::PathTooDeep(_)
-        | ExtractError::PathTooLong(_)
-        | ExtractError::UnsupportedEntryKind(_)
-        | ExtractError::Malformed(_) => wit_types::ErrorKind::InvalidInput,
-        _ => wit_types::ErrorKind::Internal,
+impl From<&ExtractError> for wit_types::ErrorKind {
+    fn from(error: &ExtractError) -> Self {
+        match error {
+            ExtractError::UnsafePath(_)
+            | ExtractError::PathTooDeep(_)
+            | ExtractError::PathTooLong(_)
+            | ExtractError::UnsupportedEntryKind(_)
+            | ExtractError::Malformed(_) => Self::InvalidInput,
+            _ => Self::Internal,
+        }
     }
 }
 
@@ -337,10 +341,10 @@ mod tests {
     fn insert_archive_blob(
         cache: &BlobCache,
         cache_key: &str,
-        blob_path: PathBuf,
+        blob_path: &Path,
         archive_bytes: &[u8],
     ) -> u64 {
-        std::fs::write(&blob_path, archive_bytes).unwrap();
+        std::fs::write(blob_path, archive_bytes).unwrap();
         let record = cache.store(
             cache_key.to_string(),
             BlobMetadata {
@@ -365,7 +369,7 @@ mod tests {
         let cache = Arc::new(BlobCache::new(blob_cache_dir.clone()));
 
         let blob_path = blob_cache_dir.join("pkg-1.0.crate");
-        let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", blob_path, &synthesize_targz());
+        let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", &blob_path, &synthesize_targz());
 
         let trees = Arc::new(TreeRefs::new());
         let extractor = Arc::new(
@@ -403,7 +407,7 @@ mod tests {
         let blob_id = insert_archive_blob(
             &cache,
             "multi-root.crate",
-            blob_cache_dir.join("multi-root.crate"),
+            &blob_cache_dir.join("multi-root.crate"),
             &synthesize_multi_root_targz(),
         );
 
@@ -461,7 +465,7 @@ mod tests {
         let blob_id = insert_archive_blob(
             &cache,
             "pkg-1.0.crate",
-            blob_cache_dir.join("pkg-1.0.crate"),
+            &blob_cache_dir.join("pkg-1.0.crate"),
             &synthesize_targz(),
         );
 
@@ -531,7 +535,7 @@ mod tests {
         let blob_id = insert_archive_blob(
             &cache,
             "pkg-1.0.crate",
-            blob_cache_dir.join("pkg-1.0.crate"),
+            &blob_cache_dir.join("pkg-1.0.crate"),
             &synthesize_targz(),
         );
 

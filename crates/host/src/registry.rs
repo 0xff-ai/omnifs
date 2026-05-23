@@ -3,11 +3,12 @@
 //! Scans the providers directory, instantiates providers via `ProviderRuntime`,
 //! and manages timer-driven refresh tasks.
 
-use crate::config::InstanceConfig;
+use crate::config::{EffectiveConfig, InstanceConfig};
 use crate::runtime::cloner::GitCloner;
+use crate::runtime::manifest::read_provider_metadata_from_wasm;
 use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::runtime::wasm;
-use crate::runtime::{ProviderRuntime, RuntimeBuildError};
+use crate::runtime::{ProviderRuntime, RuntimeBuildError, RuntimeDirs};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -29,12 +30,7 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    pub fn load(
-        config_dir: &Path,
-        plugin_dir: &Path,
-        cloner: &Arc<GitCloner>,
-        cache_dir: &Path,
-    ) -> Result<Self, RegistryError> {
+    pub fn load(dirs: RuntimeDirs<'_>, cloner: &Arc<GitCloner>) -> Result<Self, RegistryError> {
         let engine = wasm::component_engine(|_| {})
             .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
@@ -47,28 +43,13 @@ impl ProviderRegistry {
         );
 
         let mut instances = HashMap::new();
-        let mut root_mount = None;
+        let mut root_mount: Option<String> = None;
 
-        let providers_dir = config_dir.join("providers");
-        if !providers_dir.exists() {
-            let (timer_shutdown, _) = watch::channel(false);
-            return Ok(Self {
-                engine,
-                instances,
-                root_mount,
-                timer_shutdown,
-                timer_tasks: parking_lot::Mutex::new(Vec::new()),
-            });
-        }
-
-        for entry in std::fs::read_dir(&providers_dir).map_err(RegistryError::ScanFailed)? {
-            let entry = entry.map_err(RegistryError::ScanFailed)?;
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-
-            match Self::load_instance(&engine, &path, plugin_dir, cloner, cache_dir, &extractor) {
+        let config_paths = dirs
+            .mount_config_paths()
+            .map_err(RegistryError::ScanFailed)?;
+        for path in config_paths {
+            match Self::load_instance(&engine, &path, dirs, cloner, &extractor) {
                 Ok((mount, is_root, runtime)) => {
                     if instances.contains_key(&mount) {
                         warn!(
@@ -112,29 +93,35 @@ impl ProviderRegistry {
     fn load_instance(
         engine: &wasmtime::Engine,
         config_path: &Path,
-        plugin_dir: &Path,
+        dirs: RuntimeDirs<'_>,
         cloner: &Arc<GitCloner>,
-        cache_dir: &Path,
         extractor: &Arc<ArchiveExtractorComponent>,
     ) -> Result<(String, bool, ProviderRuntime), RegistryError> {
-        let config = InstanceConfig::from_file(config_path)
-            .map_err(|e| RegistryError::ConfigError(e.to_string()))?;
+        let config = crate::config::mount_load::load_mount_config(config_path)
+            .map_err(|error| RegistryError::ConfigError(error.to_string()))?;
 
-        let wasm_path = plugin_dir.join(&config.plugin);
+        let wasm_path = dirs.provider_path(&config.provider);
         if !wasm_path.exists() {
-            return Err(RegistryError::PluginNotFound(
+            return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
             ));
         }
-
-        let is_root = config.root_mount;
+        let effective_config =
+            effective_config_for_wasm(&wasm_path, config).map_err(|e| match e {
+                RuntimeBuildError::InvalidConfig(message) => RegistryError::ConfigError(format!(
+                    "config file {}: {message}",
+                    config_path.display()
+                )),
+                other => RegistryError::RuntimeError(other.to_string()),
+            })?;
+        let is_root = effective_config.root_mount;
+        let mount = effective_config.mount.clone();
         let runtime = ProviderRuntime::new(
             engine,
             &wasm_path,
-            &config,
+            &effective_config,
             cloner.clone(),
-            cache_dir,
-            &config.mount,
+            dirs,
             extractor.clone(),
         )
         .map_err(|e| match e {
@@ -145,7 +132,7 @@ impl ProviderRegistry {
             other => RegistryError::RuntimeError(other.to_string()),
         })?;
 
-        Ok((config.mount, is_root, runtime))
+        Ok((mount, is_root, runtime))
     }
 
     pub fn get(&self, mount: &str) -> Option<&Arc<ProviderRuntime>> {
@@ -187,13 +174,7 @@ impl ProviderRegistry {
         }
 
         for (mount, runtime) in &self.instances {
-            let interval_secs = match runtime.capabilities() {
-                Ok(caps) => caps.refresh_interval_secs,
-                Err(e) => {
-                    warn!(mount, error = %e, "failed to read provider capabilities");
-                    continue;
-                },
-            };
+            let interval_secs = runtime.requested_capabilities().refresh_interval_secs;
             if interval_secs == 0 {
                 continue;
             }
@@ -222,14 +203,30 @@ impl ProviderRegistry {
     }
 }
 
+fn effective_config_for_wasm(
+    wasm_path: &Path,
+    config: InstanceConfig,
+) -> Result<EffectiveConfig, RuntimeBuildError> {
+    let fallback_provider_id = wasm_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&config.mount)
+        .to_string();
+    let metadata =
+        read_provider_metadata_from_wasm(wasm_path).map_err(RuntimeBuildError::InvalidConfig)?;
+    config
+        .into_effective(fallback_provider_id, metadata.as_ref())
+        .map_err(|error| RuntimeBuildError::InvalidConfig(error.to_string()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("failed to scan providers directory: {0}")]
     ScanFailed(std::io::Error),
     #[error("config error: {0}")]
     ConfigError(String),
-    #[error("plugin not found: {0}")]
-    PluginNotFound(String),
+    #[error("provider not found: {0}")]
+    ProviderNotFound(String),
     #[error("runtime error: {0}")]
     RuntimeError(String),
 }
@@ -237,6 +234,7 @@ pub enum RegistryError {
 #[cfg(test)]
 mod tests {
     use super::{ProviderRegistry, RegistryError};
+    use crate::runtime::RuntimeDirs;
     use crate::runtime::cloner::GitCloner;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -254,27 +252,77 @@ mod tests {
             .join("test_provider.wasm")
     }
 
+    // Appends an `omnifs.provider-metadata.v1` custom section carrying the
+    // given JSON to an existing WASM binary.  Custom sections may appear
+    // anywhere in a WASM module, so appending is safe for wasmtime.
+    fn wasm_with_appended_metadata(wasm_bytes: &[u8], metadata_json: &[u8]) -> Vec<u8> {
+        fn encode_var_u32(mut value: usize, out: &mut Vec<u8>) {
+            loop {
+                let mut byte = u8::try_from(value & 0x7f).unwrap();
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80;
+                }
+                out.push(byte);
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+
+        let section_name = omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME.as_bytes();
+        let mut payload: Vec<u8> = Vec::new();
+        encode_var_u32(section_name.len(), &mut payload);
+        payload.extend_from_slice(section_name);
+        payload.extend_from_slice(metadata_json);
+
+        let mut out = wasm_bytes.to_vec();
+        out.push(0x00); // custom section id
+        encode_var_u32(payload.len(), &mut out);
+        out.extend_from_slice(&payload);
+        out
+    }
+
     #[test]
     fn load_fails_on_invalid_provider_config() {
+        // Appends a configSchema (additionalProperties: false) to the test
+        // provider WASM so that validate_instance_config rejects extra fields.
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
-        let plugin_dir = tempfile::tempdir().expect("temp plugin dir");
-        let providers_dir = config_dir.path().join("providers");
-        std::fs::create_dir_all(&providers_dir).expect("create providers dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let mounts_dir = config_dir.path().join("mounts");
+        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
 
-        let provider_wasm = test_provider_wasm_path();
+        let base_wasm = test_provider_wasm_path();
         assert!(
-            provider_wasm.exists(),
+            base_wasm.exists(),
             "test provider missing at {}. Run `just build-providers` first.",
-            provider_wasm.display()
+            base_wasm.display()
         );
-        std::fs::copy(&provider_wasm, plugin_dir.path().join("test_provider.wasm"))
-            .expect("copy test provider");
+
+        let metadata_json = serde_json::to_vec(&serde_json::json!({
+            "id": "test",
+            "displayName": "Test",
+            "provider": "test_provider.wasm",
+            "defaultMount": "test",
+            "configSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+            }
+        }))
+        .unwrap();
+        let patched = wasm_with_appended_metadata(
+            &std::fs::read(&base_wasm).expect("read test provider"),
+            &metadata_json,
+        );
+        std::fs::write(providers_dir.path().join("test_provider.wasm"), patched)
+            .expect("write patched provider");
 
         std::fs::write(
-            providers_dir.join("invalid.json"),
+            mounts_dir.join("invalid.json"),
             r#"{
-                "plugin": "test_provider.wasm",
+                "provider": "test_provider.wasm",
                 "mount": "test",
                 "config": {
                     "unexpected": true
@@ -285,10 +333,13 @@ mod tests {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         match ProviderRegistry::load(
-            config_dir.path(),
-            plugin_dir.path(),
+            RuntimeDirs::new(
+                cache_dir.path(),
+                config_dir.path(),
+                &mounts_dir,
+                providers_dir.path(),
+            ),
             &cloner,
-            cache_dir.path(),
         ) {
             Err(RegistryError::ConfigError(message)) => {
                 assert!(message.contains("failed validation"));

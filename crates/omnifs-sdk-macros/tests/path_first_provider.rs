@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::unused_async, clippy::cast_possible_truncation)]
+
 use omnifs_sdk::Cx;
 use omnifs_sdk::prelude::*;
 use std::cell::RefCell;
@@ -104,13 +106,26 @@ mod ambiguous_handlers {
     }
 }
 
+fn fixture_capabilities() -> RequestedCapabilities {
+    RequestedCapabilities {
+        domains: Vec::new(),
+        unix_sockets: Vec::new(),
+        auth_types: Vec::new(),
+        max_memory_mb: 16,
+        needs_git: false,
+        needs_websocket: false,
+        needs_streaming: false,
+        refresh_interval_secs: 0,
+    }
+}
+
 #[omnifs_sdk::provider(mounts(
     crate::root_handlers::RootHandlers,
     crate::hello_handlers::HelloHandlers,
     crate::extras_handlers::ExtrasHandlers,
 ))]
 impl TestProvider {
-    fn init(_config: Config) -> (State, ProviderInfo) {
+    fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         (
             State,
             ProviderInfo {
@@ -118,21 +133,141 @@ impl TestProvider {
                 version: "0.1.0".into(),
                 description: "test provider".into(),
             },
+            fixture_capabilities(),
         )
     }
+}
 
-    fn capabilities() -> RequestedCapabilities {
-        RequestedCapabilities {
-            domains: Vec::new(),
-            unix_sockets: Vec::new(),
-            auth_types: Vec::new(),
-            max_memory_mb: 16,
-            needs_git: false,
-            needs_websocket: false,
-            needs_streaming: false,
-            refresh_interval_secs: 0,
+mod static_auth_metadata_fixture {
+    use super::*;
+
+    #[omnifs_sdk::provider(
+        metadata = "tests/static-auth-provider.json",
+        mounts(crate::root_handlers::RootHandlers)
+    )]
+    impl StaticAuthMetadataProvider {
+        fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
+            (
+                State,
+                ProviderInfo {
+                    name: "static-auth".into(),
+                    version: "0.1.0".into(),
+                    description: "static auth provider".into(),
+                },
+                fixture_capabilities(),
+            )
         }
     }
+}
+
+mod oauth_loopback_metadata_fixture {
+    use super::*;
+
+    #[omnifs_sdk::provider(
+        metadata = "tests/oauth-loopback-provider.json",
+        mounts(crate::root_handlers::RootHandlers)
+    )]
+    impl OauthLoopbackMetadataProvider {
+        fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
+            (
+                State,
+                ProviderInfo {
+                    name: "oauth-loopback".into(),
+                    version: "0.1.0".into(),
+                    description: "oauth loopback provider".into(),
+                },
+                fixture_capabilities(),
+            )
+        }
+    }
+}
+
+mod file_auth_fixture {
+    use super::*;
+
+    #[omnifs_sdk::provider(
+        metadata = "tests/fixture-provider.json",
+        mounts(crate::root_handlers::RootHandlers)
+    )]
+    impl FileAuthProvider {
+        fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
+            (
+                State,
+                ProviderInfo {
+                    name: "file-auth".into(),
+                    version: "0.1.0".into(),
+                    description: "file auth provider".into(),
+                },
+                fixture_capabilities(),
+            )
+        }
+    }
+}
+
+fn auth_manifest_from_metadata(bytes: &[u8]) -> omnifs_mount_schema::AuthManifest {
+    omnifs_mount_schema::ProviderManifest::from_bytes(bytes)
+        .unwrap()
+        .wasm_auth_manifest()
+        .expect("provider metadata auth")
+}
+
+#[test]
+fn static_auth_provider_metadata_exposes_auth_manifest() {
+    let manifest = auth_manifest_from_metadata(
+        &static_auth_metadata_fixture::__OMNIFS_PROVIDER_METADATA_STATICAUTHMETADATAPROVIDER,
+    );
+
+    assert_eq!(manifest.schemes.len(), 1);
+    assert!(matches!(
+        &manifest.schemes[0],
+        omnifs_mount_schema::AuthScheme::StaticToken(scheme)
+            if scheme.key == "github" && scheme.inject_domains == ["api.github.com"]
+    ));
+}
+
+#[test]
+fn oauth_loopback_provider_metadata_exposes_auth_manifest() {
+    let manifest = auth_manifest_from_metadata(
+        &oauth_loopback_metadata_fixture::__OMNIFS_PROVIDER_METADATA_OAUTHLOOPBACKMETADATAPROVIDER,
+    );
+
+    assert_eq!(manifest.schemes.len(), 1);
+    assert!(matches!(
+        &manifest.schemes[0],
+        omnifs_mount_schema::AuthScheme::Oauth(scheme)
+            if scheme.key == "linear" && matches!(
+                scheme.flow,
+                omnifs_mount_schema::OAuthFlow::PkceLoopback(_)
+            )
+    ));
+}
+
+#[test]
+fn file_auth_provider_metadata_exposes_auth_manifest() {
+    let manifest = auth_manifest_from_metadata(
+        &file_auth_fixture::__OMNIFS_PROVIDER_METADATA_FILEAUTHPROVIDER,
+    );
+
+    assert_eq!(manifest.schemes.len(), 1);
+    assert!(matches!(
+        &manifest.schemes[0],
+        omnifs_mount_schema::AuthScheme::StaticToken(scheme)
+            if scheme.key == "fixture" && scheme.inject_domains == ["api.fixture.test"]
+    ));
+}
+
+#[test]
+fn provider_metadata_section_embeds_full_manifest() {
+    // Provider metadata is the sole auth source; host and CLI derive the wasm
+    // auth manifest from `ProviderManifest::wasm_auth_manifest()`.
+    let metadata_bytes = &file_auth_fixture::__OMNIFS_PROVIDER_METADATA_FILEAUTHPROVIDER;
+    let metadata = omnifs_mount_schema::ProviderManifest::from_bytes(metadata_bytes).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(metadata_bytes).unwrap();
+
+    assert_eq!(metadata.id, "fixture");
+    assert!(raw.get("auth").is_some(), "unified manifest carries auth");
+    assert!(raw.get("authManifest").is_none(), "legacy field is gone");
+    assert!(raw.get("devMount").is_none(), "devMount was removed");
 }
 
 #[tokio::test]
@@ -205,11 +340,11 @@ fn parse_unit(path: &str) -> Option<Box<dyn std::any::Any>> {
     }
 }
 
-fn call_dir<'a>(
-    _cx: &'a Cx<State>,
+fn call_dir(
+    _cx: &Cx<State>,
     _path: Box<dyn std::any::Any>,
     _intent: DirIntent,
-) -> omnifs_sdk::handler::BoxFuture<'a, Projection> {
+) -> omnifs_sdk::handler::BoxFuture<'_, Projection> {
     Box::pin(async { Ok(Projection::new()) })
 }
 
@@ -235,10 +370,10 @@ fn parse_path_only(path: &str) -> Option<Box<dyn std::any::Any>> {
     }
 }
 
-fn call_file_echo<'a>(
-    _cx: &'a Cx<State>,
+fn call_file_echo(
+    _cx: &Cx<State>,
     path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+) -> omnifs_sdk::handler::BoxFuture<'_, FileContent> {
     Box::pin(async move {
         let path = *path.downcast::<String>().expect("file path mismatch");
         Ok(FileContent::bytes(path.into_bytes()))
@@ -274,24 +409,24 @@ fn registry_accepts_rest_alongside_exact_and_prefix() {
     registry.validate().unwrap();
 }
 
-fn call_exact<'a>(
-    _cx: &'a Cx<State>,
+fn call_exact(
+    _cx: &Cx<State>,
     _path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+) -> omnifs_sdk::handler::BoxFuture<'_, FileContent> {
     Box::pin(async { Ok(FileContent::bytes(b"exact".to_vec())) })
 }
 
-fn call_prefix<'a>(
-    _cx: &'a Cx<State>,
+fn call_prefix(
+    _cx: &Cx<State>,
     _path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+) -> omnifs_sdk::handler::BoxFuture<'_, FileContent> {
     Box::pin(async { Ok(FileContent::bytes(b"prefix".to_vec())) })
 }
 
-fn call_rest<'a>(
-    _cx: &'a Cx<State>,
+fn call_rest(
+    _cx: &Cx<State>,
     _path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+) -> omnifs_sdk::handler::BoxFuture<'_, FileContent> {
     Box::pin(async { Ok(FileContent::bytes(b"rest".to_vec())) })
 }
 
@@ -401,17 +536,17 @@ impl omnifs_sdk::handler::Handler<State> for StateSubtree {
     }
 }
 
-fn call_bind_stub<'a>(
-    _cx: &'a Cx<State>,
+fn call_bind_stub(
+    _cx: &Cx<State>,
     _parsed: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
+) -> omnifs_sdk::handler::BoxFuture<'_, Box<dyn omnifs_sdk::handler::Handler<State>>> {
     Box::pin(async { Ok(Box::new(StubSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
 }
 
-fn call_state_bind_stub<'a>(
-    _cx: &'a Cx<State>,
+fn call_state_bind_stub(
+    _cx: &Cx<State>,
     _parsed: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, Box<dyn omnifs_sdk::handler::Handler<State>>> {
+) -> omnifs_sdk::handler::BoxFuture<'_, Box<dyn omnifs_sdk::handler::Handler<State>>> {
     Box::pin(async { Ok(Box::new(StateSubtree) as Box<dyn omnifs_sdk::handler::Handler<State>>) })
 }
 
@@ -520,7 +655,11 @@ async fn implicit_prefix_dir_lookup_resolves_without_explicit_handler() {
     let List::Entries(listing) = list else {
         panic!("expected entries, got subtree");
     };
-    let names: Vec<&str> = listing.entries().iter().map(|e| e.name()).collect();
+    let names: Vec<&str> = listing
+        .entries()
+        .iter()
+        .map(omnifs_sdk::browse::Entry::name)
+        .collect();
     assert_eq!(names, ["categories"]);
     assert!(listing.exhaustive());
 
@@ -593,10 +732,10 @@ fn parse_only_digits(path: &str) -> Option<Box<dyn std::any::Any>> {
     }
 }
 
-fn call_digits<'a>(
-    _cx: &'a Cx<State>,
+fn call_digits(
+    _cx: &Cx<State>,
     _path: Box<dyn std::any::Any>,
-) -> omnifs_sdk::handler::BoxFuture<'a, FileContent> {
+) -> omnifs_sdk::handler::BoxFuture<'_, FileContent> {
     Box::pin(async { Ok(FileContent::bytes(b"digits".to_vec())) })
 }
 

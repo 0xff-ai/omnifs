@@ -19,7 +19,8 @@ mkdir -p \
   "$(dirname "$OMNIFS_LOG_FILE")"
 
 if [ "$OMNIFS_MOUNT_POINT" = "/omnifs" ]; then
-  for cfg in "$OMNIFS_CONFIG_DIR"/providers/*.json; do
+  omnifs debug install-dev-mounts "$OMNIFS_CONFIG_DIR/mounts"
+  for cfg in "$OMNIFS_CONFIG_DIR"/mounts/*.json; do
     [ -e "$cfg" ] || continue
     name=$(jq -r '.mount // empty' "$cfg")
     [ -n "$name" ] && ln -sfn "/omnifs/$name" "/$name"
@@ -33,7 +34,7 @@ tee -a "$OMNIFS_LOG_FILE" < "$log_pipe" &
 exec >"$log_pipe" 2>&1
 rm -f "$log_pipe"
 
-exec omnifs mount \
+exec omnifs daemon mount \
   --mount-point "$OMNIFS_MOUNT_POINT" \
   --config-dir "$OMNIFS_CONFIG_DIR" \
   --cache-dir "$OMNIFS_CACHE_DIR"

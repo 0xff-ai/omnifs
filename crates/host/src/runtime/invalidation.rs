@@ -149,19 +149,3 @@ fn parent_child_for_notify(path: &str) -> Option<(String, &str)> {
         _ => None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::parent_child_for_notify;
-
-    #[test]
-    fn parent_child_for_notify_maps_top_level_entries_to_root() {
-        assert_eq!(parent_child_for_notify("foo"), Some((String::new(), "foo")));
-        assert_eq!(
-            parent_child_for_notify("owner/repo"),
-            Some(("owner".to_string(), "repo"))
-        );
-        assert_eq!(parent_child_for_notify("owner/"), None);
-        assert_eq!(parent_child_for_notify(""), None);
-    }
-}

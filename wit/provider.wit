@@ -263,6 +263,7 @@ interface types {
 
     record initialize-result {
         info: provider-info,
+        capabilities: requested-capabilities,
     }
 
     // --- Data types ---
@@ -429,8 +430,6 @@ interface lifecycle {
     /// changed later.
     initialize: func(config: list<u8>) -> provider-return;
     shutdown: func();
-    get-config-schema: func() -> option<string>;
-    capabilities: func() -> requested-capabilities;
 }
 
 interface browse {

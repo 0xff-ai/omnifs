@@ -28,12 +28,12 @@ pub mod tree_refs;
 pub(crate) mod wasm;
 pub(super) mod wit_conversions;
 
-use crate::auth::AuthManager;
+use crate::auth::{AuthManager, credential_store_for_config_dir};
 use crate::cache;
 use crate::cache::blobs::BlobCache;
 use crate::cache::{BatchRecord, CacheRecord, Key, RecordKind};
-use crate::config::InstanceConfig;
 use crate::config::schema;
+use crate::config::{EffectiveConfig, ProviderConfigJson};
 use crate::omnifs::provider::log::Host as LogHost;
 use crate::omnifs::provider::types::{self as wit_types, Host as TypesHost};
 use crate::runtime::activity::ActivityTable;
@@ -45,12 +45,16 @@ use crate::runtime::http_stack::HttpStack;
 use crate::runtime::inflight::InFlight;
 use crate::runtime::instance::ProviderInstance;
 use crate::runtime::invalidation::InvalidationState;
-use crate::runtime::manifest::{DeclaredHandler, read_declared_handlers_from_wasm};
+use crate::runtime::manifest::{
+    DeclaredHandler, read_auth_manifest_from_wasm, read_declared_handlers_from_wasm,
+};
 use crate::runtime::operation_ids::OperationIds;
 use crate::runtime::tools::archive::ArchiveExtractorComponent;
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
+use omnifs_model::MountName;
 use parking_lot::Mutex;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
@@ -66,12 +70,72 @@ const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// FUSE notifier handle (only available on Linux with FUSE support).
 pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
 
+/// Host directories needed to build one provider runtime.
+#[derive(Clone, Copy)]
+pub struct RuntimeDirs<'a> {
+    pub cache_dir: &'a Path,
+    pub config_dir: &'a Path,
+    pub mounts_dir: &'a Path,
+    pub providers_dir: &'a Path,
+}
+
+impl<'a> RuntimeDirs<'a> {
+    pub fn new(
+        cache_dir: &'a Path,
+        config_dir: &'a Path,
+        mounts_dir: &'a Path,
+        providers_dir: &'a Path,
+    ) -> Self {
+        Self {
+            cache_dir,
+            config_dir,
+            mounts_dir,
+            providers_dir,
+        }
+    }
+
+    pub fn mount_config_path(&self, name: &MountName) -> PathBuf {
+        self.mounts_dir.join(format!("{name}.json"))
+    }
+
+    pub fn mount_config_paths(&self) -> io::Result<Vec<PathBuf>> {
+        let read = match std::fs::read_dir(self.mounts_dir) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+
+        let mut files = read
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| Self::is_json_config_file(path))
+            .collect::<Vec<_>>();
+        files.sort();
+        Ok(files)
+    }
+
+    pub fn provider_path(&self, provider: &str) -> PathBuf {
+        let provider = PathBuf::from(provider);
+        if provider.is_absolute() {
+            provider
+        } else {
+            self.providers_dir.join(provider)
+        }
+    }
+
+    fn is_json_config_file(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    }
+}
+
 /// Runtime for one mounted WASM provider component.
 ///
 /// Manages the Wasmtime store, routes callouts, and handles async
 /// continuations with operation ID allocation.
 pub struct ProviderRuntime {
     instance: ProviderInstance,
+    initialize_result: wit_types::InitializeResult,
     operation_ids: OperationIds,
     http: Arc<HttpStack>,
     git: git::GitExecutor,
@@ -125,8 +189,39 @@ pub enum RuntimeBuildError {
     HttpClient(#[from] reqwest::Error),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+    #[error("cache dir {path}: {source}")]
+    CacheDir { path: PathBuf, source: io::Error },
     #[error("provider protocol: {0}")]
     ProviderProtocol(String),
+}
+
+#[derive(Debug)]
+struct ProviderCacheDirs {
+    blob: PathBuf,
+    archive_root: PathBuf,
+}
+
+impl ProviderCacheDirs {
+    fn prepare(cache_dir: &Path, mount_name: &str) -> std::result::Result<Self, RuntimeBuildError> {
+        let provider_root = cache_dir.join("providers").join(mount_name);
+        let dirs = Self {
+            blob: provider_root.join("blobs"),
+            archive_root: provider_root.join("archives"),
+        };
+        dirs.prepare_all()?;
+        Ok(dirs)
+    }
+
+    fn prepare_all(&self) -> std::result::Result<(), RuntimeBuildError> {
+        [&self.blob, &self.archive_root]
+            .into_iter()
+            .try_for_each(|path| {
+                std::fs::create_dir_all(path).map_err(|source| RuntimeBuildError::CacheDir {
+                    path: path.clone(),
+                    source,
+                })
+            })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,12 +269,12 @@ impl ProviderRuntime {
     pub fn new(
         engine: &wasmtime::Engine,
         wasm_path: &Path,
-        config: &InstanceConfig,
+        config: &EffectiveConfig,
         cloner: Arc<GitCloner>,
-        cache_dir: &Path,
-        mount_name: &str,
+        dirs: RuntimeDirs<'_>,
         extractor: Arc<ArchiveExtractorComponent>,
     ) -> std::result::Result<Self, RuntimeBuildError> {
+        let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
         let preopens = config
             .capabilities
@@ -188,48 +283,44 @@ impl ProviderRuntime {
             .unwrap_or(&[]);
         let instance = ProviderInstance::new(engine, wasm_path, config_bytes, preopens)?;
 
-        // Query the provider's declared capabilities and incorporate needs_git.
-        let provider_caps = instance.capabilities()?;
+        validate_instance_config(config.provider_config_schema(), config, mount_name)?;
 
-        let grants = CapabilityGrants::from_config(config, &provider_caps);
+        let init_return = instance.initialize().map_err(RuntimeBuildError::from)?;
+        let initialize_result = finish_initialize_return(init_return)?;
+        let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
-        // Validate instance config against the provider's declared schema.
-        let wit_schema = instance.config_schema()?;
-        validate_instance_config(wit_schema.as_deref(), config, mount_name)?;
+        let auth_manifest =
+            read_auth_manifest_from_wasm(wasm_path).map_err(RuntimeBuildError::InvalidConfig)?;
         let auth = if config.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
-            Arc::new(AuthManager::from_configs(&config.auth).map_err(|e| {
-                RuntimeBuildError::ProviderProtocol(format!("auth config error: {e}"))
-            })?)
+            let store = credential_store_for_config_dir(dirs.config_dir);
+            let refresh_lock_path = dirs.config_dir.join("credentials.lock");
+            Arc::new(
+                AuthManager::from_configs_manifest_store_with_store(
+                    &config.auth,
+                    auth_manifest.as_ref(),
+                    config.provider_id(),
+                    store,
+                    refresh_lock_path,
+                )
+                .map_err(|e| {
+                    RuntimeBuildError::ProviderProtocol(format!("auth config error: {e}"))
+                })?,
+            )
         };
 
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
 
-        let provider_cache_root = cache_dir.join("providers").join(mount_name);
-        let blob_cache_dir = provider_cache_root.join("blobs");
-        let archive_root = provider_cache_root.join("archives");
-        if let Err(e) = std::fs::create_dir_all(&blob_cache_dir) {
-            warn!(
-                dir = %blob_cache_dir.display(),
-                error = %e,
-                "failed to create blob cache dir; fetch-blob will fail until resolved"
-            );
-        }
-        if let Err(e) = std::fs::create_dir_all(&archive_root) {
-            warn!(
-                dir = %archive_root.display(),
-                error = %e,
-                "failed to create archive extract dir; open-archive will fail until resolved"
-            );
-        }
-        let blob_cache = Arc::new(BlobCache::new(blob_cache_dir));
+        let cache_dirs = ProviderCacheDirs::prepare(dirs.cache_dir, mount_name)?;
+        let provider_cache_root = dirs.cache_dir.join("providers").join(mount_name);
+        let blob_cache = Arc::new(BlobCache::new(cache_dirs.blob));
         let archive = Arc::new(ArchiveExecutor::new(
             blob_cache.clone(),
             trees.clone(),
-            archive_root,
+            cache_dirs.archive_root,
             extractor,
         ));
 
@@ -251,6 +342,7 @@ impl ProviderRuntime {
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
         Ok(Self {
             instance,
+            initialize_result,
             operation_ids: OperationIds::new(),
             http,
             git,
@@ -266,21 +358,18 @@ impl ProviderRuntime {
         })
     }
 
-    pub fn initialize(&self) -> Result<wit_types::OpResult> {
-        let ret = self.instance.initialize()?;
-        self.finish_provider_return(&Op::Initialize, ret)
-    }
-
     pub fn shutdown(&self) -> Result<()> {
         self.instance.shutdown()
     }
 
-    pub fn config_schema(&self) -> Result<Option<String>> {
-        self.instance.config_schema()
+    #[must_use]
+    pub fn requested_capabilities(&self) -> &wit_types::RequestedCapabilities {
+        &self.initialize_result.capabilities
     }
 
-    pub fn capabilities(&self) -> Result<wit_types::RequestedCapabilities> {
-        self.instance.capabilities()
+    #[must_use]
+    pub fn provider_info(&self) -> &wit_types::ProviderInfo {
+        &self.initialize_result.info
     }
 
     pub fn call_close_file(&self, handle: u64) -> Result<()> {
@@ -385,18 +474,37 @@ impl ProviderRuntime {
     }
 }
 
+fn finish_initialize_return(
+    ret: wit_types::ProviderReturn,
+) -> std::result::Result<wit_types::InitializeResult, RuntimeBuildError> {
+    Validator::returned(&Op::Initialize, &ret, |_| false).map_err(|message| {
+        RuntimeBuildError::ProviderProtocol(format!(
+            "initialize returned invalid result: {message}"
+        ))
+    })?;
+    match ret.result {
+        wit_types::OpResult::Initialize(result) => Ok(result),
+        other => Err(RuntimeBuildError::ProviderProtocol(format!(
+            "initialize returned unexpected result: {other:?}"
+        ))),
+    }
+}
+
 fn validate_instance_config(
-    schema_json: Option<&str>,
-    config: &InstanceConfig,
+    schema: Option<&serde_json::Value>,
+    config: &EffectiveConfig,
     mount_name: &str,
 ) -> std::result::Result<(), RuntimeBuildError> {
-    let Some(schema_json) = schema_json else {
+    let Some(schema) = schema else {
         return Ok(());
     };
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
-    let config_value = config.config_raw.as_ref().unwrap_or(&empty_config);
-    match schema::validate_config(schema_json, config_value) {
+    let config_value = config
+        .config_raw
+        .as_ref()
+        .map_or(&empty_config, ProviderConfigJson::as_value);
+    match schema::validate_config(schema, config_value) {
         Ok(()) => Ok(()),
         Err(schema::SchemaError::Validation(error)) => Err(RuntimeBuildError::InvalidConfig(
             format!("config for mount {mount_name} failed validation: {error}"),
@@ -414,6 +522,36 @@ fn absolute_mount_path(path: &str) -> String {
         path.to_string()
     } else {
         format!("/{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderCacheDirs, RuntimeBuildError};
+
+    #[test]
+    fn provider_cache_dirs_are_created_before_runtime_uses_them() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let cache_dirs = ProviderCacheDirs::prepare(dir.path(), "linear").unwrap();
+
+        assert!(cache_dirs.blob.is_dir());
+        assert!(cache_dirs.archive_root.is_dir());
+    }
+
+    #[test]
+    fn provider_cache_dir_creation_failure_stops_runtime_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = dir.path().join("providers").join("linear").join("blobs");
+        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+        std::fs::write(&blob_path, "not a directory").unwrap();
+
+        let error = ProviderCacheDirs::prepare(dir.path(), "linear").unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeBuildError::CacheDir { path, .. } if path == blob_path
+        ));
     }
 }
 

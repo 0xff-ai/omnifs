@@ -59,7 +59,7 @@ until the version moves.
 
 ```json
 {
-  "plugin": "omnifs_provider_db.wasm",
+  "provider": "omnifs_provider_db.wasm",
   "mount": "db",
   "capabilities": {
     "max_memory_mb": 128,

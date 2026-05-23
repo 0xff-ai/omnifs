@@ -201,7 +201,7 @@ mod subtree_handlers {
     crate::subtree_handlers::SubtreeHandlers,
 ))]
 impl TestProvider {
-    fn init(_config: Config) -> (State, ProviderInfo) {
+    fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         (
             State,
             ProviderInfo {
@@ -209,20 +209,17 @@ impl TestProvider {
                 version: "0.1.0".into(),
                 description: "A test provider with canned data".into(),
             },
+            RequestedCapabilities {
+                domains: vec!["httpbin.org".into()],
+                unix_sockets: Vec::new(),
+                auth_types: vec![],
+                max_memory_mb: 16,
+                needs_git: false,
+                needs_websocket: false,
+                needs_streaming: false,
+                refresh_interval_secs: 0,
+            },
         )
-    }
-
-    fn capabilities() -> RequestedCapabilities {
-        RequestedCapabilities {
-            domains: vec!["httpbin.org".into()],
-            unix_sockets: Vec::new(),
-            auth_types: vec![],
-            max_memory_mb: 16,
-            needs_git: false,
-            needs_websocket: false,
-            needs_streaming: false,
-            refresh_interval_secs: 0,
-        }
     }
 
     #[allow(clippy::unused_async)]

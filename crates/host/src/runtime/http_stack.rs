@@ -13,7 +13,7 @@
 //! without re-buffering. That is the only reqwest type any caller ever
 //! sees.
 
-use crate::auth::AuthManager;
+use crate::auth::{AuthManager, RefreshOutcome};
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
 use crate::runtime::capability::CapabilityChecker;
@@ -39,12 +39,21 @@ impl HttpStack {
         capability: Arc<CapabilityChecker>,
     ) -> Result<Self, reqwest::Error> {
         let https_client = base_client_builder().build()?;
-        Ok(Self {
+        Ok(Self::with_https_client(auth, capability, https_client))
+    }
+
+    #[doc(hidden)]
+    pub fn with_https_client(
+        auth: Arc<AuthManager>,
+        capability: Arc<CapabilityChecker>,
+        https_client: reqwest::Client,
+    ) -> Self {
+        Self {
             https_client,
             unix_clients: DashMap::new(),
             auth,
             capability,
-        })
+        }
     }
 
     /// Authorize, build, and dispatch a request. Returns the in-flight
@@ -67,14 +76,47 @@ impl HttpStack {
             return Err(callout_denied(e.to_string()));
         }
 
+        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
+            return Err(callout_denied(format!("unsupported HTTP method: {method}")));
+        };
+
+        let response = self
+            .send_once(reqwest_method.clone(), &parsed, url, headers, body, timeout)
+            .await?;
+        if !self
+            .auth
+            .should_refresh_for_response(url, response.status(), response.headers())
+        {
+            return Ok(response);
+        }
+
+        match self.auth.refresh_for_url(url).await {
+            Ok(RefreshOutcome::Refreshed) => {
+                self.send_once(reqwest_method, &parsed, url, headers, body, timeout)
+                    .await
+            },
+            Ok(RefreshOutcome::NoCredential | RefreshOutcome::NotApplicable) => Ok(response),
+            Err(error) => Err(callout_denied(format!("auth refresh failed: {error}"))),
+        }
+    }
+
+    async fn send_once(
+        &self,
+        reqwest_method: reqwest::Method,
+        parsed: &Url,
+        url: &str,
+        headers: &[wit_types::Header],
+        body: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, wit_types::CalloutResult> {
+        if let Err(error) = self.auth.prepare_for_url(url).await {
+            return Err(callout_denied(format!("auth prepare failed: {error}")));
+        }
+
         let auth_headers = self.auth.headers_for_url(url);
         if auth_headers.is_empty() && self.auth.requires_auth_for_url(url) {
             return Err(callout_denied(format!("no credentials for {url}")));
         }
-
-        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
-            return Err(callout_denied(format!("unsupported HTTP method: {method}")));
-        };
 
         let header_map = match build_header_map(
             auth_headers.iter().map(|(n, v)| (n.as_str(), v.as_str())),
@@ -84,7 +126,7 @@ impl HttpStack {
             Err(message) => return Err(callout_internal(message)),
         };
 
-        let (client, request_url) = self.client_and_url_for(&parsed)?;
+        let (client, request_url) = self.client_and_url_for(parsed)?;
         let mut request = client
             .request(reqwest_method, request_url)
             .headers(header_map)

@@ -678,7 +678,7 @@ this sequence so the risky logic is isolated before route churn.
 - [ ] Run `cargo test -p omnifs-provider-arxiv --all-targets`.
 - [ ] Run `cargo check -p omnifs-provider-arxiv --target wasm32-wasip2`.
 - [ ] Run `cargo clippy -p omnifs-provider-arxiv --all-targets -- -D warnings`.
-- [ ] Validate the container path with `just dev` and `omnifs status`.
+- [ ] Validate the container path with `omnifs dev` and `omnifs status`.
 - [ ] Validate `/arxiv/categories/{category}/recent` and
       `/arxiv/categories/{category}/submissions/{YYYYMMDD}` inside the
       container.

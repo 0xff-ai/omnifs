@@ -223,23 +223,25 @@ impl ArchiveExtractorComponent {
                 entries: stats.entries,
                 bytes_written: stats.bytes_written,
             }),
-            Ok(Err(err)) => Err(translate_wit_error(err)),
+            Ok(Err(err)) => Err(err.into()),
             Err(trap) => Err(ExtractError::SandboxTrapped(format!("{trap:#}"))),
         }
     }
 }
 
-fn translate_wit_error(err: wit_extract::ExtractError) -> ExtractError {
-    match err {
-        wit_extract::ExtractError::TooManyEntries => ExtractError::TooManyEntries,
-        wit_extract::ExtractError::FileTooLarge(p) => ExtractError::FileTooLarge(p),
-        wit_extract::ExtractError::TotalTooLarge => ExtractError::TotalTooLarge,
-        wit_extract::ExtractError::PathTooDeep(p) => ExtractError::PathTooDeep(p),
-        wit_extract::ExtractError::PathTooLong(p) => ExtractError::PathTooLong(p),
-        wit_extract::ExtractError::UnsafePath(p) => ExtractError::UnsafePath(p),
-        wit_extract::ExtractError::UnsupportedEntryKind(p) => ExtractError::UnsupportedEntryKind(p),
-        wit_extract::ExtractError::Malformed(m) => ExtractError::Malformed(m),
-        wit_extract::ExtractError::Io(m) => ExtractError::Io(m),
+impl From<wit_extract::ExtractError> for ExtractError {
+    fn from(err: wit_extract::ExtractError) -> Self {
+        match err {
+            wit_extract::ExtractError::TooManyEntries => Self::TooManyEntries,
+            wit_extract::ExtractError::FileTooLarge(p) => Self::FileTooLarge(p),
+            wit_extract::ExtractError::TotalTooLarge => Self::TotalTooLarge,
+            wit_extract::ExtractError::PathTooDeep(p) => Self::PathTooDeep(p),
+            wit_extract::ExtractError::PathTooLong(p) => Self::PathTooLong(p),
+            wit_extract::ExtractError::UnsafePath(p) => Self::UnsafePath(p),
+            wit_extract::ExtractError::UnsupportedEntryKind(p) => Self::UnsupportedEntryKind(p),
+            wit_extract::ExtractError::Malformed(m) => Self::Malformed(m),
+            wit_extract::ExtractError::Io(m) => Self::Io(m),
+        }
     }
 }
 

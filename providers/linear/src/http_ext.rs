@@ -1,8 +1,8 @@
 //! Linear GraphQL transport extension over `Cx`.
 //!
-//! Linear PATs go in `Authorization` *without* the `Bearer ` prefix; that
-//! is wired up at the host's `api-key-header` injector based on the mount
-//! config. Providers never see the credential.
+//! Linear PATs go in `Authorization` without the `Bearer ` prefix; the host
+//! static-token injector applies the mount manifest's header prefix. Providers
+//! never see the credential.
 
 use omnifs_sdk::Cx;
 use omnifs_sdk::error::ProviderError;

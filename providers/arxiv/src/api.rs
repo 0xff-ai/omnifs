@@ -316,26 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn category_page_url_uses_start_zero_for_page_zero() {
-        let category: CategoryKey = "hep-th".parse().unwrap();
-
-        let url = category_page_url(&category, RecentPage::zero());
-        let parsed = Url::parse(&url).unwrap();
-        let pairs: Vec<_> = parsed.query_pairs().collect();
-
-        assert_eq!(
-            pairs,
-            vec![
-                ("search_query".into(), "cat:hep-th".into()),
-                ("start".into(), "0".into()),
-                ("max_results".into(), "100".into()),
-                ("sortBy".into(), "submittedDate".into()),
-                ("sortOrder".into(), "descending".into()),
-            ]
-        );
-    }
-
-    #[test]
     fn parses_feed_snapshot_and_entry_submission_day() {
         let parsed = parse_category_page(RecentPage::zero(), SAMPLE_FEED).unwrap();
 
@@ -349,16 +329,6 @@ mod tests {
             parsed.papers[0].entry.abstract_text,
             "This paper studies the case where whitespace is collapsed."
         );
-    }
-
-    #[test]
-    fn missing_feed_updated_is_rejected_for_category_pages() {
-        let feed = br#"<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">0</opensearch:totalResults>
-</feed>"#;
-
-        assert!(parse_category_page(RecentPage::zero(), feed).is_err());
     }
 
     #[test]

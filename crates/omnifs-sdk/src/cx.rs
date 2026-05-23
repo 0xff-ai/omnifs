@@ -140,11 +140,6 @@ impl<S> Cx<S> {
         self.inner.delivered.borrow_mut().pop_front()
     }
 
-    #[cfg(test)]
-    pub(crate) fn take_yielded_callout(&self) -> Option<Callout> {
-        self.inner.yielded.borrow_mut().pop()
-    }
-
     pub fn state_handle(&self) -> Rc<RefCell<S>> {
         Rc::clone(&self.inner.state)
     }

@@ -1,0 +1,92 @@
+use super::config_generation::GeneratedMountConfig;
+use crate::auth_mount::AuthSelection;
+use anyhow::Context;
+use omnifs_host::config::ProviderConfigJson;
+use omnifs_model::MountName;
+use omnifs_mount_schema::{ProviderCapabilities, ProviderManifest};
+use serde::Serialize;
+use std::fs;
+use std::path::Path;
+
+pub(super) struct MountFile<'a> {
+    mount_name: &'a MountName,
+    manifest: &'a ProviderManifest,
+    auth: Option<&'a AuthSelection>,
+    scopes: &'a [String],
+    generated: GeneratedMountConfig,
+}
+
+impl<'a> MountFile<'a> {
+    pub(super) fn new(
+        mount_name: &'a MountName,
+        manifest: &'a ProviderManifest,
+        auth: Option<&'a AuthSelection>,
+        scopes: &'a [String],
+        generated: GeneratedMountConfig,
+    ) -> Self {
+        Self {
+            mount_name,
+            manifest,
+            auth,
+            scopes,
+            generated,
+        }
+    }
+
+    pub(super) fn write_to(self, path: &Path) -> anyhow::Result<()> {
+        let config = SerializableMountFile {
+            provider: &self.manifest.provider,
+            mount: self.mount_name.as_str(),
+            auth: self.auth.map(|auth| MountAuthEntry {
+                auth_type: &auth.auth_type,
+                scheme: auth.scheme.as_deref(),
+                account: auth.account.as_deref(),
+                scopes: self.scopes,
+            }),
+            capabilities: self.generated.capabilities,
+            config: self
+                .generated
+                .config
+                .as_ref()
+                .map(|value| ProviderConfigJson::from_value(value.clone())),
+        };
+
+        let pretty = serde_json::to_string_pretty(&config).context("serialize mount config")?;
+        fs::write(path, format!("{pretty}\n"))
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+}
+
+/// Typed mount config written to `~/.omnifs/config/mounts/<name>.json`.
+///
+/// Field declaration order is the serialization order; using a struct
+/// instead of an ad-hoc `serde_json::Map` removes the need for
+/// `serde_json`'s `preserve_order` feature.
+#[derive(Serialize)]
+struct SerializableMountFile<'a> {
+    provider: &'a str,
+    mount: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth: Option<MountAuthEntry<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<ProviderCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<ProviderConfigJson>,
+}
+
+#[derive(Serialize)]
+struct MountAuthEntry<'a> {
+    #[serde(rename = "type")]
+    auth_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheme: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<&'a str>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    scopes: &'a [String],
+}
+
+fn slice_is_empty(s: &&[String]) -> bool {
+    s.is_empty()
+}

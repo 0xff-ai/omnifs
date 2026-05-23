@@ -53,7 +53,7 @@ impl Default for BlobLimits {
 }
 
 impl BlobLimits {
-    pub fn from_config(config: &crate::config::InstanceConfig) -> Self {
+    pub fn from_config(config: &crate::config::EffectiveConfig) -> Self {
         let defaults = Self::default();
         let caps = config.capabilities.as_ref();
         Self {
@@ -146,7 +146,7 @@ impl BlobExecutor {
             let lock = self.cache.key_lock(&req.cache_key);
             let _guard = lock.lock().await;
             if let Some(record) = self.cache.lookup_by_key(&req.cache_key) {
-                blob_fetched_to_wit(&record)
+                wit_types::CalloutResult::BlobFetched(record.as_ref().into())
             } else {
                 // HttpStack::send already returns a fully-formed CalloutResult on
                 // pre-flight or network failure — pass it through unchanged.
@@ -162,7 +162,7 @@ impl BlobExecutor {
                     .await
                 {
                     Ok(response) => match self.materialize(&req.cache_key, response).await {
-                        Ok(record) => blob_fetched_to_wit(&record),
+                        Ok(record) => wit_types::CalloutResult::BlobFetched((&record).into()),
                         Err(e) => e.into(),
                     },
                     Err(early) => early,
@@ -262,22 +262,24 @@ impl BlobExecutor {
     }
 }
 
-fn blob_fetched_to_wit(record: &BlobRecord) -> wit_types::CalloutResult {
-    wit_types::CalloutResult::BlobFetched(wit_types::BlobFetched {
-        blob: record.id,
-        size: record.size,
-        content_type: record.content_type.clone(),
-        etag: record.etag.clone(),
-        status: record.status,
-        response_headers: record
-            .response_headers
-            .iter()
-            .map(|(name, value)| wit_types::Header {
-                name: name.clone(),
-                value: value.clone(),
-            })
-            .collect(),
-    })
+impl From<&BlobRecord> for wit_types::BlobFetched {
+    fn from(record: &BlobRecord) -> Self {
+        Self {
+            blob: record.id,
+            size: record.size,
+            content_type: record.content_type.clone(),
+            etag: record.etag.clone(),
+            status: record.status,
+            response_headers: record
+                .response_headers
+                .iter()
+                .map(|(name, value)| wit_types::Header {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Attach an io-context prefix to a `BlobError::Io` so the

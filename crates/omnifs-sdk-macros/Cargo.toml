@@ -17,6 +17,7 @@ syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Path-only (no `version` field) so `cargo publish` drops this dev-dep

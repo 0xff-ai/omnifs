@@ -12,10 +12,18 @@ keywords = ["omnifs", "wasm", "wit", "schema", "fuse"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true, features = ["indexmap2"] }
+jsonschema = { workspace = true }
+indexmap = { workspace = true }
 wasmparser = "0.246"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+
+[[bin]]
+name = "dump-provider"
+path = "src/bin/dump_provider.rs"
 
 [lints.rust]
 unsafe_code = "deny"

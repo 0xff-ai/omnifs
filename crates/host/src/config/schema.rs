@@ -8,13 +8,14 @@ pub enum SchemaError {
     Validation(String),
 }
 
-pub fn validate_config(schema_json: &str, config: &serde_json::Value) -> Result<(), SchemaError> {
-    let schema: serde_json::Value =
-        serde_json::from_str(schema_json).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
-    jsonschema::meta::validate(&schema).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
+pub fn validate_config(
+    schema: &serde_json::Value,
+    config: &serde_json::Value,
+) -> Result<(), SchemaError> {
+    jsonschema::meta::validate(schema).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
 
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let errors: Vec<String> = validator
         .iter_errors(config)
         .map(|error| format_validation_error(&error))

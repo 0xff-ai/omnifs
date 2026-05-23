@@ -27,42 +27,9 @@ impl<'cx, S> Builder<'cx, S> {
             }),
             |result| match result {
                 CalloutResult::GitRepoOpened(info) => Ok(info),
-                CalloutResult::CalloutError(e) => Err(ProviderError::from_callout_error(&e)),
+                CalloutResult::CalloutError(e) => Err(e.into()),
                 _ => Err(ProviderError::internal("unexpected callout result type")),
             },
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::cell::RefCell;
-    use core::future::Future;
-    use core::pin::Pin;
-    use core::task::{Context, Poll, Waker};
-    use std::rc::Rc;
-
-    #[test]
-    fn open_repo_yields_git_open_callout() {
-        let cx = Cx::new(7, Rc::new(RefCell::new(())));
-        let future = cx.git().open_repo(
-            "github.com/octocat/Hello-World",
-            "git@github.com:octocat/Hello-World.git",
-        );
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut future = Box::pin(future);
-
-        assert!(matches!(
-            Future::poll(Pin::as_mut(&mut future), &mut context),
-            Poll::Pending
-        ));
-
-        let Some(Callout::GitOpenRepo(request)) = cx.take_yielded_callout() else {
-            panic!("expected git-open-repo callout");
-        };
-        assert_eq!(request.cache_key, "github.com/octocat/Hello-World");
-        assert_eq!(request.clone_url, "git@github.com:octocat/Hello-World.git");
     }
 }

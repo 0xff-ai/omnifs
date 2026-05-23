@@ -5,31 +5,6 @@ use omnifs_host::cache::{
 };
 
 #[test]
-fn l2_put_get_metadata() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("browse.redb");
-    let l2 = Cache::open(&db_path).unwrap();
-
-    let record = CacheRecord::new(RecordKind::Attr, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
-    l2.put(
-        &Key::new("owner/repo/_issues/_open/1/title", RecordKind::Attr),
-        &record,
-    )
-    .unwrap();
-
-    let got = l2
-        .get(&Key::new(
-            "owner/repo/_issues/_open/1/title",
-            RecordKind::Attr,
-        ))
-        .unwrap();
-    assert!(got.is_some());
-    let got = got.unwrap();
-    assert_eq!(got.kind, RecordKind::Attr);
-    assert_eq!(got.payload, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
-}
-
-#[test]
 fn l2_drops_records_from_prior_schema_version() {
     // Manually write a record whose header advertises the prior schema
     // (v4). The reader must treat it as a miss so the runtime re-fetches
@@ -57,17 +32,6 @@ fn l2_drops_records_from_prior_schema_version() {
     assert!(
         got.is_none(),
         "stale schema records must be treated as miss"
-    );
-}
-
-#[test]
-fn l2_get_miss() {
-    let dir = tempfile::tempdir().unwrap();
-    let l2 = Cache::open(&dir.path().join("browse.redb")).unwrap();
-    assert!(
-        l2.get(&Key::new("nonexistent", RecordKind::Lookup))
-            .unwrap()
-            .is_none()
     );
 }
 

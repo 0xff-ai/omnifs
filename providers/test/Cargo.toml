@@ -10,14 +10,6 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
 serde = { workspace = true }
-
-[package.metadata.component]
-package = "omnifs:provider"
-
-[package.metadata.component.target]
-world = "provider"
-path = "../../wit"
-
 [lints.rust]
 unsafe_code = "allow"
 

@@ -24,14 +24,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
-
-[package.metadata.component]
-package = "omnifs:provider"
-
-[package.metadata.component.target]
-world = "provider"
-path = "../../wit"
-
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

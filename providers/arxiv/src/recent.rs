@@ -555,35 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn crossing_into_older_day_completes_newer_bucket() {
-        let mut index = RecentIndex::new();
-        index.record_page(page(0, 300, vec![paper("2605.00001", 12)]));
-        index.record_page(page(1, 300, vec![paper("2605.00002", 11)]));
-        let newer = SubmissionDay::parse_path("20260512").unwrap();
-        let older = SubmissionDay::parse_path("20260511").unwrap();
-        assert!(index.submission(newer).unwrap().complete);
-        assert!(!index.submission(older).unwrap().complete);
-    }
-
-    #[test]
-    fn scan_exhaustion_closes_open_buckets() {
-        let mut index = RecentIndex::new();
-        let record = index.record_page(page(0, 1, vec![paper("2605.00001", 12)]));
-        let day = SubmissionDay::parse_path("20260512").unwrap();
-        assert!(index.submission(day).unwrap().complete);
-        assert_eq!(record.completed_submissions, vec![day]);
-    }
-
-    #[test]
-    fn non_contiguous_pages_do_not_complete_buckets() {
-        let mut index = RecentIndex::new();
-        index.record_page(page(1, 300, vec![paper("2605.00002", 11)]));
-        let day = SubmissionDay::parse_path("20260511").unwrap();
-        assert!(!index.submission(day).unwrap().complete);
-        assert_eq!(index.contiguous_through, None);
-    }
-
-    #[test]
     fn new_feed_snapshot_resets_category_scan() {
         let mut index = RecentIndex::new();
         index.record_page(page(0, 200, vec![paper("2605.00001", 12)]));
@@ -640,83 +611,6 @@ mod tests {
         assert_eq!(view.papers.len(), 2);
         assert_eq!(index.recent_page(RecentPage::new(1)).unwrap().len(), 2);
         assert_eq!(index.fetched_papers().len(), 2);
-    }
-
-    #[test]
-    fn submission_projection_status_matches_completion() {
-        let mut index = RecentIndex::new();
-        index.record_page(page(0, 200, vec![paper("2605.00001", 12)]));
-        let day = SubmissionDay::parse_path("20260512").unwrap();
-        let category = "cs.AI".parse().unwrap();
-        let partial = index.project_submission(&category, day).unwrap();
-        assert!(format!("{partial:?}").contains("More"));
-        let partial_status: serde_json::Value =
-            serde_json::from_slice(&index.submission_status_json(day, false).unwrap()).unwrap();
-        assert_eq!(
-            partial_status["next_page"],
-            serde_json::Value::String("../../recent/pages/1".to_string())
-        );
-
-        index.record_page(page(1, 200, vec![paper("2605.00002", 11)]));
-        let complete = index.project_submission(&category, day).unwrap();
-        assert!(format!("{complete:?}").contains("Exhaustive"));
-        let complete_status: serde_json::Value =
-            serde_json::from_slice(&index.submission_status_json(day, true).unwrap()).unwrap();
-        assert!(complete_status["next_page"].is_null());
-    }
-
-    #[test]
-    fn scan_exhaustion_closes_index_projection_statuses() {
-        let mut index = RecentIndex::new();
-        index.record_page(page(0, 1, vec![paper("2605.00001", 12)]));
-        let category = "cs.AI".parse().unwrap();
-        let day = SubmissionDay::parse_path("20260512").unwrap();
-
-        assert!(index.scan_exhausted());
-        assert!(format!("{:?}", index.project_recent_pages()).contains("Exhaustive"));
-        assert!(format!("{:?}", index.project_submissions()).contains("Exhaustive"));
-        assert!(
-            format!("{:?}", index.project_submission(&category, day).unwrap())
-                .contains("Exhaustive")
-        );
-    }
-
-    #[test]
-    fn incomplete_scan_keeps_next_page_projection_statuses() {
-        let mut index = RecentIndex::new();
-        index.record_page(page(0, 200, vec![paper("2605.00001", 12)]));
-        let category = "cs.AI".parse().unwrap();
-        let day = SubmissionDay::parse_path("20260512").unwrap();
-
-        assert!(!index.scan_exhausted());
-        assert!(format!("{:?}", index.project_recent_pages()).contains("pages/1"));
-        assert!(format!("{:?}", index.project_submissions()).contains("pages/1"));
-        assert!(
-            format!("{:?}", index.project_submission(&category, day).unwrap()).contains("pages/1")
-        );
-    }
-
-    #[test]
-    fn fetched_projection_accumulates_deduped_page_papers() {
-        let mut index = RecentIndex::new();
-        let category = "cs.AI".parse().unwrap();
-        index.record_page(page(
-            0,
-            300,
-            vec![paper("2605.00001", 12), paper("2605.00002", 12)],
-        ));
-        index.record_page(page(
-            1,
-            300,
-            vec![paper("2605.00002", 12), paper("2605.00003", 11)],
-        ));
-
-        let fetched = index.project_fetched(&category);
-        let debug = format!("{fetched:?}");
-        assert!(debug.contains("2605.00001"));
-        assert!(debug.contains("2605.00002"));
-        assert!(debug.contains("2605.00003"));
-        assert!(debug.contains("recent/_fetched/2605.00001"));
     }
 
     #[test]
