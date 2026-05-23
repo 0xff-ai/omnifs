@@ -82,10 +82,6 @@ impl Session {
         &self.mounts_dir
     }
 
-    fn mount_config_path(&self, name: &omnifs_model::MountName) -> PathBuf {
-        self.mounts_dir.join(format!("{name}.json"))
-    }
-
     pub(crate) fn credentials_file(&self) -> &Path {
         &self.credentials_file
     }
@@ -139,7 +135,7 @@ impl SessionMaterializer<'_> {
             Self::patch_auth_json(auth, &effective)?;
         }
 
-        let out = self.session.mount_config_path(&cfg.name);
+        let out = crate::paths::mount_config_path_for(self.session.mounts_dir(), &cfg.name);
         let pretty =
             serde_json::to_string_pretty(&value).context("serialize materialized mount config")?;
         fs::write(&out, format!("{pretty}\n"))

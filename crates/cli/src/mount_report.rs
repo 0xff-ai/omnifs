@@ -50,7 +50,7 @@ impl ProviderCatalog {
     }
 
     pub(crate) fn mount_config_path(&self, name: &MountName) -> PathBuf {
-        self.mounts_dir().join(format!("{name}.json"))
+        crate::paths::mount_config_path_for(self.mounts_dir(), name)
     }
 
     pub(crate) fn closest_mount_name(&self, target: &str) -> anyhow::Result<Option<String>> {

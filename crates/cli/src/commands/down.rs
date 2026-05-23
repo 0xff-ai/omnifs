@@ -31,7 +31,7 @@ impl DownArgs {
             .or(config.container_name)
             .unwrap_or_else(|| session::CONTAINER_NAME.to_string());
         let container_name = ContainerName::new(container_name)?;
-        let remove_result = match Runtime::connect() {
+        let remove_result = match Runtime::connect_docker() {
             Ok(runtime) => runtime.remove_existing(&container_name).await,
             Err(error) => Err(error),
         };

@@ -49,7 +49,7 @@ impl<'a> ProviderSelection<'a> {
 
         // Explicit --as collisions always error, regardless of --yes.
         if explicit_name.is_some() {
-            if self.mount_config_path(&proposed_name).exists() {
+            if crate::paths::mount_config_path_for(self.mounts_dir, &proposed_name).exists() {
                 anyhow::bail!(
                     "mount `{proposed}` already exists; choose a different name with --as"
                 );
@@ -87,7 +87,7 @@ impl<'a> ProviderSelection<'a> {
         interactive: bool,
         yes: bool,
     ) -> anyhow::Result<MountName> {
-        if !self.mount_config_path(&proposed).exists() {
+        if !crate::paths::mount_config_path_for(self.mounts_dir, &proposed).exists() {
             return Ok(proposed);
         }
         let suggestion = self.next_available(&proposed)?;
@@ -110,11 +110,9 @@ impl<'a> ProviderSelection<'a> {
     fn next_available(&self, base: &MountName) -> anyhow::Result<MountName> {
         (2..1000)
             .filter_map(|n| MountName::new(format!("{base}-{n}")).ok())
-            .find(|candidate| !self.mount_config_path(candidate).exists())
+            .find(|candidate| {
+                !crate::paths::mount_config_path_for(self.mounts_dir, candidate).exists()
+            })
             .ok_or_else(|| anyhow!("could not find an available mount name derived from `{base}`"))
-    }
-
-    fn mount_config_path(&self, name: &MountName) -> std::path::PathBuf {
-        self.mounts_dir.join(format!("{name}.json"))
     }
 }

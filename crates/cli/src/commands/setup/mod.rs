@@ -24,6 +24,7 @@ use crate::commands::{init, up};
 use crate::error::WithHint;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
+use crate::runtime_target::RuntimeTarget;
 use crate::session::HOST_FUSE_MOUNT;
 
 use self::host_os::HostOs;
@@ -56,12 +57,12 @@ impl SetupArgs {
             anyhow::bail!("omnifs does not yet run on this platform");
         }
 
-        let runtime = connect_runtime(os).await?;
-
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
+
+        let runtime = connect_runtime(os, ctx.runtime()).await?;
 
         runtime
             .pull_image_with_progress(ctx.runtime().image().as_str())
@@ -125,8 +126,8 @@ fn print_explainer(os: HostOs) {
     anstream::println!();
 }
 
-async fn connect_runtime(os: HostOs) -> anyhow::Result<Runtime> {
-    let runtime = Runtime::connect().context("connect to Docker daemon")?;
+async fn connect_runtime(os: HostOs, target: &RuntimeTarget) -> anyhow::Result<Runtime> {
+    let runtime = Runtime::connect_for(target).context("connect to Docker daemon")?;
     runtime
         .ping()
         .await

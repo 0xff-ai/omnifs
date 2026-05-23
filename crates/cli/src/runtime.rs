@@ -16,7 +16,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
-use crate::runtime_selection::RuntimeSelection;
+use crate::runtime_target::RuntimeTarget;
 use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, MountConfig, Session};
 
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/mounts";
@@ -38,28 +38,30 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub(crate) fn connect() -> Result<Self> {
-        let selection =
-            RuntimeSelection::new(ContainerName::new(CONTAINER_NAME)?, ImageRef::new(IMAGE)?);
-        Self::connect_for(&selection)
+    /// Connect to the Docker daemon without binding container/image targets.
+    /// Teardown paths pass an explicit [`ContainerName`] to [`Self::remove_existing`].
+    pub(crate) fn connect_docker() -> Result<Self> {
+        Ok(Self {
+            docker: connect_docker_client()?,
+            container_name: ContainerName::new(CONTAINER_NAME)?,
+            image: ImageRef::new(IMAGE)?,
+        })
     }
 
-    pub(crate) fn connect_for(selection: &RuntimeSelection) -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("connect to Docker daemon (is it running?)")?;
+    pub(crate) fn connect_for(target: &RuntimeTarget) -> Result<Self> {
         Ok(Self {
-            docker,
-            container_name: selection.container_name().clone(),
-            image: selection.image().clone(),
+            docker: connect_docker_client()?,
+            container_name: target.container_name().clone(),
+            image: target.image().clone(),
         })
     }
 
     pub(crate) async fn connect_ready(
-        selection: &RuntimeSelection,
+        target: &RuntimeTarget,
         command: &'static str,
     ) -> Result<Self> {
         anstream::println!("Connecting to Docker");
-        let runtime = Self::connect_for(selection)?;
+        let runtime = Self::connect_for(target)?;
         runtime
             .ping()
             .await
@@ -455,4 +457,8 @@ impl Runtime {
             ..Default::default()
         }
     }
+}
+
+fn connect_docker_client() -> Result<Docker> {
+    Docker::connect_with_local_defaults().context("connect to Docker daemon (is it running?)")
 }

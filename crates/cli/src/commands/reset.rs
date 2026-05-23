@@ -162,7 +162,7 @@ fn print_preview(targets: &[MountTarget], keep_credentials: bool, container_name
 }
 
 async fn teardown_container(container_name: &str) {
-    match Runtime::connect() {
+    match Runtime::connect_docker() {
         Ok(runtime) => match ContainerName::new(container_name.to_owned()) {
             Ok(container_name) => match runtime.remove_existing(&container_name).await {
                 Ok(()) => anstream::println!("✓ Container `{container_name}` removed"),

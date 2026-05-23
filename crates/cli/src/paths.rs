@@ -117,16 +117,24 @@ impl Paths {
     }
 
     pub fn mount_config_path(&self, name: &MountName) -> PathBuf {
-        self.mounts_dir.join(format!("{name}.json"))
+        mount_config_path_for(&self.mounts_dir, name)
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {
-        let provider = PathBuf::from(provider);
-        if provider.is_absolute() {
-            provider
-        } else {
-            self.providers_dir.join(provider)
-        }
+        provider_path_for(&self.providers_dir, provider)
+    }
+}
+
+pub(crate) fn mount_config_path_for(mounts_dir: &Path, name: &MountName) -> PathBuf {
+    mounts_dir.join(format!("{name}.json"))
+}
+
+pub(crate) fn provider_path_for(providers_dir: &Path, provider: &str) -> PathBuf {
+    let provider = PathBuf::from(provider);
+    if provider.is_absolute() {
+        provider
+    } else {
+        providers_dir.join(provider)
     }
 }
 

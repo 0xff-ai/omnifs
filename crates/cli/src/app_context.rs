@@ -1,13 +1,13 @@
 use crate::catalog::ProviderCatalog;
 use crate::config::Config;
 use crate::paths::{PathOverrides, Paths};
-use crate::runtime_selection::RuntimeSelection;
+use crate::runtime_target::RuntimeTarget;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppContext {
     paths: Paths,
     config: Config,
-    runtime: RuntimeSelection,
+    runtime: RuntimeTarget,
     catalog: ProviderCatalog,
 }
 
@@ -22,7 +22,7 @@ impl AppContext {
         image: Option<String>,
     ) -> anyhow::Result<Self> {
         let (paths, config) = Paths::resolve_with_config(path_overrides)?;
-        let runtime = RuntimeSelection::resolve(container_name, image, &config)?;
+        let runtime = RuntimeTarget::resolve(container_name, image, &config)?;
         let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
         Ok(Self {
             paths,
@@ -40,7 +40,7 @@ impl AppContext {
         &self.config
     }
 
-    pub(crate) fn runtime(&self) -> &RuntimeSelection {
+    pub(crate) fn runtime(&self) -> &RuntimeTarget {
         &self.runtime
     }
 

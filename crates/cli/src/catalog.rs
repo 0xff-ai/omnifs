@@ -82,23 +82,14 @@ impl ProviderCatalog {
     }
 
     pub(crate) fn provider_path(&self, config: &EffectiveConfig) -> PathBuf {
-        self.provider_path_for(&config.provider)
-    }
-
-    fn provider_path_for(&self, provider: &str) -> PathBuf {
-        let provider = PathBuf::from(provider);
-        if provider.is_absolute() {
-            provider
-        } else {
-            self.providers_dir.join(provider)
-        }
+        crate::paths::provider_path_for(&self.providers_dir, &config.provider)
     }
 
     /// Apply provider metadata to `config`, preferring metadata embedded in the
     /// provider file on disk and falling back to the built-in catalog when the
     /// provider is absent or carries no metadata section.
     pub(crate) fn apply_metadata(&self, config: &mut InstanceConfig) -> anyhow::Result<bool> {
-        let provider = self.provider_path_for(&config.provider);
+        let provider = crate::paths::provider_path_for(&self.providers_dir, &config.provider);
         let bytes = match fs::read(&provider) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

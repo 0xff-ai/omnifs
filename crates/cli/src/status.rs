@@ -96,7 +96,6 @@ pub(crate) fn resolve_paths(
             config_dir: Some(state.config_dir),
             cache_dir: Some(state.cache_dir),
         })
-        .or_else(proc_mounts::infer_running_mount_args)
         .unwrap_or_default();
     let config_dir_override = config_dir
         .clone()
@@ -134,13 +133,13 @@ pub(crate) fn collect_status(
     mount_point: PathBuf,
 ) -> anyhow::Result<StatusReport> {
     let store = crate::session::open_store(&paths.credentials_file, true);
-    let running_args = crate::runtime_state::RuntimeState::load(&paths.config_dir)
-        .map(|state| proc_mounts::RunningMountArgs {
+    let running_args = crate::runtime_state::RuntimeState::load(&paths.config_dir).map(|state| {
+        proc_mounts::RunningMountArgs {
             mount_point: Some(state.mount_point),
             config_dir: Some(state.config_dir),
             cache_dir: Some(state.cache_dir),
-        })
-        .or_else(proc_mounts::infer_running_mount_args);
+        }
+    });
     let mount = proc_mounts::find_mount(&mount_point)?;
     let runtime = RuntimeStatus::from_mount(running_args, mount.as_ref());
     Ok(StatusReport {
@@ -335,7 +334,7 @@ pub(crate) struct StatusJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum RuntimeJson {
-    /// Daemon detected via `/proc/{pid}/cmdline` (only inside the container).
+    /// Daemon detected via persisted `runtime_state.json`.
     Running {
         mount_point: std::path::PathBuf,
         config_dir: std::path::PathBuf,
