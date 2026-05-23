@@ -4,7 +4,7 @@ use omnifs_creds::CredentialStore;
 use omnifs_model::MountName;
 use std::path::{Path, PathBuf};
 
-use crate::auth_readiness::AuthReadiness;
+use crate::auth::AuthReadiness;
 use crate::catalog::{LoadedMount, ProviderCatalog, ProviderTemplate};
 use std::collections::BTreeMap;
 

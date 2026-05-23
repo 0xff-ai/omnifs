@@ -4,9 +4,7 @@
 //! as well as provider introspection utilities.
 
 mod app_context;
-mod auth_manifest_view;
-mod auth_mount;
-mod auth_readiness;
+mod auth;
 mod builtin_catalog;
 mod capability;
 mod catalog;

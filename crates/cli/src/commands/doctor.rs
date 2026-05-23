@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::app_context::AppContext;
-use crate::auth_readiness::{AuthProbeSeverity, AuthProbeSummary};
+use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
 use crate::status::UserMountStatus;

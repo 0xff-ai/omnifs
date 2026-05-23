@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 use crate::app_context::AppContext;
-use crate::auth_mount::AuthSelection;
+use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::paths::PathOverrides;
@@ -275,7 +275,7 @@ async fn run_static_token_init(
         .auth
         .as_ref()
         .map(omnifs_mount_schema::ProviderAuthManifest::wasm_auth_manifest);
-    let scheme_key = crate::auth_manifest_view::AuthManifestView::new(auth_manifest.as_ref())
+    let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
         .static_token_scheme_key(auth.scheme.as_deref(), None)?;
     let target =
         CredentialTarget::for_static_import(&manifest.id, &scheme_key, auth.account.as_deref())?;
@@ -292,7 +292,7 @@ async fn run_static_token_init(
 mod tests {
     use super::config_generation::{GeneratedMountConfig, MountConfigGenerator};
     use super::{AuthImportDecision, MountFile};
-    use crate::auth_mount::AuthSelection;
+    use crate::auth::AuthSelection;
     use crate::capability::{capability_label, capability_value};
     use crate::catalog::{ProviderCatalog, ProviderSource};
     use omnifs_model::MountName;

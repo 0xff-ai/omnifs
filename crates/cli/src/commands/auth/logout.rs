@@ -5,7 +5,7 @@ use omnifs_creds::CredentialStore;
 use omnifs_host::config::AuthConfig;
 
 use super::shared::{load_mount, oauth_request, primary_auth, read_auth_manifest};
-use crate::auth_manifest_view::AuthManifestView;
+use crate::auth::AuthManifestView;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;

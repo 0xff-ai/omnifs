@@ -1,5 +1,5 @@
 use super::detect;
-use crate::auth_mount::AuthSelection;
+use crate::auth::AuthSelection;
 use omnifs_mount_schema::AuthManifest;
 use secrecy::SecretString;
 

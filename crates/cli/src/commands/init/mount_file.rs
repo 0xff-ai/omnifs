@@ -1,5 +1,5 @@
 use super::config_generation::GeneratedMountConfig;
-use crate::auth_mount::AuthSelection;
+use crate::auth::AuthSelection;
 use anyhow::Context;
 use omnifs_host::config::ProviderConfigJson;
 use omnifs_model::MountName;

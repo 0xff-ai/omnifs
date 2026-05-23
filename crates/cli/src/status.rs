@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::{catalog::ProviderCatalog, paths::Paths, proc_mounts};
 
-pub(crate) use crate::auth_readiness::AuthReadiness;
-use crate::auth_readiness::AuthTerminalKind;
+pub(crate) use crate::auth::AuthReadiness;
+use crate::auth::AuthTerminalKind;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};
 
 /// Canonical default for the FUSE mount point inside the container.

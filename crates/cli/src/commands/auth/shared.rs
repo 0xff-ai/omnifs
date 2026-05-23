@@ -4,7 +4,7 @@ use omnifs_auth::OAuthRequest;
 use omnifs_host::config::{AuthConfig, EffectiveConfig};
 use omnifs_mount_schema::AuthManifest;
 
-use crate::auth_mount::MountAuth;
+use crate::auth::MountAuth;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 

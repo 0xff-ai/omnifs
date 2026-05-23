@@ -8,7 +8,7 @@ use secrecy::SecretString;
 use time::OffsetDateTime;
 
 use super::shared::{format_rfc3339, load_mount, oauth_request, primary_auth, read_auth_manifest};
-use crate::auth_manifest_view::AuthManifestView;
+use crate::auth::AuthManifestView;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;

@@ -8,7 +8,7 @@ use omnifs_host::config::AuthConfig;
 use super::shared::{
     MountConfig, format_rfc3339, format_scopes, load_all_mounts, primary_auth, read_auth_manifest,
 };
-use crate::auth_manifest_view::AuthManifestView;
+use crate::auth::AuthManifestView;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;

@@ -8,7 +8,7 @@ use omnifs_mount_schema::{
     AuthInject, AuthManifest, ManifestAuthScheme, ManifestStaticTokenScheme, ProviderManifest,
 };
 
-use crate::auth_manifest_view::AuthManifestView;
+use super::manifest_view::AuthManifestView;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use omnifs_model::MountName;
