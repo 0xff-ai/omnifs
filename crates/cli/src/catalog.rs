@@ -85,54 +85,42 @@ impl ProviderCatalog {
         crate::paths::provider_path_for(&self.providers_dir, &config.provider)
     }
 
+    /// Read provider metadata from the on-disk WASM file when it exists and
+    /// carries an embedded metadata section.
+    ///
+    /// Returns `Ok(None)` when the file is missing or the WASM has no metadata
+    /// section; callers fall back to the built-in catalog.
+    fn load_disk_provider_manifest(
+        &self,
+        provider: &str,
+    ) -> anyhow::Result<Option<(PathBuf, ProviderManifest)>> {
+        let path = crate::paths::provider_path_for(&self.providers_dir, provider);
+        read_provider_metadata_file(&path).map(|manifest| manifest.map(|manifest| (path, manifest)))
+    }
+
     /// Apply provider metadata to `config`, preferring metadata embedded in the
     /// provider file on disk and falling back to the built-in catalog when the
     /// provider is absent or carries no metadata section.
     pub(crate) fn apply_metadata(&self, config: &mut InstanceConfig) -> anyhow::Result<bool> {
-        let provider = crate::paths::provider_path_for(&self.providers_dir, &config.provider);
-        let bytes = match fs::read(&provider) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return BuiltinManifestIndex::embedded()?.apply_metadata_to(config);
-            },
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", provider.display()));
-            },
-        };
-        let metadata_applied = if let Some(manifest) =
-            omnifs_mount_schema::read_provider_metadata_section(&bytes)
-                .with_context(|| format!("extract provider metadata from {}", provider.display()))?
-        {
+        if let Some((path, manifest)) = self.load_disk_provider_manifest(&config.provider)? {
             config
                 .apply_provider_metadata(&manifest)
-                .with_context(|| format!("apply provider metadata from {}", provider.display()))?;
-            true
-        } else {
-            BuiltinManifestIndex::embedded()?.apply_metadata_to(config)?
-        };
-        Ok(metadata_applied)
+                .with_context(|| format!("apply provider metadata from {}", path.display()))?;
+            return Ok(true);
+        }
+        BuiltinManifestIndex::embedded()?.apply_metadata_to(config)
     }
 
     pub(crate) fn auth_manifest_for(
         &self,
         config: &EffectiveConfig,
     ) -> anyhow::Result<Option<AuthManifest>> {
-        let provider = self.provider_path(config);
-        let bytes = match fs::read(&provider) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(BuiltinManifestIndex::embedded()?.auth_manifest_for(config));
-            },
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", provider.display()));
-            },
-        };
-        let metadata = omnifs_mount_schema::read_provider_metadata_section(&bytes)
-            .with_context(|| format!("extract provider metadata from {}", provider.display()))?;
-        match metadata.and_then(|manifest| manifest.wasm_auth_manifest()) {
-            Some(manifest) => Ok(Some(manifest)),
-            None => Ok(BuiltinManifestIndex::embedded()?.auth_manifest_for(config)),
+        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&config.provider)? {
+            if let Some(auth) = manifest.wasm_auth_manifest() {
+                return Ok(Some(auth));
+            }
         }
+        Ok(BuiltinManifestIndex::embedded()?.auth_manifest_for(config))
     }
 
     pub(crate) fn provider_templates(&self) -> anyhow::Result<BTreeMap<String, ProviderTemplate>> {
@@ -167,10 +155,7 @@ impl ProviderCatalog {
                 continue;
             }
 
-            let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let Some(manifest) = omnifs_mount_schema::read_provider_metadata_section(&bytes)
-                .with_context(|| format!("extract provider metadata from {}", path.display()))?
-            else {
+            let Some(manifest) = read_provider_metadata_file(&path)? else {
                 continue;
             };
             let file_name = path
@@ -300,4 +285,14 @@ fn mount_config_paths(dir: &Path) -> io::Result<Vec<PathBuf>> {
 fn mount_config_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+}
+
+fn read_provider_metadata_file(path: &Path) -> anyhow::Result<Option<ProviderManifest>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    omnifs_mount_schema::read_provider_metadata_section(&bytes)
+        .with_context(|| format!("extract provider metadata from {}", path.display()))
 }
