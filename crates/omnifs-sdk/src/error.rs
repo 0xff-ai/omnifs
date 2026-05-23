@@ -146,24 +146,6 @@ impl ProviderError {
         }
     }
 
-    pub fn from_callout_error(error: &CalloutError) -> Self {
-        let message = format!("callout error: {}", error.message);
-        match error.kind {
-            ErrorKind::NotFound => Self::not_found(message),
-            ErrorKind::NotADirectory => Self::not_a_directory(message),
-            ErrorKind::NotAFile => Self::not_a_file(message),
-            ErrorKind::PermissionDenied => Self::permission_denied(message),
-            ErrorKind::Network => Self::network(message),
-            ErrorKind::Timeout => Self::timeout(message),
-            ErrorKind::Denied => Self::denied(message),
-            ErrorKind::RateLimited => Self::rate_limited(message),
-            ErrorKind::InvalidInput => Self::invalid_input(message),
-            ErrorKind::TooLarge => Self::too_large(message),
-            ErrorKind::VersionMismatch => Self::version_mismatch(message),
-            ErrorKind::Internal => Self::internal(message),
-        }
-    }
-
     pub fn is_retryable(&self) -> bool {
         self.retryable
     }
@@ -214,7 +196,21 @@ impl From<ProviderError> for ProviderReturn {
 
 impl From<CalloutError> for ProviderError {
     fn from(error: CalloutError) -> Self {
-        Self::from_callout_error(&error)
+        let message = format!("callout error: {}", error.message);
+        match error.kind {
+            ErrorKind::NotFound => Self::not_found(message),
+            ErrorKind::NotADirectory => Self::not_a_directory(message),
+            ErrorKind::NotAFile => Self::not_a_file(message),
+            ErrorKind::PermissionDenied => Self::permission_denied(message),
+            ErrorKind::Network => Self::network(message),
+            ErrorKind::Timeout => Self::timeout(message),
+            ErrorKind::Denied => Self::denied(message),
+            ErrorKind::RateLimited => Self::rate_limited(message),
+            ErrorKind::InvalidInput => Self::invalid_input(message),
+            ErrorKind::TooLarge => Self::too_large(message),
+            ErrorKind::VersionMismatch => Self::version_mismatch(message),
+            ErrorKind::Internal => Self::internal(message),
+        }
     }
 }
 

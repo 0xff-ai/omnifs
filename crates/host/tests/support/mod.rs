@@ -1,8 +1,8 @@
 use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{ReadFileBytes, ReadFileResult};
-use omnifs_host::runtime::ProviderRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
 use omnifs_host::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
+use omnifs_host::runtime::{ProviderRuntime, RuntimeDirs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -42,11 +42,12 @@ pub struct RuntimeHarness {
     pub _engine: wasmtime::Engine,
     pub clone_dir: TempDir,
     pub _cache_dir: TempDir,
+    pub _config_dir: TempDir,
     pub runtime: ProviderRuntime,
 }
 
 #[allow(dead_code)]
-pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {
+pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -56,10 +57,10 @@ pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {
         .join("target")
         .join("wasm32-wasip2")
         .join("release")
-        .join(plugin_name);
+        .join(provider_name);
     assert!(
         path.exists(),
-        "{plugin_name} not found at {path}. Run `just build-providers` first.",
+        "{provider_name} not found at {path}. Run `just build-providers` first.",
         path = path.display()
     );
     path
@@ -77,7 +78,7 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
     let config = InstanceConfig::parse(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -89,14 +90,21 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
 
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+    let wasm_path = provider_wasm_path(&config.provider);
+    let effective_config = config.into_effective("test_provider", None).unwrap();
     let runtime = ProviderRuntime::new(
         engine,
-        &provider_wasm_path(&config.plugin),
-        &config,
+        &wasm_path,
+        &effective_config,
         cloner,
-        cache_dir.path(),
-        "test-mount",
+        RuntimeDirs::new(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+        ),
         make_extractor(),
     )
     .unwrap();
@@ -105,41 +113,54 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
         _engine: engine.clone(),
         clone_dir,
         _cache_dir: cache_dir,
+        _config_dir: config_dir,
         runtime,
     }
 }
 
 #[allow(dead_code)]
-pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
+pub fn try_make_runtime_from_config(
+    config_json: &str,
+) -> Result<RuntimeHarness, omnifs_host::runtime::RuntimeBuildError> {
     let config = InstanceConfig::parse(config_json).unwrap();
     let engine = make_engine();
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
+    let wasm_path = provider_wasm_path(&config.provider);
+    let effective_config = config.into_effective("test_provider", None).unwrap();
     let runtime = ProviderRuntime::new(
         &engine,
-        &provider_wasm_path(&config.plugin),
-        &config,
+        &wasm_path,
+        &effective_config,
         cloner,
-        cache_dir.path(),
-        &config.mount,
+        RuntimeDirs::new(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+        ),
         make_extractor(),
-    )
-    .unwrap();
+    )?;
 
-    RuntimeHarness {
+    Ok(RuntimeHarness {
         _engine: engine,
         clone_dir,
         _cache_dir: cache_dir,
+        _config_dir: config_dir,
         runtime,
-    }
+    })
+}
+
+#[allow(dead_code)]
+pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
+    try_make_runtime_from_config(config_json).unwrap()
 }
 
 #[allow(dead_code)]
 pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
-    let harness = make_runtime_from_config(config_json);
-    harness.runtime.initialize().unwrap();
-    harness
+    make_runtime_from_config(config_json)
 }
 
 /// Initialises a git repo in `dir` with a README and a src/main.rs, then

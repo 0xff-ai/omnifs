@@ -19,7 +19,7 @@ pub(crate) struct State {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DnsRecord {
-    pub rtype: types::RecordType,
+    pub rtype: types::SupportedRecordType,
     pub value: String,
 }
 

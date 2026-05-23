@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Host-managed provider credentials with OAuth, static-token validation, keyring storage with file fallback, and layered credential lookup.
+- `omnifs dev` contributor workflow for building the dev image, synthesizing built-in provider mount configs, materializing fixtures and credentials, and launching the container directly.
+- npm packaging wrapper for distributing the `omnifs` CLI binary.
+
+### Changed
+
+- CLI flows were redesigned around mount configs, provider metadata, credential materialization, and container lifecycle commands.
+- Provider manifests now describe auth schemes, injection policy, capability grants, and config schema in `omnifs.provider.json`.
+- Docker Compose development entrypoints were replaced by the supported `omnifs dev`, `omnifs shell`, `omnifs logs`, and `omnifs down` workflow.
+
+### Fixed
+
+- Credential persistence now avoids stale file fallback entries after keyring writes and hardens file-store durability and permissions.
+- Host credential-store setup now logs when keyring access falls back to the file store.
+
 ## [0.1.0] - 2026-05-07
 
 ### Added

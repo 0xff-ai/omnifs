@@ -9,8 +9,8 @@ use omnifs_host::omnifs::provider::types::{
 };
 use omnifs_host::runtime::RuntimeError;
 use support::{
-    create_test_repo, make_engine, make_initialized_runtime, make_runtime_from_config,
-    provider_wasm_path,
+    create_test_repo, make_engine, make_initialized_runtime, provider_wasm_path,
+    try_make_runtime_from_config,
 };
 use wasmtime::component::{Component, HasData, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
@@ -250,82 +250,11 @@ fn expect_fetch(response: StepOutcome) -> HttpRequest {
 }
 
 #[test]
-fn dns_provider_exposes_declared_config_schema() {
-    fn resolve_local_ref<'a>(
-        root: &'a serde_json::Value,
-        schema: &'a serde_json::Value,
-    ) -> &'a serde_json::Value {
-        let Some(reference) = schema["$ref"].as_str() else {
-            return schema;
-        };
-
-        reference
-            .trim_start_matches("#/")
-            .split('/')
-            .fold(root, |current, segment| &current[segment])
-    }
-
-    let harness = make_runtime_from_config(
-        r#"
-        {
-            "plugin": "omnifs_provider_dns.wasm",
-            "mount": "dns",
-            "capabilities": {
-                "domains": ["cloudflare-dns.com", "dns.google"]
-            },
-            "config": {
-                "default_resolver": "cloudflare",
-                "resolvers": {
-                    "cloudflare": {
-                        "url": "https://cloudflare-dns.com/dns-query",
-                        "aliases": ["1.1.1.1"]
-                    }
-                }
-            }
-        }
-    "#,
-    );
-
-    let schema = harness.runtime.config_schema().unwrap().unwrap();
-    let schema_json: serde_json::Value = serde_json::from_str(&schema).unwrap();
-
-    assert_eq!(
-        schema_json["properties"]["default_resolver"]["default"],
-        serde_json::Value::String("cloudflare".to_string())
-    );
-    assert!(schema_json["properties"]["resolvers"].is_object());
-    let resolver_value_schema = resolve_local_ref(
-        &schema_json,
-        &schema_json["properties"]["resolvers"]["additionalProperties"],
-    );
-    assert_eq!(
-        schema_json["properties"]["resolvers"]["type"],
-        serde_json::Value::String("object".to_string())
-    );
-    assert_eq!(
-        resolver_value_schema["type"],
-        serde_json::Value::String("object".to_string())
-    );
-    assert_eq!(
-        resolver_value_schema["properties"]["url"]["type"],
-        serde_json::Value::String("string".to_string())
-    );
-    assert_eq!(
-        resolver_value_schema["properties"]["aliases"]["type"],
-        serde_json::Value::String("array".to_string())
-    );
-    assert_eq!(
-        resolver_value_schema["properties"]["aliases"]["items"]["type"],
-        serde_json::Value::String("string".to_string())
-    );
-}
-
-#[test]
 fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
-    let harness = make_runtime_from_config(
+    let error = match try_make_runtime_from_config(
         r#"
         {
-            "plugin": "omnifs_provider_dns.wasm",
+            "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
             "capabilities": {
                 "domains": ["cloudflare-dns.com", "dns.google"]
@@ -341,19 +270,16 @@ fn dns_provider_rejects_invalid_default_resolver_config_during_initialize() {
             }
         }
     "#,
-    );
-
-    let result = harness.runtime.initialize().unwrap();
-    match result {
-        OpResult::Error(error) => {
-            assert_eq!(error.kind, ErrorKind::InvalidInput);
-            assert!(
-                error.message.contains("default resolver"),
-                "unexpected error: {error:?}"
-            );
-        },
-        other => panic!("expected initialize-time config error, got {other:?}"),
+    ) {
+        Ok(_) => panic!("expected runtime construction to fail for invalid dns config"),
+        Err(error) => error,
     }
+    .to_string();
+
+    assert!(
+        error.contains("default resolver"),
+        "unexpected construction error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -362,7 +288,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "omnifs_provider_dns.wasm",
+            "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
             "capabilities": {
                 "domains": ["cloudflare-dns.com", "dns.google"]
@@ -561,7 +487,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
             assert!(names.contains(&"_all"));
             assert!(names.contains(&"_raw"));
         },
-        other => panic!("expected domain listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected domain listing, got {other:?}")
+        },
     }
 
     let reverse_listing = harness.runtime.list_children("_reverse").await.unwrap();
@@ -572,7 +500,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
                 "reverse dir should not eagerly list dynamic children: {listing:?}"
             );
         },
-        other => panic!("expected reverse dir listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected reverse dir listing, got {other:?}")
+        },
     }
 
     let resolver_reverse_listing = harness
@@ -587,7 +517,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
             );
         },
-        other => panic!("expected resolver reverse dir listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected resolver reverse dir listing, got {other:?}")
+        },
     }
 }
 
@@ -596,7 +528,7 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "omnifs_provider_dns.wasm",
+            "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
             "capabilities": {
                 "domains": ["cloudflare-dns.com", "dns.google"]
@@ -694,7 +626,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "omnifs_provider_dns.wasm",
+            "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
             "capabilities": {
                 "domains": ["cloudflare-dns.com", "dns.google"]
@@ -725,7 +657,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "omnifs_provider_dns.wasm",
+            "provider": "omnifs_provider_dns.wasm",
             "mount": "dns",
             "capabilities": {
                 "domains": ["cloudflare-dns.com", "dns.google"]
@@ -1468,7 +1400,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "omnifs_provider_github.wasm",
+            "provider": "omnifs_provider_github.wasm",
             "mount": "github",
             "capabilities": {
                 "domains": ["api.github.com"],
@@ -1493,7 +1425,9 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
             assert!(real_root.join("README.md").is_file());
             assert!(real_root.join("src").is_dir());
         },
-        other => panic!("expected repo tree listing, got {other:?}"),
+        other @ ListChildrenResult::Entries(_) => {
+            panic!("expected repo tree listing, got {other:?}")
+        },
     }
 
     let repo_child = harness

@@ -30,7 +30,9 @@ Hybrid pagination across issues + PRs and cross-listing PR projection keep listi
 
 ## Capabilities
 
-`api.github.com` over HTTPS plus `git@github.com:*` over SSH for the bind-mounted clones. Bearer-token auth via `GITHUB_TOKEN` env or a Docker secret file. 256 MiB memory limit. Read-only today; mutation path WIP per the design docs.
+`api.github.com` over HTTPS plus `git@github.com:*` over SSH for the bind-mounted clones. The default user workflow is `omnifs init github`, which runs GitHub's device flow with product client id `Ov23licogxMDzS47s9sF` and no default scopes. That default is public-read only; use `omnifs init github --scope repo` only when you need private repository access and accept GitHub OAuth's broad private-repository grant. Bearer-token auth via `GITHUB_TOKEN` env or a Docker secret file remains supported for the development Compose path. 256 MiB memory limit. Read-only today; mutation path WIP per the design docs.
+
+For OAuth setup, see `docs/oauth.md`.
 
 ## Install
 
@@ -40,7 +42,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-github
 ```
 
-The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). Configure in your omnifs mount config under the `github` key.
+The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). The provider's `omnifs.provider.json` is the source for the embedded provider metadata and auth section, and drives `omnifs init github`.
 
 ## Status
 

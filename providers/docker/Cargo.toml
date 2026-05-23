@@ -23,14 +23,6 @@ hashbrown = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[package.metadata.component]
-package = "omnifs:provider"
-
-[package.metadata.component.target]
-world = "provider"
-path = "../../wit"
-
 [lints.rust]
 unsafe_code = "allow"
 

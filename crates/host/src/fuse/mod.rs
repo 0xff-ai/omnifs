@@ -85,19 +85,21 @@ struct FullReadTarget {
 }
 
 /// Map a provider error to its corresponding FUSE errno.
-fn provider_errno(error: &ProviderError) -> Errno {
-    match error.kind {
-        ErrorKind::NotFound => Errno::ENOENT,
-        ErrorKind::NotADirectory => Errno::ENOTDIR,
-        ErrorKind::NotAFile => Errno::EISDIR,
-        ErrorKind::PermissionDenied | ErrorKind::Denied => Errno::EACCES,
-        ErrorKind::InvalidInput => Errno::EINVAL,
-        ErrorKind::TooLarge => Errno::EFBIG,
-        ErrorKind::RateLimited => Errno::EAGAIN,
-        ErrorKind::Network
-        | ErrorKind::Timeout
-        | ErrorKind::VersionMismatch
-        | ErrorKind::Internal => Errno::EIO,
+impl From<&ProviderError> for Errno {
+    fn from(error: &ProviderError) -> Self {
+        match error.kind {
+            ErrorKind::NotFound => Errno::ENOENT,
+            ErrorKind::NotADirectory => Errno::ENOTDIR,
+            ErrorKind::NotAFile => Errno::EISDIR,
+            ErrorKind::PermissionDenied | ErrorKind::Denied => Errno::EACCES,
+            ErrorKind::InvalidInput => Errno::EINVAL,
+            ErrorKind::TooLarge => Errno::EFBIG,
+            ErrorKind::RateLimited => Errno::EAGAIN,
+            ErrorKind::Network
+            | ErrorKind::Timeout
+            | ErrorKind::VersionMismatch
+            | ErrorKind::Internal => Errno::EIO,
+        }
     }
 }
 
@@ -491,7 +493,7 @@ impl FuseFs {
                     message = error.message,
                     "provider returned typed error for lookup_child"
                 );
-                Err(provider_errno(&error))
+                Err((&error).into())
             },
             Err(error) => {
                 warn!(
@@ -670,7 +672,7 @@ impl FuseFs {
                     message = error.message,
                     "provider returned typed error for list_children"
                 );
-                Err(provider_errno(&error))
+                Err((&error).into())
             },
             Err(error) => {
                 warn!(
@@ -742,7 +744,7 @@ impl FuseFs {
                     message = error.message,
                     "provider returned typed error for read_chunk"
                 );
-                reply.error(provider_errno(&error));
+                reply.error((&error).into());
             },
             Err(error) => {
                 warn!(path = ranged.path.as_str(), error = %error, "read_chunk runtime error");
@@ -857,7 +859,7 @@ impl FuseFs {
                     message = error.message,
                     "provider returned typed error for read_file"
                 );
-                reply.error(provider_errno(&error));
+                reply.error((&error).into());
             },
             Err(error) => {
                 warn!(path = target.path.as_str(), error = %error, "read_file runtime error");
@@ -961,7 +963,7 @@ impl FuseFs {
                 );
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Err(RuntimeError::ProviderError(error)) => Err(provider_errno(&error)),
+            Err(RuntimeError::ProviderError(error)) => Err((&error).into()),
             Err(error) => {
                 warn!(
                     path = target.path.as_str(),
@@ -1017,7 +1019,7 @@ impl FuseFs {
                 self.file_cache.insert(target.fh, data);
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Err(RuntimeError::ProviderError(error)) => Err(provider_errno(&error)),
+            Err(RuntimeError::ProviderError(error)) => Err((&error).into()),
             Err(error) => {
                 warn!(
                     path = target.path.as_str(),
@@ -1541,6 +1543,6 @@ mod tests {
             retryable: true,
         };
 
-        assert_eq!(i32::from(provider_errno(&error)), i32::from(Errno::EAGAIN));
+        assert_eq!(i32::from(Errno::from(&error)), i32::from(Errno::EAGAIN));
     }
 }

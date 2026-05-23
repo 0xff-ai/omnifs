@@ -25,12 +25,9 @@ serde_json = { workspace = true }
 rc-zip-sync = { version = "4", default-features = false, features = ["deflate"] }
 strum = { workspace = true }
 
-[package.metadata.component]
-package = "omnifs:provider"
+[dev-dependencies]
+omnifs-mount-schema = { version = "0.1.0", path = "../../crates/omnifs-mount-schema" }
 
-[package.metadata.component.target]
-world = "provider"
-path = "../../wit"
 
 [lints.rust]
 unsafe_code = "allow"

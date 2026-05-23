@@ -1,0 +1,32 @@
+{
+  "name": "@0xff-ai/omnifs",
+  "version": "0.0.1",
+  "description": "Host CLI for OmnIFS, a Docker-backed virtual filesystem for external services",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/raulk/omnifs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raulk/omnifs.git"
+  },
+  "bin": {
+    "omnifs": "bin/omnifs.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "optionalDependencies": {
+    "@0xff-ai/omnifs-cli-darwin-arm64": "0.0.1",
+    "@0xff-ai/omnifs-cli-darwin-x64": "0.0.1",
+    "@0xff-ai/omnifs-cli-linux-arm64": "0.0.1",
+    "@0xff-ai/omnifs-cli-linux-x64": "0.0.1"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "provider": "omnifs_provider_github.wasm",
+  "mount": "github",
+  "auth": {
+    "type": "static-token",
+    "scheme": "pat",
+    "token_file": "/run/secrets/github_token"
+  }
+}

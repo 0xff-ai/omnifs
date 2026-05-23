@@ -1,0 +1,16 @@
+pub mod auth;
+pub mod completions;
+pub mod daemon;
+pub mod debug;
+pub mod dev;
+pub mod doctor;
+pub mod down;
+pub mod init;
+pub mod logs;
+pub mod mounts;
+pub mod reset;
+pub mod setup;
+pub mod shell;
+pub mod status;
+pub mod up;
+pub mod version;

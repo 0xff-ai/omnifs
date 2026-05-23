@@ -55,8 +55,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 #
 # Discovers every crate under `providers/` whose package name starts
 # with `omnifs-provider-` and builds them in a single cargo invocation.
-# Adding a new provider is therefore just `providers/<name>/...` plus
-# a `docker/providers/<name>.json` config below.
+# Adding a new provider is therefore just `providers/<name>/...` with
+# its provider manifest.
 
 FROM toolchain AS providers
 WORKDIR /src
@@ -152,12 +152,15 @@ RUN printf '%s\n' \
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
-    && mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
-
-COPY docker/providers/*.json /root/.omnifs/providers/
+    && mkdir -p /root/.omnifs/config/mounts /root/.omnifs/data /root/.omnifs/cache /root/.omnifs/providers /tmp/omnifs-provider-manifests
 
 SHELL ["/bin/zsh", "-c"]
-ENV SHELL=/bin/zsh
+# `omnifs daemon mount` resolves `providers_dir` from `OMNIFS_PROVIDERS_DIR`
+# before falling back to `data_dir/providers`. The image bakes WASMs under
+# `/root/.omnifs/providers/`, so declare that location for the daemon and for
+# `docker exec omnifs omnifs status`.
+ENV SHELL=/bin/zsh \
+    OMNIFS_PROVIDERS_DIR=/root/.omnifs/providers
 WORKDIR /
 ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
@@ -165,5 +168,5 @@ FROM runtime-base AS runtime
 
 COPY --from=builder /omnifs /usr/local/bin/
 COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_*.wasm \
-     /root/.omnifs/plugins/
+     /root/.omnifs/providers/
 RUN chmod 0755 /usr/local/bin/omnifs

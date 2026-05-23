@@ -23,7 +23,7 @@ pub struct CapabilityGrants {
 
 impl CapabilityGrants {
     pub fn from_config(
-        config: &crate::config::InstanceConfig,
+        config: &crate::config::EffectiveConfig,
         provider_caps: &wit_types::RequestedCapabilities,
     ) -> Self {
         let caps = config.capabilities.as_ref();
@@ -291,13 +291,6 @@ mod tests {
         let checker = CapabilityChecker::new(grants(Vec::new(), vec!["/127.0.0.1"]));
         let url = unix_url("/127.0.0.1", "/whatever");
         checker.check_url(&url).unwrap();
-    }
-
-    #[test]
-    fn decode_unix_socket_round_trips() {
-        let url = unix_url("/var/run/docker.sock", "/v1.43/containers/json");
-        let path = CapabilityChecker::decode_unix_socket(&url).unwrap();
-        assert_eq!(path, PathBuf::from("/var/run/docker.sock"));
     }
 
     #[test]

@@ -9,29 +9,23 @@ use omnifs_host::config::InstanceConfig;
 use omnifs_host::omnifs::provider::types::{
     EntryKind, FileSize, ListChildrenResult, LookupChildResult, OpResult, Stability,
 };
-use omnifs_host::runtime::ProviderRuntime;
 use omnifs_host::runtime::cloner::GitCloner;
+use omnifs_host::runtime::{ProviderRuntime, RuntimeDirs};
 use support::{make_engine, make_initialized_runtime, make_runtime};
 
 #[tokio::test]
 async fn test_initialize() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    let result = harness.runtime.initialize().unwrap();
-    match result {
-        OpResult::Initialize(init) => {
-            assert_eq!(init.info.name, "test-provider");
-            assert_eq!(init.info.version, "0.1.0");
-        },
-        other => panic!("expected initialize result, got {other:?}"),
-    }
+    let info = harness.runtime.provider_info();
+    assert_eq!(info.name, "test-provider");
+    assert_eq!(info.version, "0.1.0");
 }
 
 #[tokio::test]
 async fn test_list_root() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    harness.runtime.initialize().unwrap();
     let result = harness.runtime.list_children("").await.unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
@@ -51,7 +45,7 @@ async fn test_list_root() {
                     .all(|entry| matches!(entry.kind, EntryKind::Directory))
             );
         },
-        other => panic!("expected list entries, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => panic!("expected list entries, got {other:?}"),
     }
 }
 
@@ -59,7 +53,6 @@ async fn test_list_root() {
 async fn test_list_hello_dir() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    harness.runtime.initialize().unwrap();
     let result = harness.runtime.list_children("hello").await.unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
@@ -75,7 +68,7 @@ async fn test_list_hello_dir() {
             assert!(names.contains(&"bundle"));
             assert!(names.contains(&"snapshot"));
         },
-        other => panic!("expected list entries, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => panic!("expected list entries, got {other:?}"),
     }
 }
 
@@ -84,7 +77,7 @@ async fn test_list_projects_nested_files_into_cache() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -135,7 +128,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -175,7 +168,7 @@ async fn test_read_file() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -195,7 +188,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -207,7 +200,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     let listing = harness.runtime.list_children("hello").await.unwrap();
     match listing {
         ListChildrenResult::Entries(_) => {},
-        other => panic!("expected list entries, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => panic!("expected list entries, got {other:?}"),
     }
 
     let result = harness.runtime.read_file("hello/projected").await.unwrap();
@@ -257,7 +250,7 @@ async fn test_ranged_open_read_chunk_contract() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -295,7 +288,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -340,7 +333,6 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
 async fn test_lookup_child() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    harness.runtime.initialize().unwrap();
     let result = harness.runtime.lookup_child("", "hello").await.unwrap();
     match result {
         LookupChildResult::Entry(result) => {
@@ -367,7 +359,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -403,7 +395,7 @@ async fn test_lookup_projects_adjacent_files_into_cache() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -457,7 +449,7 @@ async fn test_lookup_projects_siblings_into_cache() {
     let harness = make_initialized_runtime(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -603,7 +595,7 @@ async fn test_cache_isolated_by_mount_name() {
     let config = InstanceConfig::parse(
         r#"
         {
-            "plugin": "test_provider.wasm",
+            "provider": "test_provider.wasm",
             "mount": "test",
             "capabilities": {
                 "domains": ["httpbin.org"]
@@ -615,31 +607,44 @@ async fn test_cache_isolated_by_mount_name() {
 
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
     let extractor = support::make_extractor();
+    let wasm_path = support::provider_wasm_path(&config.provider);
+    let mut config_a = config.clone();
+    config_a.mount = "mount-a".to_string();
+    let mut config_b = config;
+    config_b.mount = "mount-b".to_string();
+    let effective_config_a = config_a.into_effective("test_provider", None).unwrap();
+    let effective_config_b = config_b.into_effective("test_provider", None).unwrap();
     let runtime_a = ProviderRuntime::new(
         &engine,
-        &support::provider_wasm_path(&config.plugin),
-        &config,
+        &wasm_path,
+        &effective_config_a,
         cloner.clone(),
-        cache_dir.path(),
-        "mount-a",
+        RuntimeDirs::new(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+        ),
         extractor.clone(),
     )
     .unwrap();
     let runtime_b = ProviderRuntime::new(
         &engine,
-        &support::provider_wasm_path(&config.plugin),
-        &config,
+        &wasm_path,
+        &effective_config_b,
         cloner,
-        cache_dir.path(),
-        "mount-b",
+        RuntimeDirs::new(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+        ),
         extractor,
     )
     .unwrap();
-
-    runtime_a.initialize().unwrap();
-    runtime_b.initialize().unwrap();
 
     let result = runtime_a.list_children("hello").await.unwrap();
     assert!(matches!(result, ListChildrenResult::Entries(_)));

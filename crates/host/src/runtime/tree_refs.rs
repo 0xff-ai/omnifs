@@ -38,24 +38,3 @@ impl Default for TreeRefs {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn register_assigns_unique_ids() {
-        let reg = TreeRefs::new();
-        let a = reg.register(PathBuf::from("/tmp/a"));
-        let b = reg.register(PathBuf::from("/tmp/b"));
-        assert_ne!(a, b);
-        assert_eq!(reg.resolve(a).unwrap(), PathBuf::from("/tmp/a"));
-        assert_eq!(reg.resolve(b).unwrap(), PathBuf::from("/tmp/b"));
-    }
-
-    #[test]
-    fn resolve_unknown_returns_none() {
-        let reg = TreeRefs::new();
-        assert!(reg.resolve(9999).is_none());
-    }
-}

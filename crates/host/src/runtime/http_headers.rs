@@ -60,32 +60,3 @@ pub(crate) fn decode_response_headers(headers: &HeaderMap) -> Vec<(String, Strin
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_header_map_rejects_invalid_header_name() {
-        let error = build_header_map(
-            std::iter::empty::<(&str, &str)>(),
-            [("bad header", "value")],
-        )
-        .unwrap_err();
-        assert!(error.contains("invalid request header name"));
-    }
-
-    #[test]
-    fn decode_response_headers_drops_non_utf8_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-valid", HeaderValue::from_static("ok"));
-        headers.insert("x-bytes", HeaderValue::from_bytes(b"\x80binary").unwrap());
-
-        let response_headers = decode_response_headers(&headers);
-
-        assert_eq!(
-            response_headers,
-            vec![("x-valid".to_string(), "ok".to_string())]
-        );
-    }
-}

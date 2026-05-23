@@ -1,0 +1,23 @@
+{
+  "id": "dns",
+  "displayName": "DNS",
+  "provider": "omnifs_provider_dns.wasm",
+  "defaultMount": "dns",
+  "capabilities": [
+    {
+      "kind": "domain",
+      "value": "cloudflare-dns.com",
+      "why": "Send DNS-over-HTTPS queries to the bundled public resolver endpoints."
+    },
+    {
+      "kind": "domain",
+      "value": "dns.google",
+      "why": "Send DNS-over-HTTPS queries to the bundled public resolver endpoints."
+    },
+    {
+      "kind": "memoryMb",
+      "value": 32,
+      "why": "Keep resolver execution small; DNS responses are compact and do not need a large heap."
+    }
+  ]
+}

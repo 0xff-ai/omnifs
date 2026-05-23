@@ -20,6 +20,7 @@ jsonschema = { workspace = true }
 postcard = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+strum = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 libc = { workspace = true }
@@ -35,6 +36,14 @@ moka = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
+omnifs-model = { version = "0.1.0", path = "../omnifs-model" }
+omnifs-auth = { version = "0.1.0", path = "../omnifs-auth" }
+omnifs-creds = { version = "0.1.0", path = "../omnifs-creds" }
+arc-swap = { workspace = true }
+async_singleflight = { workspace = true }
+fs2 = { workspace = true }
+secrecy = "0.10"
+time = { workspace = true }
 
 [dev-dependencies]
 http = { workspace = true }
@@ -44,6 +53,8 @@ wasmtime = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 zip = { workspace = true }
+rcgen = "0.13"
+tokio-rustls = "0.26"
 
 [lints]
 workspace = true

@@ -4,15 +4,18 @@ use omnifs_sdk::prelude::*;
 use crate::events::timer_tick;
 use crate::{Config, State};
 
-#[provider(mounts(
-    crate::root::RootHandlers,
-    crate::repo::RepoHandlers,
-    crate::issues::IssueHandlers,
-    crate::pulls::PullHandlers,
-    crate::actions::ActionHandlers,
-))]
+#[provider(
+    metadata = "omnifs.provider.json",
+    mounts(
+        crate::root::RootHandlers,
+        crate::repo::RepoHandlers,
+        crate::issues::IssueHandlers,
+        crate::pulls::PullHandlers,
+        crate::actions::ActionHandlers,
+    )
+)]
 impl GithubProvider {
-    fn init(_config: Config) -> (State, ProviderInfo) {
+    fn init(_config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         (
             State {
                 event_etags: hashbrown::HashMap::new(),
@@ -22,20 +25,8 @@ impl GithubProvider {
                 version: "0.1.0".to_string(),
                 description: "GitHub API provider for omnifs".to_string(),
             },
+            RequestedCapabilities::with_git(60),
         )
-    }
-
-    fn capabilities() -> RequestedCapabilities {
-        RequestedCapabilities {
-            domains: vec!["api.github.com".to_string()],
-            unix_sockets: Vec::new(),
-            auth_types: vec!["bearer-token".to_string()],
-            max_memory_mb: 128,
-            needs_git: true,
-            needs_websocket: false,
-            needs_streaming: false,
-            refresh_interval_secs: 60,
-        }
     }
 
     async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects> {

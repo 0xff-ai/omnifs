@@ -1,0 +1,9 @@
+{
+  "provider": "omnifs_provider_linear.wasm",
+  "mount": "linear",
+  "auth": {
+    "type": "static-token",
+    "scheme": "pat",
+    "token_env": "LINEAR_TOKEN"
+  }
+}

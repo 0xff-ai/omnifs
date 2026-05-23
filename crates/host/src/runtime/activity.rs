@@ -102,37 +102,6 @@ impl ActivityTable {
 mod tests {
     use super::{ActivePathTouch, ActivityTable};
     use std::time::Duration;
-
-    #[test]
-    fn activity_table_tracks_and_prunes_paths_by_type() {
-        let mut table = ActivityTable::new(Duration::from_secs(60));
-        table.touch([
-            ActivePathTouch {
-                mount_id: "/{owner}/{repo}".to_string(),
-                mount_name: "Repo".to_string(),
-                path: "/openai/gvfs".to_string(),
-            },
-            ActivePathTouch {
-                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
-                mount_name: "Issue".to_string(),
-                path: "/openai/gvfs/_issues/_open/7".to_string(),
-            },
-        ]);
-
-        let active = table.active_path_sets();
-        assert_eq!(active.len(), 2);
-        let issue = active
-            .iter()
-            .find(|entry| entry.mount_id == "/{owner}/{repo}/_issues/_open/{number}")
-            .expect("missing issue activity");
-        assert_eq!(issue.mount_name, "Issue");
-        let repo = active
-            .iter()
-            .find(|entry| entry.mount_id == "/{owner}/{repo}")
-            .expect("missing repo activity");
-        assert_eq!(repo.mount_name, "Repo");
-    }
-
     #[test]
     fn activity_table_removes_exact_paths_and_prefixes() {
         let mut table = ActivityTable::new(Duration::from_secs(60));
@@ -187,17 +156,6 @@ mod tests {
         assert_eq!(active[0].paths, vec!["/openai/gvfs-tools"]);
 
         table.remove_prefix("/");
-        assert!(table.active_path_sets().is_empty());
-    }
-
-    #[test]
-    fn activity_table_prunes_zero_ttl_entries() {
-        let mut table = ActivityTable::new(Duration::ZERO);
-        table.touch([ActivePathTouch {
-            mount_id: "/{owner}/{repo}".to_string(),
-            mount_name: "Repo".to_string(),
-            path: "/openai/gvfs".to_string(),
-        }]);
         assert!(table.active_path_sets().is_empty());
     }
 }

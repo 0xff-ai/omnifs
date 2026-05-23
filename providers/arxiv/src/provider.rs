@@ -3,9 +3,12 @@ use std::collections::HashMap;
 
 use crate::{Config, State};
 
-#[provider(mounts(crate::categories::CategoryHandlers, crate::paper::PaperHandlers,))]
+#[provider(
+    metadata = "omnifs.provider.json",
+    mounts(crate::categories::CategoryHandlers, crate::paper::PaperHandlers,)
+)]
 impl ArxivProvider {
-    fn init(config: Config) -> (State, ProviderInfo) {
+    fn init(config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         (
             State {
                 config,
@@ -16,19 +19,7 @@ impl ArxivProvider {
                 version: "0.1.0".to_string(),
                 description: "arXiv recent submissions provider for omnifs".to_string(),
             },
+            RequestedCapabilities::runtime_only(3600),
         )
-    }
-
-    fn capabilities() -> RequestedCapabilities {
-        RequestedCapabilities {
-            domains: vec!["export.arxiv.org".to_string(), "arxiv.org".to_string()],
-            unix_sockets: Vec::new(),
-            auth_types: vec![],
-            max_memory_mb: 64,
-            needs_git: false,
-            needs_websocket: false,
-            needs_streaming: false,
-            refresh_interval_secs: 3600,
-        }
     }
 }

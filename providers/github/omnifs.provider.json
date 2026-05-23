@@ -1,0 +1,56 @@
+{
+  "id": "github",
+  "displayName": "GitHub",
+  "provider": "omnifs_provider_github.wasm",
+  "defaultMount": "github",
+  "capabilities": [
+    {
+      "kind": "domain",
+      "value": "api.github.com",
+      "why": "Fetch GitHub API resources such as repository metadata, issues, pull requests, actions, and events."
+    },
+    {
+      "kind": "gitRepo",
+      "value": "git@github.com:*",
+      "why": "Clone repository contents over SSH when browsing _repo paths."
+    },
+    {
+      "kind": "memoryMb",
+      "value": 256,
+      "why": "Leave room for larger GitHub API payloads and repository tree projections."
+    }
+  ],
+  "auth": {
+    "inject": {
+      "domains": ["api.github.com"],
+      "header": "Authorization",
+      "prefix": "Bearer "
+    },
+    "default": "device",
+    "schemes": {
+      "pat": {
+        "type": "staticToken",
+        "description": "GitHub personal access token",
+        "creationUrl": "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
+        "validation": {
+          "method": "GET",
+          "url": "https://api.github.com/user",
+          "expectStatus": 200,
+          "extract": { "identity": "/login" }
+        }
+      },
+      "device": {
+        "type": "oauth",
+        "displayName": "GitHub OAuth device flow",
+        "clientId": "Ov23licogxMDzS47s9sF",
+        "scopes": [],
+        "flow": {
+          "kind": "deviceCode",
+          "authorizationEndpoint": "https://github.com/login/oauth/authorize",
+          "deviceAuthorizationEndpoint": "https://github.com/login/device/code",
+          "tokenEndpoint": "https://github.com/login/oauth/access_token"
+        }
+      }
+    }
+  }
+}

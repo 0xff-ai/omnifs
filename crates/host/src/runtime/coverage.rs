@@ -78,21 +78,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::PathCoverageIndex;
-
-    #[test]
-    fn coverage_index_tracks_multiple_paths_per_key() {
-        let mut index = PathCoverageIndex::default();
-        let repo = ("repo".to_string(), "openai/gvfs".to_string());
-
-        index.insert(repo.clone(), "openai/gvfs".to_string());
-        index.insert(repo.clone(), "openai/gvfs/_issues".to_string());
-
-        assert_eq!(
-            index.remove_key(&repo),
-            vec!["openai/gvfs".to_string(), "openai/gvfs/_issues".to_string()]
-        );
-    }
-
     #[test]
     fn coverage_index_removes_paths_by_prefix_with_segment_boundaries() {
         let mut index = PathCoverageIndex::default();

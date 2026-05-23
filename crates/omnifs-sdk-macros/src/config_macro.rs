@@ -25,7 +25,6 @@ fn add_config_attrs(attrs: &mut Vec<Attribute>) {
         #[derive(
             std::fmt::Debug,
             omnifs_sdk::serde::Deserialize,
-            omnifs_sdk::schemars::JsonSchema,
         )]
     });
     attrs.push(syn::parse_quote! {
@@ -33,9 +32,6 @@ fn add_config_attrs(attrs: &mut Vec<Attribute>) {
     });
     attrs.push(syn::parse_quote! {
         #[serde(deny_unknown_fields)]
-    });
-    attrs.push(syn::parse_quote! {
-        #[schemars(crate = "omnifs_sdk::schemars")]
     });
 }
 

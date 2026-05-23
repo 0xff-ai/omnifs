@@ -1,0 +1,56 @@
+{
+  "id": "linear",
+  "displayName": "Linear",
+  "provider": "omnifs_provider_linear.wasm",
+  "defaultMount": "linear",
+  "capabilities": [
+    {
+      "kind": "domain",
+      "value": "api.linear.app",
+      "why": "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."
+    },
+    {
+      "kind": "memoryMb",
+      "value": 128,
+      "why": "Leave room for GraphQL response decoding and issue tree projections."
+    }
+  ],
+  "auth": {
+    "inject": {
+      "domains": ["api.linear.app"],
+      "header": "Authorization",
+      "prefix": ""
+    },
+    "default": "oauth",
+    "schemes": {
+      "pat": {
+        "type": "staticToken",
+        "description": "Linear personal access token or API key",
+        "creationUrl": "https://linear.app/settings/api",
+        "validation": {
+          "method": "POST",
+          "url": "https://api.linear.app/graphql",
+          "body": "{\"query\":\"query { viewer { id name email organization { name urlKey } } }\"}",
+          "expectStatus": 200,
+          "jsonPointer": "/data/viewer/id",
+          "extract": {
+            "identity": "/data/viewer/email",
+            "workspace": "/data/viewer/organization/urlKey"
+          }
+        }
+      },
+      "oauth": {
+        "type": "oauth",
+        "displayName": "Linear OAuth",
+        "clientId": "4dc7b7c05f651306a318de6f9f963b40",
+        "scopes": ["read"],
+        "flow": {
+          "kind": "pkceLoopback",
+          "authorizationEndpoint": "https://linear.app/oauth/authorize",
+          "tokenEndpoint": "https://api.linear.app/oauth/token",
+          "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
+        }
+      }
+    }
+  }
+}

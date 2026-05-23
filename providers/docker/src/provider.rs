@@ -6,14 +6,27 @@ use crate::api::ApiBase;
 use crate::events::timer_tick;
 use crate::{Config, EventCheckpoint, State};
 
-#[provider(mounts(
-    crate::system::SystemHandlers,
-    crate::containers::ContainerHandlers,
-    crate::compose::ComposeHandlers,
-))]
+#[provider(
+    metadata = "omnifs.provider.json",
+    mounts(
+        crate::system::SystemHandlers,
+        crate::containers::ContainerHandlers,
+        crate::compose::ComposeHandlers,
+    )
+)]
 impl DockerProvider {
-    fn init(config: Config) -> (State, ProviderInfo) {
+    fn init(config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         let endpoint = HttpEndpoint::parse(&config.endpoint);
+        // Five seconds tracks a developer's interactive expectation
+        // ("did the container come up yet?") without flooding the
+        // daemon with /events polls. A real interactive shell can
+        // re-list manually if it wants faster reaction.
+        let mut capabilities = RequestedCapabilities::runtime_only(5);
+        if let HttpEndpoint::Unix(socket) = &endpoint {
+            capabilities
+                .unix_sockets
+                .push(socket.to_string_lossy().into_owned());
+        }
         (
             State {
                 api: ApiBase::new(endpoint),
@@ -25,24 +38,8 @@ impl DockerProvider {
                 version: "0.1.0".to_string(),
                 description: "Docker daemon provider for omnifs".to_string(),
             },
+            capabilities,
         )
-    }
-
-    fn capabilities() -> RequestedCapabilities {
-        RequestedCapabilities {
-            domains: Vec::new(),
-            unix_sockets: vec!["/var/run/docker.sock".to_string()],
-            auth_types: Vec::new(),
-            max_memory_mb: 64,
-            needs_git: false,
-            needs_websocket: false,
-            needs_streaming: false,
-            // Five seconds tracks a developer's interactive expectation
-            // ("did the container come up yet?") without flooding the
-            // daemon with /events polls. A real interactive shell can
-            // re-list manually if it wants faster reaction.
-            refresh_interval_secs: 5,
-        }
     }
 
     async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects> {

@@ -2,8 +2,10 @@
 //! wasm file and print a summary of handler and mutation records.
 //!
 //! Run with:
+//! ```text
 //!   cargo run -p omnifs-mount-schema --example dump_wasm -- \
 //!     target/wasm32-wasip2/debug/omnifs_provider_github.wasm
+//! ```
 
 use std::env;
 use std::fs;

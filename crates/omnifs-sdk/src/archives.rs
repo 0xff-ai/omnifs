@@ -98,7 +98,7 @@ impl<'cx, S> OpenRequest<'cx, S> {
             Callout::OpenArchive(request),
             |result| match result {
                 CalloutResult::ArchiveOpened(opened) => Ok(TreeRef::new(opened.tree)),
-                CalloutResult::CalloutError(e) => Err(ProviderError::from_callout_error(&e)),
+                CalloutResult::CalloutError(e) => Err(e.into()),
                 _ => Err(ProviderError::internal(
                     "unexpected callout result for open-archive",
                 )),

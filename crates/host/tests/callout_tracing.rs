@@ -333,7 +333,7 @@ async fn blob_fetch_span_records_cache_key_and_late_bound_blob() {
 #[tokio::test(flavor = "current_thread")]
 async fn blob_read_span_records_response_body_bytes_at_close() {
     let req = read_blob_request();
-    let callout = wit_types::Callout::ReadBlob(req.clone());
+    let callout = wit_types::Callout::ReadBlob(req);
     let output = run_with_capture_async(|| async move {
         dispatch_one_sync(13, 2, &callout, || fake_blob_read(&req));
     })

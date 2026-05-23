@@ -191,12 +191,9 @@ jobs:
     permissions:
       contents: read
       packages: read
-    # compose.yaml interpolates these on every `docker compose ...`
-    # invocation (up, exec, down). Setting them at the job level
-    # avoids per-step exports and keeps cleanup working even when an
-    # earlier step short-circuited.
     env:
-      GITHUB_TOKEN_FILE: ${{ github.workspace }}/.secrets/github_token
+      CONTAINER: omnifs
+      IMAGE: ghcr.io/${{ github.repository }}:smoke
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -213,12 +210,10 @@ jobs:
           name: docker-digest-amd64
           path: /tmp/digests
 
-      - name: Pull the amd64 image and tag it for compose
+      - name: Pull the amd64 image and tag it for smoke
         # docker-build pushes runtime images by digest only (no tags);
-        # we pull the amd64 digest the matrix produced and retag it
-        # to whatever compose.yaml references. This skips the image
-        # build entirely on smoke and avoids duplicating buildx work
-        # across smoke and docker-build.
+        # pull the digest the matrix produced and retag it for this job.
+        # Skips the image build entirely.
         run: |
           set -euo pipefail
           digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
@@ -229,10 +224,7 @@ jobs:
           digest_file="${digest_path##*/}"
           ref="${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}"
           docker pull "$ref"
-          docker tag "$ref" "${REGISTRY}/${IMAGE_NAME}:latest"
-
-      - name: Set up Docker Compose
-        uses: docker/setup-compose-action@v2.1.0
+          docker tag "$ref" "$IMAGE"
 
       - name: Start SSH agent socket
         run: |
@@ -246,40 +238,56 @@ jobs:
           mkdir -p .secrets/db
           # GitHub token for the github provider.
           printf '%s' "${{ github.token }}" > .secrets/github_token
+          chmod 600 .secrets/github_token
           # Chinook SQLite fixture for the db provider. The image bakes
-          # docker/providers/db.json with path /data/test.db; compose
-          # mounts .secrets/db there. Pinned to the lerocha master copy;
-          # the database has not changed in years.
+          # providers/db/omnifs.provider.json with path /data/test.db;
+          # the smoke container mounts .secrets/db there. Pinned to the
+          # lerocha master copy; the database has not changed in years.
           curl -fsSL -o .secrets/db/test.db \
             https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
 
-      - name: Start stack
+      - name: Start container
+        # Mirrors the container shape that `omnifs dev` launches via the
+        # Docker API: FUSE device, SYS_ADMIN, apparmor:unconfined,
+        # github token secret, chinook DB fixture, host docker socket,
+        # and the SSH agent forward for git providers.
         run: |
           set -euo pipefail
-          docker compose up -d
+          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+          docker run -d \
+            --name "$CONTAINER" \
+            --device /dev/fuse \
+            --cap-add SYS_ADMIN \
+            --security-opt apparmor:unconfined \
+            -e SSH_AUTH_SOCK=/ssh-agent \
+            -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
+            -v "${{ github.workspace }}/.secrets/github_token:/run/secrets/github_token:ro" \
+            -v "${{ github.workspace }}/.secrets/db:/data:ro" \
+            -v "${{ github.workspace }}/scripts/demo.sh:/tmp/demo.sh:ro" \
+            -v "/var/run/docker.sock:/var/run/docker.sock:ro" \
+            -v "$SSH_AUTH_SOCK:/ssh-agent" \
+            "$IMAGE"
 
           for _ in $(seq 1 60); do
-            if docker compose exec -T omnifs sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
+            if docker exec "$CONTAINER" sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
               exit 0
             fi
-
-            if ! docker ps --format '{{.Names}}' | grep -qx omnifs; then
-              docker compose logs omnifs >&2 || true
-              docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' >&2 || true
+            if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+              docker logs "$CONTAINER" >&2 || true
+              docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' >&2 || true
               exit 1
             fi
-
             sleep 1
           done
 
-          docker compose logs omnifs >&2 || true
-          docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' >&2 || true
+          docker logs "$CONTAINER" >&2 || true
+          docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' >&2 || true
           exit 1
 
       - name: Run demo smoke script
         run: |
           set -euo pipefail
-          docker compose exec -T omnifs env \
+          docker exec "$CONTAINER" env \
             OMNIFS_DEMO_MODE=smoke \
             OMNIFS_DEMO_OWNER=ollama \
             OMNIFS_DEMO_REPO=ollama \
@@ -288,12 +296,12 @@ jobs:
       - name: Dump omnifs log on failure
         if: failure()
         run: |
-          docker compose logs omnifs || true
-          docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' || true
+          docker logs "$CONTAINER" || true
+          docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' || true
 
-      - name: Clean up compose stack
+      - name: Clean up
         if: always()
-        run: docker compose down --remove-orphans --volumes
+        run: docker rm -f "$CONTAINER" || true
 
   runtime-arm64:
     name: docker-build (linux/arm64)

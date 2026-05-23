@@ -301,13 +301,12 @@ pub(super) fn validate_operation_result(
             offset: 0,
             length: 0,
         },
-        wit_types::OpResult::Initialize(_) => Op::Initialize,
+        wit_types::OpResult::Initialize(_) | wit_types::OpResult::Error(_) => Op::Initialize,
         wit_types::OpResult::OnEvent => Op::OnEvent {
             event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
                 active_paths: Vec::new(),
             }),
         },
-        wit_types::OpResult::Error(_) => Op::Initialize,
     };
     let ret = wit_types::ProviderReturn {
         result: result.clone(),

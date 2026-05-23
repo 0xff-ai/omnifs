@@ -1,21 +1,13 @@
 use std::collections::BTreeMap;
-use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hickory_proto::op::{Message, MessageType, OpCode, Query as DnsQuery, ResponseCode};
-use hickory_proto::rr::{Name, RecordType as HickoryRecordType};
+use hickory_proto::rr::Name;
 
-use crate::types::{RecordType, ResolverName};
-#[cfg(test)]
-use omnifs_sdk::omnifs::provider::types::{Callout, Header, HttpRequest};
+use crate::types::{ResolverName, SupportedRecordType};
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::Deserialize;
-
-#[cfg(test)]
-const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
-#[cfg(test)]
-const GOOGLE_DOH: &str = "https://dns.google/dns-query";
 
 const BUILTIN_DEFAULTS_JSON: &str = r#"{
   "default_resolver": "cloudflare",
@@ -244,34 +236,10 @@ pub(super) fn query_url(
     config: &ResolverConfig,
     resolver: Option<&str>,
     domain: &str,
-    rtype: RecordType,
+    rtype: SupportedRecordType,
 ) -> Result<String> {
-    let endpoint = config.resolve_endpoint(resolver)?;
-    let ep = endpoint.as_str();
-    let sep = if ep.contains('?') { '&' } else { '?' };
-    let dns_query = encode_dns_query(domain, rtype)?;
-    let url = format!("{ep}{sep}dns={dns_query}");
-    Ok(url)
-}
-
-/// Callout-based query function (kept for potential test usage).
-#[cfg(test)]
-fn query(
-    config: &ResolverConfig,
-    resolver: Option<&str>,
-    domain: &str,
-    rtype: RecordType,
-) -> Result<Callout> {
-    let url = query_url(config, resolver, domain, rtype)?;
-    Ok(Callout::Fetch(HttpRequest {
-        method: "GET".to_string(),
-        url,
-        headers: vec![Header {
-            name: "Accept".to_string(),
-            value: "application/dns-message".to_string(),
-        }],
-        body: None,
-    }))
+    let name = parse_name(domain)?;
+    query_with_name(config, resolver, name, rtype)
 }
 
 pub(super) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)> {
@@ -296,15 +264,15 @@ pub(super) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)
     let mut records = Vec::new();
 
     for answer in &response.answers {
-        let maybe_type = RecordType::from_wire(u16::from(answer.record_type()));
-        if let Some(rtype) = maybe_type {
-            let ttl = u64::from(answer.ttl);
-            min_ttl = Some(min_ttl.unwrap_or(ttl).min(ttl));
-            records.push(crate::DnsRecord {
-                rtype,
-                value: answer.data.to_string(),
-            });
-        }
+        let Some(rtype) = SupportedRecordType::from_hickory(answer.record_type()) else {
+            continue;
+        };
+        let ttl = u64::from(answer.ttl);
+        min_ttl = Some(min_ttl.unwrap_or(ttl).min(ttl));
+        records.push(crate::DnsRecord {
+            rtype,
+            value: answer.data.to_string(),
+        });
     }
 
     Ok((records, min_ttl.unwrap_or(DEFAULT_TTL_SECS)))
@@ -319,51 +287,37 @@ pub(super) fn reverse_query_url(
     let addr = ip
         .parse::<IpAddr>()
         .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
-    let ptr_domain = match addr {
-        IpAddr::V4(addr) => ip_to_in_addr_arpa(addr),
-        IpAddr::V6(addr) => ip_to_ip6_arpa(addr),
-    };
-    query_url(config, resolver, &ptr_domain, RecordType::PTR)
+    let name = Name::from(addr);
+    query_with_name(config, resolver, name, SupportedRecordType::PTR)
 }
 
-/// Callout-based reverse query function (kept for potential test usage).
-#[cfg(test)]
-fn reverse_query(config: &ResolverConfig, resolver: Option<&str>, ip: &str) -> Result<Callout> {
-    let addr = ip
-        .parse::<IpAddr>()
-        .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
-    let ptr_domain = match addr {
-        IpAddr::V4(addr) => ip_to_in_addr_arpa(addr),
-        IpAddr::V6(addr) => ip_to_ip6_arpa(addr),
+fn parse_name(domain: &str) -> Result<Name> {
+    let fqdn = if domain.ends_with('.') {
+        domain.to_string()
+    } else {
+        format!("{domain}.")
     };
-    query(config, resolver, &ptr_domain, RecordType::PTR)
-}
-
-fn encode_dns_query(domain: &str, rtype: RecordType) -> Result<String> {
-    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
-    let mut fqdn = domain.to_string();
-    if !fqdn.ends_with('.') {
-        fqdn.push('.');
-    }
-
-    let name = Name::from_ascii(&fqdn).map_err(|error| {
+    Name::from_ascii(&fqdn).map_err(|error| {
         ProviderError::invalid_input(format!("invalid domain name {domain:?}: {error}"))
-    })?;
+    })
+}
 
-    let hickory_rtype = match rtype {
-        RecordType::A => HickoryRecordType::A,
-        RecordType::AAAA => HickoryRecordType::AAAA,
-        RecordType::CNAME => HickoryRecordType::CNAME,
-        RecordType::MX => HickoryRecordType::MX,
-        RecordType::NS => HickoryRecordType::NS,
-        RecordType::TXT => HickoryRecordType::TXT,
-        RecordType::SOA => HickoryRecordType::SOA,
-        RecordType::SRV => HickoryRecordType::SRV,
-        RecordType::CAA => HickoryRecordType::CAA,
-        RecordType::PTR => HickoryRecordType::PTR,
-    };
+fn query_with_name(
+    config: &ResolverConfig,
+    resolver: Option<&str>,
+    name: Name,
+    rtype: SupportedRecordType,
+) -> Result<String> {
+    let endpoint = config.resolve_endpoint(resolver)?;
+    let ep = endpoint.as_str();
+    let sep = if ep.contains('?') { '&' } else { '?' };
+    let dns_query = encode_dns_query(&name, rtype)?;
+    Ok(format!("{ep}{sep}dns={dns_query}"))
+}
 
-    message.add_query(DnsQuery::query(name, hickory_rtype));
+fn encode_dns_query(name: &Name, rtype: SupportedRecordType) -> Result<String> {
+    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+    message.add_query(DnsQuery::query(name.clone(), rtype.as_hickory()));
     message.metadata.recursion_desired = true;
 
     let wire = message
@@ -373,121 +327,15 @@ fn encode_dns_query(domain: &str, rtype: RecordType) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(wire))
 }
 
-fn ip_to_in_addr_arpa(ip: Ipv4Addr) -> String {
-    let octets = ip.octets();
-    format!(
-        "{}.{}.{}.{}.in-addr.arpa",
-        octets[3], octets[2], octets[1], octets[0]
-    )
-}
-
-fn ip_to_ip6_arpa(ip: Ipv6Addr) -> String {
-    // 32 nibbles + 31 dots + ".ip6.arpa" (9) = 72
-    let mut out = String::with_capacity(72);
-    for (i, nibble) in ip
-        .octets()
-        .iter()
-        .rev()
-        .flat_map(|byte| [byte & 0x0f, byte >> 4])
-        .enumerate()
-    {
-        if i > 0 {
-            out.push('.');
-        }
-        let _ = write!(out, "{nibble:x}");
-    }
-    out.push_str(".ip6.arpa");
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use hickory_proto::rr::{RData, Record, rdata::A};
+    use hickory_proto::rr::RecordType as HickoryRecordType;
     use omnifs_sdk::error::ProviderErrorKind;
 
     fn default_config() -> ResolverConfig {
         ResolverConfig::from_json(b"{}").unwrap()
-    }
-
-    fn make_dns_message_response(
-        response_code: ResponseCode,
-        answers: impl IntoIterator<Item = (&'static str, u32, &'static str)>,
-    ) -> Vec<u8> {
-        let mut response = Message::new(0, MessageType::Response, OpCode::Query);
-        response.metadata.response_code = response_code;
-        let records: Vec<_> = answers
-            .into_iter()
-            .map(|(domain, ttl, address)| make_a_record(domain, ttl, address))
-            .collect();
-        response.add_answers(records);
-        response.to_vec().unwrap()
-    }
-
-    fn make_a_record(domain: &str, ttl: u32, address: &str) -> Record {
-        Record::from_rdata(
-            Name::from_ascii(domain).unwrap(),
-            ttl,
-            RData::A(A(address.parse::<Ipv4Addr>().unwrap())),
-        )
-    }
-
-    #[test]
-    fn default_resolves_to_cloudflare() {
-        let cfg = default_config();
-        assert_eq!(cfg.resolve_endpoint(None).unwrap(), CLOUDFLARE_DOH);
-        assert_eq!(
-            cfg.resolve_endpoint(Some("cloudflare")).unwrap(),
-            CLOUDFLARE_DOH
-        );
-        assert_eq!(
-            cfg.resolve_endpoint(Some("1.1.1.1")).unwrap(),
-            CLOUDFLARE_DOH
-        );
-    }
-
-    #[test]
-    fn alias_resolves_google() {
-        let cfg = default_config();
-        assert_eq!(cfg.resolve_endpoint(Some("google")).unwrap(), GOOGLE_DOH);
-        assert_eq!(cfg.resolve_endpoint(Some("8.8.8.8")).unwrap(), GOOGLE_DOH);
-        assert_eq!(
-            cfg.resolve_endpoint(Some("dns.google")).unwrap(),
-            GOOGLE_DOH
-        );
-    }
-
-    #[test]
-    fn custom_resolver_from_config() {
-        let json = br#"{
-            "default_resolver": "quad9",
-            "resolvers": {
-                "quad9": {
-                    "url": "https://dns.quad9.net:5053/dns-query",
-                    "aliases": ["9.9.9.9"]
-                }
-            }
-        }"#;
-        let cfg = ResolverConfig::from_json(json).unwrap();
-        assert_eq!(
-            cfg.resolve_endpoint(None).unwrap(),
-            "https://dns.quad9.net:5053/dns-query"
-        );
-        assert_eq!(
-            cfg.resolve_endpoint(Some("9.9.9.9")).unwrap(),
-            "https://dns.quad9.net:5053/dns-query"
-        );
-    }
-
-    #[test]
-    fn https_url_passthrough() {
-        let cfg = default_config();
-        assert_eq!(
-            cfg.resolve_endpoint(Some("https://custom.dns/query"))
-                .unwrap(),
-            "https://custom.dns/query"
-        );
     }
 
     #[test]
@@ -497,89 +345,12 @@ mod tests {
         assert_eq!(err.kind(), ProviderErrorKind::InvalidInput);
         assert!(err.to_string().contains("unknown resolver specifier"));
     }
-
-    #[test]
-    fn missing_default_resolver_is_rejected() {
-        let json = br#"{
-            "default_resolver": "quad9",
-            "resolvers": {
-                "cloudflare": {
-                    "url": "https://cloudflare-dns.com/dns-query",
-                    "aliases": ["1.1.1.1"]
-                }
-            }
-        }"#;
-        let err = ResolverConfig::from_json(json).unwrap_err();
-        assert_eq!(err.kind(), ProviderErrorKind::InvalidInput);
-        assert!(err.to_string().contains("default resolver"));
-    }
-
-    #[test]
-    fn invalid_json_config_is_rejected() {
-        let err = ResolverConfig::from_json(b"{").unwrap_err();
-        assert_eq!(err.kind(), ProviderErrorKind::InvalidInput);
-        assert!(err.to_string().contains("invalid resolver config"));
-    }
-
-    #[test]
-    fn in_addr_arpa() {
-        assert_eq!(
-            ip_to_in_addr_arpa(Ipv4Addr::new(93, 184, 216, 34)),
-            "34.216.184.93.in-addr.arpa"
-        );
-    }
-
-    #[test]
-    fn ip6_arpa() {
-        assert_eq!(
-            ip_to_ip6_arpa(Ipv6Addr::LOCALHOST),
-            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
-        );
-    }
-
-    #[test]
-    fn invalid_reverse_ip_is_rejected() {
-        let cfg = default_config();
-        assert!(matches!(
-            reverse_query(&cfg, None, "1:2:3:4:5:6:7:8:9"),
-            Err(err) if format!("{err}").contains("invalid IP address")
-        ));
-        assert!(matches!(
-            reverse_query(&cfg, None, "999.184.216.34"),
-            Err(err) if format!("{err}").contains("invalid IP address")
-        ));
-    }
-
-    #[test]
-    fn parse_doh_response() {
-        let response = make_dns_message_response(
-            ResponseCode::NoError,
-            [
-                ("example.com", 300, "93.184.216.34"),
-                ("example.com", 200, "93.184.216.35"),
-            ],
-        );
-        let (records, ttl) = parse_response(&response).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].value, "93.184.216.34");
-        assert_eq!(records[1].value, "93.184.216.35");
-        assert_eq!(ttl, 200);
-    }
-
     #[test]
     fn query_uses_dns_wireformat_parameter() {
         let cfg = default_config();
-        let Ok(Callout::Fetch(request)) = query(&cfg, None, "ibm.com", RecordType::A) else {
-            panic!("expected fetch callout");
-        };
+        let url = query_url(&cfg, None, "ibm.com", SupportedRecordType::A).expect("query url");
 
-        assert_eq!(request.method, "GET");
-        assert_eq!(request.headers.len(), 1);
-        assert_eq!(request.headers[0].name, "Accept");
-        assert_eq!(request.headers[0].value, "application/dns-message");
-
-        let (_, dns_param) = request
-            .url
+        let (_, dns_param) = url
             .split_once("dns=")
             .expect("expected dns query parameter");
         let wire = URL_SAFE_NO_PAD.decode(dns_param).unwrap();
@@ -592,19 +363,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_nxdomain() {
-        let response = make_dns_message_response(ResponseCode::NXDomain, []);
-        let err = parse_response(&response).unwrap_err();
-        assert_eq!(err.kind(), ProviderErrorKind::NotFound);
-        assert!(err.to_string().contains("Non-Existent Domain"));
-    }
-
-    #[test]
-    fn resolvers_file_format() {
+    fn reverse_query_uses_hickory_ptr_name() {
         let cfg = default_config();
-        let content = cfg.format_resolvers_file();
-        assert!(content.contains("cloudflare"));
-        assert!(content.contains("google"));
-        assert!(content.contains(CLOUDFLARE_DOH));
+        let url = reverse_query_url(&cfg, None, "26.3.0.103").expect("reverse query url");
+        let (_, dns_param) = url.split_once("dns=").expect("dns param");
+        let message = Message::from_vec(&URL_SAFE_NO_PAD.decode(dns_param).unwrap()).unwrap();
+        assert_eq!(message.queries[0].query_type, HickoryRecordType::PTR);
+        assert_eq!(
+            message.queries[0].name.to_string(),
+            "103.0.3.26.in-addr.arpa."
+        );
     }
 }

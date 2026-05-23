@@ -91,21 +91,31 @@ impl DeclaredHandler {
     }
 }
 
-pub fn read_declared_handlers_from_wasm(path: &Path) -> Result<Vec<DeclaredHandler>, String> {
+fn load_provider_wasm(path: &Path) -> Result<mts::ProviderWasm, String> {
     let bytes =
         std::fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let section_bytes = mts::read_manifest_section(&bytes).map_err(|error| error.to_string())?;
-    if section_bytes.is_empty() {
+    Ok(mts::ProviderWasm::from_bytes(bytes))
+}
+
+pub fn read_declared_handlers_from_wasm(path: &Path) -> Result<Vec<DeclaredHandler>, String> {
+    let wasm = load_provider_wasm(path)?;
+    if wasm
+        .manifest_section()
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
         return Ok(Vec::new());
     }
 
-    let mut records = Vec::new();
-    for record in mts::ManifestRecordIter::new(&section_bytes) {
-        records
-            .push(record.map_err(|error| format!("decoding provider manifest record: {error}"))?);
-    }
-    let resolved = mts::resolve_manifest(records)
-        .map_err(|error| format!("resolving provider manifest: {error}"))?;
+    let resolved = wasm.resolved_manifest().map_err(|error| match error {
+        mts::ProviderWasmError::Decode(decode) => {
+            format!("decoding provider manifest record: {decode}")
+        },
+        mts::ProviderWasmError::Resolve(resolve) => {
+            format!("resolving provider manifest: {resolve}")
+        },
+        mts::ProviderWasmError::Section(section) => section.to_string(),
+    })?;
 
     // Skip bind sites: they're parents of expanded subtree routes, not
     // concrete handlers the runtime can dispatch.
@@ -115,6 +125,18 @@ pub fn read_declared_handlers_from_wasm(path: &Path) -> Result<Vec<DeclaredHandl
         .filter(|handler| !matches!(handler.handler_kind, mts::HandlerKindRecord::Subtree))
         .map(DeclaredHandler::new)
         .collect()
+}
+
+pub fn read_auth_manifest_from_wasm(path: &Path) -> Result<Option<mts::AuthManifest>, String> {
+    Ok(read_provider_metadata_from_wasm(path)?.and_then(|manifest| manifest.wasm_auth_manifest()))
+}
+
+pub fn read_provider_metadata_from_wasm(
+    path: &Path,
+) -> Result<Option<mts::ProviderManifest>, String> {
+    load_provider_wasm(path)?
+        .metadata()
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -1,14 +1,20 @@
 [workspace]
 members = ["cargo:."]
 
-# v0.1.0 ships Linux-only because the omnifs CLI requires FUSE, which
-# isn't available on macOS or Windows. Add more targets when the
-# macFUSE / WinFsp story is sorted.
+# The host CLI ships for Linux and macOS. The runtime mount remains
+# Linux FUSE inside the Docker image; macOS support means the CLI talks
+# to Docker Desktop and users enter the mounted environment with
+# `omnifs shell`, not that omnifs exposes a native Finder mount.
 [dist]
 cargo-dist-version = "0.31.0"
 ci = "github"
 installers = []
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
 hosting = "github"
 github-attestations = true
 pr-run-mode = "skip"

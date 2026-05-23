@@ -1,0 +1,20 @@
+{
+  "id": "fixture",
+  "displayName": "Fixture",
+  "provider": "fixture_provider.wasm",
+  "defaultMount": "fixture",
+  "auth": {
+    "inject": {
+      "domains": ["api.fixture.test"],
+      "header": "Authorization",
+      "prefix": "Bearer "
+    },
+    "default": "fixture",
+    "schemes": {
+      "fixture": {
+        "type": "staticToken",
+        "description": "Fixture token"
+      }
+    }
+  }
+}

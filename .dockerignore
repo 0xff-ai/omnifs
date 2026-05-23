@@ -1,9 +1,42 @@
+# Ignore everything by default. The Dockerfile builds from `COPY . .`, so
+# this file is the build-context contract.
+*
+
+# Root Cargo/build inputs.
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!rustfmt.toml
+!.clippy.toml
+!.cargo/
+!.cargo/**
+
+# Rust source roots and WIT definitions.
+!crates/
+!crates/**
+!providers/
+!providers/**
+!wit/
+!wit/**
+
+# Runtime scripts copied by the Dockerfile.
+!scripts/
+!scripts/demo.sh
+!scripts/container-entrypoint.sh
+
+# Docker metadata needed for rebuilds, but not for image contents.
+!Dockerfile
+!.dockerignore
+
+# Keep generated output and local state out even under re-included roots.
 target/
 **/target/
-providers/target/
+.git/
 .worktrees/
 .claude/
-.git/
+.serena/
+.manual/
+.secrets/
 .ssh/
 .env
 .env.*
@@ -12,4 +45,4 @@ providers/target/
 *.mp4
 *.cast
 demo.*
-docs/
+.DS_Store

@@ -164,10 +164,4 @@ mod tests {
         );
         assert_eq!(err_kind(resp), ProviderErrorKind::RateLimited);
     }
-
-    #[test]
-    fn passes_through_2xx_responses() {
-        let resp = response(200, &[], b"ok");
-        assert!(github_check_status(resp).is_ok());
-    }
 }

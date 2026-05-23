@@ -24,13 +24,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 strum = { workspace = true }
 
-[package.metadata.component]
-package = "omnifs:provider"
-
-[package.metadata.component.target]
-world = "provider"
-path = "../../wit"
-
+[dev-dependencies]
+omnifs-mount-schema = { version = "0.1.0", path = "../../crates/omnifs-mount-schema" }
 [lints.rust]
 unsafe_code = "allow"
 

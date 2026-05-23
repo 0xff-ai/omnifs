@@ -862,7 +862,7 @@ impl<S> MountRegistry<S> {
         }
 
         if let Some((route, parsed)) = self.match_file(&abs) {
-            return opened_file_from_content((route.call)(cx, parsed).await?);
+            return (route.call)(cx, parsed).await?.try_into();
         }
 
         Err(ProviderError::not_found(format!("path not found: {path}")))
@@ -1239,7 +1239,7 @@ impl<S, B> SubtreeRegistry<S, B> {
     pub async fn open_file(&self, cx: &Cx<S>, bindings: &B, path: &str) -> Result<OpenedFile> {
         let abs = to_absolute_path(path);
         if let Some((route, parsed)) = self.match_file(&abs) {
-            return opened_file_from_content((route.call)(cx, bindings, parsed).await?);
+            return (route.call)(cx, bindings, parsed).await?.try_into();
         }
 
         Err(ProviderError::not_found(format!("path not found: {path}")))
@@ -1479,22 +1479,26 @@ fn projected_file_from_projection(
         .with_effects(effects))
 }
 
-fn opened_file_from_content(content: FileContent) -> Result<OpenedFile> {
-    match content {
-        FileContent::Bytes(_)
-        | FileContent::BytesWithAttrs { .. }
-        | FileContent::Blob(_)
-        | FileContent::BlobWithAttrs { .. } => Err(ProviderError::invalid_input(
-            "open-file requires FileContent::ranged or FileContent::range_bytes",
-        )),
-        FileContent::Range { file, reader } => {
-            file.validate()
-                .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
-            Ok(OpenedFile::new(file.attrs, reader))
-        },
-        FileContent::Stream(_) => Err(ProviderError::unimplemented(
-            "streamed file reads are not wired through the current host runtime",
-        )),
+impl TryFrom<FileContent> for OpenedFile {
+    type Error = ProviderError;
+
+    fn try_from(content: FileContent) -> std::result::Result<Self, Self::Error> {
+        match content {
+            FileContent::Bytes(_)
+            | FileContent::BytesWithAttrs { .. }
+            | FileContent::Blob(_)
+            | FileContent::BlobWithAttrs { .. } => Err(ProviderError::invalid_input(
+                "open-file requires FileContent::ranged or FileContent::range_bytes",
+            )),
+            FileContent::Range { file, reader } => {
+                file.validate()
+                    .map_err(|error| ProviderError::invalid_input(error.message().to_string()))?;
+                Ok(OpenedFile::new(file.attrs, reader))
+            },
+            FileContent::Stream(_) => Err(ProviderError::unimplemented(
+                "streamed file reads are not wired through the current host runtime",
+            )),
+        }
     }
 }
 

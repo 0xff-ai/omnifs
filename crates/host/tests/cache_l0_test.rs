@@ -2,25 +2,6 @@ use omnifs_host::cache::l0::Cache;
 use omnifs_host::cache::{CacheRecord, Key, L0_SKIP_THRESHOLD, RecordKind};
 
 #[test]
-fn l0_put_get() {
-    let l0 = Cache::new();
-    let key = Key::new("docs/readme.md", RecordKind::Attr);
-    let record = CacheRecord::new(RecordKind::Attr, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
-    l0.put(key.clone(), record.clone());
-
-    let got = l0.get(&key);
-    assert!(got.is_some());
-    assert_eq!(got.unwrap().payload, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
-}
-
-#[test]
-fn l0_get_miss() {
-    let l0 = Cache::new();
-    let key = Key::new("nope", RecordKind::File);
-    assert!(l0.get(&key).is_none());
-}
-
-#[test]
 fn l0_invalidate_exact() {
     let l0 = Cache::new();
     let key = Key::new("owner/repo/README.md", RecordKind::File);

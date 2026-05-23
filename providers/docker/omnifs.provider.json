@@ -1,0 +1,31 @@
+{
+  "id": "docker",
+  "displayName": "Docker",
+  "provider": "omnifs_provider_docker.wasm",
+  "defaultMount": "docker",
+  "capabilities": [
+    {
+      "kind": "unixSocket",
+      "value": "configured Docker socket",
+      "dynamic": true,
+      "why": "Talk to the configured Docker daemon socket for container, image, and compose reads."
+    },
+    {
+      "kind": "memoryMb",
+      "value": 64,
+      "why": "Keep Docker metadata browsing bounded; responses are streamed from the daemon."
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "required": ["endpoint"],
+    "additionalProperties": false,
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "default": "unix:///var/run/docker.sock",
+        "description": "Docker daemon endpoint"
+      }
+    }
+  }
+}

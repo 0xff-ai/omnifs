@@ -2,11 +2,14 @@
 /providers/target
 /dist
 .worktrees/
+npm/platform/*/bin/omnifs
+npm/platform/*/bin/omnifs.exe
 
 .DS_Store
 .env
 .env.*
 .secrets/
+.manual/
 *.log
 
 # Demo recording artifacts

@@ -9,6 +9,8 @@
 //! [`exports::omnifs::tool_archive::extract::ExtractError`]; the
 //! host translates that into its own `ArchiveError`.
 
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,6 +48,7 @@ impl Guest for ExtractorComponent {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 export!(ExtractorComponent);
 
 // The `max_` prefix is load-bearing here: the same fields appear in

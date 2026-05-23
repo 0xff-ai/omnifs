@@ -6,7 +6,7 @@ This crate is an implementation detail of the [omnifs](https://github.com/raulk/
 
 ## What's in here
 
-`MountSpec`, `Capabilities`, and the manifest enum types that the host runtime reads. `wasmparser`-backed helpers for extracting the section from a `.wasm` component file.
+`ProviderManifest`, `ProviderCapabilities`, `AuthManifest`, and the manifest enum types that the host runtime reads. `wasmparser`-backed helpers extract omnifs custom sections from `.wasm` component files.
 
 ## Install
 

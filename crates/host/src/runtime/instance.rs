@@ -12,9 +12,9 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::Provider;
-use crate::config::{PreopenMode, PreopenedPath};
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::wasm;
+use omnifs_mount_schema::{PreopenMode, PreopenedPath};
 
 use super::{HostState, Op, RuntimeBuildError, RuntimeError};
 
@@ -143,28 +143,6 @@ impl ProviderInstance {
         })
     }
 
-    pub fn config_schema(&self) -> std::result::Result<Option<String>, RuntimeError> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            Ok(self
-                .bindings
-                .omnifs_provider_lifecycle()
-                .call_get_config_schema(&mut *store)?)
-        })
-    }
-
-    pub fn capabilities(
-        &self,
-    ) -> std::result::Result<wit_types::RequestedCapabilities, RuntimeError> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            Ok(self
-                .bindings
-                .omnifs_provider_lifecycle()
-                .call_capabilities(&mut *store)?)
-        })
-    }
-
     pub fn close_file(&self, handle: u64) -> std::result::Result<(), RuntimeError> {
         without_tokio_handle(|| {
             let mut store = self.store.lock();
@@ -263,13 +241,6 @@ fn validate_preopen_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_preopen_path_accepts_absolute() {
-        let p = validate_preopen_path("/data/db", "host").expect("absolute ok");
-        assert_eq!(p, PathBuf::from("/data/db"));
-    }
-
     #[test]
     fn validate_preopen_path_rejects_relative() {
         let err = validate_preopen_path("data/db", "host").unwrap_err();

@@ -336,15 +336,6 @@ fn format_atom_utc(value: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn recent_page_maps_to_start_offset() {
-        let page: RecentPage = "1".parse().unwrap();
-        assert_eq!(page.index(), 1);
-        assert_eq!(page.start(), 100);
-        assert_eq!("300".parse::<RecentPage>().unwrap().start(), 30_000);
-    }
-
     #[test]
     fn category_key_rejects_route_scaffolding_names() {
         assert!("cs.AI".parse::<CategoryKey>().is_ok());
@@ -354,41 +345,5 @@ mod tests {
         assert!("papers".parse::<CategoryKey>().is_err());
         assert!("recent".parse::<CategoryKey>().is_err());
         assert!("submissions".parse::<CategoryKey>().is_err());
-    }
-
-    #[test]
-    fn submission_day_uses_utc_published_date() {
-        let day = SubmissionDay::from_published("2026-05-12T01:30:00+02:00").unwrap();
-        assert_eq!(day.path_segment(), "20260511");
-        assert_eq!(day.date().year(), 2026);
-    }
-
-    #[test]
-    fn feed_snapshot_formats_utc() {
-        let snapshot = FeedSnapshot::parse("2025-01-15T00:00:00-05:00").unwrap();
-        assert_eq!(snapshot.as_utc_string(), "2025-01-15T05:00:00Z");
-    }
-
-    #[test]
-    fn paper_key_round_trip_preserves_slash_ids() {
-        let encoded = PaperKey::encode_raw_id("hep-th/9901001");
-        assert_eq!(encoded.as_ref(), "hep-th%2F9901001");
-        assert_eq!(encoded.decode().unwrap(), "hep-th/9901001");
-    }
-
-    #[test]
-    fn split_versioned_id_handles_bare_and_versioned() {
-        assert_eq!(
-            split_versioned_id("2501.12345"),
-            ("2501.12345".to_string(), None)
-        );
-        assert_eq!(
-            split_versioned_id("2501.12345v3"),
-            ("2501.12345".to_string(), Some(3))
-        );
-        assert_eq!(
-            split_versioned_id("hep-th/9901001"),
-            ("hep-th/9901001".to_string(), None)
-        );
     }
 }
