@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use omnifs_mount_schema::{AuthManifest, OauthScheme, SchemeResolveError};
 
-pub(crate) const DEFAULT_STATIC_SCHEME: &str = "static-token";
+const DEFAULT_STATIC_SCHEME: &str = "static-token";
 
 pub(crate) struct AuthManifestView<'a> {
     manifest: Option<&'a AuthManifest>,

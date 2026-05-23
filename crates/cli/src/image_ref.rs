@@ -1,5 +1,4 @@
 use std::fmt;
-use std::str::FromStr;
 
 use thiserror::Error;
 
@@ -37,30 +36,6 @@ impl fmt::Display for ImageRef {
 impl AsRef<str> for ImageRef {
     fn as_ref(&self) -> &str {
         self.as_str()
-    }
-}
-
-impl FromStr for ImageRef {
-    type Err = ImageRefError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for ImageRef {
-    type Error = ImageRefError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<&str> for ImageRef {
-    type Error = ImageRefError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::new(value)
     }
 }
 

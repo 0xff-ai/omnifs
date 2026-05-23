@@ -18,15 +18,18 @@ const IMAGE: &str = concat!("ghcr.io/raulk/omnifs:", env!("CARGO_PKG_VERSION"));
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
 
+/// Aggregate result of a completed diagnostic run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DoctorVerdict {
+    Clean,
+    Warnings,
+    Failures,
+}
+
 impl DoctorArgs {
-    pub async fn run(self) -> anyhow::Result<crate::outcome::CommandOutcome> {
+    pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let ctx = AppContext::resolve_default()?;
-        let exit_code = run(ctx.paths(), ctx.catalog()).await?;
-        Ok(if exit_code == 0 {
-            crate::outcome::CommandOutcome::Success
-        } else {
-            crate::outcome::CommandOutcome::Exit(exit_code)
-        })
+        run(ctx.paths(), ctx.catalog()).await
     }
 }
 
@@ -87,7 +90,7 @@ impl DoctorReport {
         self.probes.last().expect("record just pushed").render()
     }
 
-    fn exit_code(&self) -> i32 {
+    fn verdict(&self) -> DoctorVerdict {
         let any_red = self
             .probes
             .iter()
@@ -97,16 +100,16 @@ impl DoctorReport {
             .iter()
             .any(|probe| matches!(probe.result, ProbeResult::Warn(_)));
         if any_red {
-            1
+            DoctorVerdict::Failures
         } else if any_yellow {
-            2
+            DoctorVerdict::Warnings
         } else {
-            0
+            DoctorVerdict::Clean
         }
     }
 }
 
-pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<i32> {
+pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<DoctorVerdict> {
     let mut report = DoctorReport::default();
 
     // 1. docker_reachable
@@ -155,7 +158,7 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<i32
     let network_result = probe_network().await;
     anstream::println!("{}", report.record("network", network_result));
 
-    Ok(report.exit_code())
+    Ok(report.verdict())
 }
 
 async fn probe_docker_reachable() -> (Option<Docker>, ProbeResult) {

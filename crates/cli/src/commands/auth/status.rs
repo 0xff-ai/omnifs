@@ -8,7 +8,7 @@ use omnifs_host::config::AuthConfig;
 use super::shared::{
     MountConfig, format_rfc3339, format_scopes, load_all_mounts, primary_auth, read_auth_manifest,
 };
-use crate::auth_manifest_view::{AuthManifestView, DEFAULT_STATIC_SCHEME};
+use crate::auth_manifest_view::AuthManifestView;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
@@ -98,7 +98,7 @@ impl<'a> AuthStatus<'a> {
                 view.static_token_scheme_key(None, auth.and_then(AuthConfig::scheme))
                     .ok()
             })
-            .unwrap_or_else(|| DEFAULT_STATIC_SCHEME.to_owned());
+            .unwrap_or_else(|| "unknown".to_owned());
         let target = CredentialTarget::for_scheme(&mount.config, auth, &scheme, None)?;
         let entry = target.lookup(self.store)?;
         Ok(AuthStatusRow {

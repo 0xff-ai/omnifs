@@ -21,7 +21,6 @@ mod error;
 mod image_ref;
 mod mount_report;
 mod mount_tree;
-pub mod outcome;
 pub mod paths;
 mod presentation;
 mod proc_mounts;
@@ -42,12 +41,7 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     match run(cli).await {
-        Ok(outcome) => {
-            let code = outcome.exit_code();
-            if code != 0 {
-                std::process::exit(code);
-            }
-        },
+        Ok(()) => {},
         Err(error) => {
             anstream::eprint!("{}", error::render(&error));
             std::process::exit(1);
@@ -74,6 +68,6 @@ fn init_tracing(verbose: u8) {
     builder.init();
 }
 
-async fn run(cli: Cli) -> anyhow::Result<outcome::CommandOutcome> {
+async fn run(cli: Cli) -> anyhow::Result<()> {
     cli.command.run().await
 }

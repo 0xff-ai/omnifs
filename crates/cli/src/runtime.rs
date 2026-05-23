@@ -3,7 +3,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig};
 use bollard::query_parameters::{
@@ -38,13 +38,13 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub(crate) fn connect() -> anyhow::Result<Self> {
+    pub(crate) fn connect() -> Result<Self> {
         let selection =
             RuntimeSelection::new(ContainerName::new(CONTAINER_NAME)?, ImageRef::new(IMAGE)?);
         Self::connect_for(&selection)
     }
 
-    pub(crate) fn connect_for(selection: &RuntimeSelection) -> anyhow::Result<Self> {
+    pub(crate) fn connect_for(selection: &RuntimeSelection) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()
             .context("connect to Docker daemon (is it running?)")?;
         Ok(Self {
@@ -57,7 +57,7 @@ impl Runtime {
     pub(crate) async fn connect_ready(
         selection: &RuntimeSelection,
         command: &'static str,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         anstream::println!("Connecting to Docker");
         let runtime = Self::connect_for(selection)?;
         runtime
@@ -71,11 +71,11 @@ impl Runtime {
         Ok(runtime)
     }
 
-    pub(crate) async fn ping(&self) -> anyhow::Result<()> {
+    pub(crate) async fn ping(&self) -> Result<()> {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
     }
 
-    pub(crate) async fn pull_image_with_progress(&self, image: &str) -> anyhow::Result<()> {
+    pub(crate) async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
         anstream::println!("Pulling {image}");
         let (from_image, tag) = image
             .rsplit_once(':')
@@ -137,7 +137,7 @@ impl Runtime {
         &self,
         session: &Session,
         extras: ContainerExtras,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.ensure_image().await?;
         self.remove().await?;
 
@@ -165,11 +165,11 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn remove(&self) -> anyhow::Result<()> {
+    pub(crate) async fn remove(&self) -> Result<()> {
         self.remove_existing(&self.container_name).await
     }
 
-    pub(crate) async fn remove_existing(&self, name: &ContainerName) -> anyhow::Result<()> {
+    pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
         anstream::print!("Checking for existing container `{name}` ");
         std::io::stdout().flush().ok();
         match self
@@ -215,7 +215,7 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn wait_for_fuse_mount(&self) -> anyhow::Result<()> {
+    pub(crate) async fn wait_for_fuse_mount(&self) -> Result<()> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
 
         anstream::println!(
@@ -270,7 +270,7 @@ impl Runtime {
         .with_hint("Run `omnifs doctor` to verify Docker, FUSE, and image cache")
     }
 
-    pub(crate) async fn verify_status(&self, configs: &[MountConfig]) -> anyhow::Result<()> {
+    pub(crate) async fn verify_status(&self, configs: &[MountConfig]) -> Result<()> {
         use bollard::container::LogOutput;
         use bollard::exec::{CreateExecOptions, StartExecResults};
 
@@ -374,7 +374,7 @@ impl Runtime {
         Ok(())
     }
 
-    async fn ensure_image(&self) -> anyhow::Result<()> {
+    async fn ensure_image(&self) -> Result<()> {
         anstream::print!("Checking image `{}` ", self.image);
         std::io::stdout().flush().ok();
         match self.docker.inspect_image(self.image.as_str()).await {

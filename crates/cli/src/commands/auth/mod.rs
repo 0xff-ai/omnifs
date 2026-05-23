@@ -92,7 +92,7 @@ impl AuthArgs {
             AuthCommand::Logout { mount, revoke } => {
                 logout::logout(&paths, catalog, store.as_ref(), &mount, None, revoke).await
             },
-            AuthCommand::Status { json } => match OutputFormat::from_json_flag(json) {
+            AuthCommand::Status { json } => match OutputFormat::from(json) {
                 OutputFormat::Json => status::status_json(&paths, catalog, store.as_ref()),
                 OutputFormat::Text => status::status(&paths, catalog, store.as_ref()),
             },

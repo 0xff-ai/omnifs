@@ -6,7 +6,6 @@
 //! confirms capabilities per provider, runs `init`, and (unless `--no-up`)
 //! launches the container.
 
-pub mod docker_pull;
 pub mod host_os;
 pub mod summary;
 
@@ -64,7 +63,9 @@ impl SetupArgs {
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        docker_pull::pull(&runtime, ctx.runtime().image().as_str()).await?;
+        runtime
+            .pull_image_with_progress(ctx.runtime().image().as_str())
+            .await?;
 
         let catalog = ctx.catalog();
         let templates = catalog.provider_templates()?;

@@ -1,7 +1,7 @@
 //! `omnifs status` verb handler.
 
 use crate::app_context::AppContext;
-use crate::presentation::{DetailMode, OutputFormat};
+use crate::presentation::OutputFormat;
 use crate::status::{collect_status, resolve_paths};
 use anyhow::Context;
 use clap::Args;
@@ -44,17 +44,14 @@ fn print_local_status(args: StatusArgs) -> anyhow::Result<()> {
     let ctx = AppContext::resolve_default()?;
     let (paths, mount_point) = resolve_paths(args.mount_point, args.config_dir, args.cache_dir);
     let report = collect_status(ctx.catalog(), paths, mount_point)?;
-    match OutputFormat::from_json_flag(args.json) {
+    match OutputFormat::from(args.json) {
         OutputFormat::Json => {
             let payload = report.to_json();
             let serialized = serde_json::to_string(&payload).context("serialize status JSON")?;
             anstream::println!("{serialized}");
         },
         OutputFormat::Text => {
-            anstream::print!(
-                "{}",
-                report.render(DetailMode::from_flag(args.detail).is_detail())
-            );
+            anstream::print!("{}", report.render(args.detail));
         },
     }
     Ok(())

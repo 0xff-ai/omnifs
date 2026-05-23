@@ -1,6 +1,5 @@
 use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContainerName(String);
@@ -30,14 +29,6 @@ impl fmt::Display for ContainerName {
 impl AsRef<str> for ContainerName {
     fn as_ref(&self) -> &str {
         self.as_str()
-    }
-}
-
-impl FromStr for ContainerName {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
     }
 }
 

@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::commands;
+use crate::commands::doctor::DoctorVerdict;
 
 #[derive(Parser)]
 #[command(
@@ -81,42 +82,39 @@ pub enum Commands {
     Debug(commands::debug::DebugArgs),
 }
 
-use crate::outcome::CommandOutcome;
-
 impl Commands {
-    pub async fn run(self) -> anyhow::Result<CommandOutcome> {
+    pub async fn run(self) -> anyhow::Result<()> {
         match self {
-            Self::Status(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Auth(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Setup(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Init(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Up(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Dev(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Down(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Logs(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Shell(args) => {
-                args.run()?;
-                Ok(CommandOutcome::Success)
+            Self::Doctor(args) => {
+                let verdict = args.run().await?;
+                exit_for_verdict(verdict);
             },
-            Self::Mounts(args) => {
-                args.run()?;
-                Ok(CommandOutcome::Success)
-            },
-            Self::Reset(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Doctor(args) => args.run().await,
+            Self::Status(args) => args.run().await,
+            Self::Auth(args) => args.run().await,
+            Self::Setup(args) => args.run().await,
+            Self::Init(args) => args.run().await,
+            Self::Up(args) => args.run().await,
+            Self::Dev(args) => args.run().await,
+            Self::Down(args) => args.run().await,
+            Self::Logs(args) => args.run().await,
+            Self::Shell(args) => args.run(),
+            Self::Mounts(args) => args.run(),
+            Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();
-                Ok(CommandOutcome::Success)
+                Ok(())
             },
-            Self::Version(args) => args.run().await.map(|()| CommandOutcome::Success),
-            Self::Daemon(args) => {
-                args.run()?;
-                Ok(CommandOutcome::Success)
-            },
-            Self::Debug(args) => {
-                args.run()?;
-                Ok(CommandOutcome::Success)
-            },
+            Self::Version(args) => args.run().await,
+            Self::Daemon(args) => args.run(),
+            Self::Debug(args) => args.run(),
         }
     }
+}
+
+fn exit_for_verdict(verdict: DoctorVerdict) -> ! {
+    std::process::exit(match verdict {
+        DoctorVerdict::Clean => 0,
+        DoctorVerdict::Failures => 1,
+        DoctorVerdict::Warnings => 2,
+    })
 }

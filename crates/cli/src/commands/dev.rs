@@ -16,8 +16,7 @@ use crate::app_context::AppContext;
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
 use crate::paths::PathOverrides;
-use crate::presentation::PromptMode;
-use crate::runtime::ContainerExtras;
+use crate::runtime::{ContainerExtras, Runtime};
 use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, Session, env_string, open_store,
     set_private_dir, write_secret,
@@ -39,8 +38,7 @@ impl DevArgs {
         let workspace = WorkspaceRoot::discover()?;
         anstream::println!("Workspace: {}", workspace.path().display());
 
-        let prompt = PromptMode::from_yes_flag(self.yes);
-        confirm_gh_token_capture(prompt)?;
+        confirm_gh_token_capture(self.yes)?;
 
         let gh_token = capture_gh_token()?;
 
@@ -53,7 +51,7 @@ impl DevArgs {
         let container_name =
             env_string(ENV_CONTAINER_NAME).unwrap_or_else(|| CONTAINER_NAME.to_string());
 
-        if !prompt.should_skip_confirm() {
+        if !self.yes {
             confirm_session(
                 &token_path,
                 &db_path,
@@ -89,7 +87,7 @@ impl DevArgs {
         session.populate(&configs, ctx.catalog(), store.as_ref())?;
         anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
-        let runtime_handle = crate::runtime::Runtime::connect_ready(runtime, "omnifs dev").await?;
+        let rt = Runtime::connect_ready(runtime, "omnifs dev").await?;
 
         let extras = ContainerExtras {
             binds: vec![
@@ -98,10 +96,10 @@ impl DevArgs {
             ],
             ..Default::default()
         };
-        runtime_handle.launch_container(&session, extras).await?;
+        rt.launch_container(&session, extras).await?;
 
-        runtime_handle.wait_for_fuse_mount().await?;
-        runtime_handle.verify_status(&configs).await?;
+        rt.wait_for_fuse_mount().await?;
+        rt.verify_status(&configs).await?;
         cleanup.disarm();
         anstream::println!(
             "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
@@ -113,8 +111,8 @@ impl DevArgs {
     }
 }
 
-fn confirm_gh_token_capture(prompt: PromptMode) -> anyhow::Result<()> {
-    if prompt.should_skip_confirm() {
+fn confirm_gh_token_capture(skip_confirm: bool) -> anyhow::Result<()> {
+    if skip_confirm {
         return Ok(());
     }
     anstream::println!();
