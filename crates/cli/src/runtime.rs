@@ -19,8 +19,8 @@ use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
 use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, MountConfig, Session};
 
-const HOST_MOUNTS_DIR: &str = "/root/.omnifs/mounts";
-const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/credentials.json";
+const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
+const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
 
 /// Extra bind mounts on top of the canonical session wiring.
 /// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
@@ -253,6 +253,29 @@ impl Runtime {
                     anstream::println!("✓ FUSE mount is ready");
                     return Ok(());
                 }
+            }
+            if let Ok(container) = self
+                .docker
+                .inspect_container(
+                    self.container_name.as_str(),
+                    None::<InspectContainerOptions>,
+                )
+                .await
+                && let Some(state) = container.state
+                && state.running == Some(false)
+            {
+                let exit_code = state.exit_code.unwrap_or_default();
+                let status = state
+                    .status
+                    .map_or_else(|| "exited".to_string(), |status| status.to_string());
+                return Err(anyhow::anyhow!(
+                    "container `{}` {status} before {HOST_FUSE_MOUNT} became available (exit {exit_code})",
+                    self.container_name
+                ))
+                .with_hint(format!(
+                    "`docker logs {}` may show why the daemon failed to mount",
+                    self.container_name
+                ));
             }
             if attempt > 0 && attempt % 5 == 0 {
                 anstream::print!(".");

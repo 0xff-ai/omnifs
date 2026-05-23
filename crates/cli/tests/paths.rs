@@ -7,6 +7,8 @@ mod common;
 
 use common::with_env;
 use omnifs_cli::paths::{PathOverrides, Paths};
+
+#[test]
 fn resolve_flag_overrides_win_over_env() {
     let tmp = tempfile::tempdir().unwrap();
     let env_config = tmp.path().join("env_config");
@@ -28,6 +30,7 @@ fn resolve_flag_overrides_win_over_env() {
             });
             // Flag override wins over env var.
             assert_eq!(paths.config_dir, flag_config);
+            assert_eq!(paths.credentials_file, flag_config.join("credentials.json"));
         },
     );
 }

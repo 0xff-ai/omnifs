@@ -152,15 +152,13 @@ RUN printf '%s\n' \
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
-    && mkdir -p /root/.omnifs/providers /root/.omnifs/mounts /tmp/omnifs-provider-manifests
+    && mkdir -p /root/.omnifs/config/mounts /root/.omnifs/data /root/.omnifs/cache /root/.omnifs/providers /tmp/omnifs-provider-manifests
 
 SHELL ["/bin/zsh", "-c"]
-# `omnifs daemon mount` resolves `providers_dir` (compiled provider WASMs)
-# from `OMNIFS_PROVIDERS_DIR` → config-file → `data_dir/providers`. The
-# image bakes WASMs under `/root/.omnifs/providers/` (alongside the
-# bind-mounted `mounts/` dir), which sits under `config_dir`, not the
-# XDG `data_dir`. Declare the location so the daemon finds them without
-# the host having to pass `--providers-dir` through the entrypoint.
+# `omnifs daemon mount` resolves `providers_dir` from `OMNIFS_PROVIDERS_DIR`
+# before falling back to `data_dir/providers`. The image bakes WASMs under
+# `/root/.omnifs/providers/`, so declare that location for the daemon and for
+# `docker exec omnifs omnifs status`.
 ENV SHELL=/bin/zsh \
     OMNIFS_PROVIDERS_DIR=/root/.omnifs/providers
 WORKDIR /

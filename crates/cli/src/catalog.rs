@@ -115,10 +115,10 @@ impl ProviderCatalog {
         &self,
         config: &EffectiveConfig,
     ) -> anyhow::Result<Option<AuthManifest>> {
-        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&config.provider)? {
-            if let Some(auth) = manifest.wasm_auth_manifest() {
-                return Ok(Some(auth));
-            }
+        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&config.provider)?
+            && let Some(auth) = manifest.wasm_auth_manifest()
+        {
+            return Ok(Some(auth));
         }
         Ok(BuiltinManifestIndex::embedded()?.auth_manifest_for(config))
     }

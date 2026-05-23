@@ -75,7 +75,7 @@ impl Paths {
             .or_else(|| std::env::var_os("OMNIFS_PROVIDERS_DIR").map(PathBuf::from))
             .unwrap_or_else(|| data_dir.join("providers"));
 
-        let credentials_file = data_dir.join("credentials.json");
+        let credentials_file = config_dir.join("credentials.json");
         let config_file = config_dir.join("config.toml");
 
         Paths {

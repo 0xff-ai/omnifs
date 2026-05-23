@@ -6,8 +6,8 @@ if [ "$#" -gt 0 ]; then
 fi
 
 : "${OMNIFS_MOUNT_POINT:=/omnifs}"
-: "${OMNIFS_CONFIG_DIR:=/root/.omnifs}"
-: "${OMNIFS_CACHE_DIR:=/tmp/omnifs-cache}"
+: "${OMNIFS_CONFIG_DIR:=/root/.omnifs/config}"
+: "${OMNIFS_CACHE_DIR:=/root/.omnifs/cache}"
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
 : "${RUST_LOG:=info}"
 export RUST_LOG
@@ -19,8 +19,12 @@ mkdir -p \
   "$(dirname "$OMNIFS_LOG_FILE")"
 
 if [ "$OMNIFS_MOUNT_POINT" = "/omnifs" ]; then
-  omnifs debug install-dev-mounts "$OMNIFS_CONFIG_DIR/mounts"
-  for cfg in "$OMNIFS_CONFIG_DIR"/mounts/*.json; do
+  mounts_dir="$OMNIFS_CONFIG_DIR/mounts"
+  mkdir -p "$mounts_dir"
+  if ! compgen -G "$mounts_dir/*.json" >/dev/null; then
+    omnifs debug install-dev-mounts "$mounts_dir"
+  fi
+  for cfg in "$mounts_dir"/*.json; do
     [ -e "$cfg" ] || continue
     name=$(jq -r '.mount // empty' "$cfg")
     [ -n "$name" ] && ln -sfn "/omnifs/$name" "/$name"
