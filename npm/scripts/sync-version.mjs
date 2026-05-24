@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const npmRoot = path.join(repoRoot, "npm");
+const cargoTomlPath = path.join(repoRoot, "Cargo.toml");
 const packageFiles = [
   path.join(npmRoot, "omnifs", "package.json"),
   path.join(npmRoot, "platform", "darwin-arm64", "package.json"),
@@ -14,8 +15,7 @@ const packageFiles = [
   path.join(npmRoot, "platform", "linux-x64", "package.json")
 ];
 
-function workspaceVersion() {
-  const cargoToml = fs.readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8");
+function workspaceVersion(cargoToml) {
   const match = cargoToml.match(/\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/);
   if (!match) {
     throw new Error("could not find [workspace.package] version in Cargo.toml");
@@ -23,7 +23,11 @@ function workspaceVersion() {
   return match[1];
 }
 
-const version = process.argv[2] || workspaceVersion();
+const cargoToml = fs.readFileSync(cargoTomlPath, "utf8");
+const version = process.argv[2] || workspaceVersion(cargoToml);
+if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  throw new Error(`invalid SemVer release version: ${version}`);
+}
 
 for (const file of packageFiles) {
   const packageJson = JSON.parse(fs.readFileSync(file, "utf8"));

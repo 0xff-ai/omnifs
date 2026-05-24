@@ -19,8 +19,9 @@ hosting = "github"
 github-attestations = true
 pr-run-mode = "skip"
 
-# We append a build-wasm-providers job to release.yml that ships the
-# four wasm32-wasip2 provider components alongside the host binaries.
-# Without this, `dist init` would overwrite that customization on
-# every dist upgrade.
+# Hand-maintained workflow customizations:
+# - release.yml: build-wasm-providers job for wasm32-wasip2 components
+# - ship-release.yml: GHCR image promotion + npm (called from release-on-merge)
+# - omnifs-mount-schema: [package.metadata.dist] dist = false (dump-provider is dev-only)
+# Without allow-dirty, `dist init` would overwrite release.yml on upgrade.
 allow-dirty = ["ci"]

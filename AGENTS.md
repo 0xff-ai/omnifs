@@ -71,6 +71,19 @@ The Dockerfile is intentionally cache-oriented:
 
 Preserve that structure unless there is a clear regression or simplification with equal caching behavior.
 
+## Release and npm packaging
+
+User-facing releases ship the host CLI (cargo-dist + npm), WASM providers, and a GHCR runtime image. Maintainer flow lives in `RELEASING.md`.
+
+**Version coupling:** for release `X.Y.Z`, npm package version, CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all use the **same unprefixed semver** (`0.2.0`, not `v0.2.0`):
+
+- npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
+- CLI default image: `ghcr.io/raulk/omnifs:X.Y.Z` (`crates/cli/src/session.rs`)
+- Git tag / GitHub Release name: `vX.Y.Z` (conventional `v` prefix only here)
+- GHCR promote publishes both `X.Y.Z` and `vX.Y.Z`; the CLI default uses the unprefixed tag
+
+npm installs the native CLI binary only. Docker is pulled on `omnifs up`, not at `npm install`. Do not bump npm/Cargo versions independently or change the embedded image ref without running through `omnifs-release prepare`.
+
 ## Auth and cloning
 
 Mount JSON accepts `static-token` with `scheme`, or `oauth`.

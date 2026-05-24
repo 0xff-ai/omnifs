@@ -1,0 +1,84 @@
+name: Release on merge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      should_ship: ${{ steps.plan.outputs.should_ship }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install native linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Decide whether to ship
+        id: plan
+        run: |
+          set -euo pipefail
+          plan="$(cargo run -q -p omnifs-release -- ship-plan --format json)"
+          echo "$plan"
+          should_ship="$(jq -r '.should_ship' <<< "$plan")"
+          tag="$(jq -r '.tag' <<< "$plan")"
+          version="$(jq -r '.version' <<< "$plan")"
+          echo "should_ship=$should_ship" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    if: needs.plan.outputs.should_ship == 'true'
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_commit_sha: ${{ steps.release.outputs.release_commit_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install native linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Create GitHub release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          commit="$(cargo run -q -p omnifs-release -- create-github-release --format json | jq -r .release_commit_sha)"
+          echo "release_commit_sha=$commit" >> "$GITHUB_OUTPUT"
+
+  ship:
+    if: needs.plan.outputs.should_ship == 'true'
+    needs: [plan, release]
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/ship-release.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      version: ${{ needs.plan.outputs.version }}
+      release_commit_sha: ${{ needs.release.outputs.release_commit_sha }}
+    secrets: inherit

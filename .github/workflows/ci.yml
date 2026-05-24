@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
@@ -226,82 +225,10 @@ jobs:
           docker pull "$ref"
           docker tag "$ref" "$IMAGE"
 
-      - name: Start SSH agent socket
-        run: |
-          set -euo pipefail
-          eval "$(ssh-agent -a "$RUNNER_TEMP/ssh-agent.sock")"
-          echo "SSH_AUTH_SOCK=$RUNNER_TEMP/ssh-agent.sock" >> "$GITHUB_ENV"
-
-      - name: Create fixtures
-        run: |
-          set -euo pipefail
-          mkdir -p .secrets/db
-          # GitHub token for the github provider.
-          printf '%s' "${{ github.token }}" > .secrets/github_token
-          chmod 600 .secrets/github_token
-          # Chinook SQLite fixture for the db provider. The image bakes
-          # providers/db/omnifs.provider.json with path /data/test.db;
-          # the smoke container mounts .secrets/db there. Pinned to the
-          # lerocha master copy; the database has not changed in years.
-          curl -fsSL -o .secrets/db/test.db \
-            https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
-
-      - name: Start container
-        # Mirrors the container shape that `omnifs dev` launches via the
-        # Docker API: FUSE device, SYS_ADMIN, apparmor:unconfined,
-        # github token secret, chinook DB fixture, host docker socket,
-        # and the SSH agent forward for git providers.
-        run: |
-          set -euo pipefail
-          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-          docker run -d \
-            --name "$CONTAINER" \
-            --device /dev/fuse \
-            --cap-add SYS_ADMIN \
-            --security-opt apparmor:unconfined \
-            -e SSH_AUTH_SOCK=/ssh-agent \
-            -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-            -v "${{ github.workspace }}/.secrets/github_token:/run/secrets/github_token:ro" \
-            -v "${{ github.workspace }}/.secrets/db:/data:ro" \
-            -v "${{ github.workspace }}/scripts/demo.sh:/tmp/demo.sh:ro" \
-            -v "/var/run/docker.sock:/var/run/docker.sock:ro" \
-            -v "$SSH_AUTH_SOCK:/ssh-agent" \
-            "$IMAGE"
-
-          for _ in $(seq 1 60); do
-            if docker exec "$CONTAINER" sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
-              exit 0
-            fi
-            if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-              docker logs "$CONTAINER" >&2 || true
-              docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' >&2 || true
-              exit 1
-            fi
-            sleep 1
-          done
-
-          docker logs "$CONTAINER" >&2 || true
-          docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' >&2 || true
-          exit 1
-
-      - name: Run demo smoke script
-        run: |
-          set -euo pipefail
-          docker exec "$CONTAINER" env \
-            OMNIFS_DEMO_MODE=smoke \
-            OMNIFS_DEMO_OWNER=ollama \
-            OMNIFS_DEMO_REPO=ollama \
-            /tmp/demo.sh
-
-      - name: Dump omnifs log on failure
-        if: failure()
-        run: |
-          docker logs "$CONTAINER" || true
-          docker exec "$CONTAINER" sh -lc 'cat /tmp/omnifs.log' || true
-
-      - name: Clean up
-        if: always()
-        run: docker rm -f "$CONTAINER" || true
+      - name: Run smoke container
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/ci-smoke-container.sh
 
   runtime-arm64:
     name: docker-build (linux/arm64)
@@ -309,8 +236,7 @@ jobs:
     needs: [lint, build-test]
     if: >-
       (github.event_name == 'push' && (
-        github.ref == 'refs/heads/main' ||
-        startsWith(github.ref, 'refs/tags/v')
+        github.ref == 'refs/heads/main'
       )) ||
       (github.event_name == 'pull_request' && (
         contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
@@ -377,8 +303,7 @@ jobs:
     needs: [lint, build-test, runtime-amd64, runtime-arm64, smoke]
     if: >-
       (github.event_name == 'push' && (
-        github.ref == 'refs/heads/main' ||
-        startsWith(github.ref, 'refs/tags/v')
+        github.ref == 'refs/heads/main'
       )) ||
       (github.event_name == 'pull_request' && (
         contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
@@ -417,8 +342,6 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
 
       - name: Create and push manifest list
         working-directory: /tmp/digests
@@ -459,18 +382,3 @@ jobs:
           grep -q 'Platform:.*linux/arm64' image-manifest.txt
           digest="$(awk '/^Digest:/ { print $2; exit }' image-manifest.txt)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Attest image build provenance
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v4.1.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
-          push-to-registry: true
-          # `raulk/omnifs` is a user-owned repo. GitHub's attestation
-          # storage records are only supported for org-owned repos, so
-          # the default create-storage-record=true would fail at attest
-          # time. The Sigstore bundle is still attached to the OCI
-          # manifest (via push-to-registry) and is verifiable with
-          # `gh attestation verify`.
-          create-storage-record: false

@@ -3833,6 +3833,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-release"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "time",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "omnifs-sdk"
 version = "0.1.0"
 dependencies = [

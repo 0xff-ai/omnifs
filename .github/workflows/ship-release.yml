@@ -1,0 +1,244 @@
+name: Ship release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      release_commit_sha:
+        required: true
+        type: string
+      publish:
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  dist:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ inputs.tag }}
+      release_commit_sha: ${{ inputs.release_commit_sha }}
+    secrets: inherit
+
+  promote:
+    needs: dist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Promote CI image to release tags
+        id: promote
+        env:
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT_SHA: ${{ inputs.release_commit_sha }}
+        run: |
+          set -euo pipefail
+          digest="$(scripts/promote-release-image.sh \
+            "${{ env.REGISTRY }}" \
+            "${{ env.IMAGE_NAME }}" \
+            "$RELEASE_COMMIT_SHA" \
+            "$TAG" \
+            "$VERSION")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.promote.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+  npm-platform:
+    name: npm-platform (${{ matrix.package-platform }})
+    needs:
+      - dist
+      - promote
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package-platform: linux-x64
+            rust-target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - package-platform: linux-arm64
+            rust-target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - package-platform: darwin-x64
+            rust-target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - package-platform: darwin-arm64
+            rust-target: aarch64-apple-darwin
+            runner: macos-14
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Wait for dist CLI archive on GitHub Release
+        id: wait
+        env:
+          TAG: ${{ inputs.tag }}
+          RUST_TARGET: ${{ matrix.rust-target }}
+        run: |
+          set -euo pipefail
+          asset="omnifs-cli-${RUST_TARGET}.tar.xz"
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$asset"; then
+              echo "found release asset $asset"
+              echo "asset=$asset" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$i" -eq 60 ]]; then
+              echo "timed out waiting for $asset on release $TAG" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Download dist CLI archive
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-download
+          gh release download "$TAG" \
+            --pattern "${{ steps.wait.outputs.asset }}" \
+            --dir dist-download
+
+      - name: Extract CLI binary
+        id: binary
+        run: |
+          set -euo pipefail
+          archive="dist-download/${{ steps.wait.outputs.asset }}"
+          mkdir -p dist-extract
+          tar -xJf "$archive" -C dist-extract
+          if [[ -x dist-extract/omnifs ]]; then
+            binary="dist-extract/omnifs"
+          else
+            binary="$(find dist-extract -type f -name omnifs -perm -111 | head -n 1)"
+          fi
+          if [[ -z "$binary" || ! -x "$binary" ]]; then
+            echo "could not find omnifs binary in $archive" >&2
+            find dist-extract -type f >&2 || true
+            exit 1
+          fi
+          echo "path=$binary" >> "$GITHUB_OUTPUT"
+
+      - name: Sync npm metadata
+        run: node npm/scripts/sync-version.mjs
+
+      - name: Verify CLI release version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          actual="$("${{ steps.binary.outputs.path }}" --version)"
+          expected="omnifs ${VERSION}"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'CLI version mismatch: expected %s, got %s\n' "$expected" "$actual" >&2
+            exit 1
+          fi
+
+      - name: Stage npm package
+        run: |
+          set -euo pipefail
+          node npm/scripts/stage-platform-package.mjs \
+            "${{ matrix.package-platform }}" \
+            "${{ steps.binary.outputs.path }}"
+          npm pack "./npm/platform/${{ matrix.package-platform }}" --pack-destination "$RUNNER_TEMP"
+
+      - name: Verify runtime image is promoted
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/wait-for-ghcr-tag.sh \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}" \
+            12 10
+
+      - name: Publish platform package
+        if: inputs.publish
+        run: npm publish "./npm/platform/${{ matrix.package-platform }}" --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  npm-root:
+    needs:
+      - dist
+      - promote
+      - npm-platform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Sync and validate npm metadata
+        run: |
+          node npm/scripts/sync-version.mjs
+          node npm/scripts/validate-platforms.mjs
+
+      - name: Stage root package
+        run: npm pack ./npm/omnifs --pack-destination "$RUNNER_TEMP"
+
+      - name: Publish root package
+        if: inputs.publish
+        run: npm publish ./npm/omnifs --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

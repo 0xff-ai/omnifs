@@ -108,11 +108,41 @@ for (const entry of fs.readdirSync(platformDir, { withFileTypes: true })) {
 }
 
 const rootPackage = readJson("npm/omnifs/package.json");
+
+const cargoToml = fs.readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8");
+const workspaceVersion = cargoToml.match(
+  /\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/
+)?.[1];
+if (!workspaceVersion) {
+  fail("Cargo.toml missing [workspace.package] version");
+} else if (rootPackage.version !== workspaceVersion) {
+  fail(
+    `npm/omnifs/package.json version ${rootPackage.version} != Cargo.toml workspace version ${workspaceVersion}`
+  );
+}
+
 assertSetEqual(
   Object.keys(rootPackage.optionalDependencies ?? {}),
   Object.values(platforms).map((spec) => spec.package),
   "npm/omnifs/package.json optionalDependencies"
 );
+for (const [packageName, version] of Object.entries(rootPackage.optionalDependencies ?? {})) {
+  if (workspaceVersion && version !== workspaceVersion) {
+    fail(
+      `npm/omnifs/package.json optional dependency ${packageName} version ${version} != Cargo.toml workspace version ${workspaceVersion}`
+    );
+  }
+}
+
+for (const platformKey of platformKeys) {
+  const packageJsonPath = path.join("npm", "platform", platformKey, "package.json");
+  const packageJson = readJson(packageJsonPath);
+  if (workspaceVersion && packageJson.version !== workspaceVersion) {
+    fail(
+      `${packageJsonPath} version ${packageJson.version} != Cargo.toml workspace version ${workspaceVersion}`
+    );
+  }
+}
 
 const resolveBinarySource = fs.readFileSync(
   path.join(repoRoot, "npm/omnifs/scripts/resolve-binary.js"),
@@ -150,37 +180,39 @@ assertSetEqual(
   "dist-workspace.toml targets"
 );
 
-const npmWorkflow = fs.readFileSync(
-  path.join(repoRoot, ".github/workflows/npm.yml"),
-  "utf8"
-);
-const workflowMatrix = parseNpmWorkflowMatrix(npmWorkflow);
-const workflowByPlatform = Object.fromEntries(
-  workflowMatrix.map((entry) => [entry.platform, entry])
-);
+const publishWorkflowPath = path.join(repoRoot, ".github/workflows/ship-release.yml");
+if (!fs.existsSync(publishWorkflowPath)) {
+  fail(".github/workflows/ship-release.yml is missing");
+} else {
+  const publishWorkflow = fs.readFileSync(publishWorkflowPath, "utf8");
+  const workflowMatrix = parseNpmWorkflowMatrix(publishWorkflow);
+  const workflowByPlatform = Object.fromEntries(
+    workflowMatrix.map((entry) => [entry.platform, entry])
+  );
 
-for (const platformKey of platformKeys) {
-  const expected = platforms[platformKey];
-  const actual = workflowByPlatform[platformKey];
-  if (!actual) {
-    fail(`.github/workflows/npm.yml missing matrix entry for ${platformKey}`);
-    continue;
+  for (const platformKey of platformKeys) {
+    const expected = platforms[platformKey];
+    const actual = workflowByPlatform[platformKey];
+    if (!actual) {
+      fail(`.github/workflows/ship-release.yml missing npm matrix entry for ${platformKey}`);
+      continue;
+    }
+    if (actual.rustTarget !== expected.rustTarget) {
+      fail(
+        `.github/workflows/ship-release.yml ${platformKey} rust-target ${actual.rustTarget} != platforms.json ${expected.rustTarget}`
+      );
+    }
+    if (actual.runner !== expected.runner) {
+      fail(
+        `.github/workflows/ship-release.yml ${platformKey} runner ${actual.runner} != platforms.json ${expected.runner}`
+      );
+    }
   }
-  if (actual.rustTarget !== expected.rustTarget) {
-    fail(
-      `.github/workflows/npm.yml ${platformKey} rust-target ${actual.rustTarget} != platforms.json ${expected.rustTarget}`
-    );
-  }
-  if (actual.runner !== expected.runner) {
-    fail(
-      `.github/workflows/npm.yml ${platformKey} runner ${actual.runner} != platforms.json ${expected.runner}`
-    );
-  }
-}
 
-for (const platformKey of Object.keys(workflowByPlatform)) {
-  if (!platformKeySet.has(platformKey)) {
-    fail(`.github/workflows/npm.yml has extra matrix entry ${platformKey}`);
+  for (const platformKey of Object.keys(workflowByPlatform)) {
+    if (!platformKeySet.has(platformKey)) {
+      fail(`.github/workflows/ship-release.yml has extra npm matrix entry ${platformKey}`);
+    }
   }
 }
 

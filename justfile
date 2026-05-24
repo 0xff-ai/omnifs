@@ -41,3 +41,12 @@ regen-schema:
 
 check-npm-platforms:
     node npm/scripts/validate-platforms.mjs
+
+check-release:
+    cargo run -q -p omnifs-release -- check release-pr
+
+release-prompt:
+    cargo run -q -p omnifs-release -- prompt
+
+prepare-release *args:
+    cargo run -p omnifs-release -- prepare {{args}}
