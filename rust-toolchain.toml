@@ -1,5 +1,5 @@
 [toolchain]
-# Keep in sync with .clippy.toml `msrv` and npm.yml `toolchain: 1.91.0`.
+# Keep in sync with .clippy.toml `msrv` and release.yml `toolchain: 1.91.0`.
 channel = "1.91.0"
 components = ["clippy", "rust-analyzer", "rust-src", "rustfmt"]
 targets = ["wasm32-wasip2"]
