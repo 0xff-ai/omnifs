@@ -16,8 +16,8 @@ default-members = ["crates/cli", "crates/host"]
 version = "0.2.0-dev.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/raulk/omnifs"
-homepage = "https://github.com/raulk/omnifs"
+repository = "https://github.com/0xff-ai/omnifs"
+homepage = "https://github.com/0xff-ai/omnifs"
 readme = "README.md"
 
 [workspace.dependencies]

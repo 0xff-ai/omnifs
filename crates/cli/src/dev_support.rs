@@ -31,7 +31,7 @@ impl WorkspaceRoot {
             "`omnifs dev` must run inside the omnifs source checkout; no [workspace] Cargo.toml found above {}",
             cwd.display()
         ))
-        .with_hint("Clone https://github.com/raulk/omnifs and run `omnifs dev` from the repo root")
+        .with_hint("Clone https://github.com/0xff-ai/omnifs and run `omnifs dev` from the repo root")
     }
 
     pub(crate) fn path(&self) -> &Path {

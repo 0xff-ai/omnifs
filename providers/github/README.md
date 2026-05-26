@@ -1,6 +1,6 @@
 # omnifs-provider-github
 
-[omnifs](https://github.com/raulk/omnifs) provider that projects GitHub repositories, issues, pull requests, and CI runs into a FUSE-visible tree. Source trees are bind-mounted clones (cloned on demand via SSH); issues and PRs are per-item directories with title, body, state, and comments as separate files.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects GitHub repositories, issues, pull requests, and CI runs into a FUSE-visible tree. Source trees are bind-mounted clones (cloned on demand via SSH); issues and PRs are per-item directories with title, body, state, and comments as separate files.
 
 ## Mount layout
 
@@ -42,7 +42,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-github
 ```
 
-The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). The provider's `omnifs.provider.json` is the source for the embedded provider metadata and auth section, and drives `omnifs init github`.
+The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases). The provider's `omnifs.provider.json` is the source for the embedded provider metadata and auth section, and drives `omnifs init github`.
 
 ## Status
 

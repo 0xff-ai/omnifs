@@ -51,7 +51,7 @@ Use `omnifs logs`, `omnifs logs -f`, and `omnifs down` to inspect and stop the c
 
 ```bash
 # Clone the repo
-git clone https://github.com/raulk/omnifs
+git clone https://github.com/0xff-ai/omnifs
 cd omnifs
 
 # Build, materialize, and start the dev container

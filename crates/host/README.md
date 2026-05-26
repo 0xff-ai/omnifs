@@ -1,6 +1,6 @@
 # omnifs-host
 
-Host runtime for the [omnifs](https://github.com/raulk/omnifs) virtual filesystem. Loads `wasm32-wasip2` provider components in a `wasmtime` sandbox and bridges their path-first handlers to a Linux FUSE mount, including capability enforcement, callout execution (HTTP, git), and a two-tier (in-memory + redb-backed) browse cache.
+Host runtime for the [omnifs](https://github.com/0xff-ai/omnifs) virtual filesystem. Loads `wasm32-wasip2` provider components in a `wasmtime` sandbox and bridges their path-first handlers to a Linux FUSE mount, including capability enforcement, callout execution (HTTP, git), and a two-tier (in-memory + redb-backed) browse cache.
 
 This crate is the engine inside `omnifs-cli`. Embed it directly to host omnifs providers from a custom binary.
 

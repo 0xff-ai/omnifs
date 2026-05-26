@@ -78,7 +78,7 @@ User-facing releases ship the host CLI, WASM providers, npm packages, and a GHCR
 **Version coupling:** for release `X.Y.Z`, npm package version, CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all use the **same unprefixed semver** (`0.2.0`, not `v0.2.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
-- CLI default image: `ghcr.io/raulk/omnifs:X.Y.Z` (`crates/cli/src/session.rs`)
+- CLI default image: `ghcr.io/0xff-ai/omnifs:X.Y.Z` (`crates/cli/src/session.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (conventional `v` prefix only here)
 - GHCR promote publishes both `X.Y.Z` and `vX.Y.Z`; the CLI default uses the unprefixed tag
 
@@ -120,7 +120,7 @@ just release-cut 0.2.0-dev.0       # opens release/vX.Y.Z PR
 # Verify after publish:
 gh release view vX.Y.Z --json isPrerelease,assets
 npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'    # dev tag should point at the new version
-docker buildx imagetools inspect ghcr.io/raulk/omnifs:X.Y.Z
+docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs:X.Y.Z
 ```
 
 **Secrets and gates** that must be in place before any cut:

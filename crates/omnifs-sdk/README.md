@@ -1,6 +1,6 @@
 # omnifs-sdk
 
-SDK for building [omnifs](https://github.com/raulk/omnifs) providers. Providers are `wasm32-wasip2` components that the omnifs host loads and drives through a WIT interface; this crate turns a Rust impl block into a complete provider component with the right manifest, dispatch wiring, and runtime glue.
+SDK for building [omnifs](https://github.com/0xff-ai/omnifs) providers. Providers are `wasm32-wasip2` components that the omnifs host loads and drives through a WIT interface; this crate turns a Rust impl block into a complete provider component with the right manifest, dispatch wiring, and runtime glue.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ Build with `cargo build --target wasm32-wasip2 --release` and the resulting `.wa
 - **Typed subtrees**: a `#[subtree] impl B { ... }` block can be mounted at any `#[bind("/path/{capture}/...")]` site for clean handoff.
 - **Capabilities**: providers declare HTTP domains, auth types, memory limits, and git/websocket flags in their manifest; the host enforces them.
 
-The [path-dispatch-and-listing design doc](https://github.com/raulk/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) is the source of truth for routing precedence and listing semantics.
+The [path-dispatch-and-listing design doc](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) is the source of truth for routing precedence and listing semantics.
 
 ## Install
 

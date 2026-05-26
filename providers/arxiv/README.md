@@ -1,6 +1,6 @@
 # omnifs-provider-arxiv
 
-[omnifs](https://github.com/raulk/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Browse recent category submissions or direct paper ids; each paper materializes its PDF, source tarball, metadata, links, and version history as files.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Browse recent category submissions or direct paper ids; each paper materializes its PDF, source tarball, metadata, links, and version history as files.
 
 ## Mount layout
 
@@ -39,7 +39,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-arxiv
 ```
 
-The resulting `omnifs_provider_arxiv.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). Configure in your omnifs mount config under the `arxiv` key.
+The resulting `omnifs_provider_arxiv.wasm` is also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases). Configure in your omnifs mount config under the `arxiv` key.
 
 ## Status
 

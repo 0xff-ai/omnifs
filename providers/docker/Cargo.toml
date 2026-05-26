@@ -4,8 +4,8 @@ version.workspace = true
 edition = "2024"
 description = "omnifs provider for browsing the local Docker daemon"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/raulk/omnifs"
-homepage = "https://github.com/raulk/omnifs"
+repository = "https://github.com/0xff-ai/omnifs"
+homepage = "https://github.com/0xff-ai/omnifs"
 
 [lib]
 crate-type = ["cdylib", "lib"]

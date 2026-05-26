@@ -705,16 +705,16 @@ io.omnifs.providers.sha256=<checksum manifest sha256>
 Cosign public verification must pin both issuer and identity:
 
 ```bash
-cosign verify ghcr.io/raulk/omnifs@sha256:<digest> \
+cosign verify ghcr.io/0xff-ai/omnifs@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/raulk/omnifs/\\.github/workflows/(ci|release)\\.yml@refs/heads/main$'
+  --certificate-identity-regexp '^https://github.com/0xff-ai/omnifs/\\.github/workflows/(ci|release)\\.yml@refs/heads/main$'
 ```
 
 Artifact public verification should use GitHub artifact attestations against the expected repository and commit:
 
 ```bash
 gh attestation verify omnifs-cli-linux-x64.tar.xz \
-  --repo raulk/omnifs \
+  --repo 0xff-ai/omnifs \
   --signer-workflow .github/workflows/ci.yml
 ```
 

@@ -1,6 +1,6 @@
 # omnifs-cli
 
-The `omnifs` command-line tool: mount [omnifs](https://github.com/raulk/omnifs) providers as a FUSE filesystem so external services (GitHub, arXiv, DNS, your own) appear as ordinary files and directories.
+The `omnifs` command-line tool: mount [omnifs](https://github.com/0xff-ai/omnifs) providers as a FUSE filesystem so external services (GitHub, arXiv, DNS, your own) appear as ordinary files and directories.
 
 ## Install
 
@@ -8,9 +8,9 @@ The `omnifs` command-line tool: mount [omnifs](https://github.com/raulk/omnifs) 
 npm install -g @0xff-ai/omnifs
 ```
 
-The npm package installs the native host CLI for Linux and macOS. The CLI then pulls the version-matched runtime image from `ghcr.io/raulk/omnifs` when you run `omnifs up`.
+The npm package installs the native host CLI for Linux and macOS. The CLI then pulls the version-matched runtime image from `ghcr.io/0xff-ai/omnifs` when you run `omnifs up`.
 
-Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases).
+Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases).
 
 From source, use:
 
@@ -44,7 +44,7 @@ Precedence: CLI flag > env var > config file > built-in default.
 
 ```toml
 container_name = "omnifs"
-image = "ghcr.io/raulk/omnifs:0.4"
+image = "ghcr.io/0xff-ai/omnifs:0.4"
 
 [paths]
 mounts_dir = "~/work/omnifs-mounts"

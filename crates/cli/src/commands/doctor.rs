@@ -13,7 +13,7 @@ use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
 use crate::status::UserMountStatus;
 
-const IMAGE: &str = concat!("ghcr.io/raulk/omnifs:", env!("CARGO_PKG_VERSION"));
+const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
