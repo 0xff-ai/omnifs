@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0-dev.1] - 2026-05-26
+
 ### Fixed
 
 - `omnifs` CLI shim no longer fails at startup with `Cannot find module '../../platforms.json'`. The platform-to-package map was previously loaded at runtime from `npm/platforms.json`, which lives outside the published `@0xff-ai/omnifs` tarball and is not included on install. The map is now inlined in `scripts/resolve-binary.js`, with `just npm-validate` cross-checking it against `npm/platforms.json` so the two cannot drift.
