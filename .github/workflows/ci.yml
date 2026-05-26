@@ -60,7 +60,7 @@ jobs:
 
   wasm:
     name: wasm
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       id-token: write
@@ -111,7 +111,7 @@ jobs:
 
   host-test:
     name: host test
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: wasm
     steps:
       - uses: actions/checkout@v6
@@ -178,7 +178,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [verify, wasm]
     permissions:
       contents: read
@@ -276,7 +276,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     needs: [verify, wasm]
     permissions:
       contents: read
@@ -348,7 +348,7 @@ jobs:
           - platform: linux/arm64
             id: linux-arm64
             digest_name: arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v6
 
@@ -408,7 +408,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: runtime-image
     timeout-minutes: 30
     permissions:
@@ -452,7 +452,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: runtime-image
     permissions:
       contents: read
@@ -503,7 +503,7 @@ jobs:
        (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full'))))
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [cli-cross, cli-linux-arm64, runtime-image, smoke, docker-publish]
     steps:
       - name: Verify full factory jobs
