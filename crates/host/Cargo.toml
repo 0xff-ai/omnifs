@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Host runtime for the OmnIFS virtual filesystem with WASM provider support"
+description = "Host runtime for the omnifs virtual filesystem with WASM provider support"
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "fuse", "wasm", "wasmtime", "filesystem"]
 
@@ -30,15 +30,15 @@ futures = "0.3"
 gix = { version = "0.72", default-features = false, features = ["blocking-network-client"] }
 fuser = { version = "0.17", features = ["macos-no-mount"] }
 url = "2"
-wasmtime-wasi = "43"
+wasmtime-wasi = { version = "43", default-features = false, features = ["p2"] }
 redb = { workspace = true }
 moka = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
-omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
-omnifs-model = { version = "0.1.0", path = "../omnifs-model" }
-omnifs-auth = { version = "0.1.0", path = "../omnifs-auth" }
-omnifs-creds = { version = "0.1.0", path = "../omnifs-creds" }
+omnifs-mount-schema = { workspace = true }
+omnifs-model = { workspace = true }
+omnifs-auth = { workspace = true }
+omnifs-creds = { workspace = true }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }
 fs2 = { workspace = true }
@@ -54,7 +54,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 zip = { workspace = true }
 rcgen = "0.13"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true

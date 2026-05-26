@@ -1,44 +1,82 @@
 # Releasing omnifs
 
-This document describes how to cut a release. Maintainers use the internal `omnifs-release` CLI to prepare a release PR locally. Merging that PR creates the tag and GitHub Release and triggers the ship pipeline.
+How omnifs ships: one maintainer command surface (`just`), two workflows (`ci.yml` + `release.yml`), no compile at ship time.
 
-Release automation replaces the previous tag-triggered `release.yml` and separate `npm.yml` workflow with a maintainer-driven prepare flow. All version bumps, tag creation, and ship gating go through `omnifs-release` plus the workflows below.
+## What happens (end to end)
 
-## Overview
+| Phase | Who / what | What runs | Outcome |
+|-------|------------|-----------|---------|
+| 1. Development | You + feature PRs | CI `verify` + `release-check` → `just release-check` | `[Unreleased]` updated (or `no-changelog` label) |
+| 2. Cut release | You on `origin/main` | `just release-cut` | Branch `release/vX.Y.Z`, version bump, changelog finalized, release PR opened |
+| 3. Review | You + release PR CI | CI verify; `just release-check` | Release PR shape validated |
+| 4. Merge | Merge to `main` | **CI** factory | `omnifs-wasm`, four `omnifs-cli-*` tarballs, runtime image `sha-<commit>` |
+| 5. Ship | **Release** workflow after green CI | `just release-plan-json` → softprops → promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
 
-Three workflows cooperate:
-
-| Layer | Workflow | Trigger | Responsibility |
-|-------|----------|---------|----------------|
-| CI | `.github/workflows/ci.yml` | push to `main`, PRs | lint, test, docker build (amd64 + arm64), smoke, push `ghcr.io/<repo>:sha-<commit>` |
-| Changelog guard | `.github/workflows/changelog-check.yml` | PRs to `main` | require `[Unreleased]` updates on every PR unless labeled `no-changelog`; validate release PR shape |
-| Release + ship | `.github/workflows/release-on-merge.yml` | push to `main` | when workspace version exceeds latest tag: create GitHub Release, call `ship-release.yml` |
+Nothing in phase 5 recompiles. Release downloads artifacts from the CI run that triggered it (`workflow_run`).
 
 ```text
-During development
-  └─ edit CHANGELOG.md [Unreleased] on feature PRs
-
-Cut release locally (from origin/main)
-  └─ just prepare-release
-  └─ optional: just release-prompt  (LLM draft from commit range)
-  └─ review release PR, merge to main
-
-Merge release PR to main
-  └─ release-on-merge: gh release create vX.Y.Z (notes from CHANGELOG.md)
-  └─ ship-release: resolve tag → commit SHA; dist/WASM/npm/promote all use that SHA
+feature PR ──► ci release-check
+                    │
+main + notes ──► release cut (local) ──► release/v* PR ──► release check
+                    │
+              merge to main ──► CI factory (artifacts + image)
+                    │
+              CI success ──► Release workflow (plan → GH release → promote → npm)
 ```
+
+## Maintainer commands
+
+Maintainer commands are exposed through the root **`justfile`**. Run `just` to list the grouped command surface. The release and npm recipes call policy-heavy Bun scripts at `scripts/{npm,release}.ts`, which dispatch to `scripts/lib/`.
+
+| Subcommand | When | What it does |
+|------------|------|----------------|
+| **`just release-cut`** | Local, on clean `main` | Bump versions, finalize CHANGELOG, commit on `release/vX.Y.Z`, push, open PR |
+| **`just release-cut-local`** | Local, on clean `main` | Prepare the release branch without pushing |
+| **`just release-check`** | Every PR (CI) | On `release/*` branches: validate release PR. Else: validate `[Unreleased]` vs base |
+| **`just release-plan-json`** | CI only, after green `main` | If workspace version > latest tag: emit ship metadata; else no-op |
+| **`just npm-sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from workspace (or `version`) through `npm pkg set` |
+| **`just npm-validate`** | `just check`, release PR, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` |
+
+Optional (not part of the ship path):
+
+```bash
+just release-prompt   # LLM helper: commit range since last tag
+```
+
+Examples:
+
+```bash
+# Cut a release (interactive patch bump)
+git fetch origin && git checkout main && git reset --hard origin/main
+just release-cut
+
+# Pin version or prepare without pushing
+just release-cut 0.2.0
+just release-cut-local 0.2.0
+
+# Match CI changelog check on a feature branch
+just release-check origin/main HEAD
+```
+
+Day-to-day dev uses `just check`, `just providers-build`, and `omnifs dev`.
+
+## Workflows
+
+| Workflow | Trigger | Role |
+|----------|---------|------|
+| `ci.yml` | push / PR to `main` | Fast preflight, native host/WASM verification, and on `main`/`ci-full`: Linux + Darwin CLI archives, runtime images, smoke, and the `sha-<commit>` manifest |
+| `release.yml` | `workflow_run` after successful **CI** on `main` `push` | `just release-plan-json` → GitHub Release + assets → GHCR promote → npm; platform npm packages are staged from `npm/platforms.json` |
 
 ## Release authority
 
-**`omnifs-release`** owns the version bump in the release PR, GitHub Release creation on merge, and validation checks. **ship-release** builds and publishes artifacts for the commit the tag points at, not necessarily `github.sha` from the workflow run.
-
-After tagging, `omnifs-release create-github-release` verifies the tag points at the release commit and passes that SHA through dist, WASM build, and GHCR promotion (`sha-<commit>`).
+- **`just release-cut`**: version bump in the release PR only (Cargo, lockfile, npm, CHANGELOG).
+- **`just release-plan-json`**: ship gating (version vs latest tag, changelog/npm validation, release notes for softprops).
+- **CI**: single factory; builds all binaries and images.
+- **`release.yml`**: attach CI artifacts, promote `sha-*` → semver tags, publish npm.
 
 ## Branch hygiene
 
 **Always treat `origin/main` as the release base**, not local `main`.
-
-Local `main` can drift if you experimented with release or WIT vendoring work on that branch. Release PRs and `prepare` must start from the same commit GitHub uses:
 
 ```bash
 git fetch origin
@@ -46,234 +84,111 @@ git checkout main
 git reset --hard origin/main   # only when local main has diverged
 ```
 
-When reviewing a release branch locally, diff against `origin/main`:
-
-```bash
-git diff origin/main --stat
-git log origin/main..HEAD --oneline
-```
-
-Do **not** use `git diff main` if local `main` is ahead of `origin/main`; that shows unrelated deletions (for example vendored `crates/*/wit/*` files that exist only on a stale local branch).
+When reviewing a release branch: `git diff origin/main --stat`, not `git diff main` if local `main` drifted.
 
 ## Changelog policy
 
-`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/). **Humans or LLMs write the prose**; release automation never auto-generates changelog entries.
+[Keep a Changelog](https://keepachangelog.com/). Humans or LLMs write prose; automation never invents entries.
 
-Every PR to `main` must update `CHANGELOG.md` under `## [Unreleased]`. Add the **`no-changelog`** label to exempt chore-only PRs (docs typos, CI-only tweaks with no user-visible effect, etc.).
-
-### During development
-
-Add notes under `## [Unreleased]` as you land notable changes:
-
-```markdown
-## [Unreleased]
-
-### Added
-
-- Short description of the user-visible change.
-```
-
-Use the existing sections (`Added`, `Changed`, `Fixed`, etc.) and write for end users, not commit subjects.
-
-Local check (matches CI; defaults to `origin/main`):
-
-```bash
-cargo run -p omnifs-release -- check changelog-pr --base origin/main --head HEAD
-```
-
-### Release PR shape
-
-Release PRs use branch names `release/v*`. CI validates them separately:
-
-```bash
-just check-release
-# equivalent:
-cargo run -p omnifs-release -- check release-pr
-```
-
-Before merge, confirm:
-
-- `## [X.Y.Z]` exists with release notes
-- `## [Unreleased]` is present and empty
-- npm and Cargo versions match the target version
+- Feature PRs: update `## [Unreleased]` (or label **`no-changelog`** for exempt chores).
+- Release PR: `just release-cut` moves `[Unreleased]` into `## [X.Y.Z] - date` and leaves an empty `[Unreleased]`.
 
 ## What gets released
 
-Each release ships:
+- **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container
+- **WASM**: `omnifs-wasm` artifact (`omnifs_provider_*.wasm`, `omnifs_tool_*.wasm`)
+- **Runtime**: `ghcr.io/raulk/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag)
+- **npm**: `@0xff-ai/omnifs` + four platform packages
 
-- **Host CLI** — cross-platform tarballs (`omnifs-cli-*`) built by [cargo-dist](https://github.com/axodotdev/cargo-dist) and uploaded to the GitHub Release
-- **WASM providers** — `omnifs_provider_*.wasm` for built-in providers
-- **Runtime image** — `ghcr.io/raulk/omnifs:<version>` and `ghcr.io/raulk/omnifs:v<version>`, promoted from the CI-built `sha-<commit>` image (not rebuilt on release)
-- **npm packages** — `@0xff-ai/omnifs` plus four platform packages, staged from dist CLI archives
+## npm platform catalog
 
-The CLI embeds the runtime image reference `ghcr.io/raulk/omnifs:<CARGO_PKG_VERSION>`. npm publish is gated on that image existing in GHCR before any package goes live.
+`npm/platforms.json` is the source of truth for platform npm packages. Each entry defines the platform package name, Rust target triple, and npm `os`/`cpu` metadata. The Release workflow reads this file with `jq` while staging platform packages, so do not copy the npm publishing matrix into `.github/workflows/release.yml`.
 
-## Version source of truth
+`just npm-sync` updates package versions by calling `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the workspace version.
 
-- **Cargo:** `[workspace.package].version` in `Cargo.toml` (bumped in the release PR by `omnifs-release prepare`)
-- **npm:** root and platform `package.json` files, synced by `omnifs-release prepare`
-- **Git tag / GitHub Release:** `vX.Y.Z`, created by `gh release create` on merge
+## Version coupling
 
-Internal workspace crates use path-only dependencies. We do not publish crates to crates.io.
+For release `X.Y.Z`, npm, `omnifs --version`, and default image `ghcr.io/raulk/omnifs:X.Y.Z` share the **same unprefixed semver**. Git tag / GitHub Release name use **`vX.Y.Z`**.
 
-### Version coupling (npm, CLI, runtime image)
+Do not bump versions outside `just release-cut`. Do not change the embedded default image ref without going through a full release.
 
-For a release `X.Y.Z`, these identifiers use the **same semver string without a `v` prefix**:
+## Step-by-step (maintainer)
 
-| Surface | Example for 0.2.0 | Notes |
-|---------|-------------------|-------|
-| Cargo workspace | `0.2.0` | `[workspace.package].version` |
-| npm root + platform packages | `0.2.0` | `@0xff-ai/omnifs`, `@0xff-ai/omnifs-cli-*` |
-| CLI `omnifs --version` | `omnifs 0.2.0` | `CARGO_PKG_VERSION` at build time |
-| Default runtime image | `ghcr.io/raulk/omnifs:0.2.0` | compile-time default in `crates/cli/src/session.rs` |
+### 1. Land work on `main`
 
-**Git and GitHub** use the conventional **`v` prefix** (`v0.2.0`) for tags and release names. That is separate from npm/Cargo semver and from the CLI's default image ref.
+Merge features with changelog updates. Green `main` CI publishes `sha-<commit>` and (on `main` only) release artifacts.
 
-**GHCR** gets both tags on promote: `0.2.0` and `v0.2.0`, both pointing at the same digest as the CI `sha-<commit>` image. The CLI default pull uses the **unprefixed** tag only.
+### 2. Cut the release PR
 
-```text
-npm install @0xff-ai/omnifs@0.2.0
-  └─ optional platform package @0.2.0 ships omnifs binary (0.2.0)
-
-omnifs up
-  └─ pulls ghcr.io/raulk/omnifs:0.2.0 by default (not :v0.2.0)
-```
-
-npm does **not** fetch Docker at install time. Ship CI verifies the promoted image exists before publishing npm packages so the default ref is live when users run `omnifs up`.
-
-Overrides (`OMNIFS_IMAGE`, config `image`, `--image`) break this coupling intentionally; do not change defaults without updating all version surfaces above.
-
-## Step-by-step release
-
-### 1. Land changes on main
-
-Merge feature PRs to `main` as usual. Keep `CHANGELOG.md [Unreleased]` up to date.
-
-CI must pass on `main`. Each green CI run publishes `ghcr.io/raulk/omnifs:sha-<commit>` for that merge commit.
-
-### 2. Prepare the release PR locally
+Prerequisites: clean `main` = `origin/main`, `gh` auth, `[Unreleased]` filled, `just`, and `cargo install cargo-edit` for `cargo set-version`.
 
 ```bash
-git fetch origin
-git checkout main
-git reset --hard origin/main
-just prepare-release
-# or pin the version:
-just prepare-release -- --version 0.2.0
-# dry run (commit locally, no push/PR):
-just prepare-release -- --no-push
+just release-cut
 ```
 
-`prepare`:
+`just release-cut` creates `release/vX.Y.Z`, bumps workspace + npm, finalizes CHANGELOG, commits, pushes, opens PR.
 
-1. Creates branch `release/vX.Y.Z`
-2. Bumps workspace version and refreshes `Cargo.lock` via `cargo update --workspace`
-3. Syncs npm package versions (including root `optionalDependencies`)
-4. Moves `[Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`
-5. Restores an empty `## [Unreleased]`
-6. Commits, pushes, and opens a PR labeled `release` (unless `--no-push`)
-
-Optional LLM-assisted changelog **before** running `prepare`:
-
-```bash
-just release-prompt > /tmp/release-notes-prompt.md
-# paste into your editor/LLM; add the output under ## [Unreleased] on main, commit, then prepare
-```
-
-The prompt includes only the commit range since the last tag; inspect git locally or in your editor to draft notes.
-
-Review the opened PR. Edit changelog wording on the release branch if needed.
+Optional before cut: `just release-prompt` → draft notes → commit on `main` → then `just release-cut`.
 
 ### 3. Merge the release PR
 
-Merge when green. The next push to `main` triggers `.github/workflows/release-on-merge.yml`.
+Wait for PR CI (including `just release-check`). Merge to `main`.
 
-CI runs `cargo run -p omnifs-release -- check release-pr` on release PRs (includes `validate-platforms.mjs`) and again inside `ship-plan` before tagging.
+### 4. Wait for ship (automatic)
 
-### 4. Ship runs automatically
+1. **CI** on merge commit: factory must go green.
+2. **Release** workflow: starts only after that CI succeeds.
+3. Watch **Actions → Release** for plan / github-release / promote / npm.
 
-When the workspace version is greater than the latest semver tag:
-
-1. **Ship plan** — `cargo run -p omnifs-release -- ship-plan`
-2. **GitHub Release** — `cargo run -p omnifs-release -- create-github-release`
-3. **Ship** (`.github/workflows/ship-release.yml`), in order:
-   - **dist** — cargo-dist uploads CLI archives to the release
-   - **WASM** — provider components uploaded to the same release
-   - **promote** — waits for `sha-<commit>`, then promotes to `vX.Y.Z` and `X.Y.Z` on GHCR
-   - **npm** — downloads dist archives, verifies CLI version and runtime image, publishes platform packages then the root package
-
-Monitor progress under **Actions → Release on merge** on GitHub.
+Re-run a failed **Release** job after fixing CI; do not re-run compile steps in ship.
 
 ## Prerequisites and secrets
 
-### CI image must exist for the release commit
-
-Ship promotes `ghcr.io/<repo>:sha-<commit>` for the **tagged release commit**. CI must have published that `sha-*` image on `main`. If you merge the release PR before CI finishes for that commit, promotion waits for the `sha-*` tag to appear.
-
-### GitHub secrets
-
 | Secret | Used for |
 |--------|----------|
-| `GITHUB_TOKEN` | GitHub Release, dist upload, GHCR login, npm asset download |
-| `NPM_TOKEN` | npm publish (`@0xff-ai/omnifs` and platform packages) |
+| `GITHUB_TOKEN` | Releases, artifacts, GHCR |
+| npm Trusted Publishing | npm publish via GitHub OIDC |
 
-### Local prepare prerequisites
-
-- Clean working tree on `main` synced to `origin/main`
-- `gh` authenticated with permission to open PRs
-- `[Unreleased]` contains release notes
+Local **`just release-cut`**: requires `cargo-edit` (`cargo set-version`) so Cargo owns workspace version and path dependency updates.
 
 ## What not to do
 
-- Do not run `git tag` / `git push --tags` manually
-- Do not bump `[workspace.package].version` outside a release PR
-- Do not expect cargo-dist to create the GitHub Release or write release notes (upload-only)
-- Do not rebuild the runtime docker image during release (promote-only)
-- Do not prepare a release from a local `main` that is ahead of `origin/main`
+- Manual `git tag` / `git push --tags`
+- Version bumps outside `just release-cut`
+- Rebuild image/WASM/CLI during ship
+- `prepare` from a stale local `main`
 
 ## Troubleshooting
 
-### Feature PR check failed: changelog
-
-The PR did not update `CHANGELOG.md [Unreleased]`. Add user-facing notes, or apply the **`no-changelog`** label for exempt chore-only changes.
-
-### Release PR check failed: changelog
-
-Finalize the changelog on the release PR: add `## [X.Y.Z] - date`, move notes out of `[Unreleased]`, and leave `[Unreleased]` empty.
-
-### Release PR diff shows unexpected WIT or manifest changes
-
-You are probably diffing against stale local `main`. Run `git fetch origin && git diff origin/main --stat` on the release branch instead.
-
-### Image promotion timed out
-
-CI may still be running, or CI failed on the release commit. Check **Actions → CI** for that SHA. Fix CI on `main` and re-run the failed ship job, or cut a patch release after CI is green.
-
-### npm publish failed: runtime image missing
-
-Promotion did not complete before npm ran, or GHCR promotion failed. Check the **promote** job in ship-release. npm verifies `ghcr.io/raulk/omnifs:<version>` exists before publishing.
-
-### Release did not ship after merge
-
-`ship-plan` only ships when the workspace version is greater than the latest `v*.*.*` tag. If you merged a non-release PR, nothing happens. If the version was not bumped, run `prepare` again.
-
-### Ship used the wrong commit
-
-Verify the tagged commit with `git rev-parse vX.Y.Z^{commit}` and confirm the ship workflow's `release_commit_sha` matches.
+| Problem | Fix |
+|---------|-----|
+| Feature PR changelog check failed | Update `[Unreleased]` or add `no-changelog` |
+| Release PR check failed | Ensure `## [version]` exists, `[Unreleased]` empty, versions synced |
+| Release workflow did not run | CI must succeed on `main` push first |
+| Missing GH assets | CI must upload `omnifs-wasm` + four `omnifs-cli-*`; re-run CI then Release |
+| npm failed | Check **promote** job; npm needs GHCR tag + CI CLI artifacts |
+| No ship after merge | `just release-plan-json` no-ops if version ≤ latest tag; run `just release-cut` again |
 
 ## Configuration reference
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `crates/omnifs-release/` | Maintainer CLI: prepare, check, prompt, ship-plan |
-| `dist-workspace.toml` | cargo-dist targets and `allow-dirty` for custom release.yml jobs |
-| `scripts/promote-release-image.sh` | Promotes `sha-*` → semver tags on GHCR |
-| `scripts/wait-for-ghcr-tag.sh` | Polls until a GHCR tag is readable |
-| `npm/scripts/sync-version.mjs` | Syncs npm versions from Cargo workspace version (also used in ship CI) |
-| `npm/scripts/validate-platforms.mjs` | Validates npm layout against `platforms.json` and ship-release matrix |
+| `justfile`, `just/` | Maintainer command surface used locally and in CI |
+| `scripts/npm.ts` | npm platform catalog, package sync, and package validation (logic in `scripts/lib/npm-workspace.ts`) |
+| `scripts/release.ts` | release cut, release check, release plan, and release-note prompt (logic in `scripts/lib/release-workflow.ts`) |
+| `scripts/toolchain/wasi-env.ts` | WASI SDK bootstrap and env export for provider builds |
+| `scripts/toolchain/versions.ts` | Read a scalar pin from `tools/versions.toml` |
+| `npm/platforms.json` | Source of truth for npm platform packages |
+| `tools/versions.toml` | Pinned Zig, cargo-zigbuild, WASI SDK, and cargo tool versions used by CI |
+| `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
+| `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
+| `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin cross-link helper |
+| `scripts/ci/build-runtime-image.sh` | Runtime image assembly from prebuilt CLI and WASM artifacts |
+| `.github/workflows/ci.yml` | Factory + `sha-*` image + PR release checks |
+| `.github/workflows/release.yml` | Post-CI ship |
+| `scripts/ci/promote-image.sh` | `sha-*` → semver GHCR tags |
 
 ## Related docs
 
-- `CHANGELOG.md` — release history and `[Unreleased]` draft
-- `AGENTS.md` — contributor workflow (`omnifs dev`, validation commands)
-- Provider READMEs — note that `.wasm` artifacts ship on each GitHub Release
+- `CHANGELOG.md`
+- `AGENTS.md`: `omnifs dev`, `just check`

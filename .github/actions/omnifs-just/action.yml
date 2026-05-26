@@ -1,0 +1,12 @@
+name: omnifs-just
+description: Install pinned maintainer command tools for omnifs CI
+runs:
+  using: composite
+  steps:
+    - uses: extractions/setup-just@v3
+      with:
+        just-version: 1.51.0
+
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.10

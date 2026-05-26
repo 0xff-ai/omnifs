@@ -16,6 +16,8 @@
 !crates/**
 !providers/
 !providers/**
+!xtask/
+!xtask/**
 !wit/
 !wit/**
 

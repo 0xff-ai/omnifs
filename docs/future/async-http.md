@@ -1,6 +1,6 @@
 # Future redesign: direct WASIp2 HTTP with async components
 
-This is the redesign OmnIFS should pursue once async components are mature enough to preserve the concurrency we already rely on.
+This is the redesign omnifs should pursue once async components are mature enough to preserve the concurrency we already rely on.
 
 The target end state is clean:
 
@@ -21,7 +21,7 @@ The current provider boundary works, but it is carrying too much custom machiner
 - the host re-enters the component with `resume(id, result)`
 - the SDK keeps pending continuations keyed by request id
 
-That shape solved a real problem. It lets OmnIFS drop the store between slow operations and keep multiple requests in flight on one provider instance. But it also spreads transport mechanics across the WIT world, the host runtime, and the generated SDK glue.
+That shape solved a real problem. It lets omnifs drop the store between slow operations and keep multiple requests in flight on one provider instance. But it also spreads transport mechanics across the WIT world, the host runtime, and the generated SDK glue.
 
 The future redesign should keep the concurrency benefit and drop the custom protocol.
 
@@ -35,7 +35,7 @@ More specifically, the runtime needs to support all of these at once:
 2. no custom continuation/resume boundary
 3. multiple concurrent requests on one provider instance
 
-Ordinary host-side async is not enough. Wasmtime can already suspend guest execution while an imported host function awaits internally, but that still leaves one active top-level call owning the component instance and store. For OmnIFS, that would flatten same-instance concurrency into a single active request.
+Ordinary host-side async is not enough. Wasmtime can already suspend guest execution while an imported host function awaits internally, but that still leaves one active top-level call owning the component instance and store. For omnifs, that would flatten same-instance concurrency into a single active request.
 
 So the trigger is not "host-side async exists." The trigger is:
 
@@ -67,7 +67,7 @@ That gives us:
 - a standard component-model HTTP interface instead of a repo-local effect enum
 - a clearer contract between provider code and the host
 - a better match for the rest of the WASIp2/component ecosystem
-- fewer OmnIFS-specific transport concepts inside provider code
+- fewer omnifs-specific transport concepts inside provider code
 
 It also forces the right target change:
 
@@ -89,7 +89,7 @@ At the WIT level, `wasi:http` is not just `fetch(url) -> response`. It works thr
 - bodies and streams
 - pollables
 
-That is the right interface shape for the platform, but it is too noisy to expose directly in day-to-day provider code. Even in the future design, OmnIFS should add a small provider-facing HTTP layer that turns the raw binding surface into something closer to:
+That is the right interface shape for the platform, but it is too noisy to expose directly in day-to-day provider code. Even in the future design, omnifs should add a small provider-facing HTTP layer that turns the raw binding surface into something closer to:
 
 ```rust
 let response = http::send(request).await?;
@@ -154,7 +154,7 @@ The future host runtime should use:
 - async component support once mature enough for the target concurrency shape
 - async instantiation and guest calls
 
-The key change is that concurrency should become a runtime property, not an OmnIFS-specific resume protocol.
+The key change is that concurrency should become a runtime property, not an omnifs-specific resume protocol.
 
 ### HTTP policy and auth
 
@@ -174,7 +174,7 @@ That preserves one of the strongest parts of the current system: providers descr
 
 This is the hard requirement the redesign must satisfy.
 
-Today, OmnIFS gets same-instance concurrency by briefly entering the component, receiving an effect request, dropping the store, doing I/O, and resuming later. The future design must match the observable behavior without reproducing that protocol ourselves.
+Today, omnifs gets same-instance concurrency by briefly entering the component, receiving an effect request, dropping the store, doing I/O, and resuming later. The future design must match the observable behavior without reproducing that protocol ourselves.
 
 In practical terms, the runtime has to let a provider instance participate in multiple concurrent filesystem requests while provider code is suspended in async imports or awaits. If the runtime model still serializes top-level calls per instance, then the redesign is not ready, no matter how nice the code looks.
 
@@ -247,4 +247,4 @@ That is the moment this redesign moves from "future note" to "real migration pla
 
 The right way to read this note is not "we decided against async HTTP." The better read is: this is the async HTTP redesign we want, and we now understand the price of doing it too early.
 
-When async components are ready to preserve OmnIFS's concurrency model, this becomes a cleanup with real upside. Until then, the current continuation boundary is the mechanism that holds the design together, and this note exists so we can pick the future path back up without redoing the investigation from scratch.
+When async components are ready to preserve omnifs's concurrency model, this becomes a cleanup with real upside. Until then, the current continuation boundary is the mechanism that holds the design together, and this note exists so we can pick the future path back up without redoing the investigation from scratch.

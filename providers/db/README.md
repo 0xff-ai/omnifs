@@ -93,11 +93,10 @@ mkdir -p providers/db/testdata
 curl -sL -o providers/db/testdata/chinook.sqlite \
   https://github.com/lerocha/chinook-database/raw/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
 
-just build
-just db_test_data=$(pwd)/providers/db/testdata/chinook.sqlite container=omnifs-db image=omnifs-db:dev start
-docker exec -it omnifs-db /bin/zsh
-ls /omnifs/db/tables
-cat /omnifs/db/tables/Album/schema.sql
+# Contributor path: omnifs dev mounts the db provider with this fixture — see AGENTS.md
+omnifs dev -y
+docker exec omnifs /bin/zsh -lc 'ls /omnifs/db/tables'
+docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/schema.sql'
 ```
 
 ## Build notes

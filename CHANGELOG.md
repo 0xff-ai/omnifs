@@ -14,7 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- Release automation now uses the internal `omnifs-release` maintainer CLI with a merge-triggered ship pipeline instead of separate tag-driven release and npm workflows; see `RELEASING.md`.
+- Release automation now uses a `just` maintainer command surface with Bun policy scripts, a two-workflow CI factory, and a post-merge ship pipeline; see `RELEASING.md`.
+- Maintainer dev checks use `just check` and `just providers-build`, with a local WASI SDK sysroot for WASM provider builds.
 - CLI flows were redesigned around mount configs, provider metadata, credential materialization, and container lifecycle commands.
 - Provider manifests now describe auth schemes, injection policy, capability grants, and config schema in `omnifs.provider.json`.
 - Docker Compose development entrypoints were replaced by the supported `omnifs dev`, `omnifs shell`, `omnifs logs`, and `omnifs down` workflow.

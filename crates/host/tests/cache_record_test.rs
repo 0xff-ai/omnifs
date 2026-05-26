@@ -4,15 +4,6 @@ use omnifs_host::cache::{
 };
 use omnifs_host::omnifs::provider::types as wit_types;
 
-fn exact_file(size: u64) -> EntryMeta {
-    EntryMeta::file(FileAttrsCache {
-        size: wit_types::FileSize::Exact(size),
-        bytes: wit_types::ProjBytes::Deferred(wit_types::ReadMode::Full),
-        stability: wit_types::Stability::Immutable,
-        version_token: None,
-    })
-}
-
 fn deferred_file(size: wit_types::FileSize) -> EntryMeta {
     EntryMeta::file(FileAttrsCache {
         size,

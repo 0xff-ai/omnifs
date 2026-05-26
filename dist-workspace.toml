@@ -9,9 +9,8 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 ci = "github"
 installers = []
+# Linux CLI archives come from native CI jobs; cargo-dist owns macOS packaging only.
 targets = [
-  "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ]
@@ -20,8 +19,8 @@ github-attestations = true
 pr-run-mode = "skip"
 
 # Hand-maintained workflow customizations:
-# - release.yml: build-wasm-providers job for wasm32-wasip2 components
-# - ship-release.yml: GHCR image promotion + npm (called from release-on-merge)
+# - ci.yml: native Cargo artifact factory + Docker runtime assembly on main
+# - release.yml: workflow_run after green CI — softprops GH release + promote + npm
 # - omnifs-mount-schema: [package.metadata.dist] dist = false (dump-provider is dev-only)
-# Without allow-dirty, `dist init` would overwrite release.yml on upgrade.
+# Without allow-dirty, `dist init` would overwrite ci.yml on upgrade.
 allow-dirty = ["ci"]

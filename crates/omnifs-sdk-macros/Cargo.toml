@@ -16,7 +16,7 @@ proc-macro = true
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
+omnifs-mount-schema = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
@@ -24,7 +24,7 @@ serde_json = { workspace = true }
 # entry and breaks the sdk <-> sdk-macros publish cycle. Local trybuild
 # tests still resolve via the path. Dev-deps don't propagate to
 # consumers, so dropping it on the published manifest is harmless.
-omnifs-sdk = { path = "../omnifs-sdk" }
+omnifs-sdk = { workspace = true }
 tokio = { workspace = true }
 trybuild = "1"
 serde = { workspace = true }

@@ -293,7 +293,6 @@ mod tests {
     use super::config_generation::{GeneratedMountConfig, MountConfigGenerator};
     use super::{AuthImportDecision, MountFile};
     use crate::auth::AuthSelection;
-    use crate::capability::{capability_label, capability_value};
     use crate::catalog::{ProviderCatalog, ProviderSource};
     use omnifs_model::MountName;
     use omnifs_mount_schema::{

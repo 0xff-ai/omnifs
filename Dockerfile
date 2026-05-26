@@ -17,8 +17,8 @@ RUN cargo install cargo-chef --locked \
 # sysroot via `--sysroot=`. We expose the sysroot through
 # `WASI_SYSROOT` and target-specific `CC_*` / `CFLAGS_*` env vars so
 # `cc-rs` invokes the right clang with the right `--sysroot`.
-ARG WASI_SDK_VERSION=25
-ARG WASI_SDK_RELEASE=25.0
+ARG WASI_SDK_VERSION=33
+ARG WASI_SDK_RELEASE=33.0
 ENV WASI_SDK_HOME=/opt/wasi-sdk
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
@@ -64,7 +64,12 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     set -eux; \
     pkgs=$(awk -F'"' '/^name = "omnifs-provider-/ { printf " -p %s", $2 }' providers/*/Cargo.toml); \
-    cargo build $pkgs --target wasm32-wasip2 --release --target-dir /src/target
+    cargo build $pkgs -p test-provider --target wasm32-wasip2 --release --target-dir /src/target; \
+    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 --target-dir /src/target
+
+# Provider + tool WASM for host builds and macOS dist (CI artifact omnifs-wasm).
+FROM scratch AS wasm-artifacts
+COPY --from=providers /src/target/wasm32-wasip2/release/*.wasm /
 
 # --- Build extractor and host binary ---
 
@@ -76,6 +81,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
     && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
+
+FROM builder AS cli-export
+RUN mkdir -p /out && cp /omnifs /out/omnifs
 
 # --- Lint and test (CI targets) ---
 #

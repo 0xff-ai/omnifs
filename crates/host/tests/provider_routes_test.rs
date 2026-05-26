@@ -8,6 +8,7 @@ use omnifs_host::omnifs::provider::types::{
     ProjBytes, ProviderEvent, ProviderStep, Stability,
 };
 use omnifs_host::runtime::RuntimeError;
+use std::sync::OnceLock;
 use support::{
     create_test_repo, make_engine, make_initialized_runtime, provider_wasm_path,
     try_make_runtime_from_config,
@@ -104,6 +105,22 @@ struct GithubProviderSession {
     bindings: omnifs_host::Provider,
 }
 
+struct GithubProviderFixture {
+    engine: Engine,
+    component: Component,
+}
+
+fn github_provider_fixture() -> &'static GithubProviderFixture {
+    static FIXTURE: OnceLock<GithubProviderFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let engine = make_engine();
+        let component =
+            Component::from_file(&engine, provider_wasm_path("omnifs_provider_github.wasm"))
+                .unwrap();
+        GithubProviderFixture { engine, component }
+    })
+}
+
 #[derive(Debug)]
 struct StepOutcome {
     result: Option<OpResult>,
@@ -134,8 +151,8 @@ impl StepOutcome {
 
 impl GithubProviderSession {
     fn new() -> Self {
-        let engine = make_engine();
-        let mut linker = Linker::<TestHostState>::new(&engine);
+        let fixture = github_provider_fixture();
+        let mut linker = Linker::<TestHostState>::new(&fixture.engine);
         wasmtime_wasi::p2::add_to_linker_sync::<TestHostState>(&mut linker).unwrap();
         omnifs_host::Provider::add_to_linker::<TestHostState, TestHostState>(
             &mut linker,
@@ -143,18 +160,16 @@ impl GithubProviderSession {
         )
         .unwrap();
 
-        let component =
-            Component::from_file(&engine, provider_wasm_path("omnifs_provider_github.wasm"))
-                .unwrap();
         let mut store = Store::new(
-            &engine,
+            &fixture.engine,
             TestHostState {
                 wasi: WasiCtxBuilder::new().build(),
                 table: ResourceTable::new(),
             },
         );
 
-        let bindings = omnifs_host::Provider::instantiate(&mut store, &component, &linker).unwrap();
+        let bindings =
+            omnifs_host::Provider::instantiate(&mut store, &fixture.component, &linker).unwrap();
         let init = bindings
             .omnifs_provider_lifecycle()
             .call_initialize(&mut store, b"{}")
@@ -165,7 +180,7 @@ impl GithubProviderSession {
         );
 
         Self {
-            _engine: engine,
+            _engine: fixture.engine.clone(),
             store,
             bindings,
         }

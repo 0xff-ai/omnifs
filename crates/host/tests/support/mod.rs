@@ -5,7 +5,7 @@ use omnifs_host::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LI
 use omnifs_host::runtime::{ProviderRuntime, RuntimeDirs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 
 #[allow(dead_code)]
@@ -60,7 +60,7 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
         .join(provider_name);
     assert!(
         path.exists(),
-        "{provider_name} not found at {path}. Run `just build-providers` first.",
+        "{provider_name} not found at {path}. Run `just providers-build` first.",
         path = path.display()
     );
     path
@@ -68,9 +68,20 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
 
 #[allow(dead_code)]
 pub fn make_engine() -> wasmtime::Engine {
-    let mut wasm_config = wasmtime::Config::new();
-    wasm_config.wasm_component_model(true);
-    wasmtime::Engine::new(&wasm_config).unwrap()
+    static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let mut wasm_config = wasmtime::Config::new();
+            wasm_config.wasm_component_model(true);
+            // Persist Component compilations across nextest processes. Each test
+            // process otherwise re-codegens test_provider.wasm via Cranelift,
+            // which costs several seconds per test. Cache lives at
+            // $XDG_CACHE_HOME/wasmtime/ (~/.cache/wasmtime/ on Linux) and is
+            // populated by the first test process to compile a given module.
+            wasm_config.cache(Some(wasmtime::Cache::from_file(None).unwrap()));
+            wasmtime::Engine::new(&wasm_config).unwrap()
+        })
+        .clone()
 }
 
 #[allow(dead_code)]

@@ -625,4 +625,3 @@ stop when changing protocol semantics:
 - **Read bytes consistency.** `file-proj.bytes` describes the projected file
   contract. `read-file-result` carries materialized full-read bytes and must
   be consistent with `proj-bytes::deferred(read-mode::full)`.
-
