@@ -83,6 +83,7 @@ export class NpmWorkspace {
     validatePackages(version, catalog, layout, errors);
     validateRootOptionalDependencies(version, layout, catalog, errors);
     await this.validateDistTargets(catalog, errors);
+    await this.validateResolveBinaryInline(catalog, errors);
 
     if (errors.length > 0) {
       printErrorsAndExit("npm platform validation", errors);
@@ -134,6 +135,30 @@ export class NpmWorkspace {
       }
     }
     await this.repo.$`npm ${args} --prefix ${dirname(pkg.path)}`;
+  }
+
+  private async validateResolveBinaryInline(catalog: PlatformCatalog, errors: string[]): Promise<void> {
+    // resolve-binary.js is installed inside the published @0xff-ai/omnifs
+    // tarball, so it cannot require npm/platforms.json (which sits outside
+    // the package directory). The runtime platform→package map is therefore
+    // inlined in the script; cross-check it here so the two cannot drift.
+    const scriptPath = this.repo.path("npm", "omnifs", "scripts", "resolve-binary.js");
+    let source: string;
+    try {
+      source = await Bun.file(scriptPath).text();
+    } catch (error) {
+      errors.push(`could not read ${scriptPath}: ${errorMessage(error)}`);
+      return;
+    }
+    const expected = new Map<string, string>(
+      Object.values(catalog).map((spec) => [`${spec.os}:${spec.cpu}`, spec.package]),
+    );
+    for (const [key, pkg] of expected) {
+      const literal = `"${key}": "${pkg}"`;
+      if (!source.includes(literal)) {
+        errors.push(`npm/omnifs/scripts/resolve-binary.js missing inline mapping ${literal}`);
+      }
+    }
   }
 
   private async validateDistTargets(catalog: PlatformCatalog, errors: string[]): Promise<void> {

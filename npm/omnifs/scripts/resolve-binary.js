@@ -3,10 +3,16 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const platforms = require("../../platforms.json");
-const PACKAGES = Object.fromEntries(
-  Object.values(platforms).map((spec) => [`${spec.os}:${spec.cpu}`, spec.package])
-);
+// Inlined from npm/platforms.json. The platforms.json file lives at the
+// workspace root (npm/platforms.json), outside this package directory, so it
+// cannot be required at runtime from the published tarball. `just npm-validate`
+// cross-checks this map against npm/platforms.json to prevent drift.
+const PACKAGES = {
+  "linux:x64": "@0xff-ai/omnifs-cli-linux-x64",
+  "linux:arm64": "@0xff-ai/omnifs-cli-linux-arm64",
+  "darwin:x64": "@0xff-ai/omnifs-cli-darwin-x64",
+  "darwin:arm64": "@0xff-ai/omnifs-cli-darwin-arm64"
+};
 
 function packageForPlatform(platform = process.platform, arch = process.arch) {
   return PACKAGES[`${platform}:${arch}`] || null;
@@ -73,5 +79,7 @@ function resolveBinary() {
 
 module.exports = {
   packageForPlatform,
-  resolveBinary
+  resolveBinary,
+  // exported for npm-validate cross-check
+  PACKAGES
 };
