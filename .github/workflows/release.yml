@@ -250,6 +250,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           SHOULD_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
           NPM_TAG: ${{ needs.plan.outputs.is_prerelease == 'true' && 'dev' || 'latest' }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           just npm-sync
@@ -328,4 +329,5 @@ jobs:
           inputs.publish
         env:
           NPM_TAG: ${{ needs.plan.outputs.is_prerelease == 'true' && 'dev' || 'latest' }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish ./npm/omnifs --access public --provenance --tag "$NPM_TAG"
