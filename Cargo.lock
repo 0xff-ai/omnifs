@@ -3413,6 +3413,7 @@ dependencies = [
 name = "omnifs-auth"
 version = "0.2.0-dev.1"
 dependencies = [
+ "http",
  "oauth2",
  "omnifs-creds",
  "omnifs-mount-schema",

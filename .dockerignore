@@ -8,8 +8,6 @@
 !rust-toolchain.toml
 !rustfmt.toml
 !.clippy.toml
-!.cargo/
-!.cargo/**
 
 # Rust source roots and WIT definitions.
 !crates/
@@ -25,6 +23,7 @@
 !scripts/
 !scripts/demo.sh
 !scripts/container-entrypoint.sh
+!scripts/container-zshrc.zsh
 
 # Docker metadata needed for rebuilds, but not for image contents.
 !Dockerfile

@@ -46,7 +46,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM toolchain AS deps
 WORKDIR /src
 COPY --from=planner /src/recipe.json recipe.json
-COPY .cargo .cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     cargo chef cook --release --recipe-path recipe.json
@@ -147,15 +146,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gum \
     && rm -rf /var/lib/apt/lists/*
 
-RUN printf '%s\n' \
-        'alias ls="ls --color=auto"' \
-        'alias ll="ls -lrt"' \
-        '' \
-        'setopt NO_AUTO_CD' \
-        'setopt PROMPT_SUBST' \
-        'PROMPT="%F{blue}%~%f %# "' \
-        'skip_global_compinit=1' \
-        >/etc/zsh/zshrc
+COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
 
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint

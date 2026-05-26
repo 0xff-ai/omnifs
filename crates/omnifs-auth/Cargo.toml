@@ -11,9 +11,11 @@ readme = "README.md"
 [dependencies]
 omnifs-creds = { workspace = true }
 omnifs-mount-schema = { workspace = true }
+http = { workspace = true }
 oauth2 = { workspace = true }
 reqwest = { workspace = true }
 secrecy = "0.10"
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
@@ -22,7 +24,6 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-rustls = "0.26"
 

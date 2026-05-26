@@ -155,7 +155,7 @@ fn resolve_selection(
         anstream::println!();
     }
 
-    let selectable: Vec<&catalog::ProviderTemplate> = templates
+    let mut selectable: Vec<&catalog::ProviderTemplate> = templates
         .values()
         .filter(|tmpl| !configured.contains_key(&tmpl.manifest.id))
         .collect();
@@ -163,6 +163,11 @@ fn resolve_selection(
         anstream::println!("All providers already configured. Nothing to add.");
         return Ok(Vec::new());
     }
+    // Demote providers that require user-supplied state (PAT, fixture file) to
+    // the bottom of the picker and uncheck them by default so the smoke path
+    // for a fresh setup only enables providers that work with ambient or
+    // browser-based auth.
+    selectable.sort_by_key(|tmpl| (default_off(&tmpl.manifest.id), tmpl.manifest.id.clone()));
 
     let options: Vec<ProviderOption> = selectable
         .iter()
@@ -171,7 +176,11 @@ fn resolve_selection(
             line: option_line(&tmpl.manifest),
         })
         .collect();
-    let default_indices: Vec<usize> = (0..options.len()).collect();
+    let default_indices: Vec<usize> = options
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, opt)| (!default_off(&opt.id)).then_some(idx))
+        .collect();
 
     let chosen = inquire::MultiSelect::new("Which providers do you want to configure?", options)
         .with_default(&default_indices)
@@ -180,6 +189,14 @@ fn resolve_selection(
         .map_err(|e| anyhow!("selection prompt: {e}"))?;
 
     Ok(chosen.into_iter().map(|opt| opt.id).collect())
+}
+
+/// Providers that don't work end-to-end without an explicit user step (PAT,
+/// fixture file). Listed at the bottom of the setup picker and unchecked by
+/// default so a fresh `omnifs setup` keeps moving without hitting prompts the
+/// user can't satisfy from ambient context.
+fn default_off(provider_id: &str) -> bool {
+    matches!(provider_id, "db" | "linear")
 }
 
 /// One-row summary shown inside the multi-select.

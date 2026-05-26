@@ -78,6 +78,11 @@ impl UpArgs {
             "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
             runtime.container_name()
         );
+        anstream::println!();
+        anstream::println!(
+            "Run `{}` to open a shell inside the container and browse {HOST_FUSE_MOUNT}.",
+            crate::style::bold("omnifs shell"),
+        );
         Ok(())
     }
 }
