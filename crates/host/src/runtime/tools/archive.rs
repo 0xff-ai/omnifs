@@ -23,7 +23,7 @@ use wasmtime::{Engine, Store, StoreLimits};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// Embedded extractor wasm artifact. The path resolves relative to
-/// `crates/host/src/`. `just build-providers` (and the `Extractor`
+/// `crates/host/src/`. `just providers-build` (and the `Extractor`
 /// Docker build step) ensure this file exists before the host crate
 /// compiles.
 const EXTRACTOR_WASM: &[u8] = include_bytes!(concat!(

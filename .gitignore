@@ -1,4 +1,7 @@
 /target
+.cache/
+/dist-wasm
+/dist-cli
 /providers/target
 /dist
 .worktrees/
@@ -32,3 +35,4 @@ docs/superpowers/plans/
 # Linear CLI workspace config
 .linear.toml
 .worktrees/
+/.todo/

@@ -15,6 +15,15 @@ use wasmtime_wasi::WasiView;
 pub(crate) fn component_engine(configure: impl FnOnce(&mut Config)) -> wasmtime::Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    // Persist compiled component artifacts to the platform cache dir so
+    // engine creation (e.g. ArchiveExtractorComponent::new, each provider
+    // engine) doesn't re-codegen identical wasm on every invocation.
+    // Silently degrade if the cache can't be initialised (read-only $HOME,
+    // missing cache dir on locked-down hosts): the compile still works, just
+    // uncached.
+    if let Ok(cache) = wasmtime::Cache::from_file(None) {
+        config.cache(Some(cache));
+    }
     configure(&mut config);
     Engine::new(&config)
 }

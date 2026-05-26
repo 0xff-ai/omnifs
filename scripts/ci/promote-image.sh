@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
-  echo "usage: scripts/promote-release-image.sh REGISTRY IMAGE_NAME COMMIT_SHA TAG [TAG...]" >&2
+  echo "usage: scripts/ci/promote-image.sh REGISTRY IMAGE_NAME COMMIT_SHA TAG [TAG...]" >&2
   exit 2
 fi
 
@@ -19,7 +19,20 @@ for tag in "$@"; do
   tag_args+=("-t" "${registry}/${image_name}:${tag}")
 done
 
-scripts/wait-for-ghcr-tag.sh "$source"
+# Release is triggered by workflow_run after green CI; allow brief registry lag.
+max_attempts=12
+wait_secs=10
+for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+  if docker buildx imagetools inspect "$source" >/dev/null 2>&1; then
+    break
+  fi
+  if ((attempt == max_attempts)); then
+    echo "timed out waiting for CI image $source" >&2
+    exit 1
+  fi
+  printf 'waiting for %s (%s/%s)...\n' "$source" "$attempt" "$max_attempts" >&2
+  sleep "$wait_secs"
+done
 
 docker buildx imagetools inspect "$source" >&2
 docker buildx imagetools create "${tag_args[@]}" "$source" >&2

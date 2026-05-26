@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Command-line interface for mounting OmnIFS virtual filesystems"
+description = "Command-line interface for mounting omnifs virtual filesystems"
 categories = ["filesystem", "command-line-utilities"]
 keywords = ["omnifs", "fuse", "filesystem", "wasm", "cli"]
 
@@ -18,11 +18,11 @@ name = "omnifs_cli"
 path = "src/lib.rs"
 
 [dependencies]
-omnifs-host = { version = "0.1.0", path = "../host" }
-omnifs-mount-schema = { version = "0.1.0", path = "../omnifs-mount-schema" }
-omnifs-creds = { version = "0.1.0", path = "../omnifs-creds" }
-omnifs-auth = { version = "0.1.0", path = "../omnifs-auth" }
-omnifs-model = { version = "0.1.0", path = "../omnifs-model" }
+omnifs-host = { workspace = true }
+omnifs-mount-schema = { workspace = true }
+omnifs-creds = { workspace = true }
+omnifs-auth = { workspace = true }
+omnifs-model = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }

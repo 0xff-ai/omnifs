@@ -17,7 +17,7 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
-omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { workspace = true }
 hashbrown = { workspace = true }
 http = { workspace = true }
 serde = { workspace = true }
@@ -25,7 +25,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 
 [dev-dependencies]
-omnifs-mount-schema = { version = "0.1.0", path = "../../crates/omnifs-mount-schema" }
+omnifs-mount-schema = { workspace = true }
 [lints.rust]
 unsafe_code = "allow"
 

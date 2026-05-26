@@ -17,7 +17,7 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
-omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { workspace = true }
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }

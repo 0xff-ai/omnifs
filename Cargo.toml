@@ -21,15 +21,22 @@ homepage = "https://github.com/raulk/omnifs"
 readme = "README.md"
 
 [workspace.dependencies]
-wasmtime = { version = "43", features = ["component-model", "runtime"] }
+omnifs-auth = { version = "0.1.0", path = "crates/omnifs-auth" }
+omnifs-creds = { version = "0.1.0", path = "crates/omnifs-creds" }
+omnifs-host = { version = "0.1.0", path = "crates/host" }
+omnifs-model = { version = "0.1.0", path = "crates/omnifs-model" }
+omnifs-mount-schema = { version = "0.1.0", path = "crates/omnifs-mount-schema" }
+omnifs-sdk = { version = "0.1.0", path = "crates/omnifs-sdk" }
+omnifs-sdk-macros = { version = "0.1.0", path = "crates/omnifs-sdk-macros" }
+wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indexmap = { version = "2", features = ["serde"] }
 schemars = "1"
-jsonschema = "0.46"
+jsonschema = { version = "0.46", default-features = false }
 postcard = { version = "1", features = ["alloc"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -54,7 +61,7 @@ flate2 = "1"
 zip = { version = "5", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 fs2 = "0.4"
-oauth2 = { version = "5", features = ["reqwest"] }
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 webbrowser = "1"
 arc-swap = "1"
 async_singleflight = "0.6"
@@ -74,3 +81,4 @@ unsafe_code = "warn"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = "symbols"

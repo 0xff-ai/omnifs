@@ -4,9 +4,11 @@
 # GITHUB_WORKSPACE, GITHUB_TOKEN, RUNNER_TEMP.
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
 : "${IMAGE:?IMAGE must be set to the container image ref}"
 CONTAINER="${CONTAINER:-omnifs}"
-WORKSPACE="${GITHUB_WORKSPACE:-$(cd "$(dirname "$0")/.." && pwd)}"
+WORKSPACE="${GITHUB_WORKSPACE:-$root}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 
 cleanup() {

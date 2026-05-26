@@ -1,32 +1,32 @@
 {
-  "name": "@0xff-ai/omnifs",
-  "version": "0.1.0",
-  "description": "Host CLI for OmnIFS, a Docker-backed virtual filesystem for external services",
-  "license": "MIT OR Apache-2.0",
-  "homepage": "https://github.com/raulk/omnifs",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/raulk/omnifs.git"
-  },
   "bin": {
     "omnifs": "bin/omnifs.js"
+  },
+  "description": "Host CLI for omnifs, a Docker-backed virtual filesystem for external services",
+  "engines": {
+    "node": ">=16"
   },
   "files": [
     "bin/",
     "scripts/",
     "README.md"
   ],
-  "scripts": {
-    "postinstall": "node scripts/postinstall.js",
-    "smoke": "node scripts/smoke.js"
-  },
+  "homepage": "https://github.com/raulk/omnifs",
+  "license": "MIT OR Apache-2.0",
+  "name": "@0xff-ai/omnifs",
   "optionalDependencies": {
     "@0xff-ai/omnifs-cli-darwin-arm64": "0.1.0",
     "@0xff-ai/omnifs-cli-darwin-x64": "0.1.0",
     "@0xff-ai/omnifs-cli-linux-arm64": "0.1.0",
     "@0xff-ai/omnifs-cli-linux-x64": "0.1.0"
   },
-  "engines": {
-    "node": ">=16"
-  }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raulk/omnifs.git"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "version": "0.1.0"
 }

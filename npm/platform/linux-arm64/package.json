@@ -1,21 +1,21 @@
 {
-  "name": "@0xff-ai/omnifs-cli-linux-arm64",
-  "version": "0.1.0",
-  "description": "OmnIFS CLI binary for Linux arm64",
-  "license": "MIT OR Apache-2.0",
+  "cpu": [
+    "arm64"
+  ],
+  "description": "omnifs CLI binary for Linux arm64",
+  "files": [
+    "bin/omnifs",
+    "README.md"
+  ],
   "homepage": "https://github.com/raulk/omnifs",
+  "license": "MIT OR Apache-2.0",
+  "name": "@0xff-ai/omnifs-cli-linux-arm64",
+  "os": [
+    "linux"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/raulk/omnifs.git"
   },
-  "os": [
-    "linux"
-  ],
-  "cpu": [
-    "arm64"
-  ],
-  "files": [
-    "bin/omnifs",
-    "README.md"
-  ]
+  "version": "0.1.0"
 }

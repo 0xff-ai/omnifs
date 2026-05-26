@@ -1,0 +1,40 @@
+FROM ubuntu:25.10
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl fuse3 gnupg jq \
+        zsh git openssh-client procps \
+        bat git-delta ripgrep util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://repo.charm.sh/apt/gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/charm.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+        > /etc/apt/sources.list.d/charm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gum \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+        'alias ls="ls --color=auto"' \
+        'alias ll="ls -lrt"' \
+        '' \
+        'setopt NO_AUTO_CD' \
+        'setopt PROMPT_SUBST' \
+        'PROMPT="%F{blue}%~%f %# "' \
+        'skip_global_compinit=1' \
+        >/etc/zsh/zshrc
+
+COPY scripts/demo.sh /tmp/demo.sh
+COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
+COPY omnifs /usr/local/bin/omnifs
+COPY providers/omnifs_provider_*.wasm /root/.omnifs/providers/
+
+RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint /usr/local/bin/omnifs \
+    && mkdir -p /root/.omnifs/config/mounts /root/.omnifs/data /root/.omnifs/cache /root/.omnifs/providers /tmp/omnifs-provider-manifests
+
+SHELL ["/bin/zsh", "-c"]
+ENV SHELL=/bin/zsh \
+    OMNIFS_PROVIDERS_DIR=/root/.omnifs/providers
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]

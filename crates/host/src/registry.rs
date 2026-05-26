@@ -296,7 +296,7 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just build-providers` first.",
+            "test provider missing at {}. Run `just providers-build` first.",
             base_wasm.display()
         );
 

@@ -1,6 +1,6 @@
 [package]
 name = "test-provider"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 publish = false
 
@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-omnifs-sdk = { version = "0.1.0", path = "../../crates/omnifs-sdk" }
+omnifs-sdk = { workspace = true }
 serde = { workspace = true }
 [lints.rust]
 unsafe_code = "allow"
