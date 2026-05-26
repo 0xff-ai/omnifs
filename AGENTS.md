@@ -86,6 +86,55 @@ npm installs the native CLI binary only. Docker is pulled on `omnifs up`, not at
 
 `npm/platforms.json` is the single source of truth for platform npm packages, Rust target triples, and npm `os`/`cpu` metadata. `release.yml` reads it directly when staging the four platform packages; do not hand-maintain a second npm publishing matrix in GitHub Actions. `just npm-sync` updates package versions through `npm pkg set` so package manifests keep their existing order and formatting. The npm policy implementation lives in `scripts/lib/npm-workspace.ts` (consumed by both `scripts/npm.ts` and the release workflow). Keep it consolidated in that one module unless it grows a real second responsibility.
 
+The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work entirely from files inside the `@0xff-ai/omnifs` package directory. `npm/platforms.json` lives at the workspace root and is **not** included in the published tarball; if `resolve-binary.js` ever needs that data it must be inlined (with `just npm-validate` cross-checking against `npm/platforms.json`). Same rule applies to any future runtime helper added to the published package.
+
+### Release procedure
+
+Releases go through `just release-cut` followed by a regular PR + merge to `main`. The release workflow fires after green CI on `main`. Prerelease versions (anything containing `-`, e.g. `0.2.0-dev.0`) are auto-detected: GitHub release is marked `prerelease=true, make_latest=false`, npm publishes with dist-tag `dev`, GHCR still gets both `X.Y.Z` and `vX.Y.Z` tags.
+
+**Local verification before cutting** (mandatory; the publish pipeline cannot catch install-time failures):
+
+```bash
+# 1. Pack the root npm package as it would publish.
+scratch="$(mktemp -d)"; cd "$scratch"
+npm pack /Users/raul/W/omnifs/npm/omnifs
+
+# 2. Install the tarball into a scratch prefix, both with and without scripts.
+prefix="$scratch/prefix"; mkdir -p "$prefix"
+npm install --ignore-scripts --prefix "$prefix" "$scratch"/0xff-ai-omnifs-*.tgz
+node "$prefix/node_modules/@0xff-ai/omnifs/bin/omnifs.js" --version    # must succeed
+
+npm install --prefix "$prefix" "$scratch"/0xff-ai-omnifs-*.tgz         # postinstall path
+node "$prefix/node_modules/@0xff-ai/omnifs/bin/omnifs.js" --version    # must succeed
+```
+
+If either invocation fails (MODULE_NOT_FOUND, missing platform binary, postinstall crash), the published package will fail the same way for every user. Fix before cutting.
+
+**End-to-end cut sequence** once the local check passes:
+
+```bash
+# On main, clean tree:
+just release-cut 0.2.0-dev.0       # opens release/vX.Y.Z PR
+# Watch PR CI; merge via squash + delete branch.
+# Release workflow_run fires after green CI on main.
+# Verify after publish:
+gh release view vX.Y.Z --json isPrerelease,assets
+npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'    # dev tag should point at the new version
+docker buildx imagetools inspect ghcr.io/raulk/omnifs:X.Y.Z
+```
+
+**Secrets and gates** that must be in place before any cut:
+
+- `NPM_TOKEN` repository secret (Automation type, bypasses 2FA). The npm-platforms and npm-root jobs in `release.yml` pass it as `NODE_AUTH_TOKEN`. Migrate to npm Trusted Publishers (OIDC) per package after the first publish to remove the long-lived secret.
+- `id-token: write` permission on the publish jobs (already set) for `--provenance`.
+- The `release` label must exist on the GitHub repo; `release.ts publishReleasePr` attaches it to the cut PR and fails if missing.
+- `release-cut` requires `cargo set-version`; install with `cargo install cargo-edit` if missing.
+
+**Failure modes seen in practice** (record here when they happen so the next cut avoids them):
+
+- *Race against main's CI*: when PR #X merges and you immediately `release-cut`, the resulting `release/vX.Y.Z` PR starts CI before main's post-merge CI has saved its caches under `refs/heads/main`. PR CI runs cold on lanes like `cli (linux-x64, darwin)`. Mitigation: wait for the prior main CI to complete before cutting, or accept one cold cycle.
+- *Branch name collision*: if a non-versioned branch named `release` exists (locally or remotely), git refuses to create `release/vX.Y.Z` (`cannot lock ref ... 'refs/heads/release' exists`). Delete or rename the conflicting branch first. The PR-branch from the last release-cleanup is the usual culprit; delete remote (`gh pr merge --delete-branch` or `git push origin --delete release`) and `git remote prune origin` locally.
+
 ## Auth and cloning
 
 Mount JSON accepts `static-token` with `scheme`, or `oauth`.
