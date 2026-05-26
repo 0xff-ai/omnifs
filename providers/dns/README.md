@@ -1,6 +1,6 @@
 # omnifs-provider-dns
 
-[omnifs](https://github.com/raulk/omnifs) provider that resolves DNS queries over DNS-over-HTTPS and projects each record type as a file. Default resolver is Cloudflare; `/dns/@{resolver}/...` scopes a query to a specific resolver, and `/dns/_reverse/{ip}` does PTR lookups.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that resolves DNS queries over DNS-over-HTTPS and projects each record type as a file. Default resolver is Cloudflare; `/dns/@{resolver}/...` scopes a query to a specific resolver, and `/dns/_reverse/{ip}` does PTR lookups.
 
 ## Mount layout
 
@@ -29,7 +29,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-dns
 ```
 
-The resulting `omnifs_provider_dns.wasm` is also attached to each [GitHub Release](https://github.com/raulk/omnifs/releases). Configure in your omnifs mount config under the `dns` key.
+The resulting `omnifs_provider_dns.wasm` is also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases). Configure in your omnifs mount config under the `dns` key.
 
 ## Status
 

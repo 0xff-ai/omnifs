@@ -126,7 +126,7 @@ pick_first_child_with_file() {
 run_smoke_demo() {
     set -euo pipefail
 
-    local owner=${OMNIFS_DEMO_OWNER:-raulk}
+    local owner=${OMNIFS_DEMO_OWNER:-0xff-ai}
     local requested_repo=${OMNIFS_DEMO_REPO:-omnifs}
     local owner_root="/github/${owner}"
     local requested_repo_root="${owner_root}/${requested_repo}"
@@ -194,7 +194,7 @@ if [[ ${OMNIFS_DEMO_MODE:-full} == smoke ]]; then
     exit 0
 fi
 
-demo_owner=${OMNIFS_DEMO_OWNER:-raulk}
+demo_owner=${OMNIFS_DEMO_OWNER:-0xff-ai}
 demo_repo=${OMNIFS_DEMO_REPO:-omnifs}
 
 clear

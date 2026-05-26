@@ -1,6 +1,6 @@
 # omnifs-sdk-macros
 
-Proc macros for the [omnifs](https://github.com/raulk/omnifs) provider SDK. These power the path-first handler model that providers use to project external services into FUSE-visible paths.
+Proc macros for the [omnifs](https://github.com/0xff-ai/omnifs) provider SDK. These power the path-first handler model that providers use to project external services into FUSE-visible paths.
 
 This crate is re-exported through `omnifs-sdk`. Provider authors should depend on `omnifs-sdk` and import macros from there; depending on `omnifs-sdk-macros` directly is not supported.
 
@@ -12,7 +12,7 @@ This crate is re-exported through `omnifs-sdk`. Provider authors should depend o
 - `#[config]` — provider config struct, deserialized from JSON by the host.
 - `#[provider(mounts(...))]` — provider entrypoint; declares mount points and wires the manifest custom section.
 
-See the [SDK design notes](https://github.com/raulk/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) for the routing precedence and listing semantics behind these macros.
+See the [SDK design notes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) for the routing precedence and listing semantics behind these macros.
 
 ## Install
 

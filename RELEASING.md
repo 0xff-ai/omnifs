@@ -97,7 +97,7 @@ When reviewing a release branch: `git diff origin/main --stat`, not `git diff ma
 
 - **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container
 - **WASM**: `omnifs-wasm` artifact (`omnifs_provider_*.wasm`, `omnifs_tool_*.wasm`)
-- **Runtime**: `ghcr.io/raulk/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag)
+- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag)
 - **npm**: `@0xff-ai/omnifs` + four platform packages
 
 ## npm platform catalog
@@ -108,7 +108,7 @@ When reviewing a release branch: `git diff origin/main --stat`, not `git diff ma
 
 ## Version coupling
 
-For release `X.Y.Z`, npm, `omnifs --version`, and default image `ghcr.io/raulk/omnifs:X.Y.Z` share the **same unprefixed semver**. Git tag / GitHub Release name use **`vX.Y.Z`**.
+For release `X.Y.Z`, npm, `omnifs --version`, and default image `ghcr.io/0xff-ai/omnifs:X.Y.Z` share the **same unprefixed semver**. Git tag / GitHub Release name use **`vX.Y.Z`**.
 
 Do not bump versions outside `just release-cut`. Do not change the embedded default image ref without going through a full release.
 

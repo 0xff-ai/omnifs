@@ -20,7 +20,7 @@ use crate::{
 };
 
 pub(crate) const CONTAINER_NAME: &str = "omnifs";
-pub(crate) const IMAGE: &str = concat!("ghcr.io/raulk/omnifs:", env!("CARGO_PKG_VERSION"));
+pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 pub(crate) const HOST_CRED_DIR: &str = "/run/omnifs/creds";
 pub(crate) const HOST_FUSE_MOUNT: &str = "/omnifs";
 pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";

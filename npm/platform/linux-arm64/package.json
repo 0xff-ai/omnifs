@@ -7,7 +7,7 @@
     "bin/omnifs",
     "README.md"
   ],
-  "homepage": "https://github.com/raulk/omnifs",
+  "homepage": "https://github.com/0xff-ai/omnifs",
   "license": "MIT OR Apache-2.0",
   "name": "@0xff-ai/omnifs-cli-linux-arm64",
   "os": [
@@ -15,7 +15,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/raulk/omnifs.git"
+    "url": "git+https://github.com/0xff-ai/omnifs.git"
   },
   "version": "0.2.0-dev.1"
 }

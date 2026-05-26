@@ -21,7 +21,7 @@ The root package exposes the `omnifs` executable and delegates to the native
 binary in the installed platform package. Platform packages contain only the
 compiled Rust CLI and package metadata.
 
-The npm install step does not pull `ghcr.io/raulk/omnifs:<version>`. That image
+The npm install step does not pull `ghcr.io/0xff-ai/omnifs:<version>`. That image
 pull happens in `omnifs up`, where the CLI can honor `--image` and
 `OMNIFS_IMAGE`, report Docker errors with runtime context, and avoid a large
 download during package installation.
@@ -46,5 +46,5 @@ Release versions must stay lockstep:
 Cargo workspace version
 npm root package version
 npm platform package versions
-ghcr.io/raulk/omnifs:<version>
+ghcr.io/0xff-ai/omnifs:<version>
 ```
