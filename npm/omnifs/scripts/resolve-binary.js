@@ -63,7 +63,13 @@ function resolveBinary() {
     }
     return {
       ok: false,
-      message: `${packageName} is installed, but ${binary} is missing`
+      message: [
+        `${packageName} is installed, but ${binary} is missing.`,
+        "This usually means an interrupted or partial upgrade left the platform package without its binary.",
+        "Fix it with:",
+        "  npm uninstall -g @0xff-ai/omnifs",
+        "  npm install -g @0xff-ai/omnifs@dev    # or @latest"
+      ].join("\n")
     };
   } catch (error) {
     return {
