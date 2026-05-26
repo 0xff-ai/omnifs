@@ -142,7 +142,7 @@ jobs:
         # snapshot to the GHA cache; restore-keys recover the previous
         # snapshot. Avoids tying invalidation to Cargo.lock / rust-toolchain,
         # which would force a cold cache on every unrelated dep bump.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/wasmtime
           key: wasmtime-cache-${{ runner.os }}-${{ github.sha }}
@@ -218,7 +218,7 @@ jobs:
         run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
 
       - name: Cache darwin rustup toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .cache/darwin-rustup
           key: darwin-rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
