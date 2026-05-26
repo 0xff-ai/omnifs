@@ -6,24 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0-dev.0] - 2026-05-26
+
 ### Added
 
-- Host-managed provider credentials with OAuth, static-token validation, keyring storage with file fallback, and layered credential lookup.
-- `omnifs dev` contributor workflow for building the dev image, synthesizing built-in provider mount configs, materializing fixtures and credentials, and launching the container directly.
-- npm packaging wrapper for distributing the `omnifs` CLI binary.
+- omnifs is now distributed on npm as `@0xff-ai/omnifs`. Install with `npm install -g @0xff-ai/omnifs`; the CLI binary ships in one of four platform-specific optional-dependency packages (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`). The Docker image is pulled on `omnifs up`, not at install time.
+- Full `omnifs init <provider>` / `omnifs up` / `omnifs down` mount lifecycle. `omnifs init` walks through provider auth (device-code or PKCE loopback OAuth), writes a per-mount config under `~/.omnifs/config/mounts/`, and stores credentials in the OS keychain (macOS Keychain, Linux libsecret, Windows DPAPI) with a mode-600 file fallback at `~/.omnifs/data/credentials.json`. `omnifs up` pulls the matching runtime image, materialises credentials into a private session directory bind-mounted read-only into the container, then removes the session on stop or failure.
+- `omnifs auth` subcommands: `login`, `logout`, `status`, `refresh`, `scopes`, `import`. OAuth refresh happens automatically with a one-shot 401 retry coordinated by a singleflight plus a cross-process file lock so concurrent CLI invocations do not race on the same refresh token.
+- `omnifs setup` guided first-run walkthrough: detects OS and Docker, helps pick providers, runs `init` for each, and brings the container up.
+- `omnifs doctor` runs ten ordered probes to diagnose why a mount is not working (Docker availability, FUSE timeout, missing credentials, etc.).
+- `omnifs reset` clears configs and credentials after an explicit confirmation prompt.
+- `omnifs mounts ls` / `omnifs mounts rm` for listing and removing configured mounts.
+- `omnifs status` readiness card showing runtime state, configured mounts, and auth state.
+- `omnifs version` and `omnifs completions` commands.
+- `omnifs dev` contributor sandbox: walks up from cwd to find the workspace `Cargo.toml`, captures `gh auth token`, downloads the Chinook SQLite fixture into `.secrets/db/test.db`, builds an `omnifs:<short-sha>-dev` image, and starts a container with all built-in providers mounted. Replaces the old `just dev` / `docker compose up` workflow.
+- Three supported OAuth flows in the new `omnifs-auth` crate: PKCE loopback (browser-redirect), PKCE manual code (paste-back), and device code (visit URL, type short code). GitHub uses device code with no default write scopes; Linear uses PKCE loopback with the `read` scope.
+- Host-managed provider credentials: providers never see tokens; the host attaches them to outgoing HTTP requests after callouts cross the WASM boundary. Provider auth needs are declared in `omnifs.provider.json` (OAuth endpoints, scopes, injection header, allowed domains); adding a new service does not require patching the host.
+- `omnifs-creds` crate for the keychain + file + in-memory credential store, with `CredentialKey::storage_key()` (`provider:scheme:account`) as the public wire form. Stale file-fallback entries are cleaned up after successful keyring writes; durability and permissions are hardened.
+- Database provider (`omnifs-provider-db`) mounted at `/db`, projecting a read-only SQLite database as a filesystem. Exposes `meta/{version.txt,path.txt,info.json}` and `tables/{name}/{schema.sql,schema.json,indexes.json,count.txt,sample.json}`. SQLite runs inside the WASM sandbox via `rusqlite` with the bundled feature; the host preopens the database file's parent directory through Wasmtime's WASI context with read-only permissions so no bytes cross the WIT boundary. v1 is SQLite-only and read-only.
+- Docker provider (`omnifs-provider-docker`) mounted at `/docker`, projecting the local Docker daemon over the Unix socket. Exposes `/system/{info,version,df}.json`, `/system/ping`, `/containers/_listing.json`, facets `{by-name,by-id,_running,_stopped}` each binding to a per-container subtree (`inspect.json`, `summary.json`, `summary.txt`, `state`), and `/compose/{project}/services/{service}/containers/{name}` grouping by Compose labels. Container state files are marked volatile so reads bypass the kernel page cache and always reach the provider. Bounded-window `/events` polling translates container actions into cache-invalidation prefixes.
+- Unix-socket HTTP transport in the host. Providers use `HttpEndpoint::Unix` and `build_url(path, query)`; the host detects `unix:` URLs, decodes the hex-encoded socket path, builds a per-socket `reqwest::Client` via `ClientBuilder::unix_socket`, and rewrites the URL for that client. Unix sockets are gated by a new `unix-sockets` allowlist on `CapabilityGrants`.
+- Linear provider (`omnifs-provider-linear`) mounted at `/linear`, projecting a Linear workspace. Teams appear at `/linear/teams/{KEY}`, issues at `/linear/teams/{KEY}/issues/{_open,_all}/{IDENT}/`. Each issue surface has `title`, `state`, `priority`, `assignee`, and `description.md` as files. Issue listings preload child files so a `cat` after `ls` skips a follow-up round trip. Uses Linear's GraphQL API with hand-written query strings and serde response structs (Linear's endpoint rejects full introspection queries as too complex, ruling out code generation).
+- arXiv provider now also exposes a recent-submissions surface per category: `/categories/{cat}/recent`, `/categories/{cat}/recent/_fetched`, `/categories/{cat}/recent/pages/{n}`, and `/categories/{cat}/submissions/{YYYYMMDD}` directories discovered from fetched pages. Direct paper lookup at `/papers/{id}` is unchanged.
+- Projected file attributes: providers now declare `Size` (`Exact`, `NonZero`, or `Unknown`), `Bytes` (inline or deferred), `ReadMode`, and `Stability` (`Immutable`, `Mutable`, or `Volatile`) through the `Projection` API. The host uses these facts to set `st_size`, FUSE direct-I/O flags, cache behavior, ranged-read handling, and post-read size promotion. The old 256 MiB placeholder is removed. Volatile files return `entry_timeout = 0`, `attr_timeout = 0`, and `FOPEN_DIRECT_IO`; ranged files open a provider handle for snapshot-consistent reads.
+- Sandboxed archive extraction via a host-owned `omnifs-tool-archive` Wasm component. `BlobExecutor` streams `fetch-blob` responses into a staged temp file and commits metadata before the body is visible; `ArchiveExecutor` keys extracted trees by `(cache-key, format, strip-prefix)` and coalesces concurrent extractions through `TreeMaterializer`. The extractor runs path sanitization, depth/length/entry-count/per-file/total-byte limits inside the sandbox and publishes completed trees via atomic directory rename so tree refs never observe partial output.
+- `EffectiveConfig` type representing a mount after provider metadata has been merged in. `ProviderCatalog::load_mount()` returns one; credential targeting, session materialisation, and runtime construction all consume it. The previous `InstanceConfig`-plus-late-`apply_metadata` pattern is removed.
+- Provider runtime capabilities now come back from `init` as `(State, ProviderInfo, RequestedCapabilities)` instead of a separate WIT export. Initialisation runs exactly once in `ProviderRuntime::new`. Capability entries can be marked `dynamic: true` when the concrete grant depends on mount config (Docker's socket path is the motivating case).
+- `omnifs-mount-schema` crate is split into typed modules with a checked-in JSON schema at `crates/omnifs-mount-schema/schema/omnifs.provider.schema.json` (regenerate with `just regen-schema`).
+- Per-crate README files for all published crates.
 
 ### Changed
 
-- Release automation now uses a `just` maintainer command surface with Bun policy scripts, a two-workflow CI factory, and a post-merge ship pipeline; see `RELEASING.md`.
-- Maintainer dev checks use `just check` and `just providers-build`, with a local WASI SDK sysroot for WASM provider builds.
-- CLI flows were redesigned around mount configs, provider metadata, credential materialization, and container lifecycle commands.
-- Provider manifests now describe auth schemes, injection policy, capability grants, and config schema in `omnifs.provider.json`.
-- Docker Compose development entrypoints were replaced by the supported `omnifs dev`, `omnifs shell`, `omnifs logs`, and `omnifs down` workflow.
+- arXiv provider route model is restructured around recent submissions. The calendar/date-query, `new`, `updated`, `by-author`, `/authors`, and `/search` surfaces are removed. Category traversal now goes through `/categories/{category}/recent` and `/categories/{category}/submissions/{YYYYMMDD}`; direct paper lookup at `/papers/{paper}` is unchanged. The only live category listing query shape is `search_query=cat:{category}` sorted by `submittedDate` descending.
+- Provider protocol vocabulary is reorganized into three orthogonal channels: `callout` (intermediate host work the provider suspends on), `return` (the completed operation answer), and `effect` (host-side mutation committed at the return boundary). `provider-response` is renamed to `provider-step` with arms `suspended(callouts)` and `returned(provider-return)`. A return cannot carry callouts; an error return cannot carry effects.
+- Dead git callouts (`git-list-tree`, `git-read-blob`, `git-head-ref`, `git-list-cached-repos`) and the unused `reconcile` interface are removed from the WIT.
+- The `sidecar::materialize` method is folded into `lookup-child` and `list-children` via `#[subtree]` dispatch from the SDK.
+- Host runtime module `crates/host/src/runtime/mod.rs` is split into focused modules: `instance.rs` (Wasmtime mechanics), `callouts.rs` (dispatch and tracing), `effects.rs` (terminal mutations and `ProjectionAccumulator`), `log_redaction.rs`, `wit_conversions.rs`, `op.rs` (the `Op` enum and `Validator`), and `http_stack.rs` (shared HTTP transport). `RuntimeError` construction errors split into `RuntimeBuildError`.
+- Browse cache re-skin enums collapse into their WIT counterparts; `cache::SCHEMA_VERSION` bumps to 5, invalidating existing L2 records.
+- CLI flows are redesigned around mount configs, provider metadata, credential materialisation, and container lifecycle commands. Verbose output is off by default; `-v` enables INFO logs and `-vv` adds DEBUG. Common errors surface a `Try:` block with a concrete next step.
+- Provider manifests (`omnifs.provider.json`) describe auth schemes, token injection policy, capability grants, and config schema. All built-in providers (`arxiv`, `db`, `dns`, `docker`, `github`, `linear`, `test`) carry an `omnifs.provider.json` and drop vestigial `[package.metadata.component]` Cargo sections.
+- Docker Compose development entrypoints (`compose.yaml`, `just dev`) are replaced by the supported `omnifs dev`, `omnifs shell`, `omnifs logs`, and `omnifs down` workflow.
+- Wasm providers are baked into the runtime image at `/root/.omnifs/providers/` with `OMNIFS_PROVIDERS_DIR` set so the daemon finds them without an entrypoint flag.
 
 ### Fixed
 
-- Credential persistence now avoids stale file fallback entries after keyring writes and hardens file-store durability and permissions.
+- Large file content (PR diffs, arXiv papers over the 512 KiB `MAX_EAGER_RESPONSE_BYTES` cap) no longer returns EIO. The GitHub and arXiv providers route oversized reads through `fetch-blob` so bytes stay host-side; the SDK gains `FileContent::Blob` and `FileContent::BlobWithAttrs` variants for blob-backed file content.
+- `cd /github/<owner>` followed by `ls` no longer re-fetches the listing. The SDK's `projection_exact_lookup` was marking dirents non-exhaustive even when the handler returned `PageStatus::Exhaustive`; a new `listing-exhaustive` flag on `proj-entry` propagates the exhaustive bit into the host's projection accumulator.
+- `lookup_child` into a bind site now dispatches correctly when `parent_path` equals the bind template exactly (not just when it is a strict ancestor). Previously the lookup fell through to the no-handler branch and returned `NotFound`.
+- `projection_exact_lookup` was packing the looked-up target's children into `lookup-entry.siblings` instead of the target's actual siblings. The host was caching the listing under the wrong key. The SDK now populates `siblings` with the target's siblings computed from the parent's static children, with the exhaustive bit derived from `StaticChildren::parent_has_dynamic_children`.
+- Synchronous FUSE invalidation is removed from the provider callout path, eliminating hangs when reading GitHub projected files such as issue bodies.
+- DNS and other unknown-size full-read files now return complete content through `cat`, `head`, and similar tools instead of appearing empty because the kernel saw a zero or one byte sentinel before provider content was materialised.
+- Credential persistence no longer leaves stale file-fallback entries after keyring writes; file-store durability and permissions are hardened.
 - Host credential-store setup now logs when keyring access falls back to the file store.
+- `sdk-macros` dev-dependency on `omnifs-sdk` no longer carries a redundant version specifier, fixing workspace version resolution.
 
 ## [0.1.0] - 2026-05-07
 
