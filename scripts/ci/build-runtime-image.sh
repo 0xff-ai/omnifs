@@ -47,6 +47,7 @@ cp "$binary" "$context/omnifs"
 cp "$wasm_dir"/omnifs_provider_*.wasm "$context/providers/"
 cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
 cp "$root/scripts/container-entrypoint.sh" "$context/scripts/container-entrypoint.sh"
+cp "$root/scripts/container-zshrc.zsh" "$context/scripts/container-zshrc.zsh"
 
 if [[ -z "$metadata_file" ]]; then
   metadata_file="$context/build-metadata.json"

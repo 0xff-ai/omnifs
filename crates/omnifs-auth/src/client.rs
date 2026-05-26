@@ -145,8 +145,13 @@ impl OAuthClient {
         for param in &request.oauth.scheme.extra_token_params {
             token_request = token_request.add_extra_param(&param.key, &param.value);
         }
+        let polling_http = device_polling_http(&self.http);
         let token = token_request
-            .request_async(&self.http, tokio::time::sleep, Some(details.expires_in()))
+            .request_async(
+                &polling_http,
+                tokio::time::sleep,
+                Some(details.expires_in()),
+            )
             .await?;
         let entry = credential_entry_from_token(&token);
         Ok(entry)
@@ -316,6 +321,65 @@ fn oauth_http_client() -> Result<reqwest::Client, AuthError> {
     Ok(reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
+}
+
+/// Wraps a [`reqwest::Client`] for device-code polling and rewrites GitHub's
+/// non-RFC-8628 behavior: GitHub returns 200 OK with an error JSON body
+/// (`{"error":"authorization_pending",...}`) while the user is still
+/// approving the device. Without this shim oauth2 5.x parses the 200 as a
+/// success token response, fails the JSON schema check, and the entire poll
+/// loop bails on the first iteration with `Failed to parse server response`.
+fn device_polling_http(http: &reqwest::Client) -> DevicePollingHttp {
+    DevicePollingHttp(http.clone())
+}
+
+struct DevicePollingHttp(reqwest::Client);
+
+impl<'c> oauth2::AsyncHttpClient<'c> for DevicePollingHttp {
+    type Error = oauth2::HttpClientError<reqwest::Error>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, Self::Error>> + Send + Sync + 'c>>;
+
+    fn call(&'c self, request: oauth2::HttpRequest) -> Self::Future {
+        let inner = self.0.clone();
+        Box::pin(async move {
+            let response =
+                <reqwest::Client as oauth2::AsyncHttpClient<'_>>::call(&inner, request).await?;
+            Ok(rewrite_pending_to_error_status(response))
+        })
+    }
+}
+
+/// If the response is 200 OK but the JSON body has an `error` field, rewrite
+/// to 400 so oauth2's response handling routes it through the error-response
+/// path (where `authorization_pending` and `slow_down` continue the poll).
+/// Compliant providers never hit this rewrite (they already return 4xx with
+/// an error body), so this is a no-op for everything but GitHub.
+fn rewrite_pending_to_error_status(response: oauth2::HttpResponse) -> oauth2::HttpResponse {
+    if response.status() != http::StatusCode::OK {
+        return response;
+    }
+    let Some(content_type) = response.headers().get(http::header::CONTENT_TYPE) else {
+        return response;
+    };
+    let ct = content_type.to_str().unwrap_or("").to_ascii_lowercase();
+    if !ct.starts_with("application/json") {
+        return response;
+    }
+    let body = response.body();
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return response;
+    };
+    if parsed
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    parts.status = http::StatusCode::BAD_REQUEST;
+    http::Response::from_parts(parts, body)
 }
 
 fn authorization_url(
@@ -627,6 +691,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(entry.access_token().expose_secret(), "device-access-1");
+    }
+
+    #[test]
+    fn rewrite_pending_promotes_github_style_200_error_to_400() {
+        let body = br#"{"error":"authorization_pending","error_description":"..."}"#.to_vec();
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
+            .body(body.clone())
+            .unwrap();
+        let rewritten = rewrite_pending_to_error_status(response);
+        assert_eq!(rewritten.status(), http::StatusCode::BAD_REQUEST);
+        assert_eq!(rewritten.body(), &body);
+    }
+
+    #[test]
+    fn rewrite_pending_leaves_successful_token_response_alone() {
+        let body = br#"{"access_token":"x","token_type":"bearer"}"#.to_vec();
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(body.clone())
+            .unwrap();
+        let rewritten = rewrite_pending_to_error_status(response);
+        assert_eq!(rewritten.status(), http::StatusCode::OK);
+        assert_eq!(rewritten.body(), &body);
+    }
+
+    #[test]
+    fn rewrite_pending_leaves_non_json_responses_alone() {
+        let body = b"error=authorization_pending".to_vec();
+        let response = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body.clone())
+            .unwrap();
+        let rewritten = rewrite_pending_to_error_status(response);
+        assert_eq!(rewritten.status(), http::StatusCode::OK);
     }
 
     #[test]
