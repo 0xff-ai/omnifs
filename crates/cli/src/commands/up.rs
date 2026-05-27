@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 use crate::app_context::AppContext;
-use crate::runtime::{ContainerExtras, Runtime};
+use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
 use crate::session::{HOST_FUSE_MOUNT, Session, discover_mounts, open_store};
 
 #[derive(Args, Debug, Clone, Default)]
@@ -68,7 +68,13 @@ impl UpArgs {
         let runtime_handle = Runtime::connect_ready(runtime, "omnifs up").await?;
 
         runtime_handle
-            .launch_container(&session, ContainerExtras::default())
+            .launch_container(
+                &session,
+                ContainerExtras {
+                    tcp_ports: vec![GUEST_INSPECTOR_PORT],
+                    ..ContainerExtras::default()
+                },
+            )
             .await?;
 
         runtime_handle.wait_for_fuse_mount().await?;

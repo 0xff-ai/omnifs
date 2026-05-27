@@ -22,9 +22,13 @@ use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Moun
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
 
+/// TCP port the daemon's inspector server binds inside the container.
+/// Forwarded to host loopback by `omnifs dev` and `omnifs up`.
+pub(crate) const GUEST_INSPECTOR_PORT: u16 = 7878;
+
 /// Extras layered on top of the canonical session wiring.
-/// `omnifs dev` uses this for the GitHub token secret file, DB fixture,
-/// and the inspector TCP port; `omnifs up` leaves it empty.
+/// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
+/// both `omnifs dev` and `omnifs up` expose the inspector TCP port.
 #[derive(Debug, Default)]
 pub(crate) struct ContainerExtras {
     pub(crate) binds: Vec<String>,

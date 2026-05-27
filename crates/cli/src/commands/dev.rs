@@ -16,7 +16,7 @@ use crate::app_context::AppContext;
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
 use crate::paths::PathOverrides;
-use crate::runtime::{ContainerExtras, Runtime};
+use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
 use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, Session, env_string, open_store,
     set_private_dir, write_secret,
@@ -25,9 +25,6 @@ use crate::session::{
 const CHINOOK_URL: &str = "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite";
 const GUEST_TOKEN_PATH: &str = "/run/secrets/github_token";
 const GUEST_DB_DIR: &str = "/data";
-/// TCP port the daemon's inspector server binds inside the
-/// container. Forwarded to the host's 127.0.0.1:7878 by `omnifs dev`.
-const GUEST_INSPECTOR_PORT: u16 = 7878;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DevArgs {
