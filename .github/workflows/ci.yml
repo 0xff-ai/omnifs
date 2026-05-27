@@ -113,21 +113,39 @@ jobs:
     name: host test
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: wasm
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Mount Cargo registry sticky disk
+        uses: useblacksmith/stickydisk@v1
         with:
-          shared-key: host-test
-          cache-on-failure: true
+          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
+          path: ~/.cargo/registry
+
+      - name: Mount Cargo git sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
+          path: ~/.cargo/git
+
+      - name: Mount host target sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-host-target-${{ runner.os }}-${{ runner.arch }}
+          path: target
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest@0.9.132
+
+      - name: Prepare WASM sidecar directory
+        run: rm -rf target/wasm32-wasip2/release
 
       - name: Download WASM sidecar inputs
         uses: actions/download-artifact@v8
@@ -180,6 +198,8 @@ jobs:
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [verify, wasm]
+    env:
+      CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
       packages: read
@@ -192,14 +212,31 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Mount Cargo registry sticky disk
+        uses: useblacksmith/stickydisk@v1
         with:
-          shared-key: cli-cross
-          workspaces: |
-            . -> target/ci-cross
-          cache-on-failure: true
+          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
+          path: ~/.cargo/registry
+
+      - name: Mount Cargo git sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
+          path: ~/.cargo/git
+
+      - name: Mount cross target sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cli-cross-target-${{ runner.os }}-${{ runner.arch }}
+          path: target/ci-cross
+
+      - name: Mount Darwin rustup sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-darwin-rustup-${{ runner.os }}-${{ runner.arch }}
+          path: .cache/darwin-rustup
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -216,14 +253,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cross
         run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
-
-      - name: Cache darwin rustup toolchain
-        uses: actions/cache@v5
-        with:
-          path: .cache/darwin-rustup
-          key: darwin-rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: |
-            darwin-rustup-${{ runner.os }}-
 
       - name: Build Darwin CLI binaries
         id: darwin
@@ -278,6 +307,8 @@ jobs:
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     needs: [verify, wasm]
+    env:
+      CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
       id-token: write
@@ -287,12 +318,25 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Mount Cargo registry sticky disk
+        uses: useblacksmith/stickydisk@v1
         with:
-          shared-key: cli-linux-arm64
-          cache-on-failure: true
+          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
+          path: ~/.cargo/registry
+
+      - name: Mount Cargo git sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
+          path: ~/.cargo/git
+
+      - name: Mount Linux arm64 target sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cli-linux-arm64-target-${{ runner.os }}-${{ runner.arch }}
+          path: target/ci-linux-arm64
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
@@ -306,6 +350,8 @@ jobs:
 
       - name: Build Linux arm64 CLI
         id: build
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-linux-arm64
         run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
