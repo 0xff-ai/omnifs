@@ -1,12 +1,14 @@
 //! TUI state: operation store, mount windows, filters.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 
 use omnifs_inspector::{InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
 use super::palette::MountPalette;
+use super::source::SourceMessage;
 use super::trace_state::{MAX_RECENT_TRACES, Operation, TraceReducer};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
 
@@ -21,7 +23,13 @@ pub enum ConnectionMode {
 pub struct App {
     pub mode: ConnectionMode,
     pub container: String,
+    /// True only after the source thread reports at least one
+    /// successful TCP connect. Stays false through every silent
+    /// reconnect attempt so the header never lies about reachability.
     pub connected: bool,
+    /// Inspector address shown in the header while disconnected.
+    /// `None` in [`ConnectionMode::Replay`].
+    pub addr: Option<SocketAddr>,
     pub paused: bool,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
@@ -65,11 +73,19 @@ pub struct TreeCursor {
 }
 
 impl App {
-    pub fn new(mode: ConnectionMode, container: impl Into<String>) -> Self {
+    pub fn new(
+        mode: ConnectionMode,
+        container: impl Into<String>,
+        addr: Option<SocketAddr>,
+    ) -> Self {
         Self {
             mode,
             container: container.into(),
-            connected: matches!(mode, ConnectionMode::Inspector),
+            // Start false in Inspector mode: connection state is only
+            // honest once the source thread actually attaches. Replay
+            // mode ignores this flag in the header.
+            connected: false,
+            addr,
             paused: false,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
@@ -142,6 +158,26 @@ impl App {
         match omnifs_inspector::parse_record_line(line.trim()) {
             Ok(record) => self.apply_record(&record),
             Err(_) => self.dropped_events += 1,
+        }
+    }
+
+    /// Consume one source message: line payload or a connection-state
+    /// transition. Pairs with [`super::source::EventSource::drain`].
+    pub fn apply_source_message(&mut self, message: SourceMessage) {
+        match message {
+            SourceMessage::Line(line) => {
+                if !line.trim().is_empty() {
+                    self.apply_line(&line);
+                }
+            },
+            SourceMessage::Connected => {
+                self.connected = true;
+                self.status_message = "connected".into();
+            },
+            SourceMessage::Disconnected => {
+                self.connected = false;
+                self.status_message = "disconnected, reconnecting…".into();
+            },
         }
     }
 

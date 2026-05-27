@@ -55,10 +55,16 @@ fn render_compact(frame: &mut Frame, app: &App, area: Rect) {
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let source = match app.mode {
         ConnectionMode::Inspector => {
+            // When disconnected, surface the address we're failing to
+            // reach so the user can tell "no peer listening" apart from
+            // "peer connected but quiet".
             let state = if app.connected {
-                "connected"
+                "connected".to_string()
             } else {
-                "disconnected"
+                match app.addr {
+                    Some(addr) => format!("waiting on {addr}"),
+                    None => "disconnected".to_string(),
+                }
             };
             format!("live · {} · {state}", app.container)
         },

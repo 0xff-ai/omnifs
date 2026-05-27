@@ -21,7 +21,11 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let mut app = App::new(mode, container);
+    let addr = match &source {
+        SourceKind::Socket { addr, .. } => Some(*addr),
+        SourceKind::Replay(_) => None,
+    };
+    let mut app = App::new(mode, container, addr);
     let event_source = EventSource::spawn(source);
 
     let tick_rate = Duration::from_millis(50);
@@ -48,10 +52,8 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
         }
 
         if last_tick.elapsed() >= tick_rate {
-            for line in event_source.drain() {
-                if !line.trim().is_empty() {
-                    app.apply_line(&line);
-                }
+            for message in event_source.drain() {
+                app.apply_source_message(message);
             }
             app.animate();
             last_tick = std::time::Instant::now();

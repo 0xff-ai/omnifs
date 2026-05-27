@@ -31,8 +31,20 @@ pub enum SourceKind {
     },
 }
 
+/// Out-of-band signal the source thread sends so the front-end can
+/// surface honest connection state instead of silently looping on a
+/// failed `connect_timeout`.
+pub enum SourceMessage {
+    Line(String),
+    /// First successful TCP connect, or a successful reconnect after a drop.
+    Connected,
+    /// Stream closed after a previously-connected session (daemon
+    /// shutdown or transient drop). Reconnection attempts continue.
+    Disconnected,
+}
+
 pub struct EventSource {
-    rx: Receiver<String>,
+    rx: Receiver<SourceMessage>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -52,12 +64,12 @@ impl EventSource {
         Self { rx, handle }
     }
 
-    pub fn drain(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        while let Ok(line) = self.rx.try_recv() {
-            lines.push(line);
+    pub fn drain(&self) -> Vec<SourceMessage> {
+        let mut messages = Vec::new();
+        while let Ok(message) = self.rx.try_recv() {
+            messages.push(message);
         }
-        lines
+        messages
     }
 }
 
@@ -73,13 +85,13 @@ impl Drop for EventSource {
     }
 }
 
-fn replay_path(path: &Path, tx: &Sender<String>) {
+fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
     let Ok(file) = File::open(path) else {
         return;
     };
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(Result::ok) {
-        if tx.send(line).is_err() {
+        if tx.send(SourceMessage::Line(line)).is_err() {
             break;
         }
         thread::sleep(Duration::from_millis(120));
@@ -89,8 +101,10 @@ fn replay_path(path: &Path, tx: &Sender<String>) {
 /// Connect to the daemon's TCP loopback and forward every received
 /// line into `tx`. Reconnects with a short backoff if the daemon is
 /// not yet listening — useful for `omnifs inspect` racing
-/// `omnifs dev`.
-fn socket_source(addr: SocketAddr, record: Option<&Path>, tx: &Sender<String>) {
+/// `omnifs dev`. Connect/disconnect transitions are reported through
+/// `SourceMessage` so the front-end never claims "connected" while the
+/// socket is still failing.
+fn socket_source(addr: SocketAddr, record: Option<&Path>, tx: &Sender<SourceMessage>) {
     let mut record_file = record.and_then(|path| {
         std::fs::OpenOptions::new()
             .create(true)
@@ -104,19 +118,25 @@ fn socket_source(addr: SocketAddr, record: Option<&Path>, tx: &Sender<String>) {
             thread::sleep(Duration::from_millis(250));
             continue;
         };
+        if tx.send(SourceMessage::Connected).is_err() {
+            return;
+        }
         let reader = BufReader::new(stream);
         for line in reader.lines().map_while(Result::ok) {
             if let Some(file) = record_file.as_mut() {
                 let _ = writeln!(file, "{}", line.trim());
                 let _ = file.flush();
             }
-            if tx.send(line).is_err() {
+            if tx.send(SourceMessage::Line(line)).is_err() {
                 return;
             }
         }
         // Stream closed (daemon shutdown or transient drop). Brief
         // backoff then try to reconnect; the daemon will restart with
         // a fresh history snapshot.
+        if tx.send(SourceMessage::Disconnected).is_err() {
+            return;
+        }
         thread::sleep(Duration::from_millis(500));
     }
 }

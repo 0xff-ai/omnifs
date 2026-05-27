@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args;
@@ -95,28 +95,85 @@ impl InspectArgs {
     }
 }
 
+/// How long to wait silently before announcing that the inspector
+/// socket is unreachable. Short enough that the user notices a
+/// misconfiguration quickly, long enough that the common
+/// `omnifs inspect` racing `omnifs dev` startup doesn't print noise.
+const PLAIN_WAITING_ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
+/// Re-announce cadence while still waiting on a never-reached peer.
+const PLAIN_WAITING_REMIND_EVERY: Duration = Duration::from_secs(15);
+
 /// Plain-mode driver: connect to the TCP socket, forward each line
 /// to stdout (formatted on parse, raw on parse-failure), and
 /// optionally append to a host-side record file.
+///
+/// Connection-state transitions are reported to stderr so the user
+/// can tell "still waiting on the daemon" apart from "connected but
+/// quiet".
 fn socket_plain_attach(
     addr: SocketAddr,
     record_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let mut record = record_path.map(open_record_file).transpose()?;
+    anstream::eprintln!("omnifs inspect: connecting to {addr}…");
+    let mut ever_connected = false;
+    let mut wait_started = Instant::now();
+    let mut last_waiting_announce: Option<Instant> = None;
     // Reconnect loop: lets the user start `omnifs inspect` before
     // `omnifs dev` finishes binding the socket.
     loop {
         let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+            announce_waiting(
+                addr,
+                ever_connected,
+                wait_started,
+                &mut last_waiting_announce,
+            );
             thread::sleep(Duration::from_millis(250));
             continue;
         };
+        anstream::eprintln!("omnifs inspect: connected to {addr}");
+        ever_connected = true;
+        last_waiting_announce = None;
         let reader = BufReader::new(stream);
         for line in reader.lines() {
             let line = line.context("read inspector stream")?;
             emit_plain_line(&line, record.as_mut())?;
         }
+        anstream::eprintln!("omnifs inspect: disconnected from {addr}, reconnecting…");
+        wait_started = Instant::now();
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Emit a stderr hint when the initial connect has been failing for a
+/// while, then a quieter periodic reminder. Silent until we've waited
+/// `PLAIN_WAITING_ANNOUNCE_AFTER`; rate-limited after that to avoid
+/// spamming a tail-style invocation.
+fn announce_waiting(
+    addr: SocketAddr,
+    ever_connected: bool,
+    wait_started: Instant,
+    last_announce: &mut Option<Instant>,
+) {
+    if wait_started.elapsed() < PLAIN_WAITING_ANNOUNCE_AFTER {
+        return;
+    }
+    if let Some(prev) = *last_announce
+        && prev.elapsed() < PLAIN_WAITING_REMIND_EVERY
+    {
+        return;
+    }
+    if ever_connected {
+        anstream::eprintln!("omnifs inspect: still trying to reach {addr}…");
+    } else {
+        anstream::eprintln!(
+            "omnifs inspect: no inspector listening on {addr}. \
+             Is the omnifs container running with the inspector port published? \
+             (try `omnifs up` or `omnifs dev`). Still retrying…"
+        );
+    }
+    *last_announce = Some(Instant::now());
 }
 
 fn open_record_file(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
