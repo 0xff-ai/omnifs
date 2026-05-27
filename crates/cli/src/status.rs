@@ -4,6 +4,7 @@ use comfy_table::{Cell, ContentArrangement, Table, presets};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use crate::session::CredsBackend;
 use crate::{catalog::ProviderCatalog, paths::Paths, proc_mounts};
 
 pub(crate) use crate::auth::AuthReadiness;
@@ -132,7 +133,7 @@ pub(crate) fn collect_status(
     paths: Paths,
     mount_point: PathBuf,
 ) -> anyhow::Result<StatusReport> {
-    let store = crate::session::open_store(&paths.credentials_file, true);
+    let store = CredsBackend::auto(&paths.credentials_file, true);
     let running_args = crate::runtime_state::RuntimeState::load(&paths.config_dir).map(|state| {
         proc_mounts::RunningMountArgs {
             mount_point: Some(state.mount_point),

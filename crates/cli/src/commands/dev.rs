@@ -18,7 +18,7 @@ use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
 use crate::paths::PathOverrides;
 use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
 use crate::session::{
-    CONTAINER_NAME, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, Session, env_string, open_store,
+    CONTAINER_NAME, CredsBackend, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, Session, env_string,
     set_private_dir, write_secret,
 };
 
@@ -82,7 +82,14 @@ impl DevArgs {
         anstream::println!("Installing built-in dev mount configs");
         let configs = dev_mounts::install(&session)?;
 
-        let store = open_store(&paths.credentials_file, true);
+        // Force the file backend: macOS pops a "allow keychain access"
+        // GUI prompt whenever the debug `omnifs dev` binary's
+        // signature differs from the installed binary that originally
+        // stored the credential, and the dialog blocks contributor
+        // iteration. Dev never needs the OS keychain — the JSON store
+        // at `~/.omnifs/data/credentials.json` is the source of truth
+        // for the in-tree workflow.
+        let store = CredsBackend::file(&paths.credentials_file, true);
         anstream::println!("Materializing mount configs and credentials");
         session.populate(&configs, ctx.catalog(), store.as_ref())?;
         anstream::println!("✓ Materialized {} mount(s)", configs.len());
