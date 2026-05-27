@@ -207,8 +207,19 @@ async fn ensure_db_fixture(db_dir: &Path, db_path: &Path) -> anyhow::Result<()> 
 
 fn build_image(workspace: &Path, image: &str) -> anyhow::Result<()> {
     anstream::println!("Building image `{image}` (cached layers reused)");
+    // Bake the launcher's `CARGO_PKG_VERSION` into the image so the
+    // pre-`docker create` handshake in `runtime.rs` can refuse to
+    // launch this image with an older `omnifs` on PATH.
+    let min_launcher = env!("CARGO_PKG_VERSION");
     let status = Command::new("docker")
-        .args(["build", "-t", image, "."])
+        .args([
+            "build",
+            "-t",
+            image,
+            "--build-arg",
+            &format!("OMNIFS_MIN_LAUNCHER_VERSION={min_launcher}"),
+            ".",
+        ])
         .current_dir(workspace)
         .status()
         .context("invoke docker build")?;

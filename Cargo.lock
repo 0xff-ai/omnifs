@@ -3583,6 +3583,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "strsim",
