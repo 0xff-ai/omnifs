@@ -11,6 +11,7 @@ use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
+use crate::session::CredsBackend;
 use crate::status::UserMountStatus;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
@@ -270,7 +271,7 @@ fn probe_mount_configs(
     paths: &Paths,
     catalog: &ProviderCatalog,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {
-    let store = crate::session::open_store(&paths.credentials_file, false);
+    let store = CredsBackend::auto(&paths.credentials_file, false);
     let mounts = match catalog.scan_user_mount_configs(store.as_ref()) {
         Ok(m) => m,
         Err(error) => {

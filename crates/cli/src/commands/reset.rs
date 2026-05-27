@@ -19,7 +19,7 @@ use crate::container_name::ContainerName;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
-use crate::session::{self, ENV_CONTAINER_NAME};
+use crate::session::{self, CredsBackend, ENV_CONTAINER_NAME};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {
@@ -76,7 +76,7 @@ impl ResetArgs {
         // Docker (or an absent container) isn't a reset failure.
         teardown_container(&container_name).await;
 
-        let store = session::open_store(&paths.credentials_file, false);
+        let store = CredsBackend::auto(&paths.credentials_file, false);
         for target in &targets {
             delete_credentials(
                 store.as_ref(),

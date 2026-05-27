@@ -27,6 +27,36 @@ pub enum Op {
     },
 }
 
+/// Descriptor used by the live observability stream. `None` for ops that
+/// do not produce a user-observable `provider.start`/`provider.end` pair.
+pub struct LiveOpDescriptor {
+    pub method: &'static str,
+    pub path: String,
+}
+
+impl Op {
+    /// Return the descriptor when this op should appear in the live stream.
+    pub fn live_descriptor(&self) -> Option<LiveOpDescriptor> {
+        let (method, path) = match self {
+            Self::LookupChild { parent_path, name } => (
+                "lookup_child",
+                if parent_path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{parent_path}/{name}")
+                },
+            ),
+            Self::ListChildren { path } => ("list_children", path.clone()),
+            Self::ReadFile { path } => ("read_file", path.clone()),
+            Self::OpenFile { .. }
+            | Self::ReadChunk { .. }
+            | Self::Initialize
+            | Self::OnEvent { .. } => return None,
+        };
+        Some(LiveOpDescriptor { method, path })
+    }
+}
+
 pub(super) struct Validator<'a, F> {
     op: &'a Op,
     ret: &'a wit_types::ProviderReturn,

@@ -165,6 +165,17 @@ ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
 FROM runtime-base AS runtime
 
+# Launcher↔image version handshake. The launcher inspects this label
+# before `docker create` and refuses to start the container if it is
+# older than the value here — catches the footgun where a
+# contributor's `omnifs` on PATH (e.g. an old npm-installed release)
+# is used to launch an image built from a newer source tree that
+# wires new capabilities (ports, env vars, mounts) the old launcher
+# doesn't know about. `omnifs dev` and CI both pass the workspace
+# `CARGO_PKG_VERSION` as the build arg.
+ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
+LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
+
 COPY --from=builder /omnifs /usr/local/bin/
 COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_*.wasm \
      /root/.omnifs/providers/

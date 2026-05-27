@@ -6,6 +6,7 @@
 use crate::fuse::FuseFs;
 use crate::path_key::PathToInode;
 use crate::registry::ProviderRegistry;
+use crate::runtime::inspector;
 use dashmap::DashMap;
 use fuser::{Notifier, Session};
 use parking_lot::Mutex;
@@ -20,14 +21,14 @@ use tracing::info;
 pub fn mount_blocking(
     mount_point: &Path,
     registry: &Arc<ProviderRegistry>,
-    rt: Handle,
+    rt: &Handle,
 ) -> Result<(), MountError> {
     // Create shared path_to_inode map for invalidation.
     let path_to_inode: Arc<PathToInode> = Arc::new(DashMap::new());
     let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(None));
 
     let fs = FuseFs::new_with_path_map_and_notifier(
-        rt,
+        rt.clone(),
         Arc::clone(registry),
         Arc::clone(&path_to_inode),
         Arc::clone(&notifier),
@@ -35,6 +36,21 @@ pub fn mount_blocking(
     let config = FuseFs::mount_config();
 
     info!(mount = %mount_point.display(), "starting FUSE mount");
+
+    if let Some(sink) = inspector::init_global_from_env() {
+        if let Some(path) = sink.tee_path() {
+            info!(path = %path.display(), "inspector stream enabled (in-memory ring + file tee)");
+        } else {
+            info!("inspector stream enabled (in-memory ring only)");
+        }
+        // Spawn the UDS subscriber server on the runtime that drives
+        // callouts. The returned JoinHandle is leaked intentionally:
+        // the server should live as long as the daemon, and tokio
+        // aborts the task when the runtime shuts down at process exit.
+        if let Some(_handle) = sink.spawn_socket_server(rt) {
+            info!("inspector socket server spawned");
+        }
+    }
 
     let session = Session::new(fs, mount_point, &config)
         .map_err(|e| MountError::FuseFailed(e.to_string()))?;

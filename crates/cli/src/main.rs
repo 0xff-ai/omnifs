@@ -17,6 +17,7 @@ mod dev_mounts;
 mod dev_support;
 mod error;
 mod image_ref;
+mod inspector;
 mod mount_report;
 mod mount_tree;
 pub mod paths;

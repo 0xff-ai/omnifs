@@ -26,7 +26,7 @@ async fn test_initialize() {
 async fn test_list_root() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    let result = harness.runtime.list_children("").await.unwrap();
+    let result = harness.runtime.list_children("", None).await.unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
             assert_eq!(listing.entries.len(), 3);
@@ -53,7 +53,7 @@ async fn test_list_root() {
 async fn test_list_hello_dir() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    let result = harness.runtime.list_children("hello").await.unwrap();
+    let result = harness.runtime.list_children("hello", None).await.unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
             assert_eq!(listing.entries.len(), 9);
@@ -86,7 +86,7 @@ async fn test_list_projects_nested_files_into_cache() {
     "#,
     );
 
-    let result = harness.runtime.list_children("hello").await.unwrap();
+    let result = harness.runtime.list_children("hello", None).await.unwrap();
     assert!(
         matches!(result, ListChildrenResult::Entries(_)),
         "expected list entries, got {result:?}"
@@ -137,7 +137,11 @@ async fn test_list_projects_direct_file_content_into_cache() {
     "#,
     );
 
-    let result = harness.runtime.list_children("hello/bundle").await.unwrap();
+    let result = harness
+        .runtime
+        .list_children("hello/bundle", None)
+        .await
+        .unwrap();
     assert!(
         matches!(result, ListChildrenResult::Entries(_)),
         "expected DirEntries, got {result:?}"
@@ -176,10 +180,14 @@ async fn test_read_file() {
         }
     "#,
     );
-    let result = harness.runtime.read_file("hello/message").await.unwrap();
+    let result = harness
+        .runtime
+        .read_file("hello/message", None)
+        .await
+        .unwrap();
     assert_eq!(support::inline_content(&result), b"Hello, world!");
 
-    let exact = harness.runtime.read_file("hello/lazy").await.unwrap();
+    let exact = harness.runtime.read_file("hello/lazy", None).await.unwrap();
     assert_eq!(support::inline_content(&exact), b"lazy\n");
 }
 
@@ -197,13 +205,17 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     "#,
     );
 
-    let listing = harness.runtime.list_children("hello").await.unwrap();
+    let listing = harness.runtime.list_children("hello", None).await.unwrap();
     match listing {
         ListChildrenResult::Entries(_) => {},
         other @ ListChildrenResult::Subtree(_) => panic!("expected list entries, got {other:?}"),
     }
 
-    let result = harness.runtime.read_file("hello/projected").await.unwrap();
+    let result = harness
+        .runtime
+        .read_file("hello/projected", None)
+        .await
+        .unwrap();
     assert_eq!(support::inline_content(&result), b"title\n");
 
     let dirents_record = harness
@@ -333,7 +345,11 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
 async fn test_lookup_child() {
     let engine = make_engine();
     let harness = make_runtime(&engine);
-    let result = harness.runtime.lookup_child("", "hello").await.unwrap();
+    let result = harness
+        .runtime
+        .lookup_child("", "hello", None)
+        .await
+        .unwrap();
     match result {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
@@ -343,7 +359,11 @@ async fn test_lookup_child() {
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let exact_file = harness.runtime.lookup_child("hello", "lazy").await.unwrap();
+    let exact_file = harness
+        .runtime
+        .lookup_child("hello", "lazy", None)
+        .await
+        .unwrap();
     match exact_file {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
@@ -370,7 +390,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
 
     let lookup_error = harness
         .runtime
-        .lookup_child("", "checkout")
+        .lookup_child("", "checkout", None)
         .await
         .unwrap_err();
     assert!(
@@ -380,7 +400,11 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
         "unexpected error: {lookup_error}"
     );
 
-    let listing_error = harness.runtime.list_children("checkout").await.unwrap_err();
+    let listing_error = harness
+        .runtime
+        .list_children("checkout", None)
+        .await
+        .unwrap_err();
     assert!(
         listing_error
             .to_string()
@@ -406,7 +430,7 @@ async fn test_lookup_projects_adjacent_files_into_cache() {
 
     let result = harness
         .runtime
-        .lookup_child("hello", "bundle")
+        .lookup_child("hello", "bundle", None)
         .await
         .unwrap();
 
@@ -460,7 +484,7 @@ async fn test_lookup_projects_siblings_into_cache() {
 
     let result = harness
         .runtime
-        .lookup_child("hello", "snapshot")
+        .lookup_child("hello", "snapshot", None)
         .await
         .unwrap();
 
@@ -646,7 +670,7 @@ async fn test_cache_isolated_by_mount_name() {
     )
     .unwrap();
 
-    let result = runtime_a.list_children("hello").await.unwrap();
+    let result = runtime_a.list_children("hello", None).await.unwrap();
     assert!(matches!(result, ListChildrenResult::Entries(_)));
     assert!(
         runtime_a
@@ -659,8 +683,8 @@ async fn test_cache_isolated_by_mount_name() {
             .is_none()
     );
 
-    let scoped_a = runtime_a.list_children("scoped").await.unwrap();
-    let scoped_b = runtime_b.list_children("scoped").await.unwrap();
+    let scoped_a = runtime_a.list_children("scoped", None).await.unwrap();
+    let scoped_b = runtime_b.list_children("scoped", None).await.unwrap();
     assert!(matches!(scoped_a, ListChildrenResult::Entries(_)));
     assert!(matches!(scoped_b, ListChildrenResult::Entries(_)));
     assert!(

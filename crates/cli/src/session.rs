@@ -373,24 +373,99 @@ pub(crate) fn set_private_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Open the credential store using the system keychain when available, otherwise
-/// a JSON file fallback.
-pub(crate) fn open_store(file_fallback: &Path, verbose: bool) -> Box<dyn CredentialStore> {
-    match KeyringStore::new() {
-        Ok(store) => Box::new(store),
-        Err(error) => {
-            if verbose {
-                let prefix = match &error {
-                    StoreError::Unavailable(_) => "Keychain unavailable",
-                    _ => "Keychain init failed",
-                };
-                anstream::eprintln!(
-                    "{prefix} ({error}); reading credentials from {} instead",
-                    file_fallback.display()
-                );
-            }
-            Box::new(FileStore::new(file_fallback))
-        },
+/// Env var to force a specific credential backend. Values: `file`,
+/// `keychain`. Unset (or anything else) defers to the caller's
+/// requested [`CredsBackend`]; setting it always wins.
+///
+/// The escape hatch matters on macOS: each binary signature is a
+/// distinct keychain identity, so a debug build (or a different
+/// install path) hitting credentials stored by a previously-trusted
+/// binary triggers an "Allow / Always Allow / Deny" GUI prompt. Under
+/// a non-interactive runner the process blocks forever waiting for
+/// the dialog.
+pub(crate) const ENV_CREDS_BACKEND: &str = "OMNIFS_CREDS_BACKEND";
+
+/// Constructors for the credential store. Pick the variant whose
+/// semantics fit the call site:
+///
+/// - [`Self::auto`]: standard end-user flow. Keychain when available,
+///   file fallback otherwise. Honors [`ENV_CREDS_BACKEND`] as a hard
+///   ops override.
+/// - [`Self::file`]: force the JSON store. Used by `omnifs dev` to
+///   bypass macOS keychain prompts that block non-interactively when
+///   the debug binary's signature differs from the installed binary
+///   that originally wrote the credential.
+/// - [`Self::keychain`]: force the system keychain; only fall back
+///   to the file store if the keychain itself isn't accessible.
+pub(crate) struct CredsBackend;
+
+impl CredsBackend {
+    /// Default policy: try keychain, fall back to file on failure.
+    /// [`ENV_CREDS_BACKEND`] is consulted first and overrides the
+    /// default when set to `file` or `keychain`.
+    pub(crate) fn auto(file_fallback: &Path, verbose: bool) -> Box<dyn CredentialStore> {
+        match env_string(ENV_CREDS_BACKEND).as_deref() {
+            Some("file") => Self::file(file_fallback, verbose),
+            Some("keychain") => Self::keychain(file_fallback, verbose),
+            Some(other) => {
+                if verbose {
+                    anstream::eprintln!(
+                        "{ENV_CREDS_BACKEND}=`{other}` is not a recognized value (file|keychain); \
+                         using default keychain-with-file-fallback"
+                    );
+                }
+                Self::keychain_with_fallback(file_fallback, verbose)
+            },
+            None => Self::keychain_with_fallback(file_fallback, verbose),
+        }
+    }
+
+    /// Force the file-backed store. Ignores [`ENV_CREDS_BACKEND`] —
+    /// the caller knows it doesn't want the keychain.
+    pub(crate) fn file(file_fallback: &Path, verbose: bool) -> Box<dyn CredentialStore> {
+        if verbose {
+            anstream::eprintln!(
+                "Using file-backed credentials store at {} (keychain bypassed)",
+                file_fallback.display()
+            );
+        }
+        Box::new(FileStore::new(file_fallback))
+    }
+
+    /// Force the system keychain. Falls back to the file store only
+    /// if the keychain itself is unavailable (e.g. headless Linux).
+    pub(crate) fn keychain(file_fallback: &Path, verbose: bool) -> Box<dyn CredentialStore> {
+        match KeyringStore::new() {
+            Ok(store) => Box::new(store),
+            Err(error) => {
+                if verbose {
+                    anstream::eprintln!(
+                        "Keychain forced but unavailable ({error}); reading credentials from {} instead",
+                        file_fallback.display()
+                    );
+                }
+                Box::new(FileStore::new(file_fallback))
+            },
+        }
+    }
+
+    fn keychain_with_fallback(file_fallback: &Path, verbose: bool) -> Box<dyn CredentialStore> {
+        match KeyringStore::new() {
+            Ok(store) => Box::new(store),
+            Err(error) => {
+                if verbose {
+                    let prefix = match &error {
+                        StoreError::Unavailable(_) => "Keychain unavailable",
+                        _ => "Keychain init failed",
+                    };
+                    anstream::eprintln!(
+                        "{prefix} ({error}); reading credentials from {} instead",
+                        file_fallback.display()
+                    );
+                }
+                Box::new(FileStore::new(file_fallback))
+            },
+        }
     }
 }
 
@@ -403,7 +478,7 @@ pub(crate) fn sync_session_credentials_to_host(
         return Ok(0);
     }
     let session_store = FileStore::new(&session_credentials);
-    let host_store = open_store(credentials_file, true);
+    let host_store = CredsBackend::auto(credentials_file, true);
     let mut synced = 0;
     let keys = session_store.list().with_context(|| {
         format!(

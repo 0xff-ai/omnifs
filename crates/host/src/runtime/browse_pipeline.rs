@@ -3,6 +3,7 @@ use crate::cache::{BatchRecord, CacheRecord, DirentRecord, DirentsPayload, Entry
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::effects::{push_projected_entry, push_projected_file_content};
 use crate::runtime::inflight::{Acquired, share_outcome, unshare_outcome};
+use omnifs_inspector::TraceId;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -11,6 +12,7 @@ impl ProviderRuntime {
         &self,
         parent_path: &str,
         name: &str,
+        fuse_trace: Option<TraceId>,
     ) -> Result<wit_types::LookupChildResult> {
         let op = Op::LookupChild {
             parent_path: parent_path.to_string(),
@@ -22,7 +24,7 @@ impl ProviderRuntime {
             format!("{parent_path}/{name}")
         };
         let result = self
-            .coalesced(&child_path, || self.run_op(op.clone()))
+            .coalesced(&child_path, || self.run_op(op.clone(), fuse_trace))
             .await?;
 
         if let wit_types::OpResult::LookupChild(wit_types::LookupChildResult::Entry(entry)) =
@@ -39,11 +41,17 @@ impl ProviderRuntime {
         }
     }
 
-    pub async fn list_children(&self, path: &str) -> Result<wit_types::ListChildrenResult> {
+    pub async fn list_children(
+        &self,
+        path: &str,
+        fuse_trace: Option<TraceId>,
+    ) -> Result<wit_types::ListChildrenResult> {
         let op = Op::ListChildren {
             path: path.to_string(),
         };
-        let result = self.coalesced(path, || self.run_op(op.clone())).await?;
+        let result = self
+            .coalesced(path, || self.run_op(op.clone(), fuse_trace))
+            .await?;
 
         if let wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
             ref listing,
@@ -60,11 +68,17 @@ impl ProviderRuntime {
         }
     }
 
-    pub async fn read_file(&self, path: &str) -> Result<wit_types::ReadFileResult> {
+    pub async fn read_file(
+        &self,
+        path: &str,
+        fuse_trace: Option<TraceId>,
+    ) -> Result<wit_types::ReadFileResult> {
         let op = Op::ReadFile {
             path: path.to_string(),
         };
-        let result = self.coalesced(path, || self.run_op(op.clone())).await?;
+        let result = self
+            .coalesced(path, || self.run_op(op.clone(), fuse_trace))
+            .await?;
 
         if matches!(result, wit_types::OpResult::ReadFile(_)) {
             self.touch_activity_for_relative_path(path);
@@ -81,7 +95,7 @@ impl ProviderRuntime {
         let op = Op::OpenFile {
             path: path.to_string(),
         };
-        let result = self.run_op(op.clone()).await?;
+        let result = self.run_op(op.clone(), None).await?;
 
         if matches!(result, wit_types::OpResult::OpenFile(_)) {
             self.touch_activity_for_relative_path(path);
@@ -105,7 +119,7 @@ impl ProviderRuntime {
             offset,
             length,
         };
-        let result = self.run_op(op.clone()).await?;
+        let result = self.run_op(op.clone(), None).await?;
 
         match result {
             wit_types::OpResult::ReadChunk(result) => Ok(result),

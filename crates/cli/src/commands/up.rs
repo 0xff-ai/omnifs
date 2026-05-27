@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use clap::Args;
 
 use crate::app_context::AppContext;
-use crate::runtime::{ContainerExtras, Runtime};
-use crate::session::{HOST_FUSE_MOUNT, Session, discover_mounts, open_store};
+use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
+use crate::session::{CredsBackend, HOST_FUSE_MOUNT, Session, discover_mounts};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
@@ -60,7 +60,7 @@ impl UpArgs {
         let mut cleanup = session.cleanup_on_drop();
         anstream::println!("Preparing session at {}", session.root().display());
         anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
-        let store = open_store(&paths.credentials_file, true);
+        let store = CredsBackend::auto(&paths.credentials_file, true);
         anstream::println!("Materializing mount configs and credentials");
         session.populate(&configs, catalog, store.as_ref())?;
         anstream::println!("✓ Materialized {} mount(s)", configs.len());
@@ -68,7 +68,13 @@ impl UpArgs {
         let runtime_handle = Runtime::connect_ready(runtime, "omnifs up").await?;
 
         runtime_handle
-            .launch_container(&session, ContainerExtras::default())
+            .launch_container(
+                &session,
+                ContainerExtras {
+                    tcp_ports: vec![GUEST_INSPECTOR_PORT],
+                    ..ContainerExtras::default()
+                },
+            )
             .await?;
 
         runtime_handle.wait_for_fuse_mount().await?;

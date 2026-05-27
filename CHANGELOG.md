@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Container shell now greets interactive users with a welcome banner: an "OMNIFS" wordmark, the tagline `open a path, read the world.`, and indented blocks of example paths (`ls /github/<owner>/<repo>/_repo`, `cat /dns/<domain>/TXT`, an arXiv `find` pipeline) and useful commands (`omnifs status`, `omnifs logs -f`, `omnifs auth list`). Gated on `[[ -o interactive ]]` so `zsh -c '...'` invocations stay silent. Lives in `scripts/container-zshrc.zsh`, copied into both the dev `Dockerfile` and the release `scripts/ci/Dockerfile.runtime`.
 - `omnifs up` now prints a hint pointing at `omnifs shell` after the FUSE mount comes online, so new users immediately know how to enter the projected filesystem.
+- `omnifs inspect` shows a live JSONL observability stream from the host daemon as a ratatui TUI: a path-tree of mount activity, a per-mount sparkline strip, an operations log (retention 4096), and an inline waterfall for the selected trace. Use `--replay <file>` for a captured JSONL trace, `--record <file>` to tee the live stream to a host path while attached, and `--plain` for line-oriented output. The host daemon emits typed `InspectorEvent` records (FUSE, provider, callout, subtree, clone, cache) through a non-blocking sink (lock-free `crossbeam_queue::ArrayQueue` history ring plus `tokio::sync::broadcast` for live subscribers) over TCP loopback `127.0.0.1:7878`. Schema lives in the new `omnifs-inspector` crate with redaction at the wire boundary. File tee is opt-in via `OMNIFS_INSPECTOR_PATH`. `omnifs up` exposes the inspector port to host loopback so `omnifs inspect` works against the standard runtime container, not just `omnifs dev`.
+- Runtime images now carry an `ai.0xff.omnifs.min-launcher-version` label, and `omnifs dev` refuses to start an image that requires a newer launcher. This catches source-image versus installed-CLI skew before Docker starts a container with missing port mappings or environment wiring.
+- `OMNIFS_CREDS_BACKEND=file|keychain` overrides the automatic credential backend selection, and `omnifs dev` uses the file backend directly so contributor builds do not block on macOS Keychain prompts from differently signed binaries.
 
 ### Changed
 
@@ -18,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `omnifs inspect` now reports honest socket state. The TUI starts in a waiting state until the daemon actually accepts a TCP connection, and `--plain` mode prints connect, disconnect, and delayed "no inspector listening" diagnostics instead of silently reconnecting forever.
+- GitHub repository names such as `.github` and `.gitignore` are accepted as safe path segments. Only bare `.` and `..` remain rejected for traversal safety.
+- GitHub issue listings under a nonexistent repository now surface `NotFound` instead of `InvalidInput`, so FUSE renders `ENOENT` rather than `EINVAL` for structurally valid paths that point at a missing repo.
 - GitHub OAuth device flow no longer fails on the first poll with `request_failed: Failed to parse server response`. GitHub's `/login/oauth/access_token` returns `200 OK` with `{"error":"authorization_pending",...}` while the user is approving, violating RFC 8628; `oauth2` 5.x interpreted the 200 as success and tripped on the body schema. `omnifs-auth` now wraps `reqwest::Client` in a `DevicePollingHttp` impl of `oauth2::AsyncHttpClient` that re-stamps any `200 + JSON-with-error-field` response as `400`, routing GitHub's responses through the standard error-handling path. Compliant providers are unaffected.
 - `omnifs dev` builds again. The `Dockerfile` still referenced `.cargo/`, which was removed in #78; the stray `COPY .cargo .cargo` and matching `.dockerignore` allowlist entries are gone.
 

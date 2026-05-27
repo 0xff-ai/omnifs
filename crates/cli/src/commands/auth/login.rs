@@ -16,6 +16,7 @@ use super::shared::{format_scopes, oauth_request};
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
 use crate::paths::{PathOverrides, Paths};
+use crate::session::CredsBackend;
 
 pub(super) async fn login(
     _paths: &Paths,
@@ -116,7 +117,7 @@ pub(crate) async fn login_with_paths(
     )?;
     let mut paths = ctx.paths().clone();
     paths.credentials_file = credentials_file;
-    let store = crate::session::open_store(&paths.credentials_file, true);
+    let store = CredsBackend::auto(&paths.credentials_file, true);
     login(
         &paths,
         ctx.catalog(),

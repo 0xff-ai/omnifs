@@ -42,8 +42,12 @@ impl GitExecutor {
         error.message = tracing::field::Empty,
         error.retryable = tracing::field::Empty,
     ))]
-    pub fn open_repo(&self, req: &wit_types::GitOpenRequest) -> wit_types::CalloutResult {
-        let result = match self.open_repo_inner(req) {
+    pub fn open_repo(
+        &self,
+        req: &wit_types::GitOpenRequest,
+        operation_id: u64,
+    ) -> wit_types::CalloutResult {
+        let result = match self.open_repo_inner(req, operation_id) {
             Ok(id) => wit_types::CalloutResult::GitRepoOpened(wit_types::GitRepoInfo {
                 repo: id,
                 tree: id,
@@ -54,11 +58,16 @@ impl GitExecutor {
         result
     }
 
-    fn open_repo_inner(&self, req: &wit_types::GitOpenRequest) -> Result<u64, GitError> {
+    fn open_repo_inner(
+        &self,
+        req: &wit_types::GitOpenRequest,
+        operation_id: u64,
+    ) -> Result<u64, GitError> {
         self.capability.check_git_url(&req.clone_url)?;
+        let mut observer = super::inspector::InspectorCloneObserver::for_operation(operation_id);
         let cache_path = self
             .cloner
-            .clone_if_needed(&req.cache_key, &req.clone_url)
+            .clone_if_needed(&req.cache_key, &req.clone_url, &mut observer)
             .map_err(|error| {
                 warn!(
                     cache_key = %req.cache_key,

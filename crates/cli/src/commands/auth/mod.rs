@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::app_context::AppContext;
 use crate::paths::PathOverrides;
 use crate::presentation::OutputFormat;
+use crate::session::CredsBackend;
 
 pub(crate) use import::run_auth_manifest;
 pub(crate) use login::login_with_paths;
@@ -82,7 +83,7 @@ impl AuthArgs {
             paths.credentials_file = creds;
         }
         let catalog = ctx.catalog();
-        let store = crate::session::open_store(&paths.credentials_file, true);
+        let store = CredsBackend::auto(&paths.credentials_file, true);
         match self.command {
             AuthCommand::Login {
                 mount,

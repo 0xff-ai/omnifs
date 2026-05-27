@@ -58,9 +58,18 @@ if [[ "$push" == "true" ]]; then
   output_arg=(--push)
 fi
 
+# Bake the launcher's crate version into the image so the launcher's
+# pre-`docker create` handshake (see `crates/cli/src/runtime.rs`) can
+# refuse mismatched pairings. Read the workspace version directly so
+# this works whether or not the build binary is native-runnable.
+if [[ -z "${OMNIFS_MIN_LAUNCHER_VERSION:-}" ]]; then
+  OMNIFS_MIN_LAUNCHER_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' "$root/Cargo.toml")"
+fi
+
 docker buildx build "${output_arg[@]}" \
   --metadata-file "$metadata_file" \
   --platform "$platform" \
+  --build-arg "OMNIFS_MIN_LAUNCHER_VERSION=${OMNIFS_MIN_LAUNCHER_VERSION}" \
   -t "$image" \
   -f "$(dirname "${BASH_SOURCE[0]}")/Dockerfile.runtime" \
   "$context"

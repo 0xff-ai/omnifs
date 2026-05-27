@@ -1,5 +1,6 @@
 use hashbrown::HashSet;
 use omnifs_sdk::Cx;
+use omnifs_sdk::error::ProviderErrorKind;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -97,7 +98,32 @@ pub(crate) async fn list_hybrid<T: Listable>(
          ?state={rest_state}&sort=created&direction=desc&per_page={PAGE_SIZE}"
     );
 
-    let first: SearchResults<T> = cx.github_json(&search_path).await?;
+    let first: SearchResults<T> = match cx.github_json(&search_path).await {
+        Ok(results) => results,
+        Err(err) if is_search_repo_missing(&err) => {
+            // GitHub's /search/issues returns HTTP 422 when the `repo:`
+            // qualifier names a repository it can't see — non-existent,
+            // renamed, deleted, or private without auth. The SDK maps
+            // that to `InvalidInput` (→ EINVAL), which is a misleading
+            // error for the FUSE user: they entered a directory that
+            // looks structurally valid (`/{owner}/{repo}/_issues/_all`)
+            // and got "invalid argument" with no hint that the repo
+            // itself is the problem.
+            //
+            // Disambiguate by probing REST: if `/repos/{owner}/{repo}`
+            // is 404, the repo doesn't exist — surface that as NotFound
+            // (→ ENOENT), which renders as the expected "no such
+            // file or directory". If REST says the repo exists, the
+            // 422 is a real query issue, so propagate the original error.
+            if repo_exists(cx, owner, repo).await? {
+                return Err(err);
+            }
+            return Err(ProviderError::not_found(format!(
+                "{owner}/{repo}: repository not found on GitHub"
+            )));
+        },
+        Err(err) => return Err(err),
+    };
     let capped_total = first.total_count.min(SEARCH_RESULT_CAP);
     let page_count = capped_total.div_ceil(PAGE_SIZE);
     let mut items = first.items;
@@ -255,5 +281,30 @@ pub(crate) async fn comments_projection(
             }
             Ok(projection)
         },
+    }
+}
+
+/// Heuristic: the SDK collapses every non-rate-limited 4xx other than
+/// 404 to [`ProviderErrorKind::InvalidInput`] with message `HTTP <code>`,
+/// so we recognise a search-time 422 by matching both. False positives
+/// here (a real 422 on a valid repo) only cost one extra REST round-trip
+/// in `repo_exists`.
+fn is_search_repo_missing(err: &ProviderError) -> bool {
+    err.kind() == ProviderErrorKind::InvalidInput && err.message().contains("HTTP 422")
+}
+
+/// Probe REST `/repos/{owner}/{repo}` to decide whether a missing
+/// search result reflects a non-existent repo or some other failure.
+/// Returns `Ok(true)` on 200, `Ok(false)` on 404, and propagates other
+/// errors (auth, rate-limit, transport) so callers don't synthesise
+/// ENOENT over a transient outage.
+async fn repo_exists(cx: &Cx<State>, owner: &OwnerName, repo: &RepoName) -> Result<bool> {
+    match cx
+        .github_json::<serde::de::IgnoredAny>(format!("/repos/{owner}/{repo}"))
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
     }
 }

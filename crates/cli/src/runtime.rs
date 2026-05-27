@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig};
+use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, PortBinding};
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions,
     StartContainerOptions, StopContainerOptions,
@@ -22,13 +22,26 @@ use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Moun
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
 
-/// Extra bind mounts on top of the canonical session wiring.
+/// TCP port the daemon's inspector server binds inside the container.
+/// Forwarded to host loopback by `omnifs dev` and `omnifs up`.
+pub(crate) const GUEST_INSPECTOR_PORT: u16 = 7878;
+
+/// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
+/// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
+/// reads it before `docker create` to refuse running an image baked
+/// from a newer source tree than the launcher itself.
+const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
+
+/// Extras layered on top of the canonical session wiring.
 /// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
-/// `omnifs up` leaves it empty.
+/// both `omnifs dev` and `omnifs up` expose the inspector TCP port.
 #[derive(Debug, Default)]
 pub(crate) struct ContainerExtras {
     pub(crate) binds: Vec<String>,
     pub(crate) env: Vec<String>,
+    /// TCP ports the container should expose to the host loopback.
+    /// Each port `N` is forwarded as `127.0.0.1:N:N`.
+    pub(crate) tcp_ports: Vec<u16>,
 }
 
 pub(crate) struct Runtime {
@@ -141,6 +154,7 @@ impl Runtime {
         extras: ContainerExtras,
     ) -> Result<()> {
         self.ensure_image().await?;
+        self.verify_launcher_compat().await?;
         self.remove().await?;
 
         anstream::println!(
@@ -417,6 +431,27 @@ impl Runtime {
         }
     }
 
+    /// Pre-`docker create` check: read the image's
+    /// `ai.0xff.omnifs.min-launcher-version` label and refuse to
+    /// launch if this CLI is older than the value. Catches the
+    /// footgun where a contributor's `omnifs` on PATH is an older
+    /// release than the daemon baked into the image (new ports, env
+    /// vars, or mounts get silently dropped because the launcher
+    /// doesn't know to set them).
+    async fn verify_launcher_compat(&self) -> Result<()> {
+        let image = self
+            .docker
+            .inspect_image(self.image.as_str())
+            .await
+            .with_context(|| format!("inspect image `{}` for compatibility label", self.image))?;
+        let label = image
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|l| l.get(LAUNCHER_VERSION_LABEL));
+        check_launcher_compat(env!("CARGO_PKG_VERSION"), label.map(String::as_str))
+    }
+
     fn build_container_body(
         &self,
         session: &Session,
@@ -455,8 +490,27 @@ impl Runtime {
 
         binds.extend(extras.binds);
 
+        let mut exposed_ports = Vec::new();
+        let mut port_bindings = std::collections::HashMap::new();
+        for port in &extras.tcp_ports {
+            let key = format!("{port}/tcp");
+            exposed_ports.push(key.clone());
+            port_bindings.insert(
+                key,
+                Some(vec![PortBinding {
+                    host_ip: Some("127.0.0.1".to_string()),
+                    host_port: Some(port.to_string()),
+                }]),
+            );
+        }
+
         let host_config = HostConfig {
             binds: Some(binds),
+            port_bindings: if port_bindings.is_empty() {
+                None
+            } else {
+                Some(port_bindings)
+            },
             devices: Some(vec![DeviceMapping {
                 path_on_host: Some("/dev/fuse".to_string()),
                 path_in_container: Some("/dev/fuse".to_string()),
@@ -476,6 +530,11 @@ impl Runtime {
         ContainerCreateBody {
             image: Some(self.image.as_str().to_string()),
             env: Some(env),
+            exposed_ports: if exposed_ports.is_empty() {
+                None
+            } else {
+                Some(exposed_ports)
+            },
             host_config: Some(host_config),
             ..Default::default()
         }
@@ -484,4 +543,107 @@ impl Runtime {
 
 fn connect_docker_client() -> Result<Docker> {
     Docker::connect_with_local_defaults().context("connect to Docker daemon (is it running?)")
+}
+
+/// Compare the running launcher's version to the image's
+/// min-launcher-version label. Pure function so the policy is
+/// covered by unit tests without spinning up Docker.
+///
+/// Policy:
+/// - Missing label (older image): warn, allow. Preserves
+///   compatibility with images built before this handshake landed.
+/// - Sentinel `"unknown"` (image built without the build arg): warn,
+///   allow. Same reason.
+/// - Unparseable label or launcher version: warn, allow. Don't break
+///   launch on a parse failure — leave a breadcrumb instead.
+/// - Launcher version `< label`: refuse.
+fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<()> {
+    use semver::Version;
+
+    let Some(label_value) = label else {
+        anstream::eprintln!(
+            "note: image has no `{LAUNCHER_VERSION_LABEL}` label; skipping launcher version check"
+        );
+        return Ok(());
+    };
+    if label_value == "unknown" {
+        anstream::eprintln!(
+            "note: image's `{LAUNCHER_VERSION_LABEL}` is `unknown` (build arg not set); \
+             skipping launcher version check"
+        );
+        return Ok(());
+    }
+    let Ok(required) = Version::parse(label_value) else {
+        anstream::eprintln!(
+            "note: image's `{LAUNCHER_VERSION_LABEL}` label `{label_value}` is not valid semver; \
+             skipping launcher version check"
+        );
+        return Ok(());
+    };
+    let Ok(running) = Version::parse(launcher_version) else {
+        anstream::eprintln!(
+            "note: launcher version `{launcher_version}` is not valid semver; \
+             skipping launcher version check"
+        );
+        return Ok(());
+    };
+    if running < required {
+        anyhow::bail!(
+            "launcher version mismatch: this `omnifs` CLI is {running}, but the image expects \
+             ≥ {required}. The image was built from a newer source tree and may declare ports, \
+             env vars, or mounts this launcher doesn't know to set. Update your launcher: \
+             `cargo install --path crates/cli --force` from the worktree, or reinstall via npm."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_label_is_allowed_with_warning() {
+        check_launcher_compat("0.2.0-dev.1", None).expect("missing label should be permissive");
+    }
+
+    #[test]
+    fn unknown_sentinel_is_allowed() {
+        check_launcher_compat("0.2.0-dev.1", Some("unknown")).expect("unknown is permissive");
+    }
+
+    #[test]
+    fn equal_versions_pass() {
+        check_launcher_compat("0.2.0-dev.1", Some("0.2.0-dev.1")).expect("equal versions pass");
+    }
+
+    #[test]
+    fn launcher_newer_than_label_passes() {
+        check_launcher_compat("0.3.0", Some("0.2.0-dev.1")).expect("newer launcher is fine");
+    }
+
+    #[test]
+    fn launcher_older_than_label_fails() {
+        let err = check_launcher_compat("0.2.0-dev.1", Some("0.2.0-dev.2"))
+            .expect_err("older launcher must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("0.2.0-dev.1"),
+            "msg should name running version: {msg}"
+        );
+        assert!(
+            msg.contains("0.2.0-dev.2"),
+            "msg should name required version: {msg}"
+        );
+        assert!(
+            msg.contains("cargo install") || msg.contains("npm"),
+            "msg should hint at remediation: {msg}"
+        );
+    }
+
+    #[test]
+    fn unparseable_label_is_permissive() {
+        check_launcher_compat("0.2.0-dev.1", Some("not-semver"))
+            .expect("garbage label should not block launch");
+    }
 }

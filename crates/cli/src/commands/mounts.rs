@@ -13,6 +13,7 @@ use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
+use crate::session::CredsBackend;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -81,7 +82,7 @@ pub fn rm(
         )?;
     }
 
-    let store = crate::session::open_store(&paths.credentials_file, false);
+    let store = CredsBackend::auto(&paths.credentials_file, false);
     delete_credentials(
         store.as_ref(),
         &credential_target,

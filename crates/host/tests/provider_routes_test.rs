@@ -314,7 +314,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let lookup = harness
         .runtime
-        .lookup_child("", "_resolvers")
+        .lookup_child("", "_resolvers", None)
         .await
         .unwrap();
     match lookup {
@@ -326,7 +326,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let resolvers_file = harness.runtime.read_file("_resolvers").await.unwrap();
+    let resolvers_file = harness.runtime.read_file("_resolvers", None).await.unwrap();
     let body =
         String::from_utf8(support::into_inline(resolvers_file)).expect("utf8 resolvers file");
     assert!(
@@ -334,7 +334,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         "unexpected resolvers file: {body}"
     );
 
-    let reverse_lookup = harness.runtime.lookup_child("", "_reverse").await.unwrap();
+    let reverse_lookup = harness
+        .runtime
+        .lookup_child("", "_reverse", None)
+        .await
+        .unwrap();
     match reverse_lookup {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
@@ -346,7 +350,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_lookup = harness
         .runtime
-        .lookup_child("", "@cloudflare")
+        .lookup_child("", "@cloudflare", None)
         .await
         .unwrap();
     match resolver_lookup {
@@ -360,7 +364,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_domain_lookup = harness
         .runtime
-        .lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com", None)
         .await
         .unwrap();
     match resolver_domain_lookup {
@@ -374,7 +378,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_lookup = harness
         .runtime
-        .lookup_child("@cloudflare", "_reverse")
+        .lookup_child("@cloudflare", "_reverse", None)
         .await
         .unwrap();
     match resolver_reverse_lookup {
@@ -388,7 +392,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_ip_lookup = harness
         .runtime
-        .lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8", None)
         .await
         .unwrap();
     match reverse_ip_lookup {
@@ -403,7 +407,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_ip_lookup = harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8", None)
         .await
         .unwrap();
     match resolver_reverse_ip_lookup {
@@ -418,7 +422,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_reverse_lookup = harness
         .runtime
-        .lookup_child("_reverse", "not-an-ip")
+        .lookup_child("_reverse", "not-an-ip", None)
         .await
         .unwrap();
     match invalid_reverse_lookup {
@@ -428,7 +432,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_resolver_reverse_lookup = harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "not-an-ip")
+        .lookup_child("@cloudflare/_reverse", "not-an-ip", None)
         .await
         .unwrap();
     match invalid_resolver_reverse_lookup {
@@ -436,7 +440,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected invalid resolver reverse lookup NotFound, got {other:?}"),
     }
 
-    let direct_ip_lookup = harness.runtime.lookup_child("", "8.8.8.8").await.unwrap();
+    let direct_ip_lookup = harness
+        .runtime
+        .lookup_child("", "8.8.8.8", None)
+        .await
+        .unwrap();
     match direct_ip_lookup {
         LookupChildResult::NotFound => {},
         other => panic!("expected root direct-IP lookup NotFound, got {other:?}"),
@@ -444,7 +452,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_direct_ip_lookup = harness
         .runtime
-        .lookup_child("@cloudflare", "8.8.8.8")
+        .lookup_child("@cloudflare", "8.8.8.8", None)
         .await
         .unwrap();
     match resolver_direct_ip_lookup {
@@ -454,7 +462,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let domain_lookup = harness
         .runtime
-        .lookup_child("", "example.com")
+        .lookup_child("", "example.com", None)
         .await
         .unwrap();
     match domain_lookup {
@@ -490,7 +498,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         other => panic!("expected domain lookup, got {other:?}"),
     }
 
-    let listing = harness.runtime.list_children("example.com").await.unwrap();
+    let listing = harness
+        .runtime
+        .list_children("example.com", None)
+        .await
+        .unwrap();
     match listing {
         ListChildrenResult::Entries(listing) => {
             let names: Vec<&str> = listing
@@ -507,7 +519,11 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         },
     }
 
-    let reverse_listing = harness.runtime.list_children("_reverse").await.unwrap();
+    let reverse_listing = harness
+        .runtime
+        .list_children("_reverse", None)
+        .await
+        .unwrap();
     match reverse_listing {
         ListChildrenResult::Entries(listing) => {
             assert!(
@@ -522,7 +538,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_listing = harness
         .runtime
-        .list_children("@cloudflare/_reverse")
+        .list_children("@cloudflare/_reverse", None)
         .await
         .unwrap();
     match resolver_reverse_listing {
@@ -552,23 +568,23 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     "#,
     );
 
-    harness.runtime.read_file("_resolvers").await.unwrap();
+    harness.runtime.read_file("_resolvers", None).await.unwrap();
 
     harness
         .runtime
-        .lookup_child("@cloudflare", "example.com")
+        .lookup_child("@cloudflare", "example.com", None)
         .await
         .unwrap();
 
     harness
         .runtime
-        .lookup_child("_reverse", "8.8.8.8")
+        .lookup_child("_reverse", "8.8.8.8", None)
         .await
         .unwrap();
 
     harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "8.8.8.8")
+        .lookup_child("@cloudflare/_reverse", "8.8.8.8", None)
         .await
         .unwrap();
 
@@ -652,7 +668,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
 
     let error = harness
         .runtime
-        .read_file("@missing/example.com/A")
+        .read_file("@missing/example.com/A", None)
         .await
         .unwrap_err();
     match error {
@@ -683,7 +699,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
 
     let error = harness
         .runtime
-        .read_file("example.com/BOGUS")
+        .read_file("example.com/BOGUS", None)
         .await
         .unwrap_err();
     match error {
@@ -695,7 +711,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
 
     let error = harness
         .runtime
-        .read_file("@cloudflare/example.com/BOGUS")
+        .read_file("@cloudflare/example.com/BOGUS", None)
         .await
         .unwrap_err();
     match error {
@@ -1428,7 +1444,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_listing = harness
         .runtime
-        .list_children("octocat/Hello-World/_repo")
+        .list_children("octocat/Hello-World/_repo", None)
         .await
         .unwrap();
     match repo_listing {
@@ -1447,7 +1463,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_child = harness
         .runtime
-        .lookup_child("octocat/Hello-World", "_repo")
+        .lookup_child("octocat/Hello-World", "_repo", None)
         .await
         .unwrap();
     match repo_child {

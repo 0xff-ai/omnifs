@@ -1,5 +1,11 @@
 FROM ubuntu:25.10
 
+# Launcher↔image version handshake. See top-level `Dockerfile` for
+# the rationale; this image is built by `scripts/ci/build-runtime-image.sh`
+# which passes the release crate version as `OMNIFS_MIN_LAUNCHER_VERSION`.
+ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
+LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl fuse3 gnupg jq \

@@ -22,6 +22,7 @@ omnifs-host = { workspace = true }
 omnifs-mount-schema = { workspace = true }
 omnifs-creds = { workspace = true }
 omnifs-auth = { workspace = true }
+omnifs-inspector = { workspace = true }
 omnifs-model = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
@@ -45,7 +46,10 @@ arboard = { version = "3", default-features = false }
 time = { workspace = true }
 bollard = "0.21"
 futures-util = "0.3"
+semver = "1"
 webbrowser = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = { workspace = true }

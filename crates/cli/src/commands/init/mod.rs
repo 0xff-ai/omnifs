@@ -13,6 +13,7 @@ mod provider_selection;
 mod token_validation;
 
 use crate::error::WithHint;
+use crate::session::CredsBackend;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use omnifs_creds::CredentialEntry;
@@ -259,7 +260,7 @@ async fn run_static_token_init(
         }
     }
 
-    let store = crate::session::open_store(credentials_file, true);
+    let store = CredsBackend::auto(credentials_file, true);
     anstream::println!("Storing credential in {} ...", store.backend_label());
     let now = OffsetDateTime::now_utc();
     let mut entry = CredentialEntry::static_token(token, now);

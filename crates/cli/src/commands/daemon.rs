@@ -99,6 +99,6 @@ fn mount_daemon(
     }
 
     info!(mount_point, "starting FUSE mount");
-    mount::mount_blocking(&mount_path, &registry, rt)?;
+    mount::mount_blocking(&mount_path, &registry, &rt)?;
     Ok(())
 }
