@@ -222,89 +222,64 @@ impl TraceReducer {
     }
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
+        let trace_id = record.trace_id;
         match &record.event {
-            InspectorEvent::FuseStart {
+            InspectorEvent::FuseStart { op, mount, path } => {
+                self.on_fuse_start(trace_id, op, mount, path, record.mono_us);
+            },
+            InspectorEvent::FuseEnd { op, end } => self.on_fuse_end(
                 trace_id,
                 op,
-                mount,
-                path,
-            } => self.on_fuse_start(*trace_id, op, mount, path, record.mono_us),
-            InspectorEvent::FuseEnd {
-                trace_id,
-                op,
-                elapsed_us,
-                result,
-            } => self.on_fuse_end(*trace_id, op, *elapsed_us, result.outcome, record.mono_us),
+                end.elapsed_us,
+                end.result.outcome,
+                record.mono_us,
+            ),
             InspectorEvent::ProviderStart {
-                trace_id,
                 operation_id,
                 provider,
                 method,
                 path,
                 ..
-            } => self.on_provider_start(*trace_id, *operation_id, provider, method, path),
-            InspectorEvent::ProviderSuspend {
-                trace_id,
-                callout_count,
-                ..
-            } => self.on_provider_suspend(*trace_id, *callout_count),
+            } => self.on_provider_start(trace_id, *operation_id, provider, method, path),
+            InspectorEvent::ProviderSuspend { callout_count, .. } => {
+                self.on_provider_suspend(trace_id, *callout_count);
+            },
             InspectorEvent::ProviderResume {
-                trace_id,
                 round,
                 result_count,
                 ..
-            } => self.on_provider_resume(*trace_id, *round, *result_count),
-            InspectorEvent::ProviderEnd {
-                trace_id,
-                elapsed_us,
-                result,
-                ..
-            } => self.on_provider_end(*trace_id, *elapsed_us, result.outcome),
+            } => self.on_provider_resume(trace_id, *round, *result_count),
+            InspectorEvent::ProviderEnd { end, .. } => {
+                self.on_provider_end(trace_id, end.elapsed_us, end.result.outcome);
+            },
             InspectorEvent::CalloutStart {
-                trace_id,
                 callout_index,
                 kind,
                 summary,
                 ..
-            } => self.on_callout_start(*trace_id, *callout_index, *kind, summary),
+            } => self.on_callout_start(trace_id, *callout_index, *kind, summary),
             InspectorEvent::CalloutEnd {
-                trace_id,
-                callout_index,
-                elapsed_us,
-                result,
-                ..
-            } => self.on_callout_end(*trace_id, *callout_index, *elapsed_us, result.outcome),
+                callout_index, end, ..
+            } => self.on_callout_end(trace_id, *callout_index, end.elapsed_us, end.result.outcome),
             InspectorEvent::CacheEvent {
-                trace_id,
                 mount,
                 path,
                 kind,
                 elapsed_us,
                 ..
-            } => self.on_cache(*trace_id, mount, path, *kind, *elapsed_us, record.mono_us),
-            InspectorEvent::SubtreeStart {
-                trace_id, tree_ref, ..
-            } => self.on_subtree_start(*trace_id, tree_ref, record.mono_us),
-            InspectorEvent::SubtreeEnd {
-                trace_id,
-                tree_ref,
-                elapsed_us,
-                result,
-                ..
-            } => self.on_subtree_end(*trace_id, tree_ref, *elapsed_us, result.outcome),
+            } => self.on_cache(trace_id, mount, path, *kind, *elapsed_us, record.mono_us),
+            InspectorEvent::SubtreeStart { tree_ref, .. } => {
+                self.on_subtree_start(trace_id, tree_ref, record.mono_us);
+            },
+            InspectorEvent::SubtreeEnd { tree_ref, end, .. } => {
+                self.on_subtree_end(trace_id, tree_ref, end.elapsed_us, end.result.outcome);
+            },
             InspectorEvent::CloneStart {
-                trace_id,
-                cache_key,
-                remote,
-                ..
-            } => self.on_clone_start(*trace_id, cache_key, remote),
-            InspectorEvent::CloneEnd {
-                trace_id,
-                cache_key,
-                elapsed_us,
-                result,
-                ..
-            } => self.on_clone_end(*trace_id, cache_key, *elapsed_us, result.outcome),
+                cache_key, remote, ..
+            } => self.on_clone_start(trace_id, cache_key, remote),
+            InspectorEvent::CloneEnd { cache_key, end, .. } => {
+                self.on_clone_end(trace_id, cache_key, end.elapsed_us, end.result.outcome);
+            },
         }
     }
 
@@ -639,10 +614,10 @@ fn outcome_status(outcome: InspectorOutcome) -> OperationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_inspector::OutcomeFields;
+    use omnifs_inspector::{OpEnd, OutcomeFields};
 
-    fn record(mono_us: u64, event: InspectorEvent) -> InspectorRecord {
-        InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, event)
+    fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
+        InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)
     }
 
     #[test]
@@ -650,18 +625,18 @@ mod tests {
         let mut traces = TraceReducer::default();
         let events = [
             record(
+                7,
                 10,
                 InspectorEvent::FuseStart {
-                    trace_id: 7,
                     op: "lookup".into(),
                     mount: "github".into(),
                     path: "/raulk/omnifs".into(),
                 },
             ),
             record(
+                7,
                 20,
                 InspectorEvent::ProviderStart {
-                    trace_id: 7,
                     operation_id: 42,
                     mount: "github".into(),
                     provider: "github".into(),
@@ -670,9 +645,9 @@ mod tests {
                 },
             ),
             record(
+                7,
                 30,
                 InspectorEvent::CalloutStart {
-                    trace_id: 7,
                     operation_id: 42,
                     callout_index: 0,
                     kind: CalloutKind::Fetch,
@@ -680,19 +655,21 @@ mod tests {
                 },
             ),
             record(
+                7,
                 40,
                 InspectorEvent::CalloutEnd {
-                    trace_id: 7,
                     operation_id: 42,
                     callout_index: 0,
-                    elapsed_us: 1_200,
-                    result: OutcomeFields::ok(),
+                    end: OpEnd {
+                        elapsed_us: 1_200,
+                        result: OutcomeFields::ok(),
+                    },
                 },
             ),
             record(
+                7,
                 50,
                 InspectorEvent::CacheEvent {
-                    trace_id: 7,
                     operation_id: Some(42),
                     mount: "github".into(),
                     path: "/raulk/omnifs".into(),
@@ -701,21 +678,25 @@ mod tests {
                 },
             ),
             record(
+                7,
                 60,
                 InspectorEvent::ProviderEnd {
-                    trace_id: 7,
                     operation_id: 42,
-                    elapsed_us: 2_500,
-                    result: OutcomeFields::ok(),
+                    end: OpEnd {
+                        elapsed_us: 2_500,
+                        result: OutcomeFields::ok(),
+                    },
                 },
             ),
             record(
+                7,
                 70,
                 InspectorEvent::FuseEnd {
-                    trace_id: 7,
                     op: "lookup".into(),
-                    elapsed_us: 3_000,
-                    result: OutcomeFields::ok(),
+                    end: OpEnd {
+                        elapsed_us: 3_000,
+                        result: OutcomeFields::ok(),
+                    },
                 },
             ),
         ];
@@ -751,8 +732,8 @@ mod tests {
         for trace_id in 0..(MAX_RECENT_TRACES as u64 + 2) {
             traces.apply_record(&record(
                 trace_id,
+                trace_id,
                 InspectorEvent::FuseStart {
-                    trace_id,
                     op: "lookup".into(),
                     mount: "test".into(),
                     path: format!("/path/{trace_id}"),

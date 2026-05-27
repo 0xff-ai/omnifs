@@ -13,7 +13,7 @@ mod wire;
 mod writer;
 
 pub use envelope::{InspectorRecord, SCHEMA_VERSION};
-pub use event::InspectorEvent;
+pub use event::{InspectorEvent, OpEnd};
 pub use kind::{CacheKind, CalloutKind};
 pub use outcome::{InspectorOutcome, OutcomeFields};
 pub use redaction::{
@@ -26,5 +26,5 @@ pub use wire::{
 };
 pub use writer::{InspectorLineWriter, LineWriteError};
 
-/// FUSE-bound correlation id (one per FUSE request in v1).
+/// FUSE-bound correlation id, one per FUSE request.
 pub type TraceId = u64;

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
-/// Host browse-cache observability kind (v1 does not expose L0 vs L2).
+/// Host browse-cache observability kind. Does not expose the internal
+/// L0 vs L2 tiering; subscribers see one logical browse cache.
 /// `Display` matches the serde wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 #[serde(rename_all = "snake_case")]

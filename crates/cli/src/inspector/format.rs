@@ -1,6 +1,6 @@
 //! Format [`InspectorEvent`] records for terminal output.
 
-use omnifs_inspector::{CacheKind, InspectorEvent, InspectorRecord};
+use omnifs_inspector::{CacheKind, InspectorEvent, InspectorRecord, TraceId};
 
 /// Map a wire `CacheKind` to the user-facing display label. The wire
 /// schema distinguishes browse/file/blob tiers so a debugger can see
@@ -26,7 +26,7 @@ pub fn format_record(record: &InspectorRecord) -> String {
         "[{} +{}µs] {}",
         record.ts,
         record.mono_us,
-        format_event(&record.event)
+        format_event(record.trace_id, &record.event)
     )
 }
 
@@ -34,25 +34,16 @@ pub fn format_record(record: &InspectorRecord) -> String {
 // per-variant helpers obscures the wire-vs-display correspondence
 // without saving a meaningful number of lines, so the lint is allowed.
 #[allow(clippy::too_many_lines)]
-pub fn format_event(event: &InspectorEvent) -> String {
+pub fn format_event(trace_id: TraceId, event: &InspectorEvent) -> String {
     match event {
-        InspectorEvent::FuseStart {
-            trace_id,
-            op,
-            mount,
-            path,
-        } => format!("fuse.start #{trace_id} {op} {}", mount_path(mount, path)),
-        InspectorEvent::FuseEnd {
-            trace_id,
-            op,
-            elapsed_us,
-            result,
-        } => format!(
-            "fuse.end   #{trace_id} {op} {} {elapsed_us}µs",
-            result.outcome
+        InspectorEvent::FuseStart { op, mount, path } => {
+            format!("fuse.start #{trace_id} {op} {}", mount_path(mount, path))
+        },
+        InspectorEvent::FuseEnd { op, end } => format!(
+            "fuse.end   #{trace_id} {op} {} {}µs",
+            end.result.outcome, end.elapsed_us
         ),
         InspectorEvent::ProviderStart {
-            trace_id,
             operation_id,
             mount,
             provider,
@@ -62,29 +53,21 @@ pub fn format_event(event: &InspectorEvent) -> String {
             "provider.start #{trace_id} op={operation_id} {mount}/{provider} {method} {path}"
         ),
         InspectorEvent::ProviderSuspend {
-            trace_id,
             operation_id,
             callout_count,
         } => format!("provider.suspend #{trace_id} op={operation_id} callouts={callout_count}"),
         InspectorEvent::ProviderResume {
-            trace_id,
             operation_id,
             round,
             result_count,
         } => format!(
             "provider.resume #{trace_id} op={operation_id} round={round} results={result_count}"
         ),
-        InspectorEvent::ProviderEnd {
-            trace_id,
-            operation_id,
-            elapsed_us,
-            result,
-        } => format!(
-            "provider.end   #{trace_id} op={operation_id} {} {elapsed_us}µs",
-            result.outcome
+        InspectorEvent::ProviderEnd { operation_id, end } => format!(
+            "provider.end   #{trace_id} op={operation_id} {} {}µs",
+            end.result.outcome, end.elapsed_us
         ),
         InspectorEvent::CalloutStart {
-            trace_id,
             operation_id,
             callout_index,
             kind,
@@ -93,54 +76,45 @@ pub fn format_event(event: &InspectorEvent) -> String {
             "callout.start #{trace_id} op={operation_id} idx={callout_index} {kind} {summary}"
         ),
         InspectorEvent::CalloutEnd {
-            trace_id,
             operation_id,
             callout_index,
-            elapsed_us,
-            result,
+            end,
         } => format!(
-            "callout.end   #{trace_id} op={operation_id} idx={callout_index} {} {elapsed_us}µs",
-            result.outcome
+            "callout.end   #{trace_id} op={operation_id} idx={callout_index} {} {}µs",
+            end.result.outcome, end.elapsed_us
         ),
         InspectorEvent::SubtreeStart {
-            trace_id,
             operation_id,
             tree_ref,
         } => format!("subtree.start #{trace_id} op={operation_id} {tree_ref}"),
         InspectorEvent::SubtreeEnd {
-            trace_id,
             operation_id,
             tree_ref,
-            elapsed_us,
-            result,
+            end,
         } => format!(
-            "subtree.end   #{trace_id} op={operation_id} {tree_ref} {} {elapsed_us}µs",
-            result.outcome
+            "subtree.end   #{trace_id} op={operation_id} {tree_ref} {} {}µs",
+            end.result.outcome, end.elapsed_us
         ),
         InspectorEvent::CloneStart {
-            trace_id,
             operation_id,
             cache_key,
             remote,
         } => format!("clone.start #{trace_id} op={operation_id} {cache_key} {remote}"),
         InspectorEvent::CloneEnd {
-            trace_id,
             operation_id,
             cache_key,
-            elapsed_us,
-            result,
+            end,
         } => format!(
-            "clone.end   #{trace_id} op={operation_id} {cache_key} {} {elapsed_us}µs",
-            result.outcome
+            "clone.end   #{trace_id} op={operation_id} {cache_key} {} {}µs",
+            end.result.outcome, end.elapsed_us
         ),
         InspectorEvent::CacheEvent {
-            trace_id,
             operation_id,
             mount,
             path,
             kind,
             elapsed_us,
-        } => format_cache(*trace_id, *operation_id, mount, path, *kind, *elapsed_us),
+        } => format_cache(trace_id, *operation_id, mount, path, *kind, *elapsed_us),
     }
 }
 

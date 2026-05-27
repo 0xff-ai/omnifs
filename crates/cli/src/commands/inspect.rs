@@ -158,8 +158,8 @@ mod tests {
         let record = InspectorRecord::new(
             "t",
             1,
+            1,
             InspectorEvent::FuseStart {
-                trace_id: 1,
                 op: "lookup".into(),
                 mount: "dns".into(),
                 path: "/x".into(),
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn record_appends_while_emitting() {
         let mut capture = NamedTempFile::new().expect("tempfile");
-        let json = r#"{"v":1,"ts":"t","mono_us":1,"event":{"type":"fuse.start","trace_id":1,"op":"read","mount":"m","path":"/"}}"#;
+        let json = r#"{"v":1,"ts":"t","mono_us":1,"seq":0,"trace_id":1,"event":{"type":"fuse.start","op":"read","mount":"m","path":"/"}}"#;
         emit_plain_line(json, Some(capture.as_file_mut())).expect("emit");
         capture.as_file_mut().rewind().expect("rewind");
         let mut contents = String::new();

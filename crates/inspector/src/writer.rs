@@ -57,8 +57,8 @@ mod tests {
             .write_record(&InspectorRecord::new(
                 "2026-05-23T00:00:00Z",
                 1,
+                7,
                 InspectorEvent::FuseStart {
-                    trace_id: 7,
                     op: "lookup".into(),
                     mount: "github".into(),
                     path: "/a".into(),
@@ -69,9 +69,7 @@ mod tests {
         let contents = std::fs::read_to_string(path).expect("read");
         let line = contents.lines().next().expect("one line");
         let parsed = parse_record_line(line).expect("parse");
-        assert!(matches!(
-            parsed.event,
-            InspectorEvent::FuseStart { trace_id: 7, .. }
-        ));
+        assert_eq!(parsed.trace_id, 7);
+        assert!(matches!(parsed.event, InspectorEvent::FuseStart { .. }));
     }
 }

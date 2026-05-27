@@ -67,19 +67,17 @@ pub fn serialize_record(record: &InspectorRecord) -> Result<String, serde_json::
 mod tests {
     use super::*;
     use crate::envelope::InspectorRecord;
-    use crate::event::InspectorEvent;
+    use crate::event::{InspectorEvent, OpEnd};
     use crate::kind::CalloutKind;
     use crate::outcome::OutcomeFields;
 
     #[test]
     fn roundtrip_fuse_start_example() {
-        let json = r#"{"v":1,"ts":"2026-05-23T12:14:08.123456Z","mono_us":123456789,"event":{"type":"fuse.start","trace_id":42,"op":"lookup","mount":"github","path":"/raulk/omnifs"}}"#;
+        let json = r#"{"v":1,"ts":"2026-05-23T12:14:08.123456Z","mono_us":123456789,"seq":0,"trace_id":42,"event":{"type":"fuse.start","op":"lookup","mount":"github","path":"/raulk/omnifs"}}"#;
         let record = parse_record(json).expect("parse");
         assert_eq!(record.mono_us, 123_456_789);
-        assert!(matches!(
-            record.event,
-            InspectorEvent::FuseStart { trace_id: 42, .. }
-        ));
+        assert_eq!(record.trace_id, 42);
+        assert!(matches!(record.event, InspectorEvent::FuseStart { .. }));
         let again = serialize_record(&record).expect("serialize");
         let reparsed = parse_record(&again).expect("reparse");
         assert_eq!(record, reparsed);
@@ -90,16 +88,19 @@ mod tests {
         let record = InspectorRecord::new(
             "2026-05-23T12:14:09Z",
             200,
+            1,
             InspectorEvent::FuseEnd {
-                trace_id: 1,
                 op: "lookup".to_string(),
-                elapsed_us: 3000,
-                result: OutcomeFields::ok(),
+                end: OpEnd {
+                    elapsed_us: 3000,
+                    result: OutcomeFields::ok(),
+                },
             },
         );
         let json = serialize_record(&record).expect("serialize");
         assert!(json.contains("\"outcome\":\"ok\""));
         assert!(json.contains("\"type\":\"fuse.end\""));
+        assert!(json.contains("\"trace_id\":1"));
     }
 
     #[test]
@@ -107,8 +108,8 @@ mod tests {
         let start = InspectorRecord::new(
             "t",
             1,
+            9,
             InspectorEvent::CalloutStart {
-                trace_id: 9,
                 operation_id: 3,
                 callout_index: 0,
                 kind: CalloutKind::GitOpenRepo,
@@ -118,34 +119,34 @@ mod tests {
         let end = InspectorRecord::new(
             "t",
             2,
+            9,
             InspectorEvent::CalloutEnd {
-                trace_id: 9,
                 operation_id: 3,
                 callout_index: 0,
-                elapsed_us: 412_000,
-                result: OutcomeFields::ok(),
+                end: OpEnd {
+                    elapsed_us: 412_000,
+                    result: OutcomeFields::ok(),
+                },
             },
         );
         let start_json = serialize_record(&start).expect("start");
         let end_json = serialize_record(&end).expect("end");
         let start_parsed = parse_record(&start_json).expect("parse start");
         let end_parsed = parse_record(&end_json).expect("parse end");
+        assert_eq!(start_parsed.trace_id, end_parsed.trace_id);
         match (start_parsed.event, end_parsed.event) {
             (
                 InspectorEvent::CalloutStart {
-                    trace_id: a,
                     operation_id: oa,
                     callout_index: ia,
                     ..
                 },
                 InspectorEvent::CalloutEnd {
-                    trace_id: b,
                     operation_id: ob,
                     callout_index: ib,
                     ..
                 },
             ) => {
-                assert_eq!(a, b);
                 assert_eq!(oa, ob);
                 assert_eq!(ia, ib);
             },
@@ -155,7 +156,7 @@ mod tests {
 
     #[test]
     fn partial_tail_preserves_incomplete_line() {
-        let buffer = "{\"v\":1,\"ts\":\"t\",\"mono_us\":1,\"event\":{\"type\":\"fuse.start\",\"trace_id\":1,\"op\":\"read\",\"mount\":\"dns\",\"path\":\"/\"}}\n{\"v\":1,";
+        let buffer = "{\"v\":1,\"ts\":\"t\",\"mono_us\":1,\"seq\":0,\"trace_id\":1,\"event\":{\"type\":\"fuse.start\",\"op\":\"read\",\"mount\":\"dns\",\"path\":\"/\"}}\n{\"v\":1,";
         let (records, tail) = parse_complete_lines(buffer);
         assert_eq!(records.len(), 1);
         assert!(tail.starts_with("{\"v\":1,"));
@@ -163,7 +164,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let json = r#"{"v":99,"ts":"t","mono_us":0,"event":{"type":"fuse.start","trace_id":1,"op":"x","mount":"m","path":"/"}}"#;
+        let json = r#"{"v":99,"ts":"t","mono_us":0,"seq":0,"trace_id":1,"event":{"type":"fuse.start","op":"x","mount":"m","path":"/"}}"#;
         let err = parse_record(json).unwrap_err();
         assert!(matches!(err, ParseRecordError::UnsupportedVersion { .. }));
     }

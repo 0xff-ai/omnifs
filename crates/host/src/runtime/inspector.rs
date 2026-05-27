@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crossbeam_queue::ArrayQueue;
 use omnifs_inspector::{
     CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
-    OutcomeFields, TraceId, serialize_record,
+    OpEnd, OutcomeFields, TraceId, serialize_record,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -218,9 +218,11 @@ impl InspectorSink {
         self.next_trace.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn emit(&self, event: InspectorEvent) {
+    fn emit(&self, trace_id: TraceId, event: InspectorEvent) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let record = Arc::new(InspectorRecord::new(wall_ts(), self.mono_us(), event).with_seq(seq));
+        let record = Arc::new(
+            InspectorRecord::new(wall_ts(), self.mono_us(), trace_id, event).with_seq(seq),
+        );
 
         // History ring: wait-free push, drop oldest on full.
         if let Err(rejected) = self.history.push(Arc::clone(&record)) {
@@ -332,18 +334,24 @@ impl InspectorSink {
         elapsed: Duration,
     ) {
         let display = format!("tree:{tree_ref}");
-        self.emit(InspectorEvent::SubtreeStart {
+        self.emit(
             trace_id,
-            operation_id,
-            tree_ref: display.clone(),
-        });
-        self.emit(InspectorEvent::SubtreeEnd {
+            InspectorEvent::SubtreeStart {
+                operation_id,
+                tree_ref: display.clone(),
+            },
+        );
+        self.emit(
             trace_id,
-            operation_id,
-            tree_ref: display,
-            elapsed_us: to_us(elapsed),
-            result: OutcomeFields::ok(),
-        });
+            InspectorEvent::SubtreeEnd {
+                operation_id,
+                tree_ref: display,
+                end: OpEnd {
+                    elapsed_us: to_us(elapsed),
+                    result: OutcomeFields::ok(),
+                },
+            },
+        );
     }
 }
 
@@ -369,12 +377,14 @@ impl InspectorFuseScope {
         let mount = mount.into();
         let path = path.into();
         let trace_id = sink.next_trace_id();
-        sink.emit(InspectorEvent::FuseStart {
+        sink.emit(
             trace_id,
-            op: op.to_string(),
-            mount: mount.clone(),
-            path: path.clone(),
-        });
+            InspectorEvent::FuseStart {
+                op: op.to_string(),
+                mount: mount.clone(),
+                path: path.clone(),
+            },
+        );
         CURRENT_TRACE.set(Some(trace_id));
         Self {
             sink,
@@ -392,14 +402,16 @@ impl InspectorFuseScope {
     }
 
     pub fn emit_cache(&self, kind: CacheKind, elapsed: Duration) {
-        self.sink.emit(InspectorEvent::CacheEvent {
-            trace_id: self.trace_id,
-            operation_id: None,
-            mount: self.mount.clone(),
-            path: self.path.clone(),
-            kind,
-            elapsed_us: Some(to_us(elapsed)),
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::CacheEvent {
+                operation_id: None,
+                mount: self.mount.clone(),
+                path: self.path.clone(),
+                kind,
+                elapsed_us: Some(to_us(elapsed)),
+            },
+        );
     }
 
     pub fn set_outcome(&self, outcome: InspectorOutcome) {
@@ -414,12 +426,16 @@ impl Drop for InspectorFuseScope {
             .outcome
             .take()
             .unwrap_or_else(|| OutcomeFields::with_outcome(InspectorOutcome::Internal));
-        self.sink.emit(InspectorEvent::FuseEnd {
-            trace_id: self.trace_id,
-            op: self.op.to_string(),
-            elapsed_us: to_us(self.start.elapsed()),
-            result,
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::FuseEnd {
+                op: self.op.to_string(),
+                end: OpEnd {
+                    elapsed_us: to_us(self.start.elapsed()),
+                    result,
+                },
+            },
+        );
     }
 }
 
@@ -447,14 +463,16 @@ impl InspectorProviderOp {
     ) -> Option<Self> {
         let sink = global()?;
         let descriptor = op.live_descriptor()?;
-        sink.emit(InspectorEvent::ProviderStart {
+        sink.emit(
             trace_id,
-            operation_id,
-            mount: mount.to_string(),
-            provider: provider.to_string(),
-            method: descriptor.method.to_string(),
-            path: descriptor.path,
-        });
+            InspectorEvent::ProviderStart {
+                operation_id,
+                mount: mount.to_string(),
+                provider: provider.to_string(),
+                method: descriptor.method.to_string(),
+                path: descriptor.path,
+            },
+        );
         Some(Self {
             sink,
             trace_id,
@@ -465,20 +483,24 @@ impl InspectorProviderOp {
     }
 
     pub fn suspend(&self, callout_count: usize) {
-        self.sink.emit(InspectorEvent::ProviderSuspend {
-            trace_id: self.trace_id,
-            operation_id: self.operation_id,
-            callout_count: clamp_u32(callout_count),
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::ProviderSuspend {
+                operation_id: self.operation_id,
+                callout_count: clamp_u32(callout_count),
+            },
+        );
     }
 
     pub fn resume(&self, round: u32, result_count: usize) {
-        self.sink.emit(InspectorEvent::ProviderResume {
-            trace_id: self.trace_id,
-            operation_id: self.operation_id,
-            round,
-            result_count: clamp_u32(result_count),
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::ProviderResume {
+                operation_id: self.operation_id,
+                round,
+                result_count: clamp_u32(result_count),
+            },
+        );
     }
 
     /// Mark the outcome and emit `provider.end` on drop.
@@ -493,12 +515,16 @@ impl Drop for InspectorProviderOp {
             .outcome
             .take()
             .unwrap_or_else(|| OutcomeFields::with_outcome(InspectorOutcome::Internal));
-        self.sink.emit(InspectorEvent::ProviderEnd {
-            trace_id: self.trace_id,
-            operation_id: self.operation_id,
-            elapsed_us: to_us(self.start.elapsed()),
-            result,
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::ProviderEnd {
+                operation_id: self.operation_id,
+                end: OpEnd {
+                    elapsed_us: to_us(self.start.elapsed()),
+                    result,
+                },
+            },
+        );
     }
 }
 
@@ -521,13 +547,15 @@ impl InspectorCallout {
         let sink = global()?;
         let view = WitCalloutView(callout);
         let index = clamp_u32(index);
-        sink.emit(InspectorEvent::CalloutStart {
+        sink.emit(
             trace_id,
-            operation_id,
-            callout_index: index,
-            kind: view.kind(),
-            summary: view.summary(),
-        });
+            InspectorEvent::CalloutStart {
+                operation_id,
+                callout_index: index,
+                kind: view.kind(),
+                summary: view.summary(),
+            },
+        );
         Some(Self {
             sink,
             trace_id,
@@ -552,13 +580,17 @@ impl Drop for InspectorCallout {
             .outcome
             .take()
             .unwrap_or_else(|| OutcomeFields::with_outcome(InspectorOutcome::Internal));
-        self.sink.emit(InspectorEvent::CalloutEnd {
-            trace_id: self.trace_id,
-            operation_id: self.operation_id,
-            callout_index: self.index,
-            elapsed_us: to_us(self.start.elapsed()),
-            result,
-        });
+        self.sink.emit(
+            self.trace_id,
+            InspectorEvent::CalloutEnd {
+                operation_id: self.operation_id,
+                callout_index: self.index,
+                end: OpEnd {
+                    elapsed_us: to_us(self.start.elapsed()),
+                    result,
+                },
+            },
+        );
     }
 }
 
@@ -598,12 +630,14 @@ impl crate::runtime::cloner::CloneObserver for InspectorCloneObserver {
         let (Some(trace_id), Some(sink)) = (self.trace_id, self.sink.as_ref()) else {
             return;
         };
-        sink.emit(InspectorEvent::CloneStart {
+        sink.emit(
             trace_id,
-            operation_id: self.operation_id,
-            cache_key: cache_key.to_string(),
-            remote: clone_url.to_string(),
-        });
+            InspectorEvent::CloneStart {
+                operation_id: self.operation_id,
+                cache_key: cache_key.to_string(),
+                remote: clone_url.to_string(),
+            },
+        );
     }
 
     fn on_clone_end(&mut self, cache_key: &str, elapsed: Duration, ok: bool) {
@@ -615,13 +649,17 @@ impl crate::runtime::cloner::CloneObserver for InspectorCloneObserver {
         } else {
             InspectorOutcome::Network
         };
-        sink.emit(InspectorEvent::CloneEnd {
+        sink.emit(
             trace_id,
-            operation_id: self.operation_id,
-            cache_key: cache_key.to_string(),
-            elapsed_us: to_us(elapsed),
-            result: OutcomeFields::with_outcome(outcome),
-        });
+            InspectorEvent::CloneEnd {
+                operation_id: self.operation_id,
+                cache_key: cache_key.to_string(),
+                end: OpEnd {
+                    elapsed_us: to_us(elapsed),
+                    result: OutcomeFields::with_outcome(outcome),
+                },
+            },
+        );
     }
 }
 
@@ -865,9 +903,8 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
 
-    fn dummy_event(trace_id: TraceId) -> InspectorEvent {
+    fn dummy_event() -> InspectorEvent {
         InspectorEvent::FuseStart {
-            trace_id,
             op: "lookup".into(),
             mount: "test".into(),
             path: "/x".into(),
@@ -878,7 +915,7 @@ mod tests {
     fn emit_assigns_monotonic_sequence_ids() {
         let sink = InspectorSink::new_for_test(8);
         for i in 0..5 {
-            sink.emit(dummy_event(i));
+            sink.emit(i, dummy_event());
         }
         let snapshot = sink.history_snapshot();
         let seqs: Vec<u64> = snapshot.iter().map(|r| r.seq).collect();
@@ -889,7 +926,7 @@ mod tests {
     fn ring_drops_oldest_when_full_and_counts() {
         let sink = InspectorSink::new_for_test(4);
         for i in 0..10 {
-            sink.emit(dummy_event(i));
+            sink.emit(i, dummy_event());
         }
         let snapshot = sink.history_snapshot();
         assert_eq!(
@@ -908,14 +945,14 @@ mod tests {
     async fn subscriber_sees_history_snapshot_and_future_events() {
         let sink = Arc::new(InspectorSink::new_for_test(8));
         for i in 0..3 {
-            sink.emit(dummy_event(i));
+            sink.emit(i, dummy_event());
         }
         let mut sub = sink.subscribe();
         // Snapshot reflects the three pre-subscribe emits.
         let snapshot_seqs: Vec<u64> = sub.history.iter().map(|r| r.seq).collect();
         assert_eq!(snapshot_seqs, vec![1, 2, 3]);
         // Future emits arrive on the live receiver.
-        sink.emit(dummy_event(99));
+        sink.emit(99, dummy_event());
         let next = sub.live.recv().await.expect("recv");
         assert_eq!(next.seq, 4);
     }
@@ -927,7 +964,7 @@ mod tests {
         // Use a custom small-capacity sink via direct construction.
         let (live, mut rx) = broadcast::channel::<Arc<InspectorRecord>>(4);
         for i in 0u64..10 {
-            let record = Arc::new(InspectorRecord::new("t", i, dummy_event(i)).with_seq(i));
+            let record = Arc::new(InspectorRecord::new("t", i, i, dummy_event()).with_seq(i));
             let _ = live.send(record);
         }
         drop(live); // close sender so recv eventually terminates
@@ -951,7 +988,7 @@ mod tests {
 
         let sink = Arc::new(InspectorSink::new_for_test(16));
         // One pre-subscribe emit lands in the history snapshot.
-        sink.emit(dummy_event(1));
+        sink.emit(1, dummy_event());
 
         let handle = sink.spawn_with_listener(listener, &Handle::current());
 
@@ -968,7 +1005,7 @@ mod tests {
         assert!(snapshot.contains("\"seq\":1"), "got: {snapshot}");
 
         // Emit one more record and verify it streams to the client.
-        sink.emit(dummy_event(2));
+        sink.emit(2, dummy_event());
         let mut live_line = String::new();
         reader
             .read_line(&mut live_line)
@@ -992,7 +1029,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 for i in 0..per_thread {
-                    sink.emit(dummy_event(u64::try_from(t * per_thread + i).unwrap()));
+                    let tid = u64::try_from(t * per_thread + i).unwrap();
+                    sink.emit(tid, dummy_event());
                 }
             }));
         }
