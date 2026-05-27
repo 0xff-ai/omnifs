@@ -16,6 +16,7 @@ use crate::omnifs::provider::types::{
 use crate::path_key::{PathKey, PathToInode};
 use crate::path_prefix::path_prefix_matches;
 use crate::registry::ProviderRegistry;
+use crate::runtime::inspector::{self, InspectorFuseScope};
 use crate::runtime::{NotifierHandle, ProviderRuntime, RuntimeError};
 use dashmap::DashMap;
 use fuser::{
@@ -24,6 +25,7 @@ use fuser::{
     ReplyEntry, ReplyOpen, Request,
 };
 use inode::NodeEntry;
+use omnifs_inspector::{CacheKind, InspectorOutcome, TraceId};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,6 +84,18 @@ struct FullReadTarget {
     path: String,
     backing_path: Option<PathBuf>,
     attrs: Option<FileAttrsCache>,
+}
+
+/// Map a provider error to its corresponding FUSE errno.
+fn outcome_from_fuse_errno(errno: Errno) -> InspectorOutcome {
+    match i32::from(errno) {
+        libc::ENOENT => InspectorOutcome::NotFound,
+        libc::EACCES => InspectorOutcome::Denied,
+        libc::EINVAL => InspectorOutcome::InvalidInput,
+        libc::EFBIG => InspectorOutcome::TooLarge,
+        libc::EAGAIN => InspectorOutcome::Timeout,
+        _ => InspectorOutcome::Internal,
+    }
 }
 
 /// Map a provider error to its corresponding FUSE errno.
@@ -364,8 +378,11 @@ impl FuseFs {
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
+        live: Option<&InspectorFuseScope>,
+        started: Instant,
     ) -> Result<Option<(FileAttr, Duration)>, Errno> {
         let child_path = join_child_path(parent_path, name_str);
+        let elapsed = || started.elapsed();
         self.drain_and_evict_pending(mount_name);
 
         // Dirents-implied negative: if parent dirents are cached and
@@ -375,17 +392,17 @@ impl FuseFs {
             && dirents.exhaustive
         {
             if let Some(dirent) = dirents.entries.iter().find(|e| e.name == name_str) {
-                // Dirents-implied positive: the listing is authoritative
-                // and contains this name. Answer stat from the dirent's
-                // kind+size without a provider round-trip. This matters
-                // for projected sibling files: the provider's list
-                // enumerated them but there is no dedicated lookup
-                // handler at the per-child path.
+                if let Some(scope) = live {
+                    scope.emit_cache(CacheKind::BrowseHit, elapsed());
+                }
                 let ino = self.get_or_alloc_ino_meta(mount_name, &child_path, dirent.meta.clone());
                 return Ok(Some((
                     self.attr_for_inode_or_meta(ino, &dirent.meta.kind, dirent.meta.st_size()),
                     Self::ttl_for_meta(&dirent.meta),
                 )));
+            }
+            if let Some(scope) = live {
+                scope.emit_cache(CacheKind::BrowseMiss, elapsed());
             }
             return Err(Errno::ENOENT);
         }
@@ -394,6 +411,13 @@ impl FuseFs {
         if let Some(record) = self.l0_get(mount_name, &child_path, RecordKind::Lookup)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
+            if let Some(scope) = live {
+                let kind = match lookup {
+                    cache::LookupPayload::Negative => CacheKind::BrowseMiss,
+                    cache::LookupPayload::Positive(_) => CacheKind::BrowseHit,
+                };
+                scope.emit_cache(kind, elapsed());
+            }
             return self
                 .resolve_lookup_hit(mount_name, &child_path, &lookup, "l0_hit")
                 .map(Some);
@@ -406,6 +430,13 @@ impl FuseFs {
         if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup, None)
             && let Some(lookup) = cache::LookupPayload::deserialize(&record.payload)
         {
+            if let Some(scope) = live {
+                let kind = match lookup {
+                    cache::LookupPayload::Negative => CacheKind::BrowseMiss,
+                    cache::LookupPayload::Positive(_) => CacheKind::BrowseHit,
+                };
+                scope.emit_cache(kind, elapsed());
+            }
             self.l0_put(mount_name, &child_path, RecordKind::Lookup, record.clone());
             return self
                 .resolve_lookup_hit(mount_name, &child_path, &lookup, "l2_hit")
@@ -419,6 +450,9 @@ impl FuseFs {
             let ino = *ino_ref;
             drop(ino_ref);
             if let Some(entry) = self.inodes.get(&ino) {
+                if let Some(scope) = live {
+                    scope.emit_cache(CacheKind::BrowseHit, elapsed());
+                }
                 let attr = self.attr_for_kind(ino, &entry.kind, entry.size);
                 let ttl = Self::ttl_for_entry(&entry);
                 return Ok(Some((attr, ttl)));
@@ -435,12 +469,13 @@ impl FuseFs {
         mount_name: &str,
         parent_path: &str,
         name_str: &str,
+        fuse_trace: Option<TraceId>,
     ) -> Result<(FileAttr, Duration), Errno> {
         let child_path = join_child_path(parent_path, name_str);
 
         match self
             .rt
-            .block_on(runtime.lookup_child(parent_path, name_str))
+            .block_on(runtime.lookup_child(parent_path, name_str, fuse_trace))
         {
             Ok(LookupChildResult::Subtree(tree_ref)) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
@@ -577,8 +612,11 @@ impl FuseFs {
         mount_name: &str,
         _ino: u64,
         path: &str,
+        live: Option<&InspectorFuseScope>,
+        started: Instant,
     ) -> Result<Option<DirSnapshot>, Errno> {
         self.drain_and_evict_pending(mount_name);
+        let elapsed = || started.elapsed();
 
         // Only serve readdir from cache when the Dirents record was
         // marked exhaustive. Non-exhaustive records represent a partial
@@ -591,6 +629,9 @@ impl FuseFs {
             && dirents.exhaustive
         {
             debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount_name, "cache hit");
+            if let Some(scope) = live {
+                scope.emit_cache(CacheKind::BrowseHit, elapsed());
+            }
             return Ok(Some(self.snapshot_from_dirents(mount_name, path, &dirents)));
         }
 
@@ -601,6 +642,9 @@ impl FuseFs {
                 && dirents.exhaustive
             {
                 debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount_name, "cache hit");
+                if let Some(scope) = live {
+                    scope.emit_cache(CacheKind::BrowseHit, elapsed());
+                }
                 self.l0_put(mount_name, path, RecordKind::Dirents, record.clone());
                 return Ok(Some(self.snapshot_from_dirents(mount_name, path, &dirents)));
             }
@@ -621,8 +665,9 @@ impl FuseFs {
         mount_name: &str,
         ino: u64,
         path: &str,
+        fuse_trace: Option<TraceId>,
     ) -> Result<DirSnapshot, Errno> {
-        match self.rt.block_on(runtime.list_children(path)) {
+        match self.rt.block_on(runtime.list_children(path, fuse_trace)) {
             Ok(ListChildrenResult::Subtree(tree_ref)) => {
                 let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
                     return Err(Errno::EIO);
@@ -753,15 +798,20 @@ impl FuseFs {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn read_full_handle(
         &self,
         ino: INodeNo,
         fh: FuseFileHandle,
         offset: u64,
         size: u32,
+        live: Option<&InspectorFuseScope>,
         reply: ReplyData,
     ) {
         let Some(inode_entry) = self.inodes.get(&ino.0) else {
+            if let Some(scope) = live {
+                scope.set_outcome(outcome_from_fuse_errno(Errno::ENOENT));
+            }
             reply.error(Errno::ENOENT);
             return;
         };
@@ -776,6 +826,8 @@ impl FuseFs {
         drop(inode_entry);
 
         self.drain_and_evict_pending(&target.mount_name);
+        let cache_started = Instant::now();
+        let elapsed = || cache_started.elapsed();
 
         if let Some(attrs) = target.attrs.as_ref()
             && matches!(attrs.size, wit_types::FileSize::Exact(0))
@@ -799,6 +851,9 @@ impl FuseFs {
             && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
         {
             debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            if let Some(scope) = live {
+                scope.emit_cache(CacheKind::FileHit, elapsed());
+            }
             reply.data(data_slice(&payload.content, offset, size));
             self.file_cache.insert(target.fh, payload.content);
             return;
@@ -811,6 +866,9 @@ impl FuseFs {
             && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
         {
             debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
+            if let Some(scope) = live {
+                scope.emit_cache(CacheKind::FileHit, elapsed());
+            }
             let data = payload.content;
             self.l0_put_with_aux(
                 &target.mount_name,
@@ -832,6 +890,9 @@ impl FuseFs {
                 },
                 Err(e) => {
                     warn!(path = ?rp, err = %e, "backing fs error");
+                    if let Some(scope) = live {
+                        scope.set_outcome(outcome_from_fuse_errno(Errno::EIO));
+                    }
                     reply.error(Errno::EIO);
                 },
             }
@@ -839,6 +900,9 @@ impl FuseFs {
         }
 
         let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
+            if let Some(scope) = live {
+                scope.set_outcome(outcome_from_fuse_errno(Errno::ENOENT));
+            }
             reply.error(Errno::ENOENT);
             return;
         };
@@ -847,7 +911,10 @@ impl FuseFs {
 
         debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
 
-        match self.rt.block_on(runtime.read_file(&target.path)) {
+        match self
+            .rt
+            .block_on(runtime.read_file(&target.path, live.map(InspectorFuseScope::trace_id)))
+        {
             Ok(result) => {
                 self.finish_full_read(&target, &runtime, offset, size, result, reply);
             },
@@ -859,10 +926,16 @@ impl FuseFs {
                     message = error.message,
                     "provider returned typed error for read_file"
                 );
+                if let Some(scope) = live {
+                    scope.set_outcome(outcome_from_fuse_errno((&error).into()));
+                }
                 reply.error((&error).into());
             },
             Err(error) => {
                 warn!(path = target.path.as_str(), error = %error, "read_file runtime error");
+                if let Some(scope) = live {
+                    scope.set_outcome(InspectorOutcome::Internal);
+                }
                 reply.error(Errno::EIO);
             },
         }
@@ -978,6 +1051,7 @@ impl FuseFs {
     fn prefetch_full_file_on_open(
         &self,
         target: &FullReadTarget,
+        fuse_trace: Option<TraceId>,
     ) -> Result<Option<FopenFlags>, Errno> {
         if target.backing_path.is_some()
             || !target
@@ -992,7 +1066,10 @@ impl FuseFs {
             return Err(Errno::ENOENT);
         };
         self.drain_and_evict_pending(&target.mount_name);
-        match self.rt.block_on(runtime.read_file(&target.path)) {
+        match self
+            .rt
+            .block_on(runtime.read_file(&target.path, fuse_trace))
+        {
             Ok(result) => {
                 let Some((data, result_attrs)) =
                     resolve_read_payload(&runtime, &target.path, result)
@@ -1073,6 +1150,10 @@ impl Filesystem for FuseFs {
         drop(parent_entry);
 
         let child_path = join_child_path(&parent_path, name_str);
+        let live_scope = inspector::global()
+            .map(|sink| InspectorFuseScope::begin(sink, "lookup", &mount_name, &child_path));
+        let live = live_scope.as_ref();
+        let cache_started = Instant::now();
 
         // If the parent has a backing path, resolve the child from the filesystem.
         if let Some(ref parent_rp) = parent_backing_path {
@@ -1102,7 +1183,7 @@ impl Filesystem for FuseFs {
         }
 
         // L0/L2 cache path.
-        match self.lookup_check_caches(&mount_name, &parent_path, name_str) {
+        match self.lookup_check_caches(&mount_name, &parent_path, name_str, live, cache_started) {
             Ok(Some((attr, ttl))) => {
                 reply.entry(&ttl, &attr, Generation(0));
                 return;
@@ -1121,9 +1202,20 @@ impl Filesystem for FuseFs {
 
         debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
 
-        match self.lookup_via_provider(&runtime, &mount_name, &parent_path, name_str) {
+        match self.lookup_via_provider(
+            &runtime,
+            &mount_name,
+            &parent_path,
+            name_str,
+            live.map(InspectorFuseScope::trace_id),
+        ) {
             Ok((attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
-            Err(e) => reply.error(e),
+            Err(errno) => {
+                if let Some(scope) = &live_scope {
+                    scope.set_outcome(outcome_from_fuse_errno(errno));
+                }
+                reply.error(errno);
+            },
         }
     }
 
@@ -1190,6 +1282,11 @@ impl Filesystem for FuseFs {
         let backing_path = inode_entry.backing_path.clone();
         drop(inode_entry);
 
+        let live_scope = inspector::global()
+            .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, &path));
+        let live = live_scope.as_ref();
+        let cache_started = Instant::now();
+
         // Passthrough for inodes with backing_path.
         if let Some(ref rp) = backing_path {
             match self.snapshot_from_fs(&mount_name, &path, rp) {
@@ -1197,19 +1294,27 @@ impl Filesystem for FuseFs {
                     self.dir_snapshots.insert(fh, snapshot);
                     reply.opened(FuseFileHandle(fh), FopenFlags::empty());
                 },
-                Err(e) => reply.error(e),
+                Err(e) => {
+                    if let Some(scope) = &live_scope {
+                        scope.set_outcome(outcome_from_fuse_errno(e));
+                    }
+                    reply.error(e);
+                },
             }
             return;
         }
 
         // L0/L2 cache path.
-        match self.opendir_check_caches(&mount_name, ino.0, &path) {
+        match self.opendir_check_caches(&mount_name, ino.0, &path, live, cache_started) {
             Ok(Some(snapshot)) => {
                 self.dir_snapshots.insert(fh, snapshot);
                 reply.opened(FuseFileHandle(fh), FopenFlags::empty());
                 return;
             },
             Err(e) => {
+                if let Some(scope) = &live_scope {
+                    scope.set_outcome(outcome_from_fuse_errno(e));
+                }
                 reply.error(e);
                 return;
             },
@@ -1219,18 +1324,32 @@ impl Filesystem for FuseFs {
         self.drain_and_evict_pending(&mount_name);
 
         let Some(runtime) = self.runtime_for_mount(&mount_name) else {
+            if let Some(scope) = &live_scope {
+                scope.set_outcome(outcome_from_fuse_errno(Errno::ENOENT));
+            }
             reply.error(Errno::ENOENT);
             return;
         };
 
         debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount_name.as_str(), "cache miss");
 
-        match self.opendir_via_provider(&runtime, &mount_name, ino.0, &path) {
+        match self.opendir_via_provider(
+            &runtime,
+            &mount_name,
+            ino.0,
+            &path,
+            live.map(InspectorFuseScope::trace_id),
+        ) {
             Ok(snapshot) => {
                 self.dir_snapshots.insert(fh, snapshot);
                 reply.opened(FuseFileHandle(fh), FopenFlags::empty());
             },
-            Err(e) => reply.error(e),
+            Err(e) => {
+                if let Some(scope) = &live_scope {
+                    scope.set_outcome(outcome_from_fuse_errno(e));
+                }
+                reply.error(e);
+            },
         }
     }
 
@@ -1293,6 +1412,18 @@ impl Filesystem for FuseFs {
         );
         let _span = debug_span!("fuse::read", inode = ino.0, offset, size).entered();
 
+        let Some(inode_entry) = self.inodes.get(&ino.0) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let mount_name = inode_entry.mount_name.clone();
+        let path = inode_entry.path.clone();
+        drop(inode_entry);
+
+        let live_scope = inspector::global()
+            .map(|sink| InspectorFuseScope::begin(sink, "read", &mount_name, &path));
+        let live = live_scope.as_ref();
+
         if let Some(ranged) = self.ranged_handles.get(&fh.0).map(|entry| entry.clone()) {
             self.read_ranged_handle(ino.0, &ranged, offset, size, reply);
             return;
@@ -1300,11 +1431,14 @@ impl Filesystem for FuseFs {
 
         // Serve from cache if this file handle already has data.
         if let Some(cached) = self.file_cache.get(&fh.0) {
+            if let Some(scope) = live {
+                scope.emit_cache(CacheKind::FileHit, Duration::ZERO);
+            }
             reply.data(data_slice(&cached, offset, size));
             return;
         }
 
-        self.read_full_handle(ino, fh, offset, size, reply);
+        self.read_full_handle(ino, fh, offset, size, live, reply);
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
@@ -1329,6 +1463,11 @@ impl Filesystem for FuseFs {
             attrs,
         };
 
+        let live_scope = inspector::global()
+            .map(|sink| InspectorFuseScope::begin(sink, "open", &target.mount_name, &target.path));
+        let live = live_scope.as_ref();
+        let fuse_trace = live.map(InspectorFuseScope::trace_id);
+
         match self.open_ranged_file(&target) {
             Ok(Some(flags)) => {
                 reply.opened(FuseFileHandle(fh), flags);
@@ -1336,18 +1475,24 @@ impl Filesystem for FuseFs {
             },
             Ok(None) => {},
             Err(errno) => {
+                if let Some(scope) = live {
+                    scope.set_outcome(outcome_from_fuse_errno(errno));
+                }
                 reply.error(errno);
                 return;
             },
         }
 
-        match self.prefetch_full_file_on_open(&target) {
+        match self.prefetch_full_file_on_open(&target, fuse_trace) {
             Ok(Some(flags)) => {
                 reply.opened(FuseFileHandle(fh), flags);
                 return;
             },
             Ok(None) => {},
             Err(errno) => {
+                if let Some(scope) = live {
+                    scope.set_outcome(outcome_from_fuse_errno(errno));
+                }
                 reply.error(errno);
                 return;
             },

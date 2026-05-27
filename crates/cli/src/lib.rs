@@ -6,4 +6,6 @@ mod builtin_catalog;
 #[allow(dead_code)]
 mod catalog;
 pub mod config;
+#[doc(hidden)]
+pub mod inspector;
 pub mod paths;

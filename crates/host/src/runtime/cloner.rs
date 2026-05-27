@@ -53,6 +53,25 @@ fn is_safe_cache_key(key: &str) -> bool {
     true
 }
 
+/// Observer notified when a clone actually executes (cache miss). The
+/// runtime hooks this up to the inspector stream; tests and
+/// non-instrumented callers pass [`NoopCloneObserver`].
+pub trait CloneObserver {
+    /// A fresh clone is about to begin.
+    fn on_clone_start(&mut self, cache_key: &str, clone_url: &str);
+    /// The clone has finished (success or failure).
+    fn on_clone_end(&mut self, cache_key: &str, elapsed: Duration, ok: bool);
+}
+
+/// Observer that drops every notification. Used when no live sink is
+/// installed (tests, unit checks, etc.).
+pub struct NoopCloneObserver;
+
+impl CloneObserver for NoopCloneObserver {
+    fn on_clone_start(&mut self, _cache_key: &str, _clone_url: &str) {}
+    fn on_clone_end(&mut self, _cache_key: &str, _elapsed: Duration, _ok: bool) {}
+}
+
 /// Shared clone infrastructure. Owns the cache directory and a lock map
 /// to coalesce concurrent clones of the same repository.
 pub struct GitCloner {
@@ -71,7 +90,15 @@ impl GitCloner {
     /// Return the local cache path for a repository, cloning if needed.
     /// `cache_key` is a provider-supplied stable identifier (e.g. "github.com/owner/repo").
     /// `clone_url` is the full URL to pass to git clone verbatim.
-    pub fn clone_if_needed(&self, cache_key: &str, clone_url: &str) -> Result<PathBuf, CloneError> {
+    ///
+    /// `observer` is notified only when a fresh clone is about to run
+    /// (cache miss). Cache hits never call the observer.
+    pub fn clone_if_needed(
+        &self,
+        cache_key: &str,
+        clone_url: &str,
+        observer: &mut dyn CloneObserver,
+    ) -> Result<PathBuf, CloneError> {
         if !is_safe_cache_key(cache_key) {
             return Err(CloneError::UnsafeCacheKey(cache_key.to_string()));
         }
@@ -104,7 +131,11 @@ impl GitCloner {
             return Ok(cache_path);
         }
 
-        Self::run_clone(clone_url, &cache_path)?;
+        observer.on_clone_start(cache_key, clone_url);
+        let started = Instant::now();
+        let outcome = Self::run_clone(clone_url, &cache_path);
+        observer.on_clone_end(cache_key, started.elapsed(), outcome.is_ok());
+        outcome?;
         Self::write_sidecar(&sidecar, clone_url);
         Ok(cache_path)
     }

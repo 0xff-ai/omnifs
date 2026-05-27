@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig};
+use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, PortBinding};
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions,
     StartContainerOptions, StopContainerOptions,
@@ -22,13 +22,16 @@ use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Moun
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
 
-/// Extra bind mounts on top of the canonical session wiring.
-/// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
-/// `omnifs up` leaves it empty.
+/// Extras layered on top of the canonical session wiring.
+/// `omnifs dev` uses this for the GitHub token secret file, DB fixture,
+/// and the inspector TCP port; `omnifs up` leaves it empty.
 #[derive(Debug, Default)]
 pub(crate) struct ContainerExtras {
     pub(crate) binds: Vec<String>,
     pub(crate) env: Vec<String>,
+    /// TCP ports the container should expose to the host loopback.
+    /// Each port `N` is forwarded as `127.0.0.1:N:N`.
+    pub(crate) tcp_ports: Vec<u16>,
 }
 
 pub(crate) struct Runtime {
@@ -455,8 +458,27 @@ impl Runtime {
 
         binds.extend(extras.binds);
 
+        let mut exposed_ports = Vec::new();
+        let mut port_bindings = std::collections::HashMap::new();
+        for port in &extras.tcp_ports {
+            let key = format!("{port}/tcp");
+            exposed_ports.push(key.clone());
+            port_bindings.insert(
+                key,
+                Some(vec![PortBinding {
+                    host_ip: Some("127.0.0.1".to_string()),
+                    host_port: Some(port.to_string()),
+                }]),
+            );
+        }
+
         let host_config = HostConfig {
             binds: Some(binds),
+            port_bindings: if port_bindings.is_empty() {
+                None
+            } else {
+                Some(port_bindings)
+            },
             devices: Some(vec![DeviceMapping {
                 path_on_host: Some("/dev/fuse".to_string()),
                 path_in_container: Some("/dev/fuse".to_string()),
@@ -476,6 +498,11 @@ impl Runtime {
         ContainerCreateBody {
             image: Some(self.image.as_str().to_string()),
             env: Some(env),
+            exposed_ports: if exposed_ports.is_empty() {
+                None
+            } else {
+                Some(exposed_ports)
+            },
             host_config: Some(host_config),
             ..Default::default()
         }

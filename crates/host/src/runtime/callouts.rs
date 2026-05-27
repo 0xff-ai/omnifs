@@ -82,6 +82,7 @@
 
 use crate::omnifs::provider::types as wit_types;
 use crate::runtime::ProviderRuntime;
+use crate::runtime::inspector::InspectorCallout;
 use crate::runtime::log_redaction::WitHeaders;
 use tracing::Instrument;
 
@@ -241,7 +242,9 @@ impl ProviderRuntime {
         index: usize,
         callout: &wit_types::Callout,
     ) -> wit_types::CalloutResult {
-        self.run_callout(callout)
+        let live = InspectorCallout::begin(callout, op_id, index);
+        let result = self
+            .run_callout(callout, op_id)
             .instrument(tracing::info_span!(
                 target: "omnifs_callout",
                 "callout",
@@ -249,14 +252,22 @@ impl ProviderRuntime {
                 callout_index = index,
                 kind = CalloutKind::of(callout).as_str(),
             ))
-            .await
+            .await;
+        if let Some(live) = live {
+            live.finish(&result);
+        }
+        result
     }
 
-    async fn run_callout(&self, callout: &wit_types::Callout) -> wit_types::CalloutResult {
+    async fn run_callout(
+        &self,
+        callout: &wit_types::Callout,
+        op_id: u64,
+    ) -> wit_types::CalloutResult {
         match callout {
             wit_types::Callout::Fetch(req) => self.http.fetch(req, super::HTTP_FETCH_TIMEOUT).await,
             wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req),
+            wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req, op_id),
             wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
             wit_types::Callout::ReadBlob(req) => self.blob.read(req),
             wit_types::Callout::StreamOpen(_)

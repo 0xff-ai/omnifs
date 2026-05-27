@@ -16,6 +16,7 @@ pub mod git;
 pub mod http_headers;
 pub mod http_stack;
 pub mod inflight;
+pub mod inspector;
 mod instance;
 mod invalidation;
 pub(crate) mod log_redaction;
@@ -43,6 +44,7 @@ use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::http_stack::HttpStack;
 use crate::runtime::inflight::InFlight;
+use crate::runtime::inspector::{InspectorProviderOp, WitProviderErrorView};
 use crate::runtime::instance::ProviderInstance;
 use crate::runtime::invalidation::InvalidationState;
 use crate::runtime::manifest::{
@@ -52,6 +54,7 @@ use crate::runtime::operation_ids::OperationIds;
 use crate::runtime::tools::archive::ArchiveExtractorComponent;
 use crate::runtime::tree_refs::TreeRefs;
 use fuser::Notifier;
+use omnifs_inspector::{InspectorOutcome, OutcomeFields, TraceId};
 use omnifs_model::MountName;
 use parking_lot::Mutex;
 use std::io;
@@ -136,6 +139,8 @@ impl<'a> RuntimeDirs<'a> {
 pub struct ProviderRuntime {
     instance: ProviderInstance,
     initialize_result: wit_types::InitializeResult,
+    mount_name: String,
+    provider_id: String,
     operation_ids: OperationIds,
     http: Arc<HttpStack>,
     git: git::GitExecutor,
@@ -343,6 +348,8 @@ impl ProviderRuntime {
         Ok(Self {
             instance,
             initialize_result,
+            mount_name: mount_name.to_string(),
+            provider_id: config.provider_id().to_string(),
             operation_ids: OperationIds::new(),
             http,
             git,
@@ -414,33 +421,75 @@ impl ProviderRuntime {
 impl ProviderRuntime {
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
         let active_paths = self.activity_table.lock().active_path_sets();
-        self.run_op(Op::OnEvent {
-            event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
-                active_paths,
-            }),
-        })
+        self.run_op(
+            Op::OnEvent {
+                event: wit_types::ProviderEvent::TimerTick(wit_types::TimerTickContext {
+                    active_paths,
+                }),
+            },
+            None,
+        )
         .await
     }
 
-    pub(super) async fn run_op(&self, op: Op) -> Result<wit_types::OpResult> {
+    pub(super) async fn run_op(
+        &self,
+        op: Op,
+        fuse_trace: Option<TraceId>,
+    ) -> Result<wit_types::OpResult> {
         let id = self.operation_ids.allocate();
+        let trace_id = fuse_trace.or_else(inspector::current_trace_id);
+        let live_op = trace_id.and_then(|t| {
+            InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_id, t)
+        });
+        let mut resume_round = 0u32;
         let mut step = self.instance.start_op(&op, id)?;
-        loop {
+        let result = loop {
             match step {
                 wit_types::ProviderStep::Returned(ret) => {
-                    return self.finish_provider_return(&op, ret);
+                    let handoff_start = std::time::Instant::now();
+                    let outcome = self.finish_provider_return(&op, ret);
+                    // Emit subtree.start/end when the provider handed
+                    // off a tree-ref. Done here, after finish handles
+                    // the validation + effect-apply, so the elapsed
+                    // reflects the resolution work.
+                    if let (Some(trace), Ok(op_result)) = (trace_id, outcome.as_ref())
+                        && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
+                        && let Some(sink) = inspector::global()
+                    {
+                        sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
+                    }
+                    break outcome;
                 },
                 wit_types::ProviderStep::Suspended(callouts) => {
                     if callouts.is_empty() {
-                        return Err(RuntimeError::ProviderProtocol(
+                        break Err(RuntimeError::ProviderProtocol(
                             "provider suspended with no callouts".to_string(),
                         ));
                     }
+                    if let Some(live) = &live_op {
+                        live.suspend(callouts.len());
+                    }
                     let results = self.dispatch_callouts(id, &callouts).await;
+                    if let Some(live) = &live_op {
+                        live.resume(resume_round, results.len());
+                    }
+                    resume_round += 1;
                     step = self.instance.resume(id, results)?;
                 },
             }
+        };
+        if let Some(live) = live_op {
+            let outcome = match &result {
+                Ok(_) => OutcomeFields::ok(),
+                Err(RuntimeError::ProviderError(error)) => {
+                    OutcomeFields::with_outcome(WitProviderErrorView(error).outcome())
+                },
+                Err(_) => OutcomeFields::with_outcome(InspectorOutcome::Internal),
+            };
+            live.finish(outcome);
         }
+        result
     }
 
     fn finish_provider_return(

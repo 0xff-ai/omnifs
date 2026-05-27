@@ -39,11 +39,13 @@ omnifs-mount-schema = { workspace = true }
 omnifs-model = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-creds = { workspace = true }
+omnifs-inspector = { workspace = true }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }
+crossbeam-queue = "0.3"
 fs2 = { workspace = true }
 secrecy = "0.10"
-time = { workspace = true }
+time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 http = { workspace = true }

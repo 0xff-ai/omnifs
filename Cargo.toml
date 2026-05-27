@@ -24,6 +24,7 @@ readme = "README.md"
 omnifs-auth = { version = "0.2.0-dev.1", path = "crates/omnifs-auth" }
 omnifs-creds = { version = "0.2.0-dev.1", path = "crates/omnifs-creds" }
 omnifs-host = { version = "0.2.0-dev.1", path = "crates/host" }
+omnifs-inspector = { version = "0.2.0-dev.1", path = "crates/inspector" }
 omnifs-model = { version = "0.2.0-dev.1", path = "crates/omnifs-model" }
 omnifs-mount-schema = { version = "0.2.0-dev.1", path = "crates/omnifs-mount-schema" }
 omnifs-sdk = { version = "0.2.0-dev.1", path = "crates/omnifs-sdk" }

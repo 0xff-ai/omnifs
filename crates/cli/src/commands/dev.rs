@@ -25,6 +25,9 @@ use crate::session::{
 const CHINOOK_URL: &str = "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite";
 const GUEST_TOKEN_PATH: &str = "/run/secrets/github_token";
 const GUEST_DB_DIR: &str = "/data";
+/// TCP port the daemon's inspector server binds inside the
+/// container. Forwarded to the host's 127.0.0.1:7878 by `omnifs dev`.
+const GUEST_INSPECTOR_PORT: u16 = 7878;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DevArgs {
@@ -94,7 +97,10 @@ impl DevArgs {
                 format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
                 format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
             ],
-            ..Default::default()
+            env: vec![format!(
+                "OMNIFS_INSPECTOR_ADDR=0.0.0.0:{GUEST_INSPECTOR_PORT}"
+            )],
+            tcp_ports: vec![GUEST_INSPECTOR_PORT],
         };
         rt.launch_container(&session, extras).await?;
 

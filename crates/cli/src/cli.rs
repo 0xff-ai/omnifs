@@ -42,6 +42,8 @@ pub enum Commands {
     Down(commands::down::DownArgs),
     /// Tail the daemon log inside the container.
     Logs(commands::logs::LogsArgs),
+    /// Inspector stream: FUSE, provider, and callout JSONL events.
+    Inspect(commands::inspect::InspectArgs),
     /// Open an interactive shell inside the running container.
     Shell(commands::shell::ShellArgs),
 
@@ -97,6 +99,7 @@ impl Commands {
             Self::Dev(args) => args.run().await,
             Self::Down(args) => args.run().await,
             Self::Logs(args) => args.run().await,
+            Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run(),
             Self::Mounts(args) => args.run(),
             Self::Reset(args) => args.run().await,

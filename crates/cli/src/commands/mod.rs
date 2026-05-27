@@ -6,6 +6,7 @@ pub mod dev;
 pub mod doctor;
 pub mod down;
 pub mod init;
+pub mod inspect;
 pub mod logs;
 pub mod mounts;
 pub mod reset;
