@@ -5,7 +5,9 @@ use std::process::Command;
 
 #[test]
 fn no_info_or_span_events_in_stderr_when_quiet() {
-    let bin = env!("CARGO_BIN_EXE_omnifs");
+    let bin = std::env::var_os("NEXTEST_BIN_EXE_omnifs")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_omnifs").into());
     let output = Command::new(bin)
         .arg("--help")
         .env_remove("RUST_LOG")
