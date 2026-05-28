@@ -41,6 +41,8 @@ ci-host-test:
     #!/usr/bin/env bash
     set -euo pipefail
     test -f dist/host-tests/host-tests.tar.zst
+    test -f dist/host-tests/provider_routes_test
+    chmod 0755 dist/host-tests/provider_routes_test
     test -x dist/host-tests/provider_routes_test
     cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
     dist/host-tests/provider_routes_test --test-threads=1 --quiet
