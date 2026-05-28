@@ -6,7 +6,9 @@
 use crate::config::{EffectiveConfig, InstanceConfig};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::manifest::read_provider_metadata_from_wasm;
-use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
+use crate::runtime::tools::archive::{
+    ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS,
+};
 use crate::runtime::wasm;
 use crate::runtime::{ProviderRuntime, RuntimeBuildError, RuntimeDirs};
 use std::collections::HashMap;
@@ -37,8 +39,9 @@ impl ProviderRegistry {
         // One extractor (engine + parsed component + linker pre) shared
         // across every mount; the per-call sandbox lives on a fresh
         // `wasmtime::Store`.
+        let archive_tool_path = dirs.provider_path(ARCHIVE_TOOL_WASM);
         let extractor = Arc::new(
-            ArchiveExtractorComponent::new(DEFAULT_LIMITS)
+            ArchiveExtractorComponent::from_path(&archive_tool_path, DEFAULT_LIMITS)
                 .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
         );
 
@@ -236,10 +239,11 @@ mod tests {
     use super::{ProviderRegistry, RegistryError};
     use crate::runtime::RuntimeDirs;
     use crate::runtime::cloner::GitCloner;
+    use crate::runtime::tools::archive::ARCHIVE_TOOL_WASM;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    fn test_provider_wasm_path() -> PathBuf {
+    fn wasm_artifact_path(file_name: &str) -> PathBuf {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("host crate must have a workspace parent")
@@ -249,7 +253,15 @@ mod tests {
             .join("target")
             .join("wasm32-wasip2")
             .join("release")
-            .join("test_provider.wasm")
+            .join(file_name)
+    }
+
+    fn test_provider_wasm_path() -> PathBuf {
+        wasm_artifact_path("test_provider.wasm")
+    }
+
+    fn archive_tool_wasm_path() -> PathBuf {
+        wasm_artifact_path(ARCHIVE_TOOL_WASM)
     }
 
     // Appends an `omnifs.provider-metadata.v1` custom section carrying the
@@ -318,6 +330,17 @@ mod tests {
         );
         std::fs::write(providers_dir.path().join("test_provider.wasm"), patched)
             .expect("write patched provider");
+        let archive_tool_wasm = archive_tool_wasm_path();
+        assert!(
+            archive_tool_wasm.exists(),
+            "archive tool missing at {}. Run `just providers-build` first.",
+            archive_tool_wasm.display()
+        );
+        std::fs::copy(
+            &archive_tool_wasm,
+            providers_dir.path().join(ARCHIVE_TOOL_WASM),
+        )
+        .expect("copy archive tool");
 
         std::fs::write(
             mounts_dir.join("invalid.json"),

@@ -179,4 +179,6 @@ LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 COPY --from=builder /omnifs /usr/local/bin/
 COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_*.wasm \
      /root/.omnifs/providers/
+COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_tool_archive.wasm \
+     /root/.omnifs/providers/
 RUN chmod 0755 /usr/local/bin/omnifs

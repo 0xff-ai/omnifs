@@ -1,9 +1,8 @@
-//! Sandboxed archive extraction adapter for the embedded Wasm tool.
+//! Sandboxed archive extraction adapter for the Wasm archive tool.
 //!
-//! The host ships a precompiled `omnifs-tool-archive.wasm` (built
-//! from `crates/omnifs-tool-archive`) and runs it in a fresh
-//! `wasmtime::Store` for each `open-archive` callout. The component
-//! sees only:
+//! The host loads a precompiled `omnifs_tool_archive.wasm` component
+//! and runs it in a fresh `wasmtime::Store` for each `open-archive`
+//! callout. The component sees only:
 //!
 //! - `/blob/blob.dat`: read-only preopen of the archive bytes.
 //! - `/out/`: read-write preopen of the destination directory.
@@ -17,19 +16,12 @@ use crate::extractor_bindings::Extractor;
 use crate::extractor_bindings::exports::omnifs::tool_archive::extract as wit_extract;
 use crate::runtime::sandbox::preopen::StagedBlob;
 use crate::runtime::wasm;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use wasmtime::component::{Component, InstancePre, Linker, ResourceTable};
 use wasmtime::{Engine, Store, StoreLimits};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-/// Embedded extractor wasm artifact. The path resolves relative to
-/// `crates/host/src/`. `just providers-build` (and the `Extractor`
-/// Docker build step) ensure this file exists before the host crate
-/// compiles.
-const EXTRACTOR_WASM: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasm32-wasip2/release/omnifs_tool_archive.wasm"
-));
+pub const ARCHIVE_TOOL_WASM: &str = "omnifs_tool_archive.wasm";
 
 /// Defaults the host applies if an `ArchiveExecutor` doesn't override.
 /// Tuned to comfortably cover crates.io-class tarballs (median <1 MiB,
@@ -143,13 +135,29 @@ pub struct ArchiveExtractorComponent {
 }
 
 impl ArchiveExtractorComponent {
-    /// Compile and pre-instantiate the embedded extractor component.
+    /// Compile and pre-instantiate the extractor component from the
+    /// repo-local target path used by tests and local development.
     pub fn new(limits: ExtractorLimits) -> Result<Self, ExtractError> {
+        Self::from_path(default_archive_tool_path(), limits)
+    }
+
+    /// Compile and pre-instantiate the extractor component from a WASM file.
+    pub fn from_path(
+        path: impl AsRef<Path>,
+        limits: ExtractorLimits,
+    ) -> Result<Self, ExtractError> {
+        let path = path.as_ref();
+        let wasm = std::fs::read(path)
+            .map_err(|e| ExtractError::Io(format!("read {}: {e}", path.display())))?;
+        Self::from_bytes(&wasm, limits)
+    }
+
+    fn from_bytes(wasm_bytes: &[u8], limits: ExtractorLimits) -> Result<Self, ExtractError> {
         let engine = wasm::component_engine(|config| {
             config.consume_fuel(true);
         })
         .map_err(|e| ExtractError::Internal(format!("engine init: {e}")))?;
-        let component = Component::new(&engine, EXTRACTOR_WASM)
+        let component = Component::new(&engine, wasm_bytes)
             .map_err(|e| ExtractError::Internal(format!("parse extractor component: {e}")))?;
         let mut linker = Linker::<ExtractorState>::new(&engine);
         wasm::add_wasi_to_linker::<ExtractorState>(&mut linker)
@@ -227,6 +235,12 @@ impl ArchiveExtractorComponent {
             Err(trap) => Err(ExtractError::SandboxTrapped(format!("{trap:#}"))),
         }
     }
+}
+
+fn default_archive_tool_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/wasm32-wasip2/release")
+        .join(ARCHIVE_TOOL_WASM)
 }
 
 impl From<wit_extract::ExtractError> for ExtractError {
