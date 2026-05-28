@@ -19,21 +19,8 @@ env:
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
-  preflight-fast:
-    name: preflight fast
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/omnifs-just
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Check formatting
-        run: just ci-preflight-fast
-
-  preflight-policy:
-    name: preflight policy
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -42,8 +29,13 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - name: Validate npm manifests
-        run: just npm-validate
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run preflight checks
+        run: |
+          set -euo pipefail
+          just ci-preflight-fast
+          just ci-preflight-policy
 
       - name: Check release metadata
         if: github.event_name == 'pull_request'
@@ -58,8 +50,8 @@ jobs:
             just release-check origin/main HEAD
           fi
 
-  wasm:
-    name: wasm
+  components:
+    name: components
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -76,23 +68,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: wasm
+          shared-key: components
           cache-on-failure: true
 
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-tools@1.246.2
 
-      - name: Check, build, and validate provider WASM
+      - name: Check, build, and validate WASM components
         run: just ci-wasm
 
-      - name: Stage WASM artifacts
+      - name: Stage WASM components
         run: |
           set -euo pipefail
           mkdir -p dist-wasm
           cp target/wasm32-wasip2/release/*.wasm dist-wasm/
           test -n "$(find dist-wasm -maxdepth 1 -name 'omnifs_provider_*.wasm' -print -quit)"
-          test -n "$(find dist-wasm -maxdepth 1 -name 'omnifs_tool_*.wasm' -print -quit)"
+          test -f dist-wasm/omnifs_tool_archive.wasm
           test -f dist-wasm/test_provider.wasm
 
       - name: Attest WASM components
@@ -101,7 +93,7 @@ jobs:
         with:
           subject-path: dist-wasm/*.wasm
 
-      - name: Upload WASM artifacts
+      - name: Upload WASM components
         uses: actions/upload-artifact@v7
         with:
           name: omnifs-wasm
@@ -109,40 +101,59 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  host-test:
-    name: host test
+  host-build:
+    name: host build
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: wasm
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/host-build
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/omnifs-just
 
-      - name: Mount Cargo registry sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
-          path: ~/.cargo/registry
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Mount Cargo git sticky disk
-        uses: useblacksmith/stickydisk@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
-          path: ~/.cargo/git
+          shared-key: host-build
+          cache-on-failure: true
 
-      - name: Mount host target sticky disk
-        uses: useblacksmith/stickydisk@v1
+      - uses: taiki-e/install-action@v2
         with:
-          key: ${{ github.repository }}-host-target-${{ runner.os }}-${{ runner.arch }}
-          path: target
+          tool: nextest@0.9.132
+
+      - name: Lint and archive host tests
+        run: just ci-host-build
+
+      - name: Upload host test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-tests
+          path: dist/host-tests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  host-test:
+    name: host test
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [components, host-build]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest@0.9.132
+
+      - name: Download host test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: host-tests
+          path: dist/host-tests
 
       - name: Prepare WASM sidecar directory
         run: rm -rf target/wasm32-wasip2/release
@@ -167,39 +178,20 @@ jobs:
           restore-keys: |
             wasmtime-cache-${{ runner.os }}-
 
-      - name: Lint and test host workspace
-        run: just ci-host
+      - name: Run host tests
+        run: just ci-host-test
 
-  verify:
-    name: verify
-    runs-on: ubuntu-latest
-    needs: [preflight-fast, preflight-policy, wasm, host-test]
-    if: always()
-    steps:
-      - name: Verify required checks
-        env:
-          PREFLIGHT_FAST_RESULT: ${{ needs.preflight-fast.result }}
-          PREFLIGHT_POLICY_RESULT: ${{ needs.preflight-policy.result }}
-          WASM_RESULT: ${{ needs.wasm.result }}
-          HOST_TEST_RESULT: ${{ needs.host-test.result }}
-        run: |
-          set -euo pipefail
-          test "$PREFLIGHT_FAST_RESULT" = success
-          test "$PREFLIGHT_POLICY_RESULT" = success
-          test "$WASM_RESULT" = success
-          test "$HOST_TEST_RESULT" = success
-
-  cli-cross:
-    name: cli (linux-x64, darwin)
+  cli-linux-x64:
+    name: cli linux x64
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [verify, wasm]
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-linux-x64
     permissions:
       contents: read
       packages: read
@@ -212,67 +204,29 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Mount Cargo registry sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
-          path: ~/.cargo/registry
-
-      - name: Mount Cargo git sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
-          path: ~/.cargo/git
-
-      - name: Mount cross target sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cli-cross-target-${{ runner.os }}-${{ runner.arch }}
-          path: target/ci-cross
-
-      - name: Mount Darwin rustup sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-darwin-rustup-${{ runner.os }}-${{ runner.arch }}
-          path: .cache/darwin-rustup
-
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-linux-x64
+          cache-on-failure: true
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.15.2
 
-      - name: Download WASM sidecar inputs
-        uses: actions/download-artifact@v8
-        with:
-          name: omnifs-wasm
-          path: target/wasm32-wasip2/release
-
       - name: Build Linux x64 CLI
-        id: linux_x64
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cross
+        id: build
         run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
 
-      - name: Build Darwin CLI binaries
-        id: darwin
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cross
-          DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
-        run: just ci-build-darwin
+      - name: Package Linux x64 CLI
+        run: just ci-package-cli linux-x64 "${{ steps.build.outputs.artifact }}"
 
-      - name: Package cross-built CLI archives
-        run: |
-          set -euo pipefail
-          just ci-package-cli linux-x64 "${{ steps.linux_x64.outputs.artifact }}"
-          just ci-package-cli darwin-x64 "${{ steps.darwin.outputs.x64_artifact }}"
-          just ci-package-cli darwin-arm64 "${{ steps.darwin.outputs.arm64_artifact }}"
-
-      - name: Attest cross-built CLI archives
+      - name: Attest Linux x64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/cli/*/omnifs-cli-*.tar.xz
+          subject-path: dist/cli/linux-x64/omnifs-cli-linux-x64.tar.xz
 
       - name: Upload Linux x64 CLI archive
         uses: actions/upload-artifact@v7
@@ -282,33 +236,17 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Upload Darwin x64 CLI archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: omnifs-cli-darwin-x64
-          path: dist/cli/darwin-x64/omnifs-cli-darwin-x64.tar.xz*
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: Upload Darwin arm64 CLI archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: omnifs-cli-darwin-arm64
-          path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz*
-          retention-days: 90
-          if-no-files-found: error
-
   cli-linux-arm64:
-    name: cli (linux-arm64)
+    name: cli linux arm64
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    needs: [verify, wasm]
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-linux-arm64
     permissions:
       contents: read
       id-token: write
@@ -318,40 +256,19 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - name: Mount Cargo registry sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-registry-${{ runner.os }}
-          path: ~/.cargo/registry
-
-      - name: Mount Cargo git sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-git-${{ runner.os }}
-          path: ~/.cargo/git
-
-      - name: Mount Linux arm64 target sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cli-linux-arm64-target-${{ runner.os }}-${{ runner.arch }}
-          path: target/ci-linux-arm64
-
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-linux-arm64
+          cache-on-failure: true
 
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.15.2
 
-      - name: Download WASM sidecar inputs
-        uses: actions/download-artifact@v8
-        with:
-          name: omnifs-wasm
-          path: target/wasm32-wasip2/release
-
       - name: Build Linux arm64 CLI
         id: build
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-linux-arm64
         run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
@@ -371,30 +288,22 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  runtime-image:
-    name: runtime (${{ matrix.platform }})
+  cli-darwin:
+    name: cli darwin
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: ${{ matrix.runner }}
-    needs: [verify, wasm, cli-cross, cli-linux-arm64]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-darwin
     permissions:
       contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            id: linux-x64
-            digest_name: amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            id: linux-arm64
-            digest_name: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+      packages: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
 
@@ -402,60 +311,187 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: omnifs-wasm
-          path: dist-wasm
+          shared-key: cli-darwin
+          cache-on-failure: true
+          cache-directories: .cache/darwin-rustup
 
-      - name: Download Linux CLI archive
-        uses: actions/download-artifact@v8
-        with:
-          name: omnifs-cli-${{ matrix.id }}
-          path: dist-cli
-
-      - name: Extract Linux CLI binary
-        run: |
-          set -euo pipefail
-          mkdir -p dist-cli/bin
-          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-${{ matrix.id }}.tar.xz
-          test -x dist-cli/bin/omnifs
-
-      - name: Build and push runtime image
-        id: runtime
+      - name: Build Darwin CLI binaries
+        id: build
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:runtime-${{ matrix.digest_name }}-${{ github.sha }}
-          PLATFORM: ${{ matrix.platform }}
-          PUSH: "true"
-          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
-          OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
-        run: just ci-build-runtime
+          DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
+        run: just ci-build-darwin
 
-      - name: Export image digest
+      - name: Package Darwin CLI archives
         run: |
           set -euo pipefail
-          digest="${{ steps.runtime.outputs.digest }}"
-          test -n "$digest"
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${digest#sha256:}"
+          just ci-package-cli darwin-x64 "${{ steps.build.outputs.x64_artifact }}"
+          just ci-package-cli darwin-arm64 "${{ steps.build.outputs.arm64_artifact }}"
 
-      - name: Upload image digest
+      - name: Attest Darwin CLI archives
+        if: env.CI_MAIN_PUSH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/cli/*/omnifs-cli-*.tar.xz
+
+      - name: Upload Darwin x64 CLI archive
         uses: actions/upload-artifact@v7
         with:
-          name: docker-digest-${{ matrix.digest_name }}
-          path: /tmp/digests/*
+          name: omnifs-cli-darwin-x64
+          path: dist/cli/darwin-x64/omnifs-cli-darwin-x64.tar.xz*
+          retention-days: 90
           if-no-files-found: error
-          retention-days: 1
 
-  smoke:
-    name: smoke
+      - name: Upload Darwin arm64 CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-cli-darwin-arm64
+          path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz*
+          retention-days: 90
+          if-no-files-found: error
+
+  docker-amd64:
+    name: docker amd64
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: runtime-image
+    runs-on: ubuntu-latest
+    needs: [components, cli-linux-x64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download WASM components
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: dist-wasm
+
+      - name: Download Linux x64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-x64
+          path: dist-cli
+
+      - name: Extract Linux x64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Build and push amd64 Docker image
+        id: docker
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:docker-amd64-${{ github.sha }}
+          PLATFORM: linux/amd64
+          PUSH: "true"
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
+        run: just ci-build-runtime
+
+      - name: Export amd64 image digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.docker.outputs.digest }}"
+          test -n "$digest"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload amd64 image digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The arm64 Docker build and smoke run on an arm64 runner so the image is
+  # assembled and smoked natively. amd64 uses ubuntu-latest for lower queue time.
+  docker-arm64:
+    name: docker arm64
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    needs: [components, cli-linux-arm64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download WASM components
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: dist-wasm
+
+      - name: Download Linux arm64 CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-cli-linux-arm64
+          path: dist-cli
+
+      - name: Extract Linux arm64 CLI binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli/bin
+          tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-arm64.tar.xz
+          test -x dist-cli/bin/omnifs
+
+      - name: Build and push arm64 Docker image
+        id: docker
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:docker-arm64-${{ github.sha }}
+          PLATFORM: linux/arm64
+          PUSH: "true"
+          OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
+        run: just ci-build-runtime
+
+      - name: Export arm64 image digest
+        run: |
+          set -euo pipefail
+          digest="${{ steps.docker.outputs.digest }}"
+          test -n "$digest"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload arm64 image digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digest-arm64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke-amd64:
+    name: smoke amd64
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: ubuntu-latest
+    needs: docker-amd64
     timeout-minutes: 30
     permissions:
       contents: read
@@ -491,15 +527,66 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: just ci-smoke-container
 
-  docker-publish:
-    name: docker publish
+  smoke-arm64:
+    name: smoke arm64
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: runtime-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    needs: docker-arm64
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CONTAINER: omnifs
+      IMAGE: ghcr.io/${{ github.repository }}:smoke
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: ./.github/actions/omnifs-docker
+
+      - name: Download arm64 image digest
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-digest-arm64
+          path: /tmp/digests
+
+      - name: Pull the arm64 image and tag it for smoke
+        run: |
+          set -euo pipefail
+          digest_path=$(find /tmp/digests -mindepth 1 -maxdepth 1 -type f | head -n 1)
+          test -n "$digest_path"
+          digest_file="${digest_path##*/}"
+          ref="${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}"
+          docker pull "$ref"
+          docker tag "$ref" "$IMAGE"
+
+      - name: Run container smoke test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: just ci-smoke-container
+
+  publish:
+    name: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - components
+      - host-build
+      - host-test
+      - cli-linux-x64
+      - cli-linux-arm64
+      - cli-darwin
+      - docker-amd64
+      - docker-arm64
+      - smoke-amd64
+      - smoke-arm64
     permissions:
       contents: read
       packages: write
@@ -523,7 +610,7 @@ jobs:
             digest="${digest_file##*/}"
             refs+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
           done
-          test "${#refs[@]}" -eq 2
+          test "${#refs[@]}" -ge 2
           tag="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
           docker buildx imagetools create -t "$tag" "${refs[@]}"
           docker buildx imagetools inspect "$tag" > manifest.txt
@@ -540,29 +627,3 @@ jobs:
             manifest-digest.txt
           retention-days: 90
           if-no-files-found: error
-
-  full-factory:
-    name: full factory
-    if: >-
-      always() &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-       (github.event_name == 'pull_request' &&
-        (github.event.pull_request.user.login == 'raulk' ||
-         contains(github.event.pull_request.labels.*.name, 'ci-full'))))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [cli-cross, cli-linux-arm64, runtime-image, smoke, docker-publish]
-    steps:
-      - name: Verify full factory jobs
-        env:
-          CLI_CROSS_RESULT: ${{ needs.cli-cross.result }}
-          CLI_LINUX_ARM64_RESULT: ${{ needs.cli-linux-arm64.result }}
-          RUNTIME_IMAGE_RESULT: ${{ needs.runtime-image.result }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
-          DOCKER_PUBLISH_RESULT: ${{ needs.docker-publish.result }}
-        run: |
-          set -euo pipefail
-          test "$CLI_CROSS_RESULT" = success
-          test "$CLI_LINUX_ARM64_RESULT" = success
-          test "$RUNTIME_IMAGE_RESULT" = success
-          test "$SMOKE_RESULT" = success
-          test "$DOCKER_PUBLISH_RESULT" = success

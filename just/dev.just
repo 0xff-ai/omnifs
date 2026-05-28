@@ -30,7 +30,7 @@ host-clippy:
 
 # Build provider WASM, then run the host test suite.
 [group('dev')]
-test: providers-build ci-host-test
+test: providers-build ci-host
 
 # Run the bun script tests.
 [group('dev')]

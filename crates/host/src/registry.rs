@@ -6,7 +6,9 @@
 use crate::config::{EffectiveConfig, InstanceConfig};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::manifest::read_provider_metadata_from_wasm;
-use crate::runtime::tools::archive::{ArchiveExtractorComponent, DEFAULT_LIMITS};
+use crate::runtime::tools::archive::{
+    ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS,
+};
 use crate::runtime::wasm;
 use crate::runtime::{ProviderRuntime, RuntimeBuildError, RuntimeDirs};
 use std::collections::HashMap;
@@ -37,8 +39,9 @@ impl ProviderRegistry {
         // One extractor (engine + parsed component + linker pre) shared
         // across every mount; the per-call sandbox lives on a fresh
         // `wasmtime::Store`.
+        let archive_tool_path = dirs.provider_path(ARCHIVE_TOOL_WASM);
         let extractor = Arc::new(
-            ArchiveExtractorComponent::new(DEFAULT_LIMITS)
+            ArchiveExtractorComponent::from_path(&archive_tool_path, DEFAULT_LIMITS)
                 .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
         );
 

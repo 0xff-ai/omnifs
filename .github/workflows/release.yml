@@ -31,7 +31,7 @@ jobs:
         github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.event == 'push'
       )
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       should_ship: ${{ steps.plan.outputs.should_ship }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -77,7 +77,7 @@ jobs:
   github-release:
     if: needs.plan.outputs.should_ship == 'true'
     needs: plan
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
@@ -128,14 +128,26 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           cli=(release-assets/omnifs-cli-*/*.tar.xz)
-          wasms=(release-assets/omnifs-wasm/*.wasm)
+          provider_wasms=(release-assets/omnifs-wasm/omnifs_provider_*.wasm)
+          tool_wasms=(release-assets/omnifs-wasm/omnifs_tool_archive.wasm)
+          test_wasms=(release-assets/omnifs-wasm/test_provider.wasm)
           if (( ${#cli[@]} < 4 )); then
             printf 'expected 4 omnifs-cli archives, found %d\n' "${#cli[@]}" >&2
             find release-assets -type f >&2 || true
             exit 1
           fi
-          if (( ${#wasms[@]} == 0 )); then
+          if (( ${#provider_wasms[@]} == 0 )); then
             printf 'expected omnifs_provider_*.wasm files\n' >&2
+            find release-assets -type f >&2 || true
+            exit 1
+          fi
+          if (( ${#tool_wasms[@]} != 1 )); then
+            printf 'expected omnifs_tool_archive.wasm\n' >&2
+            find release-assets -type f >&2 || true
+            exit 1
+          fi
+          if (( ${#test_wasms[@]} != 1 )); then
+            printf 'expected CI artifact to include test_provider.wasm for host tests\n' >&2
             find release-assets -type f >&2 || true
             exit 1
           fi
@@ -150,7 +162,8 @@ jobs:
           files: |
             release-assets/omnifs-cli-*/*.tar.xz
             release-assets/omnifs-cli-*/*.tar.xz.sha256
-            release-assets/omnifs-wasm/*.wasm
+            release-assets/omnifs-wasm/omnifs_provider_*.wasm
+            release-assets/omnifs-wasm/omnifs_tool_archive.wasm
           fail_on_unmatched_files: true
           prerelease: ${{ needs.plan.outputs.is_prerelease == 'true' }}
           make_latest: ${{ needs.plan.outputs.is_prerelease == 'true' && 'false' || 'true' }}
@@ -158,7 +171,7 @@ jobs:
   promote:
     if: needs.plan.outputs.should_ship == 'true'
     needs: plan
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -199,7 +212,7 @@ jobs:
   npm-platforms:
     if: needs.plan.outputs.should_ship == 'true'
     needs: [plan, github-release, promote]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
@@ -298,7 +311,7 @@ jobs:
   npm-root:
     if: needs.plan.outputs.should_ship == 'true'
     needs: [plan, github-release, promote, npm-platforms]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write

@@ -36,6 +36,11 @@ if ! compgen -G "$wasm_dir/omnifs_provider_*.wasm" >/dev/null; then
   exit 1
 fi
 
+if [[ ! -f "$wasm_dir/omnifs_tool_archive.wasm" ]]; then
+  echo "missing archive tool WASM artifact in $wasm_dir" >&2
+  exit 1
+fi
+
 context="$(mktemp -d)"
 cleanup() {
   rm -rf "$context"
@@ -45,6 +50,7 @@ trap cleanup EXIT
 mkdir -p "$context/providers" "$context/scripts"
 cp "$binary" "$context/omnifs"
 cp "$wasm_dir"/omnifs_provider_*.wasm "$context/providers/"
+cp "$wasm_dir"/omnifs_tool_archive.wasm "$context/providers/"
 cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
 cp "$root/scripts/container-entrypoint.sh" "$context/scripts/container-entrypoint.sh"
 cp "$root/scripts/container-zshrc.zsh" "$context/scripts/container-zshrc.zsh"
