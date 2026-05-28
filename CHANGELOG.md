@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0-dev.2] - 2026-05-28
+
 ### Added
 
 - Container shell now greets interactive users with a welcome banner: an "OMNIFS" wordmark, the tagline `open a path, read the world.`, and indented blocks of example paths (`ls /github/<owner>/<repo>/_repo`, `cat /dns/<domain>/TXT`, an arXiv `find` pipeline) and useful commands (`omnifs status`, `omnifs logs -f`, `omnifs auth list`). Gated on `[[ -o interactive ]]` so `zsh -c '...'` invocations stay silent. Lives in `scripts/container-zshrc.zsh`, copied into both the dev `Dockerfile` and the release `scripts/ci/Dockerfile.runtime`.
