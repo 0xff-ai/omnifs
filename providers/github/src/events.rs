@@ -68,20 +68,20 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<Effects> {
             continue;
         };
         for event in events {
-            let base = format!("{}/_", tick.repo_id);
+            let base = tick.repo_id.to_string();
             match event.event_type.as_str() {
                 "IssuesEvent" => {
-                    invalidations.insert(format!("{base}issues"));
+                    invalidations.insert(format!("{base}/issues"));
                 },
                 "PullRequestEvent" => {
-                    invalidations.insert(format!("{base}prs"));
+                    invalidations.insert(format!("{base}/pulls"));
                 },
                 "WorkflowRunEvent" => {
-                    invalidations.insert(format!("{base}actions/runs"));
+                    invalidations.insert(format!("{base}/actions/runs"));
                 },
                 "IssueCommentEvent" => {
-                    invalidations.insert(format!("{base}issues"));
-                    invalidations.insert(format!("{base}prs"));
+                    invalidations.insert(format!("{base}/issues"));
+                    invalidations.insert(format!("{base}/pulls"));
                 },
                 _ => {},
             }

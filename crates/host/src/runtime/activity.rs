@@ -112,24 +112,24 @@ mod tests {
                 path: "/openai/gvfs".to_string(),
             },
             ActivePathTouch {
-                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+                mount_id: "/{owner}/{repo}/issues/open/{number}".to_string(),
                 mount_name: "Issue".to_string(),
-                path: "/openai/gvfs/_issues/_open/7".to_string(),
+                path: "/openai/gvfs/issues/open/7".to_string(),
             },
             ActivePathTouch {
-                mount_id: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+                mount_id: "/{owner}/{repo}/issues/open/{number}".to_string(),
                 mount_name: "Issue".to_string(),
-                path: "/openai/gvfs/_issues/_open/8".to_string(),
+                path: "/openai/gvfs/issues/open/8".to_string(),
             },
         ]);
 
-        table.remove_path("/openai/gvfs/_issues/_open/7");
+        table.remove_path("/openai/gvfs/issues/open/7");
         let active = table.active_path_sets();
         let issue = active
             .iter()
-            .find(|entry| entry.mount_id == "/{owner}/{repo}/_issues/_open/{number}")
+            .find(|entry| entry.mount_id == "/{owner}/{repo}/issues/open/{number}")
             .expect("missing issue activity");
-        assert_eq!(issue.paths, vec!["/openai/gvfs/_issues/_open/8"]);
+        assert_eq!(issue.paths, vec!["/openai/gvfs/issues/open/8"]);
 
         table.remove_prefix("/openai/gvfs");
         assert!(table.active_path_sets().is_empty());

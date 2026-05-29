@@ -49,7 +49,7 @@ What v1 does not ship and the document below covers as future work:
   └ /db/tables/{name}/sample.json     (SELECT * LIMIT sample_limit)
 ```
 
-Names: top-level entries (`meta`, `tables`) have no underscore prefix. The underscore convention is used by providers (GitHub, DNS) where path segments compete with user-supplied names (`octocat` vs `_repo`); in a database, every top-level path is provider-managed and there is no collision risk. Removing underscores makes paths visually quieter and `cat /db/meta/version.txt` reads naturally.
+Names: top-level entries (`meta`, `tables`) have no underscore prefix. The underscore convention is used by providers (GitHub, DNS) where path segments compete with user-supplied names (`octocat` vs `repo`); in a database, every top-level path is provider-managed and there is no collision risk. Removing underscores makes paths visually quieter and `cat /db/meta/version.txt` reads naturally.
 
 Table names collide with magic segments only inside `tables/`. A table named `meta` lives at `/db/tables/meta/`; that does not collide with `/db/meta/`. A table named `tables` lives at `/db/tables/tables/`; that does not collide with `/db/tables/`. Safe.
 

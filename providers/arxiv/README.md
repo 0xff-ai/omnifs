@@ -13,7 +13,7 @@
     links.json
     versions/v{n}/
   categories/{cat}/recent/
-  categories/{cat}/recent/_fetched/
+  categories/{cat}/recent/fetched/
   categories/{cat}/recent/pages/
   categories/{cat}/recent/pages/{n}/
   categories/{cat}/submissions/
@@ -24,7 +24,7 @@
 
 Category traversal uses arXiv's recent category feed with `search_query=cat:{cat}` and `max_results=100`.
 Results are sorted descending by `sortBy=submittedDate`.
-`recent/pages/{n}` fetches upstream pages, while `recent/_fetched` is the deduped set discovered so far.
+`recent/pages/{n}` fetches upstream pages, while `recent/fetched` is the deduped set discovered so far.
 Submission-day directories are materialized from already fetched recent pages and never issue date-range queries.
 
 ## Capabilities

@@ -1,21 +1,21 @@
 # omnifs-provider-dns
 
-[omnifs](https://github.com/0xff-ai/omnifs) provider that resolves DNS queries over DNS-over-HTTPS and projects each record type as a file. Default resolver is Cloudflare; `/dns/@{resolver}/...` scopes a query to a specific resolver, and `/dns/_reverse/{ip}` does PTR lookups.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that resolves DNS queries over DNS-over-HTTPS and projects each record type as a file. Default resolver is Cloudflare; `/dns/@{resolver}/...` scopes a query to a specific resolver, and `/dns/reverse/{ip}` does PTR lookups.
 
 ## Mount layout
 
 ```
 /dns/{name}/
   A AAAA MX NS TXT CNAME SOA SRV
-  _all _raw
+  all raw
 
 /dns/@cloudflare/{name}/...
 /dns/@google/{name}/...
 
-/dns/_reverse/{ip}/PTR
+/dns/reverse/{ip}/PTR
 ```
 
-`_all` projects every record type for the name as a single file; `_raw` is the wire-format binary response.
+`all` projects every record type for the name as a single file; `raw` is the wire-format binary response.
 
 ## Capabilities
 

@@ -41,20 +41,20 @@ impl RootHandlers {
         Ok(projection)
     }
 
-    #[file("/_resolvers")]
+    #[file("/resolvers")]
     fn resolvers_file(cx: &Cx<State>) -> Result<FileContent> {
         let body = cx.state(|state| state.resolvers.format_resolvers_file().into_bytes());
         Ok(FileContent::bytes(body))
     }
 
-    #[dir("/_reverse")]
+    #[dir("/reverse")]
     fn reverse_dir() -> Result<Projection> {
         let mut projection = Projection::new();
         mark_dynamic(&mut projection);
         Ok(projection)
     }
 
-    #[file("/_reverse/{ip}")]
+    #[file("/reverse/{ip}")]
     async fn reverse_ip(cx: &Cx<State>, ip: IpAddr) -> Result<FileContent> {
         let bytes = read_reverse_bytes(cx, None, &ip.to_string()).await?;
         Ok(FileContent::bytes(bytes))
@@ -67,14 +67,14 @@ impl RootHandlers {
         Ok(projection)
     }
 
-    #[dir("/@{resolver}/_reverse")]
+    #[dir("/@{resolver}/reverse")]
     fn resolver_reverse_dir(_resolver: ResolverName) -> Result<Projection> {
         let mut projection = Projection::new();
         mark_dynamic(&mut projection);
         Ok(projection)
     }
 
-    #[file("/@{resolver}/_reverse/{ip}")]
+    #[file("/@{resolver}/reverse/{ip}")]
     async fn resolver_reverse_ip(
         cx: &Cx<State>,
         resolver: ResolverName,

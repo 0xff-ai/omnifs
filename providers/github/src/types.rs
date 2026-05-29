@@ -6,9 +6,9 @@ use serde::Deserialize;
 /// State filter for resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr)]
 pub enum StateFilter {
-    #[strum(serialize = "_open")]
+    #[strum(serialize = "open")]
     Open,
-    #[strum(serialize = "_all")]
+    #[strum(serialize = "all")]
     All,
 }
 

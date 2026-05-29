@@ -12,7 +12,7 @@
     {
       "kind": "gitRepo",
       "value": "git@github.com:*",
-      "why": "Clone repository contents over SSH when browsing _repo paths."
+      "why": "Clone repository contents over SSH when browsing repo paths."
     },
     {
       "kind": "memoryMb",

@@ -42,14 +42,14 @@ preopen for the kernel to allow writes through. Use it sparingly.
 ```
 
 Views and global `/indexes/` are deferred to a v2 surface. Per-row
-directories (`_rows/{pk}/...`) are out of scope: composite PKs,
+directories (`rows/{pk}/...`) are out of scope: composite PKs,
 non-integer PKs, and tables without a primary key all need design
 work that has not happened.
 
 ## File attributes
 
 Every projected file declares `Mutable + Inline` with a content
-hash as the version token, except `_sample.json` for large samples,
+hash as the version token, except `sample.json` for large samples,
 which switches to a deferred ranged projection above the inline
 cap (`MAX_PROJECTED_BYTES = 64 KiB`). The host keys cache entries
 by the version token, so the same projection is served from cache
@@ -118,7 +118,7 @@ calling `cargo build --target wasm32-wasip2`.
 ## What's deferred
 
 - Views (`/views/...`) and global `/indexes/` directories.
-- Per-row paths (`_rows/{pk}/...`); needs design for composite,
+- Per-row paths (`rows/{pk}/...`); needs design for composite,
   non-integer, and missing-PK tables.
 - PostgreSQL backend (a network callout, plus a connection-pool
   story). The `database_type` discriminator is already in place.

@@ -14,7 +14,7 @@ impl RepoHandlers {
         Ok(projection)
     }
 
-    #[treeref("/{owner}/{repo}/_repo")]
+    #[treeref("/{owner}/{repo}/repo")]
     async fn repo_tree(cx: &Cx<State>, owner: OwnerName, repo: RepoName) -> Result<TreeRef> {
         let repo_id = RepoId::new(&owner, &repo);
         let repo = cx
@@ -27,25 +27,25 @@ impl RepoHandlers {
         Ok(TreeRef::new(repo.tree))
     }
 
-    #[dir("/{owner}/{repo}/_issues")]
+    #[dir("/{owner}/{repo}/issues")]
     fn issues(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
-        projection.dir("_all");
-        projection.dir("_open");
+        projection.dir("all");
+        projection.dir("open");
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }
 
-    #[dir("/{owner}/{repo}/_prs")]
+    #[dir("/{owner}/{repo}/pulls")]
     fn prs(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
-        projection.dir("_all");
-        projection.dir("_open");
+        projection.dir("all");
+        projection.dir("open");
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }
 
-    #[dir("/{owner}/{repo}/_actions")]
+    #[dir("/{owner}/{repo}/actions")]
     fn actions(_owner: OwnerName, _repo: RepoName) -> Result<Projection> {
         let mut projection = Projection::new();
         projection.page(PageStatus::Exhaustive);

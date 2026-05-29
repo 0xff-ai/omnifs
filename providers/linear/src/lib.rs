@@ -6,7 +6,7 @@
 //! omnifs provider WIT interface. The current v1 surface covers:
 //!
 //! - workspace root listing all teams by key
-//! - per-team `issues/_open` and `issues/_all` filtered listings
+//! - per-team `issues/open` and `issues/all` filtered listings
 //! - per-issue projection (`title`, `state`, `priority`, `assignee`,
 //!   `description.md`)
 //!

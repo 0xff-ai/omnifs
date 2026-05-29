@@ -31,7 +31,7 @@ impl SupportedRecordType {
     pub const CAA: Self = Self(HickoryRecordType::CAA);
     pub const PTR: Self = Self(HickoryRecordType::PTR);
 
-    /// PTR excluded: it is only used internally for `_reverse/<ip>`.
+    /// PTR excluded: it is only used internally for `reverse/<ip>`.
     pub fn all() -> &'static [Self] {
         &[
             Self::A,
@@ -46,7 +46,7 @@ impl SupportedRecordType {
         ]
     }
 
-    /// Subset queried in parallel for `_all` (skip SRV/CAA to reduce noise).
+    /// Subset queried in parallel for `all` (skip SRV/CAA to reduce noise).
     pub fn common() -> &'static [Self] {
         &[
             Self::A,

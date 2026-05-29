@@ -11,7 +11,7 @@ pub struct ContainerHandlers;
 
 #[handlers]
 impl ContainerHandlers {
-    #[file("/containers/_listing.json")]
+    #[file("/containers.json")]
     async fn listing(cx: &Cx<State>) -> Result<FileContent> {
         let summaries = list_containers(cx).await?;
         Ok(FileContent::bytes(pretty_json(&summaries)?))
@@ -53,7 +53,7 @@ impl ContainerHandlers {
         })
     }
 
-    #[dir("/containers/_running")]
+    #[dir("/containers/running")]
     async fn running(cx: &DirCx<State>) -> Result<Projection> {
         listing_filtered(cx, |summary| {
             // Match by `state` (the structured enum) when the daemon
@@ -71,14 +71,14 @@ impl ContainerHandlers {
         .await
     }
 
-    #[bind("/containers/_running/{name}")]
+    #[bind("/containers/running/{name}")]
     fn running_container(_cx: &Cx<State>, name: ContainerName) -> Result<ContainerSubtree> {
         Ok(ContainerSubtree {
             key: ContainerKey::Name(name.to_string()),
         })
     }
 
-    #[dir("/containers/_stopped")]
+    #[dir("/containers/stopped")]
     async fn stopped(cx: &DirCx<State>) -> Result<Projection> {
         listing_filtered(cx, |summary| {
             if let Some(state) = summary.state {
@@ -94,7 +94,7 @@ impl ContainerHandlers {
         .await
     }
 
-    #[bind("/containers/_stopped/{name}")]
+    #[bind("/containers/stopped/{name}")]
     fn stopped_container(_cx: &Cx<State>, name: ContainerName) -> Result<ContainerSubtree> {
         Ok(ContainerSubtree {
             key: ContainerKey::Name(name.to_string()),

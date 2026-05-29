@@ -16,7 +16,7 @@ This design supersedes the older transaction-directory and control-namespace mut
 
 - Make the mounted mutable scope feel like a normal Git repository.
 - Keep mutation execution reconcile-first at the provider boundary.
-- Preserve disowned subtree semantics for passthrough trees such as GitHub `_repo`.
+- Preserve disowned subtree semantics for passthrough trees such as GitHub `repo`.
 - Allow local work inside disowned islands, including nested Git repositories.
 - Keep local writes local until `git add`, `git commit`, and `git push`.
 - Preserve provider ownership of mutation grouping, conflict detection, and post-actions.
@@ -42,8 +42,8 @@ The third model is the intended UX and the chosen design. It matches normal Git 
 ```bash
 cd /github/rust-lang/rust
 git status
-printf 'closed\n' > _issues/42/state
-git add _issues/42/state
+printf 'closed\n' > issues/42/state
+git add issues/42/state
 git commit -m "close issue 42"
 git push
 ```
@@ -55,7 +55,7 @@ The cost is that the mount must support real Git worktree behavior and must defi
 - Mutable scope: a provider-controlled subtree that participates in outer-repo reconciliation. Example: `/github/rust-lang/rust`.
 - Outer repo: the Git repository presented at the mutable scope root.
 - Provider-owned path: a path inside the mutable scope that belongs to the provider reconcile model.
-- Disowned island: a subtree inside the mutable scope that is locally visible and writable but excluded from outer reconcile. Example: `/github/rust-lang/rust/_repo`.
+- Disowned island: a subtree inside the mutable scope that is locally visible and writable but excluded from outer reconcile. Example: `/github/rust-lang/rust/repo`.
 - Inner repo: a nested Git repository inside a disowned island.
 - Baseline: the last known upstream state for a provider-owned resource, including version tokens.
 - Hydration: fetching provider-owned resource files and baseline metadata into local state.
@@ -96,8 +96,8 @@ Example:
 
 ```bash
 cd /github/rust-lang/rust
-printf 'closed\n' > _issues/42/state
-git add _issues/42/state
+printf 'closed\n' > issues/42/state
+git add issues/42/state
 git commit -m "close issue 42"
 git push origin main
 ```
@@ -116,7 +116,7 @@ Disowned islands are writable and visible through the mount, but they do not ent
 Example:
 
 ```bash
-cd /github/rust-lang/rust/_repo
+cd /github/rust-lang/rust/repo
 git checkout -b spike
 printf '// test\n' >> src/lib.rs
 git commit -am "spike"
@@ -125,10 +125,10 @@ git push
 
 Meaning:
 
-- `_repo/` is a disowned island.
+- `repo/` is a disowned island.
 - Its reads and writes go to the disowned backing tree.
 - Its nested Git semantics are separate from the outer repo.
-- The outer repo ignores `_repo/` by default.
+- The outer repo ignores `repo/` by default.
 
 ### Mixed use
 
@@ -136,11 +136,11 @@ Users can work in both layers without switching mental models:
 
 ```bash
 cd /github/rust-lang/rust
-printf 'closed\n' > _issues/42/state
-git add _issues/42/state
+printf 'closed\n' > issues/42/state
+git add issues/42/state
 git commit -m "close issue 42"
 
-cd _repo
+cd repo
 git checkout -b release-notes
 printf '\nnotes\n' >> RELEASES.md
 git commit -am "notes"
@@ -175,10 +175,10 @@ From the user's perspective:
 ```text
 /github/rust-lang/rust/
   .git/
-  _issues/
-  _prs/
-  _actions/
-  _repo/          # disowned island
+  issues/
+  pulls/
+  actions/
+  repo/          # disowned island
 ```
 
 Hidden local state on disk:
@@ -246,7 +246,7 @@ Hydration stores:
 
 `fetch-resource(path)` must accept any provider-owned path under a mutable resource and return the full owning resource snapshot.
 
-This is required because the host and remote helper may only know that a user changed `_issues/42/title`; they should not have to know independently that the owning resource is `_issues/42/`.
+This is required because the host and remote helper may only know that a user changed `issues/42/title`; they should not have to know independently that the owning resource is `issues/42/`.
 
 ## Baseline ref
 
@@ -352,7 +352,7 @@ Reason:
 
 - disowned layout is provider-controlled local state
 - the ignore rule should not become committed repository content
-- inner repos such as `_repo/` should stay quiet in outer `git status`
+- inner repos such as `repo/` should stay quiet in outer `git status`
 
 ### Force-add safety
 
@@ -361,7 +361,7 @@ Ignore rules prevent normal accidental staging, but they do not stop `git add -f
 Therefore outer push must validate that `HEAD` and the index contain no tracked entries under disowned prefixes. If they do, push fails with a direct error:
 
 ```text
-outer push refused: disowned path tracked by outer repo: _repo/src/lib.rs
+outer push refused: disowned path tracked by outer repo: repo/src/lib.rs
 reset or remove the tracked disowned entries, or push from the nested repo instead
 ```
 
@@ -373,7 +373,7 @@ Disowned islands may themselves contain nested Git repos.
 
 Example:
 
-- `/github/rust-lang/rust/_repo/.git` belongs to the source checkout, not the outer omnifs repo.
+- `/github/rust-lang/rust/repo/.git` belongs to the source checkout, not the outer omnifs repo.
 
 Rules:
 
@@ -566,9 +566,9 @@ If a provider-owned changed path lacks baseline metadata:
 
 ### Inner repo confusion
 
-If a user edits `_repo/` and expects outer push to include it:
+If a user edits `repo/` and expects outer push to include it:
 
-- outer `git status` should already be quiet because `_repo/` is ignored
+- outer `git status` should already be quiet because `repo/` is ignored
 - if they force-track it, outer push fails with a message directing them to push from the nested repo instead
 
 ## Security and correctness
@@ -613,7 +613,7 @@ The design is successful when these workflows work as described:
 1. `git status` at a mutable scope root works on the mounted path itself.
 2. Editing a provider-owned file, then `git add`, `git commit`, and `git push`, creates provider mutations only at push time.
 3. Editing a disowned path keeps that edit visible locally but outer `git status` stays clean by default.
-4. `git -C /github/rust-lang/rust/_repo status` works as a nested repo workflow.
+4. `git -C /github/rust-lang/rust/repo status` works as a nested repo workflow.
 5. Outer push refuses tracked disowned paths with a direct error.
 6. `git pull --rebase` refreshes provider-owned baseline state through the provider reconcile interface.
 

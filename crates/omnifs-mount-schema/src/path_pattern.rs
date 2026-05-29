@@ -441,18 +441,18 @@ mod tests {
     #[test]
     fn path_pattern_matches_and_prefers_literals() {
         let repo = PathPattern::parse("/{owner}/{repo}").unwrap();
-        let issue = PathPattern::parse("/{owner}/{repo}/_issues/_open/{number}").unwrap();
+        let issue = PathPattern::parse("/{owner}/{repo}/issues/open/{number}").unwrap();
         let resolver = PathPattern::parse("/@{resolver}/{segment}").unwrap();
-        let literal = PathPattern::parse("/_resolvers").unwrap();
+        let literal = PathPattern::parse("/resolvers").unwrap();
         let capture = PathPattern::parse("/{segment}").unwrap();
 
         assert_eq!(
-            repo.concrete_path_for("/openai/gvfs/_issues/_open/7"),
+            repo.concrete_path_for("/openai/gvfs/issues/open/7"),
             Some("/openai/gvfs".to_string())
         );
         assert_eq!(
-            issue.concrete_path_for("/openai/gvfs/_issues/_open/7/comments/1"),
-            Some("/openai/gvfs/_issues/_open/7".to_string())
+            issue.concrete_path_for("/openai/gvfs/issues/open/7/comments/1"),
+            Some("/openai/gvfs/issues/open/7".to_string())
         );
         assert_eq!(
             resolver.concrete_path_for("/@google/example.com"),
@@ -463,25 +463,25 @@ mod tests {
     }
 
     #[test]
-    fn rest_capture_matches_zero_or_more_trailing_segments() {
-        let pat = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
-        assert!(pat.matches_path("/_ipfs/Qm123"));
-        assert!(pat.matches_path("/_ipfs/Qm123/a"));
-        assert!(pat.matches_path("/_ipfs/Qm123/a/b/c"));
-        assert!(!pat.matches_path("/_ipfs"));
+    fn rest_capture_matches_zero_ormore_trailing_segments() {
+        let pat = PathPattern::parse("/ipfs/{cid}/{*path}").unwrap();
+        assert!(pat.matches_path("/ipfs/Qm123"));
+        assert!(pat.matches_path("/ipfs/Qm123/a"));
+        assert!(pat.matches_path("/ipfs/Qm123/a/b/c"));
+        assert!(!pat.matches_path("/ipfs"));
         assert!(!pat.matches_path("/other/Qm123"));
 
-        assert_eq!(pat.rest_of("/_ipfs/Qm123"), Some(String::new()));
-        assert_eq!(pat.rest_of("/_ipfs/Qm123/a"), Some("a".to_string()));
-        assert_eq!(pat.rest_of("/_ipfs/Qm123/a/b/c"), Some("a/b/c".to_string()));
+        assert_eq!(pat.rest_of("/ipfs/Qm123"), Some(String::new()));
+        assert_eq!(pat.rest_of("/ipfs/Qm123/a"), Some("a".to_string()));
+        assert_eq!(pat.rest_of("/ipfs/Qm123/a/b/c"), Some("a/b/c".to_string()));
     }
 
     #[test]
     fn rest_capture_has_no_static_child_and_lowest_precedence() {
-        let rest = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
-        let bare = PathPattern::parse("/_ipfs/{cid}/{leaf}").unwrap();
-        let prefix = PathPattern::parse("/_ipfs/{cid}/v{version}").unwrap();
-        let exact = PathPattern::parse("/_ipfs/{cid}/versions").unwrap();
+        let rest = PathPattern::parse("/ipfs/{cid}/{*path}").unwrap();
+        let bare = PathPattern::parse("/ipfs/{cid}/{leaf}").unwrap();
+        let prefix = PathPattern::parse("/ipfs/{cid}/v{version}").unwrap();
+        let exact = PathPattern::parse("/ipfs/{cid}/versions").unwrap();
 
         assert!(rest.static_child().is_none());
         assert!(exact.precedence_key() > prefix.precedence_key());
@@ -491,11 +491,11 @@ mod tests {
 
     #[test]
     fn rest_capture_ambiguity_rules() {
-        let rest_a = PathPattern::parse("/_ipfs/{cid}/{*path}").unwrap();
-        let rest_b = PathPattern::parse("/_ipfs/{cid}/{*tail}").unwrap();
-        let bare = PathPattern::parse("/_ipfs/{cid}/{leaf}").unwrap();
-        let exact = PathPattern::parse("/_ipfs/{cid}/versions").unwrap();
-        let other_rest = PathPattern::parse("/_other/{id}/{*rest}").unwrap();
+        let rest_a = PathPattern::parse("/ipfs/{cid}/{*path}").unwrap();
+        let rest_b = PathPattern::parse("/ipfs/{cid}/{*tail}").unwrap();
+        let bare = PathPattern::parse("/ipfs/{cid}/{leaf}").unwrap();
+        let exact = PathPattern::parse("/ipfs/{cid}/versions").unwrap();
+        let other_rest = PathPattern::parse("/other/{id}/{*rest}").unwrap();
 
         assert!(rest_a.is_ambiguous_with(&rest_b));
         assert!(rest_b.is_ambiguous_with(&rest_a));

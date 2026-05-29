@@ -29,7 +29,7 @@ pub struct PullHandlers;
 
 #[handlers]
 impl PullHandlers {
-    #[dir("/{owner}/{repo}/_prs/{filter}")]
+    #[dir("/{owner}/{repo}/pulls/{filter}")]
     async fn pull_list_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -39,7 +39,7 @@ impl PullHandlers {
         pr_list(cx, &owner, &repo, filter).await
     }
 
-    #[dir("/{owner}/{repo}/_prs/{filter}/{number}")]
+    #[dir("/{owner}/{repo}/pulls/{filter}/{number}")]
     async fn pr_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -50,7 +50,7 @@ impl PullHandlers {
         pr_projection(cx, &owner, &repo, number).await
     }
 
-    #[dir("/{owner}/{repo}/_prs/{filter}/{number}/comments")]
+    #[dir("/{owner}/{repo}/pulls/{filter}/{number}/comments")]
     async fn pr_comments_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -61,7 +61,7 @@ impl PullHandlers {
         pr_comments_projection(cx, &owner, &repo, number).await
     }
 
-    #[file("/{owner}/{repo}/_prs/_open/{number}/diff")]
+    #[file("/{owner}/{repo}/pulls/open/{number}/diff")]
     async fn pr_diff_open(
         cx: &Cx<State>,
         owner: OwnerName,
@@ -71,7 +71,7 @@ impl PullHandlers {
         pr_diff_file(cx, &owner, &repo, number).await
     }
 
-    #[file("/{owner}/{repo}/_prs/_all/{number}/diff")]
+    #[file("/{owner}/{repo}/pulls/all/{number}/diff")]
     async fn pr_diff_all(
         cx: &Cx<State>,
         owner: OwnerName,
@@ -94,7 +94,7 @@ async fn pr_list(
     for pr in page.items {
         let version = pr.updated_at.clone();
         let number = pr.number;
-        let base = format!("{owner}/{repo}/_prs/{}/{number}/", filter.as_ref());
+        let base = format!("{owner}/{repo}/pulls/{}/{number}/", filter.as_ref());
         numbered::project_common_field_effects(
             &mut projection,
             &base,
