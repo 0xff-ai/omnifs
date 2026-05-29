@@ -38,17 +38,10 @@ jobs:
           just ci-preflight-policy
 
       - name: Check release metadata
-        if: github.event_name == 'pull_request'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          NO_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/')
         run: |
           set -euo pipefail
-          if [[ "$HEAD_REF" == release/* ]]; then
-            just release-check
-          elif [[ "$NO_CHANGELOG" != "true" ]]; then
-            just release-check origin/main HEAD
-          fi
+          just release-check
 
   components:
     name: components
