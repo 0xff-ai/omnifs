@@ -31,7 +31,7 @@ pub struct IssueHandlers;
 
 #[handlers]
 impl IssueHandlers {
-    #[dir("/{owner}/{repo}/_issues/{filter}")]
+    #[dir("/{owner}/{repo}/issues/{filter}")]
     async fn issue_list_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -41,7 +41,7 @@ impl IssueHandlers {
         issue_list(cx, &owner, &repo, filter).await
     }
 
-    #[dir("/{owner}/{repo}/_issues/{filter}/{number}")]
+    #[dir("/{owner}/{repo}/issues/{filter}/{number}")]
     async fn issue_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -52,7 +52,7 @@ impl IssueHandlers {
         issue_projection(cx, &owner, &repo, number).await
     }
 
-    #[dir("/{owner}/{repo}/_issues/{filter}/{number}/comments")]
+    #[dir("/{owner}/{repo}/issues/{filter}/{number}/comments")]
     async fn issue_comments_open(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -91,7 +91,7 @@ fn ingest_issue_items(
             continue;
         }
         let number = item.number;
-        let base = format!("{owner}/{repo}/_issues/{}/{number}/", filter.as_ref());
+        let base = format!("{owner}/{repo}/issues/{}/{number}/", filter.as_ref());
         numbered::project_common_field_effects(
             projection,
             &base,
@@ -113,7 +113,7 @@ fn project_pr_from_issue(
     item: Issue,
 ) {
     let version = item.updated_at.clone();
-    let base = format!("{owner}/{repo}/_prs/{}/{}/", filter.as_ref(), item.number);
+    let base = format!("{owner}/{repo}/pulls/{}/{}/", filter.as_ref(), item.number);
     projection.proj_dir(base.trim_end_matches('/'));
     numbered::project_common_field_effects(
         projection,

@@ -13,8 +13,8 @@ pub(crate) fn record_names() -> Vec<String> {
         .iter()
         .map(|rt| rt.as_ref().to_string())
         .collect();
-    names.push("_all".to_string());
-    names.push("_raw".to_string());
+    names.push("all".to_string());
+    names.push("raw".to_string());
     names
 }
 
@@ -37,8 +37,8 @@ pub(crate) async fn read_record_bytes(
     record: &str,
 ) -> Result<Vec<u8>> {
     match record {
-        "_all" => query_all(cx, resolver, domain).await,
-        "_raw" => query_raw(cx, resolver, domain).await,
+        "all" => query_all(cx, resolver, domain).await,
+        "raw" => query_raw(cx, resolver, domain).await,
         other => {
             let record_type = other
                 .parse::<SupportedRecordType>()
@@ -85,7 +85,7 @@ pub(crate) async fn query_all(
 
 /// Query the A record for `domain` and render the response in
 /// `dig(1)`-style sections. The hex dump it used to emit was opaque;
-/// a formatted ANSWER section is the shape users inspecting `_raw`
+/// a formatted ANSWER section is the shape users inspecting `raw`
 /// actually want.
 pub(crate) async fn query_raw(
     cx: &Cx<State>,

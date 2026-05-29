@@ -22,8 +22,8 @@ impl TeamHandlers {
     #[dir("/teams/{team}/issues")]
     fn issues_root(_team: TeamKey) -> Result<Projection> {
         let mut projection = Projection::new();
-        projection.dir("_all");
-        projection.dir("_open");
+        projection.dir("all");
+        projection.dir("open");
         projection.page(PageStatus::Exhaustive);
         Ok(projection)
     }

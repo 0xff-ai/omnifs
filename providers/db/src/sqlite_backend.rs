@@ -18,7 +18,7 @@ use crate::sqlite_backend_error::BackendError;
 /// surfaces the provider needs (schema, indexes, count, sample).
 pub(crate) struct SqliteBackend {
     pub(crate) conn: Connection,
-    /// The configured database path. Re-exposed for `_meta/path.txt`.
+    /// The configured database path. Re-exposed for `meta/path.txt`.
     pub(crate) path: String,
     /// Whether the connection was opened read-only.
     pub(crate) read_only: bool,
@@ -221,7 +221,7 @@ impl SqliteBackend {
     }
 
     /// Hash of (`sqlite_version`, path, file size, table count)
-    /// used as a version token for the `_meta/*` files. The host
+    /// used as a version token for the `meta/*` files. The host
     /// keeps L2 cache entries keyed by this hash, so we don't
     /// need TTLs.
     pub fn meta_version(&self) -> Result<String, BackendError> {

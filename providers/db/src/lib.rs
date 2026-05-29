@@ -51,9 +51,9 @@ pub(crate) struct Config {
     /// `DirPerms::READ + FilePerms::READ` preopens.
     #[serde(default = "default_read_only")]
     pub read_only: bool,
-    /// Maximum rows returned in `_sample.json`. Defaults to 20.
-    /// Tables with more rows are still counted in `_count.txt`,
-    /// but `_sample.json` is truncated to `sample_limit`.
+    /// Maximum rows returned in `sample.json`. Defaults to 20.
+    /// Tables with more rows are still counted in `count.txt`,
+    /// but `sample.json` is truncated to `sample_limit`.
     #[serde(default = "default_sample_limit")]
     pub sample_limit: u32,
 }

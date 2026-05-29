@@ -35,7 +35,7 @@ impl CategoryHandlers {
         project_recent(cx, category)
     }
 
-    #[dir("/categories/{category}/recent/_fetched")]
+    #[dir("/categories/{category}/recent/fetched")]
     fn fetched(cx: &DirCx<State>, category: CategoryKey) -> Result<Projection> {
         project_fetched(cx, category)
     }
@@ -65,7 +65,7 @@ impl CategoryHandlers {
         Ok(PaperSubtree::from_category(category, paper))
     }
 
-    #[bind("/categories/{category}/recent/_fetched/{paper}")]
+    #[bind("/categories/{category}/recent/fetched/{paper}")]
     #[allow(clippy::unnecessary_wraps)]
     fn fetched_paper(
         _cx: &Cx<State>,

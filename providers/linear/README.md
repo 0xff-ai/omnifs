@@ -8,8 +8,8 @@ A Linear provider for omnifs. Exposes Linear teams and issues as a virtual files
 /linear/teams/                              # all workspace teams by key
 /linear/teams/{KEY}/                        # one team (e.g. ENG, OPS)
 /linear/teams/{KEY}/issues/                 # filter selector
-/linear/teams/{KEY}/issues/_all/            # all issues for the team
-/linear/teams/{KEY}/issues/_open/           # open issues (triage, backlog, unstarted, started)
+/linear/teams/{KEY}/issues/all/            # all issues for the team
+/linear/teams/{KEY}/issues/open/           # open issues (triage, backlog, unstarted, started)
 /linear/teams/{KEY}/issues/{filter}/{KEY-N}/title           # short title
 /linear/teams/{KEY}/issues/{filter}/{KEY-N}/state           # workflow state name
 /linear/teams/{KEY}/issues/{filter}/{KEY-N}/priority        # Urgent | High | Medium | Low | No priority

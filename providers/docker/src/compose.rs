@@ -20,7 +20,7 @@ pub struct ComposeHandlers;
 
 #[handlers]
 impl ComposeHandlers {
-    #[file("/compose/_listing.json")]
+    #[file("/compose.json")]
     async fn listing(cx: &Cx<State>) -> Result<FileContent> {
         let summaries = list_containers(cx).await?;
         let listing = ComposeListing::from(&summaries);

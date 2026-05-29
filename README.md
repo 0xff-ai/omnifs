@@ -77,10 +77,10 @@ AudioNoise  HunspellColorize  libgit2         pesconvert  test-tlb
 # cd into a repo
 > cd /github/ollama/ollama
 > ls
-_actions  _issues  _prs  _repo
+actions  issues  pulls  repo
 
 # clone the repo just by listing it
-> cd /github/ollama/ollama/_repo
+> cd /github/ollama/ollama/repo
 > ls
 CMakeLists.txt     Makefile.sync  cmd        go.mod       llm         openai    server     x
 CMakePresets.json  README.md      convert    go.sum       logutil     parser    template
@@ -88,7 +88,7 @@ CONTRIBUTING.md    SECURITY.md    discover   harmony      main.go     progress  
 [...]
 
 # list open issues
-> cd /github/ollama/ollama/_issues/_open
+> cd /github/ollama/ollama/issues/open
 > ls
 10333  10928  11381  11743  12138  12539  12959  13399  13879  14239  14621  15087  15398
 10337  10929  11384  11746  12148  12541  12963  13401  13883  14243  14628  15091  15400
@@ -101,12 +101,12 @@ CONTRIBUTING.md    SECURITY.md    discover   harmony      main.go     progress  
 
 > cd /dns/cloudflare.com
 > ls
-A  AAAA  CAA  CNAME  MX  NS  SOA  SRV  TXT  _all  _raw
+A  AAAA  CAA  CNAME  MX  NS  SOA  SRV  TXT  all  raw
 > cat A
 104.16.133.229
 > cat /dns/@8.8.8.8/google.com/AAAA
 2a00:1450:4003:804::200e
-> cat /dns/_reverse/1.1.1.1
+> cat /dns/reverse/1.1.1.1
 one.one.one.one.
 
 ## poke around!
@@ -166,16 +166,16 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 | Path                                                       | Content                                         |
 | ---------------------------------------------------------- | ----------------------------------------------- |
 | `/github/{owner}`                                          | List repos for a user or org                    |
-| `/github/{owner}/{repo}/_repo/`                            | Browse the repo tree (cloned on demand via SSH) |
-| `/github/{owner}/{repo}/_issues/_open/`                    | List open issues                                |
-| `/github/{owner}/{repo}/_issues/_all/`                     | List all issues                                 |
-| `/github/{owner}/{repo}/_issues/{filter}/{n}/title`        | Issue title                                     |
-| `/github/{owner}/{repo}/_issues/{filter}/{n}/body`         | Issue body (markdown)                           |
-| `/github/{owner}/{repo}/_issues/{filter}/{n}/state`        | Issue state                                     |
-| `/github/{owner}/{repo}/_issues/{filter}/{n}/comments/{i}` | Individual comment                              |
-| `/github/{owner}/{repo}/_prs/{filter}/{n}/diff`            | PR diff                                         |
-| `/github/{owner}/{repo}/_actions/runs/{id}/status`         | CI run status                                   |
-| `/github/{owner}/{repo}/_actions/runs/{id}/log`            | CI run log                                      |
+| `/github/{owner}/{repo}/repo/`                            | Browse the repo tree (cloned on demand via SSH) |
+| `/github/{owner}/{repo}/issues/open/`                    | List open issues                                |
+| `/github/{owner}/{repo}/issues/all/`                     | List all issues                                 |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/title`        | Issue title                                     |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/body`         | Issue body (markdown)                           |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/state`        | Issue state                                     |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/comments/{i}` | Individual comment                              |
+| `/github/{owner}/{repo}/pulls/{filter}/{n}/diff`            | PR diff                                         |
+| `/github/{owner}/{repo}/actions/runs/{id}/status`         | CI run status                                   |
+| `/github/{owner}/{repo}/actions/runs/{id}/log`            | CI run log                                      |
 
 ### DNS (`/dns`)
 
@@ -188,12 +188,12 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 | `/dns/{domain}/TXT`                  | TXT records                                                 |
 | `/dns/{domain}/CNAME`                | CNAME records                                               |
 | `/dns/{domain}/SOA`                  | SOA record                                                  |
-| `/dns/{domain}/_all`                 | All common record types                                     |
-| `/dns/{domain}/_raw`                 | dig-style output                                            |
+| `/dns/{domain}/all`                 | All common record types                                     |
+| `/dns/{domain}/raw`                 | dig-style output                                            |
 | `/dns/@{resolver}/{domain}/{record}` | Query via a specific resolver (e.g., `@google`, `@1.1.1.1`) |
 | `/dns/{ip}`                          | Reverse DNS lookup (PTR)                                    |
-| `/dns/_reverse/{ip}`                 | Reverse DNS lookup (alternate path)                         |
-| `/dns/_resolvers`                    | List configured resolvers                                   |
+| `/dns/reverse/{ip}`                 | Reverse DNS lookup (alternate path)                         |
+| `/dns/resolvers`                    | List configured resolvers                                   |
 
 ### arXiv (`/arxiv`)
 

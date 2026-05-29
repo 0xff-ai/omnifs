@@ -22,7 +22,7 @@ const MAX_INLINE_DESCRIPTION_BYTES: usize = 4 * 1024;
 #[handlers]
 impl IssueHandlers {
     /// `/teams/{KEY}/issues/{filter}` lists issue identifiers (e.g.
-    /// `ENG-42`) for the team, filtered by `_open` or `_all`. Each
+    /// `ENG-42`) for the team, filtered by `open` or `all`. Each
     /// listing also preloads small per-issue inline files so a `cat`
     /// after the `ls` avoids a round trip per file.
     #[dir("/teams/{team}/issues/{filter}")]
@@ -63,7 +63,7 @@ impl IssueHandlers {
         let issue = fetch_issue_by_identifier(cx, &ident).await?;
         let mut projection = Projection::new();
         write_inline_files(&mut projection, &issue, /*include_description=*/ true);
-        // Preserve `_open` filter parents even though the parent listing
+        // Preserve `open` filter parents even though the parent listing
         // would normally have already projected the same files.
         let _ = filter;
         projection.page(PageStatus::Exhaustive);
@@ -202,7 +202,7 @@ async fn fetch_all_issues(
     };
     // `filter.state.type.in` is treated as "match anything" when omitted;
     // Linear's GraphQL accepts an empty list as "no constraint" in the
-    // `_all` direction. Send `null` instead of `[]` to be safe.
+    // `all` direction. Send `null` instead of `[]` to be safe.
     let state_filter: serde_json::Value = if state_types.is_empty() {
         serde_json::Value::Null
     } else {

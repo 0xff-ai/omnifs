@@ -140,12 +140,12 @@ run_smoke_demo() {
             break
         fi
 
-        if [[ -d ${requested_repo_root}/_issues/_open && -d ${requested_repo_root}/_prs/_open ]]; then
+        if [[ -d ${requested_repo_root}/issues/open && -d ${requested_repo_root}/pulls/open ]]; then
             repo_root=${requested_repo_root}
             break
         fi
 
-        if [[ -d ${owner_root}/_issues/_open && -d ${owner_root}/_prs/_open ]]; then
+        if [[ -d ${owner_root}/issues/open && -d ${owner_root}/pulls/open ]]; then
             repo_root=${owner_root}
             break
         fi
@@ -154,12 +154,12 @@ run_smoke_demo() {
     done
 
     [[ -n ${repo_root} ]]
-    [[ -d ${repo_root}/_issues/_open ]]
+    [[ -d ${repo_root}/issues/open ]]
 
     cd "${repo_root}"
     ls
 
-    cd "${repo_root}/_issues/_open"
+    cd "${repo_root}/issues/open"
     ls
     local first_issue
     first_issue=$(command ls -1 | head -n 1)
@@ -168,7 +168,7 @@ run_smoke_demo() {
     bat title
     [[ -f body ]] && bat -l md body
 
-    cd "${repo_root}/_prs/_open"
+    cd "${repo_root}/pulls/open"
     ls
     local first_pr
     first_pr=$(command ls -1 | head -n 1)
@@ -177,7 +177,7 @@ run_smoke_demo() {
     bat title
     bat state
 
-    if cd "${repo_root}/_actions/runs" 2>/dev/null; then
+    if cd "${repo_root}/actions/runs" 2>/dev/null; then
         ls
         local first_run
         first_run=$(command ls -1 | head -n 1)
@@ -225,7 +225,7 @@ the repo materializes lazily on first access. open files directly."
 
 type_and_run "cd ${demo_repo}" 0.1
 type_and_run "ls"
-type_and_run "cd _repo" 0.3
+type_and_run "cd repo" 0.3
 type_and_run "ls" 0.8
 type_and_run "bat README.md | head -40" 1
 type_and_run_fast "cd .."
@@ -235,9 +235,9 @@ type_and_run_fast "cd .."
 act "issues are just files
 cat a title. grep a thousand bodies. ripgrep across everything."
 
-type_and_run "cd _issues" 0.5
+type_and_run "cd issues" 0.5
 type_and_run "ls" 0.6
-type_and_run "cd _open" 0.3
+type_and_run "cd open" 0.3
 type_and_run "ls" 0.8
 issue_open_dir="${PWD}"
 issue_with_body=$(pick_first_child_with_file "$issue_open_dir" body)
@@ -253,12 +253,12 @@ type_and_run_fast 'cd ../..'
 
 # act 4: pull requests
 
-act "PRs are just files too
+act "Pull requests are just files too
 read the diff. check the state. it is all just text."
 
-type_and_run "cd _prs" 0.5
+type_and_run "cd pulls" 0.5
 type_and_run "ls" 0.5
-type_and_run "cd _open" 0.3
+type_and_run "cd open" 0.3
 type_and_run "ls" 0.8
 pr_open_dir="${PWD}"
 pr_with_diff=$(pick_first_child "$pr_open_dir")
@@ -275,7 +275,7 @@ type_and_run_fast "cd ../../.."
 act "even GitHub Actions runs
 why open a browser when you can cat a CI log directly?"
 
-type_and_run "cd _actions" 0.3
+type_and_run "cd actions" 0.3
 type_and_run "ls" 0.5
 type_and_run "cd runs" 0.3
 type_and_run "ls" 0.8

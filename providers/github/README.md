@@ -6,24 +6,24 @@
 
 ```
 /github/{owner}/{repo}/
-  _issues/{open|all}/{number}/
+  issues/{open|all}/{number}/
     title
     body
     state
     user
     comments/{n}
-  _prs/{open|all}/{number}/
+  pulls/{open|all}/{number}/
     title
     body
     state
     user
     diff
     comments/{n}
-  _actions/runs/{id}/
+  actions/runs/{id}/
     status
     conclusion
     log
-  _repo/  ← bind-mounted clone, lazily cloned via SSH
+  repo/  ← bind-mounted clone, lazily cloned via SSH
 ```
 
 Hybrid pagination across issues + PRs and cross-listing PR projection keep listings responsive without exhausting GitHub's API budget.

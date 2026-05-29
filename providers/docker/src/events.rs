@@ -68,8 +68,8 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<Effects> {
             let name = name.trim_start_matches('/');
             if !name.is_empty() {
                 prefixes.insert(format!("containers/by-name/{name}"));
-                prefixes.insert(format!("containers/_running/{name}"));
-                prefixes.insert(format!("containers/_stopped/{name}"));
+                prefixes.insert(format!("containers/running/{name}"));
+                prefixes.insert(format!("containers/stopped/{name}"));
             }
         }
         // Compose containers: invalidate the per-service container
@@ -88,10 +88,10 @@ pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<Effects> {
     // event payload doesn't carry, so we just blow them away rather
     // than try to infer transitions.
     if !prefixes.is_empty() {
-        prefixes.insert("containers/_listing.json".to_string());
-        prefixes.insert("containers/_running".to_string());
-        prefixes.insert("containers/_stopped".to_string());
-        prefixes.insert("compose/_listing.json".to_string());
+        prefixes.insert("containers.json".to_string());
+        prefixes.insert("containers/running".to_string());
+        prefixes.insert("containers/stopped".to_string());
+        prefixes.insert("compose.json".to_string());
     }
 
     for prefix in prefixes {

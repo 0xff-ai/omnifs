@@ -314,19 +314,19 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let lookup = harness
         .runtime
-        .lookup_child("", "_resolvers", None)
+        .lookup_child("", "resolvers", None)
         .await
         .unwrap();
     match lookup {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
-            assert_eq!(entry.name, "_resolvers");
+            assert_eq!(entry.name, "resolvers");
             assert!(matches!(entry.kind, EntryKind::File(_)));
         },
         other => panic!("expected Lookup, got {other:?}"),
     }
 
-    let resolvers_file = harness.runtime.read_file("_resolvers", None).await.unwrap();
+    let resolvers_file = harness.runtime.read_file("resolvers", None).await.unwrap();
     let body =
         String::from_utf8(support::into_inline(resolvers_file)).expect("utf8 resolvers file");
     assert!(
@@ -336,13 +336,13 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_lookup = harness
         .runtime
-        .lookup_child("", "_reverse", None)
+        .lookup_child("", "reverse", None)
         .await
         .unwrap();
     match reverse_lookup {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
-            assert_eq!(entry.name, "_reverse");
+            assert_eq!(entry.name, "reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
         },
         other => panic!("expected Lookup, got {other:?}"),
@@ -378,13 +378,13 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_lookup = harness
         .runtime
-        .lookup_child("@cloudflare", "_reverse", None)
+        .lookup_child("@cloudflare", "reverse", None)
         .await
         .unwrap();
     match resolver_reverse_lookup {
         LookupChildResult::Entry(result) => {
             let entry = &result.target;
-            assert_eq!(entry.name, "_reverse");
+            assert_eq!(entry.name, "reverse");
             assert!(matches!(entry.kind, EntryKind::Directory));
         },
         other => panic!("expected resolver reverse lookup, got {other:?}"),
@@ -392,7 +392,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_ip_lookup = harness
         .runtime
-        .lookup_child("_reverse", "8.8.8.8", None)
+        .lookup_child("reverse", "8.8.8.8", None)
         .await
         .unwrap();
     match reverse_ip_lookup {
@@ -407,7 +407,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_ip_lookup = harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "8.8.8.8", None)
+        .lookup_child("@cloudflare/reverse", "8.8.8.8", None)
         .await
         .unwrap();
     match resolver_reverse_ip_lookup {
@@ -422,7 +422,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_reverse_lookup = harness
         .runtime
-        .lookup_child("_reverse", "not-an-ip", None)
+        .lookup_child("reverse", "not-an-ip", None)
         .await
         .unwrap();
     match invalid_reverse_lookup {
@@ -432,7 +432,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let invalid_resolver_reverse_lookup = harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "not-an-ip", None)
+        .lookup_child("@cloudflare/reverse", "not-an-ip", None)
         .await
         .unwrap();
     match invalid_resolver_reverse_lookup {
@@ -485,13 +485,13 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/_all", RecordKind::Lookup, None)
+                    .cache_get("example.com/all", RecordKind::Lookup, None)
                     .is_some()
             );
             assert!(
                 harness
                     .runtime
-                    .cache_get("example.com/_raw", RecordKind::Lookup, None)
+                    .cache_get("example.com/raw", RecordKind::Lookup, None)
                     .is_some()
             );
         },
@@ -511,8 +511,8 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert!(names.contains(&"A"));
-            assert!(names.contains(&"_all"));
-            assert!(names.contains(&"_raw"));
+            assert!(names.contains(&"all"));
+            assert!(names.contains(&"raw"));
         },
         other @ ListChildrenResult::Subtree(_) => {
             panic!("expected domain listing, got {other:?}")
@@ -521,7 +521,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let reverse_listing = harness
         .runtime
-        .list_children("_reverse", None)
+        .list_children("reverse", None)
         .await
         .unwrap();
     match reverse_listing {
@@ -538,7 +538,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
     let resolver_reverse_listing = harness
         .runtime
-        .list_children("@cloudflare/_reverse", None)
+        .list_children("@cloudflare/reverse", None)
         .await
         .unwrap();
     match resolver_reverse_listing {
@@ -568,7 +568,7 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
     "#,
     );
 
-    harness.runtime.read_file("_resolvers", None).await.unwrap();
+    harness.runtime.read_file("resolvers", None).await.unwrap();
 
     harness
         .runtime
@@ -578,13 +578,13 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
 
     harness
         .runtime
-        .lookup_child("_reverse", "8.8.8.8", None)
+        .lookup_child("reverse", "8.8.8.8", None)
         .await
         .unwrap();
 
     harness
         .runtime
-        .lookup_child("@cloudflare/_reverse", "8.8.8.8", None)
+        .lookup_child("@cloudflare/reverse", "8.8.8.8", None)
         .await
         .unwrap();
 
@@ -598,9 +598,9 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
 
     let resolvers = active
         .iter()
-        .find(|entry| entry.mount_id == "/_resolvers")
+        .find(|entry| entry.mount_id == "/resolvers")
         .expect("missing resolvers activity");
-    assert_eq!(resolvers.paths, vec!["/_resolvers"]);
+    assert_eq!(resolvers.paths, vec!["/resolvers"]);
 
     let resolver_root = active
         .iter()
@@ -613,41 +613,41 @@ async fn dns_provider_activity_tracks_concrete_dispatched_paths() {
         .find(|entry| entry.mount_id == "/@{resolver}/{domain}")
         .expect("missing dns-segment activity");
     assert_eq!(dns_segment.paths, vec!["/@cloudflare/example.com"]);
-    assert!(!dns_segment.paths.iter().any(|path| path == "/_resolvers"));
+    assert!(!dns_segment.paths.iter().any(|path| path == "/resolvers"));
     assert!(!dns_segment.paths.iter().any(|path| path == "/@cloudflare"));
 
     let reverse_dir = active
         .iter()
-        .find(|entry| entry.mount_id == "/_reverse")
+        .find(|entry| entry.mount_id == "/reverse")
         .expect("missing reverse-dir activity");
-    assert_eq!(reverse_dir.paths, vec!["/_reverse"]);
+    assert_eq!(reverse_dir.paths, vec!["/reverse"]);
 
     let resolver_reverse_dir = active
         .iter()
-        .find(|entry| entry.mount_id == "/@{resolver}/_reverse")
+        .find(|entry| entry.mount_id == "/@{resolver}/reverse")
         .expect("missing resolver-reverse-dir activity");
-    assert_eq!(resolver_reverse_dir.paths, vec!["/@cloudflare/_reverse"]);
+    assert_eq!(resolver_reverse_dir.paths, vec!["/@cloudflare/reverse"]);
 
     let reverse_ip = active
         .iter()
-        .find(|entry| entry.mount_id == "/_reverse/{ip}")
+        .find(|entry| entry.mount_id == "/reverse/{ip}")
         .expect("missing reverse-ip activity");
-    assert_eq!(reverse_ip.paths, vec!["/_reverse/8.8.8.8"]);
+    assert_eq!(reverse_ip.paths, vec!["/reverse/8.8.8.8"]);
 
     let resolver_reverse_ip = active
         .iter()
-        .find(|entry| entry.mount_id == "/@{resolver}/_reverse/{ip}")
+        .find(|entry| entry.mount_id == "/@{resolver}/reverse/{ip}")
         .expect("missing resolver-reverse-ip activity");
     assert_eq!(
         resolver_reverse_ip.paths,
-        vec!["/@cloudflare/_reverse/8.8.8.8"]
+        vec!["/@cloudflare/reverse/8.8.8.8"]
     );
 
     assert!(
         !dns_segment
             .paths
             .iter()
-            .any(|path| path.contains("/_reverse")),
+            .any(|path| path.contains("/reverse")),
         "dns segment activity should stay domain-only: {active:?}"
     );
 }
@@ -738,12 +738,12 @@ fn github_provider_routes_namespace_and_numeric_paths() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             names.sort_unstable();
-            assert_eq!(names, vec!["_actions", "_issues", "_prs", "_repo"]);
+            assert_eq!(names, vec!["actions", "issues", "pulls", "repo"]);
         },
         other => panic!("expected repo namespace listing, got {other:?}"),
     }
 
-    let runs_fetch = expect_fetch(session.lookup_child(6, "octocat/Hello-World/_actions", "runs"));
+    let runs_fetch = expect_fetch(session.lookup_child(6, "octocat/Hello-World/actions", "runs"));
     assert!(
         runs_fetch
             .url
@@ -795,7 +795,7 @@ fn github_issue_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
-    let response = session.list_children(40, "octocat/Hello-World/_issues/_open");
+    let response = session.list_children(40, "octocat/Hello-World/issues/open");
     assert!(
         response.is_suspended(),
         "expected suspended response, got {response:?}"
@@ -852,39 +852,33 @@ fn github_issue_list_projects_files() {
             assert_eq!(
                 project_paths,
                 vec![
-                    "octocat/Hello-World/_prs/_open/6",
-                    "octocat/Hello-World/_prs/_open/6/title",
-                    "octocat/Hello-World/_prs/_open/6/body",
-                    "octocat/Hello-World/_prs/_open/6/state",
-                    "octocat/Hello-World/_prs/_open/6/user",
-                    "octocat/Hello-World/_prs/_open/6/comments",
-                    "octocat/Hello-World/_prs/_open/6/diff",
-                    "octocat/Hello-World/_issues/_open/7/title",
-                    "octocat/Hello-World/_issues/_open/7/body",
-                    "octocat/Hello-World/_issues/_open/7/state",
-                    "octocat/Hello-World/_issues/_open/7/user",
+                    "octocat/Hello-World/pulls/open/6",
+                    "octocat/Hello-World/pulls/open/6/title",
+                    "octocat/Hello-World/pulls/open/6/body",
+                    "octocat/Hello-World/pulls/open/6/state",
+                    "octocat/Hello-World/pulls/open/6/user",
+                    "octocat/Hello-World/pulls/open/6/comments",
+                    "octocat/Hello-World/pulls/open/6/diff",
+                    "octocat/Hello-World/issues/open/7/title",
+                    "octocat/Hello-World/issues/open/7/body",
+                    "octocat/Hello-World/issues/open/7/state",
+                    "octocat/Hello-World/issues/open/7/user",
                 ]
             );
             assert_eq!(
-                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/6/body"),
+                project_inline_content(&response.effects, "octocat/Hello-World/pulls/open/6/body"),
                 None
             );
             assert_eq!(
-                project_inline_content(
-                    &response.effects,
-                    "octocat/Hello-World/_issues/_open/7/body"
-                ),
+                project_inline_content(&response.effects, "octocat/Hello-World/issues/open/7/body"),
                 None
             );
             assert_eq!(
-                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/6/user"),
+                project_inline_content(&response.effects, "octocat/Hello-World/pulls/open/6/user"),
                 Some(&[][..])
             );
             assert_eq!(
-                project_inline_content(
-                    &response.effects,
-                    "octocat/Hello-World/_issues/_open/7/user"
-                ),
+                project_inline_content(&response.effects, "octocat/Hello-World/issues/open/7/user"),
                 Some(&[][..])
             );
             let names: Vec<&str> = listing
@@ -903,7 +897,7 @@ fn github_issue_list_scans_past_pr_only_pages() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
-    let response = session.list_children(42, "octocat/Hello-World/_issues/_all");
+    let response = session.list_children(42, "octocat/Hello-World/issues/all");
     let [Callout::Fetch(fetch)] = response.callouts.as_slice() else {
         panic!("expected first issues fetch, got {:?}", response.callouts);
     };
@@ -972,8 +966,8 @@ fn github_issue_list_scans_past_pr_only_pages() {
                 .collect();
             assert_eq!(names, vec!["7"]);
             let project_paths = project_paths(&response.effects);
-            assert!(project_paths.contains(&"octocat/Hello-World/_prs/_all/6"));
-            assert!(project_paths.contains(&"octocat/Hello-World/_issues/_all/7/title"));
+            assert!(project_paths.contains(&"octocat/Hello-World/pulls/all/6"));
+            assert!(project_paths.contains(&"octocat/Hello-World/issues/all/7/title"));
             assert!(listing.exhaustive);
         },
         other => panic!("expected issue listing terminal, got {other:?}"),
@@ -985,7 +979,7 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
-    let response = session.list_children(43, "octocat/Hello-World/_issues/_all");
+    let response = session.list_children(43, "octocat/Hello-World/issues/all");
     let [Callout::Fetch(_)] = response.callouts.as_slice() else {
         panic!("expected first issues fetch, got {:?}", response.callouts);
     };
@@ -1040,7 +1034,7 @@ fn github_pr_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
-    let response = session.list_children(41, "octocat/Hello-World/_prs/_open");
+    let response = session.list_children(41, "octocat/Hello-World/pulls/open");
     assert!(
         response.is_suspended(),
         "expected suspended response, got {response:?}"
@@ -1088,14 +1082,14 @@ fn github_pr_list_projects_files() {
             assert_eq!(
                 project_paths,
                 vec![
-                    "octocat/Hello-World/_prs/_open/7/title",
-                    "octocat/Hello-World/_prs/_open/7/body",
-                    "octocat/Hello-World/_prs/_open/7/state",
-                    "octocat/Hello-World/_prs/_open/7/user",
+                    "octocat/Hello-World/pulls/open/7/title",
+                    "octocat/Hello-World/pulls/open/7/body",
+                    "octocat/Hello-World/pulls/open/7/state",
+                    "octocat/Hello-World/pulls/open/7/user",
                 ]
             );
             assert_eq!(
-                project_inline_content(&response.effects, "octocat/Hello-World/_prs/_open/7/body"),
+                project_inline_content(&response.effects, "octocat/Hello-World/pulls/open/7/body"),
                 None
             );
             let names: Vec<&str> = listing
@@ -1114,7 +1108,7 @@ fn github_action_run_list_projects_files() {
     use omnifs_host::omnifs::provider::types::{Callout, CalloutResult, HttpResponse};
 
     let mut session = GithubProviderSession::new();
-    let response = session.list_children(42, "octocat/Hello-World/_actions/runs");
+    let response = session.list_children(42, "octocat/Hello-World/actions/runs");
     assert!(
         response.is_suspended(),
         "expected suspended response, got {response:?}"
@@ -1159,8 +1153,8 @@ fn github_action_run_list_projects_files() {
             assert_eq!(
                 project_paths,
                 vec![
-                    "octocat/Hello-World/_actions/runs/123/status",
-                    "octocat/Hello-World/_actions/runs/123/conclusion",
+                    "octocat/Hello-World/actions/runs/123/status",
+                    "octocat/Hello-World/actions/runs/123/conclusion",
                 ]
             );
             let names: Vec<&str> = listing
@@ -1199,7 +1193,7 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
     let mut session = GithubProviderSession::new();
 
     let lookup_fetch =
-        expect_fetch(session.lookup_child(7, "octocat/Hello-World/_actions/runs", "123"));
+        expect_fetch(session.lookup_child(7, "octocat/Hello-World/actions/runs", "123"));
     assert!(
         lookup_fetch
             .url
@@ -1227,22 +1221,22 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
             assert!(matches!(entry.kind, EntryKind::Directory));
             let child_names = project_paths(&effects);
             assert!(
-                child_names.contains(&"octocat/Hello-World/_actions/runs/123/status"),
+                child_names.contains(&"octocat/Hello-World/actions/runs/123/status"),
                 "missing status in {child_names:?}"
             );
             assert!(
-                child_names.contains(&"octocat/Hello-World/_actions/runs/123/conclusion"),
+                child_names.contains(&"octocat/Hello-World/actions/runs/123/conclusion"),
                 "missing conclusion in {child_names:?}"
             );
             assert!(
-                child_names.contains(&"octocat/Hello-World/_actions/runs/123/log"),
+                child_names.contains(&"octocat/Hello-World/actions/runs/123/log"),
                 "missing log in {child_names:?}"
             );
         },
         other => panic!("expected validated action run lookup result, got {other:?}"),
     }
 
-    let issued = session.list_children(7, "octocat/Hello-World/_actions/runs/123");
+    let issued = session.list_children(7, "octocat/Hello-World/actions/runs/123");
     assert!(
         issued.is_suspended(),
         "expected action run listing to dispatch validation, got {issued:?}"
@@ -1444,7 +1438,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_listing = harness
         .runtime
-        .list_children("octocat/Hello-World/_repo", None)
+        .list_children("octocat/Hello-World/repo", None)
         .await
         .unwrap();
     match repo_listing {
@@ -1463,7 +1457,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
     let repo_child = harness
         .runtime
-        .lookup_child("octocat/Hello-World", "_repo", None)
+        .lookup_child("octocat/Hello-World", "repo", None)
         .await
         .unwrap();
     match repo_child {
@@ -1509,7 +1503,7 @@ fn github_provider_missing_numbered_resources_validate_on_lookup() {
     let mut session = GithubProviderSession::new();
 
     let issued =
-        expect_fetch(session.lookup_child(1, "octocat/Hello-World/_issues/_open", "999999999"));
+        expect_fetch(session.lookup_child(1, "octocat/Hello-World/issues/open", "999999999"));
     assert!(
         issued
             .url
@@ -1581,7 +1575,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     let mut session = GithubProviderSession::new();
 
     let lookup_fetch =
-        expect_fetch(session.lookup_child(70, "octocat/Hello-World/_prs/_open", "7"));
+        expect_fetch(session.lookup_child(70, "octocat/Hello-World/pulls/open", "7"));
     assert!(
         lookup_fetch
             .url
@@ -1617,11 +1611,11 @@ fn github_pr_lookup_validates_and_exposes_diff() {
 
             let names = project_paths(&effects);
             assert!(
-                names.contains(&"octocat/Hello-World/_prs/_open/7/diff"),
+                names.contains(&"octocat/Hello-World/pulls/open/7/diff"),
                 "lookup effects should project diff, got {names:?}"
             );
             assert!(
-                names.contains(&"octocat/Hello-World/_prs/_open/7/comments"),
+                names.contains(&"octocat/Hello-World/pulls/open/7/comments"),
                 "lookup effects should project comments, got {names:?}"
             );
         },
@@ -1629,7 +1623,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     }
 
     let diff_fetch =
-        expect_blob_fetch(session.read_file(70, "octocat/Hello-World/_prs/_open/7/diff"));
+        expect_blob_fetch(session.read_file(70, "octocat/Hello-World/pulls/open/7/diff"));
     assert!(
         diff_fetch
             .url
@@ -1670,7 +1664,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         other => panic!("expected PR diff file after read, got {other:?}"),
     }
 
-    let retry = session.read_file(71, "octocat/Hello-World/_prs/_open/7/diff");
+    let retry = session.read_file(71, "octocat/Hello-World/pulls/open/7/diff");
     assert!(
         retry.is_suspended(),
         "expected PR diff reread to refetch, got {retry:?}"
@@ -1716,7 +1710,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
 
     let mut session = GithubProviderSession::new();
 
-    let pr_fetch = expect_fetch(session.read_file(72, "octocat/Hello-World/_prs/_open/7/title"));
+    let pr_fetch = expect_fetch(session.read_file(72, "octocat/Hello-World/pulls/open/7/title"));
     assert!(
         pr_fetch.url.ends_with("/repos/octocat/Hello-World/pulls/7"),
         "unexpected PR read URL: {}",
@@ -1749,9 +1743,9 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
             assert_eq!(
                 project_paths,
                 vec![
-                    "octocat/Hello-World/_prs/_open/7/body",
-                    "octocat/Hello-World/_prs/_open/7/state",
-                    "octocat/Hello-World/_prs/_open/7/user",
+                    "octocat/Hello-World/pulls/open/7/body",
+                    "octocat/Hello-World/pulls/open/7/state",
+                    "octocat/Hello-World/pulls/open/7/user",
                 ]
             );
         },
@@ -1759,7 +1753,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     }
 
     let run_fetch =
-        expect_fetch(session.read_file(73, "octocat/Hello-World/_actions/runs/123/status"));
+        expect_fetch(session.read_file(73, "octocat/Hello-World/actions/runs/123/status"));
     assert!(
         run_fetch
             .url
@@ -1787,12 +1781,12 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
             assert_eq!(
                 project_paths,
                 vec![
-                    "octocat/Hello-World/_actions/runs/123/conclusion",
-                    "octocat/Hello-World/_actions/runs/123/log",
+                    "octocat/Hello-World/actions/runs/123/conclusion",
+                    "octocat/Hello-World/actions/runs/123/log",
                 ]
             );
             assert_eq!(
-                project_file_stability(&effects, "octocat/Hello-World/_actions/runs/123/log"),
+                project_file_stability(&effects, "octocat/Hello-World/actions/runs/123/log"),
                 Some(Stability::Mutable)
             );
         },
@@ -1803,9 +1797,9 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
 #[test]
 fn github_provider_read_routes_dispatch_async_handlers() {
     for path in [
-        "octocat/Hello-World/_issues/_open/1/title",
-        "octocat/Hello-World/_prs/_open/1/diff",
-        "octocat/Hello-World/_actions/runs/1/status",
+        "octocat/Hello-World/issues/open/1/title",
+        "octocat/Hello-World/pulls/open/1/diff",
+        "octocat/Hello-World/actions/runs/1/status",
     ] {
         let response = invoke_github_read_route(path);
         assert!(
@@ -1836,7 +1830,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
     let cases = [
         Case {
             name: "issue title",
-            path: "octocat/Hello-World/_issues/_open/1/title",
+            path: "octocat/Hello-World/issues/open/1/title",
             ok_headers: vec![Header {
                 name: "etag".to_string(),
                 value: "\"issue-1\"".to_string(),
@@ -1852,7 +1846,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
         },
         Case {
             name: "action status",
-            path: "octocat/Hello-World/_actions/runs/99/status",
+            path: "octocat/Hello-World/actions/runs/99/status",
             ok_headers: Vec::new(),
             ok_body: br#"{"id":99,"status":"completed","conclusion":"success"}"#,
             expected_content: b"completed",
@@ -1999,7 +1993,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
     let mut session = GithubProviderSession::new();
 
     // Issue comments surface through list_children.
-    let issue_list_path = "octocat/Hello-World/_issues/_open/1/comments";
+    let issue_list_path = "octocat/Hello-World/issues/open/1/comments";
     let issue_first = session.list_children(50, issue_list_path);
     assert!(issue_first.is_suspended());
     match session.resume(
@@ -2026,10 +2020,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
     expect_network_error_on_refetch(&mut session, 51, |s, id| {
         s.list_children(id, issue_list_path)
     });
-    expect_not_found(session.read_file(52, "octocat/Hello-World/_issues/_open/1/comments/0"));
+    expect_not_found(session.read_file(52, "octocat/Hello-World/issues/open/1/comments/0"));
 
     let issue_page_two_url =
-        expect_fetch_url(session.read_file(56, "octocat/Hello-World/_issues/_open/1/comments/101"));
+        expect_fetch_url(session.read_file(56, "octocat/Hello-World/issues/open/1/comments/101"));
     assert!(
         issue_page_two_url.contains("issues/1/comments?per_page=100&page=2"),
         "expected second-page issue comment fetch, got {issue_page_two_url}"
@@ -2052,7 +2046,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
     }
 
     // PR comments surface through read_file at a specific index.
-    let pr_read_path = "octocat/Hello-World/_prs/_open/7/comments/1";
+    let pr_read_path = "octocat/Hello-World/pulls/open/7/comments/1";
     let pr_first = session.read_file(53, pr_read_path);
     assert!(pr_first.is_suspended());
     match session.resume(
@@ -2069,10 +2063,10 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         other => panic!("expected PR comment content, got {other:?}"),
     }
     expect_network_error_on_refetch(&mut session, 54, |s, id| s.read_file(id, pr_read_path));
-    expect_not_found(session.read_file(55, "octocat/Hello-World/_prs/_open/7/comments/0"));
+    expect_not_found(session.read_file(55, "octocat/Hello-World/pulls/open/7/comments/0"));
 
     let pr_page_two_url =
-        expect_fetch_url(session.read_file(57, "octocat/Hello-World/_prs/_open/7/comments/101"));
+        expect_fetch_url(session.read_file(57, "octocat/Hello-World/pulls/open/7/comments/101"));
     assert!(
         pr_page_two_url.contains("issues/7/comments?per_page=100&page=2"),
         "expected second-page PR comment fetch, got {pr_page_two_url}"
@@ -2176,7 +2170,7 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     let mut session = GithubProviderSession::new();
 
     let first_issue_page =
-        expect_fetch(session.list_children(20, "octocat/Hello-World/_issues/_all"));
+        expect_fetch(session.list_children(20, "octocat/Hello-World/issues/all"));
     assert!(
         first_issue_page.url.ends_with(
             "/search/issues?q=repo:octocat/Hello-World&sort=created&order=desc&per_page=100"
@@ -2217,7 +2211,7 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
         other => panic!("expected paginated issue listing, got {other:?}"),
     }
 
-    let first_pr_page = expect_fetch(session.list_children(21, "octocat/Hello-World/_prs/_all"));
+    let first_pr_page = expect_fetch(session.list_children(21, "octocat/Hello-World/pulls/all"));
     assert!(first_pr_page.url.ends_with(
         "/search/issues?q=repo:octocat/Hello-World+is:pr&sort=created&order=desc&per_page=100"
     ));
@@ -2413,7 +2407,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
     }
 
     let mut session = GithubProviderSession::new();
-    let issue_path = "octocat/Hello-World/_issues/_open/1/title";
+    let issue_path = "octocat/Hello-World/issues/open/1/title";
 
     let issue_fetch = expect_fetch(session.read_file(40, issue_path));
     assert!(
@@ -2493,7 +2487,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
             let prefixes = invalidate_prefixes(&first_tick_done.effects);
             assert_eq!(
                 prefixes,
-                vec!["octocat/Hello-World/_issues"],
+                vec!["octocat/Hello-World/issues"],
                 "unexpected invalidate_prefixes: {prefixes:?}"
             );
         },
@@ -2618,17 +2612,17 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
     let cases = [
         (
             "issues",
-            "octocat/Hello-World/_issues/_all",
+            "octocat/Hello-World/issues/all",
             "/search/issues?q=repo:octocat/Hello-World&sort=created&order=desc&per_page=100",
         ),
         (
-            "prs",
-            "octocat/Hello-World/_prs/_all",
+            "pulls",
+            "octocat/Hello-World/pulls/all",
             "/search/issues?q=repo:octocat/Hello-World+is:pr&sort=created&order=desc&per_page=100",
         ),
         (
             "actions",
-            "octocat/Hello-World/_actions/runs",
+            "octocat/Hello-World/actions/runs",
             "/repos/octocat/Hello-World/actions/runs?per_page=30",
         ),
     ];

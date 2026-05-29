@@ -23,7 +23,7 @@ pub struct ActionHandlers;
 
 #[handlers]
 impl ActionHandlers {
-    #[dir("/{owner}/{repo}/_actions/runs")]
+    #[dir("/{owner}/{repo}/actions/runs")]
     async fn runs(cx: &DirCx<State>, owner: OwnerName, repo: RepoName) -> Result<Projection> {
         let repo_id = RepoId::new(&owner, &repo);
         let runs: WorkflowRunsResponse = cx
@@ -33,7 +33,7 @@ impl ActionHandlers {
         let mut projection = Projection::new();
 
         for run in runs.workflow_runs {
-            let run_prefix = format!("{repo_id}/_actions/runs/{}", run.id);
+            let run_prefix = format!("{repo_id}/actions/runs/{}", run.id);
             projection.proj_file(
                 format!("{run_prefix}/status"),
                 FileProj::inline(run.status, Stability::Mutable, None),
@@ -48,7 +48,7 @@ impl ActionHandlers {
         Ok(projection)
     }
 
-    #[dir("/{owner}/{repo}/_actions/runs/{run_id}")]
+    #[dir("/{owner}/{repo}/actions/runs/{run_id}")]
     async fn run(
         cx: &DirCx<State>,
         owner: OwnerName,
@@ -80,7 +80,7 @@ impl ActionHandlers {
         Ok(projection)
     }
 
-    #[file("/{owner}/{repo}/_actions/runs/{run_id}/log")]
+    #[file("/{owner}/{repo}/actions/runs/{run_id}/log")]
     async fn run_log(
         cx: &Cx<State>,
         owner: OwnerName,

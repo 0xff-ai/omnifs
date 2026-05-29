@@ -164,9 +164,9 @@ Example DNS acceptance checks:
 
 ```bash
 cd /dns/google.com
-ls A AAAA MX NS TXT SOA _all _raw
+ls A AAAA MX NS TXT SOA all raw
 test -s A
 cat A | grep -E '^A[[:space:]]+'
-test -s _all
-cat _all | grep -E '^(A|AAAA|MX|NS|TXT|SOA)[[:space:]]+'
+test -s all
+cat all | grep -E '^(A|AAAA|MX|NS|TXT|SOA)[[:space:]]+'
 ```

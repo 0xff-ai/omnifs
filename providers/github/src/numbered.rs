@@ -106,7 +106,7 @@ pub(crate) async fn list_hybrid<T: Listable>(
             // renamed, deleted, or private without auth. The SDK maps
             // that to `InvalidInput` (→ EINVAL), which is a misleading
             // error for the FUSE user: they entered a directory that
-            // looks structurally valid (`/{owner}/{repo}/_issues/_all`)
+            // looks structurally valid (`/{owner}/{repo}/issues/all`)
             // and got "invalid argument" with no hint that the repo
             // itself is the problem.
             //

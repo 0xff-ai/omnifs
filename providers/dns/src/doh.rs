@@ -198,7 +198,7 @@ impl ResolverConfig {
         })
     }
 
-    /// Format `_resolvers` file content from configured resolvers.
+    /// Format `resolvers` file content from configured resolvers.
     pub(super) fn format_resolvers_file(&self) -> String {
         self.resolvers
             .iter()

@@ -588,7 +588,7 @@ async fn bind_root_parent_lookup_dispatches_into_subtree() {
     let mut registry = omnifs_sdk::__internal::MountRegistry::<State>::new();
     registry
         .add_bind(
-            "/containers/_running/{name}",
+            "/containers/running/{name}",
             parse_path_only,
             call_state_bind_stub,
         )
@@ -597,7 +597,7 @@ async fn bind_root_parent_lookup_dispatches_into_subtree() {
 
     let cx = Cx::new(12, Rc::new(RefCell::new(State)));
     let lookup = registry
-        .lookup_child(&cx, "/containers/_running/omnifs", "state")
+        .lookup_child(&cx, "/containers/running/omnifs", "state")
         .await
         .unwrap();
 

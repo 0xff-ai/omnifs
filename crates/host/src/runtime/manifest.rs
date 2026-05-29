@@ -155,7 +155,7 @@ mod tests {
         })
         .unwrap();
         let issue = DeclaredHandler::new(HandlerRecord {
-            path_template: "/{owner}/{repo}/_issues/_open/{number}".to_string(),
+            path_template: "/{owner}/{repo}/issues/open/{number}".to_string(),
             handler_name: "Issue".to_string(),
             handler_kind: HandlerKindRecord::Dir,
             capture_schema: Vec::new(),
@@ -172,25 +172,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            repo.concrete_path_for("/openai/gvfs/_issues/_open/7"),
+            repo.concrete_path_for("/openai/gvfs/issues/open/7"),
             Some("/openai/gvfs".to_string())
         );
         assert_eq!(
-            issue.concrete_path_for("/openai/gvfs/_issues/_open/7/comments/1"),
-            Some("/openai/gvfs/_issues/_open/7".to_string())
+            issue.concrete_path_for("/openai/gvfs/issues/open/7/comments/1"),
+            Some("/openai/gvfs/issues/open/7".to_string())
         );
         assert_eq!(
             resolver.concrete_path_for("/@google/example.com"),
             Some("/@google/example.com".to_string())
         );
-        assert_eq!(repo.concrete_path_for("/_resolvers"), None);
+        assert_eq!(repo.concrete_path_for("/resolvers"), None);
         assert_eq!(resolver.concrete_path_for("/@"), None);
     }
 
     #[test]
     fn declared_handler_specificity_prefers_literals_over_captures() {
         let literal = DeclaredHandler::new(HandlerRecord {
-            path_template: "/_resolvers".to_string(),
+            path_template: "/resolvers".to_string(),
             handler_name: "Resolvers".to_string(),
             handler_kind: HandlerKindRecord::File,
             capture_schema: Vec::new(),

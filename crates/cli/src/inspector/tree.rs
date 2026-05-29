@@ -425,12 +425,12 @@ mod tests {
     #[test]
     fn ensure_creates_ancestor_chain() {
         let mut tree = MountTree::new("github");
-        tree.mark_in_flight("raulk/omnifs/_prs/_open", 1, 100);
+        tree.mark_in_flight("raulk/omnifs/pulls/open", 1, 100);
         let raulk = tree.root.children.get("raulk").expect("raulk");
         let omnifs = raulk.children.get("omnifs").expect("omnifs");
-        let prs = omnifs.children.get("_prs").expect("_prs");
-        let open = prs.children.get("_open").expect("_open");
-        assert_eq!(open.path, "raulk/omnifs/_prs/_open");
+        let prs = omnifs.children.get("pulls").expect("pulls");
+        let open = prs.children.get("open").expect("open");
+        assert_eq!(open.path, "raulk/omnifs/pulls/open");
         assert!(open.in_flight.contains(&1));
         assert_eq!(open.status, NodeStatus::InFlight);
     }

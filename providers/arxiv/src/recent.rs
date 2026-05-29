@@ -55,10 +55,10 @@ pub(crate) struct SubmissionView<'a> {
 pub(crate) fn project_recent(cx: &Cx<State>, category: CategoryKey) -> Result<Projection> {
     cx.state(|state| {
         let mut p = Projection::new();
-        p.dir("_fetched");
+        p.dir("fetched");
         p.dir("pages");
         if let Some(index) = state.recent.get(&category) {
-            p.file_with_content("_status.json", index.recent_status_json()?);
+            p.file_with_content("status.json", index.recent_status_json()?);
             index.write_scan_page_status(&mut p);
         } else {
             p.page(PageStatus::More(Cursor::Opaque("pages/0".to_string())));
@@ -352,7 +352,7 @@ impl RecentIndex {
         let mut p = Projection::new();
         for key in self.fetched_papers() {
             p.dir(key.to_string());
-            p.proj_dir(format!("categories/{category}/recent/_fetched/{key}"));
+            p.proj_dir(format!("categories/{category}/recent/fetched/{key}"));
         }
         self.write_scan_page_status(&mut p);
         p
@@ -377,7 +377,7 @@ impl RecentIndex {
             p.proj_dir(base);
         }
         p.file_with_content(
-            "_status.json",
+            "status.json",
             self.submission_status_json(day, view.complete)?,
         );
         if view.complete {
@@ -409,7 +409,7 @@ impl RecentIndex {
                 .ok_or_else(|| ProviderError::internal("recent page referenced missing paper"))?;
             let page_base = format!("{page_prefix}/{key}");
             p.proj_dir(page_base);
-            p.proj_dir(format!("categories/{category}/recent/_fetched/{key}"));
+            p.proj_dir(format!("categories/{category}/recent/fetched/{key}"));
             let submission = SubmissionDay::from_published(&entry.published)?;
             let submission_base = format!("categories/{category}/submissions/{submission}");
             p.proj_dir(&submission_base);

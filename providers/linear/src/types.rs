@@ -6,10 +6,10 @@ use core::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr)]
 pub enum StateFilter {
     /// Open issues. Linear state types in `{triage, backlog, unstarted, started}`.
-    #[strum(serialize = "_open")]
+    #[strum(serialize = "open")]
     Open,
     /// All issues regardless of state.
-    #[strum(serialize = "_all")]
+    #[strum(serialize = "all")]
     All,
 }
 
@@ -90,7 +90,7 @@ impl std::fmt::Display for IssueIdent {
 }
 
 /// Linear workflow state type. Linear groups states under one of these
-/// types; the `_open` filter selects everything that is not `completed`
+/// types; the `open` filter selects everything that is not `completed`
 /// or `canceled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
