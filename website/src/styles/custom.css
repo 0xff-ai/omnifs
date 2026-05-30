@@ -1,0 +1,56 @@
+/*
+  omnifs docs — custom theme tuning.
+  Brand: terminal-forward, monospace accents, deep ink + electric accent.
+*/
+
+:root {
+  /* Accent: electric blue-violet that reads well on dark terminals. */
+  --sl-color-accent-low: #1e1b4b;
+  --sl-color-accent: #6366f1;
+  --sl-color-accent-high: #c7d2fe;
+
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #eceef2;
+  --sl-color-gray-2: #c0c2c7;
+  --sl-color-gray-3: #888b96;
+  --sl-color-gray-4: #545861;
+  --sl-color-gray-5: #353841;
+  --sl-color-gray-6: #24272f;
+  --sl-color-black: #17181c;
+
+  /* Slightly wider content for path tables. */
+  --sl-content-width: 50rem;
+}
+
+/* Monospace for the site title — it's a filesystem, after all. */
+.site-title {
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo,
+    Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Path-like inline code gets a subtle tint so /github/owner/repo pops. */
+:not(pre) > code {
+  font-variant-ligatures: none;
+}
+
+/* Center Mermaid diagrams and give them breathing room. */
+.mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1.5rem 0;
+}
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Tables are heavily used for path → content mappings; make them tidy. */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+}
+.sl-markdown-content th {
+  white-space: nowrap;
+}
