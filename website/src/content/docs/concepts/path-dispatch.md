@@ -1,6 +1,6 @@
 ---
 title: Path dispatch and listing
-description: How a path suffix selects a handler — literal vs capture vs rest precedence, validators that participate in match candidacy, auto-navigable prefixes, and the lookup vs readdir authority split.
+description: How a path selects a handler — literal vs capture vs rest precedence, validators in match candidacy, auto-navigable prefixes, lookup vs readdir authority.
 ---
 
 Once the host has stripped a mount prefix from a [protocol path](/concepts/path-space/), the remaining suffix must select one of the provider's registered handlers. This page describes how that choice is made: how candidate routes are ranked, how per-segment validators participate in matching, why an auto-navigable directory exists without a stub handler, and how the authority for "what exists" is split between `lookup_child` and `list_children`.

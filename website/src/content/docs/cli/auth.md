@@ -3,14 +3,16 @@ title: Authentication
 description: Manage provider credentials from the CLI — omnifs auth login, logout, import, and status.
 ---
 
-The `omnifs auth` group manages provider credentials in the host credential
-store. omnifs picks one credential backend at startup: the OS keychain, or a file
+The `omnifs auth` group manages mount credentials in the host credential store.
+omnifs picks one credential backend at startup: the OS keychain, or a file
 fallback at `~/.omnifs/data/credentials.json`. Both the `auth` write path and the
-`omnifs up` read path point at the same store, so logging in once is enough for
-the container to pick up the credential at launch.
+`omnifs up` read path point at the same store, so authenticating once is enough
+for the container to pick up the credential at launch.
 
-Credentials are keyed by `provider:scheme:account` (for example
-`github:pat:default`). They live on the host and are materialized into a
+The auth subcommands operate on a **mount name** (the name you gave a mount with
+[`omnifs init`](/cli/onboarding-config/)), defaulting to the provider's default
+mount when omitted. Credentials are keyed by `provider:scheme:account` (for
+example `github:pat:default`). They live on the host and are materialized into a
 per-session directory when `omnifs up` starts the container; they are never baked
 into the image.
 
@@ -21,70 +23,68 @@ omnifs auth <login|logout|import|status> [flags]
 ## `omnifs auth login`
 
 ```bash
-omnifs auth login <provider> [--device]
+omnifs auth login [<mount>] [flags]
 ```
 
-Logs in to a provider via OAuth. By default it uses a loopback redirect when one
-is available and falls back to the device flow otherwise. The resulting
-credential is written to the host store. The device flow auto-copies the user
-code, shows a countdown, and opens the verification URL for you.
+Logs in to a configured mount through its provider's OAuth flow and writes the
+resulting credential to the host store. The mount defaults to the provider's
+default mount if omitted.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<provider>` | Provider to authenticate (e.g. `github`, `linear`). |
-| `--device` | Force the device flow even when a loopback redirect is available. |
+| `<mount>` | Mount name to authenticate. Defaults to the provider's default mount. |
 | `--no-browser` | Print the OAuth URL instead of opening a browser. |
+| `--scope <SCOPE>` | OAuth scope to request. Repeat for multiple scopes. |
 
 ```bash
 omnifs auth login github
-omnifs auth login github --device
-omnifs auth login linear --no-browser
+omnifs auth login github --no-browser
+omnifs auth login github --scope repo --scope read:org
 ```
 
 ## `omnifs auth logout`
 
 ```bash
-omnifs auth logout <provider> [-y]
+omnifs auth logout [<mount>]
 ```
 
-Removes the stored credential for a provider. It derives the credential key for
-the provider and deletes the matching entry from the host store.
+Removes the stored credential for a mount. It resolves the mount's credential
+target and deletes the matching entry from the host store.
 
-| Flag / argument | Purpose |
-|-----------------|---------|
-| `<provider>` | Provider to log out (e.g. `github`). |
-| `-y`, `--yes` | Skip the confirmation prompt. |
+| Argument | Purpose |
+|----------|---------|
+| `<mount>` | Mount name whose stored credential should be removed. Defaults to the provider's default mount. |
 
 ```bash
 omnifs auth logout github
-omnifs auth logout github -y
 ```
 
 ## `omnifs auth import`
 
 ```bash
-omnifs auth import <provider> [flags]
+omnifs auth import [<mount>] [flags]
 ```
 
-Imports an existing token into the host store, for providers that issue personal
-access tokens or API keys instead of running an OAuth flow. The token is read
-from stdin or a named environment variable — never from a command argument.
+Imports an existing token into the host store for a mount, for providers that
+issue personal access tokens or API keys instead of running an OAuth flow. The
+token is read from stdin or a named environment variable — never from a command
+argument.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<provider>` | Provider to import a token for (e.g. `github`). |
-| `--token` | Read the token from stdin. |
+| `<mount>` | Mount name to import a token for. Defaults to the provider's default mount. |
+| `--token <-> ` | Read the token from stdin (pass `-`). |
 | `--token-env <VAR>` | Read the token from the named environment variable. |
-| `--scheme <SCHEME>` | Credential scheme (e.g. `pat`, `bearer`). Provider default if omitted. |
+| `--scheme <KEY>` | Scheme key to import under. Defaults to the provider's static scheme. |
 
 ```bash
-echo "$MY_TOKEN" | omnifs auth import github --token
+echo "$MY_TOKEN" | omnifs auth import github --token -
 omnifs auth import github --token-env GITHUB_TOKEN --scheme pat
 ```
 
 :::caution
-There is no `--token <value>` form. Use `--token` (stdin) or `--token-env <VAR>`
-so secrets never land in shell history.
+Tokens are accepted only via `--token -` (stdin) or `--token-env <VAR>`. There is
+no `--token <value>` form, so secrets never land in shell history.
 :::
 
 ## `omnifs auth status`
@@ -94,8 +94,8 @@ omnifs auth status [--json]
 ```
 
 Shows credential status per configured mount. It enumerates mounts, resolves each
-mount's credential key, and reports whether a credential is present, its source
-(host store, `token_env`, or `token_file`), and its scheme.
+mount's credential, and reports whether one is present, its source (host store,
+`token_env`, or `token_file`), and its scheme.
 
 | Flag | Purpose |
 |------|---------|

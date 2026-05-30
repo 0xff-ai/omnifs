@@ -32,7 +32,7 @@ just providers-build   # release-build providers and tools for wasm32-wasip2
 ```
 
 `just check` runs the full gate in sequence: `fmt-check`, `host-clippy`,
-`test` (which builds provider WASM then runs host tests), `providers-check`,
+`test` (which builds provider WASM, then runs host tests), `providers-check`,
 `npm-validate`, and `scripts-test`. The host clippy/test lanes **exclude** the
 WASM packages, then `providers-check` runs them under the WASM target:
 
