@@ -1,0 +1,74 @@
+---
+title: omnifs
+description: The universe, mounted on your filesystem. GitHub, DNS, arXiv and more as paths you can cd, ls, cat, and grep — for humans and agents alike.
+template: splash
+hero:
+  tagline: The universe, mounted on your filesystem. GitHub repos, DNS records, arXiv papers and more as paths you can <code>cd</code>, <code>ls</code>, <code>cat</code>, and <code>grep</code>.
+  image:
+    light: ../../assets/logo-light.svg
+    dark: ../../assets/logo-dark.svg
+  actions:
+    - text: Get started
+      link: /getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Browse providers
+      link: /providers/
+      icon: open-book
+      variant: secondary
+    - text: For agents
+      link: /guides/agents/
+      icon: rocket
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+omnifs mirrors external services into your local filesystem. Plan 9 was right,
+just 40 years early: **everything is a file**. The world moved to APIs; omnifs
+moves it back to paths, for humans and agents alike.
+
+```text
+> cd /github/torvalds/linux
+> ls
+actions  issues  pulls  repo
+> cat /dns/cloudflare.com/A
+104.16.133.229
+> cat /arxiv/papers/1706.03762/metadata.json | jq .title
+"Attention Is All You Need"
+```
+
+:::caution[Very alpha]
+omnifs is early software under active development. The runtime mount is
+Linux-only today (macOS and Windows are planned); the CLI runs on macOS and
+Linux and drives a Linux container in both cases.
+:::
+
+## Start here
+
+<CardGrid stagger>
+  <Card title="What is omnifs" icon="information">
+    Understand the projected-filesystem model and the everything-is-a-file
+    thesis. [Read the introduction](/introduction/what-is-omnifs/)
+  </Card>
+  <Card title="Quickstart" icon="rocket">
+    Install the CLI, authenticate a provider, and browse GitHub as files in a
+    few minutes. [Get started](/getting-started/quickstart/)
+  </Card>
+  <Card title="Providers" icon="puzzle">
+    See every domain omnifs projects today — GitHub, DNS, arXiv, databases,
+    Docker, Linear. [Browse the catalog](/providers/)
+  </Card>
+  <Card title="For agents" icon="rocket">
+    No SDK, no auth flow, no pagination. If you can read a file, you can read
+    the world. [Use omnifs with agents](/guides/agents/)
+  </Card>
+  <Card title="How it works" icon="setting">
+    Host, WASM providers, and the callout runtime — the three-layer
+    architecture. [See the design](/introduction/how-it-works/)
+  </Card>
+  <Card title="Build a provider" icon="seti:rust">
+    Project your own domain into the filesystem with the provider SDK.
+    [Start building](/building-providers/overview/)
+  </Card>
+</CardGrid>
