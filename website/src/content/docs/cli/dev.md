@@ -31,16 +31,12 @@ In one flow, `omnifs dev`:
 | Flag | Purpose |
 |------|---------|
 | `-y`, `--yes` | Skip the confirmation prompt before building and launching. |
-| `--image <TAG>` | Image tag to build and run. Defaults to `omnifs:<short-sha>-dev`. |
-| `--no-build` | Skip the image build and reuse an existing tag. |
-| `--container-name <NAME>` | Container name. Defaults to `OMNIFS_CONTAINER_NAME`, then `omnifs`. |
 
 ## Examples
 
 ```bash
 omnifs dev           # build the dev image, materialize secrets/fixtures, launch
 omnifs dev -y        # same, without the confirmation prompt
-omnifs dev --no-build # reuse the last-built dev image
 ```
 
 Once it is running, the standard lifecycle verbs work against the dev container:

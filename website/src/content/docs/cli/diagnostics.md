@@ -9,32 +9,30 @@ shell.
 ## `omnifs doctor`
 
 ```bash
-omnifs doctor [flags]
+omnifs doctor
 ```
 
-Probes the environment and auth state and prints a table of results. It runs six
-probes in dependency order and does not attempt any auto-fix — it diagnoses, you
-remediate.
+Probes the environment and auth state and prints each result with a status glyph
+(`✓` ok, `⚠` warning, `✗` failure, `·` skipped). It runs in dependency order and
+does not attempt any auto-fix — it diagnoses, you remediate. It takes no flags.
 
 Probes, in order:
 
 | Probe | Checks |
 |-------|--------|
-| Docker reachable | The Docker daemon responds to a ping. |
-| Runtime image present | The runtime image is cached locally; warns (not fails) if it will be pulled on `up`. Skipped if Docker is unreachable. |
-| Mount configs valid | Configured mounts parse and load. |
-| Auth ready | Each mount has a usable credential. Reuses the same loaders as `status`. |
-| SSH agent | An SSH agent is available (used for git clones). |
-| Network | Best-effort connectivity check; never reported as a failure. |
-
-| Flag | Purpose |
-|------|---------|
-| `--json` | Emit a machine-readable payload. |
-| `--container-name <NAME>` | Container name. Defaults to `OMNIFS_CONTAINER_NAME`, then `omnifs`. |
+| docker reachable | The Docker daemon responds to a ping. |
+| fuse | `/dev/fuse` exists and is openable (Linux only; skipped on macOS). |
+| image cached | The runtime image is present locally; warns (not fails) if it will be pulled on `up`. Skipped if Docker is unreachable. |
+| providers discovered | Built-in and on-disk providers are found. |
+| keychain backend | The OS keychain is available, else warns and notes the file fallback. |
+| ssh-agent | `SSH_AUTH_SOCK` is set and the socket exists (used for git clones). |
+| config file | Reports the `config.toml` path, or that the default is in effect. |
+| mount configs valid | Each configured mount parses and loads. |
+| auth ready (per mount) | Each valid mount has a usable credential. Reuses the same loaders as `status`. |
+| network | Best-effort `ghcr.io` reachability; only ever warns, never fails. |
 
 ```bash
 omnifs doctor
-omnifs doctor --json
 ```
 
 Exit codes: `0` if everything is green or skipped, `1` if any probe is red, `2`
@@ -43,24 +41,22 @@ if there are no failures but at least one warning.
 ## `omnifs version`
 
 ```bash
-omnifs version [--detail] [--json]
+omnifs version [--detail]
 ```
 
 Prints version information. With no flags it prints one line, the CLI version.
 `--detail` expands it with the resolved runtime image, container name, credential
-store backend, and provider count.
+store backend, provider count, and resolved directories.
 
 | Flag | Purpose |
 |------|---------|
-| `--detail` | Show image, container, store backend, and provider count. |
-| `--json` | Emit a machine-readable payload. |
+| `--detail` | Show image, container, store backend, provider count, and dirs. |
 
 ```bash
 omnifs version
 # omnifs 0.2.0
 
 omnifs version --detail
-omnifs version --json
 ```
 
 :::note

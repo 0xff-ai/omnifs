@@ -9,30 +9,37 @@ fallback at `~/.omnifs/data/credentials.json`. Both the `auth` write path and th
 `omnifs up` read path point at the same store, so authenticating once is enough
 for the container to pick up the credential at launch.
 
-The auth subcommands operate on a **mount name** (the name you gave a mount with
-[`omnifs init`](/cli/onboarding-config/)), defaulting to the provider's default
-mount when omitted. Credentials are keyed by `provider:scheme:account` (for
-example `github:pat:default`). They live on the host and are materialized into a
-per-session directory when `omnifs up` starts the container; they are never baked
-into the image.
+The auth subcommands operate on a **mount name** — the name you gave a mount with
+[`omnifs init`](/cli/onboarding-config/). Credentials are keyed by
+`provider:scheme:account` (for example `github:pat:default`). They live on the
+host and are materialized into a per-session directory when `omnifs up` starts the
+container; they are never baked into the image.
 
 ```bash
-omnifs auth <login|logout|import|status> [flags]
+omnifs auth <login|logout|import|status|refresh|scopes> [flags]
 ```
+
+The `auth` group accepts directory overrides that apply to every subcommand:
+
+| Flag | Purpose |
+|------|---------|
+| `--mounts-dir <DIR>` | Override the mount-configs directory. |
+| `--providers-dir <DIR>` | Override the provider WASM directory. |
+| `--credentials-file <FILE>` | Override the credential file fallback path. |
 
 ## `omnifs auth login`
 
 ```bash
-omnifs auth login [<mount>] [flags]
+omnifs auth login <mount> [flags]
 ```
 
 Logs in to a configured mount through its provider's OAuth flow and writes the
-resulting credential to the host store. The mount defaults to the provider's
-default mount if omitted.
+resulting credential to the host store. The flow is loopback-redirect by default,
+falling back to manual-code or device-code as the provider's scheme dictates.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<mount>` | Mount name to authenticate. Defaults to the provider's default mount. |
+| `<mount>` | Mount name to authenticate (required). |
 | `--no-browser` | Print the OAuth URL instead of opening a browser. |
 | `--scope <SCOPE>` | OAuth scope to request. Repeat for multiple scopes. |
 
@@ -45,24 +52,28 @@ omnifs auth login github --scope repo --scope read:org
 ## `omnifs auth logout`
 
 ```bash
-omnifs auth logout [<mount>]
+omnifs auth logout <mount> [--revoke]
 ```
 
 Removes the stored credential for a mount. It resolves the mount's credential
-target and deletes the matching entry from the host store.
+target and deletes the matching entry from the host store. With `--revoke`, and
+when the provider's OAuth scheme supports it, it also revokes the token upstream
+before deleting the local copy.
 
-| Argument | Purpose |
-|----------|---------|
-| `<mount>` | Mount name whose stored credential should be removed. Defaults to the provider's default mount. |
+| Flag / argument | Purpose |
+|-----------------|---------|
+| `<mount>` | Mount name whose stored credential should be removed (required). |
+| `--revoke` | Also revoke the access token upstream, if the provider supports it. |
 
 ```bash
 omnifs auth logout github
+omnifs auth logout github --revoke
 ```
 
 ## `omnifs auth import`
 
 ```bash
-omnifs auth import [<mount>] [flags]
+omnifs auth import <mount> [flags]
 ```
 
 Imports an existing token into the host store for a mount, for providers that
@@ -72,7 +83,7 @@ argument.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<mount>` | Mount name to import a token for. Defaults to the provider's default mount. |
+| `<mount>` | Mount name to import a token for (required). |
 | `--token <-> ` | Read the token from stdin (pass `-`). |
 | `--token-env <VAR>` | Read the token from the named environment variable. |
 | `--scheme <KEY>` | Scheme key to import under. Defaults to the provider's static scheme. |
@@ -111,3 +122,12 @@ Mounts can also reference external secrets directly through `token_env` or
 `token_file` in their config, instead of the host store. `auth status` reports
 those as externally configured.
 :::
+
+## Maintenance subcommands
+
+Two further subcommands help maintain OAuth credentials:
+
+- `omnifs auth refresh <mount>` — exchange the stored refresh token for a fresh
+  access token and rewrite the stored credential.
+- `omnifs auth scopes <mount>` — print the scopes the provider declares against
+  the scopes actually granted on the stored credential.

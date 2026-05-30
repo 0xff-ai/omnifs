@@ -68,7 +68,7 @@ Built-in providers include `github`, `dns`, `sqlite`, and `hn`.
 omnifs init github                      # interactive, OAuth by default
 omnifs init github --as work-gh         # custom mount name
 omnifs init linear --token-env LINEAR_API_KEY
-echo "$DB_TOKEN" | omnifs init sqlite --token -
+echo "$TOKEN" | omnifs init linear --token -
 ```
 
 :::caution
