@@ -74,6 +74,7 @@ export default defineConfig({
         {
           label: "Guides",
           items: [
+            { label: "Overview", slug: "guides" },
             { label: "Browsing the filesystem", slug: "guides/browsing" },
             { label: "Working with GitHub", slug: "guides/github" },
             { label: "Querying DNS", slug: "guides/dns" },
