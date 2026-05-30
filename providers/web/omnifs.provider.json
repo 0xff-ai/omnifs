@@ -1,0 +1,19 @@
+{
+  "id": "web",
+  "displayName": "Web",
+  "provider": "omnifs_provider_web.wasm",
+  "defaultMount": "web",
+  "capabilities": [
+    {
+      "kind": "domain",
+      "value": "*",
+      "why": "Fetch arbitrary user-requested URLs so any page can be rendered to Markdown.",
+      "dynamic": true
+    },
+    {
+      "kind": "memoryMb",
+      "value": 128,
+      "why": "Bound provider memory while parsing and converting large HTML documents."
+    }
+  ]
+}
