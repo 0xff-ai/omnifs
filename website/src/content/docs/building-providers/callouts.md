@@ -1,64 +1,81 @@
 ---
 title: Callouts (Suspend / Resume)
-description: How a handler suspends with callouts and the host resumes it — the request/response protocol behind cx.fetch and friends.
+description: How an async handler suspends with callouts and the host resumes it — the request/response protocol behind cx.http() and friends.
 ---
 
-A provider does no I/O itself. When a handler needs the network, a git clone, or an archive, it emits a **callout**: a request for the host to do the work. The host runs the callout, then resumes the handler with the result. This is the suspend/resume protocol, and it is strictly request/response — there are no fire-and-forget callouts, and a completed return never carries trailing callouts.
+A provider does no I/O itself. When a handler needs the network, a git clone, or an archive, it issues a **callout**: a request for the host to do the work. The handler suspends; the host runs the callout and resumes the handler with the result. This is the suspend/resume protocol, and it is strictly request/response — there are no fire-and-forget callouts, and a completed return never carries trailing callouts.
 
 ## The handler-facing API
 
-You rarely touch the raw protocol. The SDK's async runtime makes callouts look like ordinary synchronous method calls on `Cx`:
+You rarely touch the raw protocol. The SDK's async runtime makes callouts look like ordinary `.await`s on `cx`:
 
 ```rust
-#[file("{domain}/{record_type}")]
-fn record_file(domain: &str, record_type: &str, cx: &Cx) -> Result<FileContent> {
+#[file("/{domain}/{record_type}")]
+async fn record_file(cx: &Cx<State>, domain: DomainName, record_type: String)
+    -> Result<FileContent> {
     let url = format!("https://dns.google/resolve?name={domain}&type={record_type}");
-    let response = cx.fetch(Request::get(url))?;   // <- suspends here
-    if !response.is_success() {
-        return Err(ProviderError::internal(format!("query failed: {}", response.status())));
-    }
-    Ok(FileContent::new(response.body().to_vec()))
+    let resp = cx.http().get(url).send().await?;   // <- suspends here
+    let resp = resp.error_for_status()?;            // 4xx/5xx -> ProviderError
+    Ok(FileContent::bytes(resp.body().to_vec()))
 }
 ```
 
-`cx.fetch(..)` returns a `Response`, but under the hood the handler suspended after issuing a `fetch` callout, the host performed the HTTP request, and the handler resumed with the response filled in. The continuation is keyed by a correlation id the host supplied with the original browse call.
+`cx.http().get(url).send().await` yields an `http::Response<Vec<u8>>`, but under the hood the handler suspended after issuing a `fetch` callout, the host performed the HTTP request, and the SDK resumed the handler with the response. The continuation is keyed by the correlation id the host supplied with the original browse call.
 
-## The callout methods on `Cx`
+## The callout builders on `Cx`
 
-| Method | Callout | Result |
+| Builder | Callout | Result |
 | --- | --- | --- |
-| `cx.fetch(Request)` | `fetch(http-request)` | `Response` (bytes cross the WIT) |
-| `cx.fetch_blob(Request, cache_key)` | `fetch-blob` | `Blob` handle (bytes stay host-side) |
-| `cx.open_archive(blob, format, strip_prefix)` | `open-archive` | a `tree` handle |
-| `cx.git_open(clone_url, cache_key)` | `git-open-repo` | a `tree` handle |
-| `cx.read_blob(blob, offset, len)` | `read-blob` | `Vec<u8>` (a bounded range) |
+| `cx.http().get(url).send()` / `.post(url)` | `fetch(http-request)` | `http::Response<Vec<u8>>` (bytes cross the WIT) |
+| `cx.http().get(url).into_blob().with_cache_key(k).send()` | `fetch-blob` | `BlobRef` (bytes stay host-side) |
+| `cx.git().open_repo(cache_key, clone_url)` | `git-open-repo` | `GitRepoInfo` (`.tree`, `.repo`) |
+| `cx.archives().open(blob).format(..).send()` | `open-archive` | `TreeRef` |
+| `cx.blob(id).read()` / `.read_range(off, len)` | `read-blob` | `Vec<u8>` (a bounded range) |
 
-Use `fetch_blob` for large bodies you will serve verbatim or mount as a tree — the body lands in the host's disk-backed blob cache and only a handle plus metadata crosses the boundary. Use `fetch` for payloads you must parse in the provider. Reusing the same `cache_key` from the same provider deduplicates the fetch.
+The HTTP builder is chainable: `.header(name, value)`, `.body(bytes)`, and `.json(&value)` (sets the body and `Content-Type`). Invalid headers and serialization failures are recorded as a sticky error surfaced at `.send().await`. Use `ResponseExt::error_for_status()` for default 4xx/5xx mapping, or inspect the response directly for custom handling — the SDK already maps `429` with `retry-after` to a retryable `ProviderError::rate_limited`, and providers commonly add their own check (GitHub maps `x-ratelimit-remaining: 0` and abuse-detection bodies to rate-limited).
+
+Use `into_blob()` for large bodies you will serve verbatim or mount as a tree — the body lands in the host's disk-backed blob cache and only a handle plus metadata crosses the boundary. `into_blob()` requires a cache key; reusing the same key from the same provider deduplicates the fetch.
 
 ```rust
 // Large file: keep bytes host-side, serve later as a blob.
-let blob = cx.fetch_blob(Request::get(pdf_url), format!("pdf-{id}"))?;
-Ok(FileContent::blob(blob.id()))
+let blob = cx.http().get(pdf_url).into_blob().with_cache_key(format!("pdf-{id}")).send().await?;
+Ok(FileContent::blob_with_attrs(
+    FileAttrs::new(Size::Exact(blob.size), Stability::Immutable),
+    blob.id(),
+))
 
-// Cloneable tree: hand off to a bind mount.
-let tree = cx.git_open(clone_url, cache_key)?;
-Ok(List::subtree(path, tree))
+// Cloneable tree: hand off to a bind mount from a #[treeref] handler.
+let repo = cx.git().open_repo(cache_key, clone_url).await?;
+Ok(TreeRef::new(repo.tree))
 ```
 
-## Multiple callouts in one handler
+## Multiple callouts
 
-A handler may issue several callouts; each one suspends and resumes independently. Sequential calls become sequential suspend/resume cycles:
+Sequential awaits become sequential suspend/resume cycles:
 
 ```rust
-let repo = cx.fetch(Request::get(repo_url))?.json::<RepoMeta>()?;   // cycle 1
-let issues = cx.fetch(Request::get(issues_url))?.json::<Vec<Issue>>()?; // cycle 2
+let repo = cx.github_json::<RepoMeta>(format!("/repos/{owner}/{repo}")).await?;       // cycle 1
+let issues = cx.github_json::<Vec<Issue>>(format!("/repos/{owner}/{repo}/issues")).await?; // cycle 2
 ```
 
-If two requests are independent, prefer fetching once and projecting everything (see [Project everything](./project-everything/)) over many round trips.
+For independent requests, `join_all([..])` batches several callout futures into a **single** yield/resume round trip so the host runs them in parallel — this is how the DNS provider's `all` record fetches every type at once:
+
+```rust
+use omnifs_sdk::prelude::join_all;
+
+let mut requests = Vec::new();
+for record_type in SupportedRecordType::common() {
+    let url = cx.state(|s| doh::query_url(&s.resolvers, None, &domain, *record_type))?;
+    requests.push(cx.dns_message_get(url).send());
+}
+let responses = join_all(requests).await;
+```
+
+Each child future must belong to the same `Cx` and yield exactly one callout per suspension.
 
 ## The protocol underneath
 
-Each browse export returns a `provider-step`: either `returned(provider-return)` — a terminal answer plus host effects — or `suspended(list<callout>)` — a non-empty batch the host must run. The host runs the batch and calls `resume(id, results)` with one `callout-result` per callout, in order. The provider's stored continuation picks up where it left off and runs to the next suspension or to a return.
+Each browse export returns a `provider-step`: either `returned(provider-return)` — a terminal answer plus host effects — or `suspended(list<callout>)` — a non-empty batch the host must run. The host runs the batch and calls `resume(id, results)` with one `callout-result` per callout, in order. The stored continuation picks up where it left off and runs to the next suspension or to a return.
 
 ```mermaid
 sequenceDiagram
@@ -75,12 +92,12 @@ sequenceDiagram
 
 ## Errors and cancellation
 
-A callout can fail; the host delivers a `callout-error` (network, timeout, rate-limited, and so on) which surfaces in your handler as a `Result::Err`. Propagate it with `?` or map it to a more specific `ProviderError`. The host may also `cancel(id)` an in-flight operation (for example, the user interrupted the read); the SDK drops the continuation.
+A callout can fail; the host delivers a `callout-error` (network, timeout, rate-limited, …) which surfaces in your handler as the `Err` arm of the awaited `Result`. Propagate it with `?` or map it to a more specific `ProviderError`. The host may also `cancel(id)` an in-flight operation (for example, the user interrupted the read); the SDK drops the continuation.
 
 :::caution
-`initialize()` is terminal-only — it has no correlation id and cannot suspend. Never issue a callout during config parsing. Do all I/O inside browse handlers, where suspend/resume is available.
+`init` / `initialize()` is terminal-only — it has no correlation id and cannot suspend. Never issue a callout during init. Do all I/O inside browse handlers, where suspend/resume is available.
 :::
 
 :::note
-Callouts are strictly request/response. If something is conceptually one-way, it does not belong as a callout. The WIT also reserves streaming and websocket callouts (`stream-*`, `ws-*`); the SDK surfaces the synchronous `fetch`/`git_open`/`fetch_blob`/`open_archive`/`read_blob` set today.
+Callouts are strictly request/response. If something is conceptually one-way, it does not belong as a callout. The WIT also reserves streaming and websocket callouts (`stream-*`, `ws-*`); the SDK surfaces the `http`, `git`, `archives`, and `blob` builders today.
 :::

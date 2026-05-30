@@ -12,60 +12,62 @@ omnifs has two distinct mechanisms whose names both involve "subtree". They solv
 
 ## Typed subtrees (`#[subtree]` + `#[bind]`)
 
-A typed subtree groups all routes that share a parsed prefix into one Rust type. A `#[bind]` handler parses the prefix captures and constructs the value; a `#[omnifs_sdk::subtree] impl` block holds the inner handlers, whose patterns are **relative to the subtree root** and whose methods take `&self`.
+A typed subtree groups all routes that share a parsed prefix into one Rust type. A `#[bind]` handler parses and validates the prefix captures and constructs the value; a `#[omnifs_sdk::subtree] impl` block holds the inner handlers, whose patterns are **relative to the subtree root** and whose context is `&BindCtx<'_, State, B>`. The parsed prefix is read back through `cx.bindings()`.
 
 ```rust
-// tables.rs — parse the {name} prefix, validate, build a Table.
-#[omnifs_sdk::handlers(state = State)]
-impl Tables {
+// tables.rs — parse the {name} prefix, build a TableSubtree.
+pub struct TableHandlers;
+
+#[handlers]
+impl TableHandlers {
     #[dir("/tables")]
-    async fn tables(cx: Cx<State>) -> Result<Listing> {
-        let names = cx.state(|s| s.backend.borrow_mut().table_names())?;
-        Ok(Listing::complete(names.into_iter().map(Entry::dir).collect::<Vec<_>>()))
+    fn list(cx: &DirCx<State>) -> Result<Projection> {
+        let names = cx.state(|s| s.backend.borrow().list_tables())
+            .map_err(|e| ProviderError::internal(format!("list tables: {e}")))?;
+        let mut p = Projection::new();
+        for name in names { p.dir(name); }
+        p.page(PageStatus::Exhaustive);
+        Ok(p)
     }
 
     #[bind("/tables/{name}")]
-    async fn table(cx: Cx<State>, name: String) -> Result<Table> {
-        let exists = cx.state(|s| s.backend.borrow_mut().table_exists(&name))?;
-        if !exists {
-            return Err(ProviderError::not_found(format!("no such table: {name}")));
-        }
-        Ok(Table::new(name))
+    fn table(_cx: &Cx<State>, name: TableName) -> Result<TableSubtree> {
+        Ok(TableSubtree { name: name.into_inner() })
     }
 }
 ```
 
 ```rust
 // table_subtree.rs — everything under one table. Patterns are relative
-// to /tables/{name}. Methods take &self.
-pub(crate) struct Table { name: String }
-
-impl Table {
-    pub fn new(name: String) -> Self { Self { name } }
+// to /tables/{name}. Context is BindCtx; the prefix is in cx.bindings().
+pub struct TableSubtree {
+    pub name: String,
 }
 
 #[subtree]
-impl Table {
+impl TableSubtree {
     #[dir("/")]
-    async fn files(&self, cx: Cx<State>) -> Result<Listing> {
-        Ok(Listing::complete(vec![
-            Entry::file("schema.sql", deferred()),
-            Entry::file("count.txt", deferred()),
-            Entry::file("sample.json", deferred()),
-        ]))
+    fn root(cx: &BindCtx<'_, State, TableSubtree>) -> Result<Projection> {
+        ensure_table_exists(cx)?;
+        // Sibling #[file] handlers project their own entries; marking the
+        // listing exhaustive lets the host satisfy negative lookups locally.
+        let mut p = Projection::new();
+        p.page(PageStatus::Exhaustive);
+        Ok(p)
     }
 
     #[file("/schema.sql")]
-    async fn schema(&self, cx: Cx<State>) -> Result<FileContent> {
-        let sql = cx.state(|s| s.backend.borrow_mut().table_schema(&self.name))?;
-        Ok(FileContent::new(sql))
+    fn schema_sql(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
+        let table = cx.bindings().name.clone();
+        let sql = cx.state(|s| s.backend.borrow().table_create_sql(&table))
+            .map_err(|e| ProviderError::internal(format!("read schema: {e}")))?
+            .ok_or_else(|| ProviderError::not_found(format!("table not found: {table}")))?;
+        Ok(FileContent::bytes(sql))
     }
 }
 ```
 
-Inner handlers read the parsed prefix from `&self` (`self.name`) without re-parsing it on each route. The empty pattern `#[dir("/")]` is the subtree root — what the user sees when they `ls` the bound directory.
-
-The `#[subtree]` attribute accepts an optional `state =` argument when the impl's handlers need a different state type than the default; most subtrees inherit the provider state through `Cx<State>` in their handler signatures.
+`cx.bindings()` returns `&TableSubtree`, so `self.name` data is available to every route without re-parsing. `BindCtx` derefs to `Cx<State>`, so `cx.http()`, `cx.git()`, and `cx.state()` work directly. The empty pattern `#[dir("/")]` is the subtree root — what the user sees when they `ls` the bound directory.
 
 ### How dispatch flows
 
@@ -74,12 +76,12 @@ For a request to `/tables/Track/schema.sql`:
 ```mermaid
 flowchart TD
     R["list/lookup/read for /tables/Track/schema.sql"] --> B["#[bind(\"/tables/{name}\")] matches 'Track'"]
-    B --> C["construct Table { name: 'Track' } (validates existence)"]
-    C --> I["dispatch suffix '/schema.sql' through Table's inner registry"]
-    I --> F["#[file(\"/schema.sql\")] on Table -> schema(&self, cx)"]
+    B --> C["construct TableSubtree { name: 'Track' }"]
+    C --> I["dispatch suffix '/schema.sql' through TableSubtree's inner registry"]
+    I --> F["#[file(\"/schema.sql\")] on TableSubtree -> schema_sql(cx)"]
 ```
 
-The host parses the prefix once, builds the value once, then runs the suffix through the inner route table using the same precedence rules as the top level. A `#[bind]` that returns `not-found` (like a missing table) fails fast at bind time.
+The host parses the prefix once, builds the value once, then runs the suffix through the inner route table using the same precedence rules as the top level. A `#[bind]` handler can validate cheaply (a `FromStr` on the capture) and defer existence checks to the inner handlers, or return `not-found` at bind time.
 
 ## Clone / archive handoff (`#[treeref]`)
 
@@ -87,21 +89,24 @@ Use `#[treeref]` when the data behind a path is a genuine directory tree the hos
 
 ```rust
 #[treeref("/{owner}/{repo}/repo")]
-async fn repo_tree(cx: Cx<State>, owner: String, repo: String) -> Result<TreeRef> {
-    let repo_id = repo::ensure_repo(&cx, &owner, &repo).await?;
-    repo::open_tree(&cx, repo_id).await?;       // git-open-repo callout
-    Ok(TreeRef::new(repo_id.raw()))
+async fn repo_tree(cx: &Cx<State>, owner: OwnerName, repo: RepoName) -> Result<TreeRef> {
+    let repo_id = RepoId::new(&owner, &repo);
+    let repo = cx.git()
+        .open_repo(
+            format!("github.com/{repo_id}"),          // cache key
+            format!("git@github.com:{repo_id}.git"),  // clone URL
+        )
+        .await?;                                       // git-open-repo callout
+    Ok(TreeRef::new(repo.tree))
 }
 ```
 
-The terminal is a `subtree(tree-ref)` result variant; the SDK also stages the host-side install so the bind mount appears at that path. From then on, reads under `repo/` are served by the host from the materialized clone, not by your provider.
-
-You get a `TreeRef` from `cx.git().open(clone_url, cache_key).await?` for repositories, or from `cx.archives().open(blob, format, strip_prefix).await?` for a stored archive blob.
+`cx.git().open_repo(cache_key, clone_url)` returns a `GitRepoInfo`; its `.tree` field is the `tree-ref` you wrap in `TreeRef::new`. For a stored archive blob, use `cx.archives().open(blob).format(ArchiveFormat::TarGz).strip_prefix("foo/").send().await?`, which returns a `TreeRef` directly. From then on, reads under that path are served by the host from the materialized tree, not by your provider.
 
 ## Choosing between them
 
 - The path is backed by a real cloneable/extractable tree → `#[treeref]`. You write nothing per-file; the host serves the bytes.
-- The path is a logical grouping you project yourself, but every route shares a parsed, validated prefix → `#[subtree]` + `#[bind]`. You still project each file, but the prefix is parsed once and shared via `&self`.
+- The path is a logical grouping you project yourself, but every route shares a parsed, validated prefix → `#[subtree]` + `#[bind]`. You still project each file, but the prefix is parsed once and read via `cx.bindings()`.
 - The prefix is trivial and routes do not share state → just use top-level `#[dir]`/`#[file]` with captures.
 
 :::note

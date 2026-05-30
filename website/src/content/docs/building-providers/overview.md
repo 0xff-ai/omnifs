@@ -7,17 +7,17 @@ An omnifs provider is a self-contained WebAssembly component that teaches the ho
 
 ## What a provider is
 
-A provider is a `wasm32-wasip2` component implementing the `omnifs:provider` WIT interface. The host loads it, calls `initialize()` once to build your provider state, then drives it through a small browse surface:
+A provider is a `wasm32-wasip2` component implementing the `omnifs:provider` WIT interface. The host loads it, calls `init` once to build your provider state, then drives it through a small browse surface:
 
 - `lookup_child(parent_path, name)` — resolve one child entry
 - `list_children(path)` — list a directory
 - `read_file(path)` — read exact file content
 
-You do not implement those WIT functions directly. You write **async path handlers** annotated with attributes like `#[dir]` and `#[file]`, grouped in `#[omnifs_sdk::handlers] impl` blocks. The SDK macros build a route table from your handlers and dispatch each browse call to the most specific match.
+You do not implement those WIT functions directly. You write **path handlers** annotated with attributes like `#[dir]` and `#[file]`, grouped in `#[omnifs_sdk::handlers] impl` blocks. The SDK macros build a route table from your handlers and dispatch each browse call to the most specific match. A single dir handler returning a `Projection` answers lookup, list, and read at once.
 
 ## Anatomy of a provider crate
 
-A provider crate has a manifest, a `Cargo.toml`, and a `src/` tree that is conventionally split per path family:
+A provider crate has a manifest, a `Cargo.toml`, and a `src/` tree conventionally split per path family:
 
 ```
 providers/dns/
@@ -26,8 +26,8 @@ providers/dns/
   src/
     lib.rs               # State + Config + module declarations
     provider.rs          # #[omnifs_sdk::provider(...)] entrypoint + init
-    root.rs              # #[handlers] impl Root { #[dir("/")] ... }
-    query.rs             # #[handlers] impl Query { #[dir("/{domain}")] ... }
+    root.rs              # #[handlers] impl RootHandlers { #[dir("/")] ... }
+    query.rs             # record lookup logic + handlers
 ```
 
 The provider declares three kinds of things:
@@ -45,51 +45,64 @@ struct State {
     resolvers: ResolverConfig,
 }
 
-// 2. Entrypoint (provider.rs): names state, config, and handler modules.
-struct DnsProvider;
-
-#[omnifs_sdk::provider(state = State, config = Config, mounts(crate::root, crate::query))]
+// 2. Entrypoint (provider.rs): names the manifest and handler modules.
+#[provider(
+    metadata = "omnifs.provider.json",
+    mounts(crate::root::RootHandlers, crate::query::QueryHandlers)
+)]
 impl DnsProvider {
-    fn init(config: Config) -> Result<Init<State>> {
-        Ok(Init::new(State { resolvers: ResolverConfig::from_config(&config)? }))
+    fn init(config: Config) -> Result<(State, ProviderInfo, RequestedCapabilities)> {
+        let resolvers = ResolverConfig::from_config(config.default_resolver, config.resolvers)?;
+        Ok((
+            State { resolvers },
+            ProviderInfo {
+                name: "dns-provider".into(),
+                version: "0.1.0".into(),
+                description: "DNS record browsing via DNS-over-HTTPS".into(),
+            },
+            RequestedCapabilities::empty(),
+        ))
     }
 }
 
-// 3. Handlers (query.rs): async fns answering path queries.
-#[omnifs_sdk::handlers(state = State)]
-impl Query {
+// 3. Handlers (root.rs): functions answering path queries.
+pub struct RootHandlers;
+
+#[handlers]
+impl RootHandlers {
     #[dir("/{domain}")]
-    async fn domain_dir(cx: Cx<State>, domain: DomainName) -> Result<Listing> {
-        let entries = SupportedRecordType::all()
-            .iter()
-            .map(|rt| Entry::file(rt.as_str(), placeholder_proj()))
-            .collect::<Vec<_>>();
-        Ok(Listing::complete(entries))
+    fn domain_dir(_domain: DomainName) -> Result<Projection> {
+        let mut p = Projection::new();
+        for name in record_names() {
+            p.deferred_file(name);
+        }
+        p.page(PageStatus::Exhaustive);
+        Ok(p)
     }
 
     #[file("/{domain}/{record_type}")]
-    async fn record_file(cx: Cx<State>, domain: DomainName, record_type: SupportedRecordType)
+    async fn record_file(cx: &Cx<State>, domain: DomainName, record_type: String)
         -> Result<FileContent> {
-        let records = doh::resolve(&cx, &domain, record_type).await?;
-        Ok(FileContent::new(render_records(&records)))
+        let bytes = read_record_bytes(cx, None, &domain, &record_type).await?;
+        Ok(FileContent::bytes(bytes))
     }
 }
 ```
 
 ## How it fits together
 
-Every handler takes `cx: Cx<State>` first, then the typed path captures (`domain`, `record_type`). When it needs data from the outside world, it `.await`s a method on `cx` such as `cx.http().get(url).send()`. Those awaits look ordinary but are **callouts**: the handler suspends, the host runs the request, and the SDK resumes the handler with the result. The provider never opens a socket, clones a repo, or touches a credential itself.
+A handler optionally takes a context first (`cx: &DirCx<State>` for dir handlers, `cx: &Cx<State>` for file handlers, `cx: &BindCtx<'_, State, B>` inside a subtree), then one typed parameter per captured path segment. When it needs data from the outside world, it `.await`s a method on `cx` such as `cx.http().get(url).send()`. Those awaits look ordinary but are **callouts**: the handler suspends, the host runs the request, and the SDK resumes the handler with the result. The provider never opens a socket, clones a repo, or touches a credential itself.
 
 ```mermaid
 flowchart TD
-    M["mount JSON config"] --> I["init(config) -> Init&lt;State&gt;"]
+    M["mount JSON config"] --> I["init(config) -> (State, ProviderInfo, Caps)"]
     I --> ST["provider State"]
     P["browse call: lookup / list / read"] --> R["route table from #[handlers]"]
-    R --> H["matched async handler(cx, captures)"]
+    R --> H["matched handler(cx, captures)"]
     ST --> H
     H -->|await| O["cx callout: http / git / archives / blob"]
     O -->|suspend + resume| H
-    H --> T["return: Listing / FileContent / TreeRef / subtree"]
+    H --> T["return: Projection / FileContent / TreeRef"]
     T --> HOST["host: caches result, applies effects, serves FUSE"]
 ```
 
@@ -108,5 +121,5 @@ flowchart TD
 - **[WIT reference](./wit-reference/)** — the raw `omnifs:provider` interface.
 
 :::note
-The host owns all caching and all I/O. A provider is effectively a pure async function from paths to projections plus a list of callouts it wants the host to run. Keep that mental model and the rest of this section follows.
+The host owns all caching and all I/O. A provider is effectively a pure function from paths to projections plus a list of callouts it wants the host to run. Keep that mental model and the rest of this section follows.
 :::

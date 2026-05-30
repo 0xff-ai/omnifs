@@ -50,8 +50,8 @@ omnifs init [<provider>] [flags]
 Interactive setup for a single mount. It resolves the provider's manifest,
 chooses a mount name, runs the appropriate auth flow (OAuth, token import, or
 no-auth), and writes the mount config to
-`~/.omnifs/config/mounts/<name>.json`. The provider is prompted for if omitted.
-Built-in providers include `github`, `dns`, `sqlite`, and `hn`.
+`~/.omnifs/config/mounts/<name>.json`. A picker is shown if the provider is
+omitted. Built-in providers include `github`, `linear`, `dns`, and `db` (SQLite).
 
 | Flag / argument | Purpose |
 |-----------------|---------|

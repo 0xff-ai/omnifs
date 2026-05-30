@@ -3,109 +3,117 @@ title: Auth Manifest
 description: The omnifs.provider.json auth block, how it is embedded in the WASM, and why providers never see raw credentials.
 ---
 
-A provider declares its authentication scheme in `omnifs.provider.json`. That manifest is embedded into the compiled WASM, and the host derives a runtime auth manifest from it. The crucial property: **a provider never receives raw credentials.** The host injects them into outbound callouts. Your handler code calls `cx.fetch(..)` with no token, and the host adds the right `Authorization` header before the request leaves the sandbox.
+A provider declares its authentication in `omnifs.provider.json`. That manifest is embedded into the compiled WASM, and the host derives a runtime auth manifest from it. The crucial property: **a provider never receives raw credentials.** The host injects them into outbound callouts. Your handler code issues `cx.http().get(url).send()` with no token, and the host adds the configured auth header before the request leaves the sandbox.
 
 ## Where the manifest lives
 
-`omnifs.provider.json` sits at the provider crate root next to `Cargo.toml`. Its top level identifies the provider and lists mounts; the `auth` block declares the scheme.
+`omnifs.provider.json` sits at the provider crate root next to `Cargo.toml`. Its top level identifies the provider and declares `capabilities`; the `auth` block declares how credentials are obtained and injected. The whole manifest is embedded into the WASM as the `omnifs.provider-metadata.v1` custom section, and the host and CLI read it back through `ProviderManifest::wasm_auth_manifest()` to build the runtime `AuthManifest`. The provider binary is self-describing — there is no separate registration step.
+
+## No auth
+
+Providers that talk only to public endpoints omit the `auth` block entirely. The DNS and arXiv providers do this; they declare `domain` capabilities but no `auth`.
+
+## The auth block
+
+The `auth` block has three parts: `inject` (where and how the token is attached to requests), `default` (which scheme to use unless overridden), and `schemes` (the named credential methods).
 
 ```json
-{
-  "schema": "omnifs.provider/v1",
-  "id": "github",
-  "name": "GitHub",
-  "description": "Browse GitHub repositories, issues, and pull requests as a filesystem.",
-  "mounts": [
-    { "mount": "github", "description": "GitHub repositories and metadata." }
-  ],
-  "auth": {
-    "scheme": "static-token",
-    "static-token": {
-      "scheme": "Bearer",
-      "env": "GITHUB_TOKEN"
+"auth": {
+  "inject": {
+    "domains": ["api.github.com"],
+    "header": "Authorization",
+    "prefix": "Bearer "
+  },
+  "default": "device",
+  "schemes": {
+    "pat": {
+      "type": "staticToken",
+      "description": "GitHub personal access token",
+      "creationUrl": "https://github.com/settings/tokens/new?scopes=read:user",
+      "validation": {
+        "method": "GET",
+        "url": "https://api.github.com/user",
+        "expectStatus": 200,
+        "extract": { "identity": "/login" }
+      }
+    },
+    "device": {
+      "type": "oauth",
+      "displayName": "GitHub OAuth device flow",
+      "clientId": "Ov23licogxMDzS47s9sF",
+      "scopes": [],
+      "flow": {
+        "kind": "deviceCode",
+        "authorizationEndpoint": "https://github.com/login/oauth/authorize",
+        "deviceAuthorizationEndpoint": "https://github.com/login/device/code",
+        "tokenEndpoint": "https://github.com/login/oauth/access_token"
+      }
     }
   }
 }
 ```
 
-This manifest is embedded into the WASM as the `omnifs.provider-metadata.v1` custom section. The host and CLI read it through `ProviderManifest::wasm_auth_manifest()` to build the runtime `AuthManifest`, so the provider binary is self-describing — there is no separate registration step.
+### `inject`
 
-## Auth schemes
+`domains` lists the hosts the token may be attached to — the host only injects credentials into callouts whose URL matches. `header` and `prefix` form the header the host writes, for example `Authorization: Bearer <token>`. A provider that uses a raw token with no prefix (like Linear) sets `"prefix": ""`.
 
-### `none`
+### `schemes`
 
-No credentials. The DNS and arXiv providers use this.
+Each scheme has a `type`:
 
-```json
-"auth": { "scheme": "none" }
-```
+- **`staticToken`** — a long-lived token (PAT or API key). `creationUrl` points the user at where to mint one; `validation` describes a request the host runs to verify the token and `extract` identity/workspace fields from the response (via JSON pointers).
+- **`oauth`** — an OAuth flow. `flow.kind` is `deviceCode` (device flow) or `pkceLoopback` (loopback flow); the endpoints and scopes are declared inline. The host runs the flow, stores the result in the credential store, and injects the access token per `inject`.
 
-### `static-token`
+### `default`
 
-A long-lived token presented on every request with a fixed scheme. `scheme` is the HTTP auth scheme (for example `Bearer`); `env` names the environment variable or secret the host reads the token from.
-
-```json
-"auth": {
-  "scheme": "static-token",
-  "static-token": { "scheme": "Bearer", "env": "GITHUB_TOKEN" }
-}
-```
-
-The host resolves the token and injects `Authorization: Bearer <token>` into each outbound `fetch`/`fetch_blob` callout. Your handler writes the request as if it were unauthenticated:
-
-```rust
-fn fetch_repo(cx: &Cx, owner: &str, repo: &str) -> Result<RepoMeta> {
-    let req = Request::get(format!("https://api.github.com/repos/{owner}/{repo}"));
-    // No Authorization header here — the host injects it from the manifest.
-    cx.fetch(req)?.json()
-}
-```
-
-### `oauth`
-
-An OAuth flow. Declare the endpoints and scopes; the host runs the device/loopback/manual flow, stores the result in the credential store, and injects the access token into callouts.
-
-```json
-"auth": {
-  "scheme": "oauth",
-  "oauth": {
-    "authorization-endpoint": "https://linear.app/oauth/authorize",
-    "token-endpoint": "https://api.linear.app/oauth/token",
-    "scopes": ["read"]
-  }
-}
-```
+Names the scheme used when the user does not pick one. GitHub defaults to `device` (OAuth), Linear to `oauth`.
 
 ## What the provider can and cannot see
 
-The provider never sees the token, the refresh token, or any secret. It can inspect **non-secret** auth context through `cx.auth()`:
+The provider never sees the token, the refresh token, or any secret. Handlers simply make requests; the host injects auth for matching domains:
 
 ```rust
-let auth = cx.auth();
-if !auth.is_authenticated() {
-    return Err(ProviderError::permission_denied("mount is not authenticated"));
-}
-if let Some(account) = auth.account() {
-    // e.g. label the authenticated user without ever holding their token
+impl GithubHttpExt for Cx<State> {
+    fn github_get(&self, path: impl AsRef<str>) -> Request<'_, State> {
+        // No Authorization header here — the host injects it per the manifest.
+        self.http()
+            .get(format!("{API_BASE}{}", path.as_ref()))
+            .header("X-GitHub-Api-Version", "2022-11-28")
+    }
+
+    async fn github_json<T: DeserializeOwned>(&self, path: impl AsRef<str>) -> Result<T> {
+        let resp = self.github_get(path).send().await?.error_for_status()?;
+        parse_model(resp.body())
+    }
 }
 ```
-
-`Auth` exposes only `account()` (a label, if the host has one) and `is_authenticated()`. There is no method that returns the raw credential, by design.
 
 ```mermaid
 flowchart LR
     M["omnifs.provider.json auth block"] --> W["embedded: omnifs.provider-metadata.v1"]
     W --> R["host: ProviderManifest::wasm_auth_manifest()"]
-    R --> S["credential store / OAuth flow"]
-    H["handler: cx.fetch(req) with no token"] --> HOST["host injects Authorization"]
+    R --> S["credential store / OAuth or token flow"]
+    H["handler: cx.http().get(url).send()"] --> HOST["host injects header for matching domains"]
     S --> HOST
     HOST --> NET["outbound request"]
 ```
 
+## Capabilities and reach
+
+The `capabilities` array declares what the provider is allowed to reach: `domain` entries whitelist outbound hosts, `gitRepo` declares clone URL patterns (for `#[treeref]` git handoff), `memoryMb` bounds the heap, and `preopenedPath` exposes a host file/dir to the sandbox. The host grants only what the manifest declares.
+
+```json
+"capabilities": [
+  { "kind": "domain", "value": "api.github.com", "why": "Fetch GitHub API resources." },
+  { "kind": "gitRepo", "value": "git@github.com:*", "why": "Clone repository contents over SSH." },
+  { "kind": "memoryMb", "value": 256, "why": "Room for larger payloads and tree projections." }
+]
+```
+
 :::danger
-Do not attempt to read tokens from the environment, files, or config inside a provider, and do not add a token field to your `#[config]` struct. Credentials are host-managed and injected at the callout boundary. A provider that holds a secret is a sandbox-escape risk and breaks the auth contract.
+Do not read tokens from the environment, files, or config inside a provider, and do not add a token field to your `#[config]` struct. Credentials are host-managed and injected at the callout boundary. A provider that holds a secret is a sandbox-escape risk and breaks the auth contract.
 :::
 
 :::note
-Static mounts may still reference external secrets via `token_env` or `token_file` at the mount/auth config level — that is host configuration, not provider code, and it never adds keychain indirection inside mount JSON.
+The runtime types behind the `auth` block (`AuthManifest`, `AuthScheme`, `StaticTokenScheme`, `OauthScheme`, `OAuthFlow`, `DeviceCodeConfig`, `PkceLoopbackConfig`) are re-exported in the SDK prelude so host and CLI share one source of truth. Provider code rarely touches them directly.
 :::

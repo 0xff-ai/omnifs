@@ -7,7 +7,7 @@ Each mount carries a JSON config object. The host parses the mount JSON and pass
 
 ## Declaring a config struct
 
-Annotate the struct with `#[omnifs_sdk::config]`. The macro derives the serde deserialization and wires the struct into config parsing. Deriving `Default` is recommended so a missing or empty config object still produces a usable value; use `#[serde(default = "...")]` for per-field defaults.
+Annotate the struct with `#[omnifs_sdk::config]`. The macro wires up serde deserialization through the SDK's re-exported serde. Deriving `Default` is recommended so a missing or empty config object still produces a usable value; use `#[serde(default = "...")]` for per-field defaults.
 
 ```rust
 use omnifs_sdk::prelude::*;
@@ -31,7 +31,7 @@ struct ConfigResolver {
 }
 ```
 
-Field types are anything serde can deserialize. When a field type is an enum, derive `Deserialize` with the SDK's re-exported serde:
+Field types are anything serde can deserialize. When a field is an enum, derive `Deserialize` with the SDK's re-exported serde so it works on the WASI target:
 
 ```rust
 use omnifs_sdk::serde::Deserialize;
@@ -43,14 +43,19 @@ pub(crate) enum DatabaseType { Sqlite }
 
 ## Consuming config in init
 
-The `#[omnifs_sdk::provider(...)]` entrypoint names the config type and provides an `init` function. The macro deserializes the mount's config object into your type and hands it to `init`, which builds the provider `State`:
+The `#[provider(...)]` entrypoint's `init` function takes your config type by value — the macro deserializes the mount's config object into it. `init` builds the provider `State` and returns it together with `ProviderInfo` and `RequestedCapabilities`:
 
 ```rust
-#[omnifs_sdk::provider(state = State, config = Config, mounts(crate::root, crate::query))]
-impl DnsProvider {
-    fn init(config: Config) -> Result<Init<State>> {
-        let resolvers = ResolverConfig::from_config(&config)?;
-        Ok(Init::new(State { resolvers }))
+#[provider(metadata = "omnifs.provider.json", mounts(crate::tables::TableHandlers))]
+impl DbProvider {
+    fn init(config: Config) -> Result<(State, ProviderInfo, RequestedCapabilities)> {
+        let backend = SqliteBackend::open(&config.path, config.read_only)
+            .map_err(|e| ProviderError::internal(format!("open db: {e}")))?;
+        Ok((
+            State { config, backend: Rc::new(RefCell::new(backend)) },
+            ProviderInfo { name: "db-provider".into(), version: "0.1.0".into(), description: "Relational DB provider".into() },
+            RequestedCapabilities::empty(),
+        ))
     }
 }
 ```
@@ -59,13 +64,13 @@ Store whatever the handlers need on `State`. Handlers then read it through `cx.s
 
 ```rust
 #[file("/sample.json")]
-async fn sample(&self, cx: Cx<State>) -> Result<FileContent> {
+fn sample(cx: &BindCtx<'_, State, TableSubtree>) -> Result<FileContent> {
     let limit = cx.state(|s| s.config.sample_limit);
     // ...
 }
 ```
 
-`init` is synchronous — it cannot perform callouts (see the caution below). Do lazy, network-dependent work inside browse handlers, not in `init`.
+`init` is synchronous and cannot perform callouts (see the caution below). Do lazy, network-dependent work inside browse handlers, not in `init`.
 
 ## The matching mount JSON
 
@@ -111,5 +116,5 @@ You can describe the config shape for the CLI/host in `omnifs.provider.json` via
 - Secrets do not. Host-managed credentials are derived from the auth manifest and injected at the callout boundary — never read a token from config. See [Auth manifest](./auth-manifest/).
 
 :::caution
-`initialize()` is terminal-only: it has no correlation id and cannot suspend on callouts. Do not perform network I/O in `init`. Defer it to browse handlers, where suspend/resume is available.
+`init` (and the underlying `initialize()`) is terminal-only: it has no correlation id and cannot suspend on callouts. Do not perform network I/O in `init`. Defer it to browse handlers, where suspend/resume is available.
 :::

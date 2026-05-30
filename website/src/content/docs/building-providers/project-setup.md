@@ -20,6 +20,9 @@ description = "omnifs example provider"
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[package.metadata.docs.rs]
+default-target = "wasm32-wasip2"
+
 [dependencies]
 omnifs-sdk = { workspace = true }
 serde = { workspace = true }
@@ -40,11 +43,11 @@ Everything you need comes from the prelude:
 use omnifs_sdk::prelude::*;
 ```
 
-That brings in `Cx`, `Init`, `Entry`, `Listing`, `FileContent`, `TreeRef`, `Effects`, `Projection`, `Lookup` types, `FileProj`, `Size`, `Stability`, `ReadMode`, the `ResponseExt` HTTP trait, `Result`/`ProviderError`, the attribute macros (`provider`, `handlers`, `config`, `subtree`, `dir`, `file`, `treeref`, `bind`, `mutate`), and the curated WIT types (`ProviderEvent`, `OpResult`, and friends). You do **not** call `wit_bindgen::generate!` yourself; the SDK does it once and re-exports the bindings.
+That brings in the contexts (`Cx`, `DirCx`, `BindCtx`), the projection types (`Projection`, `PageStatus`, `Cursor`, `FileContent`, `FileStat`, `TreeRef`), `FileProj`/`FileAttrs`/`Size`/`Stability`/`ReadMode`, `Effects`, `Result`/`ProviderError`, the attribute macros (`provider`, `handlers`, `config`, `subtree`, `dir`, `file`, `treeref`, `bind`, `mutate`), and the curated WIT types (`ProviderInfo`, `RequestedCapabilities`, `ProviderEvent`, …). You do **not** call `wit_bindgen::generate!` yourself; the SDK does it once and re-exports the bindings.
 
 ## State, config, and the entrypoint
 
-A provider has a `State` type (your runtime data) and an optional `#[omnifs_sdk::config]` type (parsed from the mount JSON). The entrypoint struct carries `#[omnifs_sdk::provider(...)]`, which names the state type, the config type, and the handler modules, and provides an `init` function returning `Init<State>`.
+A provider has a `State` type (your runtime data) and an optional `#[omnifs_sdk::config]` type (parsed from the mount JSON). The entrypoint struct carries `#[provider(...)]`, which points at the embedded manifest, lists the handler modules, and provides an `init` function. `init` returns `(State, ProviderInfo, RequestedCapabilities)`, or `Result<(State, ProviderInfo, RequestedCapabilities)>` when it can fail.
 
 ```rust
 // lib.rs
@@ -72,16 +75,27 @@ use crate::{Config, State};
 
 struct HelloProvider;
 
-#[omnifs_sdk::provider(state = State, config = Config, mounts(crate::root))]
+#[provider(
+    metadata = "omnifs.provider.json",
+    mounts(crate::root::RootHandlers)
+)]
 impl HelloProvider {
-    fn init(config: Config) -> Result<Init<State>> {
+    fn init(config: Config) -> (State, ProviderInfo, RequestedCapabilities) {
         let greeting = config.greeting.unwrap_or_else(|| "hi".into());
-        Ok(Init::new(State { greeting }))
+        (
+            State { greeting },
+            ProviderInfo {
+                name: "hello-provider".into(),
+                version: "0.1.0".into(),
+                description: "Minimal example provider".into(),
+            },
+            RequestedCapabilities::empty(),
+        )
     }
 }
 ```
 
-`mounts(...)` lists the **modules** that contain `#[handlers]` blocks. The macro stitches their route tables together and implements the WIT `provider` world (lifecycle, browse, continuation, notify). `Init::new(state)` requests default capabilities; chain `.with_info(name, version, description)` to override the manifest-derived provider info.
+`mounts(...)` lists the **handler structs** (qualified by module) that carry `#[handlers]` blocks. The macro stitches their route tables together and implements the WIT `provider` world (lifecycle, browse, continuation, notify). `RequestedCapabilities::empty()` requests nothing extra; `::with_git(refresh_secs)` requests git plus a poll interval.
 
 ## A handler module that compiles
 
@@ -90,25 +104,27 @@ impl HelloProvider {
 use omnifs_sdk::prelude::*;
 use crate::State;
 
-#[omnifs_sdk::handlers(state = State)]
-impl Root {
+pub struct RootHandlers;
+
+#[handlers]
+impl RootHandlers {
     #[dir("/")]
-    async fn root(_cx: Cx<State>) -> Result<Listing> {
-        Ok(Listing::complete(vec![Entry::file(
-            "hello.txt",
-            FileProj::deferred(Size::NonZero, ReadMode::Full, Stability::Immutable),
-        )]))
+    fn root(_cx: &DirCx<State>) -> Result<Projection> {
+        let mut p = Projection::new();
+        p.deferred_file("hello.txt");
+        p.page(PageStatus::Exhaustive);
+        Ok(p)
     }
 
     #[file("/hello.txt")]
-    async fn hello(cx: Cx<State>) -> Result<FileContent> {
+    fn hello(cx: &Cx<State>) -> Result<FileContent> {
         let greeting = cx.state(|s| s.greeting.clone());
-        Ok(FileContent::new(format!("{greeting}\n")))
+        Ok(FileContent::bytes(format!("{greeting}\n")))
     }
 }
 ```
 
-The `impl Root` block name is just a grouping; the macro registers each handler by its path pattern, not by the impl name. Every handler is `async fn` and takes `cx: Cx<State>` as its first parameter.
+The handler struct (`RootHandlers`) is the grouping the entrypoint references; routes are registered by path pattern. The state type is inferred from the `Cx<State>` / `DirCx<State>` in your handler signatures. Handlers can be `fn` or `async fn`; the context parameter is optional when a handler needs neither config nor callouts.
 
 ## The manifest
 
@@ -126,7 +142,7 @@ Pair the crate with `omnifs.provider.json` at the crate root:
 }
 ```
 
-This manifest is embedded into the WASM and read by the host and CLI. See [Auth manifest](./auth-manifest/) for the `auth` block and [Config](./config/) for `configSchema`.
+This manifest is embedded into the WASM and read by the host and CLI. See [Auth manifest](./auth-manifest/) for the `auth`/`capabilities` blocks and [Config](./config/) for `configSchema`.
 
 ## Building
 

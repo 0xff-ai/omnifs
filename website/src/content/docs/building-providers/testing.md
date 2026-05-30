@@ -32,7 +32,7 @@ just providers-build   # release-build providers and tools for wasm32-wasip2
 
 ## Tests that must actually run
 
-For logic you want to execute as a test, write host-target-compatible code under `#[cfg(test)]`. Keep that code free of WIT/callout dependencies so it builds and runs on the native test target:
+For logic you want to execute as a test, write host-target-compatible code under `#[cfg(test)]`. Keep that code free of WIT/callout dependencies so it builds and runs on the native test target. Pure helpers — segment parsers, formatters, payload-to-projection logic — are the right thing to test this way:
 
 ```rust
 #[cfg(test)]
@@ -40,11 +40,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arxiv_id_strips_url_prefix() {
-        assert_eq!(arxiv_id("http://arxiv.org/abs/2401.00001v1"), "2401.00001v1");
+    fn paper_id_parses_versioned_arxiv_id() {
+        let id = PaperId::parse("2401.00001v1").expect("valid id");
+        assert_eq!(id.as_str(), "2401.00001v1");
+    }
+
+    #[test]
+    fn paper_id_rejects_garbage() {
+        assert!(PaperId::parse("not-an-id").is_none());
     }
 }
 ```
+
+Note the `crate-type = ["cdylib", "lib"]` in [Project setup](./project-setup/): the `lib` form is what lets these tests link the crate for the host target.
 
 Pure helpers — parsers, formatters, path logic — are the right thing to unit-test this way. Run them with the host baseline:
 

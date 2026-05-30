@@ -1,22 +1,21 @@
 ---
 title: Cache Invalidation
-description: The host owns all caching; providers signal invalidation through effects and on-event outcomes, never their own LRUs.
+description: The host owns all caching; providers signal invalidation through Effects and on_event outcomes, never their own LRUs.
 ---
 
 omnifs caches every provider result — listings, lookups, and file content — in capacity-bounded caches with no TTLs. Entries leave the cache only by capacity eviction or by **explicit invalidation** that your provider signals. Providers must not implement their own caches or time-based expiration; rely on the host's invalidation signals.
 
-## Two ways to signal invalidation
+## Invalidation lives in Effects
 
-Invalidation is expressed as effects: `invalidate-path` (one exact path) and `invalidate-prefix` (everything under a prefix). Effects are applied by the host at the response boundary, after it accepts your terminal answer.
+Invalidation is expressed through `Effects`: `invalidate_path(path)` drops one exact provider-relative path; `invalidate_prefix(prefix)` drops every cached entry whose path starts with the prefix. The host applies effects at the response boundary, after it accepts your terminal answer.
 
-### On a terminal, via `Effects`
+### On a browse terminal
 
-Any terminal you return can carry an `Effects` batch. When a handler knows that producing this result also makes other cached paths stale, stage invalidations alongside it:
+Any `Listing`, `FileContent`, or `Lookup` entry can carry an `Effects` batch via `.with_effects(..)`. When producing a result also makes other cached paths stale, stage the invalidations alongside it:
 
 ```rust
-#[file("{owner}/{repo}/refresh")]
-fn refresh(owner: &str, repo: &str, cx: &Cx) -> Result<FileContent> {
-    // Re-fetch and, because state changed, drop the cached projections.
+#[file("/{owner}/{repo}/refresh")]
+async fn refresh(cx: Cx<State>, owner: String, repo: String) -> Result<FileContent> {
     let mut effects = Effects::new();
     effects
         .invalidate_path(format!("{owner}/{repo}/meta.json"))
@@ -25,16 +24,46 @@ fn refresh(owner: &str, repo: &str, cx: &Cx) -> Result<FileContent> {
 }
 ```
 
-`invalidate_path` drops the cache entry for exactly that provider-relative path. `invalidate_prefix` drops every entry whose path starts with the prefix — use it to clear a whole subtree (a directory listing plus all its children) in one effect.
+`invalidate_path` clears exactly that entry; `invalidate_prefix` clears a whole subtree (a directory listing plus all its children) in one effect.
 
-### On an event, via `on-event`
+### On an event (`on_event`)
 
-The host can deliver `provider-event`s: a watched file changed, a webhook arrived, a timer ticked, or auth refreshed. The event handler returns a terminal whose effects describe what to invalidate; the host applies them before surfacing the result. This is the path for reacting to outside-world changes rather than user reads.
+The host can deliver `ProviderEvent`s: a watched file changed, a webhook arrived, a timer ticked, or auth refreshed. The provider entrypoint may define an `on_event` handler that returns the `Effects` to apply. This is the path for reacting to outside-world changes rather than user reads.
+
+```rust
+#[omnifs_sdk::provider(state = State, config = Config, mounts(/* ... */))]
+impl GithubProvider {
+    fn init(_config: Config) -> Result<Init<State>> {
+        Ok(Init::new(State::new()))
+    }
+
+    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects> {
+        match event {
+            ProviderEvent::TimerTick(_) => timer_tick(cx).await,
+            _ => Ok(Effects::new()),
+        }
+    }
+}
+```
+
+The `timer_tick` poller fetches what it needs (via callouts on `cx`) and returns the paths to drop:
+
+```rust
+pub(crate) async fn timer_tick(cx: Cx<State>) -> Result<Effects> {
+    let mut effects = Effects::new();
+    // Poll upstream; for repos with changes, invalidate their cached event listings.
+    effects.invalidate_prefix("some-owner/some-repo/events");
+    Ok(effects)
+}
+```
+
+`on_event` is async, so it can issue callouts before deciding what to invalidate. If you do not define `on_event`, the macro generates a no-op. To find which paths are worth polling, `cx.active_paths(mount_id, parse)` returns the currently-open paths the host reported in a `TimerTick` context.
 
 ```mermaid
 flowchart TD
-    E["provider-event: webhook-received / file-changed / timer-tick"] --> O["on-event handler"]
-    O --> EF["return terminal with Effects:\ninvalidate_path / invalidate_prefix"]
+    E["ProviderEvent: TimerTick / WebhookReceived / FileChanged"] --> O["on_event(cx, event)"]
+    O --> P["optional callouts to detect changes"]
+    P --> EF["return Effects: invalidate_path / invalidate_prefix"]
     EF --> B["host applies at response boundary"]
     B --> C["stale entries dropped; next read re-fetches"]
 ```
@@ -47,12 +76,12 @@ flowchart TD
 
 ## Paths are provider-relative and normalized
 
-Invalidation paths are relative to the mount root and must be normalized — no leading/trailing slashes, no `.` or `..` segments. The SDK trims surrounding slashes for you, but you are responsible for not constructing `..` traversals.
+Invalidation paths are relative to the mount root. The SDK trims surrounding slashes, but you must not construct `.`/`..` traversal segments.
 
 :::caution
 Do not add a provider-side LRU, a time-based cache, or a "refetch every N seconds" loop. That duplicates the host cache, fights its eviction, and produces inconsistent results. Project freely and let the host cache; invalidate explicitly when you know something changed.
 :::
 
 :::note
-Stability also feeds the host's caching decisions: `Immutable` content is held until invalidated, `Mutable` may be re-fetched, and `Volatile` is never snapshot-cached. Set the right `Stability` on your projections (see [Projections](./projections/)) so the host caches each file appropriately, then use invalidation effects for the cases stability alone cannot express.
+Stability also feeds caching decisions: `Immutable` content is held until invalidated, `Mutable` may be re-fetched, `Volatile` is never snapshot-cached. Set the right `Stability` on your projections (see [Projections](./projections/)), then use invalidation effects for what stability alone cannot express.
 :::
