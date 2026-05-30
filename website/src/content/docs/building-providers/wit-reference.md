@@ -101,7 +101,7 @@ record dir-listing {
 }
 ```
 
-The `subtree(tree-ref)` arm is the clone/archive handoff. It is **result data**, not the host mutation itself — the actual bind-mount install is staged as a `disown-tree` effect. In the SDK you produce this with `List::subtree(path, tree)` / `Lookup::subtree(path, tree)` from a `#[treeref]` handler; the SDK adds the matching effect. `lookup-entry.siblings` is what `Lookup::with_siblings` fills, and `exhaustive` is the authoritative-negative flag.
+The `subtree(tree-ref)` arm is the clone/archive handoff. It is **result data**, not the host mutation itself — the actual bind-mount install is staged as a `disown-tree` effect. In the SDK you produce this by returning a `TreeRef` from a `#[treeref]` handler; the SDK emits the `subtree` result and the matching effect. `lookup-entry.siblings` and `dir-listing.entries` are filled from the children you add to a `Projection`; `exhaustive` reflects whether you called `PageStatus::Exhaustive`.
 
 ## Read result
 
@@ -117,7 +117,7 @@ record read-file-result {
 }
 ```
 
-`FileContent::new(bytes)` produces `inline`; `FileContent::blob(id)` produces `blob`, keeping large bytes in the host's disk-backed cache rather than crossing the WIT.
+`FileContent::bytes(bytes)` produces `inline`; `FileContent::blob(id)` produces `blob`, keeping large bytes in the host's disk-backed cache rather than crossing the WIT.
 
 ## Effects: the terminal host-mutation channel
 
@@ -136,7 +136,7 @@ record proj-entry {
 }
 ```
 
-`project` installs adjacent/nested projections into the cache (see [Project everything](./project-everything/)); `invalidate-path`/`invalidate-prefix` drop cached entries (see [Cache invalidation](./cache-invalidation/)); `disown-tree` installs a handed-off tree. The SDK's `Effects` builder maps directly: `project_file`, `project_dir`, `project_dir_exhaustive`, `invalidate_path`, `invalidate_prefix`.
+`project` installs adjacent/nested projections into the cache (see [Project everything](./project-everything/)); `invalidate-path`/`invalidate-prefix` drop cached entries (see [Cache invalidation](./cache-invalidation/)); `disown-tree` installs a handed-off tree. You produce these through `Projection` (`proj`, `proj_file`, `proj_many`, `proj_dir`) and through the `Effects` returned from `on_event` (`invalidate_path`, `invalidate_prefix`); the `disown-tree` effect is emitted for you when a `#[treeref]` handler returns a `TreeRef`.
 
 ## Continuation: resume and cancel
 
@@ -149,7 +149,7 @@ interface continuation {
 }
 ```
 
-After a `suspended`, the host runs the callouts and calls `resume(id, results)` with one `callout-result` per callout, in order. The provider's continuation, keyed by `id`, runs to the next suspension or a return. `cancel` drops an in-flight continuation. The SDK's async runtime manages all of this behind `cx.fetch(..)` and friends.
+After a `suspended`, the host runs the callouts and calls `resume(id, results)` with one `callout-result` per callout, in order. The provider's continuation, keyed by `id`, runs to the next suspension or a return. `cancel` drops an in-flight continuation. The SDK's async runtime manages all of this behind `cx.http()`, `cx.git()`, and the other callout builders.
 
 ## Callouts and results
 
@@ -173,7 +173,7 @@ variant callout-result {
 }
 ```
 
-These back the `Cx` methods: `fetch` ↔ `cx.fetch`, `fetch-blob` ↔ `cx.fetch_blob`, `open-archive` ↔ `cx.open_archive`, `git-open-repo` ↔ `cx.git_open`, `read-blob` ↔ `cx.read_blob`. A `callout-error` surfaces in the handler as a `Result::Err`.
+These back the `Cx` builders: `fetch` ↔ `cx.http().get(..).send()`, `fetch-blob` ↔ `cx.http().get(..).into_blob().with_cache_key(..).send()`, `open-archive` ↔ `cx.archives().open(..).send()`, `git-open-repo` ↔ `cx.git().open_repo(cache_key, clone_url)`, `read-blob` ↔ `cx.blob(id).read()`. A `callout-error` surfaces in the handler as a `Result::Err`.
 
 ## Lifecycle and notify
 
