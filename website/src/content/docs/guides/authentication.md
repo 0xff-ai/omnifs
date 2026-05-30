@@ -121,3 +121,8 @@ PKCE protects the browser flow against code interception, and the loopback
 server only accepts localhost connections and shuts down right after the
 callback. Tokens that support refresh are renewed transparently during use.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is [OAuth](https://github.com/0xff-ai/omnifs/blob/main/docs/oauth.md), and [Host auth](https://github.com/0xff-ai/omnifs/blob/main/docs/design/host-auth.md). See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

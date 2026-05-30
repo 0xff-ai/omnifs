@@ -117,3 +117,8 @@ Do not read tokens from the environment, files, or config inside a provider, and
 :::note
 The runtime types behind the `auth` block (`AuthManifest`, `AuthScheme`, `StaticTokenScheme`, `OauthScheme`, `OAuthFlow`, `DeviceCodeConfig`, `PkceLoopbackConfig`) are re-exported in the SDK prelude so host and CLI share one source of truth. Provider code rarely touches them directly.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is [Host auth](https://github.com/0xff-ai/omnifs/blob/main/docs/design/host-auth.md), and [OAuth](https://github.com/0xff-ai/omnifs/blob/main/docs/oauth.md). See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

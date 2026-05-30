@@ -97,3 +97,8 @@ Some files reveal staleness only when read. After serving such a read, the host 
 ## Why providers declare instead of implement
 
 A provider never sets `st_size`, never toggles direct I/O, and never decides cache durability. It declares facts — "this file is immutable and exactly N bytes" or "this file is volatile, read it in ranges" — and the host translates those facts into kernel-facing behavior. This keeps the FUSE and caching mechanics in one place (the host) and keeps every provider's file model expressed in domain terms. See [the provider model](/concepts/provider-model/) for the broader description-versus-mechanics split, and [caching](/concepts/caching/) for how stability selects a cache layer.
+
+
+## Design reference
+
+The source of truth behind this page is [File attributes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/file-attributes.md), and [Projected file sizes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/projected-file-sizes.md). See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

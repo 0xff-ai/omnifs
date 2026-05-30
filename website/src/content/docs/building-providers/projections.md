@@ -131,3 +131,8 @@ The full design — every legal combination, learned-size promotion, and post-re
 :::caution
 The ranged read path (`open_file` / `read_chunk` / `close_file`) is reserved in the WIT. The current host/runtime path serves exact file bytes via `read_file`, plus `FileContent::range_bytes` for an in-memory buffer, plus subtree handoff. Prefer `deferred_file` + a `#[file]` handler, or a blob handoff, unless you are specifically building against the ranged path.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is the [File attributes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/file-attributes.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

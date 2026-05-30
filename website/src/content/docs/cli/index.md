@@ -187,3 +187,8 @@ omnifs init github    # configure a GitHub mount + auth
 omnifs up             # materialize credentials and start the container
 omnifs status         # confirm the mount is live
 ```
+
+
+## Design reference
+
+The source of truth behind this page is the [CLI redesign](https://github.com/0xff-ai/omnifs/blob/main/docs/design/cli-redesign.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

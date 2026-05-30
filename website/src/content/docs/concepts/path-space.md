@@ -101,3 +101,8 @@ The single, strict path space is a load-bearing simplification:
 - **Validation is centralised** at the WIT boundary, so internal code can assume well-formed paths.
 
 From here, see how the [provider model](/concepts/provider-model/) consumes these paths and how [path dispatch](/concepts/path-dispatch/) selects a handler for a given suffix.
+
+
+## Design reference
+
+The source of truth behind this page is the [Protocol paths](https://github.com/0xff-ai/omnifs/blob/main/docs/design/protocol-paths.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

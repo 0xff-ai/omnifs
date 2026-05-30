@@ -168,6 +168,7 @@ export default defineConfig({
             { label: "Testing", slug: "contributing/testing" },
             { label: "Observability", slug: "contributing/observability" },
             { label: "Coding conventions", slug: "contributing/conventions" },
+            { label: "Design docs & RFCs", slug: "contributing/design-docs" },
           ],
         },
         {

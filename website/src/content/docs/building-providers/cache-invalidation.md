@@ -105,3 +105,8 @@ Do not add a provider-side LRU, a time-based cache, or a refetch loop. That dupl
 :::note
 Stability also feeds caching decisions: `Immutable` content is held until invalidated, `Mutable` may be re-fetched, `Volatile` is never snapshot-cached. Set the right `Stability` on your projections (see [Projections](./projections/)), then use `on_event` invalidation for what stability alone cannot express. Version tokens (an ETag or commit sha on a `FileProj`) let the host skip refetching unchanged content even after an invalidation prompt.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is the [Cache architecture](https://github.com/0xff-ai/omnifs/blob/main/docs/design/cache-architecture.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

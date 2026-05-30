@@ -97,3 +97,8 @@ cat /arxiv/categories/cs.AI/recent/status.json | jq
 ls /arxiv/categories/cs.AI/submissions
 ls /arxiv/categories/cs.AI/submissions/20260512
 ```
+
+
+## Design reference
+
+The source of truth behind this page is the [arXiv recent submissions](https://github.com/0xff-ai/omnifs/blob/main/docs/design/arxiv-recent-submissions.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

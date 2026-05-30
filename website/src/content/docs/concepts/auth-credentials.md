@@ -119,3 +119,8 @@ Three properties fall out of keeping auth in the host:
 3. **Backend choice is invisible to providers.** Keychain or file fallback is a host startup decision; the provider's manifest and the mount config are identical either way.
 
 See [the callout runtime](/concepts/callout-runtime/) for where credentials are applied during a fetch, and [mount lifecycle](/concepts/mount-lifecycle/) for how `provider_id`, `auth.scheme`, and `auth.account` reach the effective config.
+
+
+## Design reference
+
+The source of truth behind this page is the [Host auth](https://github.com/0xff-ai/omnifs/blob/main/docs/design/host-auth.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

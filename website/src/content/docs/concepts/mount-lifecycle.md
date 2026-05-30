@@ -94,3 +94,8 @@ Separating shipped metadata, user choice, and session credentials gives each its
 - **Credentials are session-scoped artifacts**, materialized fresh on `up` and identified by a single storage-key wire form.
 
 Folding any two of these together would force secrets into config files, or force users to re-declare provider defaults, or make cleanup paths depend on intact metadata. The `EffectiveConfig` merge keeps them composable while presenting one authoritative object to everything downstream.
+
+
+## Design reference
+
+The source of truth behind this page is the [Mount lifecycle](https://github.com/0xff-ai/omnifs/blob/main/docs/design/mount-lifecycle.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

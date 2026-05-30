@@ -85,3 +85,8 @@ Modeling provider I/O as suspend/resume rather than blocking calls inside the WA
 1. **A real sandbox.** The provider has no socket, no git binary, no filesystem. It can only ask. See [the WASM sandbox](/concepts/wasm-sandbox/).
 2. **Host-side policy.** Credentials, retries, rate limits, blob spillover, and concurrency live in the host's callout executor, applied uniformly to every provider.
 3. **A flat, inspectable protocol.** Each interaction is a request and a response with a correlation id. There are no hidden hops on the hot path, which makes the protocol easy to trace and reason about.
+
+
+## Design reference
+
+The source of truth behind this page is the [Protocol shape](https://github.com/0xff-ai/omnifs/blob/main/docs/design/protocol-shape.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

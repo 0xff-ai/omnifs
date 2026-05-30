@@ -89,3 +89,8 @@ Three properties depend on the boundary:
 3. **Untrusted *input* is contained too.** Risky parsing (archives) runs in its own sandboxed tool with its own narrow WIT interface, so a parser exploit stays inside WASM.
 
 The sandbox is the structural reason the rest of the architecture works: it is *because* providers cannot act on their own that the [host can own all mechanics](/concepts/architecture/) — caching, credentials, cloning, and I/O — while still safely running provider code that describes domain facts.
+
+
+## Design reference
+
+The source of truth behind this page is the [WASM sandbox substrate](https://github.com/0xff-ai/omnifs/blob/main/docs/design/wasm-sandbox-substrate.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

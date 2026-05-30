@@ -97,3 +97,8 @@ Standard tools mix `readdir` and `lookup` freely. `ls` lists; `cat` and `stat` l
 ## Traversal testing
 
 When provider path surfaces change, test the whole shell traversal, not only the leaf paths. In a live mount, run `ll`, `cd`, and `find` from the provider root through every intermediate directory. Verify that parent directories do not synthesise duplicate root entries, that route scaffolding names do not bind as dynamic captures, and that control directories do not contain stray item nodes unless the design says they should.
+
+
+## Design reference
+
+The source of truth behind this page is the [Path dispatch & listing](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

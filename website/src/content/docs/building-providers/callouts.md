@@ -101,3 +101,8 @@ A callout can fail; the host delivers a `callout-error` (network, timeout, rate-
 :::note
 Callouts are strictly request/response. If something is conceptually one-way, it does not belong as a callout. The WIT also reserves streaming and websocket callouts (`stream-*`, `ws-*`); the SDK surfaces the `http`, `git`, `archives`, and `blob` builders today.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is the [Protocol shape](https://github.com/0xff-ai/omnifs/blob/main/docs/design/protocol-shape.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

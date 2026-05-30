@@ -142,3 +142,8 @@ cat /github/ollama/ollama/pulls/all/15087/diff
 cat /github/ollama/ollama/actions/runs/123456789/status
 cat /github/ollama/ollama/actions/runs/123456789/log
 ```
+
+
+## Design reference
+
+The source of truth behind this page is the [OAuth](https://github.com/0xff-ai/omnifs/blob/main/docs/oauth.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

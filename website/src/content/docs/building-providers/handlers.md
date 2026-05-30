@@ -167,3 +167,8 @@ The precedence, in words: subtree/treeref handlers first, then exact / static / 
 :::note
 `docs/design/path-dispatch-and-listing.md` in the repo is the source of truth for routing precedence and listing exhaustiveness. The summary here matches it; read that file before changing dispatch logic itself.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is the [Path dispatch & listing](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

@@ -91,3 +91,8 @@ Volatile content that carries no version evidence is not durably cached as exact
 - **No second cache encoding.** The browse cache keys on the canonical protocol path string, identical to the wire form.
 
 A provider's only caching responsibility is to project generously (preload, siblings) and to invalidate precisely (`on-event`). Everything else — capacity, eviction, durability, version keying, kernel notification — is the host's job.
+
+
+## Design reference
+
+The source of truth behind this page is the [Cache architecture](https://github.com/0xff-ai/omnifs/blob/main/docs/design/cache-architecture.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

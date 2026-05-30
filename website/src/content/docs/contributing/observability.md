@@ -113,3 +113,8 @@ explicitly rules out replacing the typed-enum stream with
 and the redaction discipline. Keep `InspectorEvent` and `parse_record_line` the
 single source of truth.
 :::
+
+
+## Design reference
+
+The source of truth behind this page is the [Inspector emission architecture](https://github.com/0xff-ai/omnifs/blob/main/docs/design/inspector-emission-architecture.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

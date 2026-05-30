@@ -96,3 +96,8 @@ cat ENG-42/state
 cat ENG-42/priority
 cat ENG-42/description.md
 ```
+
+
+## Design reference
+
+The source of truth behind this page is the [Linear provider design](https://github.com/0xff-ai/omnifs/blob/main/docs/design/providers/linear.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

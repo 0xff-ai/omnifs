@@ -100,3 +100,8 @@ cat /db/tables/Album/sample.json | jq '.[0]'
 find /db/tables -name schema.sql | head
 grep -r INTEGER /db/tables/
 ```
+
+
+## Design reference
+
+The source of truth behind this page is the [Database provider design](https://github.com/0xff-ai/omnifs/blob/main/docs/design/providers/db.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

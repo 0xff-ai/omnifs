@@ -102,3 +102,8 @@ Instance configs are JSON, not TOML. The host parses each mount's JSON config in
 ## The contract in one line
 
 A provider is a pure description engine: given a path and the results of any callouts it requested, it returns terminals describing directory shape, file content, and attributes. It does not touch the kernel, the cache, the network, or credentials. The host does all of that. Continue to the [callout runtime](/concepts/callout-runtime/) to see how a provider asks the host to fetch on its behalf.
+
+
+## Design reference
+
+The source of truth behind this page is the [Provider model](https://github.com/0xff-ai/omnifs/blob/main/docs/design/protocol-provider-model.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.

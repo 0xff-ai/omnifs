@@ -3,7 +3,10 @@ title: WIT Reference
 description: The omnifs:provider WIT browse surface — lookup_child, list_children, read_file, result variants, resume, and on-event.
 ---
 
-This page maps the SDK you write to the raw `omnifs:provider` WIT interface the host drives. You normally work through the SDK types; this is the contract underneath them. All excerpts are from `wit/provider.wit`.
+import { Code } from '@astrojs/starlight/components';
+import providerWit from '../../../../../wit/provider.wit?raw';
+
+This page maps the SDK you write to the raw `omnifs:provider` WIT interface the host drives. You normally work through the SDK types; this is the contract underneath them. The annotated excerpts below are slices of `wit/provider.wit`; the [full interface is embedded verbatim](#the-full-interface-verbatim) at the end of this page, imported straight from the source file so it never drifts.
 
 ## The provider world
 
@@ -200,3 +203,9 @@ variant provider-event {
 :::note
 `open-file`, `read-chunk`, `close-file`, and the `stream-*` / `ws-*` callouts are reserved in the WIT for streamed and ranged access. The current host/runtime path serves exact file bytes via `read-file` and explicit subtree handoff. Build against `read-file` and blob/tree handoff unless you are specifically extending the ranged path.
 :::
+
+## The full interface, verbatim
+
+The complete `omnifs:provider` interface, imported directly from `wit/provider.wit` at build time. This is the authoritative contract — the excerpts above are annotated slices of it.
+
+<Code code={providerWit} lang="text" title="wit/provider.wit" />

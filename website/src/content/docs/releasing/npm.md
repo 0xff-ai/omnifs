@@ -90,3 +90,8 @@ the tarball locally — with and without scripts — before cutting. See the
 - [Release process](/releasing/process/)
 - [Version coupling](/releasing/version-coupling/)
 - [Runtime image](/releasing/runtime-image/)
+
+
+## Design reference
+
+The source of truth behind this page is the [npm distribution](https://github.com/0xff-ai/omnifs/blob/main/docs/design/npm-distribution.md) design document. See the full [design-doc index](/contributing/design-docs/) for everything these pages are based on.
