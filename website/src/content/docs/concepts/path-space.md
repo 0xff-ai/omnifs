@@ -1,6 +1,6 @@
 ---
 title: The path space
-description: omnifs has one absolute path namespace with strict invariants. How a path is validated, how it maps to a provider plus mount plus suffix, and why there is only one path type.
+description: omnifs has one absolute path namespace with strict invariants. How a path is validated, maps to a provider plus mount plus suffix, and why one path type.
 ---
 
 omnifs has a single path space. A protocol path is an absolute, forward-slash-delimited string that satisfies a fixed set of invariants. It is the only path shape that crosses the WIT boundary between host and provider, and the only shape stored in host caches. There is no second encoding, no relative form, and no per-provider namespace dialect.

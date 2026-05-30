@@ -1,6 +1,6 @@
 ---
 title: The WASM sandbox
-description: The Wasmtime/WASI substrate, the capability boundary that denies providers ambient network/git/filesystem access, and embedded sandboxed tools with their own WIT interfaces.
+description: The Wasmtime/WASI substrate, the capability boundary that denies providers ambient network/git/fs access, and embedded sandboxed tools with their own WIT.
 ---
 
 Providers run as WASM components on a Wasmtime/WASI substrate inside the host. The substrate is not just an execution detail — it is a security boundary. A provider component has **no ambient capabilities**: no socket, no git binary, no filesystem, no clock-driven side channels into the outside world. Everything it does to reach a service goes through host-brokered [callouts](/concepts/callout-runtime/). This is what lets omnifs load third-party providers and still keep credentials and the host machine safe.

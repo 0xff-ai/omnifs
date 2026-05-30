@@ -44,18 +44,20 @@ omnifs auth login linear --no-browser
 ## `omnifs auth logout`
 
 ```bash
-omnifs auth logout <provider>
+omnifs auth logout <provider> [-y]
 ```
 
 Removes the stored credential for a provider. It derives the credential key for
 the provider and deletes the matching entry from the host store.
 
-| Argument | Purpose |
-|----------|---------|
-| `<provider>` | Provider to log out of (e.g. `github`). |
+| Flag / argument | Purpose |
+|-----------------|---------|
+| `<provider>` | Provider to log out (e.g. `github`). |
+| `-y`, `--yes` | Skip the confirmation prompt. |
 
 ```bash
 omnifs auth logout github
+omnifs auth logout github -y
 ```
 
 ## `omnifs auth import`
