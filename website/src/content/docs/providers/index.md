@@ -50,7 +50,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | [GitHub](/providers/github/) | `/github` | Repos, issues, PRs, CI runs, and diffs as files; repo trees cloned on demand | Device-code OAuth (default) or personal access token |
 | [DNS](/providers/dns/) | `/dns` | DNS records by type, plus reverse lookups, over DNS-over-HTTPS | None |
-| [arXiv](/providers/arxiv/) | `/arxiv` | Papers by id, category, author, or search; PDFs, source, metadata, versions | None |
+| [arXiv](/providers/arxiv/) | `/arxiv` | Papers by id or by category recent/submission scans; PDFs, source, metadata, versions | None |
 | [Database](/providers/database/) | `/db` | Schema, tables, and bounded sample rows of a SQLite database (read-only) | None (local file) |
 | [Docker](/providers/docker/) | `/docker` | Containers, images, and system metadata from a Docker daemon | None (local socket) |
 | [Linear](/providers/linear/) | `/linear` | Teams and issues from Linear's GraphQL API | PKCE OAuth `read` scope (default) or personal access token |
