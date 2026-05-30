@@ -55,11 +55,13 @@ Built-in providers include `github`, `dns`, `sqlite`, and `hn`.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<provider>` | Provider to configure (e.g. `github`, `linear`). Prompted if omitted. |
-| `--as <NAME>` | Mount name. Defaults to the provider's recommended name. |
-| `--token <-> ` | Read the credential token from stdin (pass `-`). |
-| `--token-env <VAR>` | Read the credential token from the named environment variable. |
-| `-y`, `--yes` | Skip confirmations; accept detected ambient credentials. |
+| `<provider>` | Provider to configure (e.g. `github`, `linear`). Picker shown if omitted. |
+| `--as <NAME>` | Mount name override. Auto-generated from the provider if absent. |
+| `--token <-> ` | Read the static token from stdin (pass `-`). |
+| `--token-env <VAR>` | Read the static token from the named environment variable. |
+| `--scope <SCOPE>` | OAuth scope to request. Repeat for multiple scopes. |
+| `--yes` | Accept the auto-suggested mount name on collision (never overwrite). |
+| `--no-input` | Skip prompts. Static-token providers also require `--token` or `--token-env`. |
 | `--no-browser` | Print the OAuth URL instead of opening a browser. |
 
 ```bash
@@ -83,24 +85,13 @@ detected source requires explicit confirmation.
 ## `omnifs mounts`
 
 ```bash
-omnifs mounts <ls|rm> [flags]
+omnifs mounts rm <name> [flags]
 ```
 
-Manages configured mounts. It has two subcommands: `ls` lists them and `rm`
-removes one. Status also lists mounts and `init` picks them, so only listing and
-removal need their own verbs here.
-
-### `omnifs mounts ls`
-
-```bash
-omnifs mounts ls [--json]
-```
-
-Lists configured mounts.
-
-| Flag | Purpose |
-|------|---------|
-| `--json` | Emit machine-readable JSON. |
+Manages configured mounts. Its one subcommand is `rm`, which removes a mount and,
+by default, the stored credential it references. Listing is covered by
+[`omnifs status`](/cli/lifecycle/) and selection by `init`, so only removal needs
+its own verb.
 
 ### `omnifs mounts rm`
 
@@ -109,23 +100,24 @@ omnifs mounts rm <name> [flags]
 ```
 
 Removes a configured mount. The name is validated before any path is constructed,
-so it cannot escape the mounts directory.
+so it cannot escape the mounts directory. By default it also deletes the mount's
+stored credential, in the same flow (the credential key is derived from the
+config it is about to delete).
 
 | Flag / argument | Purpose |
 |-----------------|---------|
 | `<name>` | Mount name to remove. |
-| `--purge-credentials` | Also remove the stored credential for this mount. |
-| `-y`, `--yes` | Skip the confirmation prompt. |
+| `--force` | Skip the confirmation prompt. |
+| `--keep-credentials` | Keep the stored credential; remove only the config. |
 
 ```bash
-omnifs mounts ls         # list configured mounts
-omnifs mounts rm work-gh --purge-credentials --yes
+omnifs mounts rm work-gh
+omnifs mounts rm work-gh --keep-credentials --force
 ```
 
 :::note
-Because `--purge-credentials` derives the credential key from the mount config it
-is deleting, removal happens in the same flow. Credentials sourced externally
-(`token_env`, `token_file`) are reported as unchanged.
+Credentials sourced externally (`token_env`, `token_file`) are reported as
+unchanged — only host-store credentials are deleted.
 :::
 
 ## `omnifs reset`
@@ -140,7 +132,7 @@ asks for confirmation unless `--yes` is set.
 
 | Flag | Purpose |
 |------|---------|
-| `--yes` | Skip the confirmation prompt. |
+| `-y`, `--yes` | Skip the confirmation prompt. |
 | `--keep-credentials` | Keep stored credentials; only remove configs and the container. |
 | `--container-name <NAME>` | Container name. Defaults to `OMNIFS_CONTAINER_NAME`, then `omnifs`. |
 
