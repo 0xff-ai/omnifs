@@ -8,13 +8,6 @@ host**, and the **filesystem mount runs inside a Linux container**. What differs
 between platforms is where that container's Linux kernel comes from and how you
 reach the mount.
 
-```mermaid
-flowchart LR
-  cli["omnifs CLI\n(host)"] -->|manages| container["Linux container"]
-  container --> mount["FUSE mount\n/github /dns /arxiv ..."]
-  cli -->|omnifs shell| mount
-```
-
 You browse the mount from inside the container — typically via `omnifs shell` —
 not from a path on your host filesystem.
 

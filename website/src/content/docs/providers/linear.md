@@ -86,15 +86,28 @@ Projects, cycles, comments, labels, and full workflow state — with draftable m
 
 ## Example
 
-```bash
-cd /linear/teams
-ls                                   # team keys, e.g. ENG  DES  OPS
-cd ENG/issues/open
-ls                                   # ENG-12  ENG-42  ...
-cat ENG-42/title
-cat ENG-42/state
-cat ENG-42/priority
-cat ENG-42/description.md
+```console
+$ cd /linear/teams
+$ ls
+DES  ENG  OPS
+
+$ cd ENG/issues/open
+$ ls
+ENG-12  ENG-42  ENG-77
+
+$ cat ENG-42/title
+Flush WAL buffer on graceful shutdown
+
+$ cat ENG-42/state
+In Progress
+
+$ cat ENG-42/priority
+High
+
+$ head -n 3 ENG-42/description.md
+On a clean shutdown we should flush any buffered WAL entries before
+releasing the writer lock, otherwise the next startup replays from an
+older checkpoint than necessary.
 ```
 
 

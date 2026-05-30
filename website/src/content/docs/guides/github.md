@@ -60,12 +60,18 @@ grep -rn "func main" .
 Issues live under `issues/open/` and `issues/all/` as numbered directories. Each
 issue exposes `title`, `body`, `state`, and a `comments/` directory.
 
-```bash
-ls  /github/ollama/ollama/issues/open
-cat /github/ollama/ollama/issues/open/10333/title
-cat /github/ollama/ollama/issues/open/10333/body
-cat /github/ollama/ollama/issues/open/10333/state
-ls  /github/ollama/ollama/issues/open/10333/comments
+```console
+$ ls /github/ollama/ollama/issues/open
+10333  10412  10455  10477  10489
+
+$ cat /github/ollama/ollama/issues/open/10333/title
+Allow setting a custom models directory per request
+
+$ cat /github/ollama/ollama/issues/open/10333/state
+open
+
+$ ls /github/ollama/ollama/issues/open/10333/comments
+0  1  2
 ```
 
 ## Pull request diffs

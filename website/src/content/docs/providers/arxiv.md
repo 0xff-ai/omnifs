@@ -81,13 +81,27 @@ A paper's top-level files (`paper.pdf`, `source.tar.gz`, `metadata.json`, `links
 
 ## Examples
 
-```bash
-# A specific paper by id
-cd /arxiv/papers/1706.03762
-cat metadata.json
-cp paper.pdf ~/attention.pdf
-cat versions/v1/metadata.json
+Reaching a paper by id and reading its metadata:
 
+```console
+$ cd /arxiv/papers/1706.03762
+$ ls
+links.json  metadata.json  paper.pdf  source.tar.gz  versions
+
+$ jq '{title, categories}' metadata.json
+{
+  "title": "Attention Is All You Need",
+  "categories": ["cs.CL", "cs.LG"]
+}
+
+$ cp paper.pdf ~/attention.pdf
+$ ls versions
+v1  v2  v3  v4  v5  v6  v7
+```
+
+Scanning a category and reading scan progress:
+
+```bash
 # Scan a category's recent submissions
 ls /arxiv/categories/cs.AI/recent
 ls /arxiv/categories/cs.AI/recent/pages/1

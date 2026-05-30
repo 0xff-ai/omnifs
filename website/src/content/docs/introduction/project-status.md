@@ -9,22 +9,6 @@ omnifs is **alpha** software. The core projected-filesystem model — reading li
 
 The runtime FUSE mount is **Linux-only.** The host CLI runs on **macOS and Linux**, and in both cases it talks to a Linux container that holds the actual mount. On macOS you do not get a native mount; the CLI drives the same Linux container that a Linux host would run.
 
-```mermaid
-flowchart LR
-  subgraph mac["macOS host"]
-    cli1["omnifs CLI"]
-  end
-  subgraph lin["Linux host"]
-    cli2["omnifs CLI"]
-  end
-  subgraph container["Linux container"]
-    mount["FUSE mount\n/omnifs/<mount>"]
-  end
-  cli1 -->|Docker API| container
-  cli2 -->|Docker API| container
-  mount --- mount
-```
-
 Native macOS and Windows mounts are **planned**, not present. Do not assume macFUSE, `diskutil`, or other macOS-specific mount behavior — the supported path is always the Linux container.
 
 ## What works today

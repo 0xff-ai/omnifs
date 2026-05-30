@@ -84,21 +84,43 @@ PostgreSQL is a planned backend, alongside per-row paths, saved queries, and vie
 
 ## Example
 
+Pointed at the Chinook sample database that `omnifs dev` materializes, a browse
+looks like this (output shown after each command):
+
+```console
+$ cat /db/meta/version.txt
+3.45.1
+
+$ ls /db/tables
+Album        Artist     Customer       Employee  Genre  Invoice
+InvoiceLine  MediaType  Playlist       PlaylistTrack    Track
+
+$ cat /db/tables/Album/schema.sql
+CREATE TABLE "Album"
+(
+    [AlbumId] INTEGER  NOT NULL,
+    [Title] NVARCHAR(160)  NOT NULL,
+    [ArtistId] INTEGER  NOT NULL,
+    CONSTRAINT [PK_Album] PRIMARY KEY  ([AlbumId])
+)
+
+$ cat /db/tables/Album/count.txt
+347
+
+$ jq '.[0]' /db/tables/Album/sample.json
+{
+  "AlbumId": 1,
+  "Title": "For Those About To Rock We Salute You",
+  "ArtistId": 1
+}
+```
+
+Standard tools work because every path is a real file:
+
 ```bash
-# What database is mounted and what does it contain
-cat /db/meta/version.txt
-cat /db/meta/info.json | jq
-ls /db/tables                          # Album Artist Customer Employee Genre ...
-
-# Explore a table
-cat /db/tables/Album/schema.sql
-cat /db/tables/Album/schema.json | jq
-cat /db/tables/Album/count.txt
-cat /db/tables/Album/sample.json | jq '.[0]'
-
-# Standard tools work
 find /db/tables -name schema.sql | head
-grep -r INTEGER /db/tables/
+grep -rl INTEGER /db/tables/
+du -sh /db/tables/Album
 ```
 
 

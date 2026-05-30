@@ -54,12 +54,18 @@ flowchart TD
 
 Each record-type file under a domain directory contains the answer for that one record type, one entry per line. `all` aggregates the common record types into a single file, and `raw` returns a dig-style rendering of the response.
 
-```bash
-cd /dns/cloudflare.com
-ls            # A  AAAA  CAA  CNAME  MX  NS  SOA  TXT  all  raw
-cat A         # 104.16.133.229
-cat MX
-cat all
+```console
+$ cd /dns/cloudflare.com
+$ ls
+A  AAAA  CAA  CNAME  MX  NS  SOA  TXT  all  raw
+
+$ cat A
+104.16.132.229
+104.16.133.229
+
+$ cat NS
+ns3.cloudflare.com.
+ns4.cloudflare.com.
 ```
 
 ## Choosing a resolver

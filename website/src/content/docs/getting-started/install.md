@@ -42,15 +42,6 @@ omnifs up --image ghcr.io/0xff-ai/omnifs:0.2.0
 OMNIFS_IMAGE=ghcr.io/0xff-ai/omnifs:0.2.0 omnifs up
 ```
 
-## Install to running, end to end
-
-```mermaid
-flowchart LR
-  install["npm install -g\n@0xff-ai/omnifs"] --> init["omnifs init\nconfigure providers"]
-  init --> up["omnifs up\npulls runtime image\nstarts container"]
-  up --> shell["omnifs shell\nexplore the mount"]
-```
-
 Only `omnifs up` touches Docker. `npm install` and `omnifs init` run entirely
 on the host.
 

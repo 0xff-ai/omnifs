@@ -70,10 +70,6 @@ Caching is not a separate callout. The side effects a provider wants the host to
 
 This is a deliberate single-phase design. The data needed to warm or invalidate the cache is produced exactly where it is naturally available — in the handler that just fetched it — and consumed immediately, rather than split into a second round trip. See [caching](/concepts/caching/) for how the host applies these effects.
 
-:::tip
-Providers must project everything they already have. If a handler holds an upstream payload, it emits every sibling file and child it can derive instead of returning only the requested field and forcing later refetches. This is the difference between one network round trip and many.
-:::
-
 ## Reserved streaming surface
 
 The WIT interface reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads. The current host and runtime path serves exact file bytes and explicit subtree handoff; the streaming arms exist for future ranged reads (for example, [`Volatile` files that require `Ranged` reads](/concepts/file-attributes/)).

@@ -42,17 +42,6 @@ container up; you can run `omnifs init <provider>` later.
 excluded from the picker, re-running it lets you add providers incrementally
 without re-doing the ones you have already set up.
 
-## The flow
-
-```mermaid
-flowchart TD
-  start["omnifs setup"] --> os["Detect OS"]
-  os --> docker["Explain Docker"]
-  docker --> pick["Pick providers\n(configured ones excluded)"]
-  pick --> init["Init each provider\n(OAuth + validate + config)"]
-  init --> up["omnifs up\nlaunch container"]
-```
-
 ## Next steps
 
 After setup finishes the container is running. Open a shell and explore:

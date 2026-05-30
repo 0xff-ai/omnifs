@@ -61,11 +61,16 @@ Use `ls` to discover what a directory holds and `cd` to descend. Directories
 that contain dynamic children (for example a GitHub owner's repositories) list
 what omnifs already knows and fetch more as you navigate.
 
-```bash
-ls /                      # the mounts: github, dns, arxiv, db, docker, linear
-ls /github/rust-lang      # repos under an owner
-cd /github/rust-lang/rust
-ls                        # repo, issues, pulls, actions
+```console
+$ ls /
+arxiv  db  dns  docker  github  linear
+
+$ ls /github/rust-lang
+cargo  crates.io  rust  rustlings  rustup
+
+$ cd /github/rust-lang/rust
+$ ls
+actions  issues  pulls  repo
 ```
 
 ## Reading content

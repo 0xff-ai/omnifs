@@ -125,22 +125,32 @@ Repository cloning uses SSH and your forwarded SSH agent, independent of the API
 # Repositories for an owner
 cd /github/torvalds && ls
 
-# A repository's top-level families
-ls /github/ollama/ollama          # actions  issues  pulls  repo
-
-# Clone-on-list: browse the working tree
-cd /github/ollama/ollama/repo && ls
-
-# Read issue fields
-cat /github/ollama/ollama/issues/open/15400/title
-cat /github/ollama/ollama/issues/open/15400/body
-
 # A pull request diff
 cat /github/ollama/ollama/pulls/all/15087/diff
 
 # CI run status and log
 cat /github/ollama/ollama/actions/runs/123456789/status
 cat /github/ollama/ollama/actions/runs/123456789/log
+```
+
+A reading session shows the output inline:
+
+```console
+$ ls /github/ollama/ollama
+actions  issues  pulls  repo
+
+$ cat /github/ollama/ollama/issues/open/15400/title
+Support for structured outputs / JSON schema
+
+$ cat /github/ollama/ollama/issues/open/15400/state
+open
+
+$ cat /github/ollama/ollama/actions/runs/123456789/status
+completed
+
+# Clone-on-list: the first `ls` of repo/ clones over SSH, then it is a real tree
+$ cd /github/ollama/ollama/repo && ls
+LICENSE  README.md  cmd  go.mod  go.sum  server
 ```
 
 
