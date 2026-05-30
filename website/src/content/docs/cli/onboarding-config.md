@@ -55,20 +55,22 @@ Built-in providers include `github`, `dns`, `sqlite`, and `hn`.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<provider>` | Provider to configure. Prompted if omitted. |
+| `<provider>` | Provider to configure (e.g. `github`, `linear`). Prompted if omitted. |
 | `--as <NAME>` | Mount name. Defaults to the provider's recommended name. |
-| `--token` | Read a token from stdin. |
-| `--token-env <VAR>` | Read a token from the named environment variable. |
-| `--providers-dir <DIR>` | Provider config directory override. |
+| `--token <-> ` | Read the credential token from stdin (pass `-`). |
+| `--token-env <VAR>` | Read the credential token from the named environment variable. |
+| `-y`, `--yes` | Skip confirmations; accept detected ambient credentials. |
+| `--no-browser` | Print the OAuth URL instead of opening a browser. |
 
 ```bash
 omnifs init github                      # interactive, OAuth by default
 omnifs init github --as work-gh         # custom mount name
-omnifs init sqlite --token-env DB_TOKEN # token from an env var
+omnifs init linear --token-env LINEAR_API_KEY
+echo "$DB_TOKEN" | omnifs init sqlite --token -
 ```
 
 :::caution
-Tokens are accepted only via `--token` (stdin) or `--token-env <VAR>`. There is
+Tokens are accepted only via `--token -` (stdin) or `--token-env <VAR>`. There is
 no `--token <value>` form, to keep secrets out of shell history.
 :::
 
@@ -81,11 +83,24 @@ detected source requires explicit confirmation.
 ## `omnifs mounts`
 
 ```bash
-omnifs mounts [rm <name> [flags]]
+omnifs mounts <ls|rm> [flags]
 ```
 
-With no subcommand, lists configured mounts. The only auxiliary verb is `rm`;
-status lists and `init` picks, so only removal needs its own command.
+Manages configured mounts. It has two subcommands: `ls` lists them and `rm`
+removes one. Status also lists mounts and `init` picks them, so only listing and
+removal need their own verbs here.
+
+### `omnifs mounts ls`
+
+```bash
+omnifs mounts ls [--json]
+```
+
+Lists configured mounts.
+
+| Flag | Purpose |
+|------|---------|
+| `--json` | Emit machine-readable JSON. |
 
 ### `omnifs mounts rm`
 
@@ -99,16 +114,16 @@ so it cannot escape the mounts directory.
 | Flag / argument | Purpose |
 |-----------------|---------|
 | `<name>` | Mount name to remove. |
-| `--purge-credential` | Also remove the stored credential for this mount. |
-| `--yes` | Skip the confirmation prompt. |
+| `--purge-credentials` | Also remove the stored credential for this mount. |
+| `-y`, `--yes` | Skip the confirmation prompt. |
 
 ```bash
-omnifs mounts            # list configured mounts
-omnifs mounts rm work-gh --purge-credential --yes
+omnifs mounts ls         # list configured mounts
+omnifs mounts rm work-gh --purge-credentials --yes
 ```
 
 :::note
-Because `--purge-credential` derives the credential key from the mount config it
+Because `--purge-credentials` derives the credential key from the mount config it
 is deleting, removal happens in the same flow. Credentials sourced externally
 (`token_env`, `token_file`) are reported as unchanged.
 :::

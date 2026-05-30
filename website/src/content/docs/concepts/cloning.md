@@ -1,6 +1,6 @@
 ---
 title: Cloning and subtree handoff
-description: Repo subtrees via SSH clone, forwarded SSH_AUTH_SOCK, the clone manager's dedup and cache, treeref handoff, and bind-mounted clone directories folded into lookup and list.
+description: Repo subtrees via SSH clone with a forwarded agent socket, the clone manager's dedup and cache, treeref handoff, and bind-mounted clone directories.
 ---
 
 Some provider content is a whole repository tree, not a synthetic projection. When you navigate into a repo's tree under a provider, omnifs serves it from a real git clone on disk, bind-mounted into the path space. The provider does not clone the repo itself — it hands the host a *subtree reference*, and the host's clone manager resolves it to a backing directory. This is **subtree handoff**, and it folds cleanly into the same `lookup_child` and `list_children` operations as everything else.

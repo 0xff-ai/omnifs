@@ -31,12 +31,14 @@ code, shows a countdown, and opens the verification URL for you.
 
 | Flag / argument | Purpose |
 |-----------------|---------|
-| `<provider>` | Provider to log in to (e.g. `github`). |
-| `--device` | Force the device flow even if a loopback redirect is available. |
+| `<provider>` | Provider to authenticate (e.g. `github`, `linear`). |
+| `--device` | Force the device flow even when a loopback redirect is available. |
+| `--no-browser` | Print the OAuth URL instead of opening a browser. |
 
 ```bash
 omnifs auth login github
 omnifs auth login github --device
+omnifs auth login linear --no-browser
 ```
 
 ## `omnifs auth logout`

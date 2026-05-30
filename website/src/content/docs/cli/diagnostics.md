@@ -12,20 +12,20 @@ shell.
 omnifs doctor [flags]
 ```
 
-Probes the environment and auth state and prints a table of results. It runs a
-small set of probes in dependency order and does not attempt any auto-fix — it
-diagnoses, you remediate.
+Probes the environment and auth state and prints a table of results. It runs six
+probes in dependency order and does not attempt any auto-fix — it diagnoses, you
+remediate.
 
-Probes:
+Probes, in order:
 
 | Probe | Checks |
 |-------|--------|
-| `docker_reachable` | The Docker daemon is reachable. |
-| `image_cached` | The runtime image is present locally. Depends on `docker_reachable`. |
-| `mount_configs_valid` | Configured mounts parse and load. |
-| `auth_ready` | Each mount has a usable credential. Reuses the `status` loaders; depends on `mount_configs_valid`. |
-| `ssh_agent` | An SSH agent is available (used for git clones). |
-| `network` | Best-effort connectivity check; never reported as a failure. |
+| Docker reachable | The Docker daemon responds to a ping. |
+| Runtime image present | The runtime image is cached locally; warns (not fails) if it will be pulled on `up`. Skipped if Docker is unreachable. |
+| Mount configs valid | Configured mounts parse and load. |
+| Auth ready | Each mount has a usable credential. Reuses the same loaders as `status`. |
+| SSH agent | An SSH agent is available (used for git clones). |
+| Network | Best-effort connectivity check; never reported as a failure. |
 
 | Flag | Purpose |
 |------|---------|

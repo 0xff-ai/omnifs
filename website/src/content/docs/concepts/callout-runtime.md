@@ -1,6 +1,6 @@
 ---
 title: The callout runtime
-description: Providers suspend with callouts or return terminals; the host executes the batch and resumes them. Continuations keyed by correlation id, strictly request/response.
+description: Providers suspend with callouts or return terminals; the host runs the batch and resumes them via correlation id. Strictly request/response.
 ---
 
 A provider cannot reach the network, git, or the filesystem on its own. When a handler needs external data, it does not block or `await` — it **suspends** and hands the host a list of *callouts* describing exactly what it needs. The host executes that batch, attaching credentials and policy, and calls `resume` with the outcomes. The provider picks up where it left off, possibly suspending again, until it returns a terminal.
