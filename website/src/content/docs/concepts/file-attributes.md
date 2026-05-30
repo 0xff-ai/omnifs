@@ -1,6 +1,6 @@
 ---
 title: File attributes
-description: Projected files declare Size, Bytes, ReadMode, and Stability via the Projection API. How the host wires st_size, direct I/O, cache layers, version-keyed content, and learned-size promotion.
+description: Projected files declare Size, Bytes, ReadMode, and Stability. How the host wires st_size, direct I/O, cache layers, and learned-size promotion.
 ---
 
 A projected file is more than its bytes. To behave like a real file for the standard Linux toolbox, it needs a size that `ls -l` and `stat` can read, an I/O mode the kernel can honour, and a stability classification that tells the host how long its bytes may be cached. Providers declare these through the SDK's `Projection` API; the host wires them into `st_size`, FUSE flags, cache layers, durable version-keyed content, learned-size promotion, and post-read invalidation.

@@ -1,6 +1,6 @@
 ---
 title: Mount lifecycle
-description: The three layers of a mount — shipped provider metadata, enabled mounts, runtime credentials — and how LoadedMount and EffectiveConfig compose them into a running mount.
+description: The three layers of a mount — shipped metadata, enabled mounts, runtime credentials — and how EffectiveConfig composes them into a running mount.
 ---
 
 A running mount is the product of three distinct layers, each owned by a different party and resolved at a different time. Keeping them separate is what lets a provider ship sensible defaults, a user choose what to enable, and the host materialize per-session credentials, without any of those three concerns leaking into the others.
