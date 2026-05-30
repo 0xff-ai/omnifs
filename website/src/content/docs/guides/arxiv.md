@@ -1,12 +1,12 @@
 ---
 title: Browsing arXiv
-description: Read arXiv papers as directories under /arxiv — PDFs, LaTeX source, metadata, versions, and category/author/search scopes.
+description: Read arXiv papers as directories under /arxiv — PDFs, LaTeX source, metadata, versions, and per-category recent submissions.
 ---
 
 The arXiv provider mounts under `/arxiv`. Each paper is a directory; its
-metadata, PDF, and source are files. The same per-paper subtree appears under
-every scope (categories, authors, search), so the file shape is identical
-wherever you reach a paper from.
+metadata, PDF, and source are files. The same per-paper subtree appears
+wherever a paper shows up — under `papers/`, a category's recent pages, or a
+submission-day bucket — so the file shape is identical no matter how you got there.
 
 ```bash
 ls /arxiv/papers/1706.03762
@@ -23,12 +23,10 @@ cat /arxiv/papers/1706.03762/metadata.json
 | `/arxiv/papers/{id}/metadata.json` | Title, authors, abstract, categories, links |
 | `/arxiv/papers/{id}/links.json` | Resolved arXiv URLs for this paper / version |
 | `/arxiv/papers/{id}/versions/v{n}/{paper.pdf,…}` | Same files for a specific version |
-| `/arxiv/categories/{cat}/{YYYY}/{MM}/{DD}/` | Papers in `cat` posted on that UTC day |
-| `/arxiv/categories/{cat}/new/` | Most-recent papers in `cat` by submitted date |
-| `/arxiv/categories/{cat}/updated/` | Most-recent papers in `cat` by last-updated date |
-| `/arxiv/categories/{cat}/by-author/{author}/` | Papers in `cat` by `author` |
-| `/arxiv/authors/{author}/` | Papers by author (same `new`/`updated`/`by-category` axes) |
-| `/arxiv/search/{query}/` | arXiv search results (URL-encoded query) |
+| `/arxiv/categories/{cat}/recent/` | Recent submissions in `cat` (`fetched`, `pages`, `status.json`) |
+| `/arxiv/categories/{cat}/recent/pages/{n}/` | One feed page of recent submissions (`start = n × 100`) |
+| `/arxiv/categories/{cat}/recent/fetched/` | Papers already fetched and cached for `cat` |
+| `/arxiv/categories/{cat}/submissions/{YYYYMMDD}/` | Papers submitted on that UTC day |
 
 ## A single paper
 
@@ -53,27 +51,35 @@ cp  /arxiv/papers/1706.03762/versions/v1/paper.pdf ~/attention-v1.pdf
 cat /arxiv/papers/1706.03762/versions/v2/metadata.json
 ```
 
-## Scopes: categories, authors, search
+## Browsing a category
 
-Browse collections of papers by category, by author, or by search query. Each
-scope lists papers you can descend into — the per-paper subtree is the same as
-under `/arxiv/papers/{id}/`.
+A category is browsed through a moving **recent** scan and the immutable
+**submission-day** buckets derived from it. Each entry lists papers you can
+descend into — the per-paper subtree is the same as under `/arxiv/papers/{id}/`.
 
 ```bash
-# Papers in a category, by day or by recency
-ls /arxiv/categories/cs.AI/2024/01/31
-ls /arxiv/categories/cs.AI/new
-ls /arxiv/categories/cs.AI/updated
+# Recent submissions in a subject category
+ls /arxiv/categories/cs.AI/recent
 
-# A category narrowed to one author
-ls /arxiv/categories/cs.CL/by-author/Vaswani
+# Fetch one feed page at a time (start = n × 100)
+ls /arxiv/categories/cs.AI/recent/pages/1
 
-# All papers by an author
-ls /arxiv/authors/Vaswani
+# Papers already fetched and cached for the category
+ls /arxiv/categories/cs.AI/recent/fetched
 
-# Search results (URL-encoded query)
-ls /arxiv/search/transformer
+# Scan progress: feed snapshot, totals, next page to fetch
+cat /arxiv/categories/cs.AI/recent/status.json | jq
+
+# Papers submitted on a discovered UTC day
+ls /arxiv/categories/cs.AI/submissions
+ls /arxiv/categories/cs.AI/submissions/20260512
 ```
+
+:::note
+Listing `recent/pages/{n}` is the explicit "fetch next page" action. Submission-day
+buckets read only from already-fetched state, so a day appears once a page that
+contains it has been scanned.
+:::
 
 :::tip
 Combine arXiv with the inspection tools — `jq` reads the metadata files
