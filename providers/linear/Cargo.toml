@@ -17,11 +17,12 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
+omnifs-core = { workspace = true }
 omnifs-sdk = { workspace = true }
 hashbrown = { workspace = true }
 http = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 strum = { workspace = true }
 
 [dev-dependencies]

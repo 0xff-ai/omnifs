@@ -1,7 +1,7 @@
 # File attributes for projected files
 
 Status: implemented
-Scope: `wit/provider.wit`, host FUSE layer, SDK projection API, providers
+Scope: `crates/omnifs-wit/wit/provider.wit`, host FUSE layer, SDK projection API, providers
 Supersedes the relevant parts of: `docs/design/projected-file-sizes.md` (the size-only model)
 
 ## Problem
@@ -136,7 +136,7 @@ FUSE still requires the host to return a numeric `st_size` for regular files. `S
 
 Inline bytes are capped by the SDK's eager byte limit, currently `MAX_PROJECTED_BYTES = 64 KiB`. This cap is part of the provider contract because inline bytes ride inside listings and lookup responses. Larger payloads must use `Bytes::Deferred { read: ReadMode::Full }` or `Bytes::Deferred { read: ReadMode::Ranged }`.
 
-The host also enforces a response-level eager-byte cap across entries, preloads, and sibling files in one terminal response. The implementation cap is `MAX_EAGER_RESPONSE_BYTES = 512 KiB`. The boundary rejects responses that exceed the aggregate cap; it does not silently promote excess inline files to deferred reads, because that would require inventing a handler path or changing provider-declared byte semantics.
+The host also enforces a response-level eager-byte cap across all inline entries in one terminal response (direct entries plus any inline content in `effects.fs` entries). The implementation cap is `MAX_EAGER_RESPONSE_BYTES = 512 KiB`. The boundary rejects responses that exceed the aggregate cap; it does not silently promote excess inline files to deferred reads, because that would require inventing a handler path or changing provider-declared byte semantics.
 
 `Bytes::Deferred { read: ReadMode::Full }` means the provider can produce the whole payload when the host asks to read the file.
 
@@ -146,7 +146,7 @@ For `Size::Exact(n)`, deferred reads are checked against `n`. A full read that r
 
 For `Size::Exact(0)`, the host can serve EOF without calling a deferred handler. Providers should normally use inline empty bytes for small known-empty files, but deferred exact-empty declarations remain valid.
 
-`ReadMode` is provider capability, not cache policy. The host may still choose direct I/O, page cache behavior, L0/L2 placement, or post-read invalidation based on `Size` and `Stability`.
+`ReadMode` is provider capability, not cache policy. The host may still choose direct I/O, page cache behavior, in-memory overlay or durable view cache placement, or post-read invalidation based on `Size` and `Stability`.
 
 ## Stability semantics
 
@@ -212,7 +212,7 @@ There are three viable proof mechanisms:
 
 | Mechanism | Shape | Pros | Cons |
 |---|---|---|---|
-| Explicit invalidation | Provider emits `event-outcome.invalidate-paths` or `invalidate-prefixes` when upstream state changes. | Fits the existing host cache model and works for event-driven providers. | Requires reliable provider events; polling gaps can serve stale content. |
+| Explicit invalidation | Provider returns `effects { invalidations: [...] }` carrying `object(logical-id)` or `listing(path-or-prefix)` entries when upstream state changes. | Fits the existing host cache model and works for event-driven providers. | Requires reliable provider events; polling gaps can serve stale content. |
 | Version identity | Provider attaches `version` to the file observation, such as an ETag, commit SHA, API update timestamp, or content digest. | Makes cache keys precise and lets mutable files become cacheable snapshots. | Requires providers to define token scope consistently for each path. |
 | Observation-only cache | Host caches mutable content only inside one read/open observation. | Safe default with no extra protocol. | Gives up cross-open cache reuse for mutable files. |
 
@@ -220,7 +220,7 @@ The default policy should be observation-only. Providers can opt into stronger c
 
 Versioned mutable content is keyed by `(provider-id, file-identity, version-token)`. `file-identity` is the provider-relative file path under that provider. The token is not globally unique by itself; two paths may legitimately share the same ETag or digest.
 
-Invalidation is still delivered through the existing event outcome channel. A provider that declares `Stability::Mutable` but has no event source covering that path has not supplied invalidation proof; it remains observation-only unless it supplies a version token. This keeps `Mutable` as a provider fact and keeps refresh timing as host policy.
+Invalidation is delivered through the `invalidations` field in the provider return's `effects` record. A provider that declares `Stability::Mutable` but has no event source covering that path has not supplied invalidation proof; it remains observation-only unless it supplies a version token. This keeps `Mutable` as a provider fact and keeps refresh timing as host policy.
 
 ## Legal combinations
 
@@ -254,60 +254,39 @@ Hard validation rules:
 - `Size::Exact(n)` mismatch with inline bytes is rejected after WIT decode. If the provider detects it first, it returns `op-result.err(provider-error)`; if the host detects it, the user-facing operation fails rather than publishing the entry.
 - A deferred read that contradicts `Size::Exact(n)` is a provider contract error.
 - `version` rejects empty strings and strings longer than 256 bytes.
-- These rules apply uniformly to directory entries, lookup targets, lookup siblings, preloaded entries, and sibling files returned from byte-producing handlers.
+- These rules apply uniformly to directory entries, lookup targets, lookup siblings, and preloaded entries returned from byte-producing handlers (via the `effects { fs, canonical }` channels).
 
 ## Declaring files
 
-The provider declares files via `Projection::file(name, attrs)`. Inline files carry bytes inside `Bytes::Inline`; deferred files come from a matching `#[file]` handler.
+The provider declares files via the imperative registration API. Inline files carry bytes inside `Bytes::Inline`; deferred files are served by a handler registered with `r.file(t).handler(h)`.
 
 ```rust
-p.dir("by-name");
+// Inline: bytes carried with the projection, no separate file handler needed.
+// r.file("/_README.md").handler(readme_file)?;  -- or inline via projection builder:
+FileProjection::inline(README.into()).immutable().build()
 
-p.file("_README.md", FileAttrs {
-    size: Size::Exact(README.len() as u64),
-    bytes: Bytes::Inline(README.into()),
-    stability: Stability::Immutable,
-    version: None,
-});
+// Deferred full read: handler called on read-file.
+FileProjection::deferred(Size::Unknown).full().mutable().build()
 
-p.file("inspect.json", FileAttrs {
-    size: Size::Unknown,
-    bytes: Bytes::Deferred { read: ReadMode::Full },
-    stability: Stability::Mutable,
-    version: None,
-});
+// Deferred full read with known size and version:
+FileProjection::deferred(Size::Exact(8)).full().mutable().version(state_revision).build()
 
-p.file("state", FileAttrs {
-    size: Size::Exact(8),
-    bytes: Bytes::Deferred { read: ReadMode::Full },
-    stability: Stability::Mutable,
-    version: Some(state_revision.into()),
-});
+// Deferred ranged read: handler called on open-file / read-chunk.
+FileProjection::deferred(Size::Exact(layer_size)).ranged().immutable().build()
 
-p.file("layer.tar", FileAttrs {
-    size: Size::Exact(layer_size),
-    bytes: Bytes::Deferred { read: ReadMode::Ranged },
-    stability: Stability::Immutable,
-    version: None,
-});
-
-p.file("logs/tail", FileAttrs {
-    size: Size::NonZero,
-    bytes: Bytes::Deferred { read: ReadMode::Ranged },
-    stability: Stability::Volatile,
-    version: None,
-});
+// Deferred ranged volatile: live-log shape.
+FileProjection::deferred(Size::NonZero).ranged().volatile().build()
 ```
 
 For byte-producing handlers:
 
 | Bytes | Bytes from | Handler returns |
 |---|---|---|
-| `Inline(bytes)` | Projection entry | No handler needed |
-| `Deferred { read: Full }` | matched `#[file]` handler | `FileContent::bytes(...)` |
-| `Deferred { read: Ranged }` | matched `#[file]` handler | `FileContent::ranged(attrs, reader)` or `FileContent::range_bytes(attrs, bytes)`, then `FileChunk { content, eof }` results |
+| `Inline(bytes)` | Projection builder | No separate file handler needed |
+| `Deferred { read: Full }` | registered `r.file(t).handler(h)` | `FileProjection` with full deferred bytes |
+| `Deferred { read: Ranged }` | registered `r.file(t).handler(h)` | `FileProjection` with ranged deferred bytes; `read-chunk` results carry `{ content, eof }` |
 
-The SDK and host validate attrs at the response boundary and at read/open time. A `Deferred { read: Full }` path whose `read-file` handler returns a stream or ranged content is a provider contract error. A `Deferred { read: Ranged }` path whose `open-file` handler returns whole bytes is a provider contract error. Inline-declared paths do not need a `#[file]` handler; if a handler also exists, the inline payload can still satisfy cached reads for that observation.
+The SDK and host validate attrs at the response boundary and at read/open time. A `Deferred { read: Full }` path whose `read-file` handler returns ranged content is a provider contract error. A `Deferred { read: Ranged }` path whose `open-file` handler returns whole bytes is a provider contract error. Inline-declared paths do not need a registered file handler; if a handler is registered anyway, the inline payload can still satisfy cached reads for that observation.
 
 Validation phase:
 
@@ -337,7 +316,8 @@ enum read-mode {
     ranged,
 }
 
-variant file-bytes {
+// Byte availability is kept on a separate proj-bytes variant.
+variant proj-bytes {
     inline(list<u8>),
     deferred(read-mode),
 }
@@ -348,16 +328,21 @@ enum stability {
     volatile,
 }
 
+// file-attrs carries metadata only; byte availability lives in file-proj.bytes.
 record file-attrs {
     size: file-size,
-    bytes: file-bytes,
     stability: stability,
     version-token: option<version-token>,
 }
 
+record file-proj {
+    attrs: file-attrs,
+    bytes: proj-bytes,
+}
+
 variant entry-kind {
     directory,
-    file(file-attrs),
+    file(file-proj),
 }
 
 record dir-entry {
@@ -365,52 +350,35 @@ record dir-entry {
     kind: entry-kind,
 }
 
-record projected-file {
-    name: string,
-    attrs: file-attrs,
-}
-
 record file-chunk {
     content: list<u8>,
     eof: bool,
 }
 
-record file-content-result {
+// Completed full-read result.
+record read-file-result {
     attrs: file-attrs,
-    content: list<u8>,
-    sibling-files: list<projected-file>,
+    bytes: read-file-bytes,
 }
 
-record file-open-result {
+// Opened ranged-read handle.
+record open-file-result {
     handle: file-handle,
     attrs: file-attrs,
 }
-
-record preloaded-file {
-    path: string,
-    attrs: file-attrs,
-    content: list<u8>,
-}
-
-record preloaded-entry {
-    path: string,
-    kind: entry-kind,
-}
 ```
 
-File attributes are carried by the `file(file-attrs)` entry-kind payload and by preloaded file content. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, `lookup-entry.siblings`, and preloaded entries, must carry the same shape.
+File attributes are carried by the `file(file-proj)` entry-kind payload. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, and `lookup-entry.siblings`, carries the same shape.
 
 Subtree handoffs remain a separate terminal shape, such as `list-result.subtree(tree-ref)`. They do not appear inside `dir-entry.kind`; `entry-kind` only describes entries materialized in a directory listing or lookup response.
 
-Inline bytes live inside `file-bytes.inline`, not in a separate sibling field. This prevents the metadata/payload drift that separate `set_inline_bytes` style APIs allow. The SDK and host validate after WIT decode that inline bytes imply an exact size equal to `content.len()`, then the host can cache the bytes at the response boundary just as it does for preloaded file content.
+Inline bytes live inside `proj-bytes.inline`. The SDK and host validate after WIT decode that inline bytes imply an exact size equal to `content.len()`, then the host caches the bytes at the response boundary.
 
-Deferred full files map to the existing `read-file` operation. Deferred ranged files map to the `open-file` / `read-chunk` / `close-file` operation family. The logical ranged request shape is explicit-offset: `open-file(path) -> file-handle`, `read-chunk(handle, offset, len) -> file-chunk`, and `close-file(handle)`. The concrete WIT can keep its existing `correlation-id` and `provider-return` wrapping, but the offset and length are part of the contract.
+Deferred full files map to the `read-file` operation. Deferred ranged files map to the `open-file` / `read-chunk` / `close-file` operation family. The ranged request shape is explicit-offset: `open-file(path) -> file-handle`, `read-chunk(handle, offset, len) -> file-chunk`, and `close-file(handle)`.
 
-`read-chunk` must return `file-chunk { content, eof }` or an equivalent terminal that lets the host distinguish a partial short read from observation EOF. For `Mutable + Ranged`, `eof = true` means the end of the snapshot represented by that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size. The WIT operation names can stay stable; the new attrs tell the host which path is valid for each projected file.
+`read-chunk` returns `file-chunk { content, eof }`. For `Mutable + Ranged`, `eof = true` means the end of the snapshot for that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size.
 
-For preloads, `preloaded-entry.kind` carries the same `entry-kind` shape as directory entries, so metadata-only file preloads carry `file-attrs` through `entry-kind::file(file-attrs)`. `preloaded-file` carries its own `file-attrs` next to the content bytes. Preloaded bytes are a warm content entry for that observation; they do not change a `Deferred` declaration into `Inline`, and they are discarded or scoped according to `Stability`.
-
-Sibling files returned from a byte-producing handler use the same `projected-file { name, attrs }` shape. This keeps provider-side fanout from losing size, bytes, stability, or version information after the provider has already fetched the upstream payload.
+Additional paths learned while serving a request travel through the effects record (`effects { canonical, fs, invalidations }`). The `fs` field carries `fs-write` entries for paths the host should install into the view cache; the `canonical` field carries `canonical-store` entries for object anchors. There are no separate sibling-file or preload fields on the terminal result.
 
 ## Bash-tool acceptance matrix
 

@@ -1,0 +1,514 @@
+package omnifs:provider@0.4.0;
+
+// === Shared types ===
+
+interface types {
+    type correlation-id = u64;
+    type repo-id = u64;
+    type tree-ref = u64;
+    type file-handle = u64;
+    type blob-id = u64;
+
+    // --- Provider progress and terminal return ---
+
+    /// One provider progress step. `suspended` is not a return: the host
+    /// must run a non-empty callout batch and resume the same operation.
+    /// `returned` is the completed operation answer plus host-side
+    /// effects to commit.
+    variant provider-step {
+        suspended(list<callout>),
+        returned(provider-return),
+    }
+
+    /// Completed operation answer. This shape cannot carry callouts.
+    /// `effects` is the only terminal host-mutation channel.
+    record provider-return {
+        %result: op-result,
+        effects: effects,
+    }
+
+    /// Completed operation answer. Arm names mirror provider operations;
+    /// `error` is the cross-operation failure arm.
+    variant op-result {
+        lookup-child(lookup-child-result),
+        list-children(list-children-result),
+        read-file(read-file-outcome),
+        open-file(open-file-result),
+        read-chunk(read-chunk-result),
+        initialize(initialize-result),
+        on-event,
+        error(provider-error),
+    }
+
+    // --- Callouts (provider -> host, request/response) ---
+
+    /// Work the host runs on the provider's behalf. Every callout expects
+    /// a matching `callout-result` back via `resume`; there are no
+    /// fire-and-forget callouts, and provider returns never carry
+    /// trailing callouts.
+    variant callout {
+        fetch(http-request),
+        git-open-repo(git-open-request),
+        /// HTTP fetch whose response body lands in the host's disk-backed
+        /// blob cache instead of crossing the WIT boundary. Returns a
+        /// `blob-id` plus response metadata; the bytes can later be served
+        /// verbatim as read bytes (`byte-source.blob`) or mounted as a
+        /// directory tree (`open-archive`).
+        fetch-blob(blob-fetch-request),
+        /// Mount a stored blob as a directory tree, with the host
+        /// performing decompression and walk based on the requested
+        /// archive format.
+        open-archive(archive-open-request),
+        /// Bring a (range of a) stored blob across the WIT boundary so
+        /// the provider can parse it. Use sparingly; the point of blobs
+        /// is to keep large bytes host-side.
+        read-blob(read-blob-request),
+    }
+
+    // --- Callout results (host -> provider, non-recursive) ---
+
+    variant callout-result {
+        http-response(http-response),
+        git-repo-opened(git-repo-info),
+        blob-fetched(blob-fetched),
+        archive-opened(archive-opened),
+        blob-read(list<u8>),
+        callout-error(callout-error),
+    }
+
+    type callout-results = list<callout-result>;
+
+    // --- Terminal host mutations ---
+
+    /// Host-side mutations committed at the return boundary, grouped in typed
+    /// blocks by target subsystem. The two byte-producing blocks are
+    /// distinguished by verb: `canonical` STOREs raw upstream bytes into the
+    /// object store; `fs` WRITEs materialized files and directories into the
+    /// view cache.
+    record effects {
+        canonical: list<canonical-store>,
+        fs: list<fs-write>,
+        invalidations: list<invalidation>,
+    }
+
+    record logical-id {
+        kind: string,
+        captures: list<id-capture>,
+    }
+
+    record id-capture {
+        name: string,
+        value: string,
+    }
+
+    /// Store raw upstream bytes against a logical object id. The canonical is
+    /// exactly the upstream response body, verbatim; `validator` is
+    /// host-opaque passthrough, and every representation under the object
+    /// derives from these bytes. `view-leaves` are full absolute paths the
+    /// host indexes for this id.
+    record canonical-store {
+        id: logical-id,
+        validator: option<version-token>,
+        bytes: list<u8>,
+        view-leaves: list<string>,
+    }
+
+    /// Write a materialized file or directory into the view cache.
+    ///
+    /// For `directory`, the bool is `listing-exhaustive`: when true the host
+    /// treats the files written at `<path>/<name>` in the same batch as the
+    /// authoritative listing of `path`, so a later readdir serves from cache
+    /// without re-invoking `list-children`.
+    record fs-write {
+        id: option<logical-id>,
+        path: string,
+        kind: fs-kind,
+    }
+
+    variant fs-kind {
+        file(file-out),
+        directory(bool),
+    }
+
+    variant path-or-prefix {
+        path(string),
+        prefix(string),
+    }
+
+    /// Evict a cached object or a view listing.
+    variant invalidation {
+        object(logical-id),
+        listing(path-or-prefix),
+    }
+
+    /// Canonical bytes the host pushes into `read-file` on a view-cache miss
+    /// under a known object id, so the SDK renders without an upstream call.
+    /// `id` is included so the SDK can self-check before rendering.
+    record canonical-input {
+        id: logical-id,
+        validator: option<version-token>,
+        bytes: list<u8>,
+    }
+
+    // --- Error types ---
+
+    record callout-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
+    }
+
+    enum error-kind {
+        not-found,
+        not-a-directory,
+        not-a-file,
+        permission-denied,
+        invalid-input,
+        too-large,
+        network,
+        timeout,
+        denied,
+        rate-limited,
+        version-mismatch,
+        internal,
+    }
+
+    record provider-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
+        // Structured backoff hint for `rate-limited` (HTTP `Retry-After`),
+        // in seconds. The host reads this to size a rate-limit window; a
+        // string-embedded value would not be machine-actionable.
+        retry-after: option<u32>,
+    }
+
+    // --- File metadata and projection data ---
+
+    type version-token = string;
+
+    variant file-size {
+        exact(u64),
+        non-zero,
+        unknown,
+    }
+
+    enum read-mode {
+        full,
+        ranged,
+    }
+
+    enum stability {
+        immutable,
+        mutable,
+        volatile,
+    }
+
+    /// File metadata. Bytes are deliberately not attributes.
+    record file-attrs {
+        size: file-size,
+        stability: stability,
+        version-token: option<version-token>,
+    }
+
+    /// One byte source for any materialized file or representation.
+    ///
+    /// `canonical` is a reference: serve the canonical bytes at this entry's
+    /// anchor without copying them across the WIT or duplicating them in the
+    /// view cache. `deferred` is read-on-demand and valid only for
+    /// projections and listing entries, never a `read-file` answer.
+    variant byte-source {
+        inline(list<u8>),
+        canonical,
+        blob(blob-id),
+        deferred(read-mode),
+    }
+
+    /// A materialized file: a byte source plus attributes and an optional
+    /// SDK-supplied content type the host echoes opaquely for a bare-name
+    /// leaf the standard extension suffix map cannot type (ADR-0001 §2, §9).
+    record file-out {
+        content-type: option<string>,
+        attrs: file-attrs,
+        bytes: byte-source,
+    }
+
+    variant entry-kind {
+        directory,
+        file(file-out),
+    }
+
+    record dir-entry {
+        name: string,
+        kind: entry-kind,
+        id: option<logical-id>,
+    }
+
+    // --- Terminal payloads ---
+
+    /// Lookup-child result. `subtree(tree-ref)` answers the lookup/list
+    /// operation. It is result data, not itself the host mutation.
+    variant lookup-child-result {
+        entry(lookup-entry),
+        subtree(tree-ref),
+        not-found(option<logical-id>),
+    }
+
+    /// The non-subtree, non-miss shape of a lookup: the found entry plus
+    /// cache-adjacent sibling data.
+    record lookup-entry {
+        target: dir-entry,
+        siblings: list<dir-entry>,
+        exhaustive: bool,
+    }
+
+    variant list-children-result {
+        entries(dir-listing),
+        subtree(tree-ref),
+        /// The host-supplied `cached-validator` still matches: the host
+        /// serves its cached dirents and the provider enumerated nothing
+        /// (ADR-0001 §6, listings revalidate like reads).
+        unchanged,
+    }
+
+    /// A directory listing returned by a provider, pairing child entries
+    /// with a signal about how the host should interpret absence.
+    record dir-listing {
+        entries: list<dir-entry>,
+        exhaustive: bool,
+        /// Opaque validator (e.g. an ETag) the host stores with the
+        /// listing and echoes as `cached-validator` on the next
+        /// `list-children` for a cheap re-list (ADR-0001 §8, OPEN-8).
+        validator: option<string>,
+        /// Resume token for a paged (non-exhaustive) listing; the host
+        /// echoes it back as the `cursor` argument to continue.
+        next-cursor: option<cursor>,
+    }
+
+    /// Completed full-read result: the materialized bytes for the requested
+    /// path. `bytes::canonical` references the canonical store (no copy);
+    /// `bytes::deferred` is not valid here, since a read must answer.
+    record read-file-result {
+        content-type: option<string>,
+        attrs: file-attrs,
+        bytes: byte-source,
+    }
+
+    variant read-file-outcome {
+        found(read-file-result),
+        not-found(option<logical-id>),
+    }
+
+    /// Opened ranged-read handle. `open-file` is only valid for files
+    /// projected with `proj-bytes::deferred(read-mode::ranged)`.
+    record open-file-result {
+        handle: file-handle,
+        attrs: file-attrs,
+    }
+
+    /// Chunk bytes for an `open-file` handle.
+    record read-chunk-result {
+        content: list<u8>,
+        eof: bool,
+    }
+
+    record initialize-result {
+        info: provider-info,
+        capabilities: requested-capabilities,
+    }
+
+    // --- Data types ---
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<header>,
+        body: list<u8>,
+    }
+
+    record header {
+        name: string,
+        value: string,
+    }
+
+    record git-open-request {
+        clone-url: string,
+        cache-key: string,
+    }
+
+    /// Archive formats the host knows how to extract for `open-archive`.
+    /// Closed enum on purpose; add arms when a provider needs them.
+    enum archive-format {
+        tar-gz,
+        tar,
+        zip,
+    }
+
+    /// HTTP fetch that lands its response body in the host's disk-backed
+    /// blob cache. `cache-key` is provider-scoped: two providers may
+    /// reuse the same key safely. Reusing the same `cache-key` from the
+    /// same provider deduplicates the fetch.
+    record blob-fetch-request {
+        method: string,
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+        cache-key: string,
+    }
+
+    /// Result of a successful `fetch-blob`. The body is on disk; only the
+    /// metadata crosses the WIT.
+    record blob-fetched {
+        blob: blob-id,
+        size: u64,
+        content-type: option<string>,
+        etag: option<string>,
+        status: u16,
+        response-headers: list<header>,
+    }
+
+    /// Mount a stored blob as a directory tree. `format` tells the host
+    /// how to decompress and walk the bytes. `strip-prefix`, when set,
+    /// is removed from every entry's path at mount time.
+    record archive-open-request {
+        blob: blob-id,
+        format: archive-format,
+        strip-prefix: option<string>,
+    }
+
+    record archive-opened {
+        tree: tree-ref,
+    }
+
+    /// Bring (a range of) a stored blob across the WIT. The host caps
+    /// this path to a small policy window because bytes cross into the
+    /// guest.
+    record read-blob-request {
+        blob: blob-id,
+        offset: u64,
+        len: option<u32>,
+    }
+
+    variant cursor {
+        opaque(string),
+        page(u32),
+    }
+
+    record git-repo-info {
+        repo: repo-id,
+        tree: tree-ref,
+    }
+
+    record log-entry {
+        level: log-level,
+        message: string,
+    }
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record provider-info {
+        name: string,
+        version: string,
+        description: string,
+    }
+
+    record requested-capabilities {
+        domains: list<string>,
+        /// Absolute unix socket paths the provider may open via the
+        /// `unix:` URL scheme. The host grants the union of these
+        /// provider-declared sockets and any instance-configured
+        /// sockets.
+        unix-sockets: list<string>,
+        auth-types: list<string>,
+        max-memory-mb: u32,
+        needs-git: bool,
+        needs-websocket: bool,
+        needs-streaming: bool,
+        refresh-interval-secs: u32,
+    }
+
+    variant provider-event {
+        file-changed(string),
+        webhook-received(list<u8>),
+        timer-tick,
+        auth-refreshed,
+    }
+}
+
+// === Provider exports ===
+
+interface lifecycle {
+    use types.{provider-return, requested-capabilities};
+
+    /// Terminal-only in this iteration. It has no correlation id, so it
+    /// cannot suspend on callouts unless the interface is explicitly
+    /// changed later.
+    initialize: func(config: list<u8>) -> provider-return;
+    shutdown: func();
+}
+
+interface namespace {
+    use types.{correlation-id, file-handle, provider-step, canonical-input, cursor};
+
+    lookup-child: func(id: correlation-id, parent-path: string, name: string)
+        -> provider-step;
+    list-children: func(id: correlation-id, path: string, cached-validator: option<string>, cursor: option<cursor>)
+        -> provider-step;
+    read-file: func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
+        -> provider-step;
+    open-file: func(id: correlation-id, path: string)
+        -> provider-step;
+    read-chunk: func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
+        -> provider-step;
+    close-file: func(handle: file-handle);
+}
+
+interface continuation {
+    use types.{callout-results, correlation-id, provider-step};
+
+    resume: func(id: correlation-id, results: callout-results) -> provider-step;
+    cancel: func(id: correlation-id);
+}
+
+interface notify {
+    use types.{correlation-id, provider-event, provider-step};
+
+    on-event: func(id: correlation-id, event: provider-event) -> provider-step;
+}
+
+// === Host import ===
+
+interface log {
+    use types.{log-entry};
+
+    log: func(entry: log-entry);
+}
+
+// === Worlds ===
+
+world provider-core {
+    import log;
+    export lifecycle;
+    export namespace;
+    export continuation;
+}
+
+world provider {
+    import log;
+    export lifecycle;
+    export namespace;
+    export continuation;
+    export notify;
+}

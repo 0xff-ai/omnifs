@@ -97,13 +97,12 @@ byte production.
 The right extension points are protocol-neutral provider concepts, not one
 method per frontend operation:
 
-- A prefetch or preload mechanism that lets providers warm likely reads.
-- Stronger side effects from `lookup_child`, `list_children`, and `read_file`
-  where providers return sibling attrs, sibling content, or directory facts
-  they already learned.
+- Stronger effects from `lookup_child`, `list_children`, and `read_file`
+  where providers return adjacent attrs, adjacent content, or directory facts
+  they already learned (via `effects.fs` and `effects.canonical`).
 - Directory freshness metadata, separate from file version tokens.
 - Batched projection results for domains like DNS where one upstream query
-  naturally produces many sibling files.
+  naturally produces many adjacent files.
 - Better negative-result shape, especially to distinguish "valid file with no
   answers" from "invalid file name" and "query failed".
 
@@ -124,7 +123,7 @@ The desired behavior is:
    prefetched content if available or block on the direct query or in-flight
    prefetch.
 6. When async prefetch learns content or sizes, invalidate affected inode attrs
-   and content so kernel caches and L0/L2 caches do not retain stale `st_size`
+   and content so kernel caches and the view cache do not retain stale `st_size`
    or empty content.
 7. Preserve the provider contract: DNS declares facts or hints; the host
    derives scheduling, cache policy, FUSE flags, NFS attributes, and

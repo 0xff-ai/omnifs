@@ -1,0 +1,31 @@
+[package]
+name = "omnifs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux FUSE frontend adapter for omnifs"
+categories = ["filesystem"]
+keywords = ["omnifs", "fuse", "filesystem"]
+
+[dependencies]
+dashmap = { workspace = true }
+fuser = { version = "0.17", features = ["macos-no-mount"] }
+libc = { workspace = true }
+omnifs-host = { workspace = true }
+omnifs-cache = { workspace = true }
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+omnifs-core = { workspace = true }
+omnifs-inspector = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

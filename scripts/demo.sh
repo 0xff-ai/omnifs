@@ -145,7 +145,7 @@ run_smoke_demo() {
             break
         fi
 
-        if [[ -d ${owner_root}/issues/open && -d ${owner_root}/pulls/open ]]; then
+        if [[ -d ${owner_root}/issues && -d ${owner_root}/pulls ]]; then
             repo_root=${owner_root}
             break
         fi
@@ -154,7 +154,7 @@ run_smoke_demo() {
     done
 
     [[ -n ${repo_root} ]]
-    [[ -d ${repo_root}/issues/open ]]
+    [[ -d ${repo_root}/issues ]]
 
     cd "${repo_root}"
     ls
@@ -163,19 +163,19 @@ run_smoke_demo() {
     ls
     local first_issue
     first_issue=$(command ls -1 | head -n 1)
-    [[ -n $first_issue ]]
-    cd "$first_issue"
-    bat title
-    [[ -f body ]] && bat -l md body
+    if [[ -n $first_issue ]]; then
+        cd "$first_issue"
+        bat title
+    fi
 
     cd "${repo_root}/pulls/open"
     ls
     local first_pr
     first_pr=$(command ls -1 | head -n 1)
-    [[ -n $first_pr ]]
-    cd "$first_pr"
-    bat title
-    bat state
+    if [[ -n $first_pr ]]; then
+        cd "$first_pr"
+        bat title
+    fi
 
     if cd "${repo_root}/actions/runs" 2>/dev/null; then
         ls

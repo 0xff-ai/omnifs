@@ -1,7 +1,7 @@
 # Host authentication, OAuth, and credential storage
 
 Status: accepted; current implementation covers static-token auth, generic OAuth plumbing, GitHub device-code OAuth, and Linear PKCE OAuth.
-Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.provider.json`), `crates/omnifs-mount-schema`, `crates/omnifs-sdk`, `crates/host/src/auth`, `crates/host/src/runtime/http_stack.rs`, `crates/cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
+Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.provider.json`), `crates/omnifs-mount-schema`, `crates/omnifs-sdk`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/http.rs`, `crates/omnifs-cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
 
 ## Context
 
@@ -401,7 +401,7 @@ The host runtime:
 2. At mount load, the host reads provider metadata from wasm, derives the auth manifest, picks the strategy implied by the instance config's `auth.type` and (for OAuth) `auth.scheme`, and constructs the strategy with merged metadata.
 3. `HttpStack::send` runs the 401-retry path.
 
-A future v2 WIT extension may add a per-callout `auth-context` arm so providers can request specific scopes or named accounts per call (multi-account Google Workspace). Out of scope here.
+A future WIT extension may add a per-callout `auth-context` arm so providers can request specific scopes or named accounts per call (multi-account Google Workspace). Out of scope here.
 
 ## Failure modes
 

@@ -7,45 +7,54 @@
 //! on a provider lifecycle impl, and `#[dir("...")]`, `#[file("...")]`, or
 //! `#[treeref("...")]` on path handlers.
 
-// Generate WIT bindings once; providers import from here.
-wit_bindgen::generate!({
-    world: "provider",
-    path: "../../wit",
-    pub_export_macro: true,
-});
+#[doc(hidden)]
+pub use omnifs_wit as __wit;
+pub use omnifs_wit::provider::{exports, omnifs};
+
+#[macro_export]
+macro_rules! export {
+    ($($tokens:tt)*) => {
+        $crate::__wit::provider::export!($($tokens)*);
+    };
+}
 
 pub mod archives;
 mod async_runtime;
-pub mod auth;
 pub mod blob;
 pub mod browse;
-mod capabilities;
+pub mod captures;
 
 pub mod cx;
+pub mod endpoint;
 pub mod error;
 pub mod file_attrs;
 pub mod git;
 pub mod handler;
 pub mod helpers;
 pub mod http;
+pub mod identity;
 pub mod init;
+pub mod object;
 pub mod prelude;
+pub mod projection;
 mod range_handles;
+mod rate_limit;
+pub mod repr;
+pub mod router;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
+pub use crate::rate_limit::note_rate_limited;
 pub use file_attrs::{
     FileAttrs, FileProj, ProjBytes, ReadFileBytes, ReadMode, Size, Stability, VersionToken,
 };
 pub use handler::{FileChunk, MemoryRangeReader, RangeReader};
+pub use omnifs_core::ContentType;
 pub use omnifs_sdk_macros::Config;
+pub use omnifs_sdk_macros::Endpoint;
 pub use omnifs_sdk_macros::config;
-pub use omnifs_sdk_macros::dir;
-pub use omnifs_sdk_macros::file;
-pub use omnifs_sdk_macros::handlers;
-pub use omnifs_sdk_macros::mutate;
+pub use omnifs_sdk_macros::object;
+pub use omnifs_sdk_macros::path_captures;
 pub use omnifs_sdk_macros::provider;
-pub use omnifs_sdk_macros::subtree;
-pub use omnifs_sdk_macros::treeref;
 
 // Re-export deps that generated code references, so providers don't need
 // direct dependencies on them.
@@ -60,8 +69,8 @@ pub use crate::cx::Cx;
 pub mod __internal {
     pub use crate::async_runtime::AsyncRuntime;
     pub use crate::cx::Cx;
-    pub use crate::handler::{MountRegistry, SubtreeRegistry};
     pub use crate::range_handles::RangeReaders;
+    pub use crate::rate_limit::clear_breaker;
 }
 
 #[cfg(doctest)]

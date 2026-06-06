@@ -94,8 +94,7 @@ Issue listings preload the per-issue inline files (`title`, `state`,
 `priority`, `assignee`, and the description if it fits in 4 KiB) into
 the response's projection map. A `cat` after an `ls` is served from
 cache without an additional Linear round trip. Descriptions over 4 KiB
-fall back to a deferred `#[file]` handler that fetches the issue body
-on demand.
+fall back to a deferred file handler (registered with `r.file(...).handler(h)`) that fetches the issue body on demand.
 
 The polling interval (`refresh_interval_secs`) is 120 s. With Linear's
 3M-point-per-hour API key budget, a few-team workspace stays well
@@ -114,7 +113,8 @@ For OAuth setup, see `docs/oauth.md`.
 - Labels. Filter by label, or expose label sets as directories.
 - Pagination cursors. The current implementation flattens all pages
   into one listing (capped at 2000 issues). Larger workspaces would
-  want pagination via `PageStatus::More(Cursor::Opaque(end_cursor))`.
+  want pagination via `Listing::partial` with `next_cursor` (host `@next` /
+  `DirProjection` cursor resume) instead of flattening all pages.
 - Automated live OAuth validation. CI still relies on fake OAuth servers
   because the real flow requires browser authorization.
 - `on-event` invalidation. Linear has webhooks but the provider does

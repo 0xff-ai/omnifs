@@ -1,7 +1,7 @@
 # Path dispatch and listing semantics
 
-Status: accepted
-Scope: `crates/omnifs-sdk` (route registration, lookup/list dispatch), `crates/host` (FUSE cache, lookup short-circuit), provider authoring conventions
+Status: superseded by docs/design/object-cache-primary.md and ADR-0001 §8 for current dispatch semantics; retained as the rules-of-dispatch reference for provider authors.
+Scope: `crates/omnifs-sdk` (route registration, lookup/list dispatch), `crates/omnifs-host` (FUSE cache, lookup short-circuit), provider authoring conventions
 
 ## Context
 
@@ -19,7 +19,7 @@ omnifs's dispatch combines both: routes are typed and prioritized like a URL rou
 
 ### D1. Specificity-based precedence
 
-Patterns are ordered by `PathPattern::precedence_key()`, a 4-tuple compared lexicographically:
+Patterns are ordered by `Pattern::precedence_key()`, a 4-tuple compared lexicographically:
 
 1. Non-rest patterns sort above rest patterns. Rest captures are catch-alls; narrower patterns must win where they overlap.
 2. More literal segments wins.
@@ -68,11 +68,11 @@ A provider can still claim `exhaustive: true` on a directory whose siblings incl
 
 ### D8. Compute precedence and route-table predicates at registration
 
-Spring `PathPatternParser`, ASP.NET endpoint graph, and httprouter's radix tree all bake ordering into a structure built once. omnifs's `MountRegistry::validate` is the natural place to sort and freeze. Per-request route walks are acceptable while route counts remain small; precomputed structures are the path forward as the registry grows.
+Spring `PathPatternParser`, ASP.NET endpoint graph, and httprouter's radix tree all bake ordering into a structure built once. omnifs's `Router::validate` (at provider `start`) is the natural place to sort and freeze. Per-request route walks are acceptable while route counts remain small; precomputed structures are the path forward as the registry grows.
 
 ## Pattern grammar
 
-A `PathPattern` is an ordered sequence of segments. Each segment is one of:
+A `Pattern` is an ordered sequence of segments. Each segment is one of:
 
 | Segment        | Syntax       | Matches                                                             | Validator                  |
 |----------------|--------------|---------------------------------------------------------------------|----------------------------|
@@ -81,7 +81,7 @@ A `PathPattern` is an ordered sequence of segments. Each segment is one of:
 | Prefix capture | `_v{ver}`    | any segment with the static prefix and a non-empty suffix           | route's parse function     |
 | Rest capture   | `{*tail}`    | zero or more trailing segments, joined by `/`                       | route's parse function     |
 
-Constraints (enforced by `PathPattern::parse`):
+Constraints (enforced by `Pattern::parse`):
 
 - A rest segment is allowed only as the last segment of a pattern.
 - A pattern has at most one rest segment.
@@ -90,9 +90,9 @@ Constraints (enforced by `PathPattern::parse`):
 
 ## Match algorithm
 
-The single matching primitive is `best_route_match(routes, path)` in `crates/omnifs-sdk/src/handler.rs`, used by `match_dir`, `match_file`, and `match_subtree`:
+The single matching primitive is `best_match_entries(routes, path)` in `crates/omnifs-sdk/src/router/pattern.rs`, used by `Router` dispatch for dirs, files, treerefs, and objects:
 
-1. Filter routes to those whose pattern shape accepts `path` (`PathPattern::matches_path`).
+1. Filter routes to those whose pattern shape accepts `path` (`Pattern::matches_path`).
 2. Sort the remaining candidates by `precedence_key` descending.
 3. Return the first candidate whose parse function accepts `path`.
 
@@ -100,7 +100,7 @@ Step 3 implements D2's fallthrough. A candidate that pattern-shape-matches but w
 
 ## Listing semantics
 
-`MountRegistry::list_children(path)` resolves in this order:
+`Router::list_children(path)` resolves in this order:
 
 1. Subtree handler at `path` → return subtree handoff.
 2. Explicit dir handler at `path` → invoke handler, return its `Listing` merged with literal sibling children. The `exhaustive` flag is the provider's claim.
@@ -108,7 +108,7 @@ Step 3 implements D2's fallthrough. A candidate that pattern-shape-matches but w
 4. File handler at `path` → return `not_a_directory` error.
 5. Otherwise → return `not_found`.
 
-`MountRegistry::lookup_child(parent, name)` resolves in this order, where `child = parent + "/" + name`:
+`Router::lookup_child(parent, name)` resolves in this order, where `child = parent + "/" + name`:
 
 1. Subtree handler at `child` → return subtree handoff.
 2. Explicit dir handler at `child` (and not also a file handler — the dir+file co-existence case) → invoke handler with `DirIntent::List` to warm the child's adjacent shape, return entry.
@@ -121,7 +121,7 @@ This resolution order honors D2, D4, and D5: capture validation runs in steps 1,
 
 ## Cross-kind coexistence
 
-A single template may be declared as both `#[dir]` and `#[file]` — the dispatcher routes by request kind (`list_children` → dir, `read_file` → file). Subtree handlers are mutually exclusive with dir/file on the same template, since a subtree takes the path entirely. `MountRegistry::validate` enforces this.
+A single template may be registered as both a dir and a file handler (`r.dir(t).handler(h)` and `r.file(t).handler(h)`) — the dispatcher routes by request kind (`list_children` → dir, `read_file` → file). Subtree handlers are mutually exclusive with dir/file on the same template, since a subtree takes the path entirely. `Router::validate` enforces this at registration.
 
 When dir and file co-exist on a template (always rest-captured, by current validator rules), `lookup_child` defers to the parent dir's projection verdict to disambiguate the child's kind.
 
@@ -131,7 +131,7 @@ The host's mount table is a flat name → mount lookup. Mount names are unique; 
 
 ## Provider authoring guidance
 
-- **Don't write stub handlers for literal navigation nodes.** `cd /categories` works without a `#[dir("/categories")]` handler if any registered route has `categories` as a literal at depth 1. Add an explicit handler only when the directory has data to project.
+- **Don't write stub handlers for literal navigation nodes.** `cd /categories` works without an `r.dir("/categories").handler(...)` registration if any registered route has `categories` as a literal at depth 1. Add an explicit handler only when the directory has data to project.
 - **Do write explicit handlers at directories whose children are capture-routed.** A directory whose children are matched by `/{capture}` cannot be auto-navigated through; the parent handler is the source of truth for which concrete children exist (and informs `lookup` of names not in the enumeration through D4).
 - **Don't claim `exhaustive: true` if your directory has capture siblings in the route table.** D7 documents the convention. D4 will recover from the mistake at lookup time, but the listing wire-data is still inaccurate.
 - **Use parse functions to validate captures.** A `{domain}` segment is enforced by its parse function rejecting raw IPs; a `{ip}` segment by its parse function accepting them. Two capture-shape siblings with disjoint validators (D2 fallthrough) are a clean way to model heterogeneous typed paths.

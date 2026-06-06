@@ -6,19 +6,23 @@
 
 ```
 /github/{owner}/{repo}/
-  issues/{open|all}/{number}/
-    title
-    body
-    state
-    user
-    comments/{n}
-  pulls/{open|all}/{number}/
-    title
-    body
-    state
-    user
-    diff
-    comments/{n}
+  issues/
+    open|all/
+      {number}/
+        title
+        body
+        state
+        user
+        comments/{n}
+  pulls/
+    open|all/
+      {number}/
+        title
+        body
+        state
+        user
+        diff
+        comments/{n}
   actions/runs/{id}/
     status
     conclusion
@@ -26,7 +30,7 @@
   repo/  ← bind-mounted clone, lazily cloned via SSH
 ```
 
-Hybrid pagination across issues + PRs and cross-listing PR projection keep listings responsive without exhausting GitHub's API budget.
+Hybrid search + REST pagination; `ItemKind` (`issues` vs `pulls`) selects the list source and whether `diff` exists. Issues lists exclude PR-shaped rows (no mirror into `pulls/`).
 
 ## Capabilities
 

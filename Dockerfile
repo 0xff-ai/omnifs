@@ -1,13 +1,16 @@
 # syntax=docker.io/docker/dockerfile:1.12-labs
 
-FROM rust:1-bookworm AS toolchain
+FROM rust:1.91.0-bookworm AS toolchain
 
 COPY rust-toolchain.toml .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         clang fuse3 libfuse3-dev mold pkg-config \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-install-target,target=/usr/local/cargo-install-target,sharing=locked \
+    CARGO_TARGET_DIR=/usr/local/cargo-install-target cargo install cargo-chef --locked \
     && rustup target add wasm32-wasip2
 
 # wasi-sdk supplies the wasi-sysroot headers + clang that the
@@ -46,8 +49,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM toolchain AS deps
 WORKDIR /src
 COPY --from=planner /src/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
 # --- Build providers ---
@@ -60,23 +64,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM toolchain AS providers
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-provider-target,target=/src/target,sharing=locked \
     set -eux; \
     pkgs=$(awk -F'"' '/^name = "omnifs-provider-/ { printf " -p %s", $2 }' providers/*/Cargo.toml); \
     cargo build $pkgs -p test-provider --target wasm32-wasip2 --release --target-dir /src/target; \
-    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 --target-dir /src/target
+    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 --target-dir /src/target; \
+    mkdir -p /out/wasm; \
+    cp /src/target/wasm32-wasip2/release/*.wasm /out/wasm/
 
 # Provider + tool WASM for host builds and macOS dist (CI artifact omnifs-wasm).
 FROM scratch AS wasm-artifacts
-COPY --from=providers /src/target/wasm32-wasip2/release/*.wasm /
+COPY --from=providers /out/wasm/*.wasm /
 
 # --- Build extractor and host binary ---
 
 FROM deps AS builder
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
     && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
@@ -97,8 +106,9 @@ RUN mkdir -p /out && cp /omnifs /out/omnifs
 FROM deps AS lint
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     set -eux; \
     cargo fmt --all --check; \
     # The host links pre-built `omnifs-tool-*` wasm components via
@@ -113,8 +123,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM deps AS test
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     set -eux; \
     # The host's runtime tests load `test_provider.wasm` (and other
     # provider components) from the target dir at run time; the same
@@ -177,8 +188,8 @@ ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 
 COPY --from=builder /omnifs /usr/local/bin/
-COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_provider_*.wasm \
+COPY --from=providers /out/wasm/omnifs_provider_*.wasm \
      /root/.omnifs/providers/
-COPY --from=providers /src/target/wasm32-wasip2/release/omnifs_tool_archive.wasm \
+COPY --from=providers /out/wasm/omnifs_tool_archive.wasm \
      /root/.omnifs/providers/
 RUN chmod 0755 /usr/local/bin/omnifs

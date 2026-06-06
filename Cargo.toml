@@ -10,7 +10,7 @@ members = [
     "providers/linear",
     "providers/test",
 ]
-default-members = ["crates/cli", "crates/host"]
+default-members = ["crates/omnifs-cli", "crates/omnifs-host"]
 
 [workspace.package]
 version = "0.2.0-dev.2"
@@ -23,12 +23,15 @@ readme = "README.md"
 [workspace.dependencies]
 omnifs-auth = { version = "0.2.0-dev.2", path = "crates/omnifs-auth" }
 omnifs-creds = { version = "0.2.0-dev.2", path = "crates/omnifs-creds" }
-omnifs-host = { version = "0.2.0-dev.2", path = "crates/host" }
-omnifs-inspector = { version = "0.2.0-dev.2", path = "crates/inspector" }
-omnifs-model = { version = "0.2.0-dev.2", path = "crates/omnifs-model" }
+omnifs-fuse = { version = "0.2.0-dev.2", path = "crates/omnifs-fuse" }
+omnifs-host = { version = "0.2.0-dev.2", path = "crates/omnifs-host" }
+omnifs-inspector = { version = "0.2.0-dev.2", path = "crates/omnifs-inspector" }
+omnifs-core = { version = "0.2.0-dev.2", path = "crates/omnifs-core" }
 omnifs-mount-schema = { version = "0.2.0-dev.2", path = "crates/omnifs-mount-schema" }
 omnifs-sdk = { version = "0.2.0-dev.2", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.0-dev.2", path = "crates/omnifs-sdk-macros" }
+omnifs-cache = { version = "0.2.0-dev.2", path = "crates/omnifs-cache" }
+omnifs-wit = { version = "0.2.0-dev.2", path = "crates/omnifs-wit" }
 wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -52,6 +55,7 @@ redb = "2"
 moka = { version = "0.12", features = ["sync"] }
 hashbrown = "0.15"
 http = "1"
+mime = "0.3"
 strum = { version = "0.27", features = ["derive"] }
 percent-encoding = "2"
 url = "2"

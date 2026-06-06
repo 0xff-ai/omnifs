@@ -1,4 +1,5 @@
-use crate::omnifs::provider::types::{
+use core::time::Duration;
+use omnifs_wit::provider::types::{
     CalloutError, ErrorKind, OpResult, ProviderError as WitProviderError, ProviderReturn,
 };
 use std::fmt;
@@ -12,6 +13,10 @@ pub struct ProviderError {
     pub(crate) kind: ProviderErrorKind,
     pub(crate) message: String,
     pub(crate) retryable: bool,
+    /// Structured backoff hint for `RateLimited` (from HTTP `Retry-After`).
+    /// `None` for every other kind, and for a 429 whose header was absent or
+    /// non-numeric.
+    pub(crate) retry_after: Option<Duration>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -78,7 +83,21 @@ impl ProviderError {
             kind,
             message: message.into(),
             retryable: kind.is_retryable(),
+            retry_after: None,
         }
+    }
+
+    /// Attach a structured backoff hint. Meaningful only on a `RateLimited`
+    /// error; the SDK breaker and host rate-limit window both read it.
+    #[must_use]
+    pub fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
+        self.retry_after = retry_after;
+        self
+    }
+
+    /// Structured backoff hint, if the upstream supplied one (`Retry-After`).
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -184,6 +203,9 @@ impl From<ProviderError> for OpResult {
             kind: error.kind.wit_kind(),
             message: error.message,
             retryable: error.retryable,
+            retry_after: error
+                .retry_after
+                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX)),
         })
     }
 }

@@ -2316,12 +2316,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glob"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
-
-[[package]]
 name = "hash32"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3224,6 +3218,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a86d3146ed3995b5913c414f6664344b9617457320782e64f0bb44afd49d74"
 
 [[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3559,6 +3559,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-cache"
+version = "0.2.0-dev.2"
+dependencies = [
+ "anyhow",
+ "dashmap",
+ "moka",
+ "omnifs-core",
+ "parking_lot",
+ "postcard",
+ "redb",
+ "serde",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "omnifs-cli"
 version = "0.2.0-dev.2"
 dependencies = [
@@ -3574,10 +3590,11 @@ dependencies = [
  "indicatif",
  "inquire",
  "omnifs-auth",
+ "omnifs-core",
  "omnifs-creds",
+ "omnifs-fuse",
  "omnifs-host",
  "omnifs-inspector",
- "omnifs-model",
  "omnifs-mount-schema",
  "owo-colors",
  "ratatui",
@@ -3598,13 +3615,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-core"
+version = "0.2.0-dev.2"
+dependencies = [
+ "mime",
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "omnifs-creds"
 version = "0.2.0-dev.2"
 dependencies = [
  "atomic-write-file",
  "fs2",
  "keyring",
- "omnifs-model",
+ "omnifs-core",
  "secrecy",
  "serde",
  "serde_json",
@@ -3612,6 +3640,25 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
+]
+
+[[package]]
+name = "omnifs-fuse"
+version = "0.2.0-dev.2"
+dependencies = [
+ "dashmap",
+ "fuser",
+ "libc",
+ "omnifs-cache",
+ "omnifs-core",
+ "omnifs-host",
+ "omnifs-inspector",
+ "omnifs-wit",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3626,7 +3673,6 @@ dependencies = [
  "dirs-next",
  "flate2",
  "fs2",
- "fuser",
  "futures",
  "gix",
  "hex",
@@ -3635,10 +3681,13 @@ dependencies = [
  "libc",
  "moka",
  "omnifs-auth",
+ "omnifs-cache",
+ "omnifs-core",
  "omnifs-creds",
  "omnifs-inspector",
- "omnifs-model",
+ "omnifs-itest",
  "omnifs-mount-schema",
+ "omnifs-wit",
  "parking_lot",
  "postcard",
  "rcgen",
@@ -3667,6 +3716,7 @@ dependencies = [
 name = "omnifs-inspector"
 version = "0.2.0-dev.2"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -3676,12 +3726,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnifs-model"
+name = "omnifs-itest"
 version = "0.2.0-dev.2"
 dependencies = [
+ "base64",
+ "hickory-proto",
+ "http",
+ "omnifs-cache",
+ "omnifs-core",
+ "omnifs-host",
+ "omnifs-wit",
+ "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "tokio",
+ "wasmtime",
 ]
 
 [[package]]
@@ -3689,8 +3749,10 @@ name = "omnifs-mount-schema"
 version = "0.2.0-dev.2"
 dependencies = [
  "anyhow",
+ "hex",
  "indexmap",
  "jsonschema",
+ "omnifs-core",
  "schemars",
  "serde",
  "serde_json",
@@ -3702,12 +3764,12 @@ dependencies = [
 name = "omnifs-provider-arxiv"
 version = "0.2.0-dev.2"
 dependencies = [
+ "hashbrown 0.15.5",
  "omnifs-sdk",
  "percent-encoding",
  "quick-xml",
  "serde",
  "serde_json",
- "time",
  "url",
 ]
 
@@ -3721,6 +3783,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3753,7 +3816,7 @@ version = "0.2.0-dev.2"
 dependencies = [
  "hashbrown 0.15.5",
  "http",
- "omnifs-mount-schema",
+ "omnifs-core",
  "omnifs-sdk",
  "rc-zip-sync",
  "serde",
@@ -3767,6 +3830,7 @@ version = "0.2.0-dev.2"
 dependencies = [
  "hashbrown 0.15.5",
  "http",
+ "omnifs-core",
  "omnifs-mount-schema",
  "omnifs-sdk",
  "serde",
@@ -3782,13 +3846,15 @@ dependencies = [
  "hex",
  "http",
  "lru 0.16.4",
+ "mime",
+ "omnifs-core",
  "omnifs-mount-schema",
  "omnifs-sdk-macros",
+ "omnifs-wit",
  "postcard",
  "serde",
  "serde_json",
  "url",
- "wit-bindgen 0.41.0",
 ]
 
 [[package]]
@@ -3796,14 +3862,10 @@ name = "omnifs-sdk-macros"
 version = "0.2.0-dev.2"
 dependencies = [
  "omnifs-mount-schema",
- "omnifs-sdk",
  "proc-macro2",
  "quote",
- "serde",
  "serde_json",
  "syn",
- "tokio",
- "trybuild",
 ]
 
 [[package]]
@@ -3811,9 +3873,18 @@ name = "omnifs-tool-archive"
 version = "0.2.0-dev.2"
 dependencies = [
  "flate2",
+ "omnifs-wit",
  "tar",
- "wit-bindgen 0.41.0",
  "zip",
+]
+
+[[package]]
+name = "omnifs-wit"
+version = "0.2.0-dev.2"
+dependencies = [
+ "serde",
+ "wasmtime",
+ "wit-bindgen 0.41.0",
 ]
 
 [[package]]
@@ -5128,12 +5199,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
-name = "target-triple"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "591ef38edfb78ca4771ee32cf494cb8771944bee237a9b91fc9c1424ac4b777b"
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5347,21 +5412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 1.1.1+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 1.0.1",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5552,21 +5602,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "trybuild"
-version = "1.0.116"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47c635f0191bd3a2941013e5062667100969f8c4e9cd787c14f977265d73616e"
-dependencies = [
- "glob",
- "serde",
- "serde_derive",
- "serde_json",
- "target-triple",
- "termcolor",
- "toml 1.1.2+spec-1.1.0",
-]
 
 [[package]]
 name = "typenum"

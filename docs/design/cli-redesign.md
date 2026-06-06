@@ -1,7 +1,7 @@
 # CLI design
 
 Status: accepted
-Scope: `crates/cli`
+Scope: `crates/omnifs-cli`
 Related: `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/npm-distribution.md`
 
 ## Context

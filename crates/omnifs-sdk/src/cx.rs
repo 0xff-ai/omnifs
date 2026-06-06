@@ -14,17 +14,25 @@ use crate::archives;
 use crate::blob::{BlobId, BlobReader};
 use crate::git;
 use crate::http;
-use crate::omnifs::provider::types::{Callout, CalloutResult};
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use omnifs_wit::provider::types::{Callout, CalloutResult};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Execution context for async provider handlers.
+///
+/// `Cx` separates the op-level callout machinery ([`CxShared`]: the id, the
+/// yield/deliver queues, the host-pushed validator) from the typed provider
+/// `State`. The shared part is reference-counted so a
+/// state-erased view ([`Cx::erase_state`]) drives callouts on the *same*
+/// operation — this is how `Object::load`, which takes `&Cx<()>`, issues
+/// fetches through the operation's queue while the router holds `Cx<S>`.
 pub struct Cx<S> {
-    inner: Rc<CxInner<S>>,
+    shared: Rc<CxShared>,
+    state: Rc<RefCell<S>>,
 }
 
 // Manual `Clone` to avoid the `S: Clone` bound that `#[derive(Clone)]` would
@@ -32,79 +40,107 @@ pub struct Cx<S> {
 impl<S> Clone for Cx<S> {
     fn clone(&self) -> Self {
         Self {
-            inner: Rc::clone(&self.inner),
+            shared: Rc::clone(&self.shared),
+            state: Rc::clone(&self.state),
         }
     }
 }
 
-struct CxInner<S> {
+/// Op-level callout machinery, independent of the provider state type so a
+/// state-erased [`Cx`] shares the same queues (see [`Cx::erase_state`]).
+struct CxShared {
     id: u64,
-    state: Rc<RefCell<S>>,
     yielded: RefCell<Vec<Callout>>,
     delivered: RefCell<VecDeque<CalloutResult>>,
-    active_mount_snapshot: Vec<ActiveMountPaths>,
-}
-
-#[derive(Clone)]
-struct ActiveMountPaths {
-    mount_id: String,
-    paths: Vec<String>,
+    /// The host-pushed validator for this path's anchor, if held (ADR-0001
+    /// §5.2). Set by host glue via [`Cx::with_version`]; read by handlers
+    /// through [`Cx::version`].
+    version: Option<crate::file_attrs::VersionToken>,
 }
 
 impl<S> Cx<S> {
     /// Create a new context for the given operation id and state handle.
     pub fn new(id: u64, state: Rc<RefCell<S>>) -> Self {
-        Self::new_with_activity(id, state, Vec::new())
-    }
-
-    #[doc(hidden)]
-    fn new_with_activity(
-        id: u64,
-        state: Rc<RefCell<S>>,
-        active_mount_snapshot: Vec<ActiveMountPaths>,
-    ) -> Self {
         Self {
-            inner: Rc::new(CxInner {
+            shared: Rc::new(CxShared {
                 id,
-                state,
                 yielded: RefCell::new(Vec::new()),
                 delivered: RefCell::new(VecDeque::new()),
-                active_mount_snapshot,
+                version: None,
             }),
+            state,
         }
     }
 
-    /// Create a new context seeded from a provider event payload.
+    /// Attach the host-pushed validator for this anchor. Called by host glue
+    /// before a handler or `Object::load` runs; the validator is read back via
+    /// [`Self::version`]. Rebuilds the shared cell (fresh queues) because the
+    /// validator is fixed for the lifetime of a single operation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_version(self, version: Option<crate::file_attrs::VersionToken>) -> Self {
+        Self {
+            shared: Rc::new(CxShared {
+                id: self.shared.id,
+                yielded: RefCell::new(Vec::new()),
+                delivered: RefCell::new(VecDeque::new()),
+                version,
+            }),
+            state: Rc::clone(&self.state),
+        }
+    }
+
+    /// A state-erased view sharing this operation's callout machinery. Used to
+    /// call `Object::load(&Cx<()>, ..)` from a state-bearing router: the erased
+    /// context issues callouts on the same yield/deliver queue, so object loads
+    /// suspend and resume on the operation the runtime is driving.
+    #[doc(hidden)]
+    pub fn erase_state(&self) -> Cx<()> {
+        Cx {
+            shared: Rc::clone(&self.shared),
+            state: Rc::new(RefCell::new(())),
+        }
+    }
+
+    /// The host-pushed validator for this path's anchor, if held (ADR-0001
+    /// §5.2). A handler maps it to `If-None-Match` through
+    /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`].
+    pub fn version(&self) -> Option<&crate::file_attrs::VersionToken> {
+        self.shared.version.as_ref()
+    }
+
+    /// A typed handle to a declared outbound [`crate::endpoint::Endpoint`].
+    /// Usable only if the endpoint is listed in the provider's
+    /// `resources(endpoints = [..])`.
+    pub fn endpoint<E: crate::endpoint::Endpoint>(
+        &self,
+    ) -> crate::endpoint::EndpointHandle<'_, E, S> {
+        crate::endpoint::EndpointHandle::new(self)
+    }
+
+    /// Create a new context seeded from a provider event. The event payload
+    /// no longer carries context the `Cx` needs, so this is equivalent to
+    /// [`Cx::new`]; the signature is kept for the provider macro's `on_event`
+    /// glue.
     pub fn from_event(
         id: u64,
         state: Rc<RefCell<S>>,
-        event: &crate::omnifs::provider::types::ProviderEvent,
+        _event: &omnifs_wit::provider::types::ProviderEvent,
     ) -> Self {
-        let active_mount_snapshot = match event {
-            crate::omnifs::provider::types::ProviderEvent::TimerTick(ctx) => ctx
-                .active_paths
-                .iter()
-                .map(|entry| ActiveMountPaths {
-                    mount_id: entry.mount_id.clone(),
-                    paths: entry.paths.clone(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        Self::new_with_activity(id, state, active_mount_snapshot)
+        Self::new(id, state)
     }
 
     pub fn id(&self) -> u64 {
-        self.inner.id
+        self.shared.id
     }
 
     pub fn state<R>(&self, f: impl FnOnce(&S) -> R) -> R {
-        let state = self.inner.state.borrow();
+        let state = self.state.borrow();
         f(&state)
     }
 
     pub fn state_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
-        let mut state = self.inner.state.borrow_mut();
+        let mut state = self.state.borrow_mut();
         f(&mut state)
     }
 
@@ -125,33 +161,23 @@ impl<S> Cx<S> {
     }
 
     pub(crate) fn take_yielded_callouts(&self) -> Vec<Callout> {
-        std::mem::take(&mut *self.inner.yielded.borrow_mut())
+        std::mem::take(&mut *self.shared.yielded.borrow_mut())
     }
 
     pub(crate) fn push_delivered(&self, outcome: CalloutResult) {
-        self.inner.delivered.borrow_mut().push_back(outcome);
+        self.shared.delivered.borrow_mut().push_back(outcome);
     }
 
     pub(crate) fn push_yielded(&self, callout: Callout) {
-        self.inner.yielded.borrow_mut().push(callout);
+        self.shared.yielded.borrow_mut().push(callout);
     }
 
     pub(crate) fn pop_delivered(&self) -> Option<CalloutResult> {
-        self.inner.delivered.borrow_mut().pop_front()
+        self.shared.delivered.borrow_mut().pop_front()
     }
 
     pub fn state_handle(&self) -> Rc<RefCell<S>> {
-        Rc::clone(&self.inner.state)
-    }
-
-    pub fn active_paths<P>(&self, mount_id: &str, parse: impl Fn(&str) -> Option<P>) -> Vec<P> {
-        self.inner
-            .active_mount_snapshot
-            .iter()
-            .filter(|entry| entry.mount_id == mount_id)
-            .flat_map(|entry| entry.paths.iter())
-            .filter_map(|path| parse(path))
-            .collect()
+        Rc::clone(&self.state)
     }
 }
 
@@ -223,9 +249,7 @@ impl<F: Future> Future for JoinAll<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::omnifs::provider::types::{
-        ActivePathSet, CalloutResult, HttpResponse, ProviderEvent, TimerTickContext,
-    };
+    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
     use std::task::Waker;
 
     #[test]
@@ -261,32 +285,5 @@ mod tests {
             .map(|r| r.unwrap().into_body())
             .collect();
         assert_eq!(bodies, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
-    }
-
-    #[test]
-    fn active_paths_are_filtered_by_mount_id_and_parse_success() {
-        let state = Rc::new(RefCell::new(()));
-        let event = ProviderEvent::TimerTick(TimerTickContext {
-            active_paths: vec![
-                ActivePathSet {
-                    mount_id: "/{owner}/{repo}".to_string(),
-                    mount_name: "Repo".to_string(),
-                    paths: vec!["/repos/openai/gvfs".to_string(), "/not-a-repo".to_string()],
-                },
-                ActivePathSet {
-                    mount_id: "/other".to_string(),
-                    mount_name: "Other".to_string(),
-                    paths: vec!["/repos/ignored".to_string()],
-                },
-            ],
-        });
-
-        let cx = Cx::from_event(1, state, &event);
-        assert_eq!(
-            cx.active_paths("/{owner}/{repo}", |path| {
-                path.starts_with("/repos/").then(|| path.to_string())
-            }),
-            vec!["/repos/openai/gvfs".to_string()]
-        );
     }
 }

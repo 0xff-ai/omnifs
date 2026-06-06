@@ -4,18 +4,13 @@ pub mod memory_store;
 pub use file_store::FileStore;
 pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryStore;
-pub use omnifs_model::{CredentialId, CredentialIdError};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
-impl From<CredentialIdError> for StoreError {
-    fn from(value: CredentialIdError) -> Self {
-        StoreError::Backend(value.to_string())
-    }
-}
+use omnifs_core::{CredentialId, CredentialIdError};
 
 /// Host-managed HTTP credential kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
@@ -276,6 +271,8 @@ pub enum StoreError {
     Serde(#[from] serde_json::Error),
     #[error("backend error: {0}")]
     Backend(String),
+    #[error(transparent)]
+    CredentialId(#[from] CredentialIdError),
 }
 
 mod secret_string_serde {

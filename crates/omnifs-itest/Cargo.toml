@@ -1,0 +1,26 @@
+[package]
+name = "omnifs-itest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Centralized integration tests and harnesses for omnifs providers"
+
+[dependencies]
+omnifs-host = { path = "../omnifs-host" }
+omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
+omnifs-cache = { path = "../omnifs-cache" }
+omnifs-core = { path = "../omnifs-core" }
+wasmtime = { workspace = true }
+tempfile = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { version = "0.36", features = ["bundled"] }
+base64 = "0.22"
+hickory-proto = "0.26"
+
+[lints]
+workspace = true

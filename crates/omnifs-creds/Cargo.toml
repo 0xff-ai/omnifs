@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "Host-side credential store for omnifs mounts (keyring / file fallback)."
 
 [dependencies]
-omnifs-model = { workspace = true }
+omnifs-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

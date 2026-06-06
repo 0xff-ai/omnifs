@@ -49,6 +49,14 @@ impl RangeReaders {
     pub fn remove(&self, handle: NonZeroU64) {
         self.readers.borrow_mut().remove(&handle);
     }
+
+    /// Drop every open range handle and reset the allocator. Called on provider
+    /// shutdown so readers left open by an aborted open/read/close sequence (or
+    /// an open whose return the host rejected) do not outlive the instance.
+    pub fn clear(&self) {
+        self.readers.borrow_mut().clear();
+        self.next.set(NonZeroU64::MIN);
+    }
 }
 
 impl Default for RangeReaders {

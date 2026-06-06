@@ -1,6 +1,6 @@
 # Protocol paths
 
-Scope: `wit/provider.wit`, `crates/omnifs-sdk`, `crates/host`, providers.
+Scope: `crates/omnifs-wit/wit/provider.wit`, `crates/omnifs-sdk`, `crates/omnifs-host`, providers.
 
 omnifs has a single path space. A protocol path is an absolute,
 forward-slash-delimited string that satisfies the invariants below. It
@@ -97,7 +97,7 @@ bare form.
 
 ## WIT boundary
 
-Every `string` typed as `path` in `wit/provider.wit` satisfies the
+Every `string` typed as `path` in `crates/omnifs-wit/wit/provider.wit` satisfies the
 invariants. The host calls `Path::parse` on every path string crossing
 the WIT boundary in either direction; a `PathParseError` becomes a
 `provider-error` and fails the operation.
@@ -116,10 +116,7 @@ behind the same API.
 
 ## Cache key encoding
 
-The L2 cache keys on the path string. `Path` serialises through serde
-to the inner `String`, so on-disk records remain byte-identical to a
-naked string of the same value. A `SCHEMA_VERSION` bump is only needed
-if a postcard fixture comparison shows otherwise.
+The view cache (durable `view.redb`) and object cache (`object.redb`) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
 
 ## Provider ergonomics
 
@@ -129,4 +126,4 @@ contract; add it only if friction emerges.
 
 Providers must not return bare relative paths. The dispatcher does not
 prepend `/` for them. Path-shaped fields in WIT records (lookup-entry,
-dir-listing, proj-entry, tree-handoff) all carry absolute paths.
+dir-listing, fs-write, canonical-store anchor) all carry absolute paths.

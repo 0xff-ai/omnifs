@@ -1,52 +1,59 @@
 # omnifs-sdk
 
-SDK for building [omnifs](https://github.com/0xff-ai/omnifs) providers. Providers are `wasm32-wasip2` components that the omnifs host loads and drives through a WIT interface; this crate turns a Rust impl block into a complete provider component with the right manifest, dispatch wiring, and runtime glue.
+SDK for building [omnifs](https://github.com/0xff-ai/omnifs) providers. Providers are `wasm32-wasip2` components; the host drives them through the `omnifs:provider` WIT interface. This crate supplies routing, projections, callouts, and the `#[provider]` macro that wires WIT exports to your `Router`.
 
 ## Quick start
 
 ```rust
-use omnifs_sdk::*;
+use omnifs_sdk::prelude::*;
 
 #[config]
 pub struct Config {
     pub greeting: String,
 }
 
-pub struct MyProvider { cfg: Config }
+#[derive(Default)]
+pub struct State {}
 
-#[handlers]
+struct Routes;
+
+#[provider(metadata = "omnifs.provider.json")]
 impl MyProvider {
-    #[file("/hello.txt")]
-    fn hello(&self, _: Path) -> Result<FileContent> {
-        Ok(FileContent::text(format!("{}, world\n", self.cfg.greeting)))
-    }
+    type Config = Config;
+    type State = State;
+    type Routes = Routes;
 
-    #[dir("/items")]
-    fn list_items(&self, _: Path) -> Result<Projection> {
-        Ok(Projection::new()
-            .file_with_content("a.txt", b"first\n")
-            .file_with_content("b.txt", b"second\n"))
+    fn start(config: Config, r: &mut Router<State, Routes>) -> Result<(State, Routes)> {
+        r.file("/hello.txt").handler(hello)?;
+        r.dir("/items").handler(list_items)?;
+        Ok((State::default(), Routes))
     }
 }
 
-#[provider(mounts("hello"))]
-impl MyProvider {
-    fn new(cfg: Config) -> Result<Self> {
-        Ok(Self { cfg })
-    }
+async fn hello(_cx: Cx<State>, _key: ()) -> Result<FileProjection> {
+    Ok(FileProjection::body(b"hello, world\n").build())
+}
+
+async fn list_items(_cx: DirCx<State>, _key: ()) -> Result<DirProjection> {
+    Ok(DirProjection::exhaustive([
+        Entry::file("a.txt"),
+        Entry::file("b.txt"),
+    ]))
 }
 ```
 
-Build with `cargo build --target wasm32-wasip2 --release` and the resulting `.wasm` component is ready for `omnifs mount`.
+Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component is what `omnifs` mounts.
 
 ## Concepts
 
-- **Path-first handlers**: handler signatures take a parsed `Path` and return either a terminal result or a list of `callout`s for the host to execute (HTTP fetch, git open). The host calls `resume(id, results)` to continue.
-- **Auto-navigable directories**: any literal-segment prefix of a registered route is implicitly a directory; no stub handlers needed.
-- **Typed subtrees**: a `#[subtree] impl B { ... }` block can be mounted at any `#[bind("/path/{capture}/...")]` site for clean handoff.
-- **Capabilities**: providers declare HTTP domains, auth types, memory limits, and git/websocket flags in their manifest; the host enforces them.
+- **Router registration**: `Router::dir`, `Router::file`, `Router::treeref`, `Router::bind::<Object>()`, and `Router::subtree` register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
+- **Handlers**: async functions taking `Cx<State>`, `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirProjection`, `TreeRef`, or `Effects` (for timer/event handlers).
+- **Objects**: `#[object]` types implement `Object::load` / `Object::render`; `bind` mounts them at a path template. The host caches canonical bytes and pushes them on later reads.
+- **Endpoints**: `#[derive(Endpoint)]` plus `cx.endpoint::<E>()` for typed HTTP (and rate-limit policy) against declared bases.
+- **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes the batch and calls `resume`; there are no fire-and-forget callouts.
+- **Projections**: `FileProjection` / `DirProjection` encode size, stability, byte source, and additional file, directory, and canonical effects that should be materialized with the accepted result. Listings use `FileProj::listing_shape()` for file entries named before content is fetched.
 
-The [path-dispatch-and-listing design doc](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) is the source of truth for routing precedence and listing semantics.
+See [path-dispatch-and-listing](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) and [file-attributes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/file-attributes.md) for routing precedence, pagination (`@next` / `@all`), and attribute rules.
 
 ## Install
 
@@ -55,11 +62,11 @@ The [path-dispatch-and-listing design doc](https://github.com/0xff-ai/omnifs/blo
 omnifs-sdk = "0.1"
 ```
 
-Add `crate-type = ["cdylib", "lib"]` and target `wasm32-wasip2`. The provided `omnifs-cli` host loads the resulting `.wasm` component.
+Add `crate-type = ["cdylib", "lib"]` and target `wasm32-wasip2`.
 
 ## Status
 
-Pre-1.0. Provider authoring API may evolve; minor versions track breaking SDK changes for now.
+Pre-1.0. The v2 authoring surface (`Router`, projections, objects) is the supported path; legacy `#[handlers]` / `#[subtree]` attributes were removed.
 
 ## License
 

@@ -18,7 +18,7 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
-wit-bindgen = "0.41"
+omnifs-wit = { workspace = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }
 zip = { version = "5", default-features = false, features = ["deflate"] }

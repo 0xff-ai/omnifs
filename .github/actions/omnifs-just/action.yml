@@ -3,9 +3,9 @@ description: Install pinned maintainer command tools for omnifs CI
 runs:
   using: composite
   steps:
-    - uses: extractions/setup-just@v3
+    - uses: taiki-e/install-action@v2
       with:
-        just-version: 1.51.0
+        tool: just@1.51.0
 
     - uses: oven-sh/setup-bun@v2
       with:

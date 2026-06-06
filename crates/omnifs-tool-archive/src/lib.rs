@@ -6,7 +6,7 @@
 //! [`Guest::extract`] with the requested format and limits. The
 //! component walks the archive, validates each entry, and writes
 //! sanitized output under `/out/`. Limit trips return a typed
-//! [`exports::omnifs::tool_archive::extract::ExtractError`]; the
+//! [`omnifs_wit::extractor::extract::ExtractError`]; the
 //! host translates that into its own `ArchiveError`.
 
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -15,12 +15,8 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-wit_bindgen::generate!({
-    world: "extractor",
-    path: "../../wit/extractor",
-});
-
-use exports::omnifs::tool_archive::extract::{
+use omnifs_wit::extractor::export;
+use omnifs_wit::extractor::extract::{
     ArchiveFormat, ExtractError, ExtractOptions, ExtractStats, Guest,
 };
 
@@ -49,7 +45,7 @@ impl Guest for ExtractorComponent {
 }
 
 #[cfg(target_arch = "wasm32")]
-export!(ExtractorComponent);
+export!(ExtractorComponent with_types_in omnifs_wit::extractor);
 
 // The `max_` prefix is load-bearing here: the same fields appear in
 // the WIT `extract-options` record and the host's `ExtractorLimits`.
