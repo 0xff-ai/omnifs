@@ -35,18 +35,21 @@ pub struct Freshness {
 
 /// Durable view backing: a fjall database with one keyspace per record class.
 ///
-/// `write_lock` serializes the read-modify-write in
-/// `disk_update_metadata_record`. fjall makes individual inserts/removes and
-/// batch commits atomic, but a read-then-write merge needs explicit
-/// serialization to avoid lost updates (the redb single write transaction
-/// provided this implicitly).
+/// All ordinary writes (`put`, `put_batch`, the prefix/exact deletes) run
+/// lock-free — fjall makes individual inserts/removes and batch commits atomic
+/// and is safe under concurrent writers. The only coordination here is
+/// `merge_lock`, which serializes the *read-modify-write* in
+/// `disk_update_metadata_record` (the dirents-listing merge): get-then-insert is
+/// two calls, so concurrent merges of the same key would lose updates without
+/// it. This is the only RMW writer of a metadata key, so a plain mutex suffices;
+/// redb's single write transaction provided the same guarantee implicitly.
 struct Disk {
     db: Database,
     metadata: Keyspace,
     content: Keyspace,
     bulk: Keyspace,
     freshness: Keyspace,
-    write_lock: Mutex<()>,
+    merge_lock: Mutex<()>,
 }
 
 impl Disk {
@@ -110,7 +113,7 @@ impl Cache {
                 content,
                 bulk,
                 freshness,
-                write_lock: Mutex::new(()),
+                merge_lock: Mutex::new(()),
             }),
         })
     }
@@ -232,7 +235,7 @@ impl Cache {
         let serialized = make_key(key);
         // Serialize the read-modify-write so concurrent merges of the same
         // record do not lose updates.
-        let _guard = disk.write_lock.lock();
+        let _guard = disk.merge_lock.lock();
         let existing = disk
             .metadata
             .get(serialized.as_str())?
