@@ -175,16 +175,26 @@ impl<'a> Materializer<'a> {
 
         for (dir, listing_exhaustive) in dirs {
             if let Some(new_children) = children.remove(&dir) {
-                self.store
-                    .update_metadata_record(&dir, RecordKind::Dirents, None, |existing| {
+                // The closure may run more than once: the view tier applies it
+                // inside an optimistic transaction that retries on conflict, so
+                // clone `new_children` per attempt instead of moving it.
+                self.store.update_metadata_record(
+                    &dir,
+                    RecordKind::Dirents,
+                    None,
+                    move |existing| {
                         let existing = existing
                             .and_then(|record| DirentsPayload::deserialize(&record.payload));
-                        let payload =
-                            DirentsPayload::merged(existing, new_children, listing_exhaustive);
+                        let payload = DirentsPayload::merged(
+                            existing,
+                            new_children.clone(),
+                            listing_exhaustive,
+                        );
                         payload
                             .serialize()
                             .map(|payload| Record::new(RecordKind::Dirents, payload))
-                    });
+                    },
+                );
             }
         }
 

@@ -1,5 +1,53 @@
 use omnifs_cache::view::Cache;
 use omnifs_cache::{BatchRecord, Key, Record, RecordKind, SCHEMA_VERSION};
+use std::sync::Arc;
+
+#[test]
+fn concurrent_metadata_merges_do_not_lose_updates() {
+    // The dirents-listing merge is a read-modify-write run under an optimistic
+    // transaction that retries on conflict. Hammer one key from many threads,
+    // each doing a counter increment, and assert the final disk value equals
+    // the total number of increments. A lost update (e.g. a plain get-then-put
+    // without conflict detection) would make the count come up short.
+    const THREADS: u64 = 8;
+    const ITERS: u64 = 200;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(Cache::open(&dir.path().join("browse")).unwrap());
+    let key = Key::new("/counter", RecordKind::Attr);
+
+    std::thread::scope(|scope| {
+        for _ in 0..THREADS {
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            scope.spawn(move || {
+                for _ in 0..ITERS {
+                    cache.update_metadata_record(&key, |existing| {
+                        let current = existing
+                            .and_then(|r| r.payload.try_into().ok())
+                            .map_or(0, u64::from_le_bytes);
+                        Some(Record::new(
+                            RecordKind::Attr,
+                            (current + 1).to_le_bytes().to_vec(),
+                        ))
+                    });
+                }
+            });
+        }
+    });
+
+    // Read the durable value, bypassing the mem tier (which is write-through and
+    // can lag the disk under concurrency).
+    cache.mem_invalidate(&key);
+    let final_record = cache.get(&key).expect("counter record present");
+    let total = u64::from_le_bytes(final_record.payload.as_slice().try_into().unwrap());
+    assert_eq!(
+        total,
+        THREADS * ITERS,
+        "lost an update: {total} != {}",
+        THREADS * ITERS
+    );
+}
 
 #[test]
 fn disk_drops_records_from_prior_schema_version() {

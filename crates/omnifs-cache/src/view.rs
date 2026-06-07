@@ -6,9 +6,8 @@
 
 use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches};
 use anyhow::Result;
-use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Keyspace, KeyspaceCreateOptions, OptimisticTxDatabase, UserValue};
 use moka::sync::Cache as MokaCache;
-use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,23 +32,24 @@ pub struct Freshness {
     pub generation: u64,
 }
 
-/// Durable view backing: a fjall database with one keyspace per record class.
+/// Durable view backing: a fjall optimistic-transaction database with one
+/// keyspace per record class.
 ///
 /// All ordinary writes (`put`, `put_batch`, the prefix/exact deletes) run
-/// lock-free — fjall makes individual inserts/removes and batch commits atomic
-/// and is safe under concurrent writers. The only coordination here is
-/// `merge_lock`, which serializes the *read-modify-write* in
-/// `disk_update_metadata_record` (the dirents-listing merge): get-then-insert is
-/// two calls, so concurrent merges of the same key would lose updates without
-/// it. This is the only RMW writer of a metadata key, so a plain mutex suffices;
-/// redb's single write transaction provided the same guarantee implicitly.
+/// lock-free as plain batched writes — fjall makes individual inserts/removes
+/// and batch commits atomic and is safe under concurrent writers. The
+/// dirents-listing merge in `disk_update_metadata_record` is a *read-modify-
+/// write*, so it runs inside an optimistic transaction (`fetch_update` then
+/// commit, retry on conflict): merges of *different* keys proceed in parallel,
+/// and only merges of the *same* key conflict — the loser re-reads and reruns
+/// rather than blocking. Merge keys are written exclusively through this RMW
+/// path, so the lock-free plain writes never race a merge transaction.
 struct Disk {
-    db: Database,
+    db: OptimisticTxDatabase,
     metadata: Keyspace,
     content: Keyspace,
     bulk: Keyspace,
     freshness: Keyspace,
-    merge_lock: Mutex<()>,
 }
 
 impl Disk {
@@ -99,12 +99,15 @@ impl Cache {
         } else if path.exists() {
             std::fs::remove_file(path)?;
         }
-        let db = Database::open(Config::new(path))?;
-        // Open all keyspaces before any reads or writes.
-        let metadata = db.keyspace(METADATA_KEYSPACE, KeyspaceCreateOptions::default)?;
-        let content = db.keyspace(CONTENT_KEYSPACE, KeyspaceCreateOptions::default)?;
-        let bulk = db.keyspace(BULK_KEYSPACE, KeyspaceCreateOptions::default)?;
-        let freshness = db.keyspace(FRESHNESS_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let db = OptimisticTxDatabase::builder(path).open()?;
+        // Open the plain keyspace handles before any reads or writes. Ordinary
+        // reads/writes use these directly; the merge path opens transactions
+        // against the same partitions via `db.write_tx()`.
+        let inner = db.inner();
+        let metadata = inner.keyspace(METADATA_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let content = inner.keyspace(CONTENT_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let bulk = inner.keyspace(BULK_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let freshness = inner.keyspace(FRESHNESS_KEYSPACE, KeyspaceCreateOptions::default)?;
         Ok(Self {
             mem: Self::build_mem(),
             disk: Some(Disk {
@@ -113,7 +116,6 @@ impl Cache {
                 content,
                 bulk,
                 freshness,
-                merge_lock: Mutex::new(()),
             }),
         })
     }
@@ -202,9 +204,14 @@ impl Cache {
 
     /// Transactionally update one metadata-table record. The caller owns
     /// payload semantics; this cache owns read-modify-write atomicity.
-    pub fn update_metadata_record<F>(&self, key: &Key, update: F)
+    ///
+    /// `update` is `FnMut` because the durable tier applies it inside an
+    /// optimistic transaction that reruns on a write-write conflict; callers
+    /// must produce the same result each time it is invoked (e.g. clone, do not
+    /// move, captured merge inputs).
+    pub fn update_metadata_record<F>(&self, key: &Key, mut update: F)
     where
-        F: FnOnce(Option<Record>) -> Option<Record>,
+        F: FnMut(Option<Record>) -> Option<Record>,
     {
         debug_assert_ne!(key.kind, RecordKind::File);
         let updated = if let Some(ref disk) = self.disk {
@@ -228,30 +235,41 @@ impl Cache {
         }
     }
 
-    fn disk_update_metadata_record<F>(disk: &Disk, key: &Key, update: F) -> Result<Option<Record>>
+    fn disk_update_metadata_record<F>(
+        disk: &Disk,
+        key: &Key,
+        mut update: F,
+    ) -> Result<Option<Record>>
     where
-        F: FnOnce(Option<Record>) -> Option<Record>,
+        F: FnMut(Option<Record>) -> Option<Record>,
     {
         let serialized = make_key(key);
-        // Serialize the read-modify-write so concurrent merges of the same
-        // record do not lose updates.
-        let _guard = disk.merge_lock.lock();
-        let existing = disk
-            .metadata
-            .get(serialized.as_str())?
-            .and_then(|value| Record::deserialize(&value));
-        let updated = update(existing);
-        match &updated {
-            Some(record) => {
-                let bytes = record.serialize();
-                disk.metadata
-                    .insert(serialized.as_str(), bytes.as_slice())?;
-            },
-            None => {
-                disk.metadata.remove(serialized.as_str())?;
-            },
+        // Optimistic read-modify-write: `fetch_update` reads the current value
+        // into the transaction's conflict set, applies the merge, and stages
+        // the new value, all in one tracked call. On a write-write conflict
+        // with a concurrent merge of the same key, `commit` returns
+        // `Ok(Err(Conflict))` and we retry from a fresh read. `update` is
+        // therefore `FnMut`: it may run more than once.
+        loop {
+            let mut produced: Option<Record> = None;
+            let mut tx = disk.db.write_tx()?;
+            tx.fetch_update(
+                &disk.metadata,
+                serialized.as_str(),
+                |old: Option<&UserValue>| {
+                    let existing = old.and_then(|value| Record::deserialize(value));
+                    let updated = update(existing);
+                    let bytes = updated.as_ref().map(Record::serialize);
+                    produced = updated;
+                    bytes.map(UserValue::from)
+                },
+            )?;
+            // A conflict means a concurrent merge committed the same key first;
+            // loop to re-read and reapply. Otherwise the write landed.
+            if tx.commit()?.is_ok() {
+                return Ok(produced);
+            }
         }
-        Ok(updated)
     }
 
     /// Remove the exact key from the mem and the database.
@@ -392,7 +410,7 @@ impl Cache {
         let serialized = make_key(key);
         let bytes = record.serialize();
         let target = disk.partition_for(key.kind, record.payload.len());
-        let mut batch = disk.db.batch();
+        let mut batch = disk.db.inner().batch();
         batch.insert(target, serialized.as_str(), bytes.as_slice());
         // Remove stale copy from the other file partition if the record
         // crossed the bulk threshold since last write.
@@ -406,7 +424,7 @@ impl Cache {
     }
 
     fn disk_put_batch(disk: &Disk, records: &[BatchRecord]) -> Result<()> {
-        let mut batch = disk.db.batch();
+        let mut batch = disk.db.inner().batch();
         for item in records {
             let wire_key = make_key(&Key::with_aux(
                 item.path.clone(),
@@ -441,7 +459,7 @@ impl Cache {
         // "L:mount\x1f/a/b/". The `\x1f` suffix catches the aux case.
         let aux_separator = format!("{path}\x1f");
 
-        let mut batch = disk.db.batch();
+        let mut batch = disk.db.inner().batch();
         let mut deleted = 0;
         for partition in partitions {
             for kind in RecordKind::ALL {
@@ -484,7 +502,7 @@ impl Cache {
         let child_prefix = format!("{scoped_prefix}/");
         let aux_prefix = format!("{scoped_prefix}\x1f");
 
-        let mut batch = disk.db.batch();
+        let mut batch = disk.db.inner().batch();
         let mut deleted = 0;
         for partition in partitions {
             for kind in RecordKind::ALL {
@@ -527,7 +545,7 @@ impl Cache {
     fn disk_delete_prefix(disk: &Disk, prefix: &str) -> Result<usize> {
         let partitions = [&disk.metadata, &disk.content, &disk.bulk];
 
-        let mut batch = disk.db.batch();
+        let mut batch = disk.db.inner().batch();
         let mut deleted = 0;
         for partition in partitions {
             for kind in RecordKind::ALL {

@@ -232,14 +232,14 @@ The object cache (precious, low write rate) is **durable and global**; the view 
     metadata/content/bulk : "{mount}\x1f{kind}:{path}"[<aux>]
 ```
 
-- **Object DB: one global file, mount-prefixed keys.** Object writes happen only on a cold fetch, so the single writer lock barely contends (Codex #9). Mount prefix reuses the existing range-scan machinery and keeps `TableDefinition` names static.
-- **View DB: a separate fjall keyspace, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. If the single view writer lock contends under load (Codex #9), split the view into per-mount files with the same delete-on-startup rule — no other change.
+- **Object DB: one global keyspace, mount-prefixed keys.** Object writes happen only on a cold fetch, and fjall is safe under concurrent writers, so write contention is minimal (Codex #9). Mount prefix reuses the existing range-scan machinery and keeps keyspace names static.
+- **View DB: a separate fjall keyspace, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. Ordinary view writes are lock-free; only the dirent-listing merge is a read-modify-write, and it runs as an optimistic transaction (retry on conflict), so merges of different keys never contend (Codex #8/#9).
 
 Budgets: object DB global LRU, no TTL; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
 
 ## Tradeoffs accepted
 
-- **Object DB single writer lock (global).** Only cold-fetch writes contend, and large deletes (mount teardown) are chunked so they don't hold the lock across an unrelated mount's fetch.
+- **Object DB write path (global keyspace).** fjall handles concurrent writers, and object writes happen only on cold fetches, so contention is minimal; large deletes (mount teardown) are chunked so they don't stall an unrelated mount's fetch.
 - **View recompute after any restart.** Startup deletes `view`, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
 - **Large ranged `.raw`.** A `Deferred { Ranged }` object `.raw` still has no `read-file` byte source; remains deferred per ADR-0001.
 
@@ -254,8 +254,8 @@ The design was hardened against an adversarial review. Folded in above:
 - **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate `view` deleted on every startup, so no view survives a restart to disagree with the object.
 - **#6 (High)** object eviction + refetch -> mixed versions -> a `canonical-store` overwrite evicts the object's prior derived views first.
 - **#7 (High)** global generation + tombstone GC unsafe across mounts -> the fence is per-mount.
-- **#8 (Medium)** concurrent dirent merge lost-update -> `Store::project` keeps the read-modify-write transactional inside the cache.
-- **#9 (Medium)** global write-lock contention -> object DB is global but cold-write-only, so it barely contends. The view is a **single global `view`** (per the chosen storage layout), so its writer lock is shared across mounts; this is accepted for now. If it contends under load, split the view into per-mount files (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
+- **#8 (Medium)** concurrent dirent merge lost-update -> the merge runs as an optimistic transaction inside the cache (`fetch_update` + commit/retry), so a concurrent merge of the same key forces a re-read instead of a lost update.
+- **#9 (Medium)** global write-lock contention -> fjall is safe under concurrent writers, so neither store needs a global write lock. Object writes are cold-only and barely contend; ordinary view writes are lock-free, and only the same-key dirent merge serializes (via the optimistic retry above). If a single global `view` keyspace ever contends under load, split it per-mount (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
 - **#10 (Medium)** `leaves` only `debug_assert`ed → release validation in `op_validate`.
 
 Confirmed fine: structural files under an object dir; dropping `content-type`.

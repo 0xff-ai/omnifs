@@ -540,6 +540,10 @@ impl Store {
 
     /// Atomically update one view record. The cache supplies raw bytes only;
     /// callers own payload decoding, merging, and re-encoding.
+    ///
+    /// `update` is `FnMut`: the durable view tier applies it inside an
+    /// optimistic transaction that reruns on a write-write conflict, so the
+    /// closure must be replayable (clone, do not move, any captured inputs).
     pub fn update_metadata_record<F>(
         &self,
         path: &ProtocolPath,
@@ -547,7 +551,7 @@ impl Store {
         aux: Option<&str>,
         update: F,
     ) where
-        F: FnOnce(Option<Record>) -> Option<Record>,
+        F: FnMut(Option<Record>) -> Option<Record>,
     {
         let key = Key::with_aux(self.scoped(path.as_str()), kind, aux);
         self.caches.view.update_metadata_record(&key, update);
