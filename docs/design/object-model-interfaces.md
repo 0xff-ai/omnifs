@@ -301,10 +301,10 @@ it. Overlap ⇒ `start()`-time error surfaced through `initialize()`. The same
 
 ## 6. Cache contracts (`crates/omnifs-cache` + host wiring)
 
-### 6.1 Durable redb (`object.redb`)
+### 6.1 Durable object store (`object` fjall keyspace)
 
-Two tables, byte keys (the v1 `&str` keys migrate to `&[u8]` because the id is now
-structured).
+Two keyspaces (fjall partitions), byte keys (the v1 `&str` keys migrate to `&[u8]`
+because the id is now structured).
 
 ```
 objects : key = mount ++ 0x1F ++ postcard(logical-id)
@@ -321,7 +321,7 @@ paths   : key = mount ++ 0x1F ++ full-path-string
 - `leaves` is the durable **alias set** (every full path indexed for this id).
 - No `generation` field (SIC-1). The fence lives in `Store` (§6.3).
 
-### 6.2 Ephemeral view (`view.redb`, deleted + recreated on startup)
+### 6.2 Ephemeral view (`view` fjall keyspace, deleted + recreated on startup)
 
 Existing per-record store (`Lookup`/`Attr`/`Dirents`/`File`) gains a per-leaf
 **freshness stamp** shared by all RecordKinds of one path:

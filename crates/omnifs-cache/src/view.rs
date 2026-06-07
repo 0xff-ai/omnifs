@@ -1,4 +1,4 @@
-//! Unified browse-cache tier: in-memory moka `mem` tier in front of a durable redb `disk` tier.
+//! Unified browse-cache tier: in-memory moka `mem` tier in front of a fjall `disk` tier.
 //!
 //! `Cache` owns both tiers behind one API. Reads check `mem` first and
 //! promote `disk` hits into `mem`. Writes go to both. Invalidations
@@ -6,8 +6,9 @@
 
 use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches};
 use anyhow::Result;
+use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
 use moka::sync::Cache as MokaCache;
-use redb::{Database, ReadableTable, TableDefinition};
+use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,14 +18,14 @@ pub const VIEW_MEM_MAX_WEIGHT: u64 = 32 * 1024 * 1024;
 /// Records larger than this threshold are not inserted into `mem` (256 KiB).
 pub const VIEW_MEM_SKIP_THRESHOLD: usize = 256 * 1024;
 
-/// Records larger than this threshold are stored in the redb bulk table instead of
-/// the content table (64 KiB).
+/// Records larger than this threshold are stored in the bulk partition instead of
+/// the content partition (64 KiB).
 pub const VIEW_BULK_THRESHOLD: usize = 64 * 1024;
 
-const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
-const CONTENT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("content");
-const BULK_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bulk");
-const FRESHNESS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("freshness");
+const METADATA_KEYSPACE: &str = "metadata";
+const CONTENT_KEYSPACE: &str = "content";
+const BULK_KEYSPACE: &str = "bulk";
+const FRESHNESS_KEYSPACE: &str = "freshness";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 pub struct Freshness {
@@ -32,14 +33,40 @@ pub struct Freshness {
     pub generation: u64,
 }
 
-/// Unified view cache: byte-weighted moka `mem` tier in front of a durable redb `disk` tier.
+/// Durable view backing: a fjall database with one keyspace per record class.
 ///
-/// The `mem` tier is always present. The `disk` (redb) tier is optional — when absent
-/// (e.g. the database file could not be opened) the cache operates as
+/// `write_lock` serializes the read-modify-write in
+/// `disk_update_metadata_record`. fjall makes individual inserts/removes and
+/// batch commits atomic, but a read-then-write merge needs explicit
+/// serialization to avoid lost updates (the redb single write transaction
+/// provided this implicitly).
+struct Disk {
+    db: Database,
+    metadata: Keyspace,
+    content: Keyspace,
+    bulk: Keyspace,
+    freshness: Keyspace,
+    write_lock: Mutex<()>,
+}
+
+impl Disk {
+    fn partition_for(&self, kind: RecordKind, payload_len: usize) -> &Keyspace {
+        match kind {
+            RecordKind::File if payload_len >= VIEW_BULK_THRESHOLD => &self.bulk,
+            RecordKind::File => &self.content,
+            _ => &self.metadata,
+        }
+    }
+}
+
+/// Unified view cache: byte-weighted moka `mem` tier in front of a fjall `disk` tier.
+///
+/// The `mem` tier is always present. The `disk` (fjall) tier is optional — when
+/// absent (e.g. the keyspace could not be opened) the cache operates as
 /// mem-only.
 pub struct Cache {
     mem: MokaCache<Key, Arc<Record>>,
-    disk: Option<Database>,
+    disk: Option<Disk>,
 }
 
 impl Cache {
@@ -51,7 +78,7 @@ impl Cache {
         }
     }
 
-    /// Open a view cache backed by the redb database at `path`.
+    /// Open a view cache backed by the fjall keyspace at `path`.
     ///
     /// Always deletes and recreates `path` before opening (Codex #5): the
     /// view is disposable — it is derived from the durable object cache and
@@ -62,23 +89,29 @@ impl Cache {
             std::fs::create_dir_all(parent)?;
         }
         // Delete whatever was there — stale rendered bytes must not survive
-        // a restart (Codex #5).
-        if path.exists() {
+        // a restart (Codex #5). The keyspace is a directory; tolerate a stale
+        // plain file left by an earlier storage engine.
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else if path.exists() {
             std::fs::remove_file(path)?;
         }
-        let disk = Database::create(path)?;
-        // Ensure all three tables exist before any reads or writes.
-        let txn = disk.begin_write()?;
-        {
-            let _ = txn.open_table(METADATA_TABLE)?;
-            let _ = txn.open_table(CONTENT_TABLE)?;
-            let _ = txn.open_table(BULK_TABLE)?;
-            let _ = txn.open_table(FRESHNESS_TABLE)?;
-        }
-        txn.commit()?;
+        let db = Database::open(Config::new(path))?;
+        // Open all keyspaces before any reads or writes.
+        let metadata = db.keyspace(METADATA_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let content = db.keyspace(CONTENT_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let bulk = db.keyspace(BULK_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let freshness = db.keyspace(FRESHNESS_KEYSPACE, KeyspaceCreateOptions::default)?;
         Ok(Self {
             mem: Self::build_mem(),
-            disk: Some(disk),
+            disk: Some(Disk {
+                db,
+                metadata,
+                content,
+                bulk,
+                freshness,
+                write_lock: Mutex::new(()),
+            }),
         })
     }
 
@@ -94,12 +127,12 @@ impl Cache {
             .build()
     }
 
-    // --- Mem-only operations (fast path, no redb I/O) --------------------
+    // --- Mem-only operations (fast path, no disk I/O) --------------------
 
     /// Look up a record in the mem only. Does not read from the database.
     ///
-    /// Use this for hot-path reads where falling through to redb would
-    /// change caching semantics (e.g. the FUSE pagination accumulator).
+    /// Use this for hot-path reads where falling through to the disk tier
+    /// would change caching semantics (e.g. the FUSE pagination accumulator).
     pub fn mem_get(&self, key: &Key) -> Option<Arc<Record>> {
         self.mem.get(key)
     }
@@ -120,17 +153,17 @@ impl Cache {
             .expect("invalidation closures enabled at cache construction");
     }
 
-    // --- Unified operations (mem + redb) ---------------------------------
+    // --- Unified operations (mem + disk) ---------------------------------
 
-    /// Look up a record. Checks the mem first; on a miss, reads from redb
-    /// and promotes the result into the mem.
+    /// Look up a record. Checks the mem first; on a miss, reads from the disk
+    /// tier and promotes the result into the mem.
     pub fn get(&self, key: &Key) -> Option<Arc<Record>> {
         if let Some(record) = self.mem.get(key) {
             return Some(record);
         }
         let record = self.get_from_disk(key).ok().flatten()?;
         let arc = Arc::new(record);
-        // Promote from redb into the mem if it fits the threshold.
+        // Promote from the disk tier into the mem if it fits the threshold.
         if arc.payload.len() <= VIEW_MEM_SKIP_THRESHOLD {
             self.mem.insert(key.clone(), arc.clone());
         }
@@ -192,34 +225,29 @@ impl Cache {
         }
     }
 
-    fn disk_update_metadata_record<F>(
-        disk: &Database,
-        key: &Key,
-        update: F,
-    ) -> Result<Option<Record>>
+    fn disk_update_metadata_record<F>(disk: &Disk, key: &Key, update: F) -> Result<Option<Record>>
     where
         F: FnOnce(Option<Record>) -> Option<Record>,
     {
         let serialized = make_key(key);
-        let txn = disk.begin_write()?;
-        let updated;
-        {
-            let mut table = txn.open_table(METADATA_TABLE)?;
-            let existing = table
-                .get(serialized.as_str())?
-                .and_then(|guard| Record::deserialize(guard.value()));
-            updated = update(existing);
-            match &updated {
-                Some(record) => {
-                    let bytes = record.serialize();
-                    table.insert(serialized.as_str(), bytes.as_slice())?;
-                },
-                None => {
-                    table.remove(serialized.as_str())?;
-                },
-            }
+        // Serialize the read-modify-write so concurrent merges of the same
+        // record do not lose updates.
+        let _guard = disk.write_lock.lock();
+        let existing = disk
+            .metadata
+            .get(serialized.as_str())?
+            .and_then(|value| Record::deserialize(&value));
+        let updated = update(existing);
+        match &updated {
+            Some(record) => {
+                let bytes = record.serialize();
+                disk.metadata
+                    .insert(serialized.as_str(), bytes.as_slice())?;
+            },
+            None => {
+                disk.metadata.remove(serialized.as_str())?;
+            },
         }
-        txn.commit()?;
         Ok(updated)
     }
 
@@ -312,15 +340,7 @@ impl Cache {
             return;
         };
         if let Ok(bytes) = postcard::to_allocvec(&freshness)
-            && let Err(error) = (|| -> anyhow::Result<()> {
-                let txn = disk.begin_write()?;
-                {
-                    let mut table = txn.open_table(FRESHNESS_TABLE)?;
-                    table.insert(scoped_path, bytes.as_slice())?;
-                }
-                txn.commit()?;
-                Ok(())
-            })()
+            && let Err(error) = disk.freshness.insert(scoped_path, bytes.as_slice())
         {
             tracing::debug!(path = scoped_path, error = %error, "view freshness put failed");
         }
@@ -328,10 +348,8 @@ impl Cache {
 
     pub fn get_freshness(&self, scoped_path: &str) -> Option<Freshness> {
         let disk = self.disk.as_ref()?;
-        let txn = disk.begin_read().ok()?;
-        let table = txn.open_table(FRESHNESS_TABLE).ok()?;
-        let guard = table.get(scoped_path).ok()??;
-        postcard::from_bytes(guard.value()).ok()
+        let value = disk.freshness.get(scoped_path).ok()??;
+        postcard::from_bytes(&value).ok()
     }
 
     pub fn is_fresh(&self, scoped_path: &str, now_millis: u64) -> bool {
@@ -343,114 +361,94 @@ impl Cache {
         let Some(ref disk) = self.disk else {
             return;
         };
-        if let Err(error) = (|| -> anyhow::Result<()> {
-            let txn = disk.begin_write()?;
-            {
-                let mut table = txn.open_table(FRESHNESS_TABLE)?;
-                table.remove(scoped_path)?;
-            }
-            txn.commit()?;
-            Ok(())
-        })() {
+        if let Err(error) = disk.freshness.remove(scoped_path) {
             tracing::debug!(path = scoped_path, error = %error, "view freshness delete failed");
         }
     }
 
-    // --- Internal redb helpers -----------------------------------------------
+    // --- Internal fjall helpers ----------------------------------------------
 
     fn get_from_disk(&self, key: &Key) -> Result<Option<Record>> {
         let Some(ref disk) = self.disk else {
             return Ok(None);
         };
-        let txn = disk.begin_read()?;
         let serialized = make_key(key);
 
         // For File records, check content first, then bulk.
         if key.kind == RecordKind::File {
-            if let Some(record) = Self::read_from_table(&txn, CONTENT_TABLE, &serialized)? {
+            if let Some(record) = read_from_partition(&disk.content, &serialized)? {
                 return Ok(Some(record));
             }
-            return Self::read_from_table(&txn, BULK_TABLE, &serialized);
+            return read_from_partition(&disk.bulk, &serialized);
         }
 
-        Self::read_from_table(&txn, METADATA_TABLE, &serialized)
+        read_from_partition(&disk.metadata, &serialized)
     }
 
-    fn disk_put(disk: &Database, key: &Key, record: &Record) -> Result<()> {
-        let txn = disk.begin_write()?;
+    fn disk_put(disk: &Disk, key: &Key, record: &Record) -> Result<()> {
         let serialized = make_key(key);
         let bytes = record.serialize();
-        let target = Self::table_for(key.kind, record.payload.len());
-        {
-            let mut table = txn.open_table(target)?;
-            table.insert(serialized.as_str(), bytes.as_slice())?;
-        }
-        // Remove stale copy from the other file table if the record
+        let target = disk.partition_for(key.kind, record.payload.len());
+        let mut batch = disk.db.batch();
+        batch.insert(target, serialized.as_str(), bytes.as_slice());
+        // Remove stale copy from the other file partition if the record
         // crossed the bulk threshold since last write.
         if key.kind == RecordKind::File {
             let is_bulk = record.payload.len() >= VIEW_BULK_THRESHOLD;
-            let other = if is_bulk { CONTENT_TABLE } else { BULK_TABLE };
-            let mut other_table = txn.open_table(other)?;
-            other_table.remove(serialized.as_str())?;
+            let other = if is_bulk { &disk.content } else { &disk.bulk };
+            batch.remove(other, serialized.as_str());
         }
-        txn.commit()?;
+        batch.commit()?;
         Ok(())
     }
 
-    fn disk_put_batch(disk: &Database, records: &[BatchRecord]) -> Result<()> {
-        let txn = disk.begin_write()?;
-        {
-            let mut meta = txn.open_table(METADATA_TABLE)?;
-            let mut content = txn.open_table(CONTENT_TABLE)?;
-            let mut bulk = txn.open_table(BULK_TABLE)?;
-            for item in records {
-                let wire_key = make_key(&Key::with_aux(
-                    item.path.clone(),
-                    item.kind,
-                    item.aux.as_deref(),
-                ));
-                let bytes = item.record.serialize();
-                let is_bulk = item.record.payload.len() >= VIEW_BULK_THRESHOLD;
-                match (item.kind, is_bulk) {
-                    (RecordKind::File, true) => {
-                        bulk.insert(wire_key.as_str(), bytes.as_slice())?;
-                        content.remove(wire_key.as_str())?; // clear stale small copy
-                    },
-                    (RecordKind::File, false) => {
-                        content.insert(wire_key.as_str(), bytes.as_slice())?;
-                        bulk.remove(wire_key.as_str())?; // clear stale large copy
-                    },
-                    _ => {
-                        meta.insert(wire_key.as_str(), bytes.as_slice())?;
-                    },
-                }
+    fn disk_put_batch(disk: &Disk, records: &[BatchRecord]) -> Result<()> {
+        let mut batch = disk.db.batch();
+        for item in records {
+            let wire_key = make_key(&Key::with_aux(
+                item.path.clone(),
+                item.kind,
+                item.aux.as_deref(),
+            ));
+            let bytes = item.record.serialize();
+            let is_bulk = item.record.payload.len() >= VIEW_BULK_THRESHOLD;
+            match (item.kind, is_bulk) {
+                (RecordKind::File, true) => {
+                    batch.insert(&disk.bulk, wire_key.as_str(), bytes.as_slice());
+                    batch.remove(&disk.content, wire_key.as_str()); // clear stale small copy
+                },
+                (RecordKind::File, false) => {
+                    batch.insert(&disk.content, wire_key.as_str(), bytes.as_slice());
+                    batch.remove(&disk.bulk, wire_key.as_str()); // clear stale large copy
+                },
+                _ => {
+                    batch.insert(&disk.metadata, wire_key.as_str(), bytes.as_slice());
+                },
             }
         }
-        txn.commit()?;
+        batch.commit()?;
         Ok(())
     }
 
-    fn disk_delete_exact(disk: &Database, path: &str) -> Result<usize> {
-        let txn = disk.begin_write()?;
-        let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
+    fn disk_delete_exact(disk: &Disk, path: &str) -> Result<usize> {
+        let partitions = [&disk.metadata, &disk.content, &disk.bulk];
         // Suffix that distinguishes "exact path with aux" from a child path.
         // For example, for path "mount\x1f/a/b" the key with aux is
         // "F:mount\x1f/a/b\x1f<hex>" while a child key starts with
         // "L:mount\x1f/a/b/". The `\x1f` suffix catches the aux case.
         let aux_separator = format!("{path}\x1f");
 
-        for table_def in tables {
-            let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
+        let mut batch = disk.db.batch();
+        let mut deleted = 0;
+        for partition in partitions {
             for kind in RecordKind::ALL {
                 let wire_prefix = format!("{}:{path}", kind_prefix(kind));
-                let range_end = range_end_for_prefix(&wire_prefix);
                 let after_kind = format!("{}:", kind_prefix(kind));
-                let range = table.range::<&str>(wire_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let wire_key = entry.0.value();
+                for entry in partition.prefix(wire_prefix.as_bytes()) {
+                    let wire_key = entry.key()?;
+                    let Ok(wire_key) = std::str::from_utf8(&wire_key) else {
+                        continue;
+                    };
                     let Some(rest) = wire_key.strip_prefix(after_kind.as_str()) else {
                         continue;
                     };
@@ -458,17 +456,13 @@ impl Cache {
                     //        rest starts with path + "\x1f" (same path, has aux)
                     // Do NOT match rest starting with path + "/" (child path).
                     if rest == path || rest.starts_with(aux_separator.as_str()) {
-                        to_delete.push(wire_key.to_string());
+                        batch.remove(partition, wire_key);
+                        deleted += 1;
                     }
                 }
             }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
         }
-
-        txn.commit()?;
+        batch.commit()?;
         Ok(deleted)
     }
 
@@ -482,16 +476,14 @@ impl Cache {
     /// must match on the wire key directly rather than extracting the path via
     /// `stored_key_path` (which splits on the first `\x1f` and would stop at the
     /// mount boundary).
-    fn disk_delete_scoped_prefix(disk: &Database, scoped_prefix: &str) -> Result<usize> {
-        let txn = disk.begin_write()?;
-        let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
+    fn disk_delete_scoped_prefix(disk: &Disk, scoped_prefix: &str) -> Result<usize> {
+        let partitions = [&disk.metadata, &disk.content, &disk.bulk];
         let child_prefix = format!("{scoped_prefix}/");
         let aux_prefix = format!("{scoped_prefix}\x1f");
 
-        for table_def in tables {
-            let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
+        let mut batch = disk.db.batch();
+        let mut deleted = 0;
+        for partition in partitions {
             for kind in RecordKind::ALL {
                 // Scan wire keys that start with "{kind}:{scoped_prefix}".
                 // A wire key matches if the path portion (everything after
@@ -500,12 +492,12 @@ impl Cache {
                 // starts with `scoped_prefix + "\x1f"` (same path with an aux
                 // field, e.g. a versioned file record).
                 let wire_prefix = format!("{}:{scoped_prefix}", kind_prefix(kind));
-                let range_end = range_end_for_prefix(&wire_prefix);
                 let after_kind = format!("{}:", kind_prefix(kind));
-                let range = table.range::<&str>(wire_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let wire_key = entry.0.value();
+                for entry in partition.prefix(wire_prefix.as_bytes()) {
+                    let wire_key = entry.key()?;
+                    let Ok(wire_key) = std::str::from_utf8(&wire_key) else {
+                        continue;
+                    };
                     // Extract the raw path+aux suffix after "{kind}:".
                     let Some(rest) = wire_key.strip_prefix(after_kind.as_str()) else {
                         continue;
@@ -517,75 +509,51 @@ impl Cache {
                         || rest.starts_with(child_prefix.as_str())
                         || rest.starts_with(aux_prefix.as_str());
                     if is_match {
-                        to_delete.push(wire_key.to_string());
+                        batch.remove(partition, wire_key);
+                        deleted += 1;
                     }
                 }
             }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
         }
-        txn.commit()?;
+        batch.commit()?;
         Ok(deleted)
     }
 
     /// Delete all records whose logical path is equal to `prefix` or lies
     /// beneath it on a segment boundary.
-    fn disk_delete_prefix(disk: &Database, prefix: &str) -> Result<usize> {
-        let txn = disk.begin_write()?;
-        let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
+    fn disk_delete_prefix(disk: &Disk, prefix: &str) -> Result<usize> {
+        let partitions = [&disk.metadata, &disk.content, &disk.bulk];
 
-        for table_def in tables {
-            let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
+        let mut batch = disk.db.batch();
+        let mut deleted = 0;
+        for partition in partitions {
             for kind in RecordKind::ALL {
                 let scan_prefix = make_key(&Key::new(prefix, kind));
-                let range_end = range_end_for_prefix(&scan_prefix);
-                let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let key = entry.0.value().to_string();
-                    let path = stored_key_path(&key).unwrap_or("");
+                for entry in partition.prefix(scan_prefix.as_bytes()) {
+                    let wire_key = entry.key()?;
+                    let Ok(wire_key) = std::str::from_utf8(&wire_key) else {
+                        continue;
+                    };
+                    let path = stored_key_path(wire_key).unwrap_or("");
                     if path_prefix_matches(prefix, path) {
-                        to_delete.push(key);
+                        batch.remove(partition, wire_key);
+                        deleted += 1;
                     }
                 }
             }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
         }
-        txn.commit()?;
+        batch.commit()?;
         Ok(deleted)
     }
+}
 
-    fn read_from_table(
-        txn: &redb::ReadTransaction,
-        table_def: TableDefinition<&str, &[u8]>,
-        key: &str,
-    ) -> Result<Option<Record>> {
-        let table = txn.open_table(table_def)?;
-        let Some(value) = table.get(key)? else {
-            return Ok(None);
-        };
-        // A corrupt or unknown schema version is treated as a miss so the
-        // host re-fetches from the provider.
-        Ok(Record::deserialize(value.value()))
-    }
-
-    const fn table_for(
-        kind: RecordKind,
-        payload_len: usize,
-    ) -> TableDefinition<'static, &'static str, &'static [u8]> {
-        match kind {
-            RecordKind::File if payload_len >= VIEW_BULK_THRESHOLD => BULK_TABLE,
-            RecordKind::File => CONTENT_TABLE,
-            _ => METADATA_TABLE,
-        }
-    }
+fn read_from_partition(partition: &Keyspace, key: &str) -> Result<Option<Record>> {
+    let Some(value) = partition.get(key)? else {
+        return Ok(None);
+    };
+    // A corrupt or unknown schema version is treated as a miss so the
+    // host re-fetches from the provider.
+    Ok(Record::deserialize(&value))
 }
 
 impl Default for Cache {
@@ -611,12 +579,6 @@ fn stored_key_path(key: &str) -> Option<&str> {
             .split_once('\u{1f}')
             .map_or(path_and_aux, |(path, _)| path),
     )
-}
-
-fn range_end_for_prefix(prefix: &str) -> String {
-    let mut end = prefix.to_string();
-    end.push('\u{10ffff}');
-    end
 }
 
 fn kind_prefix(kind: RecordKind) -> char {

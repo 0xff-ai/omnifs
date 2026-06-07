@@ -1,15 +1,15 @@
 //! Host cache byte storage primitives.
 //!
-//! `view::Cache` owns both the in-memory moka mem and the durable redb
+//! `view::Cache` owns both the in-memory moka mem and the durable fjall
 //! backing behind one API. Cache entries do not carry TTLs: eviction is driven
 //! purely by capacity and explicit invalidation (`invalidate_prefix` or
 //! host-applied invalidation effects).
 //!
 //! ## Global caches, per-mount facade
 //!
-//! `Caches` holds the two global cache handles (one durable `object.redb` and
-//! one non-durable `view.redb` deleted on startup). It is opened once at
-//! process start and shared via `Arc`. `Caches::mount(name)` returns a
+//! `Caches` holds the two global cache handles (one durable `object` keyspace
+//! and one non-durable `view` keyspace deleted on startup). It is opened once
+//! at process start and shared via `Arc`. `Caches::mount(name)` returns a
 //! per-mount `Store` that scopes all keys with `"{mount}\x1f{key}"`.
 //!
 //! The per-mount generation fence lives in `Store`: each `Store` owns an
@@ -166,8 +166,8 @@ const TOMBSTONE_RETAIN_GENERATIONS: u64 = 1024;
 
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.
 ///
-/// `Caches::open(dir)` creates a durable `object.redb` and deletes+recreates
-/// `view.redb` (always cold after restart, Codex #5).
+/// `Caches::open(dir)` creates a durable `object` keyspace and deletes+recreates
+/// the `view` keyspace (always cold after restart, Codex #5).
 pub struct Caches {
     pub object: object::Cache,
     pub view: view::Cache,
@@ -176,12 +176,12 @@ pub struct Caches {
 impl Caches {
     /// Open the global cache handles from `dir`.
     ///
-    /// Creates `dir/object.redb` (durable) and deletes+recreates
-    /// `dir/view.redb` (non-durable, always cold, Codex #5).
+    /// Creates `dir/object` (durable) and deletes+recreates
+    /// `dir/view` (non-durable, always cold, Codex #5).
     pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
-        let object = object::Cache::open(&dir.join("object.redb"))?;
-        let view = view::Cache::open(&dir.join("view.redb"))?;
+        let object = object::Cache::open(&dir.join("object"))?;
+        let view = view::Cache::open(&dir.join("view"))?;
         Ok(Arc::new(Self { object, view }))
     }
 
@@ -231,17 +231,17 @@ impl Store {
     /// and no durable object cache. Used by tests that don't need persistence.
     pub fn new_in_memory(mount: impl Into<String>) -> Self {
         // Build a minimal Caches with in-memory caches.
-        // The object cache still needs a real redb file (it's always durable);
-        // for in-memory use a temp file that we open and immediately discard.
-        // Tests that need the object cache should use `Caches::open`.
+        // The object cache is always durable and needs a real fjall keyspace
+        // directory; for in-memory use a temp directory that we leak so the
+        // keyspace keeps a live backing path. Tests that need the object cache
+        // should use `Caches::open`.
         let caches = Arc::new(Caches {
             object: {
                 let dir = tempfile::tempdir().expect("tempdir for in-memory object cache");
-                object::Cache::open(&dir.path().join("object.redb"))
-                    .expect("in-memory object cache")
-                // dir drops here — the file is deleted, but the Database
-                // handle keeps the fd open. On Linux this is fine for tests.
-                // On macOS the file is unlinked but the redb handle still works.
+                // Persist (leak) the temp dir: fjall actively writes journal
+                // and SST files, so the directory must outlive this scope.
+                let path = dir.keep();
+                object::Cache::open(&path.join("object")).expect("in-memory object cache")
             },
             view: view::Cache::new(),
         });

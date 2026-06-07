@@ -116,7 +116,7 @@ behind the same API.
 
 ## Cache key encoding
 
-The view cache (durable `view.redb`) and object cache (`object.redb`) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
+The view cache (`view` fjall keyspace) and object cache (`object` fjall keyspace) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
 
 ## Provider ergonomics
 

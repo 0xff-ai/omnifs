@@ -40,8 +40,8 @@ impl ProviderRegistry {
                 .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
         );
 
-        // Global cache handles: one durable object.redb and one disposable
-        // view.redb deleted + recreated on startup (Codex #5). Shared across
+        // Global cache handles: one durable `object` keyspace and one disposable
+        // `view` keyspace deleted + recreated on startup (Codex #5). Shared across
         // all provider runtimes; per-mount isolation via key prefix.
         let caches = Caches::open(dirs.cache_dir)
             .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;

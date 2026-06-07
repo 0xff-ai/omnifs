@@ -467,9 +467,9 @@ are never collapsed into one snapshot.
 
 | Store | Durability | On restart |
 |---|---|---|
-| Object cache (`object.redb`): canonical bytes + validator + the object's `id → {alias paths}` set | durable | retained; Mutable revalidates on next read, Immutable trusted |
+| Object cache (`object` fjall keyspace): canonical bytes + validator + the object's `id → {alias paths}` set | durable | retained; Mutable revalidates on next read, Immutable trusted |
 | Path↔id index | durable (stored with the object cache) | retained, so a previously-seen path finds its canonical without a blind refetch |
-| View cache (`view.redb`): rendered leaf bytes + dirents | ephemeral | deleted and recreated empty |
+| View cache (`view` fjall keyspace): rendered leaf bytes + dirents | ephemeral | deleted and recreated empty |
 | Tombstones | in-memory | cleared |
 | Per-mount generation | in-memory, monotonic within a run | reset to 0 |
 

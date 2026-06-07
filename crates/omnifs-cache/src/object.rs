@@ -1,6 +1,6 @@
 //! Object cache : durable, global, ObjectId-keyed canonical bytes.
 //!
-//! Backed by a redb database with two tables (byte keys throughout):
+//! Backed by a fjall keyspace with two partitions (byte keys throughout):
 //! - `objects`: `mount\x1f{id}` → postcard of `StoredObject`
 //! - `paths`:   `mount\x1f{full-path}` → scoped `ObjectId` bytes
 //!
@@ -9,17 +9,14 @@
 //! fence lives in `Store`.
 
 use anyhow::Result;
-#[allow(unused_imports)]
-use redb::ReadableTable as _;
-use redb::{Database, TableDefinition};
+use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use std::path::Path;
-use std::sync::Arc;
 
 /// On-disk schema version for `StoredObject`. Bump on layout change.
 pub const SCHEMA: u8 = 1;
 
-const OBJECTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
-const PATHS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("paths");
+const OBJECTS_KEYSPACE: &str = "objects";
+const PATHS_KEYSPACE: &str = "paths";
 
 /// Canonical bytes for one object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -51,7 +48,9 @@ impl StoredObject {
 /// Global, durable object-id cache. One instance per process; mount isolation
 /// is enforced by the `mount\x1f` key prefix injected by `Store`.
 pub struct Cache {
-    disk: Arc<Database>,
+    db: Database,
+    objects: Keyspace,
+    paths: Keyspace,
 }
 
 impl Cache {
@@ -60,16 +59,10 @@ impl Cache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let disk = Database::create(path)?;
-        let txn = disk.begin_write()?;
-        {
-            let _ = txn.open_table(OBJECTS_TABLE)?;
-            let _ = txn.open_table(PATHS_TABLE)?;
-        }
-        txn.commit()?;
-        Ok(Self {
-            disk: Arc::new(disk),
-        })
+        let db = Database::open(Config::new(path))?;
+        let objects = db.keyspace(OBJECTS_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let paths = db.keyspace(PATHS_KEYSPACE, KeyspaceCreateOptions::default)?;
+        Ok(Self { db, objects, paths })
     }
 
     /// UPSERT: union `new_leaves`, set canonical, keep existing PATHS rows, add
@@ -106,18 +99,14 @@ impl Cache {
     }
 
     pub fn get(&self, scoped_id: &[u8]) -> Option<StoredObject> {
-        let txn = self.disk.begin_read().ok()?;
-        let table = txn.open_table(OBJECTS_TABLE).ok()?;
-        let guard = table.get(scoped_id).ok()??;
-        decode_object(guard.value())
+        let value = self.objects.get(scoped_id).ok()??;
+        decode_object(&value)
     }
 
     /// Forward index: scoped full path → scoped `ObjectId` bytes.
     pub fn id_of(&self, scoped_path: &[u8]) -> Option<Vec<u8>> {
-        let txn = self.disk.begin_read().ok()?;
-        let table = txn.open_table(PATHS_TABLE).ok()?;
-        let guard = table.get(scoped_path).ok()??;
-        Some(guard.value().to_vec())
+        let value = self.paths.get(scoped_path).ok()??;
+        Some(value.to_vec())
     }
 
     /// Alias set for `scoped_id` (full scoped view-leaf paths). Empty when absent.
@@ -135,16 +124,13 @@ impl Cache {
         }
 
         let result = (|| -> Result<()> {
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                let mut paths = txn.open_table(PATHS_TABLE)?;
-                objects.remove(scoped_id)?;
-                for leaf in &leaves {
-                    paths.remove(leaf.as_bytes())?;
-                }
+            let mut batch = self.db.batch();
+            batch.remove(&self.objects, scoped_id);
+            for leaf in &leaves {
+                batch.remove(&self.paths, leaf.as_bytes());
             }
-            txn.commit()?;
+            batch.commit()?;
+            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
@@ -166,12 +152,8 @@ impl Cache {
 
         let result = (|| -> Result<()> {
             let payload = postcard::to_allocvec(&obj).map_err(anyhow::Error::from)?;
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                objects.insert(scoped_id, payload.as_slice())?;
-            }
-            txn.commit()?;
+            self.objects.insert(scoped_id, payload.as_slice())?;
+            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
@@ -195,16 +177,13 @@ impl Cache {
         };
 
         let result = (|| -> Result<()> {
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                let mut paths = txn.open_table(PATHS_TABLE)?;
-                objects.insert(scoped_id, payload.as_slice())?;
-                for leaf in new_leaves {
-                    paths.insert(leaf.as_bytes(), scoped_id)?;
-                }
+            let mut batch = self.db.batch();
+            batch.insert(&self.objects, scoped_id, payload.as_slice());
+            for leaf in new_leaves {
+                batch.insert(&self.paths, leaf.as_bytes(), scoped_id);
             }
-            txn.commit()?;
+            batch.commit()?;
+            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
@@ -256,7 +235,7 @@ mod tests {
 
     fn open_cache() -> (tempfile::TempDir, Cache) {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(&dir.path().join("object.redb")).unwrap();
+        let cache = Cache::open(&dir.path().join("object")).unwrap();
         (dir, cache)
     }
 

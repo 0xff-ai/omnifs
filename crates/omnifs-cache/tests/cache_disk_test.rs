@@ -6,22 +6,20 @@ fn disk_drops_records_from_prior_schema_version() {
     // Manually write a record whose header advertises the prior schema
     // version. The reader must treat it as a miss so the runtime
     // re-fetches from the provider.
-    use redb::{Database, TableDefinition};
-    const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
+    use fjall::{Config, Database, KeyspaceCreateOptions, PersistMode};
 
     let dir = tempfile::tempdir().unwrap();
-    let disk_path = dir.path().join("browse.redb");
+    let disk_path = dir.path().join("browse");
 
     {
-        let disk = Database::create(&disk_path).unwrap();
-        let txn = disk.begin_write().unwrap();
-        {
-            let mut table = txn.open_table(METADATA_TABLE).unwrap();
-            // schema_version byte = prior version, kind byte = Attr = 1, no payload.
-            let stale = [SCHEMA_VERSION - 1, 1u8];
-            table.insert("/ghost/path", stale.as_slice()).unwrap();
-        }
-        txn.commit().unwrap();
+        let db = Database::open(Config::new(&disk_path)).unwrap();
+        let metadata = db
+            .keyspace("metadata", KeyspaceCreateOptions::default)
+            .unwrap();
+        // schema_version byte = prior version, kind byte = Attr = 1, no payload.
+        let stale = [SCHEMA_VERSION - 1, 1u8];
+        metadata.insert("/ghost/path", stale.as_slice()).unwrap();
+        db.persist(PersistMode::SyncAll).unwrap();
     }
 
     let cache = Cache::open(&disk_path).unwrap();
@@ -35,7 +33,7 @@ fn disk_drops_records_from_prior_schema_version() {
 #[test]
 fn disk_put_batch() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(&dir.path().join("browse.redb")).unwrap();
+    let cache = Cache::open(&dir.path().join("browse")).unwrap();
 
     let records = vec![
         BatchRecord::new(
@@ -69,7 +67,7 @@ fn disk_invalidate_scoped_prefix_respects_segment_boundaries() {
     // Like disk_invalidate_prefix_respects_segment_boundaries but with
     // pre-scoped paths (containing `\x1f`). Tests `invalidate_scoped_prefix`.
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(&dir.path().join("browse.redb")).unwrap();
+    let cache = Cache::open(&dir.path().join("browse")).unwrap();
 
     for path in [
         "test\x1f/owner/repo",
@@ -107,7 +105,7 @@ fn disk_invalidate_scoped_prefix_respects_segment_boundaries() {
 #[test]
 fn disk_invalidate_prefix_respects_segment_boundaries() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(&dir.path().join("browse.redb")).unwrap();
+    let cache = Cache::open(&dir.path().join("browse")).unwrap();
 
     for path in ["/owner/repo", "/owner/repo/issues", "/owner/repobaz"] {
         cache.put(
@@ -138,7 +136,7 @@ fn disk_invalidate_prefix_respects_segment_boundaries() {
 #[test]
 fn disk_keying_distinguishes_kinds() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(&dir.path().join("browse.redb")).unwrap();
+    let cache = Cache::open(&dir.path().join("browse")).unwrap();
 
     let shared_path = "/owner/repo/README.md";
     let lookup = Record::new(RecordKind::Lookup, b"lookup".to_vec());
@@ -167,7 +165,7 @@ fn disk_keying_distinguishes_kinds() {
 #[test]
 fn disk_keying_distinguishes_aux_values() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(&dir.path().join("browse.redb")).unwrap();
+    let cache = Cache::open(&dir.path().join("browse")).unwrap();
 
     let path = "/owner/repo/state.txt";
     let v1 = Record::new(RecordKind::File, b"v1".to_vec());

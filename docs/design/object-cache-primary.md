@@ -58,7 +58,7 @@ and effect materialization live in `omnifs-host`.
 ```
 omnifs-cache/
   object.rs   object::Cache   durable; anchor → Canonical; paths index; fence
-  view.rs     view::Cache     moka `mem` tier + redb `disk` tier
+  view.rs     view::Cache     moka `mem` tier + fjall `disk` tier
   store.rs    Store           per-mount facade: storage primitives only
   record.rs   RecordKind, Record, BatchRecord, Dirents/FilePayload
   attrs.rs    FileAttrs, FileSize, ByteSource, Stability  (attribute DTOs stored on records)
@@ -110,10 +110,10 @@ pub struct Canonical { pub bytes: Vec<u8>, pub version: Option<VersionToken> }
 The caches are process-global handles opened once; `Store` is the cheap per-mount view that owns the **single mount-scoping policy site**. Recurring context (mount + handles) is bundled here so no method threads `(mount, ...)` repeatedly.
 
 ```rust
-pub struct Caches { object: object::Cache, view: view::Cache }   // object.redb (durable); view.redb (deleted on startup)
+pub struct Caches { object: object::Cache, view: view::Cache }   // object keyspace (durable); view keyspace (deleted on startup)
 
 impl Caches {
-    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;        // open durable object DB; delete + recreate view.redb (always cold)
+    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;        // open durable object DB; delete + recreate view keyspace (always cold)
     pub fn mount(self: &Arc<Self>, mount: MountName) -> Store;   // per-mount handle
 }
 
@@ -145,7 +145,7 @@ The caches operate on already-scoped keys; they are mount-agnostic byte stores. 
 
 ```rust
 pub struct Cache {
-    disk: redb::Database,   // objects: scoped-anchor → { canonical, leaves };  paths: scoped-leaf → scoped-anchor
+    db: fjall::Database,    // objects: scoped-anchor → { canonical, leaves };  paths: scoped-leaf → scoped-anchor
     fence: Fence,         // runtime-only, per-mount: gen + tombstones; reset on restart
 }
 
@@ -170,7 +170,7 @@ impl Cache {
 5. **Leaf invalidation cascades to the object.** Invalidating a representation path (which ADR-0001 §6 does on version advance) consults the path index and, if the path is a known leaf, evicts the whole object + its leaves, never just the one view entry (Codex #3).
 6. **Object cache is opt-in.** Structural providers emit no `canonical-store`; the cache self-selects. No host shape declaration.
 7. **No double storage.** Identity representations (`byte-source::canonical`) live only in the object cache; the view never copies them.
-8. **View is disposable.** A separate `view.redb`, deleted and recreated on every startup — no crash-detection, no sentinel. It never survives a restart to disagree with the durable object (Codex #5); object and view need no cross-store atomicity.
+8. **View is disposable.** A separate `view`, deleted and recreated on every startup — no crash-detection, no sentinel. It never survives a restart to disagree with the durable object (Codex #5); object and view need no cross-store atomicity.
 9. **Schema decoupled from wire.** `omnifs-cache` has no `omnifs-wit` dependency; the durable serde schema is versioned independently; the host owns the wire bridge.
 10. **Release-validated leaves.** `op_validate` (not a `debug_assert`) rejects empty logical ids, empty or invalid view leaves, invalidation ids, and oversized validator tokens (Codex #10).
 11. **Mount isolation by key prefix.** Cross-mount reads are unrepresentable.
@@ -222,25 +222,25 @@ logical id.
 
 ## Storage
 
-The object cache (precious, low write rate) is **durable and global**; the view cache (high write rate, disposable) is **non-durable** — a separate redb DB deleted and recreated on every startup. This split is what makes the contention and atomicity findings tractable, with no bespoke crash-detection machinery.
+The object cache (precious, low write rate) is **durable and global**; the view cache (high write rate, disposable) is **non-durable** — a separate fjall keyspace deleted and recreated on every startup. This split is what makes the contention and atomicity findings tractable, with no bespoke crash-detection machinery.
 
 ```
-<cache-dir>/object.redb               durable, global, survives restart
+<cache-dir>/object               durable, global, survives restart
     objects : "{mount}\x1f{anchor}"    -> { canonical, leaves }   // leaves = reverse set for exact eviction
     paths   : "{mount}\x1f{leaf-path}" -> anchor                  // forward map for the read-path push
-<cache-dir>/view.redb                 non-durable: deleted + recreated on every startup
+<cache-dir>/view                 non-durable: deleted + recreated on every startup
     metadata/content/bulk : "{mount}\x1f{kind}:{path}"[<aux>]
 ```
 
 - **Object DB: one global file, mount-prefixed keys.** Object writes happen only on a cold fetch, so the single writer lock barely contends (Codex #9). Mount prefix reuses the existing range-scan machinery and keeps `TableDefinition` names static.
-- **View DB: a separate redb, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view.redb` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. If the single view writer lock contends under load (Codex #9), split the view into per-mount files with the same delete-on-startup rule — no other change.
+- **View DB: a separate fjall keyspace, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. If the single view writer lock contends under load (Codex #9), split the view into per-mount files with the same delete-on-startup rule — no other change.
 
 Budgets: object DB global LRU, no TTL; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
 
 ## Tradeoffs accepted
 
 - **Object DB single writer lock (global).** Only cold-fetch writes contend, and large deletes (mount teardown) are chunked so they don't hold the lock across an unrelated mount's fetch.
-- **View recompute after any restart.** Startup deletes `view.redb`, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
+- **View recompute after any restart.** Startup deletes `view`, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
 - **Large ranged `.raw`.** A `Deferred { Ranged }` object `.raw` still has no `read-file` byte source; remains deferred per ADR-0001.
 
 ## Adversarial review (Codex gpt-5.5, accepted findings)
@@ -251,11 +251,11 @@ The design was hardened against an adversarial review. Folded in above:
 - **#2 (Critical)** wrong/stale map silently renders -> `canonical-input` carries the logical id; SDK self-checks before rendering.
 - **#3 (Critical)** invalidating a representation path left the object alive -> leaf invalidation cascades to the logical id via the path index.
 - **#4 (High)** File-shape breaks prefix deletion -> exact-leaf eviction from the object's reverse leaf set; the "textual-containment means free range-delete" claim is withdrawn.
-- **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate `view.redb` deleted on every startup, so no view survives a restart to disagree with the object.
+- **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate `view` deleted on every startup, so no view survives a restart to disagree with the object.
 - **#6 (High)** object eviction + refetch -> mixed versions -> a `canonical-store` overwrite evicts the object's prior derived views first.
 - **#7 (High)** global generation + tombstone GC unsafe across mounts -> the fence is per-mount.
 - **#8 (Medium)** concurrent dirent merge lost-update -> `Store::project` keeps the read-modify-write transactional inside the cache.
-- **#9 (Medium)** global write-lock contention -> object DB is global but cold-write-only, so it barely contends. The view is a **single global `view.redb`** (per the chosen storage layout), so its writer lock is shared across mounts; this is accepted for now. If it contends under load, split the view into per-mount files (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
+- **#9 (Medium)** global write-lock contention -> object DB is global but cold-write-only, so it barely contends. The view is a **single global `view`** (per the chosen storage layout), so its writer lock is shared across mounts; this is accepted for now. If it contends under load, split the view into per-mount files (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
 - **#10 (Medium)** `leaves` only `debug_assert`ed → release validation in `op_validate`.
 
 Confirmed fine: structural files under an object dir; dropping `content-type`.
@@ -268,5 +268,5 @@ These slices record how the branch reached the current model. They are retained 
 1. **Consolidate the view cache + rename crate.** The two former view tiers (in-memory `mem` + durable `disk`) merge into one `view::Cache`; the `mem` tier moves out of `FuseFs` into the cache; `omnifs-view` became `omnifs-cache`; module reorg. 3 host import sites + workspace member list.
 1a. **Split materialization out to the host.** Move `apply_effects` and `content_type_for` into a host `Materializer`; drop the cache's `protocol` Effects-family DTOs. **Keep the dirent read-modify-write as a transactional cache primitive** (`Store::project`), not a host read-merge-write (#8). Cache surface shrinks to storage primitives.
 2. **Wire change.** `canonical-store` now carries `id`, `validator`, `bytes`, and `view-leaves`; `canonical-input` carries `id`, `validator`, and `bytes` (#2); `op_validate` validates view leaves in release (#10). Atomic wire.
-3. **Object cache durable + exact map + fences.** Durable global `object.redb` (objects-with-leaves + paths); exact path-to-id lookup replaces the prefix probe; per-mount fence (#7) with `hit_gen` on the push (#1); object overwrite evicts prior derived views (#6); leaf invalidation cascades to the object (#3); SDK id self-check honored (#2). Non-durable `view.redb` deleted + recreated on startup (#5; no sentinel). Behavior-changing live-container validation covered cold `ls` issues -> read two representations (second renders, no refetch); structural sibling read pushes nothing; version advance then re-read a sibling representation serves the new version; kill -9 then restart serves correct recomputed bytes; restart keeps the object.
+3. **Object cache durable + exact map + fences.** Durable global `object` (objects-with-leaves + paths); exact path-to-id lookup replaces the prefix probe; per-mount fence (#7) with `hit_gen` on the push (#1); object overwrite evicts prior derived views (#6); leaf invalidation cascades to the object (#3); SDK id self-check honored (#2). Non-durable `view` deleted + recreated on startup (#5; no sentinel). Behavior-changing live-container validation covered cold `ls` issues -> read two representations (second renders, no refetch); structural sibling read pushes nothing; version advance then re-read a sibling representation serves the new version; kill -9 then restart serves correct recomputed bytes; restart keeps the object.
 4. **Docs.** Fold into ADR-0001 §4; retire `cache-architecture.md`; fix CLAUDE.md "Caching model" + "Provider architecture".
