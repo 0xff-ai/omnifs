@@ -9,7 +9,7 @@
 //! fence lives in `Store`.
 
 use anyhow::Result;
-use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path;
 
 /// On-disk schema version for `StoredObject`. Bump on layout change.
@@ -47,6 +47,11 @@ impl StoredObject {
 
 /// Global, durable object-id cache. One instance per process; mount isolation
 /// is enforced by the `mount\x1f` key prefix injected by `Store`.
+///
+/// Writes are not fsynced per commit: this backs a read-through cache, so any
+/// writes lost in a crash are simply refetched from upstream on the next read.
+/// We rely on fjall's eventual durability (background memtable flush + journal
+/// rotation) rather than forcing `persist(SyncAll)` on the write path.
 pub struct Cache {
     db: Database,
     objects: Keyspace,
@@ -130,7 +135,6 @@ impl Cache {
                 batch.remove(&self.paths, leaf.as_bytes());
             }
             batch.commit()?;
-            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
@@ -153,7 +157,6 @@ impl Cache {
         let result = (|| -> Result<()> {
             let payload = postcard::to_allocvec(&obj).map_err(anyhow::Error::from)?;
             self.objects.insert(scoped_id, payload.as_slice())?;
-            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
@@ -183,7 +186,6 @@ impl Cache {
                 batch.insert(&self.paths, leaf.as_bytes(), scoped_id);
             }
             batch.commit()?;
-            self.db.persist(PersistMode::SyncAll)?;
             Ok(())
         })();
 
