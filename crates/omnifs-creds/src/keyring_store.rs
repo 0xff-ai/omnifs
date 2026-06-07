@@ -11,8 +11,9 @@
 //! unit tests, because the keyring requires a live platform secret store
 //! that is absent in headless CI environments.
 
-use crate::{CredentialEntry, CredentialId, CredentialStore, StoreError};
+use crate::{CredentialEntry, CredentialStore, StoreError};
 use keyring::{Entry, Error as KeyringError};
+use omnifs_core::CredentialId;
 
 /// Credential store backed by the OS native keychain.
 pub struct KeyringStore {

@@ -1,33 +1,25 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#![allow(clippy::needless_pass_by_value)]
 
 //! linear-provider: Linear virtual filesystem provider for omnifs.
-//!
-//! Exposes Linear teams and issues as a virtual filesystem using the
-//! omnifs provider WIT interface. The current v1 surface covers:
-//!
-//! - workspace root listing all teams by key
-//! - per-team `issues/open` and `issues/all` filtered listings
-//! - per-issue projection (`title`, `state`, `priority`, `assignee`,
-//!   `description.md`)
-//!
-//! Mutability is modeled with `Stability::Mutable` and version tokens
-//! derived from each issue's `updatedAt` timestamp. Listings preload
-//! the per-issue files so simple browsing avoids per-issue round trips.
 
 pub(crate) use omnifs_sdk::prelude::Result;
 
-#[allow(dead_code)]
-mod graphql;
-mod http_ext;
-mod issue_subtree;
-mod issues;
-mod provider;
-mod root;
-mod teams;
-mod types;
+mod api;
+mod objects;
 
-/// Linear's GraphQL endpoint. All callouts target this URL.
-pub(crate) const API_ENDPOINT: &str = "https://api.linear.app/graphql";
+use core::str::FromStr;
+
+use hashbrown::HashSet;
+use omnifs_sdk::browse::FileContent;
+use omnifs_sdk::prelude::*;
+use serde_json::json;
+
+use crate::api::{
+    GqlResponse, ISSUE_BY_IDENTIFIER_QUERY, ISSUES_QUERY, IssueNodeData, IssuePage, IssuesData,
+    TEAMS_QUERY, Team, TeamsData, gql_request, gql_unwrap,
+};
+use crate::objects::Issue;
 
 #[derive(Clone, Default)]
 #[omnifs_sdk::config]
@@ -36,4 +28,363 @@ pub struct Config {}
 #[derive(Clone, Default)]
 pub struct State {
     pub config: Config,
+}
+
+/// State filter directories under `/teams/{KEY}/issues/`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr, strum::Display,
+)]
+pub enum StateFilter {
+    /// Open issues. Linear state types in `{triage, backlog, unstarted, started}`.
+    #[strum(serialize = "open")]
+    Open,
+    /// All issues regardless of state.
+    #[strum(serialize = "all")]
+    All,
+}
+
+impl PathSegment for StateFilter {
+    fn choices() -> Option<&'static [&'static str]> {
+        Some(&["open", "all"])
+    }
+}
+
+/// A Linear team key (e.g. `ENG`, `OPS`). Uppercase ASCII alphanumeric.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TeamKey(String);
+
+impl TeamKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for TeamKey {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.is_empty() || s.len() > 32 {
+            return Err(());
+        }
+        let ok = s
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !ok {
+            return Err(());
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl AsRef<str> for TeamKey {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TeamKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PathSegment for TeamKey {}
+
+/// A Linear issue identifier (e.g. `ENG-1234`). The textual form is
+/// what users type and what Linear's API accepts in `Issue.identifier`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IssueIdent {
+    team: TeamKey,
+    number: u64,
+}
+
+impl IssueIdent {
+    pub fn team(&self) -> &TeamKey {
+        &self.team
+    }
+}
+
+impl FromStr for IssueIdent {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let (team, number) = s.rsplit_once('-').ok_or(())?;
+        let team = team.parse::<TeamKey>()?;
+        let number = number.parse::<u64>().map_err(|_| ())?;
+        if number == 0 {
+            return Err(());
+        }
+        Ok(Self { team, number })
+    }
+}
+
+impl std::fmt::Display for IssueIdent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.team, self.number)
+    }
+}
+
+/// Linear's GraphQL host. Every request POSTs a query to `/graphql`; auth is
+/// injected from the embedded manifest into the `Authorization` header.
+#[derive(omnifs_sdk::Endpoint)]
+#[endpoint(base = "https://api.linear.app")]
+#[endpoint(default_header = "Accept: application/json")]
+struct LinearApi;
+
+#[omnifs_sdk::path_captures]
+struct IssuesRootKey {
+    team: TeamKey,
+}
+
+#[omnifs_sdk::path_captures]
+struct IssueListKey {
+    team: TeamKey,
+    filter: StateFilter,
+}
+
+#[omnifs_sdk::path_captures]
+struct IssueKey {
+    team: Facet<TeamKey>,
+    filter: Facet<StateFilter>,
+    ident: IssueIdent,
+}
+
+#[omnifs_sdk::provider(
+    metadata = "omnifs.provider.json",
+    resources(endpoints = [LinearApi]),
+)]
+impl LinearProvider {
+    type Config = Config;
+    type State = State;
+
+    fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+        r.dir("/teams").handler(teams_list)?;
+        r.dir("/teams/{team}/issues")
+            .handler(IssuesRootKey::filters)?;
+        r.dir("/teams/{team}/issues/{filter}")
+            .handler(IssueListKey::list)?;
+        r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
+            o.representations("item", (Markdown,))?;
+            o.file("title").project(Issue::title)?;
+            o.file("state").project(Issue::state)?;
+            o.file("priority").project(Issue::priority)?;
+            o.file("assignee").project(Issue::assignee)?;
+            o.file("description.md").project(Issue::description)?;
+            Ok(())
+        })?;
+        Ok(State { config })
+    }
+}
+
+async fn teams_list(cx: DirCx<State>) -> Result<DirProjection> {
+    let teams = fetch_all_teams(&cx).await?;
+    let entries = teams
+        .into_iter()
+        .filter(|team| team.key.parse::<TeamKey>().is_ok())
+        .map(|team| Entry::dir(team.key));
+    Ok(DirProjection::exhaustive(entries))
+}
+
+impl IssuesRootKey {
+    #[allow(clippy::unused_self)]
+    fn filters(self, _cx: DirCx<State>) -> Result<DirProjection> {
+        Ok(DirProjection::exhaustive(
+            StateFilter::choices()
+                .into_iter()
+                .flatten()
+                .map(|&name| Entry::dir(name.to_string())),
+        ))
+    }
+}
+
+impl IssueListKey {
+    async fn list(self, cx: DirCx<State>) -> Result<DirProjection> {
+        let team = self.team;
+        let filter = self.filter;
+        let page = fetch_all_issues(&cx, &team, filter).await?;
+        let mut seen: HashSet<String> = HashSet::with_capacity(page.items.len());
+        let mut rows: Vec<(IssueIdent, Issue)> = Vec::new();
+        for issue in page.items {
+            if !seen.insert(issue.identifier.clone()) {
+                continue;
+            }
+            let Ok(ident) = issue.identifier.parse::<IssueIdent>() else {
+                continue;
+            };
+            if ident.team() != &team {
+                continue;
+            }
+            rows.push((ident, issue));
+        }
+        let mut projection = if page.truncated {
+            DirProjection::open(rows.iter().map(|(ident, _)| Entry::dir(ident.to_string())))
+        } else {
+            DirProjection::exhaustive(rows.iter().map(|(ident, _)| Entry::dir(ident.to_string())))
+        };
+        for (ident, issue) in &rows {
+            let key = IssueKey {
+                team: Facet(team.clone()),
+                filter: Facet(filter),
+                ident: ident.clone(),
+            };
+            projection =
+                projection.preload_dir(issue_anchor_path(&key), list_field_preload(issue)?);
+        }
+        Ok(projection)
+    }
+}
+
+impl Key for IssueKey {
+    type Object = Issue;
+    type State = State;
+
+    async fn load(&self, cx: &Cx<State>, _since: Option<Validator>) -> Result<Load<Issue>> {
+        if self.ident.team() != &*self.team {
+            return Ok(Load::NotFound);
+        }
+        // WHY: Linear GraphQL has no If-None-Match; `_since` is unusable, so we
+        // always full-fetch and never return Load::Unchanged.
+        let vars = json!({ "id": self.ident.to_string() });
+        let resp: GqlResponse<IssueNodeData> = cx
+            .endpoint::<LinearApi>()
+            .post("/graphql")
+            .body_json(&gql_request(ISSUE_BY_IDENTIFIER_QUERY, &vars))
+            .json()
+            .await?;
+        let Some(node) = gql_unwrap(resp)?.issue else {
+            return Ok(Load::NotFound);
+        };
+        let bytes = node.get().as_bytes().to_vec();
+        let value: Issue = serde_json::from_str(node.get())
+            .map_err(|e| ProviderError::invalid_input(format!("linear issue node parse: {e}")))?;
+        let validator = value.version().map(Validator::from);
+        Ok(Load::Fresh {
+            value,
+            canonical: Canonical { bytes, validator },
+        })
+    }
+}
+
+async fn fetch_all_teams(cx: &Cx<State>) -> Result<Vec<Team>> {
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let vars = json!({ "after": after });
+        let data: TeamsData = gql_unwrap(
+            cx.endpoint::<LinearApi>()
+                .post("/graphql")
+                .body_json(&gql_request(TEAMS_QUERY, &vars))
+                .json()
+                .await?,
+        )?;
+        out.extend(data.teams.nodes);
+        if !data.teams.page_info.has_next_page {
+            break;
+        }
+        match data.teams.page_info.end_cursor {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(out)
+}
+
+async fn fetch_all_issues(
+    cx: &Cx<State>,
+    team: &TeamKey,
+    filter: StateFilter,
+) -> Result<IssuePage> {
+    let state_types = match filter {
+        StateFilter::Open => vec!["triage", "backlog", "unstarted", "started"],
+        StateFilter::All => Vec::new(),
+    };
+    let state_filter: serde_json::Value = if state_types.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Array(
+            state_types
+                .into_iter()
+                .map(serde_json::Value::from)
+                .collect(),
+        )
+    };
+
+    let mut items: Vec<Issue> = Vec::new();
+    let mut after: Option<String> = None;
+    let mut truncated = false;
+    loop {
+        let vars = json!({
+            "teamKey": team.as_str(),
+            "stateTypes": state_filter,
+            "after": after,
+        });
+        let data: IssuesData = gql_unwrap(
+            cx.endpoint::<LinearApi>()
+                .post("/graphql")
+                .body_json(&gql_request(ISSUES_QUERY, &vars))
+                .json()
+                .await?,
+        )?;
+        items.extend(data.issues.nodes);
+        if !data.issues.page_info.has_next_page {
+            break;
+        }
+        match data.issues.page_info.end_cursor {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+        if items.len() >= 2000 {
+            truncated = true;
+            break;
+        }
+    }
+    Ok(IssuePage { items, truncated })
+}
+
+fn issue_anchor_path(key: &IssueKey) -> String {
+    format!("/teams/{}/issues/{}/{}", *key.team, *key.filter, key.ident)
+}
+
+fn list_field_preload(issue: &Issue) -> Result<DirProjection> {
+    let title = issue.title()?;
+    let state = issue.state()?;
+    let priority = issue.priority()?;
+    let assignee = issue.assignee()?;
+    Ok(DirProjection::open([
+        Entry::file("title"),
+        Entry::file("state"),
+        Entry::file("priority"),
+        Entry::file("assignee"),
+    ])
+    .preload_file("title", file_content_to_projection(title)?)
+    .preload_file("state", file_content_to_projection(state)?)
+    .preload_file("priority", file_content_to_projection(priority)?)
+    .preload_file("assignee", file_content_to_projection(assignee)?))
+}
+
+fn file_content_to_projection(content: FileContent) -> Result<FileProjection> {
+    let attrs = content.attrs().clone();
+    let content_type = content.content_type();
+    let bytes = content
+        .content()
+        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
+        .to_vec();
+    let mut builder = FileProjection::inline(bytes).size(attrs.size);
+    builder = match attrs.stability {
+        Stability::Immutable => builder.immutable(),
+        Stability::Mutable => builder.mutable(),
+        Stability::Volatile => {
+            return Err(ProviderError::internal(
+                "list preload cannot project volatile inline bytes",
+            ));
+        },
+    };
+    if let Some(version) = attrs.version {
+        builder = builder.version(version);
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.content_type(content_type);
+    }
+    Ok(builder.build())
 }

@@ -19,16 +19,6 @@ proc-macro2 = "1"
 omnifs-mount-schema = { workspace = true }
 serde_json = { workspace = true }
 
-[dev-dependencies]
-# Path-only (no `version` field) so `cargo publish` drops this dev-dep
-# entry and breaks the sdk <-> sdk-macros publish cycle. Local trybuild
-# tests still resolve via the path. Dev-deps don't propagate to
-# consumers, so dropping it on the published manifest is harmless.
-omnifs-sdk = { workspace = true }
-tokio = { workspace = true }
-trybuild = "1"
-serde = { workspace = true }
-
 [lints.rust]
 unsafe_code = "deny"
 

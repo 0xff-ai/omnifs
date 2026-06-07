@@ -1,7 +1,7 @@
 # Mount lifecycle
 
 Status: implementation aligned
-Scope: `crates/cli`, `crates/host/src/auth`, `crates/host/src/config`, provider metadata, Docker lifecycle wrappers
+Scope: `crates/omnifs-cli`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/config`, provider metadata, Docker lifecycle wrappers
 Related: `docs/design/host-auth.md`, `docs/design/file-attributes.md`, `docs/design/wasm-sandbox-substrate.md`
 
 ## Context

@@ -1,7 +1,7 @@
 # db provider
 
 Status: v1 shipped (sqlite, read-only, browse-only); future surface designed below
-Scope: `providers/db/`, `crates/host/src/config` (preopened paths capability), `crates/host/src/runtime/instance.rs` (sync wasmtime isolation)
+Scope: `providers/db/`, `crates/omnifs-host/src/config` (preopened paths capability), `crates/omnifs-host/src/runtime/instance.rs` (sync wasmtime isolation)
 Supersedes the postgres-specific draft: parts of `docs/design/providers/postgres.md` (the `pg-query` callout idea) are deferred behind the file-backed sqlite path, which works through standard WASI filesystem syscalls and needs no WIT extension.
 
 ## Summary
@@ -40,7 +40,7 @@ What v1 does not ship and the document below covers as future work:
 /db/meta/info.json                    (size, page_size, page_count, app_id,
                                        user_version, journal_mode)
 /db/tables/                           (lists every table from sqlite_master)
-/db/tables/{name}/                    (#[bind] → TableSubtree, name validated
+/db/tables/{name}/                    (r.subtree → TableSubtree, name validated
                                        as a safe path segment)
   ├ /db/tables/{name}/schema.sql      (CREATE TABLE statement)
   ├ /db/tables/{name}/schema.json     (PRAGMA table_info: columns, types, PK)
@@ -88,7 +88,7 @@ Table names collide with magic segments only inside `tables/`. A table named `me
 
 The host's `CapabilitiesConfig` grows a `preopened_paths: Option<Vec<PreopenedPath>>` field. The runtime wires each entry into Wasmtime's `WasiCtxBuilder::preopened_dir(host, guest, DirPerms, FilePerms)` with read or read-write permission per the `mode` field.
 
-A second host change ships with v1: `crates/host/src/runtime/instance.rs` wraps each sync wasmtime call in `std::thread::scope` so the call runs on a fresh OS thread with no tokio handle. This is the "load-bearing escape hatch" the agent's report flagged. Background:
+A second host change ships with v1: `crates/omnifs-host/src/runtime/instance.rs` wraps each sync wasmtime call in `std::thread::scope` so the call runs on a fresh OS thread with no tokio handle. This is the "load-bearing escape hatch" the agent's report flagged. Background:
 
 - The host uses `wasmtime::add_to_linker_sync` and drives wasmtime from inside `tokio::Runtime::block_on(...)` on a tokio worker thread.
 - The first time a guest calls a WASI filesystem syscall (i.e. the first read from SQLite), `wasmtime_wasi`'s internal `in_tokio` shim tries to use the tokio runtime handle in a way that conflicts with the already-running runtime and panics with "Cannot start a runtime from within a runtime."
@@ -143,7 +143,7 @@ This is the documented design space the next iterations of the provider can fill
 The biggest gap: today there is no way to address an individual row. The shape:
 
 ```
-/db/tables/{table}/rows/{pk}/             (#[bind] → RowSubtree)
+/db/tables/{table}/rows/{pk}/             (r.subtree → RowSubtree)
 /db/tables/{table}/rows/{pk}/row.json     (full row as JSON)
 /db/tables/{table}/rows/{pk}/{column}     (one file per column)
 ```
@@ -157,7 +157,7 @@ Open questions before this lands:
    - Per-column files only: matches the GitHub provider's issue shape (`title`, `state`, ...). Lighter reads at the cost of one PRAGMA per row dir at materialization.
    - Both, with per-column files projected from the same row fetch via `proj_file`. The likely answer; matches existing provider conventions.
 
-3. **Listing semantics for `rows/`.** A million-row table cannot enumerate every PK. The right answer leans on routing rule D4 (negative `lookup_child` is authoritative only when no capture sibling could match): `rows/` lists a sample (first N PKs) with `exhaustive: false`, and a lookup of any PK falls through to the parent `#[dir]` handler which performs a `SELECT * WHERE pk = ?` lookup per requested PK. The user sees a partial directory listing but `cat /db/tables/Album/rows/42/title` works for any 42 that exists.
+3. **Listing semantics for `rows/`.** A million-row table cannot enumerate every PK. The right answer leans on routing rule D4 (negative `lookup_child` is authoritative only when no capture sibling could match): `rows/` lists a sample (first N PKs) with `exhaustive: false`, and a lookup of any PK falls through to the parent dir handler (registered with `r.dir(...).handler(h)`) which performs a `SELECT * WHERE pk = ?` lookup per requested PK. The user sees a partial directory listing but `cat /db/tables/Album/rows/42/title` works for any 42 that exists.
 
 4. **No-PK tables.** SQLite exposes an internal `rowid` for tables without an explicit PK. Using it as the PK is a footgun because `VACUUM` can renumber rowids. Two viable answers:
    - Refuse `rows/` for no-PK tables; only `sample.json` works. Conservative; the path simply does not exist.

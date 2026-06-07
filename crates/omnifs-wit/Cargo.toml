@@ -1,0 +1,22 @@
+[package]
+name = "omnifs-wit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WIT source locations for omnifs provider and tool components"
+categories = ["filesystem", "wasm"]
+keywords = ["omnifs", "wit", "wasm", "component-model"]
+
+[features]
+default = []
+host-bindings = ["dep:wasmtime"]
+
+[dependencies]
+serde = { workspace = true }
+wit-bindgen = "0.41"
+wasmtime = { workspace = true, optional = true }
+
+[lints]
+workspace = true

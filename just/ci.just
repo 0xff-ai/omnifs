@@ -27,13 +27,6 @@ ci-host-build:
       --exclude 'omnifs-tool-*' \
       --exclude test-provider \
       --archive-file dist/host-tests/host-tests.tar.zst
-    metadata="$(mktemp)"
-    cargo test -p omnifs-host --test provider_routes_test --no-run --message-format=json > "$metadata"
-    binary="$(jq -r 'select(.executable != null and .target.name == "provider_routes_test") | .executable' "$metadata" | head -n 1)"
-    test -n "$binary"
-    test -x "$binary"
-    cp "$binary" dist/host-tests/provider_routes_test
-    chmod 0755 dist/host-tests/provider_routes_test
 
 # Run host tests against already-staged WASM sidecar artifacts.
 [group('ci')]
@@ -41,11 +34,7 @@ ci-host-test:
     #!/usr/bin/env bash
     set -euo pipefail
     test -f dist/host-tests/host-tests.tar.zst
-    test -f dist/host-tests/provider_routes_test
-    chmod 0755 dist/host-tests/provider_routes_test
-    test -x dist/host-tests/provider_routes_test
     cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
-    dist/host-tests/provider_routes_test --test-threads=1 --quiet
 
 # Build a Linux CLI artifact for the requested Rust target.
 [group('ci')]

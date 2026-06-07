@@ -36,3 +36,6 @@ docs/superpowers/plans/
 .linear.toml
 .worktrees/
 /.todo/
+
+# Cursor
+NOTEPAD.md

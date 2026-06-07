@@ -1,7 +1,7 @@
 # Wasm sandbox substrate
 
 Status: accepted
-Scope: `crates/host` Wasmtime/WASI plumbing, provider runtime, embedded sandboxed tools, tool-specific WIT interfaces
+Scope: `crates/omnifs-host` Wasmtime/WASI plumbing, provider runtime, embedded sandboxed tools, tool-specific WIT interfaces
 
 ## Context
 
@@ -127,7 +127,7 @@ The final shape should separate common Wasm host mechanics from the
 runtimes that use them.
 
 ```text
-crates/host/src/runtime/
+crates/omnifs-host/src/runtime/
   wasm/
     mod.rs
     engine.rs       # Wasmtime Config, Engine, Component helpers

@@ -1,139 +1,79 @@
+//! The `#[provider]` attribute macro.
+//!
+//! It backs `#[omnifs_sdk::provider(resources(..), events(..), metadata = "..")]`
+//! on a provider impl block whose associated `type Config/State` aliases
+//! and a synchronous `start(config, &mut Router) -> Result<State>`
+//! method define the provider.
+
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{ImplItem, ImplItemFn, ItemImpl, LitStr, Token, Type};
+use syn::{Expr, ImplItem, ImplItemFn, ItemImpl, LitBool, LitInt, LitStr, Path, Token, Type};
 
-struct ClassifiedMethods {
-    init: InitReturn,
-    on_event: Option<ImplItemFn>,
-    resume_notify: Option<ImplItemFn>,
-    cancel_notify: Option<ImplItemFn>,
-    helpers: Vec<ImplItemFn>,
-}
-
-enum InitReturn {
-    Infallible {
-        func: ImplItemFn,
-        config: Type,
-        state: Type,
-    },
-    Fallible {
-        func: ImplItemFn,
-        config: Type,
-        state: Type,
-    },
-}
-
-impl InitReturn {
-    fn from_init_func(func: ImplItemFn) -> syn::Result<Self> {
-        let config = func
-            .sig
-            .inputs
-            .first()
-            .and_then(|arg| match arg {
-                syn::FnArg::Typed(pat_type) => Some((*pat_type.ty).clone()),
-                syn::FnArg::Receiver(_) => None,
-            })
-            .ok_or_else(|| syn::Error::new(func.sig.span(), "init must have a config parameter"))?;
-
-        let syn::ReturnType::Type(_, ty) = func.sig.output.clone() else {
-            return Err(syn::Error::new(
-                func.sig.span(),
-                "init must return (State, ProviderInfo, RequestedCapabilities) or Result<(State, ProviderInfo, RequestedCapabilities)>",
-            ));
-        };
-
-        if let Type::Tuple(tuple) = &*ty
-            && tuple.elems.len() == 3
-        {
-            return Ok(Self::Infallible {
-                func,
-                config,
-                state: tuple.elems[0].clone(),
-            });
-        }
-
-        if let Type::Path(path) = &*ty
-            && let Some(segment) = path.path.segments.last()
-            && segment.ident == "Result"
-            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-            && let Some(syn::GenericArgument::Type(Type::Tuple(tuple))) = args.args.first()
-            && tuple.elems.len() == 3
-        {
-            return Ok(Self::Fallible {
-                func,
-                config,
-                state: tuple.elems[0].clone(),
-            });
-        }
-
-        Err(syn::Error::new(
-            ty.span(),
-            "init must return (State, ProviderInfo, RequestedCapabilities) or Result<(State, ProviderInfo, RequestedCapabilities)>",
-        ))
-    }
-
-    fn func(&self) -> &ImplItemFn {
-        match self {
-            Self::Infallible { func, .. } | Self::Fallible { func, .. } => func,
-        }
-    }
-
-    fn config(&self) -> &Type {
-        match self {
-            Self::Infallible { config, .. } | Self::Fallible { config, .. } => config,
-        }
-    }
-
-    fn state(&self) -> &Type {
-        match self {
-            Self::Infallible { state, .. } | Self::Fallible { state, .. } => state,
-        }
-    }
+/// A `timer(Duration, Self::method)` event declaration.
+struct TimerSpec {
+    interval: Expr,
+    handler: Path,
 }
 
 pub struct ProviderArgs {
     metadata_path: Option<LitStr>,
-    mount_modules: Vec<syn::Path>,
+    git: bool,
+    memory_mb: Option<u32>,
+    endpoints: Vec<Path>,
+    timer: Option<TimerSpec>,
+    name: Option<LitStr>,
+    version: Option<LitStr>,
+    description: Option<LitStr>,
 }
 
 impl Parse for ProviderArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        if input.is_empty() {
-            return Ok(Self {
-                metadata_path: None,
-                mount_modules: Vec::new(),
-            });
-        }
-
-        let mut metadata_path = None;
-        let mut mount_modules = Vec::new();
+        let mut args = Self {
+            metadata_path: None,
+            git: false,
+            memory_mb: None,
+            endpoints: Vec::new(),
+            timer: None,
+            name: None,
+            version: None,
+            description: None,
+        };
 
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             match key.to_string().as_str() {
                 "metadata" => {
-                    if metadata_path.is_some() {
-                        return Err(syn::Error::new(key.span(), "duplicate `metadata` argument"));
-                    }
                     let _: Token![=] = input.parse()?;
-                    metadata_path = Some(input.parse()?);
+                    args.metadata_path = Some(input.parse()?);
                 },
-                "mounts" => {
+                "name" => {
+                    let _: Token![=] = input.parse()?;
+                    args.name = Some(input.parse()?);
+                },
+                "version" => {
+                    let _: Token![=] = input.parse()?;
+                    args.version = Some(input.parse()?);
+                },
+                "description" => {
+                    let _: Token![=] = input.parse()?;
+                    args.description = Some(input.parse()?);
+                },
+                "resources" => {
                     let content;
                     syn::parenthesized!(content in input);
-                    while !content.is_empty() {
-                        mount_modules.push(content.parse()?);
-                        if content.peek(Token![,]) {
-                            let _: Token![,] = content.parse()?;
-                        }
-                    }
+                    parse_resources(&content, &mut args)?;
+                },
+                "events" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    parse_events(&content, &mut args)?;
                 },
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `metadata = \"...\"` and `mounts(...)`",
+                        "supported provider arguments are `metadata = \"...\"`, `resources(...)`, `events(...)`, and `name`/`version`/`description` overrides",
                     ));
                 },
             }
@@ -142,123 +82,153 @@ impl Parse for ProviderArgs {
             }
         }
 
-        Ok(Self {
-            metadata_path,
-            mount_modules,
-        })
+        Ok(args)
     }
 }
 
-fn reject_removed_route_surface(items: &[ImplItem]) -> syn::Result<()> {
-    for item in items {
-        match item {
-            ImplItem::Macro(mac) if mac.mac.path.is_ident("routes") => {
+fn parse_resources(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Result<()> {
+    while !content.is_empty() {
+        let key: syn::Ident = content.parse()?;
+        match key.to_string().as_str() {
+            "git" => {
+                let _: Token![=] = content.parse()?;
+                let value: LitBool = content.parse()?;
+                args.git = value.value;
+            },
+            "memory_mb" => {
+                let _: Token![=] = content.parse()?;
+                let value: LitInt = content.parse()?;
+                args.memory_mb = Some(value.base10_parse::<u32>()?);
+            },
+            "endpoints" => {
+                let _: Token![=] = content.parse()?;
+                let list;
+                syn::bracketed!(list in content);
+                while !list.is_empty() {
+                    args.endpoints.push(list.parse()?);
+                    if list.peek(Token![,]) {
+                        let _: Token![,] = list.parse()?;
+                    }
+                }
+            },
+            _ => {
                 return Err(syn::Error::new(
-                    mac.mac.span(),
-                    "route macros are removed; use free-function #[dir]/#[file]/#[subtree] handlers and #[omnifs_sdk::provider(mounts(...))]",
+                    key.span(),
+                    "supported resources are `git = <bool>`, `memory_mb = <int>`, and `endpoints = [..]`",
                 ));
             },
-            ImplItem::Fn(func)
-                if func.attrs.iter().any(|attr| {
-                    attr.path().is_ident("lookup")
-                        || attr.path().is_ident("list")
-                        || attr.path().is_ident("read")
-                }) =>
-            {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "#[lookup]/#[list]/#[read] handlers are removed; use free-function #[dir]/#[file]/#[subtree] handlers",
-                ));
-            },
-            _ => {},
+        }
+        if content.peek(Token![,]) {
+            let _: Token![,] = content.parse()?;
         }
     }
     Ok(())
 }
 
-fn is_mount_module_macro(path: &syn::Path) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| segment.ident == "mount_module")
+fn parse_events(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Result<()> {
+    while !content.is_empty() {
+        let key: syn::Ident = content.parse()?;
+        match key.to_string().as_str() {
+            "timer" => {
+                let inner;
+                syn::parenthesized!(inner in content);
+                let interval: Expr = inner.parse()?;
+                let _: Token![,] = inner.parse()?;
+                let handler: Path = inner.parse()?;
+                args.timer = Some(TimerSpec { interval, handler });
+            },
+            _ => {
+                return Err(syn::Error::new(
+                    key.span(),
+                    "supported events are `timer(<Duration>, Self::method)`",
+                ));
+            },
+        }
+        if content.peek(Token![,]) {
+            let _: Token![,] = content.parse()?;
+        }
+    }
+    Ok(())
 }
 
-fn classify_methods(items: Vec<ImplItem>) -> syn::Result<ClassifiedMethods> {
-    let mut init = None;
-    let mut on_event = None;
-    let mut resume_notify = None;
-    let mut cancel_notify = None;
-    let mut helpers = Vec::new();
+/// The pieces extracted from the provider impl block.
+struct ClassifiedImpl {
+    config_type: Type,
+    state_type: Type,
+    methods: Vec<ImplItemFn>,
+}
+
+fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
+    let mut config_type = None;
+    let mut state_type = None;
+    let mut start_seen = false;
+    let mut methods = Vec::new();
 
     for item in items {
         match item {
-            ImplItem::Fn(func) => match func.sig.ident.to_string().as_str() {
-                "init" => {
-                    init = Some(InitReturn::from_init_func(func)?);
-                },
-                "capabilities" => {
+            ImplItem::Type(ty) => match ty.ident.to_string().as_str() {
+                "Config" => config_type = Some(ty.ty),
+                "State" => state_type = Some(ty.ty),
+                _ => {
                     return Err(syn::Error::new(
-                        func.sig.span(),
-                        "`capabilities` is returned from `init`; include RequestedCapabilities in the init return tuple",
+                        ty.ident.span(),
+                        "only `type Config` and `type State` are recognized",
                     ));
                 },
-                "auth_manifest" => {
-                    return Err(syn::Error::new(
-                        func.sig.span(),
-                        "auth_manifest is removed; declare auth in omnifs.provider.json and use #[provider(metadata = \"...\")]",
-                    ));
-                },
-                "register_scopes" => {
-                    return Err(syn::Error::new(
-                        func.sig.span(),
-                        "register_scopes is removed in the path-first provider SDK",
-                    ));
-                },
-                "on_event" => on_event = Some(func),
-                "resume_notify" => resume_notify = Some(func),
-                "cancel_notify" => cancel_notify = Some(func),
-                _ => helpers.push(func),
             },
-            ImplItem::Macro(mac) if is_mount_module_macro(&mac.mac.path) => {
+            ImplItem::Fn(func) => {
+                if func.sig.ident == "start" {
+                    start_seen = true;
+                }
+                methods.push(func);
+            },
+            other => {
                 return Err(syn::Error::new(
-                    mac.mac.span(),
-                    "mount_module! is removed; declare handler modules in #[omnifs_sdk::provider(mounts(...))]",
+                    other.span(),
+                    "unsupported item in #[provider] impl; expected `type` aliases and methods",
                 ));
             },
-            ImplItem::Macro(mac) => {
-                return Err(syn::Error::new(
-                    mac.mac.span(),
-                    "unsupported macro inside #[omnifs_sdk::provider] impl",
-                ));
-            },
-            _ => {},
         }
     }
 
-    Ok(ClassifiedMethods {
-        init: init.ok_or_else(|| {
+    if !start_seen {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "missing required `fn start(config, &mut Router<State>) -> Result<State>`",
+        ));
+    }
+
+    Ok(ClassifiedImpl {
+        config_type: config_type.ok_or_else(|| {
             syn::Error::new(
                 proc_macro2::Span::call_site(),
-                "missing required `init` method",
+                "missing `type Config = ..;`",
             )
         })?,
-        on_event,
-        resume_notify,
-        cancel_notify,
-        helpers,
+        state_type: state_type.ok_or_else(|| {
+            syn::Error::new(proc_macro2::Span::call_site(), "missing `type State = ..;`")
+        })?,
+        methods,
     })
 }
 
-struct ProviderManifestSections {
+/// The compile-time manifest facts: the embedded custom section plus the
+/// provider name/description used to derive [`ProviderInfo`].
+struct ManifestFacts {
     metadata_section: TokenStream2,
+    name: Option<String>,
+    description: Option<String>,
 }
 
-fn generate_provider_manifest_sections(
+fn read_manifest_facts(
     type_name: &syn::Ident,
     metadata_path: Option<&LitStr>,
-) -> syn::Result<ProviderManifestSections> {
+) -> syn::Result<ManifestFacts> {
     let Some(metadata_path) = metadata_path else {
-        return Ok(ProviderManifestSections {
+        return Ok(ManifestFacts {
             metadata_section: TokenStream2::new(),
+            name: None,
+            description: None,
         });
     };
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|error| {
@@ -283,6 +253,8 @@ fn generate_provider_manifest_sections(
             format!("invalid provider manifest {}: {error}", path.display()),
         )
     })?;
+    let name = manifest.id.clone();
+    let description = manifest.display_name.clone();
     let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {
         syn::Error::new(
             metadata_path.span(),
@@ -295,20 +267,13 @@ fn generate_provider_manifest_sections(
         type_name.to_string().to_uppercase()
     );
 
-    // Force Cargo to track the manifest file as a build input. Without
-    // this, changing `omnifs.provider.json` without touching any `.rs`
-    // file leaves Cargo unable to see the input changed; incremental
-    // rebuilds (and Docker layer caches) then reuse a wasm with stale
-    // metadata embedded in its custom section. `include_bytes!` makes
-    // the manifest a tracked compile-time dep at zero runtime cost (the
-    // const is dropped by the linker).
+    // Force Cargo to track the manifest as a build input; without it an edit to
+    // `omnifs.provider.json` alone leaves a stale custom section in incremental
+    // and Docker-layer-cached builds. `include_bytes!` is a tracked compile-time
+    // dep at zero runtime cost (the const is dropped by the linker).
     let path_lit = syn::LitStr::new(&path.display().to_string(), metadata_path.span());
-    let dep_section = quote! {
-        const _: &[u8] = include_bytes!(#path_lit);
-    };
-
     let metadata_section = quote! {
-        #dep_section
+        const _: &[u8] = include_bytes!(#path_lit);
 
         #[cfg(all(target_arch = "wasm32", not(test)))]
         #[unsafe(link_section = "omnifs.provider-metadata.v1")]
@@ -319,73 +284,90 @@ fn generate_provider_manifest_sections(
         #[allow(non_upper_case_globals)]
         pub(crate) const #metadata_ident: [u8; #metadata_len] = [ #(#metadata_bytes),* ];
     };
-    Ok(ProviderManifestSections { metadata_section })
+    Ok(ManifestFacts {
+        metadata_section,
+        name: Some(name),
+        description: Some(description),
+    })
 }
 
-fn generate_state_management(state_type: &Type) -> TokenStream2 {
-    quote! {
-        thread_local! {
-            static STATE: core::cell::RefCell<Option<std::rc::Rc<core::cell::RefCell<#state_type>>>>
-                = const { core::cell::RefCell::new(None) };
-            static ASYNC_RUNTIME: omnifs_sdk::__internal::AsyncRuntime<#state_type> =
-                omnifs_sdk::__internal::AsyncRuntime::new();
-            static MOUNT_REGISTRY: std::cell::OnceCell<
-                omnifs_sdk::error::Result<std::rc::Rc<omnifs_sdk::__internal::MountRegistry<#state_type>>>
-            > = const { std::cell::OnceCell::new() };
-        }
-
-        pub(crate) fn state_handle() -> core::result::Result<
-            std::rc::Rc<core::cell::RefCell<#state_type>>,
-            String,
-        > {
-            STATE.with(|slot| {
-                slot.borrow()
-                    .as_ref()
-                    .cloned()
-                    .ok_or_else(|| "provider not initialized".to_string())
-            })
-        }
-
-        pub(crate) fn mount_registry() -> omnifs_sdk::error::Result<
-            std::rc::Rc<omnifs_sdk::__internal::MountRegistry<#state_type>>,
-        > {
-            MOUNT_REGISTRY.with(|slot| {
-                slot.get_or_init(|| __mount_registry().map(std::rc::Rc::new))
-                    .as_ref()
-                    .map(std::rc::Rc::clone)
-                    .map_err(Clone::clone)
-            })
-        }
-    }
-}
-
-fn generate_registry_builder(state_type: &Type, modules: &[syn::Path]) -> TokenStream2 {
-    let mount_calls = modules
-        .iter()
-        .map(|module| quote! { #module::mount(&mut registry); });
-    quote! {
-        fn __mount_registry() -> omnifs_sdk::error::Result<omnifs_sdk::__internal::MountRegistry<#state_type>> {
-            let mut registry = omnifs_sdk::__internal::MountRegistry::new();
-            #(#mount_calls)*
-            registry.validate()?;
-            Ok(registry)
-        }
-    }
-}
-
-fn generate_lifecycle_impl(type_name: &syn::Ident, init: &InitReturn) -> TokenStream2 {
-    let config_type = init.config();
-    let init_body = match init {
-        InitReturn::Fallible { .. } => quote! {
-            let (state, info, capabilities) = match #type_name::init(config) {
-                Ok(parts) => parts,
-                Err(error) => return omnifs_sdk::prelude::err(error),
-            };
-        },
-        InitReturn::Infallible { .. } => quote! {
-            let (state, info, capabilities) = #type_name::init(config);
-        },
+fn provider_info_tokens(
+    type_name: &syn::Ident,
+    args: &ProviderArgs,
+    manifest: &ManifestFacts,
+) -> TokenStream2 {
+    let name = match (&args.name, &manifest.name) {
+        (Some(lit), _) => quote! { #lit.to_string() },
+        (None, Some(name)) => quote! { #name.to_string() },
+        (None, None) => quote! { stringify!(#type_name).to_string() },
     };
+    let version = if let Some(lit) = &args.version {
+        quote! { #lit.to_string() }
+    } else {
+        quote! { env!("CARGO_PKG_VERSION").to_string() }
+    };
+    let description = match (&args.description, &manifest.description) {
+        (Some(lit), _) => quote! { #lit.to_string() },
+        (None, Some(desc)) => quote! { #desc.to_string() },
+        (None, None) => quote! { String::new() },
+    };
+    quote! {
+        omnifs_sdk::prelude::ProviderInfo {
+            name: #name,
+            version: #version,
+            description: #description,
+        }
+    }
+}
+
+fn requested_capabilities_tokens(args: &ProviderArgs) -> TokenStream2 {
+    let git = args.git;
+    let refresh = if let Some(timer) = &args.timer {
+        let interval = &timer.interval;
+        quote! { (#interval).as_secs() as u32 }
+    } else {
+        quote! { 0u32 }
+    };
+    let memory = if let Some(mb) = args.memory_mb {
+        quote! { #mb }
+    } else {
+        quote! { 0u32 }
+    };
+    quote! {
+        omnifs_sdk::prelude::RequestedCapabilities {
+            needs_git: #git,
+            refresh_interval_secs: #refresh,
+            max_memory_mb: #memory,
+            ..omnifs_sdk::prelude::RequestedCapabilities::empty()
+        }
+    }
+}
+
+fn endpoint_assert_tokens(endpoints: &[Path]) -> TokenStream2 {
+    if endpoints.is_empty() {
+        return TokenStream2::new();
+    }
+    let asserts = endpoints
+        .iter()
+        .map(|path| quote! { assert_endpoint::<#path>(); });
+    quote! {
+        // `endpoints = [..]` is a declared-intent list; keep it honest by
+        // statically asserting each names a real `Endpoint`, without any
+        // runtime registration (`cx.endpoint::<E>()` needs none).
+        const _: fn() = || {
+            fn assert_endpoint<E: omnifs_sdk::endpoint::Endpoint>() {}
+            #(#asserts)*
+        };
+    }
+}
+
+fn generate_lifecycle(
+    type_name: &syn::Ident,
+    config_type: &Type,
+    state_type: &Type,
+    info_tokens: &TokenStream2,
+    caps_tokens: &TokenStream2,
+) -> TokenStream2 {
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::lifecycle::Guest for #type_name {
             fn initialize(config_bytes: Vec<u8>) -> omnifs_sdk::prelude::ProviderReturn {
@@ -395,12 +377,24 @@ fn generate_lifecycle_impl(type_name: &syn::Ident, init: &InitReturn) -> TokenSt
                         return omnifs_sdk::prelude::err(
                             omnifs_sdk::error::ProviderError::invalid_input(format!("config error: {error}"))
                         );
-                    }
+                    },
                 };
-                #init_body
+                let mut router = omnifs_sdk::prelude::Router::<#state_type>::new();
+                let state = match #type_name::start(config, &mut router) {
+                    Ok(state) => state,
+                    Err(error) => return omnifs_sdk::prelude::err(error),
+                };
+                if let Err(error) = router.seal() {
+                    return omnifs_sdk::prelude::err(error);
+                }
                 STATE.with(|slot| {
                     *slot.borrow_mut() = Some(std::rc::Rc::new(core::cell::RefCell::new(state)));
                 });
+                ROUTER.with(|slot| {
+                    *slot.borrow_mut() = Some(std::rc::Rc::new(router));
+                });
+                let info = #info_tokens;
+                let capabilities = #caps_tokens;
                 omnifs_sdk::prelude::ProviderReturn::terminal(
                     omnifs_sdk::prelude::OpResult::Initialize(
                         omnifs_sdk::omnifs::provider::types::InitializeResult { info, capabilities }
@@ -410,146 +404,54 @@ fn generate_lifecycle_impl(type_name: &syn::Ident, init: &InitReturn) -> TokenSt
 
             fn shutdown() {
                 STATE.with(|slot| *slot.borrow_mut() = None);
+                ROUTER.with(|slot| *slot.borrow_mut() = None);
                 ASYNC_RUNTIME.with(|runtime| runtime.clear());
+                RANGE_HANDLES.with(|handles| handles.clear());
+                omnifs_sdk::__internal::clear_breaker();
             }
         }
     }
 }
 
-fn generate_resume_impl(
-    type_name: &syn::Ident,
-    resume_notify: Option<&ImplItemFn>,
-    cancel_notify: Option<&ImplItemFn>,
-) -> TokenStream2 {
-    let resume_notify_body = resume_notify.map_or_else(TokenStream2::new, |_| {
-        quote! {
-            if let Some(response) = #type_name::resume_notify(id, outcome) {
-                return response;
-            }
-        }
-    });
-    let cancel_notify_body = cancel_notify.map_or_else(
-        TokenStream2::new,
-        |_| quote! { #type_name::cancel_notify(id); },
-    );
-
-    quote! {
-        impl omnifs_sdk::exports::omnifs::provider::continuation::Guest for #type_name {
-            fn resume(
-                id: u64,
-                outcome: omnifs_sdk::prelude::CalloutResults,
-            ) -> omnifs_sdk::prelude::ProviderStep {
-                if let Some(response) = ASYNC_RUNTIME.with(|runtime| runtime.resume(id, outcome.clone())) {
-                    return response;
-                }
-                #resume_notify_body
-                omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::internal(format!("no pending future for id {id}"))
-                )
-            }
-
-            fn cancel(id: u64) {
-                ASYNC_RUNTIME.with(|runtime| runtime.cancel(id));
-                #cancel_notify_body
-            }
-        }
-    }
-}
-
-struct BrowseDispatchOp {
-    method_name: syn::Ident,
-    extra_params: TokenStream2,
-    registry_call: TokenStream2,
-    ok_binding: syn::Ident,
-    op_result: TokenStream2,
-}
-
-fn generate_browse_dispatch_method(state_type: &Type, op: BrowseDispatchOp) -> TokenStream2 {
-    let BrowseDispatchOp {
-        method_name,
-        extra_params,
-        registry_call,
-        ok_binding,
-        op_result,
-    } = op;
-    quote! {
-        fn #method_name(id: u64, #extra_params) -> omnifs_sdk::prelude::ProviderStep {
-            let Ok(state) = state_handle() else {
-                return omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::internal("provider not initialized")
-                );
-            };
-            let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
-            let future_cx = cx.clone();
-            let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                Box::pin(async move {
-                    let registry = match mount_registry() {
-                        Ok(registry) => registry,
-                        Err(error) => return omnifs_sdk::prelude::err(error),
-                    };
-                    match #registry_call.await {
-                        Ok(#ok_binding) => {
-                            let (result, effects) = #ok_binding.into_result_and_effects();
-                            omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                #op_result,
-                                effects,
-                            )
-                        },
-                        Err(error) => omnifs_sdk::prelude::err(error),
-                    }
-                });
-            ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
-        }
-    }
-}
-
-fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStream2 {
-    let lookup_child = generate_browse_dispatch_method(
-        state_type,
-        BrowseDispatchOp {
-            method_name: format_ident!("lookup_child"),
-            extra_params: quote! { parent_path: String, name: String },
-            registry_call: quote! { registry.lookup_child(&future_cx, &parent_path, &name) },
-            ok_binding: format_ident!("lookup"),
-            op_result: quote! { omnifs_sdk::prelude::OpResult::LookupChild(result) },
-        },
-    );
-    let list_children = generate_browse_dispatch_method(
-        state_type,
-        BrowseDispatchOp {
-            method_name: format_ident!("list_children"),
-            extra_params: quote! { path: String },
-            registry_call: quote! { registry.list_children(&future_cx, &path) },
-            ok_binding: format_ident!("list"),
-            op_result: quote! { omnifs_sdk::prelude::OpResult::ListChildren(result) },
-        },
-    );
-    let read_file = generate_browse_dispatch_method(
-        state_type,
-        BrowseDispatchOp {
-            method_name: format_ident!("read_file"),
-            extra_params: quote! { path: String },
-            registry_call: quote! { registry.read_file(&future_cx, &path) },
-            ok_binding: format_ident!("file"),
-            op_result: quote! { omnifs_sdk::prelude::OpResult::ReadFile(result) },
-        },
-    );
-
+fn generate_state_management(state_type: &Type) -> TokenStream2 {
     quote! {
         thread_local! {
-            static RANGE_READERS: omnifs_sdk::__internal::RangeReaders =
-                omnifs_sdk::__internal::RangeReaders::new();
+            static STATE: core::cell::RefCell<Option<std::rc::Rc<core::cell::RefCell<#state_type>>>>
+                = const { core::cell::RefCell::new(None) };
+            static ASYNC_RUNTIME: omnifs_sdk::__internal::AsyncRuntime<#state_type> =
+                omnifs_sdk::__internal::AsyncRuntime::new();
+            static ROUTER: core::cell::RefCell<
+                Option<std::rc::Rc<omnifs_sdk::prelude::Router<#state_type>>>
+            > = const { core::cell::RefCell::new(None) };
+            static RANGE_HANDLES: omnifs_sdk::__internal::RangeReaders =
+                const { omnifs_sdk::__internal::RangeReaders::new() };
         }
 
-        impl omnifs_sdk::exports::omnifs::provider::browse::Guest for #type_name {
-            #lookup_child
+        fn state_handle() -> core::result::Result<
+            std::rc::Rc<core::cell::RefCell<#state_type>>,
+            String,
+        > {
+            STATE.with(|slot| {
+                slot.borrow().as_ref().cloned().ok_or_else(|| "provider not initialized".to_string())
+            })
+        }
 
-            #list_children
+        fn router_handle() -> core::result::Result<
+            std::rc::Rc<omnifs_sdk::prelude::Router<#state_type>>,
+            String,
+        > {
+            ROUTER.with(|slot| {
+                slot.borrow().as_ref().cloned().ok_or_else(|| "provider not initialized".to_string())
+            })
+        }
+    }
+}
 
-            #read_file
-
-            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
-                let Ok(state) = state_handle() else {
+fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2 {
+    quote! {
+        impl omnifs_sdk::exports::omnifs::provider::namespace::Guest for #type_name {
+            fn lookup_child(id: u64, parent_path: String, name: String) -> omnifs_sdk::prelude::ProviderStep {
+                let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
                     return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
@@ -558,14 +460,99 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 let future_cx = cx.clone();
                 let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
                     Box::pin(async move {
-                        let registry = match mount_registry() {
-                            Ok(registry) => registry,
-                            Err(error) => return omnifs_sdk::prelude::err(error),
-                        };
-                        match registry.open_file(&future_cx, &path).await {
+                        match router.lookup_child(&future_cx, &parent_path, &name).await {
+                            Ok(outcome) => {
+                                let (result, effects) = outcome.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::LookupChild(result),
+                                    effects.into_wit(),
+                                )
+                            },
+                            Err(error) => omnifs_sdk::prelude::err(error),
+                        }
+                    });
+                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+            }
+
+            fn list_children(
+                id: u64,
+                path: String,
+                cached_validator: Option<String>,
+                cursor: Option<omnifs_sdk::omnifs::provider::types::Cursor>,
+            ) -> omnifs_sdk::prelude::ProviderStep {
+                let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
+                    return omnifs_sdk::prelude::err_step(
+                        omnifs_sdk::error::ProviderError::internal("provider not initialized")
+                    );
+                };
+                let version = cached_validator
+                    .as_ref()
+                    .map(|v| omnifs_sdk::file_attrs::VersionToken::from(v.as_str()));
+                let sdk_cursor = cursor.map(omnifs_sdk::prelude::Cursor::from);
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
+                let future_cx = cx.clone();
+                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
+                    Box::pin(async move {
+                        match router.list_children(&future_cx, &path, cached_validator, sdk_cursor).await {
+                            Ok(outcome) => {
+                                let (result, effects) = outcome.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::ListChildren(result),
+                                    effects.into_wit(),
+                                )
+                            },
+                            Err(error) => omnifs_sdk::prelude::err(error),
+                        }
+                    });
+                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+            }
+
+            fn read_file(
+                id: u64,
+                path: String,
+                content_type: String,
+                cached_canonical: Option<omnifs_sdk::omnifs::provider::types::CanonicalInput>,
+            ) -> omnifs_sdk::prelude::ProviderStep {
+                let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
+                    return omnifs_sdk::prelude::err_step(
+                        omnifs_sdk::error::ProviderError::internal("provider not initialized")
+                    );
+                };
+                let cached = cached_canonical
+                    .map(omnifs_sdk::browse::CachedCanonical::from_wit);
+                let version = cached.as_ref().and_then(|c| c.validator.clone());
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
+                let future_cx = cx.clone();
+                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
+                    Box::pin(async move {
+                        match router.read_file(&future_cx, &path, &content_type, cached).await {
+                            Ok(outcome) => {
+                                let (result, effects) = outcome.into_result_and_effects();
+                                omnifs_sdk::prelude::ProviderReturn::with_effects(
+                                    omnifs_sdk::prelude::OpResult::ReadFile(result),
+                                    effects.into_wit(),
+                                )
+                            },
+                            Err(error) => omnifs_sdk::prelude::err(error),
+                        }
+                    });
+                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+            }
+
+            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
+                let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
+                    return omnifs_sdk::prelude::err_step(
+                        omnifs_sdk::error::ProviderError::internal("provider not initialized")
+                    );
+                };
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                let future_cx = cx.clone();
+                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
+                    Box::pin(async move {
+                        match router.open_file(&future_cx, &path).await {
                             Ok(opened) => {
-                                let Some(handle) = RANGE_READERS.with(|readers| {
-                                    readers.allocate(opened.reader)
+                                let Some(handle) = RANGE_HANDLES.with(|handles| {
+                                    handles.allocate(opened.reader)
                                 }) else {
                                     return omnifs_sdk::prelude::err(
                                         omnifs_sdk::error::ProviderError::internal("no free ranged file handles")
@@ -586,12 +573,7 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
 
-            fn read_chunk(
-                id: u64,
-                handle: u64,
-                offset: u64,
-                length: u32,
-            ) -> omnifs_sdk::prelude::ProviderStep {
+            fn read_chunk(id: u64, handle: u64, offset: u64, len: u32) -> omnifs_sdk::prelude::ProviderStep {
                 let Ok(state) = state_handle() else {
                     return omnifs_sdk::prelude::err_step(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
@@ -599,18 +581,22 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
                 };
                 let Some(handle_id) = ::std::num::NonZeroU64::new(handle) else {
                     return omnifs_sdk::prelude::err_step(
-                        omnifs_sdk::error::ProviderError::not_found(format!("unknown file handle {handle}"))
+                        omnifs_sdk::error::ProviderError::not_found(
+                            format!("unknown file handle {handle}")
+                        )
                     );
                 };
-                let Some(reader) = RANGE_READERS.with(|readers| readers.get(handle_id)) else {
+                let Some(reader) = RANGE_HANDLES.with(|handles| handles.get(handle_id)) else {
                     return omnifs_sdk::prelude::err_step(
-                        omnifs_sdk::error::ProviderError::not_found(format!("unknown file handle {handle}"))
+                        omnifs_sdk::error::ProviderError::not_found(
+                            format!("unknown file handle {handle}")
+                        )
                     );
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
                     Box::pin(async move {
-                        match reader.read_chunk(offset, length).await {
+                        match reader.read_chunk(offset, len).await {
                             Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
                                 omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
                             ),
@@ -622,26 +608,62 @@ fn generate_browse_impl(type_name: &syn::Ident, state_type: &Type) -> TokenStrea
 
             fn close_file(handle: u64) {
                 if let Some(handle_id) = ::std::num::NonZeroU64::new(handle) {
-                    RANGE_READERS.with(|readers| readers.remove(handle_id));
+                    RANGE_HANDLES.with(|handles| handles.remove(handle_id));
                 }
             }
         }
     }
 }
 
-fn generate_notify_impl(
+fn generate_continuation(type_name: &syn::Ident) -> TokenStream2 {
+    quote! {
+        impl omnifs_sdk::exports::omnifs::provider::continuation::Guest for #type_name {
+            fn resume(
+                id: u64,
+                outcome: omnifs_sdk::prelude::CalloutResults,
+            ) -> omnifs_sdk::prelude::ProviderStep {
+                if let Some(response) = ASYNC_RUNTIME.with(|runtime| runtime.resume(id, outcome.clone())) {
+                    return response;
+                }
+                omnifs_sdk::prelude::err_step(
+                    omnifs_sdk::error::ProviderError::internal(format!("no pending future for id {id}"))
+                )
+            }
+
+            fn cancel(id: u64) {
+                ASYNC_RUNTIME.with(|runtime| runtime.cancel(id));
+            }
+        }
+    }
+}
+
+fn generate_notify(
     type_name: &syn::Ident,
     state_type: &Type,
-    has_on_event: bool,
+    timer: Option<&TimerSpec>,
 ) -> TokenStream2 {
-    let dispatch_body = if has_on_event {
+    let dispatch = if let Some(timer) = timer {
+        let method = timer
+            .handler
+            .segments
+            .last()
+            .map(|segment| segment.ident.clone());
+        let method = method.unwrap_or_else(|| format_ident!("on_tick"));
         quote! {
-            match #type_name::on_event(future_cx, event).await {
-                Ok(effects) => omnifs_sdk::prelude::ProviderReturn::with_effects(
+            match event {
+                omnifs_sdk::omnifs::provider::types::ProviderEvent::TimerTick => {
+                    match #type_name::#method(future_cx).await {
+                        Ok(effects) => omnifs_sdk::prelude::ProviderReturn::with_effects(
+                            omnifs_sdk::prelude::OpResult::OnEvent,
+                            effects.into_wit(),
+                        ),
+                        Err(error) => omnifs_sdk::prelude::err(error),
+                    }
+                },
+                _ => omnifs_sdk::prelude::ProviderReturn::with_effects(
                     omnifs_sdk::prelude::OpResult::OnEvent,
-                    effects,
+                    omnifs_sdk::prelude::Effects::new().into_wit(),
                 ),
-                Err(error) => omnifs_sdk::prelude::err(error),
             }
         }
     } else {
@@ -649,10 +671,11 @@ fn generate_notify_impl(
             let _ = (future_cx, event);
             omnifs_sdk::prelude::ProviderReturn::with_effects(
                 omnifs_sdk::prelude::OpResult::OnEvent,
-                omnifs_sdk::prelude::Effects::new(),
+                omnifs_sdk::prelude::Effects::new().into_wit(),
             )
         }
     };
+
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::notify::Guest for #type_name {
             fn on_event(
@@ -664,10 +687,10 @@ fn generate_notify_impl(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
-                let cx = omnifs_sdk::__internal::Cx::<#state_type>::from_event(id, state, &event);
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 let future_cx = cx.clone();
                 let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move { #dispatch_body });
+                    Box::pin(async move { #dispatch });
                 ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
             }
         }
@@ -675,8 +698,6 @@ fn generate_notify_impl(
 }
 
 pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result<TokenStream2> {
-    reject_removed_route_surface(&input.items)?;
-
     let type_name = match &*input.self_ty {
         Type::Path(path) => path
             .path
@@ -687,60 +708,44 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     }
     .ok_or_else(|| syn::Error::new(input.self_ty.span(), "expected a named type"))?;
 
-    let classified = classify_methods(input.items)?;
-    let state_type = classified.init.state();
+    let classified = classify_impl(input.items)?;
+    let config_type = &classified.config_type;
+    let state_type = &classified.state_type;
+    let methods = &classified.methods;
 
-    let init_func = classified.init.func();
-    let on_event_tokens = classified
-        .on_event
-        .iter()
-        .map(|func| quote! { #func })
-        .collect::<Vec<_>>();
-    let resume_notify_tokens = classified
-        .resume_notify
-        .iter()
-        .map(|func| quote! { #func })
-        .collect::<Vec<_>>();
-    let cancel_notify_tokens = classified
-        .cancel_notify
-        .iter()
-        .map(|func| quote! { #func })
-        .collect::<Vec<_>>();
-    let helper_funcs = &classified.helpers;
+    let manifest = read_manifest_facts(&type_name, args.metadata_path.as_ref())?;
+    let info_tokens = provider_info_tokens(&type_name, args, &manifest);
+    let caps_tokens = requested_capabilities_tokens(args);
+    let endpoint_assert = endpoint_assert_tokens(&args.endpoints);
 
-    let state_mgmt = generate_state_management(state_type);
-    let registry_builder = generate_registry_builder(state_type, &args.mount_modules);
-    let lifecycle_impl = generate_lifecycle_impl(&type_name, &classified.init);
-    let resume_impl = generate_resume_impl(
+    let state_management = generate_state_management(state_type);
+    let lifecycle = generate_lifecycle(
         &type_name,
-        classified.resume_notify.as_ref(),
-        classified.cancel_notify.as_ref(),
+        config_type,
+        state_type,
+        &info_tokens,
+        &caps_tokens,
     );
-    let browse_impl = generate_browse_impl(&type_name, state_type);
-    let notify_impl = generate_notify_impl(&type_name, state_type, classified.on_event.is_some());
-    let provider_manifest_sections =
-        generate_provider_manifest_sections(&type_name, args.metadata_path.as_ref())?;
-    let provider_metadata_section = provider_manifest_sections.metadata_section;
+    let namespace = generate_namespace(&type_name, state_type);
+    let continuation = generate_continuation(&type_name);
+    let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
+    let metadata_section = manifest.metadata_section;
 
     Ok(quote! {
         struct #type_name;
 
-        #state_mgmt
-        #registry_builder
-        #provider_metadata_section
+        #state_management
+        #metadata_section
+        #endpoint_assert
 
         impl #type_name {
-            #init_func
-            #(#on_event_tokens)*
-            #(#resume_notify_tokens)*
-            #(#cancel_notify_tokens)*
-            #(#helper_funcs)*
+            #(#methods)*
         }
 
-        #lifecycle_impl
-        #resume_impl
-        #browse_impl
-        #notify_impl
+        #lifecycle
+        #namespace
+        #continuation
+        #notify
 
         #[cfg(target_arch = "wasm32")]
         omnifs_sdk::export!(#type_name with_types_in omnifs_sdk);

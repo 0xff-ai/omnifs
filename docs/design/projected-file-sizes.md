@@ -1,14 +1,16 @@
 # Projected file sizes: honest stat, direct_io, and lazy resolution
 
 Status: proposal from `design/projected-file-sizes`; not implemented in this branch
-Scope: `wit/provider.wit`, host FUSE layer + cache schema, SDK projection API, providers
+Scope: `crates/omnifs-wit/wit/provider.wit`, host FUSE layer + cache schema, SDK projection API, providers
 Branch: design/projected-file-sizes
 
-Current implementation note: this branch still uses `FileStat`,
-`DEFAULT_FILE_SIZE_BYTES`, WIT `option<u64>` sizes, and cache schema
-version 2. The sections below describe the target design from the
-projected-file-sizes branch, not the implementation in
-`sandbox-archive-hardening`.
+Current implementation note: the current implementation uses the SDK `FileProj` /
+`Size` model (`Size::Unknown`, `Size::Exact`, deferred vs inline bytes).
+v1 `FileStat`, `DEFAULT_FILE_SIZE_BYTES`, and handler-local placeholders
+are removed. WIT `option<u64>` sizes and cache schema version 2 may still
+lag this document; the sections below describe the target host/FUSE design
+from the projected-file-sizes branch, not necessarily every wire detail on
+`main`.
 
 ## Problem
 
@@ -139,14 +141,13 @@ impl Size {
 The target design removes the placeholder constant
 `DEFAULT_FILE_SIZE_BYTES`, `FileStat::placeholder`, and `FileStat`
 entirely.
-Static-shape entries auto-derived from `#[file]` declarations report
+Static-shape entries registered with `r.file(t).handler(h)` report
 `Size::Unknown` so the host opens them with direct_io until the read
 resolves the real length.
 
-No macro change. The earlier sketch added `size = "exact" | "unknown"`
-to `#[file]`, but the macro fires at registration time and cannot see
-the eventual byte length, so the argument would have been
-load-bearing only as a default for the auto-derived static shape.
+No macro change is needed. The earlier sketch added `size = "exact" | "unknown"`
+as an attribute argument, but the registration fires before any byte length is
+known, so `Unknown` is always the correct default for deferred file handlers.
 Always picking `Unknown` for that case is simpler and equally honest.
 
 ### WIT changes
@@ -175,7 +176,7 @@ record dir-entry {
 }
 ```
 
-`preloaded-entry.size` follows the same shape.
+Adjacent paths learned while serving a request travel through the `effects { fs, canonical }` channels; the `preloaded-entry` WIT type from this proposal was not carried forward.
 
 `projected-file` is unchanged: when the provider materializes bytes
 inline, the host derives the size from `content.len()` at the WIT
@@ -183,8 +184,8 @@ boundary; no explicit field is needed.
 
 ### Host FUSE layer target
 
-The target design needs three changes in `crates/host/src/fuse/` and
-`crates/host/src/runtime/`:
+The target design needs three changes in `crates/omnifs-host/src/fuse/` and
+`crates/omnifs-host/src/runtime/`:
 
 1. **Open behavior.** `FuseFs::open` materializes non-exact
    `Deferred { read: Full }` files before the first read, promotes the learned

@@ -1,148 +1,240 @@
+//! arXiv upstream access: paper-detail Atom fetch, PDF/source blob fetch, and
+//! the canonical resource URL builders.
+
 use std::sync::LazyLock;
 
-use omnifs_sdk::Cx;
-use omnifs_sdk::http::{Request, ResponseExt};
+use omnifs_sdk::endpoint::BlobHandle;
+use omnifs_sdk::error::ProviderErrorKind;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use url::Url;
 
-use crate::types::{
-    CategoryKey, CategoryPage, FeedSnapshot, PAGE_SIZE, PagePaper, ParsedEntry, RecentPage,
-    normalize_whitespace, split_versioned_id,
-};
-use crate::{Result, State};
+use crate::objects::Paper;
+use crate::{normalize_whitespace, split_versioned_id};
 
-pub(crate) const API_BASE: &str = "https://export.arxiv.org/api/query";
+#[derive(omnifs_sdk::Endpoint)]
+#[endpoint(base = "https://export.arxiv.org")]
+#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+pub struct ArxivApi;
 
-const SORT_ORDER_DESC: &str = "descending";
-const SORT_BY_SUBMITTED_DATE: &str = "submittedDate";
+#[derive(omnifs_sdk::Endpoint)]
+#[endpoint(base = "https://arxiv.org")]
+#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+pub struct ArxivWeb;
 
-static API_URL: LazyLock<Url> =
-    LazyLock::new(|| Url::parse(API_BASE).expect("static URL is valid"));
+const ABS_BASE: &str = "https://arxiv.org/abs";
+const PDF_BASE: &str = "https://arxiv.org/pdf";
+const SOURCE_BASE: &str = "https://arxiv.org/e-print";
 
-pub(crate) async fn fetch_category_page(
-    cx: &Cx<State>,
-    category: &CategoryKey,
-    page: RecentPage,
-) -> Result<CategoryPage> {
-    let request_url = category_page_url(category, page);
-    let feed_xml = fetch_bytes(cx, &request_url).await?;
-    parse_category_page(page, &feed_xml)
+static ABS_URL: LazyLock<Url> =
+    LazyLock::new(|| Url::parse(ABS_BASE).expect("static URL is valid"));
+static PDF_URL: LazyLock<Url> =
+    LazyLock::new(|| Url::parse(PDF_BASE).expect("static URL is valid"));
+static SOURCE_URL: LazyLock<Url> =
+    LazyLock::new(|| Url::parse(SOURCE_BASE).expect("static URL is valid"));
+
+/// Fetch one paper's Atom feed and load it as the canonical. The canonical
+/// bytes are the raw Atom; `parse_paper_atom` only produces the in-memory value.
+pub(crate) async fn load_paper<S>(
+    cx: &Cx<S>,
+    raw_id: &str,
+    since: Option<Validator>,
+) -> Result<Load<Paper>> {
+    match cx
+        .endpoint::<ArxivApi>()
+        .get("/api/query")
+        .query("id_list", raw_id)
+        .maybe_if_none_match(since.as_ref())
+        .load_with(parse_paper_atom_or_not_found)
+        .await
+    {
+        Ok(load) => Ok(load),
+        Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(Load::NotFound),
+        Err(err) => Err(err),
+    }
 }
 
-pub(crate) fn category_page_url(category: &CategoryKey, page: RecentPage) -> String {
-    let mut url = API_URL.clone();
-    let search_query = format!("cat:{category}");
-    let start = page.start().to_string();
-    let max_results = PAGE_SIZE.to_string();
-    url.query_pairs_mut()
-        .append_pair("search_query", &search_query)
-        .append_pair("start", &start)
-        .append_pair("max_results", &max_results)
-        .append_pair("sortBy", SORT_BY_SUBMITTED_DATE)
-        .append_pair("sortOrder", SORT_ORDER_DESC);
-    url.to_string()
+/// Papers per category-recent page. The cursor carries the page index, so the
+/// listing needs no provider state (the host echoes the cursor back).
+pub(crate) const CATEGORY_PAGE_SIZE: u32 = 50;
+
+/// Fetch one page of a category's most-recent papers and return their bare
+/// arXiv ids. Stateless: pagination is driven by `page` (the listing cursor).
+pub(crate) async fn fetch_category_page<S>(
+    cx: &Cx<S>,
+    category: &str,
+    page: u32,
+) -> Result<Vec<String>> {
+    let resp = cx
+        .endpoint::<ArxivApi>()
+        .get("/api/query")
+        .query("search_query", format!("cat:{category}"))
+        .query("start", page * CATEGORY_PAGE_SIZE)
+        .query("max_results", CATEGORY_PAGE_SIZE)
+        .query("sortBy", "submittedDate")
+        .query("sortOrder", "descending")
+        .send_checked()
+        .await?;
+    parse_category_ids(resp.body())
 }
 
-pub(crate) async fn fetch_paper_detail(cx: &Cx<State>, raw_id: &str) -> Result<ParsedEntry> {
-    let request_url = paper_lookup_url(raw_id);
-    let feed_xml = fetch_bytes(cx, &request_url).await?;
-    let parsed = ParsedFeed::parse(&feed_xml)?;
-    parsed
-        .entries
+/// Extract the bare arXiv ids from a multi-entry category Atom feed.
+fn parse_category_ids(feed_xml: &[u8]) -> Result<Vec<String>> {
+    Ok(category_entry_ids(feed_xml)?
         .into_iter()
-        .next()
-        .ok_or_else(|| ProviderError::not_found("paper not found"))
+        .filter_map(|entry_id| arxiv_id_from_entry_id(&entry_id))
+        .collect())
 }
 
-pub(crate) async fn download_pdf(
-    cx: &Cx<State>,
+fn category_entry_ids(feed_xml: &[u8]) -> Result<Vec<String>> {
+    let feed: CategoryAtomFeed = quick_xml::de::from_reader(feed_xml)
+        .map_err(|e| ProviderError::invalid_input(format!("arXiv feed parse error: {e}")))?;
+    Ok(feed.entries.into_iter().map(|entry| entry.id).collect())
+}
+
+/// `http://arxiv.org/abs/2401.12345v1` -> `2401.12345` (version stripped).
+/// Splits on `/abs/` rather than the last `/` so old-style ids keep their
+/// archive prefix (`http://arxiv.org/abs/hep-th/9901001v1` -> `hep-th/9901001`).
+fn arxiv_id_from_entry_id(entry_id: &str) -> Option<String> {
+    let abs = entry_id.trim().rsplit_once("/abs/").map(|(_, raw)| raw)?;
+    let (base, _version) = split_versioned_id(abs);
+    (!base.is_empty()).then_some(base)
+}
+
+pub(crate) async fn download_pdf<S>(
+    cx: &Cx<S>,
     raw_id: &str,
     version: Option<u32>,
-) -> Result<omnifs_sdk::blob::BlobRef> {
+) -> Result<BlobHandle> {
     let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
     fetch_blob(
         cx,
-        &crate::paper::paper_pdf_url(raw_id, version),
+        &paper_pdf_path(raw_id, version),
         format!("arxiv/papers/{raw_id}/{version_tag}/paper.pdf"),
     )
     .await
 }
 
-pub(crate) async fn download_source(
-    cx: &Cx<State>,
+pub(crate) async fn download_source<S>(
+    cx: &Cx<S>,
     raw_id: &str,
     version: Option<u32>,
-) -> Result<omnifs_sdk::blob::BlobRef> {
+) -> Result<BlobHandle> {
     let version_tag = version.map_or_else(|| "latest".to_string(), |v| format!("v{v}"));
     fetch_blob(
         cx,
-        &crate::paper::paper_source_url(raw_id, version),
+        &paper_source_path(raw_id, version),
         format!("arxiv/papers/{raw_id}/{version_tag}/source.tar.gz"),
     )
     .await
 }
 
-fn parse_category_page(page: RecentPage, feed_xml: &[u8]) -> Result<CategoryPage> {
-    let parsed = ParsedFeed::parse(feed_xml)?;
-    let snapshot = parsed
-        .feed_updated
-        .ok_or_else(|| ProviderError::internal("arXiv feed missing updated timestamp"))?;
-    let papers = parsed
-        .entries
-        .into_iter()
-        .map(PagePaper::from_entry)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(CategoryPage {
-        page,
-        snapshot,
-        total_results: parsed.total_results,
-        papers,
-    })
+async fn fetch_blob<S>(cx: &Cx<S>, path: &str, cache_key: String) -> Result<BlobHandle> {
+    cx.endpoint::<ArxivWeb>()
+        .get(path)
+        .into_blob()
+        .cache_key(cache_key)
+        .fetch()
+        .await
 }
 
-fn paper_lookup_url(raw_id: &str) -> String {
-    let mut url = API_URL.clone();
-    url.query_pairs_mut().append_pair("id_list", raw_id);
+pub(crate) fn paper_abs_url(raw_id: &str, version: Option<u32>) -> String {
+    paper_resource_url(&ABS_URL, raw_id, version, "")
+}
+
+pub(crate) fn paper_pdf_url(raw_id: &str, version: Option<u32>) -> String {
+    paper_resource_url(&PDF_URL, raw_id, version, ".pdf")
+}
+
+pub(crate) fn paper_source_url(raw_id: &str, version: Option<u32>) -> String {
+    paper_resource_url(&SOURCE_URL, raw_id, version, "")
+}
+
+fn paper_pdf_path(raw_id: &str, version: Option<u32>) -> String {
+    paper_resource_path("/pdf", raw_id, version, ".pdf")
+}
+
+fn paper_source_path(raw_id: &str, version: Option<u32>) -> String {
+    paper_resource_path("/e-print", raw_id, version, "")
+}
+
+fn paper_resource_path(base: &str, raw_id: &str, version: Option<u32>, suffix: &str) -> String {
+    let mut path = base.trim_end_matches('/').to_string();
+    let (prefix, tail) = raw_id
+        .rsplit_once('/')
+        .map_or(("", raw_id), |(prefix, tail)| (prefix, tail));
+    let mut tail = tail.to_string();
+    if let Some(v) = version {
+        tail.push('v');
+        tail.push_str(&v.to_string());
+    }
+    tail.push_str(suffix);
+    for part in prefix.split('/').filter(|part| !part.is_empty()) {
+        path.push('/');
+        path.push_str(part);
+    }
+    path.push('/');
+    path.push_str(&tail);
+    path
+}
+
+fn paper_resource_url(base: &Url, raw_id: &str, version: Option<u32>, suffix: &str) -> String {
+    let mut url = base.clone();
+    let (prefix, tail) = raw_id
+        .rsplit_once('/')
+        .map_or(("", raw_id), |(prefix, tail)| (prefix, tail));
+    let mut tail = tail.to_string();
+    if let Some(v) = version {
+        tail.push('v');
+        tail.push_str(&v.to_string());
+    }
+    tail.push_str(suffix);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .expect("https URLs support path segments");
+        for part in prefix.split('/').filter(|part| !part.is_empty()) {
+            segments.push(part);
+        }
+        segments.push(&tail);
+    }
     url.into()
 }
 
-fn arxiv_get(cx: &Cx<State>, url: impl Into<String>) -> Request<'_, State> {
-    cx.http()
-        .get(url)
-        .header("User-Agent", "omnifs-provider-arxiv/0.1.0")
+fn parse_paper_atom_or_not_found(feed_xml: &[u8]) -> Result<Paper> {
+    if category_entry_ids(feed_xml)?.is_empty() {
+        return Err(ProviderError::not_found("paper not found"));
+    }
+    parse_paper_atom(feed_xml)
 }
 
-async fn fetch_bytes(cx: &Cx<State>, url: &str) -> Result<Vec<u8>> {
-    let response = arxiv_get(cx, url).send().await?.error_for_status()?;
-    Ok(response.into_body())
+/// Parse a one-entry arXiv Atom feed into a [`Paper`]. The endpoint's
+/// `arxiv.org` resource URLs (`paper.pdf`, `source.tar.gz`) are not in the
+/// feed; they are derived from the paper id at projection time.
+pub(crate) fn parse_paper_atom(feed_xml: &[u8]) -> Result<Paper> {
+    let feed: AtomFeed = quick_xml::de::from_reader(feed_xml)
+        .map_err(|e| ProviderError::invalid_input(format!("arXiv feed parse error: {e}")))?;
+    feed.entries
+        .into_iter()
+        .next()
+        .map(Paper::from_raw)
+        .transpose()?
+        .ok_or_else(|| ProviderError::not_found("paper not found"))
 }
 
-async fn fetch_blob(
-    cx: &Cx<State>,
-    url: &str,
-    cache_key: String,
-) -> Result<omnifs_sdk::blob::BlobRef> {
-    arxiv_get(cx, url)
-        .into_blob()
-        .with_cache_key(cache_key)
-        .send()
-        .await?
-        .error_for_status()
+#[derive(Debug, Deserialize)]
+struct CategoryAtomFeed {
+    #[serde(rename = "entry", default)]
+    entries: Vec<CategoryEntry>,
 }
 
-#[derive(Debug)]
-struct ParsedFeed {
-    feed_updated: Option<FeedSnapshot>,
-    total_results: u32,
-    entries: Vec<ParsedEntry>,
+#[derive(Debug, Deserialize)]
+struct CategoryEntry {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct AtomFeed {
-    updated: Option<String>,
-    #[serde(rename = "totalResults", default)]
-    total_results: Option<u32>,
     #[serde(rename = "entry", default)]
     entries: Vec<RawEntry>,
 }
@@ -179,33 +271,11 @@ struct RawTerm {
     term: String,
 }
 
-impl ParsedFeed {
-    fn parse(feed_xml: &[u8]) -> Result<Self> {
-        let feed: AtomFeed = quick_xml::de::from_reader(feed_xml)
-            .map_err(|e| ProviderError::internal(format!("arXiv feed parse error: {e}")))?;
-        let entries = feed
-            .entries
-            .into_iter()
-            .map(ParsedEntry::from_raw)
-            .collect::<Result<Vec<_>>>()?;
-        let feed_updated = feed
-            .updated
-            .as_deref()
-            .map(FeedSnapshot::parse)
-            .transpose()?;
-        Ok(Self {
-            feed_updated,
-            total_results: feed.total_results.unwrap_or(0),
-            entries,
-        })
-    }
-}
-
-impl ParsedEntry {
+impl Paper {
     fn from_raw(raw: RawEntry) -> Result<Self> {
         let id_text = normalize_whitespace(&raw.id);
         if id_text.is_empty() {
-            return Err(ProviderError::internal("arXiv entry had an empty id"));
+            return Err(ProviderError::invalid_input("arXiv entry had an empty id"));
         }
         let abs_id = id_text
             .trim()
@@ -255,104 +325,4 @@ fn clean_strings(raw: Vec<String>) -> Vec<String> {
         .map(|s| normalize_whitespace(&s))
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SAMPLE_FEED: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom"
-      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
-      xmlns:arxiv="http://arxiv.org/schemas/atom">
-  <title>arXiv Query: search_query=cat:cs.AI</title>
-  <id>http://arxiv.org/api/query?search_query=cat:cs.AI</id>
-  <updated>2025-01-15T00:00:00-05:00</updated>
-  <opensearch:totalResults>1234</opensearch:totalResults>
-  <opensearch:startIndex>0</opensearch:startIndex>
-  <opensearch:itemsPerPage>50</opensearch:itemsPerPage>
-  <entry>
-    <id>http://arxiv.org/abs/2501.12345v2</id>
-    <updated>2025-01-14T18:00:00Z</updated>
-    <published>2025-01-10T18:00:00Z</published>
-    <title>Some Paper Title with &amp; Ampersand</title>
-    <summary>This paper studies the case where    whitespace
-      is collapsed.</summary>
-    <author><name>Alice Smith</name></author>
-    <author><name>Bob Jones</name></author>
-    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
-    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
-    <category term="stat.ML" scheme="http://arxiv.org/schemas/atom"/>
-    <arxiv:doi>10.1000/example.2501.12345</arxiv:doi>
-    <arxiv:journal_ref>Example Journal, vol. 1 (2025)</arxiv:journal_ref>
-    <arxiv:comment>Accepted at NeurIPS 2025. 12 pages, 5 figures.</arxiv:comment>
-  </entry>
-</feed>"#;
-
-    #[test]
-    fn category_page_url_uses_the_single_live_query_shape() {
-        let category: CategoryKey = "cs.AI".parse().unwrap();
-        let page = RecentPage::new(1);
-
-        let url = category_page_url(&category, page);
-        let parsed = Url::parse(&url).unwrap();
-        let pairs: Vec<_> = parsed.query_pairs().collect();
-
-        assert_eq!(
-            pairs,
-            vec![
-                ("search_query".into(), "cat:cs.AI".into()),
-                ("start".into(), "100".into()),
-                ("max_results".into(), "100".into()),
-                ("sortBy".into(), "submittedDate".into()),
-                ("sortOrder".into(), "descending".into()),
-            ]
-        );
-        assert!(
-            !pairs
-                .iter()
-                .any(|(key, value)| key == "search_query" && value.contains("Date"))
-        );
-    }
-
-    #[test]
-    fn parses_feed_snapshot_and_entry_submission_day() {
-        let parsed = parse_category_page(RecentPage::zero(), SAMPLE_FEED).unwrap();
-
-        assert_eq!(parsed.snapshot.as_utc_string(), "2025-01-15T05:00:00Z");
-        assert_eq!(parsed.total_results, 1234);
-        assert_eq!(parsed.papers.len(), 1);
-        assert_eq!(parsed.papers[0].key.as_ref(), "2501.12345");
-        assert_eq!(parsed.papers[0].submission.path_segment(), "20250110");
-        assert_eq!(parsed.papers[0].entry.latest_version, 2);
-        assert_eq!(
-            parsed.papers[0].entry.abstract_text,
-            "This paper studies the case where whitespace is collapsed."
-        );
-    }
-
-    #[test]
-    fn parses_entry_with_non_contiguous_duplicate_doi() {
-        let feed = r#"<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom"
-      xmlns:arxiv="http://arxiv.org/schemas/atom">
-  <updated>2026-04-02T00:00:00Z</updated>
-  <entry>
-    <id>http://arxiv.org/abs/2604.00002v1</id>
-    <updated>2026-04-02T00:00:00Z</updated>
-    <published>2026-04-02T00:00:00Z</published>
-    <title>Interleaved-DOI Paper</title>
-    <summary>DOIs separated by other elements.</summary>
-    <author><name>Test Author</name></author>
-    <arxiv:doi>10.48550/arXiv.2604.00002</arxiv:doi>
-    <arxiv:journal_ref>Some Journal, 2026</arxiv:journal_ref>
-    <arxiv:doi>10.1234/journal.2026.002</arxiv:doi>
-  </entry>
-</feed>"#;
-        let parsed = parse_category_page(RecentPage::zero(), feed.as_bytes()).unwrap();
-        assert_eq!(
-            parsed.papers[0].entry.dois,
-            vec!["10.48550/arXiv.2604.00002", "10.1234/journal.2026.002"]
-        );
-    }
 }

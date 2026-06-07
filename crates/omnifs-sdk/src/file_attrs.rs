@@ -1,5 +1,6 @@
 use crate::error::{ProviderError, Result};
-use crate::omnifs::provider::types as wit_types;
+use omnifs_core::ContentType;
+use omnifs_wit::provider::types as wit_types;
 
 pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
@@ -95,6 +96,7 @@ impl Size {
 pub struct FileProj {
     pub attrs: FileAttrs,
     pub bytes: ProjBytes,
+    pub content_type: Option<ContentType>,
 }
 
 impl FileProj {
@@ -111,6 +113,7 @@ impl FileProj {
                 version,
             },
             bytes: ProjBytes::Inline(bytes),
+            content_type: None,
         }
     }
 
@@ -118,12 +121,25 @@ impl FileProj {
         Self {
             attrs: FileAttrs::new(size, stability),
             bytes: ProjBytes::Deferred { read },
+            content_type: None,
         }
+    }
+
+    /// Directory listing entry: attrs for `stat`/`ls` without inline bytes; content
+    /// is loaded on `read-file` or via an object/canonical path.
+    pub fn listing_shape() -> Self {
+        Self::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable)
     }
 
     #[must_use]
     pub fn with_version(mut self, version: impl Into<VersionToken>) -> Self {
         self.attrs.version = Some(version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_content_type(mut self, content_type: ContentType) -> Self {
+        self.content_type = Some(content_type);
         self
     }
 
@@ -221,7 +237,7 @@ impl From<ReadMode> for wit_types::ReadMode {
     }
 }
 
-impl From<ProjBytes> for wit_types::ProjBytes {
+impl From<ProjBytes> for wit_types::ByteSource {
     fn from(bytes: ProjBytes) -> Self {
         match bytes {
             ProjBytes::Inline(bytes) => Self::Inline(bytes),
@@ -230,7 +246,7 @@ impl From<ProjBytes> for wit_types::ProjBytes {
     }
 }
 
-impl From<ReadFileBytes> for wit_types::ReadFileBytes {
+impl From<ReadFileBytes> for wit_types::ByteSource {
     fn from(bytes: ReadFileBytes) -> Self {
         match bytes {
             ReadFileBytes::Inline(bytes) => Self::Inline(bytes),
@@ -259,9 +275,12 @@ impl From<FileAttrs> for wit_types::FileAttrs {
     }
 }
 
-impl From<FileProj> for wit_types::FileProj {
+impl From<FileProj> for wit_types::FileOut {
     fn from(file: FileProj) -> Self {
         Self {
+            content_type: file
+                .content_type
+                .map(|content_type| content_type.as_mime().to_string()),
             attrs: file.attrs.into(),
             bytes: file.bytes.into(),
         }

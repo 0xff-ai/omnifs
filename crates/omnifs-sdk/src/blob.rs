@@ -15,7 +15,7 @@
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::http::CalloutFuture;
-use crate::omnifs::provider::types::{
+use omnifs_wit::provider::types::{
     BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header, ReadBlobRequest,
 };
 

@@ -17,12 +17,12 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
+hashbrown = { workspace = true }
 omnifs-sdk = { workspace = true }
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-time = { workspace = true }
 url = { workspace = true }
 [lints.clippy]
 all = { level = "warn", priority = -1 }

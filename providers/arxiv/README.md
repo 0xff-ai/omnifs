@@ -1,31 +1,27 @@
 # omnifs-provider-arxiv
 
-[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Browse recent category submissions or direct paper ids; each paper materializes its PDF, source tarball, metadata, links, and version history as files.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Address a paper by id; each paper is an object that materializes its metadata, the raw Atom feed, the PDF and e-print source blobs, and a version tree.
 
 ## Mount layout
 
 ```
 /arxiv/
   papers/{id}/
+    paper.json      rendered metadata
+    paper.atom      verbatim Atom canonical
     paper.pdf
     source.tar.gz
-    metadata.json
-    links.json
     versions/v{n}/
-  categories/{cat}/recent/
-  categories/{cat}/recent/fetched/
-  categories/{cat}/recent/pages/
-  categories/{cat}/recent/pages/{n}/
-  categories/{cat}/submissions/
-  categories/{cat}/submissions/{YYYYMMDD}/
+      paper.json
+      paper.pdf
+      source.tar.gz
 ```
 
-`{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; `versions/v{n}/` re-projects the paper subtree at a specific version.
+A paper is an object whose canonical is the upstream Atom feed: `paper.atom` serves it verbatim and `paper.json` renders a lossy metadata view (title, authors, categories, DOIs, resource URLs).
 
-Category traversal uses arXiv's recent category feed with `search_query=cat:{cat}` and `max_results=100`.
-Results are sorted descending by `sortBy=submittedDate`.
-`recent/pages/{n}` fetches upstream pages, while `recent/fetched` is the deduped set discovered so far.
-Submission-day directories are materialized from already fetched recent pages and never issue date-range queries.
+`{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; `versions/v{n}/` re-projects metadata and the resource blobs at a specific version.
+
+The category/recent/submissions browse surface is not exposed in this release; papers are addressed by id under `/papers/`.
 
 ## Capabilities
 

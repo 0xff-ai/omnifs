@@ -1,12 +1,16 @@
 use crate::{AuthManifest, AuthScheme, OauthScheme, StaticTokenScheme};
+use thiserror::Error;
 
 const STATIC_KIND: &str = "static-token";
 const OAUTH_KIND: &str = "oauth";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SchemeResolveError {
+    #[error("no {kind} auth scheme `{key}`")]
     NotFound { kind: &'static str, key: String },
+    #[error("multiple {kind} auth schemes declared; set auth.scheme")]
     Ambiguous { kind: &'static str },
+    #[error("auth manifest declares no {kind} auth scheme")]
     NoSchemes { kind: &'static str },
 }
 

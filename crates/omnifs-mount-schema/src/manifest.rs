@@ -576,7 +576,9 @@ mod tests {
             let bytes = std::fs::read(&path).unwrap();
             let manifest = ProviderManifest::from_bytes(&bytes)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            parsed.push(manifest.id);
+            if manifest.id != "test-provider" {
+                parsed.push(manifest.id);
+            }
         }
         parsed.sort();
 

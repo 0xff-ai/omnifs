@@ -10,7 +10,7 @@ The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and 
 
 ## Supported workflow
 
-The primary contributor workflow is `omnifs dev`, implemented in `crates/cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the container directly through the Docker API.
 
 ```bash
 omnifs dev          # build dev image, materialize secrets/fixtures, launch container
@@ -78,7 +78,7 @@ User-facing releases ship the host CLI, WASM providers, npm packages, and a GHCR
 **Version coupling:** for release `X.Y.Z`, npm package version, CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all use the **same unprefixed semver** (`0.2.0`, not `v0.2.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
-- CLI default image: `ghcr.io/0xff-ai/omnifs:X.Y.Z` (`crates/cli/src/session.rs`)
+- CLI default image: `ghcr.io/0xff-ai/omnifs:X.Y.Z` (`crates/omnifs-cli/src/session.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (conventional `v` prefix only here)
 - GHCR promote publishes both `X.Y.Z` and `vX.Y.Z`; the CLI default uses the unprefixed tag
 
@@ -153,12 +153,15 @@ Git clone currently uses SSH:
 - auth comes from forwarded `SSH_AUTH_SOCK`
 - do not mount host private keys into the container
 
-### Mount loading and effective config
+### Mount loading and resolved mounts
 
-- `ProviderCatalog::load_mount()` returns `LoadedMount { config: EffectiveConfig }`.
-- Use `into_effective_mount(config, require_metadata)` for strict load versus best-effort delete/reset paths.
-- `CredentialTarget` and session materialization operate on `EffectiveConfig` after metadata merge, not raw mount JSON plus a late `apply_metadata` pass.
-- Host-managed credentials require `provider_id`, always on `EffectiveConfig`, plus `auth.scheme` and optional `auth.account`.
+- Host mount loading lives in `omnifs_host::mounts`.
+- `omnifs_host::mounts::Spec` is raw user-authored mount JSON.
+- `omnifs_host::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
+- `ProviderCatalog::load_mount()` returns `omnifs_host::mounts::Resolved` directly.
+- Use `resolve_mount_spec(spec, require_metadata)` for strict load versus best-effort delete/reset paths.
+- `CredentialTarget` and session materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
+- Host-managed credentials require `provider_id`, always on `Resolved`, plus `auth.scheme` and optional `auth.account`.
 - Static mounts may still use `token_env` or `token_file` for external secrets. Do not add keychain indirection to mount JSON.
 - Session secret filenames use `CredentialKey::storage_key()`, for example `github:pat:default`.
 
@@ -216,58 +219,48 @@ The runtime image uses Ubuntu 25.10 and `zsh`. Interactive shells should have `l
 
 ## Provider architecture
 
-Each provider is a WASM component implementing the `omnifs:provider` WIT interface. Providers are authored as free-function path handlers collected from `#[omnifs_sdk::handlers] impl ...` blocks, with the provider's mounts declared through `#[omnifs_sdk::provider(mounts(...))]`.
+Each provider is a WASM component implementing the `omnifs:provider` WIT interface. A provider is one `#[omnifs_sdk::provider(...)] impl P` block whose `start(config, r: &mut Router<State, Routes>)` registers routes **imperatively** (there are no per-route attribute macros). The registration verbs:
 
-Handler attributes inside a `#[handlers]` block are:
+- `r.dir(t).handler(h)`: a directory route family
+- `r.file(t).handler(h)`: a file route family
+- `r.treeref(t).handler(h)`: a subtree-handoff route family that returns a `TreeRef` the host resolves to a bind-mounted clone directory
+- `r.bind::<O>(t)`: attach an Object `O` to a route (object-shaped providers); `O` supplies `load` + `render`, so there is no separate fetcher
+- `r.subtree(t).nest(&s)`: mount a typed subtree registry `s` at `t`; the host parses the prefix captures and dispatches the suffix through `s`
 
-- `#[dir("...")]`: a directory path family
-- `#[file("...")]`: an exact file path family
-- `#[treeref("...")]`: a subtree handoff path family that returns a `TreeRef` for the host to resolve to a bind-mounted clone directory
-- `#[bind("...")]`: mounts a typed subtree, a `#[subtree] impl B { ... }` block, at this path family; the host parses prefix captures, constructs `B`, and dispatches the suffix through `B`'s inner registry
-- `#[mutate("...")]`: a mutation handler
+The supporting attribute macros are top-level only: `#[omnifs_sdk::provider(...)]` (entrypoint), `#[omnifs_sdk::object(kind, represents(...), fields(...), repr_stem)]` (an Object's static facts), `#[omnifs_sdk::config]` (JSON config struct), `#[omnifs_sdk::path_captures]` (a typed multi-segment key), and `#[derive(omnifs_sdk::Endpoint)]` (an outbound host). There is no `#[handlers]`, `#[dir]`, `#[file]`, `#[treeref]`, `#[bind]`, `#[mutate]`, or `#[subtree]` attribute.
 
-Top-level attributes include:
-
-- `#[omnifs_sdk::config]`: provider config struct
-- `#[omnifs_sdk::subtree] impl B { ... }`: typed subtree handler block whose inner `#[dir]` and `#[file]` items are templates relative to the subtree root
-- `#[omnifs_sdk::provider(...)]`: provider entrypoint
-
-The host browse surface is:
+The host browse surface is byte-level:
 
 - `lookup_child(id, parent_path, name)`: resolves one child entry
-- `list_children(id, path)`: lists a directory
-- `read_file(id, path)`: reads exact file content
+- `list_children(id, path, cached_validator, cursor)`: lists a directory
+- `read_file(id, path, content_type, cached_canonical)`: reads file bytes; `cached_canonical` is the object the host pushes for re-rendering (see Caching model)
+- `open_file` / `read_chunk` / `close_file`: ranged/streamed reads
 
-Subtree handoff folds into `lookup_child` and `list_children`. When a `#[treeref]` handler matches the requested path, the corresponding `lookup-result::subtree(tree-ref)` or `list-result::subtree(tree-ref)` terminal is returned, and the host resolves the handle to a bind-mounted clone directory. The WIT keeps the `subtree` arm name on result variants; the SDK-side attribute is `#[treeref]` because `#[subtree]` is reserved for typed-subtree-dispatch impl blocks.
+Subtree handoff folds into `lookup_child` and `list_children`: a `treeref` route returns the `lookup-result::subtree(tree-ref)` / `list-result::subtree(tree-ref)` terminal and the host resolves the handle to a bind-mounted clone directory.
 
-The current browse model is:
+Dispatch (the SDK router under `crates/omnifs-sdk/src/router/`; ADR-0001 §8 is the design rationale):
 
-- Any registered route's literal-segment prefix is an auto-navigable directory. Provider authors do not write no-op stub `#[dir]` handlers for intermediate navigation nodes.
-- Per-segment validators, meaning route parse functions, participate in match candidacy. A parse rejection falls through to the next-most-specific candidate route, not to ENOENT.
-- `lookup_child` answers subtree handlers first, then falls back to exact/static/auto-navigable shape, then to the parent `#[dir]` handler for dynamic children.
-- `list_children` answers subtree handlers first, then merges static child shape with the parent directory projection. An auto-navigable directory's listing is `exhaustive=false` whenever any sibling route at depth + 1 has a capture or rest segment.
-- `read_file` uses exact `#[file]` handlers first, then allows bounded eager bytes from a parent directory projection for projected files.
+- Any registered route's literal-segment prefix is an auto-navigable directory; authors do not write no-op stub handlers for intermediate navigation nodes.
+- Per-segment validators (capture parse functions) participate in match candidacy. A parse rejection falls through to the next-most-specific candidate route, not to ENOENT.
+- `lookup` is the authoritative name oracle; `readdir` may be non-exhaustive. An `exhaustive` listing means "these are the names I am aware of," and `lookup(parent, name)` may resolve a name absent from the latest `readdir`.
+- A directory listing merges the literal sibling routes registered at that depth with the handler's enumeration; an auto-navigable listing is `exhaustive=false` whenever a capture sibling exists at the next depth.
 
-`docs/design/path-dispatch-and-listing.md` is the source of truth for routing precedence, listing exhaustiveness, and the `lookup` versus `readdir` authority split. Read it before changing dispatch logic.
+Providers return either a terminal `op-result`, wrapped in a `provider-return` with `effects`, or suspend with a list of `callout`s (HTTP fetch, git open, fetch-blob, open-archive). The host runs the batch and calls `resume(id, results)`. Providers store continuations keyed by correlation ID. Callouts are strictly request/response; there are no fire-and-forget callouts.
 
-Providers return either a terminal `op-result`, wrapped in a `provider-return`, or suspend with a list of `callout`s such as HTTP fetch or git open. The host executes the batch and calls `resume(id, results)` with the outcomes. Providers store continuations keyed by correlation ID to resume from where they left off. Callouts are strictly request/response; there are no fire-and-forget callouts.
+Host-side mutations travel as `effects` on the terminal, not as separate callouts: `canonical` (store object bytes + path index leaves), `fs` (materialize files/dirs into the view cache), and `invalidations` (`object` / `listing`). See the Caching model section. `on-event` handlers return a normal `provider-step`; their `effects.invalidations` are applied at the response boundary. There is no `preload` field and no `event-outcome` record.
 
-Cache side effects travel inside the terminal, not as separate callouts:
+The WIT reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads.
 
-- `list-children` listings carry a `preload` field with content for named paths the host should cache alongside the listing. `lookup-child` returning a directory through a `#[dir]` handler carries the same field on `lookup-entry.preload`.
-- `on-event` handlers return an `event-outcome` record with `invalidate-paths` and `invalidate-prefixes`; the host applies them at the response boundary before surfacing the terminal.
-
-The WIT still reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads. The current host/runtime path serves exact file bytes and explicit subtree handoff.
-
-Instance configs are JSON, not TOML. The host parses each mount's JSON config into an `InstanceConfig`; the provider-specific `config` object is preserved as a `serde_json::Value` and re-serialized to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
+Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_host::mounts::Spec`, resolves it to `omnifs_host::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
 
 ## Caching model
 
-The host owns all caching. Provider results, including listings, lookups, and file content, land in capacity-bounded caches. There are no TTLs. Entries leave the cache by capacity eviction or by explicit invalidation from `event-outcome` fields returned by `on-event` handlers or from the FUSE notifier.
+The host owns all caching as plain byte storage; it never reasons about objects. There are no TTLs; entries leave by capacity eviction or by explicit invalidation (SDK `invalidate_object`, `invalidate_listing_path`, and `invalidate_listing_prefix` effects or the FUSE notifier). Providers must not add their own LRUs or time-based expiration. The full design is `docs/design/object-cache-primary.md`; read it before changing cache code. The key points:
 
-Providers must not add their own LRUs or time-based expiration. Rely on the host's invalidation signals.
-
-When a read route materializes a payload that contains fields for the item's sibling files, return them in `FileContent::with_sibling_files(..)` so the host caches them alongside the primary file. A later stat or read of a sibling should avoid a round trip. The same applies to lookup routes: use `Lookup::with_sibling_files(..)` whenever the payload already carries sibling content. For content that is not a direct sibling of the looked-up target, such as nested children of a listed directory, use `Projection::preload` or `preload_many`; those land on the terminal's preload field.
+- **Three host caches, named by role.** **Object cache**: durable primary (`object.redb`, global, mount-prefixed keys); holds canonical upstream bytes keyed by logical object id; object-shaped providers only (a provider that emits no `canonical-store` effect self-selects out). **View cache**: derived, non-durable (`view.redb`, deleted and recreated on every startup); the rendered representations/fields/dirents shell tools read; recomputes from the object cache with no upstream refetch. **Blob cache**: large binary served by handle (+ archive trees), unchanged.
+- **Effects, not preload-vs-sibling.** A provider return carries `effects { canonical, fs, invalidations }`. `canonical-store { id, validator, bytes, view-leaves }` stores object bytes and teaches the host the exact full paths that map to that logical id. `fs` writes materialized files/dirs into the view cache and can carry the same id for object leaves. There is no `FileContent::with_sibling_files`, `Lookup::with_sibling_files`, `Projection::preload`, or `event-outcome`; those are gone. "Preload" is still the umbrella concept (any resource returned other than the one requested), expressed as additional `canonical-store`/`fs` effects.
+- **The read path.** On a view miss the host resolves the path to a logical object id by exact map lookup (never a prefix probe) and pushes the cached canonical (`canonical-input { id, bytes, validator }`) into `read-file`; the SDK renders without an upstream call. The SDK self-checks the pushed id against its route-derived id before rendering. Identity representations (`byte-source::canonical`) live only in the object cache and are never copied into the view cache.
+- **Fences.** A per-mount generation + tombstone fence rejects a write (canonical-store or a rendered view result) derived from data read before a concurrent invalidation. Object overwrite evicts the id's prior derived view leaves (version coherence); leaf invalidation cascades to the whole object via the reverse leaf set.
 
 ## Design invariants
 
@@ -305,7 +298,7 @@ The full design lives in `docs/design/file-attributes.md`, including enum defini
 ### CLI presentation vs schema types
 
 - `omnifs-mount-schema` types are wire/config truth. Do not add human-facing CLI labels or terminal formatting there.
-- Provider capability display uses the schema `CapabilityEntry` enum directly. Format at use site through `crates/cli/src/capability.rs`, with `capability_label` and `capability_value`. Do not introduce parallel CLI view-model structs for the same schema type.
+- Provider capability display uses the schema `CapabilityEntry` enum directly. Format at use site through `crates/omnifs-cli/src/capability.rs`, with `capability_label` and `capability_value`. Do not introduce parallel CLI view-model structs for the same schema type.
 - Status/JSON output helpers such as `*_to_json` are DTO serialization, not domain types. Keep them separate from schema conversions.
 
 ### Rust type conversions

@@ -27,33 +27,44 @@ The provider opens **read-only by default**. The application-layer
 the URI mode, but the host still needs `"mode": "rw"` on the
 preopen for the kernel to allow writes through. Use it sparingly.
 
-## Path tree (v1)
+Table metadata and database info are **object-shaped**: one `load()`
+per table or for the `/meta` singleton produces a provider-synthesized
+canonical JSON document; warm field leaves (`schema.sql`, `schema.json`,
+`indexes.json`, `count.txt`, `version.txt`, `path.txt`) render from
+that canonical without re-querying SQLite. Object-cache invariant #3
+(canonical byte-equals a single upstream GET) does **not** apply here:
+the canonical is synthesized locally, not fetched verbatim from a remote.
+
+Both objects declare compile-time **`Immutable`** stability (fixed snapshot
+semantics with `read_only=true` / `immutable=1`). `sample.json` remains
+route-shaped with a version token and ranged reads above the inline cap.
+
+## Path tree
 
 ```
-/db/meta/version.txt              # rusqlite::version()
-/db/meta/path.txt                 # the configured file path
-/db/meta/info.json                # size, page_size, page_count, app_id, user_version, journal_mode
-/db/tables/                       # one directory per user table
-/db/tables/{table}/schema.sql    # CREATE TABLE statement from sqlite_master
-/db/tables/{table}/schema.json   # columns from PRAGMA table_info
-/db/tables/{table}/indexes.json  # PRAGMA index_list + index_info
-/db/tables/{table}/count.txt     # SELECT count(*)
-/db/tables/{table}/sample.json   # SELECT * LIMIT sample_limit (default 20)
+/db/meta/info.json                # canonical db.database object (pretty JSON + \n)
+/db/meta/version.txt             # warm projection from info canonical
+/db/meta/path.txt                # warm projection from info canonical
+/db/tables/                      # exhaustive table name listing (no preload)
+/db/tables/{table}/table.json    # canonical db.table object (pretty JSON + \n)
+/db/tables/{table}/schema.sql    # warm projection from table canonical
+/db/tables/{table}/schema.json   # warm projection from table canonical
+/db/tables/{table}/indexes.json  # warm projection from table canonical
+/db/tables/{table}/count.txt     # warm projection from table canonical
+/db/tables/{table}/sample.json   # route-shaped: SELECT * LIMIT sample_limit (default 20)
 ```
 
-Views and global `/indexes/` are deferred to a v2 surface. Per-row
+Views and global `/indexes/` are deferred to a later surface. Per-row
 directories (`rows/{pk}/...`) are out of scope: composite PKs,
 non-integer PKs, and tables without a primary key all need design
 work that has not happened.
 
 ## File attributes
 
-Every projected file declares `Mutable + Inline` with a content
-hash as the version token, except `sample.json` for large samples,
-which switches to a deferred ranged projection above the inline
-cap (`MAX_PROJECTED_BYTES = 64 KiB`). The host keys cache entries
-by the version token, so the same projection is served from cache
-until the version moves.
+Object leaves inherit **`Immutable`** from the `#[object(stability = Immutable)]`
+declaration. `sample.json` is **`Mutable`** with a content hash version token;
+large samples switch to a deferred ranged projection above the inline cap
+(`MAX_PROJECTED_BYTES = 64 KiB`).
 
 ## Example config
 
@@ -96,6 +107,7 @@ curl -sL -o providers/db/testdata/chinook.sqlite \
 # Contributor path: omnifs dev mounts the db provider with this fixture — see AGENTS.md
 omnifs dev -y
 docker exec omnifs /bin/zsh -lc 'ls /omnifs/db/tables'
+docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/table.json'
 docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/schema.sql'
 ```
 

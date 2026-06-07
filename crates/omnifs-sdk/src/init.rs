@@ -3,7 +3,7 @@
 //! Provides a typed builder for constructing the initial provider state
 //! and metadata returned from `init`.
 
-use crate::omnifs::provider::types::ProviderInfo;
+use omnifs_wit::provider::types::ProviderInfo;
 
 /// Initialization context for a provider.
 ///

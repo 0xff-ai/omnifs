@@ -1,6 +1,6 @@
 # Provider protocol: callouts, returns, and effects
 
-Scope: `wit/provider.wit`, host runtime, SDK, SDK macros, providers.
+Scope: `crates/omnifs-wit/wit/provider.wit`, host runtime, SDK, SDK macros, providers.
 
 ## Vocabulary
 
@@ -18,11 +18,10 @@ or returns a result with effects.
 ## WIT shape
 
 Types not redefined in this block are kept from the current
-`wit/provider.wit` unless a later phase explicitly changes them.
+`crates/omnifs-wit/wit/provider.wit` unless a later phase explicitly changes them.
 
 ```wit
 type correlation-id = u64;
-type stream-id = u64;
 type tree-ref = u64;
 type file-handle = u64;
 type blob-id = u64;
@@ -40,13 +39,6 @@ variant provider-step {
 /// callouts, and a provider return can never carry trailing callouts.
 variant callout {
     fetch(http-request),
-    stream-open(http-request),
-    stream-recv(stream-id),
-    stream-close(stream-id),
-    ws-connect(ws-connect-request),
-    ws-send(ws-send-request),
-    ws-recv(ws-recv-request),
-    ws-close(stream-id),
     git-open-repo(git-open-request),
     fetch-blob(blob-fetch-request),
     open-archive(archive-open-request),
@@ -55,12 +47,6 @@ variant callout {
 
 variant callout-result {
     http-response(http-response),
-    stream-opened(stream-id),
-    stream-chunk(option<list<u8>>),
-    stream-closed,
-    ws-connected(stream-id),
-    ws-message(option<list<u8>>),
-    ws-closed,
     git-repo-opened(git-repo-info),
     blob-fetched(blob-fetched),
     archive-opened(archive-opened),
@@ -117,7 +103,7 @@ record dir-entry {
     name: string,
     /// A direct result entry may include `proj-bytes::inline(...)`. Those
     /// bytes are for this entry only and are committed with the accepted
-    /// lookup or listing result. Use `effect::project` for additional paths.
+    /// lookup or listing result. Use `effects.fs` for additional paths.
     kind: entry-kind,
 }
 
@@ -125,31 +111,31 @@ record dir-entry {
 /// `effects` is the only terminal host-mutation channel in the target WIT.
 record provider-return {
     result: op-result,
-    effects: list<effect>,
+    effects: effects,
 }
 
-/// Host-side mutation committed at the return boundary.
-variant effect {
-    project(proj-entry),
-    invalidate-path(string),
-    invalidate-prefix(string),
-    disown-tree(tree-handoff),
+/// Host-side mutations committed at the return boundary.
+record effects {
+    /// Object-cache writes: anchor → { version, bytes, leaves }.
+    canonical: list<canonical-store>,
+    /// View-cache writes: path metadata or dirents to install.
+    fs: list<fs-write>,
+    /// Invalidations to apply after the return is accepted.
+    invalidations: list<invalidation>,
 }
 
-/// Provider-relative path metadata to install into the host projection cache.
-record proj-entry {
+record canonical-store {
+    anchor: string,
+    version: option<version-token>,
+    bytes: list<u8>,
+    /// Anchor-relative leaf remainders, e.g. ["/item.md", "/title"] or [".md", ".json", ".raw"].
+    leaves: list<string>,
+}
+
+/// Provider-relative path metadata to install into the host view cache.
+record fs-write {
     path: string,
     kind: entry-kind,
-}
-
-/// Host routing state for a tree handoff. The operation result still says
-/// that the path is a subtree; this effect says the host should install that
-/// tree as disowned or passthrough state after accepting the return.
-record tree-handoff {
-    /// Provider-relative path being handed off. For `lookup-child`, this is
-    /// `parent-path/name`; for `list-children`, this is the listed path.
-    path: string,
-    tree: tree-ref,
 }
 
 /// Lookup-child result. `subtree(tree-ref)` answers the lookup/list operation.
@@ -255,7 +241,7 @@ interface lifecycle {
     capabilities: func() -> requested-capabilities;
 }
 
-interface browse {
+interface namespace {
     lookup-child: func(id: correlation-id, parent-path: string, name: string)
         -> provider-step;
     list-children: func(id: correlation-id, path: string) -> provider-step;
@@ -298,7 +284,7 @@ interface continuation {
 
 - A suspended step must contain at least one callout.
 - A returned step never carries callouts, trailing or otherwise.
-- `error(provider-error)` must have an empty `effects` list. The host rejects
+- `error(provider-error)` must have empty `effects` fields. The host rejects
   errors with host mutations.
 - The `op-result` arm returned by `continuation.resume(id, results)`
   must match the operation originally suspended under `id`.
@@ -318,15 +304,10 @@ interface continuation {
   state for that id.
 - `lookup-child-result::not-found` is a normal negative lookup. A missing
   `list-children` target returns `error(provider-error::not-found)`.
-- A `lookup-child-result::subtree(tree)` or
-  `list-children-result::subtree(tree)` must be paired with exactly one
-  matching `effect::disown-tree(tree-handoff { path, tree })`. For
-  `lookup-child`, `path` is the provider-relative looked-up child path
-  (`parent-path/name`). For `list-children`, `path` is the listed path. Bare
-  subtree results are provider contract errors.
+- A `lookup-child-result::subtree(tree)` or `list-children-result::subtree(tree)` is a terminal for subtree handoff; the host resolves the handle to a bind-mounted clone directory. Bare subtree results without a resolvable host-side tree ref are provider contract errors.
 - `file-attrs` carries metadata only. Projected byte availability lives in
   `file-proj.bytes`.
-- `file-proj.bytes` is the only byte source on a `project` effect. Direct
+- `file-proj.bytes` is the only byte source on an `fs` effect entry. Direct
   `lookup-child` and `list-children` entries may also include
   `proj-bytes::inline(...)`, but those bytes belong only to the returned entry,
   not to adjacent or nested paths.
@@ -351,97 +332,35 @@ interface continuation {
 `.blob()` yield `CalloutFuture`s. Terminal host mutations are staged on
 return builders, not on `Cx`.
 
-### `Effects` builder
+### Effects and the return builder
 
-```rust
-#[derive(Default)]
-pub struct Effects {
-    effects: Vec<Effect>,
-}
+Provider authors do not construct `ProviderReturn` directly in normal code. Effects accumulate on the projection or file-content builders and are emitted as part of the terminal return. The three effect channels in the `effects` record are:
 
-impl Effects {
-    pub fn new() -> Self;
-    pub fn project_dir(&mut self, path: impl Into<String>) -> Result<&mut Self>;
-    pub fn project_file(&mut self, path: impl Into<String>, file: FileProj) -> Result<&mut Self>;
-    pub fn invalidate_path(&mut self, path: impl Into<String>) -> &mut Self;
-    pub fn invalidate_prefix(&mut self, prefix: impl Into<String>) -> &mut Self;
-
-    #[doc(hidden)]
-    pub fn disown_tree(&mut self, path: impl Into<String>, tree: TreeRef) -> &mut Self;
-}
-```
-
-Provider authors do not construct `ProviderReturn` directly in normal code.
-The macro wraps handler results with their accumulated effects. `disown_tree`
-is reserved for generated subtree plumbing; ordinary provider code returns a
-subtree result and lets the macro stage the required handoff effect.
-
-### `Projection` stages projection effects
-
-`Projection` continues to describe the direct list/lookup answer. It also
-gains helpers for adjacent or nested projected paths that should be installed
-when the answer is accepted:
-
-```rust
-impl Projection {
-    pub fn proj(&mut self, path: impl Into<String>, content: impl Into<Vec<u8>>);
-    pub fn proj_dir(&mut self, path: impl Into<String>);
-    pub fn proj_file(&mut self, path: impl Into<String>, file: FileProj);
-}
-```
-
-`projection.proj(...)` carries inline bytes and `projection.proj_file(...)`
-takes an explicit `FileProj`. The name matches the data type: the provider
-asks the host to install a projection after the completed operation answer
-is accepted.
-
-### `FileContent` can carry effects
-
-A read handler that learned adjacent files projects them through the
-effect channel:
-
-```rust
-let mut effects = Effects::new();
-effects.project_file(path, file_proj)?;
-FileContent::new(bytes).with_effects(effects)
-```
-
-There is no separate sibling-file plumbing on read terminals; everything
-goes through `project`.
+- `canonical`: `canonical-store { id, validator, bytes, view-leaves }` object-cache writes. Emitted automatically by `Load::Fresh` for object-shaped providers; structural providers never emit these.
+- `fs`: `fs-write { id, path, kind }` view-cache writes for adjacent or nested paths learned while serving the request. Use projection preload methods such as `preload_file` and `preload_dir` to attach these to the terminal.
+- `invalidations`: `object(logical-id)` or `listing(path-or-prefix)` entries applied after the return is accepted. Use the projection invalidation helpers to attach these to the terminal.
 
 ### `on-event` returns effects
 
-The user-facing signature becomes:
+The `on-event` handler returns a normal provider step. Invalidation effects are
+committed at the same accepted-return boundary as lookup, listing, and read
+effects:
 
 ```rust
 async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<Effects>
 ```
 
-The default implementation returns `Ok(Effects::new())`. Invalidation becomes:
+Invalidation example:
 
 ```rust
-let mut effects = Effects::new();
-effects.invalidate_prefix("octocat/Hello-World");
-Ok(effects)
+Ok(Invalidations::new().prefix("octocat/Hello-World"))
 ```
 
-The macro wraps this as:
+The macro wraps this into a provider return with `result: OpResult::OnEvent`.
 
-```rust
-ProviderStep::returned(ProviderReturn {
-    result: OpResult::OnEvent,
-    effects: effects.into_wit(),
-})
-```
+### Subtree dispatch from inside namespace
 
-### Subtree dispatch from inside browse
-
-`lookup_child` and `list_children` check `#[subtree]` handlers first by
-exact path. On hit, they return `LookupChildResult::Subtree(tree_ref)`
-or `ListChildrenResult::Subtree(tree_ref)` and stage the matching
-`effect::disown-tree` so the host installs passthrough routing state at
-the same return boundary. Provider authors do not write the disown
-effect by hand; the macro stages it.
+`lookup_child` and `list_children` check for treeref handlers first by exact path. On hit, they return `LookupChildResult::Subtree(tree_ref)` or `ListChildrenResult::Subtree(tree_ref)`. Providers register treeref handlers with `r.treeref(t).handler(h)`; the host resolves the tree ref to a bind-mounted clone directory. Provider authors do not write subtree routing by hand; the router macro stages it.
 
 ### `CalloutFuture`
 
@@ -456,12 +375,10 @@ all return `CalloutFuture<_, _, T>` for their typed responses.
 
 ### Provider call sites
 
-- Projection: `projection.proj(...)`, `projection.proj_file(...)`, or
-  `effects.project_file(...)`.
-- Invalidation: `effects.invalidate_path(...)`,
-  `effects.invalidate_prefix(...)`.
-- Event handlers: `on-event` returns `Result<Effects>`; an empty
-  `Effects::new()` is a no-op.
+- View-cache writes for adjacent paths: `FileProjection::preload_file(path, proj)`, `DirProjection::preload_file(path, proj)`, and `DirProjection::preload_dir(path, proj)` become `fs` effect entries.
+- Object-cache writes: emitted automatically by `Load::Fresh` and by directory-carried canonical effects; the `canonical` effect carries `id`, `validator`, `bytes`, and `view-leaves`.
+- Invalidation: `FileProjection::invalidate_path(...)`, `invalidate_prefix(...)` — these become `invalidations` effect entries.
+- Event handlers: `on-event` returns a normal provider step; invalidations ride in terminal `effects.invalidations`.
 
 ## Host runtime
 
@@ -470,7 +387,7 @@ all return `CalloutFuture<_, _, T>` for their typed responses.
 The runtime types that drive provider steps and dispatch callouts use
 the protocol's vocabulary:
 
-- `ProviderRuntime`.
+- `Runtime`.
 - `Callout::execute`.
 - `Callouts::execute`.
 - `drive_provider`.
@@ -510,16 +427,11 @@ FUSE.
 
 ### Effect application
 
-`apply_effects` owns host-side mutation:
+The host `Materializer::apply` owns host-side mutation from a `provider-return`:
 
-- `project` writes lookup/attr records for the provider-relative path and
-  inline bytes when the projected kind is
-  `file-proj { bytes: proj-bytes::inline(...) }`.
-- `invalidate-path` deletes exact cache records and notifies the kernel.
-- `invalidate-prefix` deletes prefix cache records and notifies affected
-  kernel paths.
-- `disown-tree` installs or updates passthrough routing state for a returned
-  subtree.
+- `effects.canonical` entries are written to the object cache: `object_store(anchor, canonical, leaves, op_gen)`. Each entry also evicts the anchor's prior derived view leaves before storing new ones (preventing mixed-version views).
+- `effects.fs` entries are written to the view cache: `project(fs_write, op_gen)`. The dirent read-modify-write is transactional inside the cache.
+- `effects.invalidations` entries delete exact or prefix-matched cache records and notify the kernel.
 
 Effect validation happens before application. Invalid effects fail the
 operation as a provider contract error and do not partially mutate host state.
@@ -529,28 +441,24 @@ operation as a provider contract error and do not partially mutate host state.
 Accepted `lookup-child` and `list-children` results install their direct
 entries as part of the primary operation result. If a returned entry is
 `file(file-proj { bytes: proj-bytes::inline(...) })`, the host commits those
-bytes for that entry alongside the lookup or listing cache records.
+bytes for that entry alongside the lookup or listing view cache records.
 
-`effect::project` remains the channel for adjacent, nested, or otherwise
+`effects.fs` is the channel for adjacent, nested, or otherwise
 secondary paths that were learned while serving the operation.
 
-### Subtree handoff in the browse pipeline
+### Subtree handoff in the namespace pipeline
 
 `call_lookup_child` and `call_list_children` inspect the returned
-result. If it carries a subtree variant, the host validates and applies
-the matching `disown-tree` effect before returning to FUSE.
+result. If it carries a subtree variant, the host resolves the tree ref to a
+bind-mounted clone directory and returns to FUSE.
 `opendir_via_provider` treats `ListChildrenResult::Subtree(tree_ref)` as
 an ordinary list result.
 
-The validator checks the handoff path: `lookup-child` handoffs must
-target the looked-up child path, and `list-children` handoffs must
-target the listed path.
+### View cache writes
 
-### Projection cache writes
-
-Projection cache writes come from `effect::project`. Directory listings
+View cache writes come from `effects.fs`. Directory listings
 populate immediate dirent records from the returned `dir-listing`; extra
-adjacent or nested paths come from effects.
+adjacent or nested paths come from `effects.fs` entries.
 
 Read results that return `read-file-bytes::blob(blob-id)` must reference
 a host-cached blob id the runtime can resolve. `fetch-blob` is the only
@@ -571,33 +479,32 @@ no `git-list-tree`, `git-read-blob`, `git-head-ref`, or
 These test files encode the protocol contract and should be the first
 stop when changing protocol semantics:
 
-- `crates/host/tests/provider_routes_test.rs` — per-operation callout
-  expectations (HTTP fetch, blob fetch, etc.) plus returned-effect
-  assertions for preload-style and invalidation paths.
-- `crates/host/tests/runtime_test.rs` — `ProviderStep::Returned`
+- `crates/omnifs-itest/tests/<provider>/` — provider-specific
+  per-operation callout expectations (HTTP fetch, blob fetch, etc.) plus
+  returned-effect assertions for preload-style and invalidation paths.
+- `crates/omnifs-host/tests/runtime_test.rs` — `ProviderStep::Returned`
   matching, validation of `ProviderReturn { result, effects }` shape.
-- `crates/host/tests/callout_tracing.rs` — span / event field contract
+- `crates/omnifs-host/tests/callout_tracing.rs` — span / event field contract
   for the `omnifs_callout` tracing target.
 - `crates/omnifs-sdk/tests/error_api_test.rs` — `error(provider-error)`
   through `ProviderStep::Returned`.
-- `crates/omnifs-sdk-macros/tests/path_first_provider.rs` — subtree
-  dispatch exercised through `lookup-child` and `list-children`.
+- `crates/omnifs-sdk/src/router/tests.rs` — `Router` dispatch exercised
+  through `lookup-child`, `list-children`, and `read-file`.
 
 ## Out of scope
 
-1. **Per-operation WIT interface split** (`browse-lookup`, `browse-list`,
+1. **Per-operation WIT interface split** (`namespace-lookup`, `namespace-list`,
    etc.). The Rust macro layer still enforces operation-specific return types;
    the remaining WIT laxity is acceptable for now.
 2. **Mid-operation partial results**. FUSE is request/response per operation.
    Partial results do not reach users. Cross-call readdir pagination remains
    separate work.
 3. **Cross-call readdir pagination**. This depends on end-to-end
-   `PageStatus::More(cursor)` wiring and is independent of this protocol shape.
+   `Listing::partial` + `next_cursor` / `DirProjection` cursor wiring and is
+   independent of this protocol shape.
 4. **Per-correlation timeout for guest and git**. This is a separate runtime
    policy issue.
-5. **Non-cache effects beyond disowning**. If future providers need additional
-   terminal host mutations, add explicit `effect` arms. Do not tunnel them
-   through callouts.
+5. **Non-cache effects beyond the three channels**. If future providers need additional terminal host mutations, add explicit fields to the `effects` record. Do not tunnel them through callouts.
 
 ## Behavioral notes
 
@@ -605,11 +512,10 @@ stop when changing protocol semantics:
   If a future use case needs "target missing but here is parent context," add a
   dedicated result arm instead of smuggling cache updates through the miss.
 - **`on-event` is intentionally no-data.** Event completion is the result;
-  invalidation, projection, or no-op behavior belongs in `effects`.
-- **Effects on `error`.** `provider-return.result = error(...)` must carry no
-  effects. Errors fail the operation and cannot commit host mutations.
-- **Project versus list.** A listing result says what immediate children the
-  operation returns. A project effect says what additional provider-relative
+  invalidation or no-op behavior belongs in the returned `Invalidations`.
+- **Effects on `error`.** `provider-return.result = error(...)` must carry empty effects fields. Errors fail the operation and cannot commit host mutations.
+- **`effects.fs` versus list.** A listing result says what immediate children the
+  operation returns. An `effects.fs` entry says what additional provider-relative
   path metadata or bytes the host should install. Inline bytes on a direct
   listed or looked-up file belong to that returned entry and are installed with
   the primary result, not through a secondary effect.
@@ -617,11 +523,7 @@ stop when changing protocol semantics:
   lookup-specific contract. If `exhaustive` is true, absence from
   `target + siblings` is a sound negative lookup for the parent. This is not a
   general `dir-listing` result and should not be broadened accidentally.
-- **Subtree versus disown.** A subtree result says what the requested path is.
-  The matching disown effect says what routing state the host commits after
-  accepting that answer. A bare subtree result is a provider contract error,
-  and a handoff whose path does not match the returned subtree path is also an
-  error.
+- **Subtree result.** A subtree result says the requested path is a treeref handoff. The host resolves the tree ref to a bind-mounted clone directory.
 - **Read bytes consistency.** `file-proj.bytes` describes the projected file
   contract. `read-file-result` carries materialized full-read bytes and must
   be consistent with `proj-bytes::deferred(read-mode::full)`.

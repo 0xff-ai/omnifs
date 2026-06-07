@@ -4,9 +4,10 @@
 //! Writes are atomic: the payload is written through `atomic-write-file` and
 //! committed into place. On Unix the file is mode 0600 after every write.
 
-use crate::{CredentialEntry, CredentialId, CredentialStore, StoreError};
+use crate::{CredentialEntry, CredentialStore, StoreError};
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use fs2::FileExt;
+use omnifs_core::CredentialId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};

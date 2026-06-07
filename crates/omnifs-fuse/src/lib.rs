@@ -1,0 +1,276 @@
+//! FUSE filesystem implementation.
+//!
+//! Bridges the omnifs virtual filesystem to the kernel FUSE subsystem.
+//! Routes operations to WASM providers. Supports direct filesystem
+//! passthrough when providers set backing paths on nodes.
+
+pub(crate) mod inode;
+
+mod common;
+mod errno;
+mod filesystem;
+mod listing;
+mod lookup;
+pub mod mount;
+mod read;
+mod read_helpers;
+mod synthetic;
+mod trace;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use common::{DirSnapshot, ROOT_INO, RangedFileHandle, TTL, TTL_DYNAMIC};
+
+use dashmap::DashMap;
+use fuser::{FileAttr, INodeNo, MountOption, Notifier};
+use inode::NodeEntry;
+use omnifs_cache::{Record as CacheRecord, RecordKind};
+use omnifs_core::view as view_types;
+use omnifs_core::view::{EntryMeta, FileAttrsCache};
+use omnifs_host::Runtime;
+use omnifs_host::path_key::{PathKey, PathToInode};
+use omnifs_host::registry::ProviderRegistry;
+use omnifs_wit::provider::types as wit_types;
+use parking_lot::Mutex;
+use std::ffi::OsStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
+use tokio::runtime::Handle;
+
+pub(crate) type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
+
+fn path_prefix_matches(prefix: &str, path: &str) -> bool {
+    let Ok(prefix) = omnifs_core::path::Path::parse(prefix) else {
+        return false;
+    };
+    let Ok(path) = omnifs_core::path::Path::parse(path) else {
+        return false;
+    };
+    path.has_prefix(&prefix)
+}
+
+pub(crate) struct Frontend {
+    rt: Handle,
+    registry: Arc<ProviderRegistry>,
+    inodes: DashMap<u64, NodeEntry>,
+    /// Reverse lookup: (mount name, path) -> inode, for dedup.
+    /// Shared via `Arc` so the FUSE notifier can also hold a reference
+    /// and invalidate entries concurrently without cloning the map.
+    path_to_inode: Arc<PathToInode>,
+    notifier: NotifierHandle,
+    next_ino: AtomicU64,
+    dir_snapshots: DashMap<u64, DirSnapshot>,
+    next_fh: AtomicU64,
+    /// Caches file content by file handle; populated on first read, evicted on release.
+    file_cache: DashMap<u64, Vec<u8>>,
+    ranged_handles: DashMap<u64, RangedFileHandle>,
+}
+
+impl Frontend {
+    #[cfg(test)]
+    pub(crate) fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
+        Self::new_with_path_map(rt, registry, Arc::new(DashMap::new()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_path_map(
+        rt: Handle,
+        registry: Arc<ProviderRegistry>,
+        path_to_inode: Arc<PathToInode>,
+    ) -> Self {
+        Self::new_with_path_map_and_notifier(
+            rt,
+            registry,
+            path_to_inode,
+            Arc::new(parking_lot::Mutex::new(None)),
+        )
+    }
+
+    pub(crate) fn new_with_path_map_and_notifier(
+        rt: Handle,
+        registry: Arc<ProviderRegistry>,
+        path_to_inode: Arc<PathToInode>,
+        notifier: NotifierHandle,
+    ) -> Self {
+        let inodes = DashMap::new();
+
+        let root_entry = NodeEntry {
+            mount_name: registry.root_mount_name().unwrap_or("").to_string(),
+            path: omnifs_core::path::Path::ROOT.to_string(),
+            kind: wit_types::EntryKind::Directory,
+            attrs: None,
+            size: 0,
+            backing_path: None,
+            synthetic: false,
+        };
+        inodes.insert(ROOT_INO, root_entry);
+
+        Self {
+            rt,
+            registry,
+            inodes,
+            path_to_inode,
+            notifier,
+            next_ino: AtomicU64::new(2),
+            dir_snapshots: DashMap::new(),
+            next_fh: AtomicU64::new(1),
+            file_cache: DashMap::new(),
+            ranged_handles: DashMap::new(),
+        }
+    }
+
+    pub(crate) fn mount_config() -> fuser::Config {
+        let mut config = fuser::Config::default();
+        config.mount_options = vec![MountOption::RO, MountOption::FSName("omnifs".to_string())];
+        config
+    }
+
+    pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Runtime>> {
+        self.registry.get(mount).cloned()
+    }
+
+    pub(crate) fn mem_get(
+        &self,
+        mount: &str,
+        path: &str,
+        kind: RecordKind,
+    ) -> Option<Arc<CacheRecord>> {
+        self.runtime_for_mount(mount)?.mem_get(path, kind, None)
+    }
+
+    fn mem_get_with_aux(
+        &self,
+        mount: &str,
+        path: &str,
+        kind: RecordKind,
+        aux: Option<&str>,
+    ) -> Option<Arc<CacheRecord>> {
+        self.runtime_for_mount(mount)?.mem_get(path, kind, aux)
+    }
+
+    pub(crate) fn mem_invalidate(&self, mount: &str, path: &str, kind: RecordKind) {
+        if let Some(runtime) = self.runtime_for_mount(mount) {
+            runtime.mem_invalidate(path, kind, None);
+        }
+    }
+
+    /// Drain pending runtime invalidations, evict matching mem entries, and
+    /// notify the kernel about deleted entries or changed directories.
+    pub(crate) fn drain_and_evict_pending(&self, mount: &str) {
+        let Some(runtime) = self.runtime_for_mount(mount) else {
+            return;
+        };
+        let prefixes = runtime.drain_invalidated_prefixes();
+        let paths = runtime.drain_invalidated_paths();
+        let changed_dirs = runtime.drain_changed_dirs();
+        if prefixes.is_empty() && paths.is_empty() && changed_dirs.is_empty() {
+            return;
+        }
+
+        let mut to_remove = Vec::new();
+        for entry in self.path_to_inode.iter() {
+            let key = entry.key();
+            if key.mount != mount {
+                continue;
+            }
+            let path = &key.path;
+            let matches_exact = paths.iter().any(|p| p == path);
+            let matches_prefix = prefixes
+                .iter()
+                .any(|prefix| path_prefix_matches(prefix, path));
+            if matches_exact || matches_prefix {
+                to_remove.push(key.clone());
+            }
+        }
+
+        for path_key in &to_remove {
+            self.notify_entry_deleted(mount, &path_key.path);
+            self.path_to_inode.remove(path_key);
+        }
+        for path in &changed_dirs {
+            self.notify_dir_changed(mount, path);
+        }
+
+        runtime.mem_invalidate_entries_if({
+            let paths = paths.clone();
+            let prefixes = prefixes.clone();
+            move |k, _| {
+                paths.contains(&k.path)
+                    || prefixes
+                        .iter()
+                        .any(|prefix| path_prefix_matches(prefix, &k.path))
+            }
+        });
+    }
+
+    fn notify_entry_deleted(&self, mount: &str, path: &str) {
+        let Some((parent_path, child_name)) = parent_child_for_notify(path) else {
+            return;
+        };
+        let parent_ino = self
+            .path_to_inode
+            .get(&PathKey::new(mount.to_string(), parent_path))
+            .map_or(ROOT_INO, |r| *r.value());
+        if let Some(notifier) = self.notifier.lock().as_ref() {
+            let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(&child_name));
+        }
+    }
+
+    fn notify_dir_changed(&self, mount: &str, path: &str) {
+        let Some(dir_ino) = self
+            .path_to_inode
+            .get(&PathKey::new(mount.to_string(), path.to_string()))
+            .map(|r| *r.value())
+        else {
+            return;
+        };
+        if let Some(notifier) = self.notifier.lock().as_ref() {
+            let _ = notifier.inval_inode(INodeNo(dir_ino), 0, 0);
+        }
+    }
+
+    fn attr_for_kind(&self, ino: u64, kind: &wit_types::EntryKind, size: u64) -> FileAttr {
+        match kind {
+            wit_types::EntryKind::Directory => self.dir_attr(ino),
+            wit_types::EntryKind::File(_) => self.file_attr(ino, size),
+        }
+    }
+
+    pub(crate) fn attr_for_inode_or_meta(
+        &self,
+        ino: u64,
+        fallback_kind: &wit_types::EntryKind,
+        fallback_size: u64,
+    ) -> FileAttr {
+        if let Some(entry) = self.inodes.get(&ino) {
+            return self.attr_for_kind(ino, &entry.kind, entry.size);
+        }
+        self.attr_for_kind(ino, fallback_kind, fallback_size)
+    }
+
+    fn ttl_for_attrs(attrs: Option<&FileAttrsCache>) -> Duration {
+        let Some(attrs) = attrs else {
+            return TTL;
+        };
+        if !matches!(attrs.size, view_types::FileSize::Exact(_))
+            || !matches!(attrs.stability, view_types::Stability::Immutable)
+        {
+            return TTL_DYNAMIC;
+        }
+        TTL
+    }
+
+    pub(crate) fn ttl_for_meta(meta: &EntryMeta) -> Duration {
+        Self::ttl_for_attrs(meta.attrs.as_ref())
+    }
+
+    fn ttl_for_entry(entry: &NodeEntry) -> Duration {
+        Self::ttl_for_attrs(entry.attrs.as_ref())
+    }
+}
+
+pub(crate) fn parent_child_for_notify(path: &str) -> Option<(String, String)> {
+    common::split_parent_leaf(path)
+}

@@ -1,0 +1,261 @@
+//! Shared discovery for configured mounts and provider templates.
+
+use anyhow::{Context, anyhow};
+use omnifs_host::mounts::{Catalog as MountCatalog, Resolved, Spec};
+use omnifs_mount_schema::{AuthManifest, ProviderManifest};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::credential_target::CredentialTarget;
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderCatalog {
+    mounts: MountCatalog,
+    providers_dir: PathBuf,
+}
+
+impl ProviderCatalog {
+    pub(crate) fn new(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
+        let mounts_dir = mounts_dir.as_ref();
+        let providers_dir = providers_dir.as_ref();
+        Self {
+            mounts: MountCatalog::new(mounts_dir, providers_dir),
+            providers_dir: providers_dir.to_path_buf(),
+        }
+    }
+
+    pub(crate) fn mounts_dir(&self) -> &Path {
+        self.mounts.mounts_dir()
+    }
+
+    pub(crate) fn builtin_manifests() -> anyhow::Result<Vec<ProviderManifest>> {
+        Ok(MountCatalog::builtin_manifests()?)
+    }
+
+    pub(crate) fn mount_config_paths(&self) -> anyhow::Result<Vec<PathBuf>> {
+        self.mounts.spec_paths().with_context(|| {
+            format!(
+                "read mount config directory {}",
+                self.mounts_dir().display()
+            )
+        })
+    }
+
+    pub(crate) fn mount_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
+        let mut targets = Vec::new();
+        for path in self.mount_config_paths()? {
+            let Some(name) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+
+            // An unparsable mount is still removable: reset is for nuking
+            // broken state as well as valid configs.
+            let credential = match Spec::from_file(&path) {
+                Ok(spec) => match self.resolve_mount_spec(spec, false) {
+                    Ok(resolved) => CredentialTarget::for_mount(&resolved),
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "unresolvable mount config; will remove the file but cannot drop credentials"
+                        );
+                        CredentialTarget::None
+                    },
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "unparsable mount config; will remove the file but cannot drop credentials"
+                    );
+                    CredentialTarget::None
+                },
+            };
+
+            targets.push(MountRemovalTarget {
+                name,
+                path,
+                credential,
+            });
+        }
+        targets.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(targets)
+    }
+
+    pub(crate) fn load_mount(&self, config_path: &Path) -> anyhow::Result<Resolved> {
+        self.mounts
+            .resolve(config_path)
+            .with_context(|| format!("load mount config {}", config_path.display()))
+    }
+
+    /// Resolve runtime-ready mount, optionally requiring provider metadata.
+    pub(crate) fn resolve_mount_spec(
+        &self,
+        spec: Spec,
+        require_metadata: bool,
+    ) -> anyhow::Result<Resolved> {
+        self.mounts
+            .resolve_spec(spec, require_metadata)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn provider_path(&self, mount: &Resolved) -> PathBuf {
+        self.mounts.provider_path(mount)
+    }
+
+    /// Apply provider metadata to `config`, preferring metadata embedded in the
+    /// provider file on disk and falling back to the built-in catalog when the
+    /// provider is absent or carries no metadata section.
+    pub(crate) fn apply_metadata(&self, spec: &mut Spec) -> anyhow::Result<bool> {
+        self.mounts.apply_metadata(spec).map_err(Into::into)
+    }
+
+    pub(crate) fn auth_manifest_for(
+        &self,
+        mount: &Resolved,
+    ) -> anyhow::Result<Option<AuthManifest>> {
+        self.mounts.auth_manifest_for(mount).map_err(Into::into)
+    }
+
+    pub(crate) fn provider_templates(&self) -> anyhow::Result<BTreeMap<String, ProviderTemplate>> {
+        let mut templates = BTreeMap::new();
+        for manifest in MountCatalog::builtin_manifests()? {
+            let auth_manifest = manifest.wasm_auth_manifest();
+            templates.insert(
+                manifest.id.clone(),
+                ProviderTemplate {
+                    source: ProviderSource::Builtin,
+                    manifest,
+                    auth_manifest,
+                },
+            );
+        }
+
+        let read = match fs::read_dir(&self.providers_dir) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(templates),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read {}", self.providers_dir.display()));
+            },
+        };
+
+        let mut disk_ids = BTreeSet::new();
+        for entry in read {
+            let path = entry
+                .with_context(|| format!("scan {}", self.providers_dir.display()))?
+                .path();
+            if path.extension().is_none_or(|ext| ext != "wasm") {
+                continue;
+            }
+
+            let Some(manifest) = read_provider_metadata_file(&path)? else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("invalid provider file name {}", path.display()))?;
+            if manifest.provider != file_name {
+                anyhow::bail!(
+                    "provider metadata in {} declares provider `{}`, expected `{file_name}`",
+                    path.display(),
+                    manifest.provider
+                );
+            }
+            let id = manifest.id.clone();
+            if !disk_ids.insert(id.clone()) {
+                anyhow::bail!(
+                    "duplicate provider metadata id in {}",
+                    self.providers_dir.display()
+                );
+            }
+            let auth_manifest = manifest.wasm_auth_manifest();
+            templates.insert(
+                id,
+                ProviderTemplate {
+                    source: ProviderSource::Disk(path),
+                    manifest,
+                    auth_manifest,
+                },
+            );
+        }
+        Ok(templates)
+    }
+
+    pub(crate) fn provider_dir_status(&self) -> ProviderDirStatus {
+        let read = match fs::read_dir(&self.providers_dir) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return ProviderDirStatus::Missing;
+            },
+            Err(error) => {
+                return ProviderDirStatus::Unreadable(error.into());
+            },
+        };
+
+        let mut wasm_count = 0;
+        for entry in read {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => return ProviderDirStatus::Unreadable(error.into()),
+            };
+            if entry.path().extension().is_some_and(|ext| ext == "wasm") {
+                wasm_count += 1;
+            }
+        }
+        ProviderDirStatus::Present { wasm_count }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MountRemovalTarget {
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) credential: CredentialTarget,
+}
+
+#[derive(Debug)]
+pub(crate) enum ProviderDirStatus {
+    Missing,
+    Present { wasm_count: usize },
+    Unreadable(anyhow::Error),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderTemplate {
+    pub(crate) source: ProviderSource,
+    pub(crate) manifest: ProviderManifest,
+    pub(crate) auth_manifest: Option<AuthManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderSource {
+    Builtin,
+    Disk(PathBuf),
+}
+
+impl ProviderSource {
+    pub(crate) fn sort_key(&self) -> u8 {
+        match self {
+            Self::Builtin => 0,
+            Self::Disk(_) => 1,
+        }
+    }
+}
+
+fn read_provider_metadata_file(path: &Path) -> anyhow::Result<Option<ProviderManifest>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    omnifs_mount_schema::read_provider_metadata_section(&bytes)
+        .with_context(|| format!("extract provider metadata from {}", path.display()))
+}

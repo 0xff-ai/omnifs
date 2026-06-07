@@ -6,11 +6,12 @@
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::omnifs::provider::types::{Callout, CalloutResult, Header, HttpRequest, HttpResponse};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use core::time::Duration;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpRequest, HttpResponse};
 
 pub struct Builder<'cx, S> {
     cx: &'cx Cx<S>,
@@ -120,6 +121,12 @@ impl<'cx, S> Request<'cx, S> {
         if let Some(error) = self.error {
             return CalloutFuture::ready_error(self.cx, error);
         }
+        // Proactive breaker: if this authority is in an open 429 window,
+        // fast-fail without issuing the callout. This lives at the lowest HTTP
+        // layer so raw `cx.http()` users inherit it, not only typed endpoints.
+        if let Some(error) = self.open_breaker_error() {
+            return CalloutFuture::ready_error(self.cx, error);
+        }
         let wit_request = HttpRequest {
             method: self.method.as_str().to_string(),
             url: self.url,
@@ -130,10 +137,19 @@ impl<'cx, S> Request<'cx, S> {
             self.cx,
             Callout::Fetch(wit_request),
             |result| match result {
-                CalloutResult::HttpResponse(resp) => resp.try_into(),
+                CalloutResult::HttpResponse(resp) => response_from_wit(resp),
                 CalloutResult::CalloutError(e) => Err(e.into()),
                 _ => Err(ProviderError::internal("unexpected callout result type")),
             },
+        )
+    }
+
+    fn open_breaker_error(&self) -> Option<ProviderError> {
+        let authority = crate::rate_limit::authority_of(&self.url)?;
+        let remaining = crate::rate_limit::with_breaker(|b| b.check(&authority))?;
+        Some(
+            ProviderError::rate_limited(format!("endpoint breaker open for {authority}"))
+                .with_retry_after(Some(remaining)),
         )
     }
 
@@ -186,6 +202,11 @@ impl<'cx, S> BlobRequest<'cx, S> {
                 ),
             );
         };
+        // Blob fetches are HTTP callouts too, so the endpoint breaker must
+        // short-circuit before the host starts fetching bytes into the cache.
+        if let Some(error) = self.inner.open_breaker_error() {
+            return CalloutFuture::ready_error(self.inner.cx, error);
+        }
         let callout = crate::blob::blob_fetch_callout(
             self.inner.method.as_str().to_string(),
             self.inner.url,
@@ -216,28 +237,24 @@ impl From<WitHeaders<'_>> for Vec<Header> {
     }
 }
 
-impl TryFrom<HttpResponse> for Response<Vec<u8>> {
-    type Error = ProviderError;
-
-    fn try_from(resp: HttpResponse) -> std::result::Result<Self, Self::Error> {
-        let status = StatusCode::from_u16(resp.status)
-            .map_err(|e| ProviderError::internal(format!("invalid response status: {e}")))?;
-        let mut builder = Response::builder().status(status);
-        // Drop malformed headers from the host rather than fail the whole
-        // response; status and body are the load-bearing fields.
-        for hdr in &resp.headers {
-            let (Ok(name), Ok(value)) = (
-                HeaderName::try_from(&hdr.name),
-                HeaderValue::try_from(&hdr.value),
-            ) else {
-                continue;
-            };
-            builder = builder.header(name, value);
-        }
-        builder
-            .body(resp.body)
-            .map_err(|e| ProviderError::internal(format!("response builder: {e}")))
+fn response_from_wit(resp: HttpResponse) -> Result<Response<Vec<u8>>> {
+    let status = StatusCode::from_u16(resp.status)
+        .map_err(|e| ProviderError::internal(format!("invalid response status: {e}")))?;
+    let mut builder = Response::builder().status(status);
+    // Drop malformed headers from the host rather than fail the whole
+    // response; status and body are the load-bearing fields.
+    for hdr in &resp.headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::try_from(&hdr.name),
+            HeaderValue::try_from(&hdr.value),
+        ) else {
+            continue;
+        };
+        builder = builder.header(name, value);
     }
+    builder
+        .body(resp.body)
+        .map_err(|e| ProviderError::internal(format!("response builder: {e}")))
 }
 
 /// Default 4xx/5xx mapping to `ProviderError`.
@@ -279,7 +296,13 @@ fn status_error(resp: &Response<Vec<u8>>) -> ProviderError {
         Some(value) => format!("HTTP 429; retry_after={value}"),
         None => "HTTP 429".to_string(),
     };
-    ProviderError::rate_limited(message)
+    // `Retry-After` is either delta-seconds or an HTTP-date. Honor the common
+    // delta-seconds form as structured backoff; an HTTP-date stays in the
+    // human-readable message only (no guest wall-clock math on the error path).
+    let retry_after_secs = retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    ProviderError::rate_limited(message).with_retry_after(retry_after_secs)
 }
 
 pub enum CalloutFuture<'cx, S, T> {
@@ -344,6 +367,7 @@ impl<S, T> Future for CalloutFuture<'_, S, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProviderErrorKind;
     use core::task::Waker;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -470,6 +494,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_http_send_fast_fails_when_breaker_open() {
+        crate::rate_limit::with_breaker(|b| {
+            b.clear();
+            b.record_429("https://raw.test", Some(Duration::from_secs(30)));
+        });
+
+        let state = Rc::new(RefCell::new(()));
+        let cx = Cx::new(1, state);
+        let mut fut = Box::pin(cx.http().get("https://raw.test/x").send());
+
+        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
+            panic!("expected open breaker to fail immediately");
+        };
+
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+        assert!(
+            cx.take_yielded_callouts().is_empty(),
+            "open breaker must not issue a fetch callout"
+        );
+
+        crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
+    }
+
+    #[test]
     fn response_ext_maps_429_to_retryable_rate_limit() {
         let resp = Response::builder()
             .status(429)
@@ -482,6 +530,20 @@ mod tests {
         assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
         assert!(error.is_retryable());
         assert_eq!(error.message(), "HTTP 429; retry_after=3");
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn rate_limit_without_retry_after_has_no_structured_hint() {
+        let resp = Response::builder()
+            .status(429)
+            .body(Vec::new())
+            .expect("response builder");
+
+        let error = resp.error_for_status_ref().unwrap_err();
+
+        assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
+        assert_eq!(error.retry_after(), None);
     }
 }
 

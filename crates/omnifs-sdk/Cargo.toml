@@ -10,12 +10,14 @@ categories = ["filesystem", "wasm", "development-tools"]
 keywords = ["omnifs", "wasm", "wit", "sdk", "fuse"]
 
 [dependencies]
+omnifs-core = { workspace = true }
 omnifs-mount-schema = { workspace = true }
 omnifs-sdk-macros = { workspace = true }
-wit-bindgen = "0.41"
+omnifs-wit = { workspace = true }
 lru = "0.16"
 hashbrown = { workspace = true }
 http = { workspace = true }
+mime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 postcard = { workspace = true }

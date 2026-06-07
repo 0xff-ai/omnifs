@@ -3,7 +3,7 @@
 use crate::cx::Cx;
 use crate::error::ProviderError;
 use crate::http::CalloutFuture;
-use crate::omnifs::provider::types::{Callout, CalloutResult, GitOpenRequest, GitRepoInfo};
+use omnifs_wit::provider::types::{Callout, CalloutResult, GitOpenRequest, GitRepoInfo};
 
 pub struct Builder<'cx, S> {
     cx: &'cx Cx<S>,

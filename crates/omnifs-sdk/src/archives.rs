@@ -12,7 +12,7 @@ use crate::cx::Cx;
 use crate::error::ProviderError;
 use crate::handler::TreeRef;
 use crate::http::CalloutFuture;
-use crate::omnifs::provider::types::{
+use omnifs_wit::provider::types::{
     ArchiveFormat as WitArchiveFormat, ArchiveOpenRequest, Callout, CalloutResult,
 };
 

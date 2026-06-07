@@ -27,7 +27,7 @@ if [[ -o interactive ]]; then
     print "Try these paths:"
     print
     print -P "  %F{8}# clone any repo just by listing it%f"
-    print -P "  %F{7}\$ ls /github/0xff-ai/omnifs/_repo%f"
+    print -P "  %F{7}\$ ls /github/0xff-ai/omnifs/repo%f"
     print
     print -P "  %F{8}# resolve any DNS records by catting%f"
     print -P "  %F{7}\$ cat /dns/openai.com/TXT%f"

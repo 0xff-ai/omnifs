@@ -1,6 +1,7 @@
 //! In-memory credential store. Intended for use in tests only.
 
-use crate::{CredentialEntry, CredentialId, CredentialStore, StoreError};
+use crate::{CredentialEntry, CredentialStore, StoreError};
+use omnifs_core::CredentialId;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 

@@ -12,7 +12,7 @@ mod auth_resolve;
 mod auth_wire;
 mod config;
 mod manifest;
-mod path_pattern;
+mod mount_config;
 mod records;
 mod resolve;
 mod runtime_grants;
@@ -31,14 +31,18 @@ pub use manifest::{
     AuthInject, CapabilityEntry, ManifestAuthScheme, ManifestOAuthFlow, ManifestOauthScheme,
     ManifestStaticTokenScheme, ProviderAuthManifest, ProviderManifest, TokenValidation,
 };
-pub use path_pattern::{PathPattern, PathSegment, PatternError, split_path};
+pub use mount_config::{
+    Auth, AuthKind, OAuth, ProviderConfig, StaticToken, deserialize_auth as deserialize_mount_auth,
+};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
     TAG_SUBTREE_ROUTE, encode_handler, encode_mutation, encode_subtree_route, frame_record,
 };
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
-pub use runtime_grants::{PreopenMode, PreopenedPath, ProviderCapabilities};
+pub use runtime_grants::{
+    PreopenMode, PreopenedPath, ProviderCapabilities, UnixSocketEndpointError,
+};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
     ProviderMetadataError, provider_manifest_json, read_manifest_section,
