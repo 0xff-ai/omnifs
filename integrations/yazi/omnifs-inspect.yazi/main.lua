@@ -1,77 +1,71 @@
---- omnifs-inspect.yazi — native Yazi previewer for the omnifs inspector stream.
+--- omnifs-inspect.yazi — live native Yazi previewer for the omnifs inspector.
 ---
---- Renders the omnifs inspector JSONL (the exact records the daemon serves on
---- its :7878 socket) as correlated per-operation traces, grouped by FUSE
---- `trace_id`, using Yazi's own widgets. No host/Rust changes: this is a pure
---- consumer of the existing inspect protocol.
+--- Renders the omnifs inspector stream as correlated, per-operation traces
+--- grouped by FUSE `trace_id`, drawn with Yazi's own widgets and refreshed in
+--- place. It is a pure consumer of the existing inspect protocol: each refresh
+--- shells out to `omnifs inspect --dump` for a one-shot snapshot of the
+--- daemon's history ring (the same records served on the :7878 socket).
 ---
---- This is a proof of concept: traces only, no cache viewer.
+--- Traces only — there is deliberately no cache viewer.
 ---
---- ── Try it (inside the omnifs container) ───────────────────────────────────
----   # 1. Tee the live inspector stream to a file (history snapshot + live):
----   bash -c 'exec 3<>/dev/tcp/127.0.0.1/7878; cat <&3 > /tmp/omnifs-inspect.jsonl &'
----   # 2. Generate some traffic so there is something to trace:
----   ls /github/torvalds; cat /dns/cloudflare.com/A
----   # 3. Open Yazi and hover the file:
----   yazi /tmp        # move the cursor onto omnifs-inspect.jsonl
+--- The previewer ignores the hovered file's contents; the file is only a
+--- trigger. `omnifs features add yazi` installs this plugin, registers the
+--- previewer, and drops a sentinel `*.omnifs-inspect` file to hover.
 ---
---- ── Install ────────────────────────────────────────────────────────────────
----   cp -r omnifs-inspect.yazi ~/.config/yazi/plugins/
---- Register the previewer in ~/.config/yazi/yazi.toml:
----   [plugin]
----   prepend_previewers = [
----     { name = "*omnifs-inspect*.jsonl", run = "omnifs-inspect" },
----   ]
----
---- Requires `jq` on PATH (the same dependency as Yazi's built-in json previewer).
+--- Requires the `omnifs` CLI on PATH (the inspector socket is published to the
+--- host by `omnifs up` / `omnifs dev`, so this works host-side too).
 
 local M = {}
 
--- jq projection: one TSV row per inspector record. Columns:
---   1 seq  2 trace_id  3 type  4 a  5 b  6 elapsed_us  7 outcome
---   8 op_id  9 provider  10 mount
--- `a`/`b` pick the most useful context field per event variant; @tsv renders
--- missing fields (null) as empty strings.
-local JQ = [[
-[ .seq, .trace_id, .event.type,
-  (.event.op // .event.method // .event.kind),
-  (.event.path // .event.summary // .event.remote // .event.tree_ref),
-  .event.elapsed_us, .event.outcome, .event.operation_id,
-  .event.provider, .event.mount ] | @tsv
-]]
-
 local DIM = "#808080"
 local MAX_TRACES = 60
+-- Seconds between in-place refreshes while the file stays hovered.
+local REFRESH = 1.5
 
--- Tab split that preserves trailing empty fields (Lua patterns drop them).
-local function split_tab(s)
-	local cols, start = {}, 1
-	while true do
-		local i = string.find(s, "\t", start, true)
-		if not i then
-			cols[#cols + 1] = string.sub(s, start)
-			return cols
-		end
-		cols[#cols + 1] = string.sub(s, start, i - 1)
-		start = i + 1
+local function fstr(line, key)
+	return line:match('"' .. key .. '":"([^"]*)"') or ""
+end
+
+local function fnum(line, key)
+	return line:match('"' .. key .. '":(%-?%d+)')
+end
+
+-- Extract the fields we render from one raw inspector JSONL record. Keys are
+-- unique across the envelope and the flattened event, so anchored matches are
+-- unambiguous. Returns nil for lines without an event type.
+local function parse(line)
+	local typ = fstr(line, "type")
+	if typ == "" then
+		return nil
 	end
+	local op, method, kind = fstr(line, "op"), fstr(line, "method"), fstr(line, "kind")
+	local path, summary = fstr(line, "path"), fstr(line, "summary")
+	local remote, tree_ref = fstr(line, "remote"), fstr(line, "tree_ref")
+	return {
+		trace_id = fnum(line, "trace_id") or "?",
+		typ = typ,
+		a = (op ~= "" and op) or (method ~= "" and method) or kind,
+		b = (path ~= "" and path) or (summary ~= "" and summary) or (remote ~= "" and remote) or tree_ref,
+		elapsed = fnum(line, "elapsed_us"),
+		outcome = fstr(line, "outcome"),
+		provider = fstr(line, "provider"),
+	}
 end
 
 local function fmt_elapsed(us)
 	local n = tonumber(us)
 	if not n then
 		return ""
-	end
-	if n >= 1000 then
+	elseif n >= 1000 then
 		return string.format("%.1fms", n / 1000)
 	end
 	return string.format("%dµs", n)
 end
 
-local function indent_for(t)
-	if t == "callout.start" or t == "callout.end" or t == "cache.event" then
+local function indent_for(typ)
+	if typ == "callout.start" or typ == "callout.end" or typ == "cache.event" then
 		return 4
-	elseif t == "fuse.start" or t == "fuse.end" then
+	elseif typ == "fuse.start" or typ == "fuse.end" then
 		return 0
 	end
 	return 2
@@ -81,57 +75,56 @@ local function outcome_span(oc)
 	return ui.Span("  " .. oc):fg(oc == "ok" and "green" or "red")
 end
 
--- Header line for one trace: the FUSE op + path, with its outcome/elapsed.
+-- Bold header for one trace: the FUSE op + path, with its outcome/elapsed.
 local function header_line(trace_id, fstart, fend)
-	local op = (fstart and fstart[4] ~= "" and fstart[4]) or "?"
+	local op = (fstart and fstart.a ~= "" and fstart.a) or "?"
 	local spans = {
 		ui.Span("● "):fg("blue"),
 		ui.Span("trace " .. trace_id .. "  "):fg(DIM),
 		ui.Span(op):bold(),
 	}
-	if fstart and fstart[5] ~= "" then
-		spans[#spans + 1] = ui.Span("  " .. fstart[5])
+	if fstart and fstart.b ~= "" then
+		spans[#spans + 1] = ui.Span("  " .. fstart.b)
 	end
 	if fend then
-		local el = fmt_elapsed(fend[6])
+		local el = fmt_elapsed(fend.elapsed)
 		if el ~= "" then
 			spans[#spans + 1] = ui.Span("  " .. el):fg(DIM)
 		end
-		if fend[7] ~= "" then
-			spans[#spans + 1] = outcome_span(fend[7])
+		if fend.outcome ~= "" then
+			spans[#spans + 1] = outcome_span(fend.outcome)
 		end
 	end
 	return ui.Line(spans)
 end
 
 -- Indented detail line for a provider/callout/cache/clone/subtree record.
-local function detail_line(c)
-	local t, a, b, provider = c[3], c[4], c[5], c[9]
+local function detail_line(r)
 	local label
-	if t:find("^provider") then
-		label = (provider ~= "" and provider or "provider") .. (a ~= "" and ("." .. a) or "")
-	elseif t:find("^callout") then
-		label = "callout " .. a
-	elseif t:find("^cache") then
-		label = "cache " .. a
-	elseif t:find("^clone") then
+	if r.typ:find("^provider") then
+		label = (r.provider ~= "" and r.provider or "provider") .. (r.a ~= "" and ("." .. r.a) or "")
+	elseif r.typ:find("^callout") then
+		label = "callout " .. r.a
+	elseif r.typ:find("^cache") then
+		label = "cache " .. r.a
+	elseif r.typ:find("^clone") then
 		label = "clone"
-	elseif t:find("^subtree") then
+	elseif r.typ:find("^subtree") then
 		label = "subtree"
 	else
-		label = t
+		label = r.typ
 	end
 
-	local spans = { ui.Span(string.rep(" ", indent_for(t))), ui.Span(label):fg("cyan") }
-	if b ~= "" then
-		spans[#spans + 1] = ui.Span("  " .. b)
+	local spans = { ui.Span(string.rep(" ", indent_for(r.typ))), ui.Span(label):fg("cyan") }
+	if r.b ~= "" then
+		spans[#spans + 1] = ui.Span("  " .. r.b)
 	end
-	local el = fmt_elapsed(c[6])
+	local el = fmt_elapsed(r.elapsed)
 	if el ~= "" then
 		spans[#spans + 1] = ui.Span("  " .. el):fg(DIM)
 	end
-	if c[7] ~= "" then
-		spans[#spans + 1] = outcome_span(c[7])
+	if r.outcome ~= "" then
+		spans[#spans + 1] = outcome_span(r.outcome)
 	end
 	return ui.Line(spans)
 end
@@ -140,32 +133,21 @@ local function msg(job, text, color)
 	ya.preview_widget(job, ui.Text({ ui.Line({ ui.Span(text):fg(color or DIM) }) }):area(job.area))
 end
 
-function M:peek(job)
-	local out, err = Command("jq")
-		:arg({ "-r", JQ, tostring(job.file.path) })
-		:stdout(Command.PIPED)
-		:stderr(Command.PIPED)
-		:output()
-
-	if not out then
-		return msg(job, "omnifs-inspect: jq failed to run: " .. tostring(err), "red")
-	end
-
-	-- Group rows by trace_id, preserving first-seen (seq) order within a trace.
+-- Group parsed rows into trace blocks and render newest-first.
+local function render(job, jsonl)
 	local order, groups = {}, {}
-	for line in (out.stdout or ""):gmatch("[^\n]+") do
-		local c = split_tab(line)
-		if #c >= 10 then
-			local id = c[2]
-			if not groups[id] then
-				groups[id] = {}
-				order[#order + 1] = id
+	for line in jsonl:gmatch("[^\n]+") do
+		local r = parse(line)
+		if r then
+			if not groups[r.trace_id] then
+				groups[r.trace_id] = {}
+				order[#order + 1] = r.trace_id
 			end
-			groups[id][#groups[id] + 1] = c
+			local g = groups[r.trace_id]
+			g[#g + 1] = r
 		end
 	end
 
-	-- Render newest traces first; cap so the preview stays snappy.
 	local lines, shown = {}, 0
 	for i = #order, 1, -1 do
 		if shown >= MAX_TRACES then
@@ -173,17 +155,17 @@ function M:peek(job)
 		end
 		local rows = groups[order[i]]
 		local fstart, fend
-		for _, c in ipairs(rows) do
-			if c[3] == "fuse.start" then
-				fstart = c
-			elseif c[3] == "fuse.end" then
-				fend = c
+		for _, r in ipairs(rows) do
+			if r.typ == "fuse.start" then
+				fstart = r
+			elseif r.typ == "fuse.end" then
+				fend = r
 			end
 		end
 		lines[#lines + 1] = header_line(order[i], fstart, fend)
-		for _, c in ipairs(rows) do
-			if c[3] ~= "fuse.start" and c[3] ~= "fuse.end" then
-				lines[#lines + 1] = detail_line(c)
+		for _, r in ipairs(rows) do
+			if r.typ ~= "fuse.start" and r.typ ~= "fuse.end" then
+				lines[#lines + 1] = detail_line(r)
 			end
 		end
 		lines[#lines + 1] = ui.Line("")
@@ -191,16 +173,38 @@ function M:peek(job)
 	end
 
 	if #lines == 0 then
-		local hint = (out.stderr ~= "" and out.stderr) or "no inspector records in this file"
-		return msg(job, "omnifs-inspect: " .. hint)
+		return msg(job, "omnifs-inspect: no inspector records yet (is the daemon busy?)")
 	end
 
-	-- Apply the scroll offset maintained by seek().
 	local view, skip = {}, job.skip or 0
 	for i = skip + 1, #lines do
 		view[#view + 1] = lines[i]
 	end
 	ya.preview_widget(job, ui.Text(view):area(job.area))
+end
+
+function M:peek(job)
+	local out, err = Command("omnifs")
+		:arg({ "inspect", "--dump" })
+		:stdout(Command.PIPED)
+		:stderr(Command.PIPED)
+		:output()
+
+	if not out then
+		msg(job, "omnifs-inspect: cannot run `omnifs inspect --dump`: " .. tostring(err), "red")
+	elseif (out.stdout or "") == "" then
+		local hint = out.stderr ~= "" and out.stderr:gsub("%s+$", "")
+			or "no inspector reachable (try `omnifs up` or `omnifs dev`)"
+		msg(job, "omnifs-inspect: " .. hint, "red")
+	else
+		render(job, out.stdout)
+	end
+
+	-- Refresh in place: re-trigger this preview after a beat. `only_if`
+	-- makes it a no-op once the cursor moves off the file, and the sleep
+	-- is the cancellation point when navigating away.
+	ya.sleep(REFRESH)
+	ya.emit("peek", { job.skip or 0, only_if = job.file.url })
 end
 
 function M:seek(job)

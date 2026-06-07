@@ -37,10 +37,23 @@ pub struct InspectArgs {
     /// Print raw JSONL instead of the ratatui canvas.
     #[arg(long)]
     pub plain: bool,
+
+    /// Print a one-shot snapshot of the inspector history (the server's
+    /// replayed ring buffer plus any live events that arrive before the
+    /// stream goes briefly idle), then exit. Unlike `--plain` this never
+    /// follows or reconnects. Intended for tooling, e.g. the Yazi previewer.
+    #[arg(long)]
+    pub dump: bool,
 }
 
 impl InspectArgs {
     pub async fn run(self) -> anyhow::Result<()> {
+        if self.dump {
+            let addr = default_inspector_addr();
+            return tokio::task::spawn_blocking(move || socket_dump(addr))
+                .await
+                .context("inspector dump task")?;
+        }
         if self.plain {
             return self.run_plain().await;
         }
@@ -96,6 +109,52 @@ impl InspectArgs {
 const PLAIN_WAITING_ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
 /// Re-announce cadence while still waiting on a never-reached peer.
 const PLAIN_WAITING_REMIND_EVERY: Duration = Duration::from_secs(15);
+
+/// Idle gap that ends a `--dump` snapshot: once the socket has been
+/// quiet this long, the server's history burst is assumed drained.
+const DUMP_IDLE_GAP: Duration = Duration::from_millis(250);
+/// Hard cap on a `--dump` snapshot, so a continuously busy stream still
+/// terminates promptly.
+const DUMP_MAX: Duration = Duration::from_secs(2);
+
+/// Connect once, forward the history snapshot (and any immediately
+/// available live lines) to stdout as raw JSONL, then exit. Does not
+/// reconnect. The read timeout doubles as the "history drained" signal.
+fn socket_dump(addr: SocketAddr) -> anyhow::Result<()> {
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+        .with_context(|| format!("connect to inspector at {addr}"))?;
+    stream
+        .set_read_timeout(Some(DUMP_IDLE_GAP))
+        .context("set inspector read timeout")?;
+
+    let start = Instant::now();
+    let mut reader = BufReader::new(stream);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // server closed the connection
+            Ok(_) => out.write_all(line.as_bytes())?,
+            // A timeout is the normal terminator: the burst has gone idle.
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            },
+            Err(e) => return Err(e).context("read inspector stream"),
+        }
+        if start.elapsed() > DUMP_MAX {
+            break;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
 
 /// Plain-mode driver: connect to the TCP socket, forward each line
 /// to stdout (formatted on parse, raw on parse-failure), and

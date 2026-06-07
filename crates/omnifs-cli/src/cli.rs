@@ -57,6 +57,9 @@ pub enum Commands {
     /// Interactive setup for a new mount.
     Init(commands::init::InitArgs),
 
+    /// Install host-side integrations (e.g. the Yazi inspector previewer).
+    Features(commands::features::FeaturesArgs),
+
     /// Manage configured mounts.
     Mounts(commands::mounts::MountsArgs),
 
@@ -95,6 +98,7 @@ impl Commands {
             Self::Auth(args) => args.run().await,
             Self::Setup(args) => args.run().await,
             Self::Init(args) => args.run().await,
+            Self::Features(args) => args.run(),
             Self::Up(args) => args.run().await,
             Self::Dev(args) => args.run().await,
             Self::Down(args) => args.run().await,

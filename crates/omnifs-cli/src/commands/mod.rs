@@ -5,6 +5,7 @@ pub mod debug;
 pub mod dev;
 pub mod doctor;
 pub mod down;
+pub mod features;
 pub mod init;
 pub mod inspect;
 pub mod logs;
