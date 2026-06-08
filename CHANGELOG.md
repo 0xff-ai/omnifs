@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Object-shaped provider routing and host-owned object/view caching now back the current provider surfaces. Providers can store canonical upstream bytes and render multiple filesystem leaves from the same object, so repeated reads of related fields can be served from host cache instead of refetching the upstream service.
+- `~/.omnifs/config.toml` is now the normal user-authored configuration surface for mounts. `omnifs init` writes inline `[[mounts]]` entries, and mount discovery still reads legacy per-mount JSON files so existing setups continue to load.
+- The public README is rewritten for launch around the shipped alpha surface: six live providers, the npm + runtime-container install path, Linux FUSE caveat, host-mediated provider authority, and the read-only roadmap boundary.
+
+### Changed
+
+- Provider paths now use plain resource names instead of underscore-prefixed control names. GitHub exposes `repo`, `issues`, `pulls`, and `actions`; filters are `open` and `all`; DNS exposes `resolvers`, `reverse`, `all`, and `raw`; Docker exposes `/containers.json`, `/compose.json`, and `{by-name,by-id,running,stopped}` under `/containers`.
+- Built-in providers have been rewritten against the current SDK registration model, removing migration-era provider boilerplate while preserving the shipped GitHub, DNS, arXiv, Docker, Linear, and SQLite path surfaces.
+- The default credential backend is now the private `credentials.json` file. The keychain backend remains available through `OMNIFS_CREDS_BACKEND=keychain`, but normal startup, auth, and runtime refresh paths no longer trigger platform keychain prompts by default.
+
+### Fixed
+
+- CI host-test Wasmtime cache restore now uses stable OS/architecture restore keys with per-run write keys, improving cache reuse between push and pull-request runs without depending on synthetic merge SHAs.
+
 ## [0.2.0-dev.2] - 2026-05-28
 
 ### Added

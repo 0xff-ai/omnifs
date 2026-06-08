@@ -1,18 +1,18 @@
 <div align="center">
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/43af533a-4db1-46f5-a7b5-bbcb75be0786" width="960" alt="omnifs">
+  <img src="https://github.com/user-attachments/assets/3b04a33c-2155-44a1-ba3a-6a285a89f215" width="960" alt="omnifs">
 </p>
 
 <h1 align="center"><b>omnifs</b></h1>
-<h4 align="center">the universe, mounted on your filesystem.</h4>
-<p align="center"><a href="#quickstart">Quickstart</a> | <a href="#explore">Examples</a> | <a href="#providers">Providers</a></p>
+<h4 align="center">open a path, read the world.</h4>
+<p align="center"><a href="https://omnifs.dev">Website</a> | <a href="https://omnifs.dev/start">Docs</a> | <a href="#quickstart">Quickstart</a> | <a href="#what-you-can-read">What you can read</a> | <a href="#providers">Providers</a> | <a href="#how-it-works">How it works</a></p>
 </div>
 
-omnifs mirrors the entire world into your local filesystem. GitHub repos, Hugging Face models, Kubernetes clusters, Slack channels, arXiv papers, and more as paths you can `cd`, `ls`, `cat`, and `grep`.
+omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv, Docker, Linear, and SQLite become directories and files you can `cd`, `ls`, `cat`, `grep`, `find`, `jq`, and script against.
 
-Plan 9 was right, just 40 years early. Everything is a file. The world moved to APIs; omnifs moves it back to paths, for humans and agents alike.
+The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> _🚧 very alpha!_
+> Alpha status: omnifs is real and usable, but the read surface is still early. The Linux FUSE mount runs inside the runtime container on macOS and Windows today; native host mounts are future work.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -22,104 +22,84 @@ Plan 9 was right, just 40 years early. Everything is a file. The world moved to 
 
 ### Prerequisites
 
-- Node.js and npm for the packaged CLI path
-- Docker on Linux, or Docker Desktop on macOS
-- SSH agent running with a GitHub key loaded if you want repo clone paths under `/github`
+- Node.js and npm for the packaged CLI.
+- Docker on Linux, or Docker Desktop on macOS.
+- A running SSH agent with a GitHub key loaded if you want GitHub repo trees under `/github/{owner}/{repo}/repo`.
 
-### CLI-managed container
-
-The normal user flow is owned by the `omnifs` CLI. The CLI stores credentials on the host, generates thin mount configs under `~/.omnifs/config/mounts`, starts the runtime container, and opens a shell into it.
+### Install and start
 
 ```bash
 npm install -g @0xff-ai/omnifs
+omnifs setup
+omnifs up
+omnifs shell
+```
+
+`omnifs setup` walks through provider selection and auth. For a direct, scriptable path, initialize providers one at a time:
+
+```bash
 omnifs init github
-omnifs init linear
+omnifs init dns
 omnifs status
 omnifs up
 omnifs shell
 ```
 
-GitHub uses device-code OAuth with the bundled public client id and no default write scopes. Linear uses browser PKCE OAuth with the bundled public client id and `read` scope. You do not need to edit configs, copy provider wasm into `~/.omnifs/data/providers`, or set OAuth client id environment variables for the bundled providers. `omnifs up` uses the version-matched runtime image unless you override it with `--image` or `OMNIFS_IMAGE`.
+The npm package installs only the host CLI. It does not pull the runtime image during `npm install`; `omnifs up` pulls the version-matched image and starts the container. Inside the container the filesystem is mounted at `/omnifs`, with provider-root symlinks such as `/github`, `/dns`, and `/arxiv` for convenience.
 
-The npm package installs only the native host CLI. It does not pull the Docker image during install; `omnifs up` pulls and starts the matching runtime image. On macOS, the mount is available inside the Docker Desktop Linux container through `omnifs shell`, not as a native Finder or host-shell mount.
+User mount configuration lives in `~/.omnifs/config.toml`. Credentials are stored by default in `~/.omnifs/data/credentials.json` with private file permissions; set `OMNIFS_CREDS_BACKEND=keychain` if you want to opt into the OS keychain backend.
 
-Use `omnifs logs`, `omnifs logs -f`, and `omnifs down` to inspect and stop the container.
-
-### Contributor sandbox
-
-`omnifs dev` is the development workflow for this repo. It captures your `gh` token, fetches the Chinook SQLite fixture, builds the image tagged at the current commit, synthesizes dev mount configs from the built-in provider manifests, and launches the container directly:
+Useful commands:
 
 ```bash
-# Clone the repo
-git clone https://github.com/0xff-ai/omnifs
-cd omnifs
-
-# Build, materialize, and start the dev container
-omnifs dev
-omnifs shell
+omnifs status      # runtime, mount, and auth state
+omnifs logs -f     # follow container and daemon logs
+omnifs inspect     # live TUI of FUSE, provider, cache, and callout activity
+omnifs down        # stop the container and clean up the session
 ```
 
-`-y` skips the session confirmation prompt.
+## What you can read
 
-### Explore
+Once you are in `omnifs shell`, use normal shell tools.
 
 ```bash
-#####################
-## GitHub as files
-###################
+# GitHub
+cd /github/ollama/ollama
+ls
+cat issues/open/12959/title
+cat pulls/open/1234/diff
+cd repo && ls
 
-# List repos in user/org
-> cd /github/torvalds
-> ls
-1590A       GuitarPedal       libdc-for-dirk  linux       subsurface-for-dirk  uemacs
-AudioNoise  HunspellColorize  libgit2         pesconvert  test-tlb
+# DNS
+cat /dns/cloudflare.com/A
+cat /dns/@google/google.com/AAAA
+cat /dns/reverse/1.1.1.1
 
-# cd into a repo
-> cd /github/ollama/ollama
-> ls
-actions  issues  pulls  repo
+# arXiv
+ls /arxiv/papers/1706.03762
+cat /arxiv/papers/1706.03762/@latest/paper.json | jq .title
 
-# clone the repo just by listing it
-> cd /github/ollama/ollama/repo
-> ls
-CMakeLists.txt     Makefile.sync  cmd        go.mod       llm         openai    server     x
-CMakePresets.json  README.md      convert    go.sum       logutil     parser    template
-CONTRIBUTING.md    SECURITY.md    discover   harmony      main.go     progress  thinking
-[...]
+# Docker
+cat /docker/system/version.json | jq .
+cat /docker/containers.json | jq .
+ls /docker/containers/running
 
-# list open issues
-> cd /github/ollama/ollama/issues/open
-> ls
-10333  10928  11381  11743  12138  12539  12959  13399  13879  14239  14621  15087  15398
-10337  10929  11384  11746  12148  12541  12963  13401  13883  14243  14628  15091  15400
+# Linear
+ls /linear/teams
+cat /linear/teams/ENG/issues/open/ENG-123/title
 
-## ... and a lot more! play the video above for a walkthrough
-
-###################
-## DNS as files
-###################
-
-> cd /dns/cloudflare.com
-> ls
-A  AAAA  CAA  CNAME  MX  NS  SOA  SRV  TXT  all  raw
-> cat A
-104.16.133.229
-> cat /dns/@8.8.8.8/google.com/AAAA
-2a00:1450:4003:804::200e
-> cat /dns/reverse/1.1.1.1
-one.one.one.one.
-
-## poke around!
+# SQLite
+ls /db/tables
+cat /db/tables/Album/schema.sql
+cat /db/tables/Album/sample.json | jq .
 ```
 
-Use `omnifs logs` (`-f` to follow) and `omnifs down` to inspect and stop the dev container.
+Repository trees are cloned on demand over SSH when you enter `repo/`. omnifs forwards your SSH agent socket into the container; it does not copy your private key.
 
 <details>
 <summary>SSH agent troubleshooting</summary>
 
-omnifs clones repos over SSH inside the container using your forwarded agent socket. This does not copy your private key into the container, but it does let the container ask your agent to sign while the socket is mounted.
-
-Verify your setup:
+Check the host before opening repo tree paths:
 
 ```bash
 echo "$SSH_AUTH_SOCK"
@@ -129,118 +109,146 @@ ssh -T git@github.com
 
 </details>
 
-## For agents
+## Why paths
 
-Agents should not have to deal with APIs. If you can read a file, you can read the world. No SDK to install, no authentication flow to implement, no pagination to manage. Just open a path and read. Write files, commit, push to sync back. The filesystem is the universal API.
+APIs are good boundaries for applications. They are a bad default interface for every script, terminal session, CI job, editor, and agent that only needs to read state.
 
-## How it works
+omnifs makes the path the interface:
 
-omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The architecture has three layers:
-
-```
-                                                                      ┌────────────────┐
-┌──────────────┐            ┌────────────────────────────┐            │ github.wasm    ├──▶ GitHub
-│  your shell  │    FUSE    │         omnifs host        │  callouts  │ linear.wasm    ├──▶ Linear
-│  or agent    │ ◀──────▶   │  /github  /linear  /arxiv  │ ◀-──────▶  │ arxiv.wasm     ├──▶ arXiv
-│              │   files    │             ...            │            │ ...            ├──▶ ...
-└──────────────┘            └────────────────────────────┘            │                │
-                                                                      └────────────────┘
+```text
+/github/ollama/ollama/issues/open/12959/title
+/docker/containers/running/{name}/state
+/arxiv/papers/1706.03762/@latest/paper.json
+/dns/cloudflare.com/TXT
 ```
 
-**Wasm providers** are WebAssembly components. Each provider projects a domain (GitHub, Linear, S3, whatever) into the filesystem namespace. Drop a `.wasm` into `~/.omnifs/data/providers/` and it mounts.
+That gives existing tools a common substrate. `grep -r`, `find`, `jq`, `tar`, `diff`, `head`, `tail`, and editors can all operate without provider-specific clients. Agents get the same benefit: open a path and read bytes.
 
-**Callout runtime** means providers never touch the network or Git directly. They describe what they need ("fetch this API endpoint", "clone this repo"), and the host executes. This keeps providers sandboxed and lets the host manage caching, rate limits, and concurrency.
-
-**Git-backed reconciliation (WIP)** means writes work through Git. Edit files in a transaction directory, then rename it to `commit/` to execute. The provider translates that into API calls. Everything stays auditable, revertible, and familiar.
+The current surface is read-only. Write-back is designed around explicit staged transactions, but projected issue, PR, container, and DNS files are not directly writable today.
 
 ## Providers
 
-| Provider   | Mount     | Description                                                              |
-| ---------- | --------- | ------------------------------------------------------------------------ |
-| **GitHub** | `/github` | Browse repos, issues, PRs, CI runs, and diffs as files                   |
-| **DNS**    | `/dns`    | Query DNS records via DNS-over-HTTPS                                     |
-| **arXiv**  | `/arxiv`  | Browse arXiv papers by id, category, author, or search; PDFs and source |
+| Provider | Mount | What it projects |
+| --- | --- | --- |
+| GitHub | `/github` | Users, orgs, repos, issues, pull requests, Actions runs, diffs, and repo trees cloned on demand |
+| DNS | `/dns` | DNS-over-HTTPS records, resolver-scoped queries, raw answers, and reverse lookups |
+| arXiv | `/arxiv` | Paper version families, PDFs, source archives, metadata, and category paper listings |
+| Docker | `/docker` | Docker daemon system state, container listings, per-container inspect output, state, and summaries |
+| Linear | `/linear` | Teams and issues, with title, state, priority, assignee, and description files |
+| SQLite | `/db` | Read-only SQLite metadata, table schemas, indexes, row counts, and samples |
 
-### GitHub (`/github`)
+### GitHub
 
-| Path                                                       | Content                                         |
-| ---------------------------------------------------------- | ----------------------------------------------- |
-| `/github/{owner}`                                          | List repos for a user or org                    |
-| `/github/{owner}/{repo}/repo/`                            | Browse the repo tree (cloned on demand via SSH) |
-| `/github/{owner}/{repo}/issues/open/`                    | List open issues                                |
-| `/github/{owner}/{repo}/issues/all/`                     | List all issues                                 |
-| `/github/{owner}/{repo}/issues/{filter}/{n}/title`        | Issue title                                     |
-| `/github/{owner}/{repo}/issues/{filter}/{n}/body`         | Issue body (markdown)                           |
-| `/github/{owner}/{repo}/issues/{filter}/{n}/state`        | Issue state                                     |
-| `/github/{owner}/{repo}/issues/{filter}/{n}/comments/{i}` | Individual comment                              |
-| `/github/{owner}/{repo}/pulls/{filter}/{n}/diff`            | PR diff                                         |
-| `/github/{owner}/{repo}/actions/runs/{id}/status`         | CI run status                                   |
-| `/github/{owner}/{repo}/actions/runs/{id}/log`            | CI run log                                      |
+| Path | Content |
+| --- | --- |
+| `/github/{owner}` | Repositories for a user or organization |
+| `/github/{owner}/{repo}` | Repository surface |
+| `/github/{owner}/{repo}/repo/` | Source tree, cloned on demand via SSH |
+| `/github/{owner}/{repo}/issues/{open,all}/` | Issue listings |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/title` | Issue title |
+| `/github/{owner}/{repo}/issues/{filter}/{n}/body` | Issue body |
+| `/github/{owner}/{repo}/pulls/{filter}/{n}/diff` | Pull request diff |
+| `/github/{owner}/{repo}/actions/runs/{id}/status` | Actions run status |
+| `/github/{owner}/{repo}/actions/runs/{id}/log` | Actions run log |
 
-### DNS (`/dns`)
+### DNS
 
-| Path                                 | Content                                                     |
-| ------------------------------------ | ----------------------------------------------------------- |
-| `/dns/{domain}/A`                    | A records                                                   |
-| `/dns/{domain}/AAAA`                 | AAAA records                                                |
-| `/dns/{domain}/MX`                   | MX records                                                  |
-| `/dns/{domain}/NS`                   | NS records                                                  |
-| `/dns/{domain}/TXT`                  | TXT records                                                 |
-| `/dns/{domain}/CNAME`                | CNAME records                                               |
-| `/dns/{domain}/SOA`                  | SOA record                                                  |
-| `/dns/{domain}/all`                 | All common record types                                     |
-| `/dns/{domain}/raw`                 | dig-style output                                            |
-| `/dns/@{resolver}/{domain}/{record}` | Query via a specific resolver (e.g., `@google`, `@1.1.1.1`) |
-| `/dns/{ip}`                          | Reverse DNS lookup (PTR)                                    |
-| `/dns/reverse/{ip}`                 | Reverse DNS lookup (alternate path)                         |
-| `/dns/resolvers`                    | List configured resolvers                                   |
+| Path | Content |
+| --- | --- |
+| `/dns/{domain}/A` | A records |
+| `/dns/{domain}/AAAA` | AAAA records |
+| `/dns/{domain}/MX` | MX records |
+| `/dns/{domain}/TXT` | TXT records |
+| `/dns/{domain}/all` | Common record types |
+| `/dns/{domain}/raw` | Dig-style output |
+| `/dns/@{resolver}/{domain}/{record}` | Query through a named or IP resolver |
+| `/dns/reverse/{ip}` | Reverse lookup |
+| `/dns/resolvers` | Configured resolvers |
 
-### arXiv (`/arxiv`)
+### arXiv
 
-Per-paper subtrees under `/arxiv/papers/{id}/` are version-first. The paper directory lists `@latest` plus numbered `vN` directories, and the same shape is mirrored under category membership paths.
+| Path | Content |
+| --- | --- |
+| `/arxiv/papers/{id}/` | Paper version family |
+| `/arxiv/papers/{id}/@latest/paper.pdf` | Latest version PDF |
+| `/arxiv/papers/{id}/@latest/source.tar.gz` | Latest version source bundle |
+| `/arxiv/papers/{id}/@latest/paper.atom` | Raw upstream Atom feed |
+| `/arxiv/papers/{id}/@latest/paper.json` | Rendered metadata |
+| `/arxiv/papers/{id}/v{n}/paper.pdf` | Version-pinned PDF |
+| `/arxiv/categories/{cat}/papers/` | Recent papers in a category |
+| `/arxiv/categories/{cat}/papers/{id}/@latest/...` | Category alias for the same paper version family |
 
-| Path                                                  | Content                                                       |
-| ----------------------------------------------------- | ------------------------------------------------------------- |
-| `/arxiv/papers/{id}/`                                 | Per-paper subtree (any arXiv id, e.g. `1706.03762`)           |
-| `/arxiv/papers/{id}/@latest/paper.pdf`                | Latest version PDF                                            |
-| `/arxiv/papers/{id}/@latest/source.tar.gz`            | Latest version source bundle                                  |
-| `/arxiv/papers/{id}/@latest/paper.atom`               | Raw upstream Atom feed                                        |
-| `/arxiv/papers/{id}/@latest/paper.json`               | Rendered metadata for the latest version                      |
-| `/arxiv/papers/{id}/v{n}/paper.pdf`                   | Version-pinned PDF                                            |
-| `/arxiv/papers/{id}/v{n}/source.tar.gz`               | Version-pinned source bundle                                  |
-| `/arxiv/papers/{id}/v{n}/paper.atom`                  | Raw Atom backing the paper object                             |
-| `/arxiv/papers/{id}/v{n}/paper.json`                  | Rendered metadata with version-specific resource URLs         |
-| `/arxiv/categories/{cat}/papers/`                     | Most-recent papers in `cat` by submitted date                 |
-| `/arxiv/categories/{cat}/papers/{id}/@latest/...`     | Category alias for the same paper version family              |
+### Docker, Linear, and SQLite
 
-## What's coming
+| Path | Content |
+| --- | --- |
+| `/docker/system/version.json` | Docker daemon version |
+| `/docker/containers.json` | Container listing |
+| `/docker/containers/{by-name,by-id,running,stopped}/` | Container indexes |
+| `/docker/containers/running/{name}/state` | Live container state |
+| `/docker/containers/running/{name}/inspect.json` | Docker inspect JSON |
+| `/linear/teams/` | Linear teams by key |
+| `/linear/teams/{KEY}/issues/{open,all}/` | Team issue listings |
+| `/linear/teams/{KEY}/issues/{filter}/{KEY-N}/description.md` | Issue description |
+| `/db/meta/info.json` | SQLite database metadata |
+| `/db/tables/{table}/schema.sql` | Table schema |
+| `/db/tables/{table}/sample.json` | Sample rows |
 
-### Core omnifs
+## How it works
 
-- Write-back via git push (mutations through staging transactions)
-- Better caching (hot-path memoization, negative caching, smarter invalidation)
-- Background indexing for large trees and expensive projections
-- Search across projected content, metadata, and repo history
-- Tracing and observability for provider calls, cache behavior, and FUSE latency
-- Better prefetching and pagination strategies for large orgs and repos
-- Persistent inode stability across remounts
-- Offline-friendly local snapshots and replayable sync
-- Mutation workflows beyond read-only browsing
-- macOS and Windows support
+omnifs runs a Linux FUSE filesystem in a runtime container. The host CLI owns setup, credentials, container lifecycle, and the user-facing commands.
 
-### Provider roadmap
+```text
+                                                                  +----------------+
++-------------+          +-----------------------------+          | github.wasm    | -> GitHub
+| shell, app, |   FUSE   |        omnifs host          | callouts | dns.wasm       | -> DoH
+| CI, agent   | <------> | /github /dns /arxiv ...    | <------> | docker.wasm    | -> Docker socket
+|             |  files   | cache, auth, git, network  |          | linear.wasm    | -> Linear
++-------------+          +-----------------------------+          +----------------+
+```
 
-| Provider             | What it could project                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| GitHub               | Commits, branches, reviews, checks, releases, and discussion state                                |
-| Hugging Face         | Models, datasets, spaces, cards, files, versions, and download metadata as browsable trees        |
-| Linear               | Teams, projects, issues, cycles, comments, labels, and workflow state with draftable mutations    |
-| DNS                  | Zones, records, history, propagation state, and provider-backed change transactions               |
-| S3 and object stores | Buckets, prefixes, object metadata, versions, lifecycle rules, and event streams                  |
-| OCI registries       | Images, tags, manifests, layers, SBOMs, and signature material as mountable content               |
-| Kubernetes           | Clusters, namespaces, workloads, logs, events, and live resource views                            |
-| Postgres and SQLite  | Schemas, tables, rows, views, and queryable virtual files for inspection and export               |
-| Slack and Discord    | Channels, threads, message history, attachments, and searchable conversation snapshots            |
+Providers are `wasm32-wasip2` WebAssembly components implementing the `omnifs:provider` interface. A provider answers filesystem operations such as `lookup_child`, `list_children`, and `read_file`. It declares its auth needs and capability grants in `omnifs.provider.json`.
+
+Providers do not hold tokens, open sockets, or run Git themselves. They return callout requests such as HTTP fetches, blob downloads, archive opens, or repo tree handoffs. The host executes those requests, attaches credentials at the boundary, enforces declared capabilities, and owns caching.
+
+The cache is host-owned plain byte storage. Providers can return canonical upstream bytes and derived filesystem entries together, so one upstream payload can populate multiple files and child entries. Invalidations come from explicit provider effects and runtime events.
+
+## Contributor workflow
+
+Use `omnifs dev` when working from this repository. It builds the dev image, captures `gh auth token`, fetches the Chinook SQLite fixture, synthesizes dev mounts from the built-in provider manifests, and starts the container.
+
+```bash
+git clone https://github.com/0xff-ai/omnifs
+cd omnifs
+cargo install --path crates/omnifs-cli --force
+omnifs dev -y
+omnifs shell
+```
+
+Core checks:
+
+```bash
+cargo fmt
+cargo nextest run
+just providers-check
+just providers-build
+```
+
+For runtime behavior, validate through the container:
+
+```bash
+omnifs dev -y
+docker exec omnifs /bin/zsh -lc 'omnifs status'
+docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
+docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
+```
+
+## Roadmap
+
+- Write-back through explicit, auditable transaction directories.
+- Native macOS and Windows mount support.
+- More providers, including object stores, OCI registries, Kubernetes, model registries, Postgres, Slack, and Discord.
+- Better search, indexing, snapshots, and provider authoring documentation.
 
 ## License
 
