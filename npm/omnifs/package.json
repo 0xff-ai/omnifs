@@ -15,10 +15,10 @@
   "license": "MIT OR Apache-2.0",
   "name": "@0xff-ai/omnifs",
   "optionalDependencies": {
-    "@0xff-ai/omnifs-cli-darwin-arm64": "0.2.0",
-    "@0xff-ai/omnifs-cli-darwin-x64": "0.2.0",
-    "@0xff-ai/omnifs-cli-linux-arm64": "0.2.0",
-    "@0xff-ai/omnifs-cli-linux-x64": "0.2.0"
+    "@0xff-ai/omnifs-cli-darwin-arm64": "0.2.1",
+    "@0xff-ai/omnifs-cli-darwin-x64": "0.2.1",
+    "@0xff-ai/omnifs-cli-linux-arm64": "0.2.1",
+    "@0xff-ai/omnifs-cli-linux-x64": "0.2.1"
   },
   "repository": {
     "type": "git",
@@ -28,5 +28,5 @@
     "postinstall": "node scripts/postinstall.js",
     "smoke": "node scripts/smoke.js"
   },
-  "version": "0.2.0"
+  "version": "0.2.1"
 }
