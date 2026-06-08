@@ -2,7 +2,6 @@
 
 use bollard::Docker;
 use clap::Args;
-use omnifs_creds::KeyringStore;
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -136,9 +135,12 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
         report.record("providers discovered", providers_result)
     );
 
-    // 5. keychain backend
-    let keychain_result = probe_keychain_backend(paths);
-    anstream::println!("{}", report.record("keychain backend", keychain_result));
+    // 5. credential store
+    let credential_store_result = probe_credential_store(paths);
+    anstream::println!(
+        "{}",
+        report.record("credential store", credential_store_result)
+    );
 
     // 6. ssh_agent
     let ssh_result = probe_ssh_agent();
@@ -228,13 +230,20 @@ fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
     }
 }
 
-fn probe_keychain_backend(paths: &Paths) -> ProbeResult {
-    match KeyringStore::new() {
-        Ok(_) => ProbeResult::Ok("keychain available".into()),
-        Err(error) => ProbeResult::Warn(format!(
-            "keychain unavailable ({error}); fallback to {}",
-            Paths::display(&paths.credentials_file)
-        )),
+fn probe_credential_store(paths: &Paths) -> ProbeResult {
+    let Some(parent) = paths.credentials_file.parent() else {
+        return ProbeResult::Err(format!(
+            "credential file has no parent: {}",
+            paths.credentials_file.display()
+        ));
+    };
+    if parent.exists() {
+        ProbeResult::Ok(format!("file {}", Paths::display(&paths.credentials_file)))
+    } else {
+        ProbeResult::Warn(format!(
+            "credential directory will be created on first write: {}",
+            Paths::display(parent)
+        ))
     }
 }
 

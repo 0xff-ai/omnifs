@@ -82,13 +82,8 @@ impl DevArgs {
         anstream::println!("Installing built-in dev mount configs");
         let configs = dev_mounts::install(&session)?;
 
-        // Force the file backend: macOS pops a "allow keychain access"
-        // GUI prompt whenever the debug `omnifs dev` binary's
-        // signature differs from the installed binary that originally
-        // stored the credential, and the dialog blocks contributor
-        // iteration. Dev never needs the OS keychain — the JSON store
-        // at `~/.omnifs/data/credentials.json` is the source of truth
-        // for the in-tree workflow.
+        // Use the same JSON credential store as the normal CLI path so
+        // contributor builds never trigger platform keychain prompts.
         let store = CredsBackend::file(&paths.credentials_file, true);
         anstream::println!("Materializing mount configs and credentials");
         session.populate(&configs, ctx.catalog(), store.as_ref())?;

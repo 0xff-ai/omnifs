@@ -25,7 +25,7 @@ pub struct AuthArgs {
     /// Override the directory holding provider WASM components.
     #[arg(long)]
     pub providers_dir: Option<PathBuf>,
-    /// Override the credential file fallback path.
+    /// Override the credential file path.
     #[arg(long)]
     pub credentials_file: Option<PathBuf>,
     #[command(subcommand)]

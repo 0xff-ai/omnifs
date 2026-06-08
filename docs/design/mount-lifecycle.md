@@ -70,15 +70,15 @@ The important invariant is one-way use: metadata/templates help create mounts, b
 
 The host owns durable credentials. The container only receives session files.
 
-The accepted store shape is layered:
+The accepted default store shape is deliberately single-backend:
 
-- primary: OS keychain through the host CLI
-- fallback: file store under the user's omnifs config directory, mode 600
+- production: file store under the user's omnifs config directory, mode 600
+- explicit opt-in: OS keychain through the host CLI
 - test: memory store
 
-Reads check the primary store first, then the fallback. Writes prefer the primary store when available. If the keychain is unavailable, the CLI can fall back to the file store with an explicit warning.
+Reads and writes use the same resolved `credentials.json` file across local builds, installed binaries, CI, containers, and the runtime auth refresh path. This avoids platform keychain permission prompts during `omnifs up` and related startup flows.
 
-The file store is a pragmatic fallback, not a stronger security boundary. Encryption-at-rest belongs at the OS or disk layer for this design. The daemon does not read the keychain or the fallback store directly.
+The file store is a pragmatic local credential store, not a stronger security boundary. Encryption-at-rest belongs at the OS or disk layer for this design. The daemon does not read the durable host store directly, and the default path does not probe the keychain.
 
 ## Runtime credential materialization
 

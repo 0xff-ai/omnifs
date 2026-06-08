@@ -36,7 +36,7 @@ Keep credentials out of the provider sandbox. Providers never see tokens. They g
 
 Keep vendor knowledge inside providers. The host's OAuth engine reads metadata supplied by the provider's auth manifest and optionally overridden by the instance config. The engine does not branch on which provider it is serving.
 
-Store tokens securely. macOS Keychain via the Security framework, Linux libsecret via the Secret Service API, Windows DPAPI via the credential vault. File fallback at `~/.omnifs/data/credentials.json` mode 600 for headless environments (CI, containers without a session bus).
+Store tokens by default in the resolved `credentials.json` file with private file and directory permissions. Keeping platform keychains out of the default path makes startup non-interactive across local builds, installed binaries, CI, and containers.
 
 Refresh transparently. A 401 inside a provider callout triggers a file-lock-protected refresh and one retry; the provider observes a successful response on the second attempt or a `permission-denied` callout error if refresh fails.
 
@@ -48,7 +48,7 @@ Federated SSO, SAML, or enterprise IdP integration as a primary code path. Users
 
 Multi-tenant credential isolation. omnifs is a single-user desktop daemon. One Unix user, one credential vault.
 
-DPoP, mTLS bearer binding, or other proof-of-possession schemes. A bearer token in the OS keychain is the strength level this design targets. If a future provider demands DPoP, it gets its own design extension.
+DPoP, mTLS bearer binding, or other proof-of-possession schemes. A bearer token in the local credential file is the strength level this design targets. If a future provider demands DPoP, it gets its own design extension.
 
 Server-side or agentless OAuth beyond the standard device-code grant. The host can run RFC 8628 device flow when the provider declares it, but it does not run a hosted broker service or hold provider secrets.
 
@@ -58,14 +58,14 @@ Auth for the host's own admin RPC (CLI ↔ daemon control channel). The daemon t
 
 Defended:
 
-- **Disk exfiltration of static tokens.** OS keychain is the primary storage; file fallback is mode 600 and warns at startup. An attacker reading the home directory without the owning UID's session does not get tokens.
-- **Token leakage through provider sandbox.** The provider cannot read host memory, the file store, or the keychain. The only token exposure surface is the `Authorization` header on the outgoing HTTP request, which the provider does not see (the host attaches it after the callout crosses the WIT boundary).
+- **Accidental credential exposure.** The credential file is written under the user's omnifs config directory with private file and directory permissions. Encryption-at-rest belongs to the OS or disk layer.
+- **Token leakage through provider sandbox.** The provider cannot read host memory or the host credential file. The only token exposure surface is the `Authorization` header on the outgoing HTTP request, which the provider does not see (the host attaches it after the callout crosses the WIT boundary).
 - **Mis-targeted token injection.** Tokens are scoped to a domain set declared in capabilities; the host refuses to inject on URLs outside that set. A provider asking the host to fetch `https://attacker.example/` does not receive the GitHub token.
 - **Refresh races.** A cross-process file lock ensures that N concurrent 401s do not produce N parallel refresh requests (some vendors throttle aggressively and rotate refresh tokens on use, which invalidates parallel callers).
 
 Not defended:
 
-- **Compromise of the host process or the Unix user.** Anyone with code execution as the owning user can read the keychain (with at most a one-time approval prompt on macOS). That is the standard desktop trust boundary.
+- **Compromise of the host process or the Unix user.** Anyone with code execution as the owning user can read the credential file. That is the standard desktop trust boundary.
 - **Compromise of the vendor's OAuth surface.** Outside our control.
 - **Stolen refresh tokens.** Once stolen, they can be used until revoked. `omnifs auth logout --revoke` revokes server-side when the provider declares a revocation endpoint.
 
@@ -188,8 +188,8 @@ provider ─WIT─►  │           (fetch / fetch-blob)       │
                      ┌──────────────────┐
                      │ CredentialStore  │  trait
                      │ ─────────────────│
-                     │ • KeyringStore   │ macOS / Linux / Windows
-                     │ • FileStore      │ ~/.omnifs/data (mode 600)
+                     │ • FileStore      │ credentials.json
+                     │ • KeyringStore   │ explicit opt-in
                      │ • MemoryStore    │ tests
                      └──────────────────┘
 
@@ -326,13 +326,13 @@ pub struct CredentialEntry {
 
 Three concrete implementations:
 
-- `KeyringStore`: macOS Keychain, Linux libsecret, Windows DPAPI. Service name `omnifs`, account `{provider_id}:{scheme}:{account}`, value JSON-serialized `CredentialEntry`. Probed at startup; on failure the host falls back to the file store with a warning.
-- `FileStore`: `~/.omnifs/data/credentials.json`, mode 600, atomic writes. Used when the keychain is unavailable (CI, containers, no session bus).
+- `FileStore`: the resolved `credentials.json`, mode 600, atomic writes. Used by all production CLI and host runtime paths.
+- `KeyringStore`: macOS Keychain, Linux libsecret, Windows DPAPI. Available for explicit opt-in, but not selected by default and not probed during startup.
 - `MemoryStore`: in-process map for tests.
 
-Startup picks **one** backend (keychain or file). There is no dual-write store.
+Startup uses the file backend. There is no dual-write store and no platform keychain probe on the default path.
 
-Encryption-at-rest for the file fallback is out of scope: the file is mode 600 inside the user's home directory, and the threat model treats user-account compromise as a separate problem.
+Encryption-at-rest for the credential file is out of scope: the file is mode 600 inside the user's omnifs config directory, and the threat model treats user-account compromise as a separate problem.
 
 ## Refresh and retry
 

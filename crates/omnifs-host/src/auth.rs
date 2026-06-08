@@ -10,9 +10,7 @@ use async_singleflight::Group;
 use fs2::FileExt;
 use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, OAuthRequestConfig};
 use omnifs_core::CredentialId;
-use omnifs_creds::{
-    CredentialEntry, CredentialKind, CredentialStore, FileStore, KeyringStore, StoreError,
-};
+use omnifs_creds::{CredentialEntry, CredentialKind, CredentialStore, FileStore, StoreError};
 use omnifs_mount_schema::{
     Auth, AuthKind, AuthManifest, OAuth, OauthScheme, SchemeResolveError, StaticToken,
 };
@@ -20,7 +18,6 @@ use secrecy::{ExposeSecret, SecretString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::{Duration as TimeDuration, OffsetDateTime};
-use tracing::warn;
 
 const DEFAULT_ACCOUNT: &str = "default";
 const OAUTH_REFRESH_WINDOW: TimeDuration = TimeDuration::seconds(60);
@@ -294,18 +291,7 @@ impl AuthManager {
 }
 
 pub(crate) fn credential_store_for_config_dir(config_dir: &Path) -> Arc<dyn CredentialStore> {
-    let fallback = config_dir.join("credentials.json");
-    match KeyringStore::new() {
-        Ok(primary) => Arc::new(primary),
-        Err(error) => {
-            warn!(
-                error = %error,
-                fallback = %fallback.display(),
-                "keyring credential store unavailable; using file store fallback"
-            );
-            Arc::new(FileStore::new(fallback))
-        },
-    }
+    Arc::new(FileStore::new(config_dir.join("credentials.json")))
 }
 
 pub fn oauth_request_from_config(
