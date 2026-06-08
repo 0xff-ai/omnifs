@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-08
+
+### Fixed
+
+- `omnifs up` now passes the runtime container's config, cache, mount-config, and provider directories through `OMNIFS_*` environment variables. This keeps the startup readiness check aligned with the materialized session mounts, so release containers no longer report zero providers after the FUSE mount is already live.
+
 ## [0.2.0] - 2026-06-08
 
 ### Added
