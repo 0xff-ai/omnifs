@@ -16,8 +16,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
-use crate::runtime_target::RuntimeTarget;
-use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, MountConfig, Session};
+use crate::runtime_target::DockerTarget;
+use crate::session::{
+    CONTAINER_NAME, GUEST_SECRET_ROOT, HOST_FUSE_MOUNT, IMAGE, MountConfig, Session,
+};
 
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
@@ -61,7 +63,7 @@ impl Runtime {
         })
     }
 
-    pub(crate) fn connect_for(target: &RuntimeTarget) -> Result<Self> {
+    pub(crate) fn connect_for(target: &DockerTarget) -> Result<Self> {
         Ok(Self {
             docker: connect_docker_client()?,
             container_name: target.container_name().clone(),
@@ -70,7 +72,7 @@ impl Runtime {
     }
 
     pub(crate) async fn connect_ready(
-        target: &RuntimeTarget,
+        target: &DockerTarget,
         command: &'static str,
     ) -> Result<Self> {
         anstream::println!("Connecting to Docker");
@@ -458,7 +460,7 @@ impl Runtime {
         extras: ContainerExtras,
     ) -> ContainerCreateBody {
         let mut binds = vec![
-            format!("{}:{HOST_CRED_DIR}:ro", session.creds_dir().display()),
+            format!("{}:{GUEST_SECRET_ROOT}:ro", session.secrets_dir().display()),
             format!("{}:{HOST_MOUNTS_DIR}:ro", session.mounts_dir().display()),
         ];
         if session.credentials_file().exists() {

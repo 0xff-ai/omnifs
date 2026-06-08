@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn roundtrip_fuse_start_example() {
-        let json = r#"{"v":1,"ts":"2026-05-23T12:14:08.123456Z","mono_us":123456789,"seq":0,"trace_id":42,"event":{"type":"fuse.start","op":"lookup","mount":"github","path":"/raulk/omnifs"}}"#;
+        let json = r#"{"v":1,"ts":"2026-05-23T12:14:08.123456Z","mono_us":123456789,"seq":0,"trace_id":42,"event":{"type":"fuse.start","op":"lookup","mount":"github","path":"/0xff-ai/omnifs"}}"#;
         let record = parse_record(json).expect("parse");
         assert_eq!(record.mono_us, 123_456_789);
         assert_eq!(record.trace_id, 42);

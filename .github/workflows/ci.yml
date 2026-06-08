@@ -174,6 +174,38 @@ jobs:
       - name: Run host tests
         run: just ci-host-test
 
+  nfs-macos:
+    name: nfs macos
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nfs-macos
+          cache-on-failure: true
+
+      - name: Build CLI and test provider
+        run: |
+          set -euo pipefail
+          cargo build -p omnifs-cli --bin omnifs
+          cargo build --target wasm32-wasip2 --release -p omnifs-tool-archive
+          cargo build --target wasm32-wasip2 --release -p test-provider
+
+      - name: Run macOS NFS loopback smoke
+        run: scripts/ci/smoke-nfs-macos.sh
+
   cli-linux-x64:
     name: cli linux x64
     if: >-
@@ -573,6 +605,7 @@ jobs:
       - components
       - host-build
       - host-test
+      - nfs-macos
       - cli-linux-x64
       - cli-linux-arm64
       - cli-darwin

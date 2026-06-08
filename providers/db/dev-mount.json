@@ -3,7 +3,7 @@
   "mount": "db",
   "config": {
     "database_type": "sqlite",
-    "path": "/data/test.db",
+    "path": "/data/db/test.db",
     "read_only": true,
     "sample_limit": 20
   }

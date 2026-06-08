@@ -43,9 +43,8 @@ impl<S> DirCx<S> {
         &self.intent
     }
 
-    /// The host-supplied pagination cursor for a `list-children` call (v2
-    /// §8). `None` on the first page or for non-list intents; the handler
-    /// resumes from it.
+    /// The host-supplied pagination cursor for a `list-children` call. `None`
+    /// on the first page or for non-list intents; the handler resumes from it.
     pub fn cursor(&self) -> Option<&Cursor> {
         match &self.intent {
             DirIntent::List { cursor } => cursor.as_ref(),

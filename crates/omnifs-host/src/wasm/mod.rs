@@ -4,7 +4,7 @@
 //! they both need the same lower-level Wasm setup: component-model
 //! engines, WASI linkers, store limits, and consistent error messages.
 
-use wasmtime::{Config, Engine, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, OptLevel, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::WasiView;
 
 /// Build a Wasmtime engine configured for the component model.
@@ -15,6 +15,9 @@ use wasmtime_wasi::WasiView;
 pub fn component_engine(configure: impl FnOnce(&mut Config)) -> wasmtime::Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    if cfg!(debug_assertions) {
+        config.cranelift_opt_level(OptLevel::None);
+    }
     // Persist compiled component artifacts to the platform cache dir so
     // engine creation (e.g. ArchiveExtractorComponent::new, each provider
     // engine) doesn't re-codegen identical wasm on every invocation.

@@ -4,6 +4,6 @@
   "auth": {
     "type": "static-token",
     "scheme": "pat",
-    "token_file": "/run/secrets/github_token"
+    "token_file": "/run/secrets/github/token"
   }
 }

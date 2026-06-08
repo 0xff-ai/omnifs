@@ -25,14 +25,14 @@ if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
   export SSH_AUTH_SOCK="$RUNNER_TEMP/ssh-agent.sock"
 fi
 
-mkdir -p "$WORKSPACE/.secrets/db"
+mkdir -p "$WORKSPACE/.omnifs-dev/fixtures/db" "$RUNNER_TEMP/omnifs-secrets/github"
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN must be set for the github provider fixture" >&2
   exit 1
 fi
-printf '%s' "$GITHUB_TOKEN" > "$WORKSPACE/.secrets/github_token"
-chmod 600 "$WORKSPACE/.secrets/github_token"
-curl -fsSL -o "$WORKSPACE/.secrets/db/test.db" \
+printf '%s' "$GITHUB_TOKEN" > "$RUNNER_TEMP/omnifs-secrets/github/token"
+chmod 600 "$RUNNER_TEMP/omnifs-secrets/github/token"
+curl -fsSL -o "$WORKSPACE/.omnifs-dev/fixtures/db/test.db" \
   https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -43,8 +43,8 @@ docker run -d \
   --security-opt apparmor:unconfined \
   -e SSH_AUTH_SOCK=/ssh-agent \
   -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-  -v "$WORKSPACE/.secrets/github_token:/run/secrets/github_token:ro" \
-  -v "$WORKSPACE/.secrets/db:/data:ro" \
+  -v "$RUNNER_TEMP/omnifs-secrets:/run/secrets:ro" \
+  -v "$WORKSPACE/.omnifs-dev/fixtures:/data:ro" \
   -v "$WORKSPACE/scripts/demo.sh:/tmp/demo.sh:ro" \
   -v "/var/run/docker.sock:/var/run/docker.sock:ro" \
   -v "$SSH_AUTH_SOCK:/ssh-agent" \

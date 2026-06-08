@@ -13,6 +13,7 @@ use clap::Args;
 use crate::app_context::AppContext;
 use crate::catalog::MountRemovalTarget;
 use crate::commands::mounts::delete_credentials;
+use crate::config::ConfigFile;
 use crate::container_name::ContainerName;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
@@ -50,7 +51,7 @@ impl ResetArgs {
         let targets = ctx.catalog().mount_removal_targets()?;
 
         if targets.is_empty() {
-            anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
+            anstream::println!("No mount configs found in {}.", paths.config_file.display());
         }
         print_preview(&targets, keep_credentials, container_name.as_str());
 
@@ -71,6 +72,8 @@ impl ResetArgs {
         teardown_container(&container_name).await;
 
         let store = CredsBackend::auto(&paths.credentials_file, false);
+        let mut config_file = ConfigFile::load(&paths.config_file)?;
+        let mut config_changed = false;
         for target in &targets {
             delete_credentials(
                 store.as_ref(),
@@ -78,9 +81,16 @@ impl ResetArgs {
                 keep_credentials,
                 &target.name,
             )?;
-            fs::remove_file(&target.path)
-                .with_context(|| format!("remove {}", target.path.display()))?;
+            if target.inline {
+                config_changed |= config_file.remove_mount(&target.name)?;
+            } else {
+                fs::remove_file(&target.path)
+                    .with_context(|| format!("remove {}", target.path.display()))?;
+            }
             anstream::println!("Removed mount `{}`", target.name);
+        }
+        if config_changed {
+            config_file.save()?;
         }
         if !targets.is_empty() {
             anstream::println!();

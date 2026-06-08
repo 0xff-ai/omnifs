@@ -16,8 +16,8 @@ pub struct InitResult {
 
 pub struct SetupSummary<'a> {
     paths: &'a Paths,
-    container_name: &'a str,
-    host_fuse_mount: &'a str,
+    runtime_name: &'a str,
+    mount_root: &'a str,
     configured: &'a BTreeMap<String, String>,
     results: &'a [InitResult],
 }
@@ -25,15 +25,15 @@ pub struct SetupSummary<'a> {
 impl<'a> SetupSummary<'a> {
     pub fn new(
         paths: &'a Paths,
-        container_name: &'a str,
-        host_fuse_mount: &'a str,
+        runtime_name: &'a str,
+        mount_root: &'a str,
         configured: &'a BTreeMap<String, String>,
         results: &'a [InitResult],
     ) -> Self {
         Self {
             paths,
-            container_name,
-            host_fuse_mount,
+            runtime_name,
+            mount_root,
             configured,
             results,
         }
@@ -50,9 +50,10 @@ impl Display for SetupSummary<'_> {
         writeln!(out, "Setup summary")?;
         writeln!(
             out,
-            "  Mounts dir       {}",
-            self.paths.mounts_dir.display()
+            "  Config           {}",
+            self.paths.config_file.display()
         )?;
+        writeln!(out, "  Mount configs    [[mounts]]")?;
         writeln!(
             out,
             "  Credentials      {}",
@@ -63,12 +64,8 @@ impl Display for SetupSummary<'_> {
             "  Providers dir    {}",
             self.paths.providers_dir.display()
         )?;
-        writeln!(out, "  Container        {}", self.container_name)?;
-        writeln!(
-            out,
-            "  Host FUSE mount  {}   (after `up`)",
-            self.host_fuse_mount
-        )?;
+        writeln!(out, "  Runtime          {}", self.runtime_name)?;
+        writeln!(out, "  Mount root       {}   (after `up`)", self.mount_root)?;
 
         if !self.configured.is_empty() || !self.results.is_empty() {
             writeln!(out, "\nMounts")?;
@@ -77,11 +74,11 @@ impl Display for SetupSummary<'_> {
             writeln!(
                 out,
                 "  {}/{mount_name}   ({provider_id}, already configured)",
-                self.host_fuse_mount
+                self.mount_root
             )?;
         }
         for result in self.results {
-            let mount_path = format!("{}/{}", self.host_fuse_mount, result.mount_name);
+            let mount_path = format!("{}/{}", self.mount_root, result.mount_name);
             match &result.outcome {
                 Ok(()) => {
                     writeln!(out, "  {mount_path}   ({})   ok", result.provider_id)?;
@@ -101,7 +98,7 @@ impl Display for SetupSummary<'_> {
             writeln!(
                 out,
                 "\nNext: `ls {}` to browse, or `omnifs status` for runtime state.",
-                self.host_fuse_mount
+                self.mount_root
             )?;
         }
         Ok(())

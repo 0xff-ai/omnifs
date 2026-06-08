@@ -1,19 +1,21 @@
 //! `omnifs version` — print the CLI version. `--detail` prints a richer
-//! block listing image / container state / credential file / provider count /
-//! configured dirs.
+//! block listing runtime state / store backend / provider count / configured
+//! dirs.
 
 use anyhow::Result;
 use bollard::Docker;
 use clap::Args;
+use omnifs_creds::KeyringStore;
 
 use crate::app_context::AppContext;
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::image_ref::{ImageOrigin, ImageRef};
 use crate::paths::Paths;
+use crate::runtime_target::RuntimeTarget;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct VersionArgs {
-    /// Print extended version detail (CLI + image + container + store + provider count + dirs).
+    /// Print extended version detail (CLI + runtime + store + provider count + dirs).
     #[arg(long = "detail")]
     pub detail: bool,
 }
@@ -27,28 +29,34 @@ impl VersionArgs {
 
         let ctx = AppContext::resolve_default()?;
         let cli = env!("CARGO_PKG_VERSION");
-        let container = describe_container(ctx.runtime().container_name().as_str()).await;
-        let image = match container.image {
-            Some(image) => ImageRef::new(image)?,
-            None => ctx.runtime().image().clone(),
-        };
-        let image_location = describe_image_location(&image).await;
+        let store_backend = describe_store_backend();
         let provider_status = provider_dir_summary(ctx.catalog());
 
         anstream::println!("CLI:        omnifs {cli}");
-        anstream::println!("Image:      {image} ({image_location})");
-        if image != *ctx.runtime().image() {
-            anstream::println!("Configured: {}", ctx.runtime().image());
+        match ctx.runtime() {
+            RuntimeTarget::Docker(target) => {
+                let container = describe_container(target.container_name().as_str()).await;
+                let image = match container.image {
+                    Some(image) => ImageRef::new(image)?,
+                    None => target.image().clone(),
+                };
+                let image_location = describe_image_location(&image).await;
+                anstream::println!("Image:      {image} ({image_location})");
+                if image != *target.image() {
+                    anstream::println!("Configured: {}", target.image());
+                }
+                anstream::println!(
+                    "Container:  {} (`{}`)",
+                    container.state,
+                    target.container_name()
+                );
+            },
+            RuntimeTarget::Native(target) => {
+                anstream::println!("Runtime:    native");
+                anstream::println!("Mount:      {}", target.mount_point().display());
+            },
         }
-        anstream::println!(
-            "Container:  {} (`{}`)",
-            container.state,
-            ctx.runtime().container_name()
-        );
-        anstream::println!(
-            "Store:      file ({})",
-            Paths::display(&ctx.paths().credentials_file)
-        );
+        anstream::println!("Store:      {store_backend}");
         anstream::println!("Providers:  {provider_status}");
         anstream::println!();
         anstream::println!("Paths:");
@@ -58,10 +66,6 @@ impl VersionArgs {
         );
         anstream::println!("  data:         {}", Paths::display(&ctx.paths().data_dir));
         anstream::println!("  cache:        {}", Paths::display(&ctx.paths().cache_dir));
-        anstream::println!(
-            "  mounts:       {}",
-            Paths::display(&ctx.paths().mounts_dir)
-        );
         anstream::println!(
             "  providers:    {}",
             Paths::display(&ctx.paths().providers_dir)
@@ -137,6 +141,13 @@ async fn describe_image_location(image: &ImageRef) -> String {
             status_code: 404, ..
         }) => "local, not built".to_string(),
         Err(_) => format!("{origin}, cache inspect failed"),
+    }
+}
+
+fn describe_store_backend() -> &'static str {
+    match KeyringStore::new() {
+        Ok(_) => "keychain",
+        Err(_) => "file fallback",
     }
 }
 

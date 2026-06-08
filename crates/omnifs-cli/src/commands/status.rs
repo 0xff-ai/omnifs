@@ -1,13 +1,17 @@
 //! `omnifs status` verb handler.
 
 use crate::app_context::AppContext;
-use crate::paths::{PathOverrides, Paths};
+use crate::catalog::ProviderCatalog;
+use crate::native_runtime;
+use crate::paths::PathOverrides;
 use crate::presentation::OutputFormat;
+use crate::runtime_mode::RuntimeMode;
 use crate::runtime_target::RuntimeTarget;
 use crate::status::{collect_status, resolve_paths};
 use anyhow::Context;
 use clap::Args;
 use std::io::Write as _;
+use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct StatusArgs {
@@ -17,6 +21,9 @@ pub struct StatusArgs {
     /// `omnifs`.
     #[arg(long)]
     pub container_name: Option<String>,
+    /// Runtime launch mode.
+    #[arg(long, value_enum)]
+    pub mode: Option<RuntimeMode>,
     #[arg(long)]
     pub mount_point: Option<String>,
     #[arg(long)]
@@ -37,7 +44,18 @@ impl StatusArgs {
             return print_local_status(self);
         }
 
-        print_container_status(self).await
+        let ctx = AppContext::resolve_with_runtime(
+            PathOverrides::default(),
+            self.container_name.clone(),
+            None,
+            self.mode,
+            self.mount_point.as_ref().map(PathBuf::from),
+        )?;
+        if matches!(ctx.runtime(), RuntimeTarget::Native(_)) {
+            return print_native_status(self, &ctx);
+        }
+
+        print_container_status(self, &ctx).await
     }
 }
 
@@ -58,15 +76,63 @@ fn print_local_status(args: StatusArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn print_container_status(args: StatusArgs) -> anyhow::Result<()> {
+fn print_native_status(args: StatusArgs, ctx: &AppContext) -> anyhow::Result<()> {
+    let paths = ctx.paths();
+    let RuntimeTarget::Native(target) = ctx.runtime() else {
+        anyhow::bail!("native status requested for docker runtime");
+    };
+    let states = omnifs_nfs::read_mount_states(&native_runtime::state_dir(paths))?;
+    let matching = states
+        .iter()
+        .find(|state| state.mount_point == target.mount_point());
+
+    let mut status_paths = paths.clone();
+    let mount_point = matching
+        .map(|state| state.mount_point.clone())
+        .or_else(|| args.mount_point.map(PathBuf::from))
+        .unwrap_or_else(|| target.mount_point().to_path_buf());
+    if let Some(state) = matching {
+        if let Some(config_dir) = &state.config_dir {
+            status_paths.config_dir.clone_from(config_dir);
+            status_paths.mounts_dir = config_dir.join("mounts");
+            status_paths.config_file = config_dir.join("config.toml");
+        }
+        if let Some(cache_dir) = &state.cache_dir {
+            status_paths.cache_dir.clone_from(cache_dir);
+        }
+    }
+
+    let config = crate::config::Config::load(&status_paths.config_file)?;
+    let catalog = ProviderCatalog::with_config(
+        &status_paths.mounts_dir,
+        &status_paths.providers_dir,
+        &status_paths.config_file,
+        config.mounts,
+    );
+    let report = collect_status(&catalog, status_paths, mount_point)?;
+    match OutputFormat::from(args.json) {
+        OutputFormat::Json => {
+            let payload = report.to_json();
+            let serialized = serde_json::to_string(&payload).context("serialize status JSON")?;
+            anstream::println!("{serialized}");
+        },
+        OutputFormat::Text => {
+            anstream::print!("{}", report.render(args.detail));
+        },
+    }
+    Ok(())
+}
+
+async fn print_container_status(args: StatusArgs, ctx: &AppContext) -> anyhow::Result<()> {
     use bollard::Docker;
     use bollard::container::LogOutput;
     use bollard::exec::{CreateExecOptions, StartExecResults};
     use futures_util::StreamExt as _;
 
-    let (_paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
-    let container_name =
-        RuntimeTarget::resolve_container_name(args.container_name.clone(), &config)?;
+    let RuntimeTarget::Docker(target) = ctx.runtime() else {
+        anyhow::bail!("container status requested for native runtime");
+    };
+    let container_name = target.container_name();
     let docker = Docker::connect_with_local_defaults()
         .context("connect to Docker daemon (is it running?)")?;
 

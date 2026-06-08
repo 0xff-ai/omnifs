@@ -14,12 +14,12 @@ use crate::{normalize_whitespace, split_versioned_id};
 
 #[derive(omnifs_sdk::Endpoint)]
 #[endpoint(base = "https://export.arxiv.org")]
-#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+#[endpoint(default_header = "User-Agent: omnifs (https://github.com/0xff-ai/omnifs)")]
 pub struct ArxivApi;
 
 #[derive(omnifs_sdk::Endpoint)]
 #[endpoint(base = "https://arxiv.org")]
-#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+#[endpoint(default_header = "User-Agent: omnifs (https://github.com/0xff-ai/omnifs)")]
 pub struct ArxivWeb;
 
 const ABS_BASE: &str = "https://arxiv.org/abs";
@@ -56,7 +56,7 @@ pub(crate) async fn load_paper<S>(
 
 /// Papers per category-recent page. The cursor carries the page index, so the
 /// listing needs no provider state (the host echoes the cursor back).
-pub(crate) const CATEGORY_PAGE_SIZE: u32 = 50;
+pub(crate) const CATEGORY_PAGE_SIZE: u32 = 10;
 
 /// Fetch one page of a category's most-recent papers and return their bare
 /// arXiv ids. Stateless: pagination is driven by `page` (the listing cursor).

@@ -23,15 +23,17 @@ Plan 9 was right, just 40 years early. Everything is a file. The world moved to 
 ### Prerequisites
 
 - Node.js and npm for the packaged CLI path
-- Docker on Linux, or Docker Desktop on macOS
+- Docker on Linux or Docker Desktop on macOS for the default packaged runtime
+- Native mode uses NFSv4 loopback on macOS and FUSE on Linux when provider WASM components are available on disk
 - SSH agent running with a GitHub key loaded if you want repo clone paths under `/github`
 
-### CLI-managed container
+### CLI-managed runtime
 
-The normal user flow is owned by the `omnifs` CLI. The CLI stores credentials on the host, generates thin mount configs under `~/.omnifs/config/mounts`, starts the runtime container, and opens a shell into it.
+The normal user flow is owned by the `omnifs` CLI. The CLI stores system settings and `[[mounts]]` in `~/.omnifs/config.toml`, keeps credential data on the host, starts the selected runtime, and opens a shell at the mount root.
 
 ```bash
 npm install -g @0xff-ai/omnifs
+omnifs setup --mode native   # or: omnifs setup --mode docker
 omnifs init github
 omnifs init linear
 omnifs status
@@ -41,22 +43,41 @@ omnifs shell
 
 GitHub uses device-code OAuth with the bundled public client id and no default write scopes. Linear uses browser PKCE OAuth with the bundled public client id and `read` scope. You do not need to edit configs, copy provider wasm into `~/.omnifs/data/providers`, or set OAuth client id environment variables for the bundled providers. `omnifs up` uses the version-matched runtime image unless you override it with `--image` or `OMNIFS_IMAGE`.
 
-The npm package installs only the native host CLI. It does not pull the Docker image during install; `omnifs up` pulls and starts the matching runtime image. On macOS, the mount is available inside the Docker Desktop Linux container through `omnifs shell`, not as a native Finder or host-shell mount.
+The npm package installs only the native host CLI. It does not pull the Docker image during install; Docker mode pulls and starts the matching runtime image on `omnifs up`. `omnifs setup --mode native` or `omnifs setup --mode docker` persists the selected runtime in `~/.omnifs/config/config.toml`; later runtime commands load that default automatically.
 
-Use `omnifs logs`, `omnifs logs -f`, and `omnifs down` to inspect and stop the container.
+```bash
+omnifs setup --mode native
+omnifs up
+omnifs shell
+```
+
+You can inspect or change the same default directly:
+
+```bash
+omnifs config runtime --mode native
+omnifs config runtime --mode docker
+```
+
+Per-command `--mode native` or `--mode docker` remains available as an override. Native mode currently requires provider `.wasm` components in the configured providers directory. Docker mode remains the default packaged runtime until provider sidecars ship through the npm packages.
+
+Use `omnifs logs`, `omnifs logs -f`, and `omnifs down` to inspect and stop the selected runtime.
 
 ### Contributor sandbox
 
-`omnifs dev` is the development workflow for this repo. It captures your `gh` token, fetches the Chinook SQLite fixture, builds the image tagged at the current commit, synthesizes dev mount configs from the built-in provider manifests, and launches the container directly:
+`omnifs dev` is the development workflow for this repo. It captures your `gh` token, fetches the Chinook SQLite fixture under `.omnifs-dev/fixtures`, synthesizes dev mount configs from the built-in provider manifests, and launches the selected runtime. If no runtime has been persisted, Docker mode is the default for CI parity; native mode builds provider WASM artifacts and mounts the runtime on the host:
 
 ```bash
 # Clone the repo
 git clone https://github.com/0xff-ai/omnifs
 cd omnifs
 
-# Build, materialize, and start the dev container
+# Build, materialize, and start Docker mode
 omnifs dev
 omnifs shell
+
+# Build providers and start native mode
+omnifs dev --mode native
+omnifs shell --mode native
 ```
 
 `-y` skips the session confirmation prompt.
@@ -112,7 +133,7 @@ one.one.one.one.
 ## poke around!
 ```
 
-Use `omnifs logs` (`-f` to follow) and `omnifs down` to inspect and stop the dev container.
+Use `omnifs logs` (`-f` to follow) and `omnifs down` to inspect and stop the dev runtime.
 
 <details>
 <summary>SSH agent troubleshooting</summary>
@@ -135,7 +156,7 @@ Agents should not have to deal with APIs. If you can read a file, you can read t
 
 ## How it works
 
-omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The architecture has three layers:
+omnifs runs as a projected filesystem with a native FUSE frontend on Linux, a native NFSv4 loopback frontend on macOS, and an optional Docker runtime that keeps the Linux FUSE mount inside the container. The architecture has three layers:
 
 ```
                                                                       ┌────────────────┐
@@ -221,12 +242,12 @@ Per-paper subtrees under `/arxiv/papers/{id}/` are version-first. The paper dire
 - Better caching (hot-path memoization, negative caching, smarter invalidation)
 - Background indexing for large trees and expensive projections
 - Search across projected content, metadata, and repo history
-- Tracing and observability for provider calls, cache behavior, and FUSE latency
+- Tracing and observability for provider calls, cache behavior, and frontend latency
 - Better prefetching and pagination strategies for large orgs and repos
 - Persistent inode stability across remounts
 - Offline-friendly local snapshots and replayable sync
 - Mutation workflows beyond read-only browsing
-- macOS and Windows support
+- Windows support
 
 ### Provider roadmap
 

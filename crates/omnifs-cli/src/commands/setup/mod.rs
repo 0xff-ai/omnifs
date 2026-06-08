@@ -1,18 +1,18 @@
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
 //! Sequential, npx-style: each step prints inline and stays in scrollback.
-//! Detects host OS, explains the alpha runtime model, verifies Docker,
-//! eagerly pulls the image, walks the user through selecting providers,
-//! confirms capabilities per provider, runs `init`, and (unless `--no-up`)
-//! launches the container.
+//! Detects host OS, explains the runtime model, verifies Docker only when Docker
+//! mode is selected, walks the user through selecting providers, confirms
+//! capabilities per provider, runs `init`, and (unless `--no-up`) launches the
+//! selected runtime.
 
 pub mod host_os;
 pub mod summary;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
@@ -21,18 +21,19 @@ use omnifs_mount_schema::ProviderManifest;
 use crate::app_context::AppContext;
 use crate::catalog;
 use crate::commands::{init, up};
+use crate::config::ConfigFile;
 use crate::error::WithHint;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
-use crate::session::HOST_FUSE_MOUNT;
+use crate::runtime_mode::RuntimeMode;
+use crate::runtime_target::{DockerTarget, RuntimeTarget};
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct SetupArgs {
-    /// Skip the final container launch.
+    /// Skip the final runtime launch.
     #[arg(long)]
     pub no_up: bool,
     /// Skip confirmations; auto-accept detected ambient credentials.
@@ -44,6 +45,12 @@ pub struct SetupArgs {
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub no_browser: bool,
+    /// Runtime mode to persist globally. Must be `native` or `docker`.
+    #[arg(long, value_enum)]
+    pub mode: Option<RuntimeMode>,
+    /// Host mount point for native mode.
+    #[arg(long)]
+    pub mount_point: Option<PathBuf>,
 }
 
 impl SetupArgs {
@@ -57,16 +64,24 @@ impl SetupArgs {
             anyhow::bail!("omnifs does not yet run on this platform");
         }
 
-        let ctx = AppContext::resolve_default()?;
+        let mode = setup_mode(self.mode)?;
+        persist_runtime_choice(mode, self.mount_point.clone())?;
+
+        let ctx = AppContext::resolve_with_runtime(
+            crate::paths::PathOverrides::default(),
+            None,
+            None,
+            Some(mode),
+            self.mount_point.clone(),
+        )?;
         let paths = ctx.paths();
-        fs::create_dir_all(&paths.mounts_dir)
-            .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        let runtime = connect_runtime(os, ctx.runtime()).await?;
-
-        runtime
-            .pull_image_with_progress(ctx.runtime().image().as_str())
-            .await?;
+        if let RuntimeTarget::Docker(target) = ctx.runtime() {
+            let runtime = connect_runtime(os, target).await?;
+            runtime
+                .pull_image_with_progress(target.image().as_str())
+                .await?;
+        }
 
         let catalog = ctx.catalog();
         let templates = catalog.provider_templates()?;
@@ -78,27 +93,68 @@ impl SetupArgs {
         let selected = resolve_selection(&self, &templates, &configured)?;
         let results = run_init_loop(&selected, &self, paths, &templates).await;
 
-        let report = summary::SetupSummary::new(
-            paths,
-            ctx.runtime().container_name().as_str(),
-            HOST_FUSE_MOUNT,
-            &configured,
-            &results,
-        );
+        let runtime_mount = ctx.runtime().mount_label();
+        let runtime_name = ctx.runtime().runtime_label();
+        let report =
+            summary::SetupSummary::new(paths, &runtime_name, &runtime_mount, &configured, &results);
         anstream::print!("{report}");
 
         let any_succeeded = results.iter().any(|r| r.outcome.is_ok());
         let any_ready = any_succeeded || !configured.is_empty();
         if self.no_up {
-            anstream::println!("\nSkipping container launch (--no-up).");
+            anstream::println!("\nSkipping runtime launch (--no-up).");
         } else if !any_ready {
             anstream::println!(
                 "\nNo mounts to launch. Add one with `omnifs init <provider>`, then run `omnifs up`."
             );
         } else {
-            launch_via_up(ctx.config()).await?;
+            launch_via_up(ctx.config(), Some(mode), self.mount_point).await?;
         }
         Ok(())
+    }
+}
+
+fn setup_mode(mode: Option<RuntimeMode>) -> anyhow::Result<RuntimeMode> {
+    match mode {
+        Some(RuntimeMode::Native) => Ok(RuntimeMode::Native),
+        Some(RuntimeMode::Docker) => Ok(RuntimeMode::Docker),
+        Some(RuntimeMode::Auto) => {
+            anyhow::bail!("`omnifs setup` requires `--mode native` or `--mode docker`, not `auto`")
+        },
+        None => anyhow::bail!("run `omnifs setup --mode native` or `omnifs setup --mode docker`"),
+    }
+}
+
+fn persist_runtime_choice(mode: RuntimeMode, mount_point: Option<PathBuf>) -> anyhow::Result<()> {
+    let paths = Paths::resolve(crate::paths::PathOverrides::default());
+    let mut config = ConfigFile::load(&paths.config_file)?;
+    config.set_runtime(Some(mode), mount_point, false)?;
+    config.save()?;
+    anstream::println!(
+        "Persisted runtime mode `{}` in {}",
+        mode.as_str(),
+        Paths::display(&paths.config_file)
+    );
+    anstream::println!();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_requires_explicit_native_or_docker_mode() {
+        assert_eq!(
+            setup_mode(Some(RuntimeMode::Native)).unwrap(),
+            RuntimeMode::Native
+        );
+        assert_eq!(
+            setup_mode(Some(RuntimeMode::Docker)).unwrap(),
+            RuntimeMode::Docker
+        );
+        assert!(setup_mode(Some(RuntimeMode::Auto)).is_err());
+        assert!(setup_mode(None).is_err());
     }
 }
 
@@ -126,7 +182,7 @@ fn print_explainer(os: HostOs) {
     anstream::println!();
 }
 
-async fn connect_runtime(os: HostOs, target: &RuntimeTarget) -> anyhow::Result<Runtime> {
+async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Runtime> {
     let runtime = Runtime::connect_for(target).context("connect to Docker daemon")?;
     runtime
         .ping()
@@ -325,7 +381,7 @@ async fn run_init_loop(
             token_env: None,
             scopes: Vec::new(),
             providers_dir: Some(paths.providers_dir.clone()),
-            mounts_dir: Some(paths.mounts_dir.clone()),
+            mounts_dir: None,
             show_capabilities: false,
         };
         let outcome = init_args.run().await.map_err(|e| e.to_string());
@@ -338,12 +394,18 @@ async fn run_init_loop(
     out
 }
 
-async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
+async fn launch_via_up(
+    config: &crate::config::Config,
+    mode: Option<RuntimeMode>,
+    mount_point: Option<PathBuf>,
+) -> anyhow::Result<()> {
     anstream::println!();
-    anstream::println!("Launching container ...");
+    anstream::println!("Launching runtime ...");
     up::UpArgs {
         mounts_dir: None,
         image: config.image.clone(),
+        mode,
+        mount_point,
         container_name: config.container_name.clone(),
         providers_dir: None,
     }

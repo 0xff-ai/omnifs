@@ -27,6 +27,17 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
+    #[doc(hidden)]
+    pub fn empty_for_test() -> Self {
+        let (timer_shutdown, _) = watch::channel(false);
+        Self {
+            instances: HashMap::new(),
+            root_mount: None,
+            timer_shutdown,
+            timer_tasks: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
     pub fn load(dirs: Dirs<'_>, cloner: &Arc<GitCloner>) -> Result<Self, RegistryError> {
         let engine = component_engine(|_| {})
             .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;

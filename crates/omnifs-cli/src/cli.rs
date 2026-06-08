@@ -29,26 +29,25 @@ pub enum Commands {
     /// Manage provider credentials.
     Auth(commands::auth::AuthArgs),
 
-    /// Bring up the omnifs container: materialize credentials from the
+    /// Bring up the omnifs runtime: materialize credentials from the
     /// host credential store, write them to a per-session directory,
-    /// bind-mount the rewritten configs into the container, then start it.
+    /// stage rewritten configs, then launch the selected frontend.
     Up(commands::up::UpArgs),
-    /// Bring up the canonical local dev sandbox: build the image, wire host
-    /// credentials, expose the Docker socket + DB fixture, and start the
-    /// container with all built-in providers' dev mounts. Source checkout
-    /// required.
+    /// Bring up the canonical local dev sandbox: wire host credentials,
+    /// materialize fixtures, and start the selected runtime with all built-in
+    /// providers' dev mounts. Source checkout required.
     Dev(commands::dev::DevArgs),
-    /// Stop and remove the omnifs container and clean up the session dir.
+    /// Stop the selected omnifs runtime and clean up the session dir.
     Down(commands::down::DownArgs),
-    /// Tail the daemon log inside the container.
+    /// Tail the selected runtime's daemon log.
     Logs(commands::logs::LogsArgs),
     /// Inspector stream: FUSE, provider, and callout JSONL events.
     Inspect(commands::inspect::InspectArgs),
-    /// Open an interactive shell inside the running container.
+    /// Open an interactive shell in the selected runtime.
     Shell(commands::shell::ShellArgs),
 
-    /// Guided onboarding walkthrough: detect OS, explain Docker, pick
-    /// providers, run init per provider, launch the container.
+    /// Guided onboarding walkthrough: detect OS, explain runtime mode, pick
+    /// providers, run init per provider, launch the selected runtime.
     ///
     /// Re-runnable. Already-configured providers are listed but excluded
     /// from the picker.
@@ -59,6 +58,9 @@ pub enum Commands {
 
     /// Manage configured mounts.
     Mounts(commands::mounts::MountsArgs),
+
+    /// Inspect or update global CLI config.
+    Config(commands::config::ConfigArgs),
 
     /// Nuke every mount config and (by default) its stored credential,
     /// then stop and remove the container. Asks for confirmation unless
@@ -71,8 +73,8 @@ pub enum Commands {
     /// Print shell completions.
     Completions(commands::completions::CompletionsArgs),
 
-    /// Print version information. Use --detail for image / container /
-    /// store / provider count alongside the CLI version.
+    /// Print version information. Use --detail for runtime / store /
+    /// provider count alongside the CLI version.
     Version(commands::version::VersionArgs),
 
     /// Daemon verbs. Internal; users should run `omnifs up` instead.
@@ -102,6 +104,7 @@ impl Commands {
             Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run(),
             Self::Mounts(args) => args.run(),
+            Self::Config(args) => args.run(),
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();

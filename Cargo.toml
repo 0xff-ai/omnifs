@@ -28,6 +28,7 @@ omnifs-host = { version = "0.2.0-dev.2", path = "crates/omnifs-host" }
 omnifs-inspector = { version = "0.2.0-dev.2", path = "crates/omnifs-inspector" }
 omnifs-core = { version = "0.2.0-dev.2", path = "crates/omnifs-core" }
 omnifs-mount-schema = { version = "0.2.0-dev.2", path = "crates/omnifs-mount-schema" }
+omnifs-nfs = { version = "0.2.0-dev.2", path = "crates/omnifs-nfs" }
 omnifs-sdk = { version = "0.2.0-dev.2", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.0-dev.2", path = "crates/omnifs-sdk-macros" }
 omnifs-cache = { version = "0.2.0-dev.2", path = "crates/omnifs-cache" }

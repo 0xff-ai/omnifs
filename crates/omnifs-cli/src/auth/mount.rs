@@ -114,10 +114,10 @@ impl ProviderCatalog {
         &self,
     ) -> anyhow::Result<Vec<MountAuth>> {
         let mut mounts = self
-            .mount_config_paths()?
+            .session_mount_configs()?
             .into_iter()
-            .map(|path| {
-                let mount = self.load_mount(&path)?;
+            .map(|mount| {
+                let mount = self.resolve_mount_spec(mount.config, true)?;
                 Ok(self.resolve_mount_auth_tolerating_manifest_errors(mount))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

@@ -2,27 +2,33 @@
 
 Repository-local guidance for working in `omnifs`.
 
+This file is an orientation aid for agents and contributors. Unless a section
+explicitly states that something is an invariant, contract, or hard requirement,
+treat descriptions here as current-context guidance, not fixed design law. When
+the live code, tests, or an explicit user request conflict with descriptive text
+in this file, use the conflict as a signal to re-check the current system rather
+than freezing the old description in place.
+
 ## Project model
 
-`omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The host runtime loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
+`omnifs` is a projected filesystem that mirrors external services into local paths. The host runtime loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
 
-The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested.
+The runtime has Docker and native frontends. Docker mode keeps the Linux FUSE mount inside the container. Native mode uses the NFSv4 loopback frontend on macOS and the FUSE frontend on Linux.
 
 ## Supported workflow
 
-The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the selected runtime. Docker is the dev default for CI parity only when no runtime mode has been persisted by setup; native dev is available with `--mode native`.
 
 ```bash
-omnifs dev          # build dev image, materialize secrets/fixtures, launch container
-omnifs shell        # attach a zsh shell
-omnifs logs -f      # follow container output
+omnifs dev          # build dev image, materialize secrets/fixtures, launch Docker mode
+omnifs dev --mode native
+omnifs shell        # attach a shell
+omnifs logs -f      # follow runtime output
 omnifs status       # inspect mounts, providers, auth state
-omnifs down         # stop and remove the container
+omnifs down         # stop the selected runtime
 ```
 
-`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, captures `gh auth token`, writes `.secrets/github_token`, downloads the Chinook SQLite fixture into `.secrets/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with all built-in providers mounted under `/omnifs/<mount>`.
-
-Do not add alternate local mount recipes unless explicitly requested.
+`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, captures `gh auth token`, downloads the Chinook SQLite fixture into `.omnifs-dev/fixtures/db/test.db`, writes provider-namespaced launch secrets into the ephemeral session, and starts all built-in providers' dev mounts. Docker dev builds an image tagged `omnifs:<short-sha>-dev`; native dev builds provider WASM artifacts with `just providers-build` and uses `target/wasm32-wasip2/release`.
 
 ## Build and validation
 
@@ -143,7 +149,7 @@ Provider auth manifests live in `omnifs.provider.json` and are embedded in WASM 
 
 `omnifs-auth` is the OAuth protocol client: `OAuthClient`, device flow, loopback flow, and manual flow. It is not mount auth config, credential storage, or manifest parsing. Its `lib.rs` is mostly re-exports; implementation lives in `client.rs` and `request.rs`.
 
-For the contributor sandbox, `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container.
+For the contributor sandbox, `omnifs dev` captures `gh auth token` and exposes it as a read-only provider-namespaced secret at `/run/secrets/github/token` inside the provider sandbox.
 
 For the normal user path, `omnifs init` plus `omnifs up`, OAuth credentials live in the host credential store: keychain or `~/.omnifs/data/credentials.json` fallback.
 
@@ -175,14 +181,14 @@ Git clone currently uses SSH:
 
 Container startup requires:
 
-- host `gh auth token` works so `omnifs dev` can capture and write `.secrets/github_token`
+- host `gh auth token` works so `omnifs dev` can capture a launch secret
 - host `SSH_AUTH_SOCK` is set
 - host SSH agent has a usable GitHub key loaded
 
 Useful host checks:
 
 ```bash
-test -s .secrets/github_token || gh auth token > .secrets/github_token
+gh auth token >/dev/null
 ssh-add -L
 ssh -T git@github.com
 ```

@@ -2,7 +2,7 @@
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
 //! the built-in catalog or provider wasm metadata, writes the resulting mount config to
-//! `~/.omnifs/config/mounts/<name>.json`, and runs the provider's default auth flow
+//! `~/.omnifs/config.toml`, and runs the provider's default auth flow
 //! when one is declared.
 
 mod auth_import;
@@ -19,15 +19,15 @@ use clap::Args;
 use omnifs_creds::CredentialEntry;
 use omnifs_mount_schema::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
-use std::fs;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::commands::auth;
+use crate::config::ConfigFile;
 use crate::credential_target::CredentialTarget;
-use crate::paths::PathOverrides;
+use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
 use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
@@ -66,10 +66,8 @@ pub struct InitArgs {
     /// Defaults to `OMNIFS_PROVIDERS_DIR`, then the default config providers dir.
     #[arg(long)]
     pub providers_dir: Option<PathBuf>,
-    /// Override the directory mount configs are written into.
-    ///
-    /// Defaults to `OMNIFS_MOUNTS_DIR`, then the default config mounts dir.
-    #[arg(long)]
+    /// Override the legacy directory holding per-mount JSON configs.
+    #[arg(long, hide = true)]
     pub mounts_dir: Option<PathBuf>,
     /// Print the provider capability table at the start of the flow.
     /// Setup-driven runs suppress this because the picker already showed it.
@@ -90,10 +88,6 @@ impl InitArgs {
             None,
         )?;
         let paths = ctx.paths();
-        let mounts_dir = paths.mounts_dir.clone();
-        fs::create_dir_all(&mounts_dir)
-            .with_context(|| format!("create {}", mounts_dir.display()))?;
-
         let interactive = !self.no_input;
         let providers_dir = paths.providers_dir.clone();
         let catalog = ctx.catalog();
@@ -102,7 +96,7 @@ impl InitArgs {
             anyhow::bail!("no built-in or disk providers are available");
         }
 
-        let provider_selection = ProviderSelection::new(&templates, &mounts_dir);
+        let provider_selection = ProviderSelection::new(catalog, &templates);
         let (provider_name, mount_name) = provider_selection.resolve(
             self.provider.as_deref(),
             self.as_name.as_deref(),
@@ -162,16 +156,18 @@ impl InitArgs {
         .resolve()?;
         let effective_auth = import_outcome.auth.clone();
 
-        let config_path = mounts_dir.join(format!("{mount_name}.json"));
-        MountFile::new(
+        let spec = MountFile::new(
             &mount_name,
             &template.manifest,
             effective_auth.as_ref(),
             &self.scopes,
             generated,
         )
-        .write_to(&config_path)?;
-        anstream::println!("✓ Wrote {}", config_path.display());
+        .into_spec()?;
+        let mut config_file = ConfigFile::load(&paths.config_file)?;
+        config_file.upsert_mount(&spec)?;
+        config_file.save()?;
+        anstream::println!("✓ Updated {}", Paths::display(&paths.config_file));
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
@@ -180,7 +176,7 @@ impl InitArgs {
             } else if auth.auth_type == "oauth" {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
                 auth::login_with_paths(
-                    mounts_dir.clone(),
+                    paths.mounts_dir.clone(),
                     providers_dir.clone(),
                     paths.credentials_file.clone(),
                     mount_name.as_str(),

@@ -20,14 +20,14 @@ use crate::{
 
 pub(crate) const CONTAINER_NAME: &str = "omnifs";
 pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
-pub(crate) const HOST_CRED_DIR: &str = "/run/omnifs/creds";
+pub(crate) const GUEST_SECRET_ROOT: &str = "/run/secrets";
 pub(crate) const HOST_FUSE_MOUNT: &str = "/omnifs";
 pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";
 pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 
 pub(crate) struct Session {
     root: PathBuf,
-    creds_dir: PathBuf,
+    secrets_dir: PathBuf,
     mounts_dir: PathBuf,
     credentials_file: PathBuf,
 }
@@ -53,17 +53,17 @@ impl Session {
         }
         fs::create_dir_all(&root)
             .with_context(|| format!("create session dir {}", root.display()))?;
-        let creds_dir = root.join("creds");
+        let secrets_dir = root.join("secrets");
         let mounts_dir = root.join("mounts");
         let credentials_file = root.join("credentials.json");
-        fs::create_dir_all(&creds_dir)?;
+        fs::create_dir_all(&secrets_dir)?;
         fs::create_dir_all(&mounts_dir)?;
         set_private_dir(&root)?;
-        set_private_dir(&creds_dir)?;
+        set_private_dir(&secrets_dir)?;
         set_private_dir(&mounts_dir)?;
         Ok(Self {
             root,
-            creds_dir,
+            secrets_dir,
             mounts_dir,
             credentials_file,
         })
@@ -73,8 +73,8 @@ impl Session {
         &self.root
     }
 
-    pub(crate) fn creds_dir(&self) -> &Path {
-        &self.creds_dir
+    pub(crate) fn secrets_dir(&self) -> &Path {
+        &self.secrets_dir
     }
 
     pub(crate) fn mounts_dir(&self) -> &Path {
@@ -83,6 +83,17 @@ impl Session {
 
     pub(crate) fn credentials_file(&self) -> &Path {
         &self.credentials_file
+    }
+
+    pub(crate) fn secret_file_for_key(&self, key: &omnifs_core::CredentialId) -> PathBuf {
+        self.secrets_dir
+            .join(key.provider_id())
+            .join(key.scheme())
+            .join(key.account())
+    }
+
+    pub(crate) fn secret_file(&self, provider: &str, name: &str) -> PathBuf {
+        self.secrets_dir.join(provider).join(name)
     }
 
     pub(crate) fn cleanup_on_drop(&self) -> SessionCleanup {
@@ -213,8 +224,13 @@ impl SessionMaterializer<'_> {
                 .with_hint(format!(
                     "Run `omnifs auth import {mount_name}` or `omnifs init {mount_name}` to configure this mount's token"
                 ))?;
-            let cred_path = self.session.creds_dir().join(&key_name);
-            write_secret(&cred_path, entry.access_token().expose_secret())?;
+            let secret_path = self.session.secret_file_for_key(key);
+            if let Some(parent) = secret_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create secret dir {}", parent.display()))?;
+                set_private_dir(parent)?;
+            }
+            write_secret(&secret_path, entry.access_token().expose_secret())?;
         }
         Ok(())
     }
@@ -257,13 +273,22 @@ impl SessionMaterializer<'_> {
         let key = target
             .primary_key()
             .expect("credential target for scheme is internal");
-        let key_name = key.storage_key();
         obj.remove("token_env");
         obj.insert(
             "token_file".into(),
-            Value::String(format!("{HOST_CRED_DIR}/{key_name}")),
+            Value::String(Self::guest_secret_path(key)),
         );
         Ok(())
+    }
+
+    fn guest_secret_path(key: &omnifs_core::CredentialId) -> String {
+        format!(
+            "{}/{}/{}/{}",
+            GUEST_SECRET_ROOT,
+            key.provider_id(),
+            key.scheme(),
+            key.account()
+        )
     }
 }
 
@@ -335,15 +360,6 @@ impl MountConfig {
             config,
             source,
         })
-    }
-}
-
-impl ProviderCatalog {
-    pub(crate) fn session_mount_configs(&self) -> anyhow::Result<Vec<MountConfig>> {
-        self.mount_config_paths()?
-            .into_iter()
-            .map(|path| MountConfig::from_path(&path))
-            .collect()
     }
 }
 
@@ -486,17 +502,22 @@ mod tests {
         ProviderCatalog::new(&session.mounts_dir, providers_dir)
     }
 
+    fn test_session(root: &Path) -> Session {
+        let session = Session {
+            root: root.to_path_buf(),
+            secrets_dir: root.join("secrets"),
+            mounts_dir: root.join("mounts"),
+            credentials_file: root.join("credentials.json"),
+        };
+        fs::create_dir_all(&session.secrets_dir).unwrap();
+        fs::create_dir_all(&session.mounts_dir).unwrap();
+        session
+    }
+
     #[test]
     fn populate_session_materializes_host_managed_static_token_to_token_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
@@ -528,11 +549,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            written["auth"][0]["token_file"], "/run/omnifs/creds/github:pat:default",
+            written["auth"][0]["token_file"], "/run/secrets/github/pat/default",
             "host-managed static token should rewrite to a session token_file"
         );
 
-        let secret = fs::read_to_string(session.creds_dir.join("github:pat:default")).unwrap();
+        let secret = fs::read_to_string(session.secret_file_for_key(&key)).unwrap();
         assert_eq!(secret, "sk-12345");
     }
 
@@ -557,14 +578,7 @@ mod tests {
     #[test]
     fn populate_session_passes_through_token_env_configs() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -586,14 +600,7 @@ mod tests {
     #[test]
     fn populate_session_materializes_oauth_credentials_for_container() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -644,14 +651,7 @@ mod tests {
     #[test]
     fn populate_session_applies_provider_metadata_before_oauth_materialization() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
@@ -699,14 +699,7 @@ mod tests {
     #[test]
     fn populate_session_uses_builtin_metadata_without_host_wasm() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -749,14 +742,7 @@ mod tests {
     #[test]
     fn populate_session_materializes_configured_docker_socket_grant() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -788,14 +774,7 @@ mod tests {
     #[test]
     fn populate_session_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let session = Session {
-            root: tmp.path().to_path_buf(),
-            creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
-            credentials_file: tmp.path().join("credentials.json"),
-        };
-        fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
+        let session = test_session(tmp.path());
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),

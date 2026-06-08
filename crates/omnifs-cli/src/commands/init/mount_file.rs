@@ -2,10 +2,13 @@ use super::config_generation::GeneratedMountConfig;
 use crate::auth::AuthSelection;
 use anyhow::Context;
 use omnifs_core::MountName;
+use omnifs_host::mounts::Spec;
 use omnifs_mount_schema::ProviderConfig;
 use omnifs_mount_schema::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
+#[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::path::Path;
 
 pub(super) struct MountFile<'a> {
@@ -33,8 +36,22 @@ impl<'a> MountFile<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn write_to(self, path: &Path) -> anyhow::Result<()> {
-        let config = SerializableMountFile {
+        let config = self.serializable();
+        let pretty = serde_json::to_string_pretty(&config).context("serialize mount config")?;
+        fs::write(path, format!("{pretty}\n"))
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
+    pub(super) fn into_spec(self) -> anyhow::Result<Spec> {
+        let value = serde_json::to_value(self.serializable()).context("serialize mount config")?;
+        serde_json::from_value(value).context("deserialize generated mount config")
+    }
+
+    fn serializable(&self) -> SerializableMountFile<'_> {
+        SerializableMountFile {
             provider: &self.manifest.provider,
             mount: self.mount_name.as_str(),
             auth: self.auth.map(|auth| MountAuthEntry {
@@ -43,22 +60,17 @@ impl<'a> MountFile<'a> {
                 account: auth.account.as_deref(),
                 scopes: self.scopes,
             }),
-            capabilities: self.generated.capabilities,
+            capabilities: self.generated.capabilities.clone(),
             config: self
                 .generated
                 .config
                 .as_ref()
                 .map(|value| ProviderConfig::from_value(value.clone())),
-        };
-
-        let pretty = serde_json::to_string_pretty(&config).context("serialize mount config")?;
-        fs::write(path, format!("{pretty}\n"))
-            .with_context(|| format!("write {}", path.display()))?;
-        Ok(())
+        }
     }
 }
 
-/// Typed mount config written to `~/.omnifs/config/mounts/<name>.json`.
+/// Typed mount config persisted into `~/.omnifs/config.toml`.
 ///
 /// Field declaration order is the serialization order; using a struct
 /// instead of an ad-hoc `serde_json::Map` removes the need for

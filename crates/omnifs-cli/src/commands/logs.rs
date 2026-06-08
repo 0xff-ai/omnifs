@@ -5,8 +5,13 @@ use bollard::Docker;
 use bollard::query_parameters::LogsOptions;
 use clap::Args;
 use futures_util::StreamExt;
+use std::path::PathBuf;
 use std::process::Command;
 
+use crate::app_context::AppContext;
+use crate::native_runtime;
+use crate::paths::PathOverrides;
+use crate::runtime_mode::RuntimeMode;
 use crate::runtime_target::RuntimeTarget;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -17,16 +22,31 @@ pub struct LogsArgs {
     /// `omnifs`.
     #[arg(long)]
     pub container_name: Option<String>,
+    /// Runtime launch mode.
+    #[arg(long, value_enum)]
+    pub mode: Option<RuntimeMode>,
+    /// Host mount point for native mode.
+    #[arg(long)]
+    pub mount_point: Option<PathBuf>,
     #[arg(short = 'f', long)]
     pub follow: bool,
 }
 
 impl LogsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::{PathOverrides, Paths};
-
-        let (_paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
-        let container_name = RuntimeTarget::resolve_container_name(self.container_name, &config)?;
+        let ctx = AppContext::resolve_with_runtime(
+            PathOverrides::default(),
+            self.container_name,
+            None,
+            self.mode,
+            self.mount_point,
+        )?;
+        let paths = ctx.paths();
+        let target = ctx.runtime();
+        let RuntimeTarget::Docker(target) = target else {
+            return native_runtime::logs(paths, self.follow);
+        };
+        let container_name = target.container_name();
         if self.follow {
             // Tail the daemon's file log; bollard's `logs` API only surfaces stdout
             // and the entrypoint writes through a `tee` pipe that buffers at EOL

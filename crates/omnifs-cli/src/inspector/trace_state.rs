@@ -630,7 +630,7 @@ mod tests {
                 InspectorEvent::FuseStart {
                     op: "lookup".into(),
                     mount: "github".into(),
-                    path: "/raulk/omnifs".into(),
+                    path: "/0xff-ai/omnifs".into(),
                 },
             ),
             record(
@@ -641,7 +641,7 @@ mod tests {
                     mount: "github".into(),
                     provider: "github".into(),
                     method: "lookup_child".into(),
-                    path: "/raulk/omnifs".into(),
+                    path: "/0xff-ai/omnifs".into(),
                 },
             ),
             record(
@@ -651,7 +651,7 @@ mod tests {
                     operation_id: 42,
                     callout_index: 0,
                     kind: CalloutKind::Fetch,
-                    summary: "GET https://api.github.com/repos/raulk/omnifs".into(),
+                    summary: "GET https://api.github.com/repos/0xff-ai/omnifs".into(),
                 },
             ),
             record(
@@ -672,7 +672,7 @@ mod tests {
                 InspectorEvent::CacheEvent {
                     operation_id: Some(42),
                     mount: "github".into(),
-                    path: "/raulk/omnifs".into(),
+                    path: "/0xff-ai/omnifs".into(),
                     kind: CacheKind::BrowseHit,
                     elapsed_us: Some(80),
                 },

@@ -42,22 +42,24 @@ pub fn name(os: HostOs) -> &'static str {
 }
 
 pub fn explain_alpha_runtime(os: HostOs) -> String {
-    let lead = "omnifs runs inside a Docker container during alpha. This is temporary. \
-        The host CLI talks to a daemon inside the container, which mounts a FUSE filesystem \
-        and proxies it back out to the host.";
+    let lead = "omnifs can run either natively or through Docker. Native mode runs the \
+        provider host on this machine and mounts a local filesystem frontend; Docker mode \
+        keeps the older containerized runtime available as a fallback.";
 
     let per_os = match os {
         HostOs::MacOs => {
-            "On macOS, native FUSE integration needs a kernel extension we have not shipped yet. \
-            The container hosts a Linux FUSE stack and we project the mount back through a shared volume."
+            "On macOS, native mode uses the NFSv4 loopback frontend so the mount is visible \
+            to host shells and Finder. Docker mode remains available when you want the older \
+            Linux-container runtime."
         },
         HostOs::LinuxNative => {
-            "On Linux, the container model gives one binary path for everyone while the runtime \
-            stabilises. Post-alpha, native Linux will skip the container entirely."
+            "On Linux, native mode uses the FUSE frontend. Docker mode remains available for \
+            contributors and environments where /dev/fuse or local privileges are awkward."
         },
         HostOs::LinuxWsl => {
-            "Inside WSL2, the container approach mirrors what we do on macOS and native Linux. \
-            Run setup from your WSL terminal, not from cmd.exe or PowerShell."
+            "Inside WSL2, native mode is used only when the distro exposes a usable FUSE \
+            device. Docker mode remains the fallback. Run setup from your WSL terminal, not \
+            from cmd.exe or PowerShell."
         },
         HostOs::Unsupported => {
             "Your platform is not yet supported by omnifs. \

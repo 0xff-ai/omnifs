@@ -1,23 +1,19 @@
-use crate::catalog::ProviderTemplate;
+use crate::catalog::{ProviderCatalog, ProviderTemplate};
 use anyhow::anyhow;
 use omnifs_core::MountName;
 use std::collections::BTreeMap;
-use std::path::Path;
 
 pub(super) struct ProviderSelection<'a> {
+    catalog: &'a ProviderCatalog,
     templates: &'a BTreeMap<String, ProviderTemplate>,
-    mounts_dir: &'a Path,
 }
 
 impl<'a> ProviderSelection<'a> {
     pub(super) fn new(
+        catalog: &'a ProviderCatalog,
         templates: &'a BTreeMap<String, ProviderTemplate>,
-        mounts_dir: &'a Path,
     ) -> Self {
-        Self {
-            templates,
-            mounts_dir,
-        }
+        Self { catalog, templates }
     }
 
     pub(super) fn provider_names(&self) -> Vec<String> {
@@ -49,7 +45,7 @@ impl<'a> ProviderSelection<'a> {
 
         // Explicit --as collisions always error, regardless of --yes.
         if explicit_name.is_some() {
-            if crate::paths::mount_config_path_for(self.mounts_dir, &proposed_name).exists() {
+            if self.catalog.mount_exists(&proposed_name)? {
                 anyhow::bail!(
                     "mount `{proposed}` already exists; choose a different name with --as"
                 );
@@ -87,7 +83,7 @@ impl<'a> ProviderSelection<'a> {
         interactive: bool,
         yes: bool,
     ) -> anyhow::Result<MountName> {
-        if !crate::paths::mount_config_path_for(self.mounts_dir, &proposed).exists() {
+        if !self.catalog.mount_exists(&proposed)? {
             return Ok(proposed);
         }
         let suggestion = self.next_available(&proposed)?;
@@ -110,9 +106,12 @@ impl<'a> ProviderSelection<'a> {
     fn next_available(&self, base: &MountName) -> anyhow::Result<MountName> {
         (2..1000)
             .filter_map(|n| MountName::new(format!("{base}-{n}")).ok())
-            .find(|candidate| {
-                !crate::paths::mount_config_path_for(self.mounts_dir, candidate).exists()
+            .find_map(|candidate| match self.catalog.mount_exists(&candidate) {
+                Ok(false) => Some(Ok(candidate)),
+                Ok(true) => None,
+                Err(error) => Some(Err(error)),
             })
+            .transpose()?
             .ok_or_else(|| anyhow!("could not find an available mount name derived from `{base}`"))
     }
 }

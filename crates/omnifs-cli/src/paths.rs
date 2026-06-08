@@ -3,9 +3,9 @@
 //! Resolution order (per directory):
 //!   1. Explicit override from `PathOverrides` (CLI flag)
 //!   2. Per-purpose env var (`OMNIFS_CONFIG_DIR`, `OMNIFS_CACHE_DIR`,
-//!      `OMNIFS_MOUNTS_DIR`, `OMNIFS_PROVIDERS_DIR`)
-//!   3. `OMNIFS_HOME` (fans out: `$OMNIFS_HOME/{config,data,cache}` as the three roots)
-//!   4. Default: `$HOME/.omnifs/{config,data,cache}`
+//!      `OMNIFS_PROVIDERS_DIR`)
+//!   3. `OMNIFS_HOME` (fans out: `$OMNIFS_HOME/{config.toml,data,cache}`)
+//!   4. Default: `$HOME/.omnifs/{config.toml,data,cache}`
 //!
 //! The default layout is identical on macOS and Linux. Users who want
 //! platform-native (XDG, Apple's Library tree) can point the per-purpose
@@ -31,8 +31,8 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
-    /// Directory holding mount instance configs (one JSON per mount).
-    /// `omnifs init` writes here.
+    /// Legacy directory holding one JSON file per mount.
+    /// Normal user mounts live in `config_file` as `[[mounts]]`.
     pub mounts_dir: PathBuf,
     /// Directory holding compiled provider WASM components, looked up
     /// by the `provider:` field of each mount config.
@@ -43,7 +43,7 @@ pub struct Paths {
 
 impl Paths {
     /// Resolve paths from overrides, env, `OMNIFS_HOME`, then the
-    /// `$HOME/.omnifs/{config,data,cache}` default.
+    /// `$HOME/.omnifs/{config.toml,data,cache}` default.
     pub fn resolve(overrides: PathOverrides) -> Self {
         let omnifs_home = std::env::var_os("OMNIFS_HOME").map(PathBuf::from);
         let default_root = default_omnifs_root();
@@ -51,8 +51,8 @@ impl Paths {
         let config_dir = overrides
             .config_dir
             .or_else(|| std::env::var_os("OMNIFS_CONFIG_DIR").map(PathBuf::from))
-            .or_else(|| omnifs_home.as_ref().map(|h| h.join("config")))
-            .unwrap_or_else(|| default_root.join("config"));
+            .or_else(|| omnifs_home.clone())
+            .unwrap_or_else(|| default_root.clone());
 
         let data_dir = overrides
             .data_dir
@@ -75,7 +75,7 @@ impl Paths {
             .or_else(|| std::env::var_os("OMNIFS_PROVIDERS_DIR").map(PathBuf::from))
             .unwrap_or_else(|| data_dir.join("providers"));
 
-        let credentials_file = config_dir.join("credentials.json");
+        let credentials_file = data_dir.join("credentials.json");
         let config_file = config_dir.join("config.toml");
 
         Paths {
@@ -104,7 +104,7 @@ impl Paths {
         Ok((paths, config))
     }
 
-    /// Home-relativize a path for display (`~/.omnifs/config/mounts`).
+    /// Home-relativize a path for display (`~/.omnifs/config.toml`).
     /// Falls back to the full path if HOME is unset or stripping fails.
     pub fn display(path: &Path) -> String {
         if let Some(home) = std::env::var_os("HOME") {

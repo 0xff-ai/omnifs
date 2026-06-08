@@ -278,6 +278,9 @@ impl ProviderManifest {
     pub fn provider_capabilities(&self) -> ProviderCapabilities {
         let mut caps = ProviderCapabilities::default();
         for entry in &self.capabilities {
+            if entry.is_dynamic() {
+                continue;
+            }
             match entry {
                 CapabilityEntry::Domain { value, .. } => caps
                     .domains
@@ -550,6 +553,36 @@ mod tests {
         assert!(explicit.is_dynamic());
         let encoded = serde_json::to_value(&explicit).unwrap();
         assert_eq!(encoded["dynamic"], true);
+    }
+
+    #[test]
+    fn dynamic_manifest_capabilities_do_not_become_runtime_grants() {
+        let manifest = ProviderManifest::from_bytes(
+            br#"{
+              "id": "docker",
+              "displayName": "Docker",
+              "provider": "omnifs_provider_docker.wasm",
+              "defaultMount": "docker",
+              "capabilities": [
+                {
+                  "kind": "unixSocket",
+                  "value": "configured Docker socket",
+                  "dynamic": true,
+                  "why": "configured at mount init"
+                },
+                {
+                  "kind": "memoryMb",
+                  "value": 64,
+                  "why": "bounded metadata browsing"
+                }
+              ]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        let grants = manifest.provider_capabilities();
+        assert_eq!(grants.unix_sockets, None);
+        assert_eq!(grants.max_memory_mb, Some(64));
     }
 
     #[test]

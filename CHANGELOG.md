@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- Repository moved from `raulk/omnifs` to `0xff-ai/omnifs`. All repository URLs, GHCR image references (`ghcr.io/0xff-ai/omnifs`), npm package homepage/repository metadata, README and documentation links, and the `omnifs dev` clone hint are updated. The `OMNIFS_DEMO_OWNER` default in `scripts/demo.sh` now points to `0xff-ai`. npm package names are unchanged (`@0xff-ai/omnifs` and `@0xff-ai/omnifs-cli-*`).
+- Repository moved from `0xff-ai/omnifs` to `0xff-ai/omnifs`. All repository URLs, GHCR image references (`ghcr.io/0xff-ai/omnifs`), npm package homepage/repository metadata, README and documentation links, and the `omnifs dev` clone hint are updated. The `OMNIFS_DEMO_OWNER` default in `scripts/demo.sh` now points to `0xff-ai`. npm package names are unchanged (`@0xff-ai/omnifs` and `@0xff-ai/omnifs-cli-*`).
 - `omnifs setup` provider multiselect now sorts `db` and `linear` to the bottom and starts them unchecked. Both require user-supplied state (a SQLite fixture path, a Linear API key) that the smoke onboarding flow can't satisfy from ambient context.
 
 ### Fixed

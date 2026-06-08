@@ -4,19 +4,30 @@ use bollard::Docker;
 use clap::Args;
 use std::borrow::Cow;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
-use crate::paths::Paths;
+use crate::paths::{PathOverrides, Paths};
+use crate::runtime_mode::RuntimeMode;
+use crate::runtime_target::RuntimeTarget;
 use crate::session::CredsBackend;
 use crate::status::UserMountStatus;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct DoctorArgs {}
+pub struct DoctorArgs {
+    /// Runtime mode to diagnose.
+    #[arg(long, value_enum)]
+    pub mode: Option<RuntimeMode>,
+    /// Host mount point for native mode.
+    #[arg(long)]
+    pub mount_point: Option<PathBuf>,
+}
 
 /// Aggregate result of a completed diagnostic run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +39,14 @@ pub(crate) enum DoctorVerdict {
 
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
-        let ctx = AppContext::resolve_default()?;
-        run(ctx.paths(), ctx.catalog()).await
+        let ctx = AppContext::resolve_with_runtime(
+            PathOverrides::default(),
+            None,
+            None,
+            self.mode,
+            self.mount_point,
+        )?;
+        run(ctx.paths(), ctx.catalog(), ctx.runtime()).await
     }
 }
 
@@ -109,27 +126,56 @@ impl DoctorReport {
     }
 }
 
-pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<DoctorVerdict> {
+pub async fn run(
+    paths: &Paths,
+    catalog: &ProviderCatalog,
+    runtime: &RuntimeTarget,
+) -> anyhow::Result<DoctorVerdict> {
     let mut report = DoctorReport::default();
 
-    // 1. docker_reachable
-    let (docker, docker_result) = probe_docker_reachable().await;
-    let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
-    anstream::println!("{}", report.record("docker reachable", docker_result));
+    anstream::println!(
+        "{}",
+        report.record(
+            "runtime mode",
+            ProbeResult::Ok(match runtime {
+                RuntimeTarget::Docker(_) => "docker".into(),
+                RuntimeTarget::Native(target) => {
+                    format!("native ({})", target.mount_point().display())
+                },
+            }),
+        )
+    );
 
-    // 2. fuse (Linux only)
-    let fuse_result = probe_fuse();
-    anstream::println!("{}", report.record("fuse", fuse_result));
+    let docker = match runtime {
+        RuntimeTarget::Docker(_) => {
+            let (docker, docker_result) = probe_docker_reachable().await;
+            anstream::println!("{}", report.record("docker reachable", docker_result));
+            docker
+        },
+        RuntimeTarget::Native(_) => {
+            anstream::println!(
+                "{}",
+                report.record("docker reachable", ProbeResult::Skipped("native mode"))
+            );
+            None
+        },
+    };
 
-    // 3. image_cached (depends on docker)
-    let image_result = match (docker_ok, docker.as_ref()) {
-        (true, Some(docker)) => probe_image_cached(docker).await,
-        _ => ProbeResult::Skipped("docker unreachable"),
+    let frontend_result = match runtime {
+        RuntimeTarget::Docker(_) => probe_fuse_for_docker(),
+        RuntimeTarget::Native(_) => probe_native_frontend(),
+    };
+    anstream::println!("{}", report.record("filesystem frontend", frontend_result));
+
+    let image_result = match (runtime, docker.as_ref()) {
+        (RuntimeTarget::Docker(_), Some(docker)) => probe_image_cached(docker).await,
+        (RuntimeTarget::Docker(_), None) => ProbeResult::Skipped("docker unreachable"),
+        (RuntimeTarget::Native(_), _) => ProbeResult::Skipped("native mode"),
     };
     anstream::println!("{}", report.record("image cached", image_result));
 
-    // 4. providers_discovered
-    let providers_result = probe_providers_discovered(catalog);
+    let providers_result =
+        probe_providers_discovered(catalog, matches!(runtime, RuntimeTarget::Native(_)));
     anstream::println!(
         "{}",
         report.record("providers discovered", providers_result)
@@ -178,7 +224,7 @@ async fn probe_docker_reachable() -> (Option<Docker>, ProbeResult) {
     }
 }
 
-fn probe_fuse() -> ProbeResult {
+fn probe_fuse_for_docker() -> ProbeResult {
     #[cfg(target_os = "linux")]
     {
         let path = Path::new("/dev/fuse");
@@ -196,8 +242,52 @@ fn probe_fuse() -> ProbeResult {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        ProbeResult::Skipped("macOS: containerized FUSE")
+        ProbeResult::Skipped("docker provides Linux FUSE")
     }
+}
+
+fn probe_native_frontend() -> ProbeResult {
+    #[cfg(target_os = "macos")]
+    {
+        if Path::new("/sbin/mount_nfs").exists() || command_exists("mount_nfs") {
+            ProbeResult::Ok("NFSv4 loopback helper available".into())
+        } else {
+            ProbeResult::Err("mount_nfs not found".into())
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        probe_linux_fuse()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        ProbeResult::Err("native mode is supported on macOS and Linux only".into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_linux_fuse() -> ProbeResult {
+    let path = Path::new("/dev/fuse");
+    if !path.exists() {
+        return ProbeResult::Err("/dev/fuse does not exist".into());
+    }
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(_) => ProbeResult::Ok("/dev/fuse openable".into()),
+        Err(error) => ProbeResult::Err(format!("/dev/fuse open: {error}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn command_exists(command: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {command} >/dev/null 2>&1"))
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 async fn probe_image_cached(docker: &Docker) -> ProbeResult {
@@ -210,13 +300,19 @@ async fn probe_image_cached(docker: &Docker) -> ProbeResult {
     }
 }
 
-fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
+fn probe_providers_discovered(catalog: &ProviderCatalog, native: bool) -> ProbeResult {
     let builtin_count = ProviderCatalog::builtin_manifests()
         .map(|v| v.len())
         .unwrap_or(0);
     match catalog.provider_dir_status() {
+        ProviderDirStatus::Missing if native => {
+            ProbeResult::Err("native mode needs provider .wasm files on disk".into())
+        },
         ProviderDirStatus::Missing if builtin_count > 0 => {
             ProbeResult::Ok(format!("{builtin_count} built-in, provider dir missing"))
+        },
+        ProviderDirStatus::Present { wasm_count } if native && wasm_count == 0 => {
+            ProbeResult::Err("native mode needs provider .wasm files on disk".into())
         },
         ProviderDirStatus::Present { wasm_count } if builtin_count + wasm_count > 0 => {
             ProbeResult::Ok(format!("{builtin_count} built-in, {wasm_count} on disk"))

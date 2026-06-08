@@ -137,16 +137,16 @@ mod tests {
     fn http_summary_uses_method_host_path() {
         let summary = redact_http_url_for_summary(
             "GET",
-            "https://api.github.com/repos/raulk/omnifs?access_token=secret",
+            "https://api.github.com/repos/0xff-ai/omnifs?access_token=secret",
         );
-        assert_eq!(summary, "GET api.github.com/repos/raulk/omnifs");
+        assert_eq!(summary, "GET api.github.com/repos/0xff-ai/omnifs");
     }
 
     #[test]
     fn git_remote_redacts_ssh_form() {
         assert_eq!(
-            redact_git_remote("git@github.com:raulk/omnifs.git"),
-            "github.com:raulk/omnifs"
+            redact_git_remote("git@github.com:0xff-ai/omnifs.git"),
+            "github.com:0xff-ai/omnifs"
         );
     }
 

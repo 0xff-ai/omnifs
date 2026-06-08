@@ -2,7 +2,7 @@
 
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::auth::AuthReadiness;
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
@@ -49,24 +49,23 @@ impl ProviderCatalog {
         &self,
         name: &MountName,
     ) -> anyhow::Result<omnifs_host::mounts::Resolved> {
-        self.load_mount(&self.mount_config_path(name))
-    }
-
-    pub(crate) fn mount_config_path(&self, name: &MountName) -> PathBuf {
-        crate::paths::mount_config_path_for(self.mounts_dir(), name)
+        let mount = self
+            .session_mount_configs()?
+            .into_iter()
+            .find(|mount| &mount.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
+        self.resolve_mount_spec(mount.config, true)
     }
 
     pub(crate) fn closest_mount_name(&self, target: &str) -> anyhow::Result<Option<String>> {
         let mut best: Option<(usize, String)> = None;
-        for path in self.mount_config_paths()? {
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str().map(str::to_owned)) else {
-                continue;
-            };
-            let distance = strsim::damerau_levenshtein(target, &stem);
+        for mount in self.session_mount_configs()? {
+            let name = mount.name.to_string();
+            let distance = strsim::damerau_levenshtein(target, &name);
             if distance <= target.len() / 2 + 1 {
                 match &best {
                     Some((current, _)) if *current <= distance => {},
-                    _ => best = Some((distance, stem)),
+                    _ => best = Some((distance, name)),
                 }
             }
         }
@@ -78,11 +77,11 @@ impl ProviderCatalog {
         templates: &BTreeMap<String, ProviderTemplate>,
     ) -> anyhow::Result<BTreeMap<String, String>> {
         let mut by_provider: BTreeMap<String, String> = BTreeMap::new();
-        for path in self.mount_config_paths()? {
-            let mount = match self.load_mount(&path) {
+        for configured in self.session_mount_configs()? {
+            let mount = match self.resolve_mount_spec(configured.config.clone(), true) {
                 Ok(mount) => mount,
                 Err(error) => {
-                    tracing::warn!(path = %path.display(), %error, "skipping unparsable mount config");
+                    tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
                     continue;
                 },
             };
@@ -104,14 +103,11 @@ impl ProviderCatalog {
     }
 
     pub(crate) fn scan_provider_configs(&self) -> anyhow::Result<Vec<ProviderConfigStatus>> {
-        if !self.mounts_dir().exists() {
-            return Ok(Vec::new());
-        }
-
-        let files = self.mount_config_paths()?;
-        let mut providers = Vec::with_capacity(files.len());
-        for config_path in files {
-            match self.load_mount(&config_path) {
+        let configs = self.session_mount_configs()?;
+        let mut providers = Vec::with_capacity(configs.len());
+        for configured in configs {
+            let config_path = configured.source.clone();
+            match self.resolve_mount_spec(configured.config, true) {
                 Ok(config) => {
                     let provider_path = self.provider_path(&config);
                     let provider_present = provider_path.exists();
@@ -151,14 +147,11 @@ impl ProviderCatalog {
         &self,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<Vec<UserMountStatus>> {
-        if !self.mounts_dir().exists() {
-            return Ok(Vec::new());
-        }
-
-        let files = self.mount_config_paths()?;
-        let mut mounts = Vec::with_capacity(files.len());
-        for config_path in files {
-            match self.read_user_mount_status(&config_path, store) {
+        let configs = self.session_mount_configs()?;
+        let mut mounts = Vec::with_capacity(configs.len());
+        for configured in configs {
+            let config_path = configured.source.clone();
+            match self.read_user_mount_status(configured, store) {
                 Ok(status) => mounts.push(UserMountStatus::Ready(status)),
                 Err(error) => mounts.push(UserMountStatus::Invalid {
                     config_path,
@@ -171,16 +164,17 @@ impl ProviderCatalog {
 
     fn read_user_mount_status(
         &self,
-        config_path: &Path,
+        configured: crate::session::MountConfig,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<UserMountReadyStatus> {
-        let config = self.load_mount(config_path)?;
+        let config_path = configured.source.clone();
+        let config = self.resolve_mount_spec(configured.config, true)?;
         let provider_path = self.provider_path(&config);
         let provider_present = provider_path.exists();
         let metadata_available = true;
         let auth = AuthReadiness::from_config(&config, store);
         Ok(UserMountReadyStatus {
-            config_path: config_path.to_path_buf(),
+            config_path: config_path.clone(),
             mount: config.mount,
             provider: config.provider,
             provider_present,

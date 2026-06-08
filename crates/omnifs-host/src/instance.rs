@@ -8,6 +8,7 @@
 use std::path::{Component as PathComponent, Path, PathBuf};
 
 use parking_lot::Mutex;
+use tracing::info;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
@@ -36,11 +37,19 @@ impl Instance {
         config_bytes: Vec<u8>,
         preopens: &[PreopenedPath],
     ) -> std::result::Result<Self, BuildError> {
+        info!(wasm = %wasm_path.display(), "building provider linker");
         let mut linker = Linker::<HostState>::new(engine);
         wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
         Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
 
+        info!(wasm = %wasm_path.display(), "compiling provider component");
+        let started = std::time::Instant::now();
         let component = Component::from_file(engine, wasm_path)?;
+        info!(
+            wasm = %wasm_path.display(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "compiled provider component"
+        );
         let wasi = build_wasi_ctx(preopens)?;
         let mut store = wasmtime::Store::new(
             engine,
@@ -50,7 +59,14 @@ impl Instance {
             },
         );
 
+        info!(wasm = %wasm_path.display(), "instantiating provider component");
+        let started = std::time::Instant::now();
         let bindings = Provider::instantiate(&mut store, &component, &linker)?;
+        info!(
+            wasm = %wasm_path.display(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "instantiated provider component"
+        );
 
         Ok(Self {
             store: Mutex::new(store),

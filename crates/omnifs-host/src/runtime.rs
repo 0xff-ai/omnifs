@@ -291,40 +291,53 @@ impl Runtime {
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
         let mount_name = config.mount.as_str();
+        let provider_id = config.provider_id.as_str();
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            wasm = %wasm_path.display(),
+            "building provider runtime"
+        );
+        let runtime_started = std::time::Instant::now();
         let config_bytes = config.config_bytes();
         let preopens = config
             .capabilities
             .as_ref()
             .and_then(|c| c.preopened_paths.as_deref())
             .unwrap_or(&[]);
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            preopens = preopens.len(),
+            "instantiating provider runtime"
+        );
         let instance = Instance::new(engine, wasm_path, config_bytes, preopens)?;
 
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            "validating provider config"
+        );
         validate_instance_config(config.provider_config_schema(), config, mount_name)?;
 
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            "initializing provider"
+        );
+        let initialize_started = std::time::Instant::now();
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            elapsed_ms = initialize_started.elapsed().as_millis(),
+            "initialized provider"
+        );
         let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
-        let auth_manifest = Artifact::load(wasm_path)
-            .and_then(|artifact| artifact.auth_manifest())
-            .map_err(BuildError::InvalidConfig)?;
-        let auth = if config.auth.is_empty() {
-            Arc::new(AuthManager::none())
-        } else {
-            let store = credential_store_for_config_dir(dirs.config_dir);
-            let refresh_lock_path = dirs.config_dir.join("credentials.lock");
-            Arc::new(
-                AuthManager::from_configs_manifest_store_with_store(
-                    &config.auth,
-                    auth_manifest.as_ref(),
-                    config.provider_id(),
-                    store,
-                    refresh_lock_path,
-                )
-                .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
-            )
-        };
+        let auth = build_auth_manager(config, wasm_path, dirs.config_dir)?;
 
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
@@ -344,7 +357,7 @@ impl Runtime {
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
-        Ok(Self {
+        let runtime = Self {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
@@ -361,7 +374,14 @@ impl Runtime {
             inflight: InFlight::new(),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
-        })
+        };
+        info!(
+            mount = mount_name,
+            provider = provider_id,
+            elapsed_ms = runtime_started.elapsed().as_millis(),
+            "built provider runtime"
+        );
+        Ok(runtime)
     }
 
     pub fn shutdown(&self) -> Result<()> {
@@ -834,6 +854,31 @@ fn finish_initialize_return(
             "initialize returned unexpected result: {other:?}"
         ))),
     }
+}
+
+fn build_auth_manager(
+    config: &Resolved,
+    wasm_path: &Path,
+    config_dir: &Path,
+) -> std::result::Result<Arc<AuthManager>, BuildError> {
+    if config.auth.is_empty() {
+        return Ok(Arc::new(AuthManager::none()));
+    }
+
+    let auth_manifest = Artifact::load(wasm_path)
+        .and_then(|artifact| artifact.auth_manifest())
+        .map_err(BuildError::InvalidConfig)?;
+    let store = credential_store_for_config_dir(config_dir);
+    let refresh_lock_path = config_dir.join("credentials.lock");
+    AuthManager::from_configs_manifest_store_with_store(
+        &config.auth,
+        auth_manifest.as_ref(),
+        config.provider_id(),
+        store,
+        refresh_lock_path,
+    )
+    .map(Arc::new)
+    .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))
 }
 
 fn validate_instance_config(

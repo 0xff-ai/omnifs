@@ -17,7 +17,7 @@ pub(super) fn status(
     let rows = AuthStatus::new(catalog, store).load()?;
     anstream::println!("backend: {}", store.backend_label());
     if rows.is_empty() {
-        anstream::println!("no mount configs found in {}", paths.mounts_dir.display());
+        anstream::println!("no mount configs found in {}", paths.config_file.display());
         return Ok(());
     }
     for row in rows {

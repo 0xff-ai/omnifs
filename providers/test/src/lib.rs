@@ -29,6 +29,13 @@ struct State {
     fresh_full_reads: u64,
 }
 
+const LARGE_RANGED_SIZE: u64 = 64 * 1024 * 1024 + 1;
+
+#[omnifs_sdk::path_captures]
+struct DynamicCaptures {
+    name: String,
+}
+
 // ===========================================================================
 // Object family: `Item`
 // ===========================================================================
@@ -160,9 +167,10 @@ async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection>
 
     for (number, item, canonical) in rows {
         let item_key = key.item(number);
+        let base = format!("items/{filter}/{number}");
         let leaves = ["item.json", "item.md", "title", "state", "body", "comments"]
             .into_iter()
-            .map(str::to_string)
+            .map(|leaf| format!("/{base}/{leaf}"))
             .collect();
         projection = projection.store_canonical(
             item_key.anchor(),
@@ -170,7 +178,6 @@ async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection>
             canonical.bytes,
             leaves,
         );
-        let base = format!("items/{filter}/{number}");
         projection = projection.preload_file(
             format!("{base}/title"),
             FileProjection::inline(item.title.as_bytes().to_vec()).build(),
@@ -257,6 +264,7 @@ impl TestProvider {
         r.file("/hello/fresh-full").handler(fresh_full)?;
         r.file("/hello/ranged").handler(ranged)?;
         r.file("/hello/unknown-ranged").handler(unknown_ranged)?;
+        r.file("/hello/large-ranged").handler(large_ranged)?;
         r.file("/hello/volatile-tail").handler(volatile_tail)?;
         r.dir("/hello/bundle").handler(bundle)?;
         r.dir("/hello/feed").handler(feed)?;
@@ -268,6 +276,8 @@ impl TestProvider {
 
         r.dir("/scoped").handler(scoped)?;
         r.file("/scoped/item").handler(scoped_item)?;
+
+        r.dir("/dynamic/{name}").handler(dynamic)?;
 
         r.treeref("/checkout").handler(checkout)?;
 
@@ -373,11 +383,18 @@ async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
 
 async fn unknown_ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(
-        FileProjection::ranged(MemoryRangeReader::new(b"unknown size\n".to_vec()))
+        FileProjection::ranged(MemoryRangeReader::new(b"unknown-size\n".to_vec()))
             .size(Size::Unknown)
             .immutable()
             .build(),
     )
+}
+
+async fn large_ranged(_cx: Cx<State>) -> Result<FileProjection> {
+    Ok(FileProjection::ranged(LargeRangedReader)
+        .size(Size::Exact(LARGE_RANGED_SIZE))
+        .immutable()
+        .build())
 }
 
 async fn volatile_tail(_cx: Cx<State>) -> Result<FileProjection> {
@@ -469,6 +486,18 @@ async fn scoped_item(_cx: Cx<State>) -> Result<FileProjection> {
 }
 
 // ===========================================================================
+// /dynamic/{name}
+// ===========================================================================
+
+async fn dynamic(_cx: DirCx<State>, captures: DynamicCaptures) -> Result<DirProjection> {
+    let value_path = format!("dynamic/{}/value", captures.name);
+    let mut content = captures.name.into_bytes();
+    content.push(b'\n');
+    Ok(DirProjection::exhaustive([Entry::file("value")])
+        .preload_file(value_path, FileProjection::inline(content).build()))
+}
+
+// ===========================================================================
 // /checkout subtree handoff
 // ===========================================================================
 
@@ -490,6 +519,23 @@ impl RangeReader for LiveTailReader {
             let mut bytes = body.into_bytes();
             bytes.truncate(length as usize);
             Ok(FileChunk::new(bytes, false))
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LargeRangedReader;
+
+impl RangeReader for LargeRangedReader {
+    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk> {
+        Box::pin(async move {
+            let remaining = LARGE_RANGED_SIZE.saturating_sub(offset);
+            let len = remaining.min(u64::from(length));
+            let bytes = vec![b'L'; usize::try_from(len).expect("chunk length fits usize")];
+            Ok(FileChunk::new(
+                bytes,
+                offset.saturating_add(len) >= LARGE_RANGED_SIZE,
+            ))
         })
     }
 }
