@@ -70,10 +70,11 @@ impl<'a> AuthImportDecision<'a> {
     }
 
     /// Semantics:
-    /// - Single detected credential: prints the credential, asks `[y/N/o for OAuth]`.
+    /// - Single detected env credential: prints the credential, asks `[y/N/o for OAuth]`.
     ///   Default is N (start OAuth). `y` imports; `N` or `o` falls through.
-    ///   For a `GhCli` credential with write-capable scopes, the warning is printed
-    ///   and `y` must be typed explicitly (Enter alone is not accepted).
+    /// - Single detected `GhCli` credential: prints the credential, asks
+    ///   `[Y/n/o for OAuth]`. Default is Y (import). `n` or `o` falls through.
+    ///   For write-capable scopes, the warning is printed before the prompt.
     /// - Multiple detected credentials: uses `inquire::Select` for the user to pick one,
     ///   with OAuth as the last option (default).
     /// - `yes` flag: silently accepts the first detected credential without prompting.
@@ -234,10 +235,13 @@ fn confirm_gh_import(account: &str, scopes: &[String]) -> anyhow::Result<bool> {
         );
         anstream::println!();
     }
-    let prompt = format!("Import gh CLI credential (@{account})? [y/N/o for OAuth]");
+    let prompt = format!("Import gh CLI credential (@{account})? [Y/n/o for OAuth]");
     let answer = inquire::Text::new(&prompt)
-        .with_default("N")
+        .with_default("y")
         .prompt()
         .map_err(|e| anyhow::anyhow!("prompt error: {e}"))?;
-    Ok(answer.trim().eq_ignore_ascii_case("y"))
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
