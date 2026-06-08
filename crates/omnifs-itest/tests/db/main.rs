@@ -2,7 +2,6 @@
 
 mod db_fixture;
 
-use omnifs_cache::RecordKind;
 use omnifs_core::path::Path as OmnifsPath;
 use omnifs_host::{Error, LookupOutcome};
 use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
@@ -57,11 +56,8 @@ async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
         .unwrap();
     match &result.bytes {
         ByteSource::Inline(bytes) => bytes.clone(),
-        ByteSource::Canonical => harness.runtime.cached_canonical_for(path).map_or_else(
-            || panic!("expected canonical bytes in object cache for {path}"),
-            |(_, bytes, _)| bytes,
-        ),
-        other => panic!("expected inline or canonical file content for {path}, got {other:?}"),
+        ByteSource::Canonical => panic!("db provider must not use canonical cache for {path}"),
+        other => panic!("expected inline file content for {path}, got {other:?}"),
     }
 }
 
@@ -135,7 +131,7 @@ async fn db_tables_listing_exhaustive_names() {
 }
 
 #[tokio::test]
-async fn db_meta_listing_loads_object_without_duplicate_effects() {
+async fn db_meta_listing_is_direct_path_surface() {
     let (_dir, harness) = db_harness();
 
     let meta = harness
@@ -158,17 +154,23 @@ async fn db_meta_listing_loads_object_without_duplicate_effects() {
     assert!(
         harness
             .runtime
+            .cached_canonical_for("/meta/info.json")
+            .is_none()
+    );
+    assert!(
+        harness
+            .runtime
             .cached_canonical_for("/meta/version.txt")
-            .is_some()
+            .is_none()
     );
 }
 
 #[tokio::test]
-async fn db_table_canonical_single_source_coherence() {
+async fn db_table_direct_files_are_coherent() {
     let (_dir, harness) = db_harness();
 
-    let canonical_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
-    let doc: TableDoc = serde_json::from_slice(&canonical_bytes).unwrap();
+    let table_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
+    let doc: TableDoc = serde_json::from_slice(&table_bytes).unwrap();
 
     let schema_sql = read_bytes(&harness, "/tables/Album/schema.sql").await;
     let schema_json = read_bytes(&harness, "/tables/Album/schema.json").await;
@@ -206,17 +208,17 @@ async fn db_table_canonical_single_source_coherence() {
 }
 
 #[tokio::test]
-async fn db_table_warm_projection_single_load() {
+async fn db_table_direct_files_do_not_use_canonical_cache() {
     let (_dir, harness) = db_harness();
 
-    let canonical_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
+    let table_bytes = read_bytes(&harness, "/tables/Album/table.json").await;
 
     let schema_sql = read_bytes(&harness, "/tables/Album/schema.sql").await;
     let schema_json = read_bytes(&harness, "/tables/Album/schema.json").await;
     let indexes_json = read_bytes(&harness, "/tables/Album/indexes.json").await;
     let count_txt = read_bytes(&harness, "/tables/Album/count.txt").await;
 
-    let doc: TableDoc = serde_json::from_slice(&canonical_bytes).unwrap();
+    let doc: TableDoc = serde_json::from_slice(&table_bytes).unwrap();
     assert_eq!(
         doc.create_sql.as_deref().unwrap_or("").as_bytes(),
         schema_sql.as_slice()
@@ -232,9 +234,14 @@ async fn db_table_warm_projection_single_load() {
     assert!(
         harness
             .runtime
-            .cache_get("/tables/Album/schema.json", RecordKind::File, None)
-            .is_some(),
-        "warm leaf should land in the view cache after canonical load"
+            .cached_canonical_for("/tables/Album/table.json")
+            .is_none()
+    );
+    assert!(
+        harness
+            .runtime
+            .cached_canonical_for("/tables/Album/schema.json")
+            .is_none()
     );
 }
 
@@ -302,7 +309,7 @@ async fn db_sample_ranged_above_inline_cap() {
 }
 
 #[tokio::test]
-async fn db_meta_database_object() {
+async fn db_meta_direct_files() {
     let (_dir, harness) = db_harness();
 
     let info_bytes = read_bytes(&harness, "/meta/info.json").await;

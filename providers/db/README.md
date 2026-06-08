@@ -27,30 +27,27 @@ The provider opens **read-only by default**. The application-layer
 the URI mode, but the host still needs `"mode": "rw"` on the
 preopen for the kernel to allow writes through. Use it sparingly.
 
-Table metadata and database info are **object-shaped**: one `load()`
-per table or for the `/meta` singleton produces a provider-synthesized
-canonical JSON document; warm field leaves (`schema.sql`, `schema.json`,
-`indexes.json`, `count.txt`, `version.txt`, `path.txt`) render from
-that canonical without re-querying SQLite. Object-cache invariant #3
-(canonical byte-equals a single upstream GET) does **not** apply here:
-the canonical is synthesized locally, not fetched verbatim from a remote.
+Table metadata and database info are **path-shaped**. The SQLite file is
+already the local source of truth, so this provider does not emit canonical
+object-cache entries for `/meta` or `/tables/{table}`. Each metadata leaf reads
+directly from the backend and returns file bytes for that path.
 
-Both objects declare compile-time **`Immutable`** stability (fixed snapshot
-semantics with `read_only=true` / `immutable=1`). `sample.json` remains
-route-shaped with a version token and ranged reads above the inline cap.
+The table name universe is captured at provider start so missing tables do not
+appear as synthetic dynamic route anchors. `sample.json` remains route-shaped
+with a version token and ranged reads above the inline cap.
 
 ## Path tree
 
 ```
-/db/meta/info.json                # canonical db.database object (pretty JSON + \n)
-/db/meta/version.txt             # warm projection from info canonical
-/db/meta/path.txt                # warm projection from info canonical
+/db/meta/info.json                # direct database info JSON (pretty JSON + \n)
+/db/meta/version.txt             # direct SQLite version text
+/db/meta/path.txt                # direct database path text
 /db/tables/                      # exhaustive table name listing (no preload)
-/db/tables/{table}/table.json    # canonical db.table object (pretty JSON + \n)
-/db/tables/{table}/schema.sql    # warm projection from table canonical
-/db/tables/{table}/schema.json   # warm projection from table canonical
-/db/tables/{table}/indexes.json  # warm projection from table canonical
-/db/tables/{table}/count.txt     # warm projection from table canonical
+/db/tables/{table}/table.json    # direct table metadata JSON (pretty JSON + \n)
+/db/tables/{table}/schema.sql    # direct CREATE TABLE SQL
+/db/tables/{table}/schema.json   # direct column metadata JSON
+/db/tables/{table}/indexes.json  # direct index metadata JSON
+/db/tables/{table}/count.txt     # direct row count text
 /db/tables/{table}/sample.json   # route-shaped: SELECT * LIMIT sample_limit (default 20)
 ```
 
@@ -61,10 +58,9 @@ work that has not happened.
 
 ## File attributes
 
-Object leaves inherit **`Immutable`** from the `#[object(stability = Immutable)]`
-declaration. `sample.json` is **`Mutable`** with a content hash version token;
-large samples switch to a deferred ranged projection above the inline cap
-(`MAX_PROJECTED_BYTES = 64 KiB`).
+Metadata leaves are direct read projections. `sample.json` is **`Mutable`** with
+a content hash version token; large samples switch to a deferred ranged
+projection above the inline cap (`MAX_PROJECTED_BYTES = 64 KiB`).
 
 ## Example config
 

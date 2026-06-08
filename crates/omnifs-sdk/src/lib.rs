@@ -73,6 +73,53 @@ pub mod __internal {
     pub use crate::rate_limit::clear_breaker;
 }
 
+/// Empty provider configuration.
+///
+/// The host sends `{}` when a mount has no provider-specific config. `()` would
+/// deserialize from JSON `null`, so providers with no config use `NoConfig`
+/// instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoConfig;
+
+impl<'de> serde::Deserialize<'de> for NoConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match <serde_json::Value as serde::Deserialize>::deserialize(deserializer)? {
+            serde_json::Value::Null => Ok(Self),
+            serde_json::Value::Object(map) if map.is_empty() => Ok(Self),
+            _ => Err(serde::de::Error::custom(
+                "expected empty provider config object",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NoConfig;
+
+    #[test]
+    fn no_config_accepts_empty_mount_config() {
+        assert_eq!(serde_json::from_str::<NoConfig>("{}").unwrap(), NoConfig);
+    }
+
+    #[test]
+    fn no_config_accepts_null_for_json_absence() {
+        assert_eq!(serde_json::from_str::<NoConfig>("null").unwrap(), NoConfig);
+    }
+
+    #[test]
+    fn no_config_rejects_provider_specific_keys() {
+        let err = serde_json::from_str::<NoConfig>(r#"{"endpoint":"x"}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("empty provider config object"),
+            "{err}"
+        );
+    }
+}
+
 #[cfg(doctest)]
 mod removed_api_doctests {
     /// ```compile_fail

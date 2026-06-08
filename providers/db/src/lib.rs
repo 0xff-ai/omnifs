@@ -72,7 +72,7 @@ fn default_sample_limit() -> u32 {
 }
 
 /// Single-threaded provider state. The `rusqlite` `Connection` is
-/// `!Send`, which fits the runtime's `Rc`-based model. Cached behind
+/// `!Send`, which fits the runtime's `Rc`-based model. Stored behind
 /// `Rc<RefCell<..>>` so handlers can borrow it from inside
 /// `Cx::state`. `SQLite` calls are synchronous, so each handler
 /// holds the borrow for the duration of one query batch.
@@ -91,10 +91,10 @@ fn install_known_tables(names: impl IntoIterator<Item = String>) {
     });
 }
 
-/// Capture for `/tables/{table}`. Validates the name is non-empty, path-safe,
-/// and present in the database snapshot opened at provider start. A parse
-/// rejection falls through to the parent `/tables` dir handler, which returns
-/// authoritative `NotFound` for names absent from the exhaustive listing.
+/// Capture for `/tables/{table}`. The SDK treats dynamic route anchors as
+/// navigable once their captures parse, before a table leaf handler can prove
+/// existence. DB tables are a local snapshot, so this parser admits only names
+/// observed at provider start to preserve lookup misses for absent tables.
 #[derive(Clone, Debug)]
 struct TableName(String);
 
@@ -130,10 +130,6 @@ struct TableKey {
     table: TableName,
 }
 
-#[omnifs_sdk::path_captures]
-struct DatabaseKey {}
-
-#[omnifs_sdk::object(kind = "db.table", key = TableKey, stability = Immutable)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TableDoc {
     pub name: String,
@@ -163,212 +159,207 @@ impl DbProvider {
             backend: Rc::new(RefCell::new(backend)),
         };
 
-        r.object::<FileInfo>("/meta", |o| {
-            o.representations("info", ())?;
-            o.file("version.txt").project(FileInfo::version)?;
-            o.file("path.txt").project(FileInfo::path)?;
-            Ok(())
-        })?;
+        r.dir("/meta").handler(meta_dir)?;
+        r.file("/meta/info.json").handler(meta_info_json)?;
+        r.file("/meta/version.txt").handler(meta_version)?;
+        r.file("/meta/path.txt").handler(meta_path)?;
 
         r.dir("/tables").handler(tables_list)?;
-
-        r.object::<TableDoc>("/tables/{table}", |o| {
-            o.representations("table", ())?;
-            o.file("schema.sql").handler(table_schema_sql)?;
-            o.file("schema.json").handler(table_schema_json)?;
-            o.file("indexes.json").handler(table_indexes_json)?;
-            o.file("count.txt").handler(table_count_txt)?;
-            o.file("sample.json").handler(table_sample)?;
-            Ok(())
-        })?;
+        r.dir("/tables/{table}").handler(table_dir)?;
+        r.file("/tables/{table}/table.json").handler(table_json)?;
+        r.file("/tables/{table}/schema.sql")
+            .handler(table_schema_sql)?;
+        r.file("/tables/{table}/schema.json")
+            .handler(table_schema_json)?;
+        r.file("/tables/{table}/indexes.json")
+            .handler(table_indexes_json)?;
+        r.file("/tables/{table}/count.txt")
+            .handler(table_count_txt)?;
+        r.file("/tables/{table}/sample.json")
+            .handler(table_sample)?;
 
         Ok(state)
     }
 }
 
-impl Key for TableKey {
-    type Object = TableDoc;
-    type State = State;
-
-    async fn load(
-        &self,
-        cx: &Cx<Self::State>,
-        _since: Option<Validator>,
-    ) -> Result<Load<TableDoc>> {
-        cx.state(|state| {
-            let backend = state.backend.borrow();
-            let name = self.table.as_str();
-            if !backend
-                .table_exists(name)
-                .map_err(|e| ProviderError::internal(format!("table_exists: {e}")))?
-            {
-                return Ok(Load::NotFound);
-            }
-            let create_sql = backend
-                .table_create_sql(name)
-                .map_err(|e| ProviderError::internal(format!("read schema: {e}")))?;
-            let columns = backend
-                .table_columns(name)
-                .map_err(|e| ProviderError::internal(format!("columns: {e}")))?;
-            let indexes = backend
-                .table_indexes(name)
-                .map_err(|e| ProviderError::internal(format!("indexes: {e}")))?;
-            let row_count = backend
-                .table_row_count(name)
-                .map_err(|e| ProviderError::internal(format!("count: {e}")))?;
-            let validator = backend.table_version(name).ok().map(Validator::from);
-
-            let doc = TableDoc {
-                name: name.to_string(),
-                create_sql,
-                columns: serde_json::to_value(&columns)
-                    .map_err(|e| ProviderError::internal(format!("encode columns: {e}")))?,
-                indexes: serde_json::to_value(&indexes)
-                    .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?,
-                row_count,
-            };
-            let mut bytes = serde_json::to_vec_pretty(&doc)
-                .map_err(|e| ProviderError::internal(format!("encode table doc: {e}")))?;
-            bytes.push(b'\n');
-            Ok(Load::Fresh {
-                value: doc,
-                canonical: Canonical { bytes, validator },
-            })
-        })
-    }
-}
-
 impl TableDoc {
-    fn schema_sql_bytes(doc: &Self) -> Vec<u8> {
-        doc.create_sql.as_deref().unwrap_or("").as_bytes().to_vec()
+    fn schema_sql(&self) -> FileContent {
+        text_content(self.create_sql.as_deref().unwrap_or("").as_bytes().to_vec())
     }
 
-    fn schema_json_bytes(doc: &Self) -> Result<Vec<u8>> {
-        let mut bytes = serde_json::to_vec_pretty(&doc.columns)
+    fn schema_json(&self) -> Result<FileContent> {
+        let mut bytes = serde_json::to_vec_pretty(&self.columns)
             .map_err(|e| ProviderError::internal(format!("encode schema: {e}")))?;
         bytes.push(b'\n');
-        Ok(bytes)
+        Ok(FileContent::new(bytes).with_content_type(ContentType::Json))
     }
 
-    fn indexes_json_bytes(doc: &Self) -> Result<Vec<u8>> {
-        let mut bytes = serde_json::to_vec_pretty(&doc.indexes)
+    fn indexes_json(&self) -> Result<FileContent> {
+        let mut bytes = serde_json::to_vec_pretty(&self.indexes)
             .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?;
         bytes.push(b'\n');
-        Ok(bytes)
+        Ok(FileContent::new(bytes).with_content_type(ContentType::Json))
     }
 
-    fn count_bytes(doc: &Self) -> Vec<u8> {
-        format!("{}\n", doc.row_count).into_bytes()
-    }
-}
-
-fn table_leaf_path(table: &str, leaf: &str) -> String {
-    format!("/tables/{table}/{leaf}")
-}
-
-async fn load_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
-    match key.load(cx, cx.version().cloned()).await? {
-        Load::Fresh { value, .. } => Ok(value),
-        Load::Unchanged => Err(ProviderError::internal(
-            "table unchanged without a host-pushed canonical in this handler path",
-        )),
-        Load::NotFound => Err(ProviderError::not_found(format!(
-            "table not found: {}",
-            key.table.as_str()
-        ))),
+    fn count(&self) -> FileContent {
+        text_content(format!("{}\n", self.row_count))
     }
 }
 
-fn table_leaf_projection(
-    table: &str,
-    leaf: &str,
-    bytes: Vec<u8>,
-    content_type: Option<ContentType>,
-) -> FileProjection {
-    let rel = table_leaf_path(table, leaf)
-        .trim_start_matches('/')
-        .to_string();
-    let preload = match content_type {
-        Some(ct) => FileProjection::inline(bytes.clone())
-            .content_type(ct)
-            .build(),
-        None => FileProjection::inline(bytes.clone()).build(),
-    };
-    let mut body = FileProjection::body(bytes);
-    if let Some(ct) = content_type {
-        body = body.content_type(ct);
+#[derive(Clone, Copy)]
+enum TableLeaf {
+    SchemaSql,
+    SchemaJson,
+    IndexesJson,
+    Count,
+}
+
+impl TableLeaf {
+    fn content(self, doc: &TableDoc) -> Result<FileContent> {
+        match self {
+            Self::SchemaSql => Ok(doc.schema_sql()),
+            Self::SchemaJson => doc.schema_json(),
+            Self::IndexesJson => doc.indexes_json(),
+            Self::Count => Ok(doc.count()),
+        }
     }
-    body.preload_file(rel, preload).build()
+
+    fn read(self, cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
+        let doc = read_table_doc(&cx, &key)?;
+        let content = self.content(&doc)?;
+        let attrs = content.attrs().clone();
+        let content_type = content.content_type();
+        let bytes = content
+            .content()
+            .ok_or_else(|| ProviderError::internal("table leaf must be inline"))?
+            .to_vec();
+        let mut requested = FileProjection::body(bytes).size(attrs.size);
+        match attrs.stability {
+            Stability::Immutable => {
+                requested = requested.immutable();
+            },
+            Stability::Mutable => {
+                requested = requested.mutable();
+            },
+            Stability::Volatile => {
+                return Err(ProviderError::internal("table leaves cannot be volatile"));
+            },
+        }
+        if let Some(version) = attrs.version {
+            requested = requested.version(version);
+        }
+        if let Some(content_type) = content_type {
+            requested = requested.content_type(content_type);
+        }
+        Ok(requested.build())
+    }
+}
+
+async fn meta_dir(_cx: DirCx<State>) -> Result<DirProjection> {
+    Ok(DirProjection::exhaustive([
+        Entry::file("info.json"),
+        Entry::file("version.txt"),
+        Entry::file("path.txt"),
+    ]))
+}
+
+async fn table_dir(_cx: DirCx<State>, _key: TableKey) -> Result<DirProjection> {
+    Ok(DirProjection::exhaustive([
+        Entry::file("table.json"),
+        Entry::file("schema.sql"),
+        Entry::file("schema.json"),
+        Entry::file("indexes.json"),
+        Entry::file("count.txt"),
+        Entry::file("sample.json"),
+    ]))
+}
+
+fn read_file_info(cx: &Cx<State>) -> Result<FileInfo> {
+    cx.state(|state| {
+        state
+            .backend
+            .borrow()
+            .file_info()
+            .map_err(|e| ProviderError::internal(format!("file_info: {e}")))
+    })
+}
+
+async fn meta_info_json(cx: Cx<State>) -> Result<FileProjection> {
+    let info = read_file_info(&cx)?;
+    let bytes = pretty_json(&info, "encode info")?;
+    Ok(FileProjection::body(bytes)
+        .content_type(ContentType::Json)
+        .mutable()
+        .build())
+}
+
+async fn meta_version(cx: Cx<State>) -> Result<FileProjection> {
+    let info = read_file_info(&cx)?;
+    Ok(file_content_projection(FileInfo::version(&info)?))
+}
+
+async fn meta_path(cx: Cx<State>) -> Result<FileProjection> {
+    let info = read_file_info(&cx)?;
+    Ok(file_content_projection(FileInfo::path(&info)?))
+}
+
+fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
+    cx.state(|state| {
+        let backend = state.backend.borrow();
+        let name = key.table.as_str();
+        if !backend
+            .table_exists(name)
+            .map_err(|e| ProviderError::internal(format!("table_exists: {e}")))?
+        {
+            return Err(ProviderError::not_found(format!("table not found: {name}")));
+        }
+        let create_sql = backend
+            .table_create_sql(name)
+            .map_err(|e| ProviderError::internal(format!("read schema: {e}")))?;
+        let columns = backend
+            .table_columns(name)
+            .map_err(|e| ProviderError::internal(format!("columns: {e}")))?;
+        let indexes = backend
+            .table_indexes(name)
+            .map_err(|e| ProviderError::internal(format!("indexes: {e}")))?;
+        let row_count = backend
+            .table_row_count(name)
+            .map_err(|e| ProviderError::internal(format!("count: {e}")))?;
+        Ok(TableDoc {
+            name: name.to_string(),
+            create_sql,
+            columns: serde_json::to_value(&columns)
+                .map_err(|e| ProviderError::internal(format!("encode columns: {e}")))?,
+            indexes: serde_json::to_value(&indexes)
+                .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?,
+            row_count,
+        })
+    })
+}
+
+async fn table_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
+    let doc = read_table_doc(&cx, &key)?;
+    let bytes = pretty_json(&doc, "encode table doc")?;
+    Ok(FileProjection::body(bytes)
+        .content_type(ContentType::Json)
+        .mutable()
+        .build())
 }
 
 async fn table_schema_sql(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    let doc = load_table_doc(&cx, &key).await?;
-    let bytes = TableDoc::schema_sql_bytes(&doc);
-    Ok(table_leaf_projection(
-        key.table.as_str(),
-        "schema.sql",
-        bytes,
-        Some(ContentType::Custom("text/plain")),
-    ))
+    TableLeaf::SchemaSql.read(cx, key)
 }
 
 async fn table_schema_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    let doc = load_table_doc(&cx, &key).await?;
-    let bytes = TableDoc::schema_json_bytes(&doc)?;
-    Ok(table_leaf_projection(
-        key.table.as_str(),
-        "schema.json",
-        bytes,
-        Some(ContentType::Json),
-    ))
+    TableLeaf::SchemaJson.read(cx, key)
 }
 
 async fn table_indexes_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    let doc = load_table_doc(&cx, &key).await?;
-    let bytes = TableDoc::indexes_json_bytes(&doc)?;
-    Ok(table_leaf_projection(
-        key.table.as_str(),
-        "indexes.json",
-        bytes,
-        Some(ContentType::Json),
-    ))
+    TableLeaf::IndexesJson.read(cx, key)
 }
 
 async fn table_count_txt(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    let doc = load_table_doc(&cx, &key).await?;
-    let bytes = TableDoc::count_bytes(&doc);
-    Ok(table_leaf_projection(
-        key.table.as_str(),
-        "count.txt",
-        bytes,
-        Some(ContentType::Custom("text/plain")),
-    ))
-}
-
-impl Key for DatabaseKey {
-    type Object = FileInfo;
-    type State = State;
-
-    async fn load(
-        &self,
-        cx: &Cx<Self::State>,
-        _since: Option<Validator>,
-    ) -> Result<Load<FileInfo>> {
-        cx.state(|state| {
-            let backend = state.backend.borrow();
-            let info = backend
-                .file_info()
-                .map_err(|e| ProviderError::internal(format!("file_info: {e}")))?;
-            let validator = backend.meta_version().ok().map(Validator::from);
-            let mut bytes = serde_json::to_vec_pretty(&info)
-                .map_err(|e| ProviderError::internal(format!("encode info: {e}")))?;
-            bytes.push(b'\n');
-            Ok(Load::Fresh {
-                value: info,
-                canonical: Canonical { bytes, validator },
-            })
-        })
-    }
+    TableLeaf::Count.read(cx, key)
 }
 
 impl FileInfo {
@@ -449,4 +440,30 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
 
 fn text_content(bytes: impl Into<Vec<u8>>) -> FileContent {
     FileContent::new(bytes).with_content_type(ContentType::Custom("text/plain"))
+}
+
+fn pretty_json<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| ProviderError::internal(format!("{context}: {e}")))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn file_content_projection(content: FileContent) -> FileProjection {
+    let attrs = content.attrs().clone();
+    let content_type = content.content_type();
+    let bytes = content.content().unwrap_or_default().to_vec();
+    let mut builder = FileProjection::body(bytes).size(attrs.size);
+    builder = match attrs.stability {
+        Stability::Immutable => builder.immutable(),
+        Stability::Mutable => builder.mutable(),
+        Stability::Volatile => builder.mutable(),
+    };
+    if let Some(version) = attrs.version {
+        builder = builder.version(version);
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.content_type(content_type);
+    }
+    builder.build()
 }

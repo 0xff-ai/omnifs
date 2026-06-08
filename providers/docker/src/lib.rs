@@ -31,17 +31,6 @@ fn default_endpoint() -> String {
     "unix:///var/run/docker.sock".to_string()
 }
 
-#[derive(Clone, Default)]
-pub struct State {
-    pub config: Config,
-}
-
-impl State {
-    pub fn new(config: Config) -> Self {
-        Self { config }
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -217,40 +206,14 @@ struct ProjectServiceKey {
     service: ServiceName,
 }
 
-async fn project_dir(_cx: DirCx<State>, _key: ProjectKey) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive(core::iter::empty::<Entry>()))
-}
-
-async fn project_services(cx: DirCx<State>, key: ProjectKey) -> Result<DirProjection> {
-    let summaries = list_containers(&cx).await?;
-    let services = services_for_project(&summaries, key.project.as_str());
-    Ok(DirProjection::exhaustive(
-        services.into_iter().map(Entry::dir),
-    ))
-}
-
-async fn service_dir(_cx: DirCx<State>, _key: ProjectServiceKey) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive(core::iter::empty::<Entry>()))
-}
-
-async fn service_containers(cx: DirCx<State>, key: ProjectServiceKey) -> Result<DirProjection> {
-    let summaries = list_containers(&cx).await?;
-    let names = containers_for_service(&summaries, key.project.as_str(), key.service.as_str());
-    Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
-}
-
-const PROJECT_LABEL: &str = "com.docker.compose.project";
-const SERVICE_LABEL: &str = "com.docker.compose.service";
-
 #[omnifs_sdk::provider(
     metadata = "omnifs.provider.json",
     resources(endpoints = [crate::api::DockerApi]),
 )]
 impl DockerProvider {
     type Config = Config;
-    type State = State;
 
-    fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+    fn start(_config: Config, r: &mut Router) -> Result<()> {
         r.file("/system/info.json").handler(system_info)?;
         r.file("/system/version.json").handler(system_version)?;
         r.file("/system/df.json").handler(system_df)?;
@@ -315,26 +278,51 @@ impl DockerProvider {
         r.file("/compose/{project}/services/{service}/containers/{reference}/summary.txt")
             .handler(container_summary)?;
 
-        Ok(State::new(config))
+        Ok(())
     }
 }
 
-async fn system_info(cx: Cx<State>) -> Result<FileProjection> {
+const PROJECT_LABEL: &str = "com.docker.compose.project";
+const SERVICE_LABEL: &str = "com.docker.compose.service";
+
+async fn project_dir(_cx: DirCx, _key: ProjectKey) -> Result<DirProjection> {
+    Ok(DirProjection::exhaustive(core::iter::empty::<Entry>()))
+}
+
+async fn project_services(cx: DirCx, key: ProjectKey) -> Result<DirProjection> {
+    let summaries = list_containers(&cx).await?;
+    let services = services_for_project(&summaries, key.project.as_str());
+    Ok(DirProjection::exhaustive(
+        services.into_iter().map(Entry::dir),
+    ))
+}
+
+async fn service_dir(_cx: DirCx, _key: ProjectServiceKey) -> Result<DirProjection> {
+    Ok(DirProjection::exhaustive(core::iter::empty::<Entry>()))
+}
+
+async fn service_containers(cx: DirCx, key: ProjectServiceKey) -> Result<DirProjection> {
+    let summaries = list_containers(&cx).await?;
+    let names = containers_for_service(&summaries, key.project.as_str(), key.service.as_str());
+    Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
+}
+
+async fn system_info(cx: Cx) -> Result<FileProjection> {
     let info: SystemInfo = fetch_json(&cx, "/info", &[]).await?;
     Ok(snapshot_body(pretty_json(&info)?))
 }
 
-async fn system_version(cx: Cx<State>) -> Result<FileProjection> {
+async fn system_version(cx: Cx) -> Result<FileProjection> {
     let version: SystemVersion = fetch_json(&cx, "/version", &[]).await?;
     Ok(snapshot_body(pretty_json(&version)?))
 }
 
-async fn system_df(cx: Cx<State>) -> Result<FileProjection> {
+async fn system_df(cx: Cx) -> Result<FileProjection> {
     let usage: SystemDataUsageResponse = fetch_json(&cx, "/system/df", &[]).await?;
     Ok(snapshot_body(pretty_json(&usage)?))
 }
 
-async fn system_ping(cx: Cx<State>) -> Result<FileProjection> {
+async fn system_ping(cx: Cx) -> Result<FileProjection> {
     let mut bytes = fetch_bytes(&cx, "/_ping", &[]).await?;
     if !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
@@ -342,26 +330,26 @@ async fn system_ping(cx: Cx<State>) -> Result<FileProjection> {
     Ok(snapshot_body(bytes))
 }
 
-async fn containers_listing(cx: Cx<State>) -> Result<FileProjection> {
+async fn containers_listing(cx: Cx) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
     Ok(snapshot_body(pretty_json(&summaries)?))
 }
 
-async fn by_name(cx: DirCx<State>) -> Result<DirProjection> {
+async fn by_name(cx: DirCx) -> Result<DirProjection> {
     let summaries = list_containers(&cx).await?;
     Ok(DirProjection::exhaustive(
         container_names(&summaries).into_iter().map(Entry::dir),
     ))
 }
 
-async fn by_id(cx: DirCx<State>) -> Result<DirProjection> {
+async fn by_id(cx: DirCx) -> Result<DirProjection> {
     let summaries = list_containers(&cx).await?;
     Ok(DirProjection::exhaustive(
         container_ids(&summaries).into_iter().map(Entry::dir),
     ))
 }
 
-async fn running(cx: DirCx<State>) -> Result<DirProjection> {
+async fn running(cx: DirCx) -> Result<DirProjection> {
     listing_filtered(&cx, |summary| {
         if let Some(state) = summary.state {
             state.as_ref() == "running"
@@ -375,7 +363,7 @@ async fn running(cx: DirCx<State>) -> Result<DirProjection> {
     .await
 }
 
-async fn stopped(cx: DirCx<State>) -> Result<DirProjection> {
+async fn stopped(cx: DirCx) -> Result<DirProjection> {
     listing_filtered(&cx, |summary| {
         if let Some(state) = summary.state {
             let s = state.as_ref();
@@ -390,7 +378,7 @@ async fn stopped(cx: DirCx<State>) -> Result<DirProjection> {
     .await
 }
 
-async fn listing_filtered<F>(cx: &DirCx<State>, predicate: F) -> Result<DirProjection>
+async fn listing_filtered<F>(cx: &DirCx, predicate: F) -> Result<DirProjection>
 where
     F: Fn(&ContainerSummary) -> bool,
 {
@@ -405,13 +393,13 @@ where
     Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
 }
 
-async fn compose_listing(cx: Cx<State>) -> Result<FileProjection> {
+async fn compose_listing(cx: Cx) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
     let listing = ComposeListing::from(&summaries);
     Ok(snapshot_body(pretty_json(&listing)?))
 }
 
-async fn container_dir(_cx: DirCx<State>, _key: ContainerKey) -> Result<DirProjection> {
+async fn container_dir(_cx: DirCx, _key: ContainerKey) -> Result<DirProjection> {
     Ok(DirProjection::exhaustive([
         Entry::file("inspect.json"),
         Entry::file("state"),
@@ -419,22 +407,22 @@ async fn container_dir(_cx: DirCx<State>, _key: ContainerKey) -> Result<DirProje
     ]))
 }
 
-async fn container_inspect(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+async fn container_inspect(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
     let bytes = fetch_bytes(&cx, &format!("/containers/{}/json", key.reference), &[]).await?;
     Ok(snapshot_body(bytes))
 }
 
-async fn container_state(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+async fn container_state(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
     let container = fetch_container(&cx, &key.reference).await?;
     Ok(snapshot_body(container.state_bytes()))
 }
 
-async fn container_summary(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+async fn container_summary(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
     let container = fetch_container(&cx, &key.reference).await?;
     Ok(snapshot_body(container.summary_bytes()))
 }
 
-async fn fetch_container(cx: &Cx<State>, reference: &ContainerRef) -> Result<Container> {
+async fn fetch_container(cx: &Cx, reference: &ContainerRef) -> Result<Container> {
     fetch_json(cx, &format!("/containers/{reference}/json"), &[])
         .await
         .map(Container)
@@ -444,7 +432,7 @@ fn snapshot_body(bytes: Vec<u8>) -> FileProjection {
     FileProjection::body(bytes).mutable().build()
 }
 
-pub(crate) async fn list_containers(cx: &Cx<State>) -> Result<Vec<ContainerSummary>> {
+pub(crate) async fn list_containers(cx: &Cx) -> Result<Vec<ContainerSummary>> {
     fetch_json(cx, "/containers/json", &[("all", "true")]).await
 }
 

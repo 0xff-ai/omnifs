@@ -1,27 +1,32 @@
 # omnifs-provider-arxiv
 
-[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Address a paper by id; each paper is an object that materializes its metadata, the raw Atom feed, the PDF and e-print source blobs, and a version tree.
+[omnifs](https://github.com/0xff-ai/omnifs) provider that projects [arXiv](https://arxiv.org) papers into a FUSE-visible tree. Address a paper by id; each paper is a version family whose `@latest` alias and numbered `vN` directories expose metadata, the raw Atom feed, the PDF, and the e-print source blob.
 
 ## Mount layout
 
 ```
 /arxiv/
   papers/{id}/
-    paper.json      rendered metadata
-    paper.atom      verbatim Atom canonical
-    paper.pdf
-    source.tar.gz
-    versions/v{n}/
+    @latest/
       paper.json
-      paper.pdf
-      source.tar.gz
+      paper.atom
+      paper.pdf        latest PDF
+      source.tar.gz    latest source bundle
+    v{n}/
+      paper.json
+      paper.atom
+      paper.pdf        version-pinned PDF
+      source.tar.gz    version-pinned source bundle
+  categories/{category}/papers/{id}/
+    @latest/
+    v{n}/
 ```
 
-A paper is an object whose canonical is the upstream Atom feed: `paper.atom` serves it verbatim and `paper.json` renders a lossy metadata view (title, authors, categories, DOIs, resource URLs).
+A paper is an object whose canonical is the upstream Atom feed: `paper.atom` serves it verbatim and `paper.json` renders a lossy metadata view (title, authors, categories, DOIs, resource URLs). `@latest` is mutable because it can move when arXiv publishes a new version; numbered `vN` directories are immutable once the paper feed reports that version.
 
-`{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; `versions/v{n}/` re-projects metadata and the resource blobs at a specific version.
+`{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; versioned ids such as `2401.12345v2` are not accepted in `{id}` and must be accessed as `2401.12345/v2/...`.
 
-The category/recent/submissions browse surface is not exposed in this release; papers are addressed by id under `/papers/`.
+Category recent listings are exposed under `/categories/{category}/papers`; member paper subtrees have the same version-first shape as `/papers/{id}`.
 
 ## Capabilities
 

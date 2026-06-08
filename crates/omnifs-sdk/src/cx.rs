@@ -30,7 +30,7 @@ use std::rc::Rc;
 /// state-erased view ([`Cx::erase_state`]) drives callouts on the *same*
 /// operation — this is how `Object::load`, which takes `&Cx<()>`, issues
 /// fetches through the operation's queue while the router holds `Cx<S>`.
-pub struct Cx<S> {
+pub struct Cx<S = ()> {
     shared: Rc<CxShared>,
     state: Rc<RefCell<S>>,
 }

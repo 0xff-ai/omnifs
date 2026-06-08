@@ -1,15 +1,17 @@
 //! The `#[provider]` attribute macro.
 //!
 //! It backs `#[omnifs_sdk::provider(resources(..), events(..), metadata = "..")]`
-//! on a provider impl block whose associated `type Config/State` aliases
-//! and a synchronous `start(config, &mut Router) -> Result<State>`
-//! method define the provider.
+//! on a provider impl block whose optional associated `type Config/State`
+//! aliases and a synchronous `start(..)` method define the provider.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Expr, ImplItem, ImplItemFn, ItemImpl, LitBool, LitInt, LitStr, Path, Token, Type};
+use syn::{
+    Expr, FnArg, ImplItem, ImplItemFn, ItemImpl, LitBool, LitInt, LitStr, Path, Token, Type,
+    parse_quote,
+};
 
 /// A `timer(Duration, Self::method)` event declaration.
 struct TimerSpec {
@@ -155,13 +157,20 @@ fn parse_events(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Resul
 struct ClassifiedImpl {
     config_type: Type,
     state_type: Type,
+    start_kind: StartKind,
     methods: Vec<ImplItemFn>,
+}
+
+#[derive(Clone, Copy)]
+enum StartKind {
+    ConfigAndRouter,
+    RouterOnly,
 }
 
 fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
     let mut config_type = None;
     let mut state_type = None;
-    let mut start_seen = false;
+    let mut start_kind = None;
     let mut methods = Vec::new();
 
     for item in items {
@@ -178,7 +187,7 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
             },
             ImplItem::Fn(func) => {
                 if func.sig.ident == "start" {
-                    start_seen = true;
+                    start_kind = Some(classify_start(&func)?);
                 }
                 methods.push(func);
             },
@@ -191,25 +200,36 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
         }
     }
 
-    if !start_seen {
+    let Some(start_kind) = start_kind else {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "missing required `fn start(config, &mut Router<State>) -> Result<State>`",
+            "missing required `fn start(..)`",
         ));
-    }
+    };
 
     Ok(ClassifiedImpl {
-        config_type: config_type.ok_or_else(|| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "missing `type Config = ..;`",
-            )
-        })?,
-        state_type: state_type.ok_or_else(|| {
-            syn::Error::new(proc_macro2::Span::call_site(), "missing `type State = ..;`")
-        })?,
+        config_type: config_type.unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
+        state_type: state_type.unwrap_or_else(|| parse_quote!(())),
+        start_kind,
         methods,
     })
+}
+
+fn classify_start(func: &ImplItemFn) -> syn::Result<StartKind> {
+    let inputs = func
+        .sig
+        .inputs
+        .iter()
+        .filter(|arg| matches!(arg, FnArg::Typed(_)))
+        .count();
+    match inputs {
+        1 => Ok(StartKind::RouterOnly),
+        2 => Ok(StartKind::ConfigAndRouter),
+        _ => Err(syn::Error::new(
+            func.sig.span(),
+            "`start` must be `fn start(r: &mut Router<..>) -> Result<..>` or `fn start(config, r: &mut Router<..>) -> Result<..>`",
+        )),
+    }
 }
 
 /// The compile-time manifest facts: the embedded custom section plus the
@@ -365,9 +385,19 @@ fn generate_lifecycle(
     type_name: &syn::Ident,
     config_type: &Type,
     state_type: &Type,
+    start_kind: StartKind,
     info_tokens: &TokenStream2,
     caps_tokens: &TokenStream2,
 ) -> TokenStream2 {
+    let start_call = match start_kind {
+        StartKind::ConfigAndRouter => quote! { #type_name::start(config, &mut router) },
+        StartKind::RouterOnly => quote! {
+            {
+                let _ = config;
+                #type_name::start(&mut router)
+            }
+        },
+    };
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::lifecycle::Guest for #type_name {
             fn initialize(config_bytes: Vec<u8>) -> omnifs_sdk::prelude::ProviderReturn {
@@ -380,7 +410,7 @@ fn generate_lifecycle(
                     },
                 };
                 let mut router = omnifs_sdk::prelude::Router::<#state_type>::new();
-                let state = match #type_name::start(config, &mut router) {
+                let state = match #start_call {
                     Ok(state) => state,
                     Err(error) => return omnifs_sdk::prelude::err(error),
                 };
@@ -711,6 +741,7 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let classified = classify_impl(input.items)?;
     let config_type = &classified.config_type;
     let state_type = &classified.state_type;
+    let start_kind = classified.start_kind;
     let methods = &classified.methods;
 
     let manifest = read_manifest_facts(&type_name, args.metadata_path.as_ref())?;
@@ -723,6 +754,7 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         &type_name,
         config_type,
         state_type,
+        start_kind,
         &info_tokens,
         &caps_tokens,
     );

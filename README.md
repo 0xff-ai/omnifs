@@ -197,22 +197,21 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 
 ### arXiv (`/arxiv`)
 
-Per-paper subtrees under `/arxiv/papers/{id}/` are mirrored under every scope (categories, authors, search), so the same `paper.pdf`, `metadata.json`, `versions/v{n}/...` shape works under `/arxiv/categories/{cat}/{ym}/{id}/...` and friends.
+Per-paper subtrees under `/arxiv/papers/{id}/` are version-first. The paper directory lists `@latest` plus numbered `vN` directories, and the same shape is mirrored under category membership paths.
 
 | Path                                                  | Content                                                       |
 | ----------------------------------------------------- | ------------------------------------------------------------- |
 | `/arxiv/papers/{id}/`                                 | Per-paper subtree (any arXiv id, e.g. `1706.03762`)           |
-| `/arxiv/papers/{id}/paper.pdf`                        | Latest version PDF                                            |
-| `/arxiv/papers/{id}/source.tar.gz`                    | Latest version source bundle                                  |
-| `/arxiv/papers/{id}/metadata.json`                    | Title, authors, abstract, categories, comment, links          |
-| `/arxiv/papers/{id}/links.json`                       | Resolved arXiv URLs for this paper / version                  |
-| `/arxiv/papers/{id}/versions/v{n}/{paper.pdf,…}`      | Same files for a specific version                             |
-| `/arxiv/categories/{cat}/{YYYY}/{MM}/{DD}/`           | Papers in `cat` posted on that UTC day (e.g. `cs.AI/2024/01/31`) |
-| `/arxiv/categories/{cat}/new/`                        | Most-recent papers in `cat` by submitted date                 |
-| `/arxiv/categories/{cat}/updated/`                    | Most-recent papers in `cat` by last-updated date              |
-| `/arxiv/categories/{cat}/by-author/{author}/`         | Papers in `cat` by `author`                                   |
-| `/arxiv/authors/{author}/`                            | Papers by author with the same `new`/`updated`/`by-category` axes |
-| `/arxiv/search/{query}/`                              | arXiv search results (URL-encoded query)                      |
+| `/arxiv/papers/{id}/@latest/paper.pdf`                | Latest version PDF                                            |
+| `/arxiv/papers/{id}/@latest/source.tar.gz`            | Latest version source bundle                                  |
+| `/arxiv/papers/{id}/@latest/paper.atom`               | Raw upstream Atom feed                                        |
+| `/arxiv/papers/{id}/@latest/paper.json`               | Rendered metadata for the latest version                      |
+| `/arxiv/papers/{id}/v{n}/paper.pdf`                   | Version-pinned PDF                                            |
+| `/arxiv/papers/{id}/v{n}/source.tar.gz`               | Version-pinned source bundle                                  |
+| `/arxiv/papers/{id}/v{n}/paper.atom`                  | Raw Atom backing the paper object                             |
+| `/arxiv/papers/{id}/v{n}/paper.json`                  | Rendered metadata with version-specific resource URLs         |
+| `/arxiv/categories/{cat}/papers/`                     | Most-recent papers in `cat` by submitted date                 |
+| `/arxiv/categories/{cat}/papers/{id}/@latest/...`     | Category alias for the same paper version family              |
 
 ## What's coming
 

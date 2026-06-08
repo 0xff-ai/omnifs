@@ -7,34 +7,20 @@ SDK for building [omnifs](https://github.com/0xff-ai/omnifs) providers. Provider
 ```rust
 use omnifs_sdk::prelude::*;
 
-#[config]
-pub struct Config {
-    pub greeting: String,
-}
-
-#[derive(Default)]
-pub struct State {}
-
-struct Routes;
-
 #[provider(metadata = "omnifs.provider.json")]
 impl MyProvider {
-    type Config = Config;
-    type State = State;
-    type Routes = Routes;
-
-    fn start(config: Config, r: &mut Router<State, Routes>) -> Result<(State, Routes)> {
+    fn start(r: &mut Router) -> Result<()> {
         r.file("/hello.txt").handler(hello)?;
         r.dir("/items").handler(list_items)?;
-        Ok((State::default(), Routes))
+        Ok(())
     }
 }
 
-async fn hello(_cx: Cx<State>, _key: ()) -> Result<FileProjection> {
+async fn hello(_cx: Cx) -> Result<FileProjection> {
     Ok(FileProjection::body(b"hello, world\n").build())
 }
 
-async fn list_items(_cx: DirCx<State>, _key: ()) -> Result<DirProjection> {
+async fn list_items(_cx: DirCx) -> Result<DirProjection> {
     Ok(DirProjection::exhaustive([
         Entry::file("a.txt"),
         Entry::file("b.txt"),
@@ -46,8 +32,9 @@ Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component
 
 ## Concepts
 
-- **Router registration**: `Router::dir`, `Router::file`, `Router::treeref`, `Router::bind::<Object>()`, and `Router::subtree` register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
-- **Handlers**: async functions taking `Cx<State>`, `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirProjection`, `TreeRef`, or `Effects` (for timer/event handlers).
+- **Router registration**: `Router::dir`, `Router::file`, `Router::treeref`, `Router::object::<Object>()`, and reusable object handles register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
+- **Provider lifecycle**: providers with no config or state can omit both associated type aliases and use `fn start(r: &mut Router) -> Result<()>`. Add `type Config = Config` or `type State = State` only when the provider actually needs them.
+- **Handlers**: async functions taking `Cx`, `DirCx`, state-bearing `Cx<State>` / `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirProjection`, `TreeRef`, or `Effects` (for timer/event handlers).
 - **Objects**: `#[object]` types implement `Object::load` / `Object::render`; `bind` mounts them at a path template. The host caches canonical bytes and pushes them on later reads.
 - **Endpoints**: `#[derive(Endpoint)]` plus `cx.endpoint::<E>()` for typed HTTP (and rate-limit policy) against declared bases.
 - **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes the batch and calls `resume`; there are no fire-and-forget callouts.

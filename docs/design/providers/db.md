@@ -40,8 +40,8 @@ What v1 does not ship and the document below covers as future work:
 /db/meta/info.json                    (size, page_size, page_count, app_id,
                                        user_version, journal_mode)
 /db/tables/                           (lists every table from sqlite_master)
-/db/tables/{name}/                    (r.subtree → TableSubtree, name validated
-                                       as a safe path segment)
+/db/tables/{name}/                    (direct handlers, name admitted from the
+                                       startup table snapshot)
   ├ /db/tables/{name}/schema.sql      (CREATE TABLE statement)
   ├ /db/tables/{name}/schema.json     (PRAGMA table_info: columns, types, PK)
   ├ /db/tables/{name}/indexes.json    (PRAGMA index_list + index_info)
@@ -109,9 +109,9 @@ The right long-term fix is `wasmtime_wasi::add_to_linker_async` (switches the ho
 | `/tables/{name}/count.txt` | Exact | Inline | Mutable | no version (cheap to recompute) |
 | `/tables/{name}/sample.json` | Exact | Inline/Deferred per size | Mutable | hash of (column set, current count, max rowid) |
 
-`Mutable` reflects that SQL operations against the database can change these values; v1 mounts are read-only at the FUSE layer, so "mutable" here describes the upstream behavior, not the user's ability to write. The host caches by `(provider, path, version)` so a `cat` after `ls` is free until the underlying data actually changes.
+`Mutable` reflects that SQL operations against the database can change these values; v1 mounts are read-only at the FUSE layer, so "mutable" here describes the upstream behavior, not the user's ability to write. The DB provider does not emit canonical object-cache entries. It reads metadata directly from SQLite for the requested path.
 
-Inline byte cap: 64 KiB per file, 512 KiB aggregate per response. `sample.json` for wide tables can exceed the per-file cap and gets `Deferred + Full` automatically; the table-subtree handler materializes the bytes on read.
+Inline byte cap: 64 KiB per file, 512 KiB aggregate per response. `sample.json` for wide tables can exceed the per-file cap and gets ranged reads automatically; the file handler materializes the bytes on read.
 
 ## Listing semantics
 
@@ -132,7 +132,7 @@ Internally the provider has a `sqlite_backend` module that owns:
 - Query helpers (`columns(table)`, `indexes(table)`, `count(table)`, `sample(table, limit)`).
 - Error translation (`SqliteBackendError` → `ProviderError::not_found / invalid_input / internal`).
 
-The path handlers in `meta.rs`, `tables.rs`, and `table_subtree.rs` call into the backend through a small trait so adding Postgres later is "implement the trait against a network connection". The provider's lib.rs picks the backend at init based on `database_type`.
+The path handlers call into the backend directly through `State`. Adding Postgres later should introduce a real backend trait when there is a second implementation, not before. The provider's `lib.rs` picks the backend at init based on `database_type`.
 
 ## Future shape
 
@@ -268,7 +268,7 @@ This is documented for design coherence only; the read-only mount and mutation m
 2. **DatabaseType derive ordering.** The agent's report notes the SDK's `#[omnifs_sdk::config]` macro appends derives after user attributes, which triggers a "derive helper attribute used before introduced" lint when combined with `#[serde(rename_all = ...)]`. Track as a small SDK fix (insert derives at the front) so future config enums don't need the workaround.
 3. **Multiple databases per mount.** A user might want `/db` to expose a directory of database files at `/db/databases/{name}/...`. Out of scope for v1 (one mount, one database); revisit when there is real demand.
 4. **Sample ordering.** `sample.json` is currently `SELECT * LIMIT n` with no `ORDER BY`. SQLite returns rows in physical order, which is usually rowid-ascending. Deterministic enough for browsing; document the contract.
-5. **Schema change invalidation.** A DDL change (`ALTER TABLE`) bumps `schema.sql`'s content hash, but the host caches by `(provider, path, version)`. The version derives from `sqlite_master` rows, which DDL updates, so this is correct. Worth a smoke test.
+5. **Schema change freshness.** A DDL change (`ALTER TABLE`) changes the data returned for `schema.sql` and the related metadata JSON leaves. The current DB provider reads those leaves directly and does not use the canonical object cache.
 6. **Read-write escape hatch test.** `read_only: false` is the documented escape hatch for WAL-mode recovery. There is no test exercising it. Add one when we hit a database that needs it.
 7. **Async wasmtime migration.** Tracked as the `add_to_linker_async` follow-up. Replaces the per-op `thread::scope` workaround in `instance.rs` with proper fiber-stacked async wasmtime calls.
 
