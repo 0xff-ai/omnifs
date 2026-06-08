@@ -1,11 +1,10 @@
 //! `omnifs version` — print the CLI version. `--detail` prints a richer
-//! block listing image / container state / store backend / provider count /
+//! block listing image / container state / credential file / provider count /
 //! configured dirs.
 
 use anyhow::Result;
 use bollard::Docker;
 use clap::Args;
-use omnifs_creds::KeyringStore;
 
 use crate::app_context::AppContext;
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
@@ -34,7 +33,6 @@ impl VersionArgs {
             None => ctx.runtime().image().clone(),
         };
         let image_location = describe_image_location(&image).await;
-        let store_backend = describe_store_backend();
         let provider_status = provider_dir_summary(ctx.catalog());
 
         anstream::println!("CLI:        omnifs {cli}");
@@ -47,7 +45,10 @@ impl VersionArgs {
             container.state,
             ctx.runtime().container_name()
         );
-        anstream::println!("Store:      {store_backend}");
+        anstream::println!(
+            "Store:      file ({})",
+            Paths::display(&ctx.paths().credentials_file)
+        );
         anstream::println!("Providers:  {provider_status}");
         anstream::println!();
         anstream::println!("Paths:");
@@ -136,13 +137,6 @@ async fn describe_image_location(image: &ImageRef) -> String {
             status_code: 404, ..
         }) => "local, not built".to_string(),
         Err(_) => format!("{origin}, cache inspect failed"),
-    }
-}
-
-fn describe_store_backend() -> &'static str {
-    match KeyringStore::new() {
-        Ok(_) => "keychain",
-        Err(_) => "file fallback",
     }
 }
 

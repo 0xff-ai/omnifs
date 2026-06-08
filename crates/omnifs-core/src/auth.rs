@@ -114,7 +114,7 @@ impl CredentialId {
         }
     }
 
-    /// Stable storage account name used by keyring and file backends.
+    /// Stable account name used in the credential store.
     pub fn storage_key(&self) -> String {
         format!("{}:{}:{}", self.provider_id, self.scheme, self.account)
     }
