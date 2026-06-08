@@ -21,6 +21,9 @@ use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Moun
 
 const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
+const GUEST_CONFIG_DIR: &str = "/root/.omnifs/config";
+const GUEST_CACHE_DIR: &str = "/root/.omnifs/cache";
+const GUEST_PROVIDERS_DIR: &str = "/root/.omnifs/providers";
 
 /// TCP port the daemon's inspector server binds inside the container.
 /// Forwarded to host loopback by `omnifs dev` and `omnifs up`.
@@ -522,6 +525,10 @@ impl Runtime {
         };
 
         let mut env = vec![
+            format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
+            format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
+            format!("OMNIFS_MOUNTS_DIR={HOST_MOUNTS_DIR}"),
+            format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];
