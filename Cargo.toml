@@ -30,6 +30,7 @@ omnifs-host = { version = "0.2.1", path = "crates/omnifs-host" }
 omnifs-inspector = { version = "0.2.1", path = "crates/omnifs-inspector" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mount = { version = "0.2.1", path = "crates/omnifs-mount" }
+omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-provider = { version = "0.2.1", path = "crates/omnifs-provider" }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }

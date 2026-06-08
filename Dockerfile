@@ -143,7 +143,7 @@ FROM ubuntu:25.10 AS runtime-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl fuse3 gnupg jq \
-        zsh git openssh-client procps \
+        zsh git openssh-client procps nfs-common netbase \
         bat git-delta ripgrep util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/apt/keyrings \
