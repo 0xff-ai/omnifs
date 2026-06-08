@@ -160,15 +160,15 @@ jobs:
       - name: Cache wasmtime component compilations
         # Wasmtime's on-disk cache is internally content-addressed (WASM hash +
         # wasmtime version), so stale entries are harmless and won't be served
-        # to mismatched callers. Key on $sha so each commit appends a fresh
-        # snapshot to the GHA cache; restore-keys recover the previous
-        # snapshot. Avoids tying invalidation to Cargo.lock / rust-toolchain,
-        # which would force a cold cache on every unrelated dep bump.
+        # to mismatched callers. GitHub caches are immutable, so use a unique
+        # write key but restore through a stable OS/arch namespace shared by
+        # push and pull_request runs.
         uses: actions/cache@v5
         with:
           path: ~/.cache/wasmtime
-          key: wasmtime-cache-${{ runner.os }}-${{ github.sha }}
+          key: wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            wasmtime-cache-${{ runner.os }}-${{ runner.arch }}-
             wasmtime-cache-${{ runner.os }}-
 
       - name: Run host tests
