@@ -3699,6 +3699,7 @@ dependencies = [
  "omnifs-host",
  "omnifs-inspector",
  "omnifs-mount",
+ "omnifs-nfs",
  "omnifs-provider",
  "serde_json",
  "thiserror 2.0.18",
@@ -3836,6 +3837,25 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "utoipa",
+]
+
+[[package]]
+name = "omnifs-nfs"
+version = "0.2.1"
+dependencies = [
+ "dashmap",
+ "getrandom 0.3.4",
+ "omnifs-cache",
+ "omnifs-core",
+ "omnifs-host",
+ "omnifs-mount",
+ "omnifs-wit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
