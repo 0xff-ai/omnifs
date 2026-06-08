@@ -1,6 +1,7 @@
 //! Shared discovery for configured mounts and provider templates.
 
 use anyhow::{Context, anyhow};
+use omnifs_core::MountName;
 use omnifs_host::mounts::{Catalog as MountCatalog, Resolved, Spec};
 use omnifs_mount_schema::{AuthManifest, ProviderManifest};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,21 +9,35 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::credential_target::CredentialTarget;
+use crate::{credential_target::CredentialTarget, session::MountConfig};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderCatalog {
     mounts: MountCatalog,
     providers_dir: PathBuf,
+    config_file: PathBuf,
+    inline_mounts: Vec<Spec>,
 }
 
 impl ProviderCatalog {
+    #[cfg(test)]
     pub(crate) fn new(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
+        Self::with_config(mounts_dir, providers_dir, PathBuf::new(), Vec::new())
+    }
+
+    pub(crate) fn with_config(
+        mounts_dir: impl AsRef<Path>,
+        providers_dir: impl AsRef<Path>,
+        config_file: impl AsRef<Path>,
+        inline_mounts: Vec<Spec>,
+    ) -> Self {
         let mounts_dir = mounts_dir.as_ref();
         let providers_dir = providers_dir.as_ref();
         Self {
             mounts: MountCatalog::new(mounts_dir, providers_dir),
             providers_dir: providers_dir.to_path_buf(),
+            config_file: config_file.as_ref().to_path_buf(),
+            inline_mounts,
         }
     }
 
@@ -43,8 +58,56 @@ impl ProviderCatalog {
         })
     }
 
+    pub(crate) fn load_mount(&self, config_path: &Path) -> anyhow::Result<Resolved> {
+        self.mounts
+            .resolve(config_path)
+            .with_context(|| format!("load mount config {}", config_path.display()))
+    }
+
+    pub(crate) fn session_mount_configs(&self) -> anyhow::Result<Vec<MountConfig>> {
+        let mut configs = Vec::new();
+        for spec in &self.inline_mounts {
+            configs.push(MountConfig::from_parsed(
+                spec.clone(),
+                self.config_file.clone(),
+            )?);
+        }
+        for path in self.mount_config_paths()? {
+            configs.push(MountConfig::from_path(&path)?);
+        }
+        configs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(configs)
+    }
+
+    pub(crate) fn mount_exists(&self, name: &MountName) -> anyhow::Result<bool> {
+        Ok(self
+            .session_mount_configs()?
+            .iter()
+            .any(|mount| &mount.name == name))
+    }
+
     pub(crate) fn mount_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
         let mut targets = Vec::new();
+        for spec in &self.inline_mounts {
+            let name = spec.mount.clone();
+            let credential = match self.resolve_mount_spec(spec.clone(), false) {
+                Ok(resolved) => CredentialTarget::for_mount(&resolved),
+                Err(error) => {
+                    tracing::warn!(
+                        config = %self.config_file.display(),
+                        mount = name,
+                        %error,
+                        "unresolvable inline mount config; will remove the entry but cannot drop credentials"
+                    );
+                    CredentialTarget::None
+                },
+            };
+            targets.push(MountRemovalTarget {
+                name,
+                path: self.config_file.clone(),
+                credential,
+            });
+        }
         for path in self.mount_config_paths()? {
             let Some(name) = path
                 .file_stem()
@@ -86,12 +149,6 @@ impl ProviderCatalog {
         }
         targets.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(targets)
-    }
-
-    pub(crate) fn load_mount(&self, config_path: &Path) -> anyhow::Result<Resolved> {
-        self.mounts
-            .resolve(config_path)
-            .with_context(|| format!("load mount config {}", config_path.display()))
     }
 
     /// Resolve runtime-ready mount, optionally requiring provider metadata.

@@ -338,15 +338,6 @@ impl MountConfig {
     }
 }
 
-impl ProviderCatalog {
-    pub(crate) fn session_mount_configs(&self) -> anyhow::Result<Vec<MountConfig>> {
-        self.mount_config_paths()?
-            .into_iter()
-            .map(|path| MountConfig::from_path(&path))
-            .collect()
-    }
-}
-
 pub(crate) fn write_secret(path: &Path, secret: &str) -> anyhow::Result<()> {
     fs::write(path, secret).with_context(|| format!("write secret to {}", path.display()))?;
     #[cfg(unix)]
