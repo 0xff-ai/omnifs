@@ -5,12 +5,12 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
-use omnifs_host::mounts::Spec;
 use std::io::Write as _;
 use std::path::Path;
 
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
+use crate::config::ConfigFile;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::session::CredsBackend;
@@ -60,13 +60,14 @@ pub fn rm(
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
-    let config_path = paths.mount_config_path(&name);
-    if !config_path.exists() {
-        return missing_mount_error(paths, catalog, name.as_str());
-    }
-
-    let config =
-        Spec::from_file(&config_path).with_context(|| format!("read {}", config_path.display()))?;
+    let mount = catalog
+        .session_mount_configs()?
+        .into_iter()
+        .find(|mount| mount.name == name)
+        .ok_or_else(|| missing_mount_error(paths, catalog, name.as_str()).unwrap_err())?;
+    let config_path = mount.source.clone();
+    let inline = config_path == paths.config_file;
+    let config = mount.config;
     let resolved = catalog
         .resolve_mount_spec(config, false)
         .with_context(|| format!("resolve mount config for `{name}`"))?;
@@ -90,8 +91,14 @@ pub fn rm(
         name.as_str(),
     )?;
 
-    std::fs::remove_file(&config_path)
-        .with_context(|| format!("remove {}", config_path.display()))?;
+    if inline {
+        let mut config = ConfigFile::load(&paths.config_file)?;
+        config.remove_mount(name.as_str())?;
+        config.save()?;
+    } else {
+        std::fs::remove_file(&config_path)
+            .with_context(|| format!("remove {}", config_path.display()))?;
+    }
     anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
     Ok(())
 }
@@ -151,7 +158,7 @@ fn missing_mount_error(paths: &Paths, catalog: &ProviderCatalog, name: &str) -> 
     let suggestion = catalog.closest_mount_name(name)?;
     let mut message = format!(
         "no mount config named `{name}` in {}",
-        Paths::display(&paths.mounts_dir)
+        Paths::display(&paths.config_file)
     );
     if let Some(suggestion) = suggestion {
         let _ = std::fmt::Write::write_fmt(

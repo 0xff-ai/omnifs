@@ -23,7 +23,12 @@ impl AppContext {
     ) -> anyhow::Result<Self> {
         let (paths, config) = Paths::resolve_with_config(path_overrides)?;
         let runtime = RuntimeTarget::resolve(container_name, image, &config)?;
-        let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
+        let catalog = ProviderCatalog::with_config(
+            &paths.mounts_dir,
+            &paths.providers_dir,
+            &paths.config_file,
+            config.mounts.clone(),
+        );
         Ok(Self {
             paths,
             config,
