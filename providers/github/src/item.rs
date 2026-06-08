@@ -3,13 +3,12 @@
 use rc_zip_sync::ReadZip;
 
 use omnifs_core::ContentType;
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 
 use crate::api::GithubRest;
 use crate::objects::{Issue, ItemData, PullRequest, Repo, Run};
 use crate::{
-    COMMENT_PAGE_SIZE, CommentRecord, ListPage, OwnerName, RepoId, RepoName, State, StateFilter,
+    COMMENT_PAGE_SIZE, CommentRecord, ListPage, OwnerName, RepoId, RepoName, StateFilter,
     WorkflowRunsResponse, fetch_owner_repos, github_check_status, list_items, resolve_owner_kind,
 };
 
@@ -125,7 +124,7 @@ pub(crate) struct RunKey {
 }
 
 impl OwnerKey {
-    pub(crate) async fn repos(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn repos(self, cx: DirCx) -> Result<DirProjection> {
         let kind = resolve_owner_kind(&cx, &self.owner)
             .await?
             .ok_or_else(|| ProviderError::not_found("owner not found"))?;
@@ -137,7 +136,7 @@ impl OwnerKey {
 
 impl IssuesRootKey {
     #[allow(clippy::unused_self)]
-    pub(crate) fn filters(self, _cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) fn filters(self, _cx: DirCx) -> Result<DirProjection> {
         Ok(DirProjection::exhaustive(
             StateFilter::choices()
                 .into_iter()
@@ -149,7 +148,7 @@ impl IssuesRootKey {
 
 impl PullsRootKey {
     #[allow(clippy::unused_self)]
-    pub(crate) fn filters(self, _cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) fn filters(self, _cx: DirCx) -> Result<DirProjection> {
         Ok(DirProjection::exhaustive(
             StateFilter::choices()
                 .into_iter()
@@ -160,7 +159,7 @@ impl PullsRootKey {
 }
 
 impl IssueListKey {
-    pub(crate) async fn list(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
         let route = ItemListRoute::Issues(self);
         let page = list_items(
             &cx,
@@ -175,7 +174,7 @@ impl IssueListKey {
 }
 
 impl PullListKey {
-    pub(crate) async fn list(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
         let route = ItemListRoute::Pulls(self);
         let page = list_items(
             &cx,
@@ -271,55 +270,15 @@ impl ItemListRoute {
     }
 
     fn listed_item_dir(&self, item: &ItemData) -> Result<DirProjection> {
-        let title = item.title()?;
-        let state = item.state()?;
-        let user = item.user()?;
-        let body = FileProjection::deferred(Size::Unknown)
-            .full()
-            .mutable()
-            .content_type(ContentType::Markdown)
-            .build();
-        let item_md = FileProjection::deferred(Size::Unknown)
-            .full()
-            .mutable()
-            .content_type(ContentType::Markdown)
-            .build();
-        let item_json = FileProjection::deferred(Size::Unknown)
-            .full()
-            .immutable()
-            .content_type(ContentType::Json)
-            .build();
-
-        let mut projection = DirProjection::exhaustive(core::iter::empty::<Entry>())
-            .preload_dir(
-                "comments",
-                DirProjection::open(core::iter::empty::<Entry>()),
-            )
-            .preload_file("title", file_content_to_projection(title)?)
-            .preload_file("state", file_content_to_projection(state)?)
-            .preload_file("user", file_content_to_projection(user)?)
-            .preload_file("body", body)
-            .preload_file("item.md", item_md)
-            .preload_file("item.json", item_json);
-
-        if matches!(self, Self::Pulls(_)) {
-            let diff = FileProjection::deferred(Size::Unknown)
-                .full()
-                .mutable()
-                .content_type(ContentType::Custom("text/x-diff"))
-                .build();
-            projection = projection.preload_file("diff", diff);
-        }
-
-        Ok(projection)
+        item.listed_dir(matches!(self, Self::Pulls(_)))
     }
 }
 
 impl Key for IssueKey {
     type Object = Issue;
-    type State = State;
+    type State = ();
 
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<Issue>> {
+    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Issue>> {
         let repo = RepoId::new(&self.owner, &self.repo);
         match cx
             .github_load::<ItemData>(format!("/repos/{repo}/issues/{}", self.number), since)
@@ -338,9 +297,9 @@ impl Key for IssueKey {
 
 impl Key for PullKey {
     type Object = PullRequest;
-    type State = State;
+    type State = ();
 
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<PullRequest>> {
+    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<PullRequest>> {
         let repo = RepoId::new(&self.owner, &self.repo);
         match cx
             .github_load::<ItemData>(format!("/repos/{repo}/pulls/{}", self.number), since)
@@ -358,9 +317,9 @@ impl Key for PullKey {
 
 impl Key for RepoKey {
     type Object = Repo;
-    type State = State;
+    type State = ();
 
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<Repo>> {
+    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Repo>> {
         cx.github_load::<Repo>(format!("/repos/{}/{}", self.owner, self.repo), since)
             .await
     }
@@ -368,9 +327,9 @@ impl Key for RepoKey {
 
 impl Key for RunKey {
     type Object = Run;
-    type State = State;
+    type State = ();
 
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<Run>> {
+    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Run>> {
         let repo = RepoId::new(&self.owner, &self.repo);
         cx.github_load::<Run>(format!("/repos/{repo}/actions/runs/{}", self.run_id), since)
             .await
@@ -378,7 +337,7 @@ impl Key for RunKey {
 }
 
 impl RepoKey {
-    pub(crate) async fn tree(self, cx: Cx<State>) -> Result<TreeRef> {
+    pub(crate) async fn tree(self, cx: Cx) -> Result<TreeRef> {
         let repo_id = RepoId::new(&self.owner, &self.repo);
         let opened = cx
             .git()
@@ -392,17 +351,17 @@ impl RepoKey {
 }
 
 impl IssueKey {
-    pub(crate) async fn comments(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn comments(self, cx: DirCx) -> Result<DirProjection> {
         comments_dir(&cx, &self.owner, &self.repo, self.number).await
     }
 }
 
 impl PullKey {
-    pub(crate) async fn comments(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn comments(self, cx: DirCx) -> Result<DirProjection> {
         comments_dir(&cx, &self.owner, &self.repo, self.number).await
     }
 
-    pub(crate) async fn diff(self, cx: Cx<State>) -> Result<FileProjection> {
+    pub(crate) async fn diff(self, cx: Cx) -> Result<FileProjection> {
         let repo_id = RepoId::new(&self.owner, &self.repo);
         let blob = cx
             .github_get(format!("/repos/{repo_id}/pulls/{}", self.number))
@@ -421,19 +380,19 @@ impl PullKey {
 }
 
 impl IssueCommentKey {
-    pub(crate) async fn read(self, cx: Cx<State>) -> Result<FileProjection> {
+    pub(crate) async fn read(self, cx: Cx) -> Result<FileProjection> {
         comment_read(&cx, &self.owner, &self.repo, self.number, self.idx).await
     }
 }
 
 impl PullCommentKey {
-    pub(crate) async fn read(self, cx: Cx<State>) -> Result<FileProjection> {
+    pub(crate) async fn read(self, cx: Cx) -> Result<FileProjection> {
         comment_read(&cx, &self.owner, &self.repo, self.number, self.idx).await
     }
 }
 
 impl RunListKey {
-    pub(crate) async fn list(self, cx: DirCx<State>) -> Result<DirProjection> {
+    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
         let repo_id = RepoId::new(&self.owner, &self.repo);
         let runs: WorkflowRunsResponse = cx
             .github_json(format!("/repos/{repo_id}/actions/runs?per_page=30"))
@@ -464,7 +423,7 @@ impl RunListKey {
 }
 
 impl RunKey {
-    pub(crate) async fn log(self, cx: Cx<State>) -> Result<FileProjection> {
+    pub(crate) async fn log(self, cx: Cx) -> Result<FileProjection> {
         let repo = RepoId::new(&self.owner, &self.repo);
         let resp = cx
             .github_get(format!("/repos/{repo}/actions/runs/{}/logs", self.run_id))
@@ -475,34 +434,8 @@ impl RunKey {
     }
 }
 
-fn file_content_to_projection(content: FileContent) -> Result<FileProjection> {
-    let attrs = content.attrs().clone();
-    let content_type = content.content_type();
-    let bytes = content
-        .content()
-        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
-        .to_vec();
-    let mut builder = FileProjection::inline(bytes).size(attrs.size);
-    builder = match attrs.stability {
-        Stability::Immutable => builder.immutable(),
-        Stability::Mutable => builder.mutable(),
-        Stability::Volatile => {
-            return Err(ProviderError::internal(
-                "list preload cannot project volatile inline bytes",
-            ));
-        },
-    };
-    if let Some(version) = attrs.version {
-        builder = builder.version(version);
-    }
-    if let Some(content_type) = content_type {
-        builder = builder.content_type(content_type);
-    }
-    Ok(builder.build())
-}
-
 async fn comments_dir(
-    cx: &DirCx<State>,
+    cx: &DirCx,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,
@@ -526,7 +459,7 @@ async fn comments_dir(
 }
 
 async fn comment_read(
-    cx: &Cx<State>,
+    cx: &Cx,
     owner: &OwnerName,
     repo: &RepoName,
     number: u64,

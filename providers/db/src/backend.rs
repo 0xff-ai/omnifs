@@ -232,23 +232,6 @@ impl SqliteBackend {
         Ok(out)
     }
 
-    /// Hash of (`sqlite_version`, path, file size, table count)
-    /// used as a version token for the `meta/*` files. The host
-    /// keeps host view cache entries keyed by this hash, so we don't
-    /// need TTLs.
-    pub fn meta_version(&self) -> Result<String, BackendError> {
-        let info = self.file_info()?;
-        let tables = self.list_tables()?;
-        let mut hasher = Sha256::new();
-        hasher.update(info.sqlite_version.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(info.path.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(info.size_bytes.to_le_bytes());
-        hasher.update(tables.len().to_le_bytes());
-        Ok(hex::encode(hasher.finalize()))
-    }
-
     /// Hash for table-specific projections: name + create SQL +
     /// row count. Changes when schema or row count moves.
     pub fn table_version(&self, table: &str) -> Result<String, BackendError> {
@@ -320,7 +303,6 @@ fn escape_identifier(name: &str) -> String {
     name.replace('"', "\"\"")
 }
 
-#[omnifs_sdk::object(kind = "db.database", key = crate::DatabaseKey, stability = Immutable)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FileInfo {
     pub path: String,

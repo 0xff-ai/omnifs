@@ -1,16 +1,15 @@
 //! arXiv paper object, representations, and warm projections.
 
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::{paper_abs_url, paper_pdf_url, paper_source_url, parse_paper_atom};
-use crate::{PaperKey, pretty_json};
+use crate::{PaperVersionKey, pretty_json};
 
 #[omnifs_sdk::object(
     kind = "arxiv.paper",
-    key = PaperKey,
+    key = PaperVersionKey,
     canonical = Atom,
     parse = parse_paper_atom
 )]
@@ -79,16 +78,12 @@ impl Paper {
         pretty_json(&payload)
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn paper_json_leaf(paper: &Paper) -> Result<FileContent> {
-        Ok(FileContent::new(paper.metadata_json_bytes(None)).with_content_type(ContentType::Json))
-    }
-
     /// `v1..=latest_version`, derived from the loaded Atom. No callout.
     #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn versions(paper: &Paper) -> Result<DirProjection> {
+    pub(crate) fn version_dirs(paper: &Paper) -> Result<DirProjection> {
         Ok(DirProjection::exhaustive(
-            (1..=paper.latest_version).map(|v| Entry::dir(format!("v{v}"))),
+            std::iter::once(Entry::dir("@latest"))
+                .chain((1..=paper.latest_version).map(|v| Entry::dir(format!("v{v}")))),
         ))
     }
 }

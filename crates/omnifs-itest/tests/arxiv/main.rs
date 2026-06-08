@@ -44,6 +44,20 @@ fn resume_paper_atom(op: &mut TestOp<'_>) {
     resume_http(op, SAMPLE_PAPER_ATOM.to_vec());
 }
 
+fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
+    op.resume(vec![CalloutResult::BlobFetched(
+        omnifs_wit::provider::types::BlobFetched {
+            blob,
+            size: 4,
+            content_type: Some("application/pdf".to_string()),
+            etag: None,
+            status: 200,
+            response_headers: Vec::new(),
+        },
+    )])
+    .unwrap();
+}
+
 fn read_file_bytes(op: &TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
@@ -61,8 +75,8 @@ fn read_file_bytes(op: &TestOp<'_>) -> Vec<u8> {
 #[test]
 fn attach_symmetry_collapses_paper_identity() {
     let harness = arxiv_harness();
-    let direct_path = format!("/papers/{PAPER_ID}/paper.atom");
-    let via_path = format!("/categories/cs.AI/papers/{PAPER_ID}/paper.atom");
+    let direct_path = format!("/papers/{PAPER_ID}/@latest/paper.atom");
+    let via_path = format!("/categories/cs.AI/papers/{PAPER_ID}/@latest/paper.atom");
 
     let mut direct = harness.read(&direct_path).unwrap();
     resume_paper_atom(&mut direct);
@@ -81,11 +95,11 @@ fn attach_symmetry_collapses_paper_identity() {
 fn canonical_is_raw_atom_and_json_is_derived() {
     let harness = arxiv_harness();
     let mut raw = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.atom"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.atom"))
         .unwrap();
     resume_paper_atom(&mut raw);
     let mut json = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.json"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.json"))
         .unwrap();
     resume_paper_atom(&mut json);
     let raw_bytes = read_file_bytes(&raw);
@@ -96,28 +110,30 @@ fn canonical_is_raw_atom_and_json_is_derived() {
 }
 
 #[test]
-fn warm_version_paths_reuse_single_atom_fetch() {
+fn paper_root_lists_latest_and_numbered_versions() {
     let harness = arxiv_harness();
-    let mut first = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.json"))
-        .unwrap();
-    let mut fetch_count = count_fetch_callouts(&[&first]);
-    resume_paper_atom(&mut first);
-    let listed = harness
-        .list(&format!("/papers/{PAPER_ID}/versions"))
-        .unwrap();
-    fetch_count += count_fetch_callouts(&[&listed]);
+    let mut listed = harness.list(&format!("/papers/{PAPER_ID}")).unwrap();
+    assert_eq!(count_fetch_callouts(&[&listed]), 1);
+    resume_paper_atom(&mut listed);
+    match listed.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["@latest", "v1", "v2", "v3"]);
+        },
+        other => panic!("expected version family listing, got {other:?}"),
+    }
+
     let mut version_body = harness
-        .read(&format!("/papers/{PAPER_ID}/versions/v2/paper.json"))
+        .read(&format!("/papers/{PAPER_ID}/v2/paper.json"))
         .unwrap();
-    fetch_count += count_fetch_callouts(&[&version_body]);
-    assert_eq!(fetch_count, 2);
     resume_paper_atom(&mut version_body);
     match version_body.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
-            omnifs_wit::provider::types::ByteSource::Inline(bytes) => {
-                assert!(bytes.starts_with(b"{"));
-            },
+            ByteSource::Inline(bytes) => assert!(bytes.starts_with(b"{")),
             other => panic!("expected inline bytes, got {other:?}"),
         },
         other => panic!("expected version json, got {other:?}"),
@@ -128,25 +144,17 @@ fn warm_version_paths_reuse_single_atom_fetch() {
 fn version_blob_immutable_latest_mutable() {
     let harness = arxiv_harness();
     let mut version_pdf_step = harness
-        .read(&format!("/papers/{PAPER_ID}/versions/v1/paper.pdf"))
+        .read(&format!("/papers/{PAPER_ID}/v1/paper.pdf"))
         .unwrap();
+    let atom_fetch = version_pdf_step.expect_single_fetch();
+    assert!(atom_fetch.url.contains(PAPER_ID));
+    resume_paper_atom(&mut version_pdf_step);
     let version_pdf = match version_pdf_step.callouts() {
         [Callout::FetchBlob(request)] => request,
         other => panic!("expected blob fetch callout, got {other:?}"),
     };
     assert!(version_pdf.url.contains("2604.00002v1"));
-    version_pdf_step
-        .resume(vec![CalloutResult::BlobFetched(
-            omnifs_wit::provider::types::BlobFetched {
-                blob: 1,
-                size: 4,
-                content_type: Some("application/pdf".to_string()),
-                etag: None,
-                status: 200,
-                response_headers: Vec::new(),
-            },
-        )])
-        .unwrap();
+    resume_blob(&mut version_pdf_step, 1);
     match version_pdf_step.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Immutable);
@@ -155,8 +163,11 @@ fn version_blob_immutable_latest_mutable() {
     }
 
     let mut latest_pdf_step = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.pdf"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.pdf"))
         .unwrap();
+    let atom_fetch = latest_pdf_step.expect_single_fetch();
+    assert!(atom_fetch.url.contains(PAPER_ID));
+    resume_paper_atom(&mut latest_pdf_step);
     let latest_pdf = match latest_pdf_step.callouts() {
         [Callout::FetchBlob(request)] => request,
         other => panic!("expected blob fetch callout, got {other:?}"),
@@ -171,18 +182,7 @@ fn version_blob_immutable_latest_mutable() {
         "latest pdf must not be version-pinned: {}",
         latest_pdf.url
     );
-    latest_pdf_step
-        .resume(vec![CalloutResult::BlobFetched(
-            omnifs_wit::provider::types::BlobFetched {
-                blob: 2,
-                size: 4,
-                content_type: Some("application/pdf".to_string()),
-                etag: None,
-                status: 200,
-                response_headers: Vec::new(),
-            },
-        )])
-        .unwrap();
+    resume_blob(&mut latest_pdf_step, 2);
     match latest_pdf_step.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_ne!(file.attrs.stability, Stability::Immutable);
@@ -217,7 +217,9 @@ fn category_listing_emits_no_member_canonicals() {
 #[test]
 fn old_style_encoded_id_round_trips() {
     let harness = arxiv_harness();
-    let mut op = harness.read("/papers/cs.LG%2F0512345/paper.json").unwrap();
+    let mut op = harness
+        .read("/papers/cs.LG%2F0512345/@latest/paper.atom")
+        .unwrap();
     let fetch = op.expect_single_fetch();
     assert!(
         fetch.url.contains("id_list=cs.LG%2F0512345")
@@ -238,7 +240,9 @@ fn old_style_encoded_id_round_trips() {
 #[test]
 fn versioned_paper_segment_rejected() {
     let harness = arxiv_harness();
-    let read = harness.read("/papers/2401.12345v2/paper.json").unwrap();
+    let read = harness
+        .read("/papers/2401.12345v2/@latest/paper.json")
+        .unwrap();
     match read.result().unwrap() {
         OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected versioned id read to fail, got {other:?}"),
@@ -253,7 +257,9 @@ fn versioned_paper_segment_rejected() {
 #[test]
 fn missing_paper_emits_not_found_with_id() {
     let harness = arxiv_harness();
-    let mut op = harness.read("/papers/99999999.99999/paper.json").unwrap();
+    let mut op = harness
+        .read("/papers/99999999.99999/@latest/paper.atom")
+        .unwrap();
     let fetch = op.expect_single_fetch();
     assert!(fetch.url.contains("99999999.99999"));
     resume_http(
@@ -313,7 +319,7 @@ fn category_listing_paginates() {
 fn representation_dispatch_respects_declared_leaves() {
     let harness = arxiv_harness();
     let mut json = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.json"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.json"))
         .unwrap();
     resume_paper_atom(&mut json);
     assert!(matches!(
@@ -321,17 +327,33 @@ fn representation_dispatch_respects_declared_leaves() {
         OpResult::ReadFile(ReadFileOutcome::Found(_))
     ));
     let mut raw = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.atom"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.atom"))
         .unwrap();
     resume_paper_atom(&mut raw);
     let raw_bytes = read_file_bytes(&raw);
     assert_eq!(raw_bytes, SAMPLE_PAPER_ATOM);
 
     let md = harness
-        .read(&format!("/papers/{PAPER_ID}/paper.md"))
+        .read(&format!("/papers/{PAPER_ID}/@latest/paper.md"))
         .unwrap();
     match md.result().unwrap() {
         OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected undeclared paper.md to be missing, got {other:?}"),
+    }
+
+    let direct_latest = harness
+        .read(&format!("/papers/{PAPER_ID}/paper.json"))
+        .unwrap();
+    match direct_latest.result().unwrap() {
+        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        other => panic!("expected old direct paper.json to be missing, got {other:?}"),
+    }
+
+    let old_versions = harness
+        .read(&format!("/papers/{PAPER_ID}/versions/v1/paper.pdf"))
+        .unwrap();
+    match old_versions.result().unwrap() {
+        OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        other => panic!("expected old versions path to be missing, got {other:?}"),
     }
 }

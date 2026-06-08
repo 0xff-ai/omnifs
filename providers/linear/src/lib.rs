@@ -11,7 +11,6 @@ mod objects;
 use core::str::FromStr;
 
 use hashbrown::HashSet;
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use serde_json::json;
 
@@ -20,15 +19,6 @@ use crate::api::{
     TEAMS_QUERY, Team, TeamsData, gql_request, gql_unwrap,
 };
 use crate::objects::Issue;
-
-#[derive(Clone, Default)]
-#[omnifs_sdk::config]
-pub struct Config {}
-
-#[derive(Clone, Default)]
-pub struct State {
-    pub config: Config,
-}
 
 /// State filter directories under `/teams/{KEY}/issues/`.
 #[derive(
@@ -154,10 +144,7 @@ struct IssueKey {
     resources(endpoints = [LinearApi]),
 )]
 impl LinearProvider {
-    type Config = Config;
-    type State = State;
-
-    fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+    fn start(r: &mut Router) -> Result<()> {
         r.dir("/teams").handler(teams_list)?;
         r.dir("/teams/{team}/issues")
             .handler(IssuesRootKey::filters)?;
@@ -172,11 +159,11 @@ impl LinearProvider {
             o.file("description.md").project(Issue::description)?;
             Ok(())
         })?;
-        Ok(State { config })
+        Ok(())
     }
 }
 
-async fn teams_list(cx: DirCx<State>) -> Result<DirProjection> {
+async fn teams_list(cx: DirCx) -> Result<DirProjection> {
     let teams = fetch_all_teams(&cx).await?;
     let entries = teams
         .into_iter()
@@ -187,7 +174,7 @@ async fn teams_list(cx: DirCx<State>) -> Result<DirProjection> {
 
 impl IssuesRootKey {
     #[allow(clippy::unused_self)]
-    fn filters(self, _cx: DirCx<State>) -> Result<DirProjection> {
+    fn filters(self, _cx: DirCx) -> Result<DirProjection> {
         Ok(DirProjection::exhaustive(
             StateFilter::choices()
                 .into_iter()
@@ -198,7 +185,7 @@ impl IssuesRootKey {
 }
 
 impl IssueListKey {
-    async fn list(self, cx: DirCx<State>) -> Result<DirProjection> {
+    async fn list(self, cx: DirCx) -> Result<DirProjection> {
         let team = self.team;
         let filter = self.filter;
         let page = fetch_all_issues(&cx, &team, filter).await?;
@@ -227,8 +214,7 @@ impl IssueListKey {
                 filter: Facet(filter),
                 ident: ident.clone(),
             };
-            projection =
-                projection.preload_dir(issue_anchor_path(&key), list_field_preload(issue)?);
+            projection = projection.preload_dir(issue_anchor_path(&key), issue.listed_dir()?);
         }
         Ok(projection)
     }
@@ -236,9 +222,9 @@ impl IssueListKey {
 
 impl Key for IssueKey {
     type Object = Issue;
-    type State = State;
+    type State = ();
 
-    async fn load(&self, cx: &Cx<State>, _since: Option<Validator>) -> Result<Load<Issue>> {
+    async fn load(&self, cx: &Cx, _since: Option<Validator>) -> Result<Load<Issue>> {
         if self.ident.team() != &*self.team {
             return Ok(Load::NotFound);
         }
@@ -265,7 +251,7 @@ impl Key for IssueKey {
     }
 }
 
-async fn fetch_all_teams(cx: &Cx<State>) -> Result<Vec<Team>> {
+async fn fetch_all_teams(cx: &Cx) -> Result<Vec<Team>> {
     let mut out = Vec::new();
     let mut after: Option<String> = None;
     loop {
@@ -290,11 +276,7 @@ async fn fetch_all_teams(cx: &Cx<State>) -> Result<Vec<Team>> {
     Ok(out)
 }
 
-async fn fetch_all_issues(
-    cx: &Cx<State>,
-    team: &TeamKey,
-    filter: StateFilter,
-) -> Result<IssuePage> {
+async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Result<IssuePage> {
     let state_types = match filter {
         StateFilter::Open => vec!["triage", "backlog", "unstarted", "started"],
         StateFilter::All => Vec::new(),
@@ -344,47 +326,4 @@ async fn fetch_all_issues(
 
 fn issue_anchor_path(key: &IssueKey) -> String {
     format!("/teams/{}/issues/{}/{}", *key.team, *key.filter, key.ident)
-}
-
-fn list_field_preload(issue: &Issue) -> Result<DirProjection> {
-    let title = issue.title()?;
-    let state = issue.state()?;
-    let priority = issue.priority()?;
-    let assignee = issue.assignee()?;
-    Ok(DirProjection::open([
-        Entry::file("title"),
-        Entry::file("state"),
-        Entry::file("priority"),
-        Entry::file("assignee"),
-    ])
-    .preload_file("title", file_content_to_projection(title)?)
-    .preload_file("state", file_content_to_projection(state)?)
-    .preload_file("priority", file_content_to_projection(priority)?)
-    .preload_file("assignee", file_content_to_projection(assignee)?))
-}
-
-fn file_content_to_projection(content: FileContent) -> Result<FileProjection> {
-    let attrs = content.attrs().clone();
-    let content_type = content.content_type();
-    let bytes = content
-        .content()
-        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
-        .to_vec();
-    let mut builder = FileProjection::inline(bytes).size(attrs.size);
-    builder = match attrs.stability {
-        Stability::Immutable => builder.immutable(),
-        Stability::Mutable => builder.mutable(),
-        Stability::Volatile => {
-            return Err(ProviderError::internal(
-                "list preload cannot project volatile inline bytes",
-            ));
-        },
-    };
-    if let Some(version) = attrs.version {
-        builder = builder.version(version);
-    }
-    if let Some(content_type) = content_type {
-        builder = builder.content_type(content_type);
-    }
-    Ok(builder.build())
 }

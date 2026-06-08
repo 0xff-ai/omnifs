@@ -29,7 +29,7 @@ pub enum DirIntent {
 /// Dir handlers serve three operations (lookup, list, read-file);
 /// `DirCx` carries which one the host asked for. Derefs to `Cx<S>` so all
 /// the usual context methods (`.http()`, `.git()`, `.state()`) work directly.
-pub struct DirCx<S> {
+pub struct DirCx<S = ()> {
     cx: Cx<S>,
     intent: DirIntent,
 }

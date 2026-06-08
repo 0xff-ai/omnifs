@@ -65,7 +65,8 @@ struct IssueKey { owner: OwnerName, repo: RepoName, filter: Facet<StateFilter>, 
 
 impl Key for IssueKey {
     type Object = Issue;
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<Issue>> {
+    type State = ();
+    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Issue>> {
         let repo = RepoId::new(&self.owner, &self.repo);
         let (item, canonical): (Issue, Canonical) =
             cx.github_load(format!("/repos/{repo}/issues/{}", self.number), since).await?;
@@ -75,7 +76,7 @@ impl Key for IssueKey {
 }
 
 impl IssueKey {
-    async fn comments(&self, cx: DirCx<State>) -> Result<DirProjection> { /* … */ }
+    async fn comments(&self, cx: DirCx) -> Result<DirProjection> { /* … */ }
 }
 ```
 
@@ -102,7 +103,7 @@ struct Canonical { bytes: Vec<u8>, validator: Option<Validator> }   // the raw u
 enum Load<T> { Fresh { value: T, canonical: Canonical }, Unchanged, NotFound }
 ```
 
-`load` is state-aware (`Cx<State>`, previously `Cx<()>`) and receives the cached
+`load` can be state-aware (`Cx<State>`) or stateless (`Cx`) and receives the cached
 `Validator` so a provider can issue a conditional request. Outcomes:
 
 - `Fresh` carries the parsed value plus the **raw upstream response bytes and
@@ -203,9 +204,11 @@ the shared canonical with no refetch.
 
 ## 4. Registration: `start()` is the whole map
 
-`fn start(config: Config, r: &mut Router<State>) -> Result<State>`. No `Routes`
-type param and no `build_path`; reverse routing is unnecessary because the host
-never needs `id→path` outside the reverse index (§7.2).
+State-bearing providers use `fn start(config: Config, r: &mut Router<State>) -> Result<State>`.
+Stateless providers use `fn start(r: &mut Router) -> Result<()>` and omit empty
+`Config`/`State` aliases. No `Routes` type param and no `build_path`; reverse
+routing is unnecessary because the host never needs `id→path` outside the
+reverse index (§7.2).
 
 ### 4.1 The object block
 
@@ -396,7 +399,7 @@ degradation is the accepted pragmatic cost of not suspending the provider.
 The three-level `Stability` (`file_attrs.rs`) governs both, per leaf:
 
 - **Immutable**: no deadline; served until capacity/invalidation. A new version is
-  a new identity/path (e.g. `versions/{v}/paper.pdf`). Never revalidates.
+  a new identity/path (e.g. `vN/paper.pdf`). Never revalidates.
 - **Mutable**: deadline = write-time + a short TTL (host config default, a few
   seconds, overridable per mount). Past it a read revalidates per §6.1.
 - **Volatile**: deadline = write-time (TTL 0); ranged re-read every time (requires
@@ -641,7 +644,7 @@ of `Format` markers; the source leaf is implicit:
 ```rust
 o.representations("item", (Markdown,))?;   // item.json (source, canonical=Json) + item.md (render)
 o.representations("paper", ())?;           // paper.atom (source, canonical=Atom)
-o.file("paper.json").project(Paper::paper_json_leaf)?; // projected JSON metadata
+o.file("paper.json").handler(PaperVersionKey::json)?; // version-aware JSON metadata
 o.representations("repo", ())?;            // repo.json (source) only, no renders
 ```
 
@@ -687,12 +690,13 @@ type (consistent with §3 normalization).
   field's normalized `Display`), `#[flatten]` parent embedding, and a generated
   `#[test]` that asserts each identity field round-trips `FromStr`/`Display`
   idempotently for a sampled set (the contract from §3; not a compile-time proof).
-- `#[provider(...)]`: unchanged entrypoint; `start` returns `Result<State>`.
+- `#[provider(...)]`: lifecycle entrypoint. Providers omit `Config` and `State`
+  aliases when both are empty; the macro defaults to `NoConfig` and `()`.
 
 ## 12. Worked example: GitHub `start()`
 
 ```rust
-fn start(_config: Config, r: &mut Router<State>) -> Result<State> {
+fn start(r: &mut Router) -> Result<()> {
     r.dir("/{owner}").handler(OwnerKey::repos)?;                       // dynamic collection
     r.object::<Repo>("/{owner}/{repo}", |o| { o.representations("repo", ())?; Ok(()) })?; // gate = load
 
@@ -756,30 +760,32 @@ field block (~6 lines) is duplicated, accepted as the cost of full separation.
 ## 13. Worked example: arXiv
 
 ```rust
-fn start(_config: Config, r: &mut Router<()>) -> Result<()> {
-    let papers = object::<Paper>("/{paper}", |o| {
-        o.representations("paper", ())?;                               // paper.atom source
-        o.file("paper.json").project(Paper::paper_json_leaf)?;         // projected JSON metadata
-        o.dir("versions").project(Paper::versions)?;                  // warm: v1..vN from latest_version
-        o.file("versions/{version}/paper.json").project(Paper::version_json)?; // warm: re-project at {version}
-        o.file("versions/{version}/paper.pdf").immutable().handler(VersionKey::pdf)?;       // blob
-        o.file("versions/{version}/source.tar.gz").immutable().handler(VersionKey::source)?;// blob
-        o.file("paper.pdf").handler(PaperKey::pdf)?;
-        o.file("source.tar.gz").handler(PaperKey::source)?;
+fn start(r: &mut Router) -> Result<()> {
+    let papers = object::<Paper>("/{paper}/{version}", |o| {
+        o.representations("paper", ())?;                    // paper.atom source
+        o.file("paper.json").handler(PaperVersionKey::json)?; // version-aware metadata
+        o.file("paper.pdf").handler(PaperVersionKey::pdf)?;  // blob
+        o.file("source.tar.gz").handler(PaperVersionKey::source)?; // blob
         Ok(())
     });
     r.attach("/papers", &papers)?;
     r.attach("/categories/{category}/papers", &papers)?;              // category: pure-nav prefix capture
 
+    r.dir("/papers/{paper}").handler(PaperKey::versions)?;
+    r.dir("/categories/{category}/papers/{paper}").handler(PaperKey::versions)?;
     r.dir("/categories/{category}").handler(CategoryKey::sub)?;
     r.dir("/categories/{category}/papers").handler(CategoryKey::recent)?; // ObjectListing::Names (ids only)
     Ok(())
 }
 ```
 
-`versions` and per-version metadata are warm projections of the one loaded Atom
-canonical (no refetch). `category` is a pure-navigation prefix capture absent from
-`PaperKey` (§4.5), so both attaches share `arxiv.paper|paper=…`. A category
+The paper directory is a version family: it lists `@latest` plus `v1..=vN`.
+The `version` capture is a `Facet<PaperVersion>`, so `@latest` and every numbered
+version share the same `arxiv.paper|paper=…` identity. `paper.atom` is the raw
+canonical source under each version selector. `paper.json` is a version-aware
+handler because the current SDK representation table does not pass route facets
+to render functions. `category` is a pure-navigation prefix capture absent from
+the key (§4.5), so direct and category-attached reads share identity. A category
 membership change emits `invalidate listing` for `/categories/{category}/papers`,
 which never evicts a paper canonical (§7.4).
 

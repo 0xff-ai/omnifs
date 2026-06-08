@@ -2,6 +2,7 @@
 
 use omnifs_core::ContentType;
 use omnifs_sdk::browse::FileContent;
+use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,73 @@ impl ItemData {
         )
         .into_bytes()
     }
+
+    pub(crate) fn listed_dir(&self, include_pull_files: bool) -> Result<DirProjection> {
+        let body = FileProjection::deferred(Size::Unknown)
+            .full()
+            .mutable()
+            .content_type(ContentType::Markdown)
+            .build();
+        let item_md = FileProjection::deferred(Size::Unknown)
+            .full()
+            .mutable()
+            .content_type(ContentType::Markdown)
+            .build();
+        let item_json = FileProjection::deferred(Size::Unknown)
+            .full()
+            .immutable()
+            .content_type(ContentType::Json)
+            .build();
+
+        let mut projection = DirProjection::exhaustive(core::iter::empty::<Entry>())
+            .preload_dir(
+                "comments",
+                DirProjection::open(core::iter::empty::<Entry>()),
+            )
+            .preload_file("title", inline_projection(self.title()?)?)
+            .preload_file("state", inline_projection(self.state()?)?)
+            .preload_file("user", inline_projection(self.user()?)?)
+            .preload_file("body", body)
+            .preload_file("item.md", item_md)
+            .preload_file("item.json", item_json);
+
+        if include_pull_files {
+            let diff = FileProjection::deferred(Size::Unknown)
+                .full()
+                .mutable()
+                .content_type(ContentType::Custom("text/x-diff"))
+                .build();
+            projection = projection.preload_file("diff", diff);
+        }
+
+        Ok(projection)
+    }
+}
+
+fn inline_projection(content: FileContent) -> Result<FileProjection> {
+    let attrs = content.attrs().clone();
+    let content_type = content.content_type();
+    let bytes = content
+        .content()
+        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
+        .to_vec();
+    let mut builder = FileProjection::inline(bytes).size(attrs.size);
+    builder = match attrs.stability {
+        Stability::Immutable => builder.immutable(),
+        Stability::Mutable => builder.mutable(),
+        Stability::Volatile => {
+            return Err(ProviderError::internal(
+                "list preload cannot project volatile inline bytes",
+            ));
+        },
+    };
+    if let Some(version) = attrs.version {
+        builder = builder.version(version);
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.content_type(content_type);
+    }
+    Ok(builder.build())
 }
 
 #[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey)]

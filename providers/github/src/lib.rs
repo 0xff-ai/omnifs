@@ -15,7 +15,12 @@ mod item;
 mod objects;
 
 pub(crate) use api::{GithubRest, github_check_status};
+use item::{
+    IssueCommentKey, IssueKey, IssueListKey, IssuesRootKey, OwnerKey, PullCommentKey, PullKey,
+    PullListKey, PullsRootKey, RepoKey, RunKey, RunListKey,
+};
 pub(crate) use objects::ItemData;
+use objects::{Issue, PullRequest, Repo, Run};
 
 /// Base URL for the GitHub REST API. Compose with a leading-slash path.
 pub(crate) const API_BASE: &str = "https://api.github.com";
@@ -35,13 +40,6 @@ pub(crate) enum OwnerKind {
     Org,
 }
 
-#[derive(Clone)]
-#[omnifs_sdk::config]
-pub struct Config {}
-
-#[derive(Clone, Default)]
-pub struct State {}
-
 /// State filter for resources.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr, strum::Display,
@@ -56,6 +54,66 @@ pub enum StateFilter {
 impl PathSegment for StateFilter {
     fn choices() -> Option<&'static [&'static str]> {
         Some(&["open", "all"])
+    }
+}
+
+#[omnifs_sdk::provider(
+    metadata = "omnifs.provider.json",
+    resources(endpoints = [api::GitHubApi], git = true),
+)]
+impl GithubProvider {
+    fn start(r: &mut Router) -> Result<()> {
+        r.dir("/{owner}").handler(OwnerKey::repos)?;
+
+        r.object::<Repo>("/{owner}/{repo}", |o| {
+            o.representations("repo", ())?;
+            Ok(())
+        })?;
+
+        r.dir("/{owner}/{repo}/issues")
+            .handler(IssuesRootKey::filters)?;
+        r.dir("/{owner}/{repo}/issues/{filter}")
+            .handler(IssueListKey::list)?;
+        r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
+            o.representations("item", (Markdown,))?;
+            o.file("title").project(Issue::title)?;
+            o.file("body").lazy().project(Issue::body)?;
+            o.file("state").project(Issue::state)?;
+            o.file("user").project(Issue::user)?;
+            o.dir("comments").handler(IssueKey::comments)?;
+            o.file("comments/{idx}").handler(IssueCommentKey::read)?;
+            Ok(())
+        })?;
+
+        r.dir("/{owner}/{repo}/pulls")
+            .handler(PullsRootKey::filters)?;
+        r.dir("/{owner}/{repo}/pulls/{filter}")
+            .handler(PullListKey::list)?;
+        r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
+            o.representations("item", (Markdown,))?;
+            o.file("title").project(PullRequest::title)?;
+            o.file("body").lazy().project(PullRequest::body)?;
+            o.file("state").project(PullRequest::state)?;
+            o.file("user").project(PullRequest::user)?;
+            o.dir("comments").handler(PullKey::comments)?;
+            o.file("comments/{idx}").handler(PullCommentKey::read)?;
+            o.file("diff").handler(PullKey::diff)?;
+            Ok(())
+        })?;
+
+        r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
+
+        r.dir("/{owner}/{repo}/actions/runs")
+            .handler(RunListKey::list)?;
+        r.object::<Run>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
+            o.representations("run", ())?;
+            o.file("status").project(Run::status)?;
+            o.file("conclusion").project(Run::conclusion)?;
+            o.file("log").handler(RunKey::log)?;
+            Ok(())
+        })?;
+
+        Ok(())
     }
 }
 
@@ -162,7 +220,7 @@ struct RepoListing {
 }
 
 pub(crate) async fn fetch_owner_repos(
-    cx: &Cx<State>,
+    cx: &Cx,
     owner: &OwnerName,
     kind: OwnerKind,
 ) -> Result<Vec<String>> {
@@ -204,10 +262,7 @@ pub(crate) async fn fetch_owner_repos(
     Ok(names)
 }
 
-pub(crate) async fn resolve_owner_kind(
-    cx: &Cx<State>,
-    owner: &OwnerName,
-) -> Result<Option<OwnerKind>> {
+pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Option<OwnerKind>> {
     use omnifs_sdk::error::ProviderErrorKind;
 
     match cx
@@ -274,7 +329,7 @@ pub(crate) struct WorkflowRunsResponse {
 /// without parsing Link headers. Pages 2..N use the typed REST endpoint
 /// because Search caps result windows and mixes issue/PR data unless qualified.
 pub(crate) async fn list_items(
-    cx: &Cx<State>,
+    cx: &Cx,
     owner: &OwnerName,
     repo: &RepoName,
     kind: item::ItemKind,
@@ -341,7 +396,7 @@ fn is_search_repo_missing(err: &ProviderError) -> bool {
     err.kind() == ProviderErrorKind::InvalidInput && err.message().contains("HTTP 422")
 }
 
-async fn repo_exists(cx: &Cx<State>, owner: &OwnerName, repo: &RepoName) -> Result<bool> {
+async fn repo_exists(cx: &Cx, owner: &OwnerName, repo: &RepoName) -> Result<bool> {
     use omnifs_sdk::error::ProviderErrorKind;
 
     match cx
@@ -351,74 +406,5 @@ async fn repo_exists(cx: &Cx<State>, owner: &OwnerName, repo: &RepoName) -> Resu
         Ok(_) => Ok(true),
         Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(false),
         Err(err) => Err(err),
-    }
-}
-
-use item::{
-    IssueCommentKey, IssueKey, IssueListKey, IssuesRootKey, OwnerKey, PullCommentKey, PullKey,
-    PullListKey, PullsRootKey, RepoKey, RunKey, RunListKey,
-};
-use objects::{Issue, PullRequest, Repo, Run};
-
-#[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
-    resources(endpoints = [api::GitHubApi], git = true),
-)]
-impl GithubProvider {
-    type Config = Config;
-    type State = State;
-
-    fn start(_config: Config, r: &mut Router<State>) -> Result<State> {
-        r.dir("/{owner}").handler(OwnerKey::repos)?;
-
-        r.object::<Repo>("/{owner}/{repo}", |o| {
-            o.representations("repo", ())?;
-            Ok(())
-        })?;
-
-        r.dir("/{owner}/{repo}/issues")
-            .handler(IssuesRootKey::filters)?;
-        r.dir("/{owner}/{repo}/issues/{filter}")
-            .handler(IssueListKey::list)?;
-        r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
-            o.representations("item", (Markdown,))?;
-            o.file("title").project(Issue::title)?;
-            o.file("body").lazy().project(Issue::body)?;
-            o.file("state").project(Issue::state)?;
-            o.file("user").project(Issue::user)?;
-            o.dir("comments").handler(IssueKey::comments)?;
-            o.file("comments/{idx}").handler(IssueCommentKey::read)?;
-            Ok(())
-        })?;
-
-        r.dir("/{owner}/{repo}/pulls")
-            .handler(PullsRootKey::filters)?;
-        r.dir("/{owner}/{repo}/pulls/{filter}")
-            .handler(PullListKey::list)?;
-        r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
-            o.representations("item", (Markdown,))?;
-            o.file("title").project(PullRequest::title)?;
-            o.file("body").lazy().project(PullRequest::body)?;
-            o.file("state").project(PullRequest::state)?;
-            o.file("user").project(PullRequest::user)?;
-            o.dir("comments").handler(PullKey::comments)?;
-            o.file("comments/{idx}").handler(PullCommentKey::read)?;
-            o.file("diff").handler(PullKey::diff)?;
-            Ok(())
-        })?;
-
-        r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
-
-        r.dir("/{owner}/{repo}/actions/runs")
-            .handler(RunListKey::list)?;
-        r.object::<Run>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
-            o.representations("run", ())?;
-            o.file("status").project(Run::status)?;
-            o.file("conclusion").project(Run::conclusion)?;
-            o.file("log").handler(RunKey::log)?;
-            Ok(())
-        })?;
-
-        Ok(State::default())
     }
 }

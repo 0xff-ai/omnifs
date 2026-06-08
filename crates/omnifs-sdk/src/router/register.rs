@@ -14,7 +14,7 @@ use super::pattern::parse_pattern;
 // ===========================================================================
 
 /// The registration + dispatch surface.
-pub struct Router<S> {
+pub struct Router<S = ()> {
     pub(super) dirs: Vec<super::handlers::DirEntry<S>>,
     pub(super) files: Vec<super::handlers::FileEntry<S>>,
     pub(super) treerefs: Vec<super::handlers::TreeRefEntry<S>>,

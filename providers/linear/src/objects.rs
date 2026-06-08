@@ -2,6 +2,7 @@
 
 use omnifs_core::ContentType;
 use omnifs_sdk::browse::FileContent;
+use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +76,19 @@ impl Issue {
         let body = self.description.as_deref().unwrap_or("");
         Ok(FileContent::new(newline(body)).with_content_type(ContentType::Markdown))
     }
+
+    pub(crate) fn listed_dir(&self) -> crate::Result<DirProjection> {
+        Ok(DirProjection::open([
+            Entry::file("title"),
+            Entry::file("state"),
+            Entry::file("priority"),
+            Entry::file("assignee"),
+        ])
+        .preload_file("title", inline_projection(self.title()?)?)
+        .preload_file("state", inline_projection(self.state()?)?)
+        .preload_file("priority", inline_projection(self.priority()?)?)
+        .preload_file("assignee", inline_projection(self.assignee()?)?))
+    }
 }
 
 impl Representable<Markdown> for Issue {
@@ -102,4 +116,30 @@ pub(crate) fn newline(text: &str) -> Vec<u8> {
 
 fn text_content(bytes: Vec<u8>) -> FileContent {
     FileContent::new(bytes).with_content_type(ContentType::Custom("text/plain"))
+}
+
+fn inline_projection(content: FileContent) -> crate::Result<FileProjection> {
+    let attrs = content.attrs().clone();
+    let content_type = content.content_type();
+    let bytes = content
+        .content()
+        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
+        .to_vec();
+    let mut builder = FileProjection::inline(bytes).size(attrs.size);
+    builder = match attrs.stability {
+        Stability::Immutable => builder.immutable(),
+        Stability::Mutable => builder.mutable(),
+        Stability::Volatile => {
+            return Err(ProviderError::internal(
+                "list preload cannot project volatile inline bytes",
+            ));
+        },
+    };
+    if let Some(version) = attrs.version {
+        builder = builder.version(version);
+    }
+    if let Some(content_type) = content_type {
+        builder = builder.content_type(content_type);
+    }
+    Ok(builder.build())
 }

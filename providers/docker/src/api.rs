@@ -9,7 +9,7 @@
 use omnifs_sdk::prelude::*;
 use serde::de::DeserializeOwned;
 
-use crate::{Result, State};
+use crate::Result;
 
 /// Typed outbound endpoint for the Docker daemon. The base carries the
 /// `unix://` socket path; every request path is prefixed with the pinned API
@@ -25,7 +25,7 @@ pub struct DockerApi;
 pub(crate) const API_VERSION_PREFIX: &str = "/v1.43";
 
 /// Fetch a JSON document from `path`, prefixing the pinned API version.
-pub(crate) async fn fetch_json<T>(cx: &Cx<State>, path: &str, query: &[(&str, &str)]) -> Result<T>
+pub(crate) async fn fetch_json<T>(cx: &Cx, path: &str, query: &[(&str, &str)]) -> Result<T>
 where
     T: DeserializeOwned,
 {
@@ -35,11 +35,7 @@ where
 }
 
 /// Fetch the raw response body from `path`, prefixing the pinned API version.
-pub(crate) async fn fetch_bytes(
-    cx: &Cx<State>,
-    path: &str,
-    query: &[(&str, &str)],
-) -> Result<Vec<u8>> {
+pub(crate) async fn fetch_bytes(cx: &Cx, path: &str, query: &[(&str, &str)]) -> Result<Vec<u8>> {
     let mut request = cx
         .endpoint::<DockerApi>()
         .get(format!("{API_VERSION_PREFIX}{path}"));
