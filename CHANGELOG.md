@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-08
+
 ### Added
 
 - Object-shaped provider routing and host-owned object/view caching now back the current provider surfaces. Providers can store canonical upstream bytes and render multiple filesystem leaves from the same object, so repeated reads of related fields can be served from host cache instead of refetching the upstream service.
