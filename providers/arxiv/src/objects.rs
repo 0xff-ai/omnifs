@@ -4,8 +4,8 @@ use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::PaperVersionKey;
 use crate::api::{paper_abs_url, paper_pdf_url, paper_source_url, parse_paper_atom};
-use crate::{PaperVersionKey, pretty_json};
 
 #[omnifs_sdk::object(
     kind = "arxiv.paper",
@@ -32,6 +32,7 @@ pub struct Paper {
 impl Representable<Json> for Paper {
     fn represent(&self) -> Vec<u8> {
         self.metadata_json_bytes(None)
+            .expect("JSON encode: infallible for json! value")
     }
 }
 
@@ -43,7 +44,7 @@ impl Paper {
         Ok(())
     }
 
-    pub(crate) fn metadata_json_bytes(&self, version: Option<u32>) -> Vec<u8> {
+    pub(crate) fn metadata_json_bytes(&self, version: Option<u32>) -> Result<Vec<u8>> {
         let resolved_version = version.unwrap_or(self.latest_version);
         let doi_urls: Vec<String> = self
             .dois

@@ -9,15 +9,13 @@ mod objects;
 use core::fmt;
 use core::str::FromStr;
 
-use omnifs_sdk::prelude::*;
-use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
-use serde_json::Value;
-
 use crate::api::{
     ArxivApi, ArxivWeb, CATEGORY_PAGE_SIZE, download_pdf, download_source, fetch_category_page,
     load_paper,
 };
 use crate::objects::Paper;
+use omnifs_sdk::prelude::*;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 
 /// Percent-encode `/` so old-style ids are a single path segment.
 const SEGMENT_ENCODE: &AsciiSet = &CONTROLS.add(b'/').add(b'%');
@@ -286,7 +284,7 @@ impl PaperVersionKey {
         if let Some(version) = key.version.number() {
             paper.validate_version(version)?;
         }
-        let builder = FileProjection::body(paper.metadata_json_bytes(key.version.number()))
+        let builder = FileProjection::body(paper.metadata_json_bytes(key.version.number())?)
             .content_type(ContentType::Json);
         Ok(if key.version.is_numbered() {
             builder.immutable().build()
@@ -353,10 +351,4 @@ pub(crate) fn split_versioned_id(raw_id: &str) -> (String, Option<u32>) {
         Ok(version) => (raw_id[..split - 1].to_string(), Some(version)),
         Err(_) => (raw_id.to_string(), None),
     }
-}
-
-pub(crate) fn pretty_json(payload: &Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec_pretty(payload).expect("serializing json! is infallible");
-    bytes.push(b'\n');
-    bytes
 }

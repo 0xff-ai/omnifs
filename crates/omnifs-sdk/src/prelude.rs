@@ -15,7 +15,7 @@ pub use crate::file_attrs::{
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
 };
-pub use crate::helpers::{err, err_step};
+pub use crate::helpers::{err, err_step, pretty_json};
 pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
 pub use crate::init::Init;
 pub use crate::object::{

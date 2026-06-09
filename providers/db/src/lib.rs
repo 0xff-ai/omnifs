@@ -286,7 +286,7 @@ fn read_file_info(cx: &Cx<State>) -> Result<FileInfo> {
 
 async fn meta_info_json(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    let bytes = pretty_json(&info, "encode info")?;
+    let bytes = pretty_json(&info)?;
     Ok(FileProjection::body(bytes)
         .content_type(ContentType::Json)
         .mutable()
@@ -339,7 +339,7 @@ fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
 
 async fn table_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
     let doc = read_table_doc(&cx, &key)?;
-    let bytes = pretty_json(&doc, "encode table doc")?;
+    let bytes = pretty_json(&doc)?;
     Ok(FileProjection::body(bytes)
         .content_type(ContentType::Json)
         .mutable()
@@ -440,13 +440,6 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
 
 fn text_content(bytes: impl Into<Vec<u8>>) -> FileContent {
     FileContent::new(bytes).with_content_type(ContentType::Custom("text/plain"))
-}
-
-fn pretty_json<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|e| ProviderError::internal(format!("{context}: {e}")))?;
-    bytes.push(b'\n');
-    Ok(bytes)
 }
 
 fn file_content_projection(content: FileContent) -> FileProjection {
