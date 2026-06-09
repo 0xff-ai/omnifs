@@ -154,6 +154,19 @@ impl<'cx, S> Request<'cx, S> {
         )
     }
 
+    /// Merge pre-validated headers into this request.
+    ///
+    /// The caller already holds a `HeaderMap` built through validated
+    /// `HeaderName`/`HeaderValue` insertions (e.g. from `endpoint::RequestBuilder`),
+    /// so no re-parsing is needed here.
+    pub(crate) fn extend_headers(mut self, headers: HeaderMap) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.headers.extend(headers);
+        self
+    }
+
     /// Convert this request into a blob-fetch. The response body lands
     /// in the host's blob cache rather than crossing the WIT, and the
     /// returned [`crate::blob::BlobRef`] can be handed to
