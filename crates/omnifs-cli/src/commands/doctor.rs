@@ -1,6 +1,5 @@
 //! `omnifs doctor` — environment + auth diagnostics. No auto-fix.
 
-use bollard::Docker;
 use clap::Args;
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -10,6 +9,7 @@ use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
+use crate::runtime::Runtime;
 use crate::session::CredsBackend;
 use crate::status::UserMountStatus;
 
@@ -113,7 +113,7 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
     let mut report = DoctorReport::default();
 
     // 1. docker_reachable
-    let (docker, docker_result) = probe_docker_reachable().await;
+    let (runtime, docker_result) = probe_docker_reachable().await;
     let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
     anstream::println!("{}", report.record("docker reachable", docker_result));
 
@@ -122,8 +122,8 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
     anstream::println!("{}", report.record("fuse", fuse_result));
 
     // 3. image_cached (depends on docker)
-    let image_result = match (docker_ok, docker.as_ref()) {
-        (true, Some(docker)) => probe_image_cached(docker).await,
+    let image_result = match (docker_ok, runtime.as_ref()) {
+        (true, Some(runtime)) => probe_image_cached(runtime).await,
         _ => ProbeResult::Skipped("docker unreachable"),
     };
     anstream::println!("{}", report.record("image cached", image_result));
@@ -164,17 +164,27 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
     Ok(report.verdict())
 }
 
-async fn probe_docker_reachable() -> (Option<Docker>, ProbeResult) {
-    let docker = match Docker::connect_with_local_defaults() {
-        Ok(d) => d,
-        Err(error) => return (None, ProbeResult::Err(format!("connect: {error}"))),
+async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
+    use crate::paths::{PathOverrides, Paths};
+    use crate::runtime::DockerProbeOutcome;
+    use crate::runtime_target::RuntimeTarget;
+
+    // Use the default runtime target so that probe_image_cached checks the
+    // same image omnifs up would pull.
+    let target = match Paths::resolve_with_config(PathOverrides::default())
+        .and_then(|(_, cfg)| RuntimeTarget::resolve(None, None, &cfg))
+    {
+        Ok(t) => t,
+        Err(e) => return (None, ProbeResult::Err(format!("resolve target: {e}"))),
     };
-    match docker.ping().await {
-        Ok(_) => (
-            Some(docker),
+
+    match Runtime::probe_docker(&target).await {
+        DockerProbeOutcome::Reachable(runtime) => (
+            Some(runtime),
             ProbeResult::Ok("docker daemon responds".into()),
         ),
-        Err(error) => (None, ProbeResult::Err(format!("ping: {error}"))),
+        DockerProbeOutcome::ConnectFailed(e) => (None, ProbeResult::Err(format!("connect: {e}"))),
+        DockerProbeOutcome::PingFailed(e) => (None, ProbeResult::Err(format!("ping: {e}"))),
     }
 }
 
@@ -200,8 +210,8 @@ fn probe_fuse() -> ProbeResult {
     }
 }
 
-async fn probe_image_cached(docker: &Docker) -> ProbeResult {
-    match docker.inspect_image(IMAGE).await {
+async fn probe_image_cached(runtime: &Runtime) -> ProbeResult {
+    match runtime.inspect_image(IMAGE).await {
         Ok(_) => ProbeResult::Ok(format!("{IMAGE} cached")),
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..

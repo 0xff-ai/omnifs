@@ -47,6 +47,89 @@ pub(crate) struct ContainerExtras {
     pub(crate) tcp_ports: Vec<u16>,
 }
 
+/// Pure description of a container launch: all bind mounts, env vars, and TCP
+/// port forwards assembled from the session and extras without touching any
+/// bollard types. Constructed by [`ContainerLaunchSpec::from_session`];
+/// mapped to a [`ContainerCreateBody`] by [`Runtime::build_container_body`].
+#[derive(Debug, Default)]
+pub(crate) struct ContainerLaunchSpec {
+    pub(crate) image: String,
+    pub(crate) binds: Vec<String>,
+    pub(crate) env: Vec<String>,
+    /// TCP ports forwarded to host loopback as `127.0.0.1:N:N`.
+    pub(crate) tcp_ports: Vec<u16>,
+}
+
+impl ContainerLaunchSpec {
+    /// Assemble the launch spec from the session state and caller-supplied
+    /// extras, without making any bollard calls.
+    pub(crate) fn from_session(
+        image: &ImageRef,
+        session: &Session,
+        extras: ContainerExtras,
+    ) -> Self {
+        let mut binds = vec![
+            format!("{}:{HOST_CRED_DIR}:ro", session.creds_dir().display()),
+            format!("{}:{HOST_MOUNTS_DIR}:ro", session.mounts_dir().display()),
+        ];
+        if session.credentials_file().exists() {
+            binds.push(format!(
+                "{}:{HOST_CREDENTIALS_FILE}",
+                session.credentials_file().display()
+            ));
+        }
+
+        // SSH_AUTH_SOCK bind enables git callouts. Skip if unset; only providers
+        // that perform git operations will notice (and they'll error clearly).
+        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
+            let host_sock = PathBuf::from(&sock);
+            if host_sock.exists() {
+                binds.push(format!("{}:/ssh-agent", host_sock.display()));
+            } else {
+                anstream::eprintln!(
+                    "SSH_AUTH_SOCK={} does not exist; git callouts will not work",
+                    host_sock.display()
+                );
+            }
+        }
+
+        // Docker socket bind powers the in-container docker provider. Optional.
+        let docker_sock = PathBuf::from("/var/run/docker.sock");
+        if docker_sock.exists() {
+            binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
+        }
+
+        binds.extend(extras.binds);
+
+        let mut env = vec![
+            format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
+            format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
+            format!("OMNIFS_MOUNTS_DIR={HOST_MOUNTS_DIR}"),
+            format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
+            "SSH_AUTH_SOCK=/ssh-agent".to_string(),
+            "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
+        ];
+        env.extend(extras.env);
+
+        Self {
+            image: image.as_str().to_string(),
+            binds,
+            env,
+            tcp_ports: extras.tcp_ports,
+        }
+    }
+}
+
+/// Outcome of a Docker daemon reachability probe.
+pub(crate) enum DockerProbeOutcome {
+    /// Daemon responded to ping; the connected `Runtime` is returned for reuse.
+    Reachable(Runtime),
+    /// Could not connect to the daemon socket.
+    ConnectFailed(bollard::errors::Error),
+    /// Connected but the ping RPC failed.
+    PingFailed(bollard::errors::Error),
+}
+
 pub(crate) struct Runtime {
     docker: Docker,
     container_name: ContainerName,
@@ -91,6 +174,104 @@ impl Runtime {
 
     pub(crate) async fn ping(&self) -> Result<()> {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
+    }
+
+    /// Probe Docker daemon reachability without requiring a pre-connected client.
+    /// Used by `omnifs doctor` so the probe result carries a typed outcome and
+    /// the resulting `Runtime` can be reused for image inspection.
+    pub(crate) async fn probe_docker(target: &RuntimeTarget) -> DockerProbeOutcome {
+        let runtime = match Self::connect_for(target) {
+            Ok(r) => r,
+            Err(e) => {
+                // connect_for wraps bollard errors in anyhow; downcast to the
+                // underlying bollard error or synthesise an IOError.
+                let bollard_err = e.downcast::<bollard::errors::Error>().unwrap_or_else(|e| {
+                    bollard::errors::Error::IOError {
+                        err: std::io::Error::other(e.to_string()),
+                    }
+                });
+                return DockerProbeOutcome::ConnectFailed(bollard_err);
+            },
+        };
+        match runtime.docker.ping().await {
+            Ok(_) => DockerProbeOutcome::Reachable(runtime),
+            Err(e) => DockerProbeOutcome::PingFailed(e),
+        }
+    }
+
+    /// Inspect an image by name. Returns the bollard result directly so callers
+    /// can match on 404 vs other errors.
+    pub(crate) async fn inspect_image(
+        &self,
+        image: &str,
+    ) -> std::result::Result<bollard::models::ImageInspect, bollard::errors::Error> {
+        self.docker.inspect_image(image).await
+    }
+
+    /// Stream the last (all, by default) lines of container stdout+stderr using
+    /// bollard's logs API. Non-follow snapshot path for `omnifs logs`.
+    pub(crate) async fn container_logs(
+        &self,
+        container_name: &ContainerName,
+        tail: Option<&str>,
+    ) -> Result<()> {
+        use bollard::query_parameters::LogsOptions;
+
+        let mut stream = self.docker.logs(
+            container_name.as_str(),
+            Some(LogsOptions {
+                stdout: true,
+                stderr: true,
+                timestamps: false,
+                tail: tail.unwrap_or("all").to_string(),
+                ..Default::default()
+            }),
+        );
+        while let Some(chunk) = stream.next().await {
+            let line = chunk.with_context(|| format!("read logs from `{container_name}`"))?;
+            anstream::print!("{line}");
+        }
+        Ok(())
+    }
+
+    /// Stream `/tmp/omnifs.log` from inside the container via `tail -F`.
+    /// Blocks until the process exits (user Ctrl-C or container stops).
+    ///
+    /// Using exec+tail rather than bollard's follow-logs because the daemon
+    /// writes through a `tee` pipe that buffers at EOL boundaries, so
+    /// bollard's `logs` API only surfaces entrypoint stdout/stderr, not the
+    /// runtime log file.
+    pub(crate) async fn exec_follow_log(&self, container_name: &ContainerName) -> Result<()> {
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+
+        let exec = self
+            .docker
+            .create_exec(
+                container_name.as_str(),
+                CreateExecOptions::<&str> {
+                    cmd: Some(vec!["tail", "-F", "/tmp/omnifs.log"]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("create exec in `{container_name}`"))?;
+
+        let StartExecResults::Attached { mut output, .. } = self
+            .docker
+            .start_exec(&exec.id, None)
+            .await
+            .with_context(|| format!("start exec in `{container_name}`"))?
+        else {
+            anyhow::bail!("expected attached exec output");
+        };
+
+        while let Some(msg) = output.next().await {
+            let chunk = msg.with_context(|| format!("read exec output from `{container_name}`"))?;
+            anstream::print!("{chunk}");
+        }
+        Ok(())
     }
 
     pub(crate) async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
@@ -160,12 +341,13 @@ impl Runtime {
         self.verify_launcher_compat().await?;
         self.remove().await?;
 
+        let spec = ContainerLaunchSpec::from_session(&self.image, session, extras);
         anstream::println!(
             "Creating container `{}` from image `{}`",
             self.container_name,
             self.image
         );
-        let create = self.build_container_body(session, extras);
+        let create = Self::build_container_body(&spec);
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -455,47 +637,10 @@ impl Runtime {
         check_launcher_compat(env!("CARGO_PKG_VERSION"), label.map(String::as_str))
     }
 
-    fn build_container_body(
-        &self,
-        session: &Session,
-        extras: ContainerExtras,
-    ) -> ContainerCreateBody {
-        let mut binds = vec![
-            format!("{}:{HOST_CRED_DIR}:ro", session.creds_dir().display()),
-            format!("{}:{HOST_MOUNTS_DIR}:ro", session.mounts_dir().display()),
-        ];
-        if session.credentials_file().exists() {
-            binds.push(format!(
-                "{}:{HOST_CREDENTIALS_FILE}",
-                session.credentials_file().display()
-            ));
-        }
-
-        // SSH_AUTH_SOCK bind enables git callouts. Skip if unset; only providers
-        // that perform git operations will notice (and they'll error clearly).
-        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
-            let host_sock = PathBuf::from(&sock);
-            if host_sock.exists() {
-                binds.push(format!("{}:/ssh-agent", host_sock.display()));
-            } else {
-                anstream::eprintln!(
-                    "SSH_AUTH_SOCK={} does not exist; git callouts will not work",
-                    host_sock.display()
-                );
-            }
-        }
-
-        // Docker socket bind powers the in-container docker provider. Optional.
-        let docker_sock = PathBuf::from("/var/run/docker.sock");
-        if docker_sock.exists() {
-            binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
-        }
-
-        binds.extend(extras.binds);
-
+    fn build_container_body(spec: &ContainerLaunchSpec) -> ContainerCreateBody {
+        let mut port_bindings = HashMap::new();
         let mut exposed_ports = Vec::new();
-        let mut port_bindings = std::collections::HashMap::new();
-        for port in &extras.tcp_ports {
+        for port in &spec.tcp_ports {
             let key = format!("{port}/tcp");
             exposed_ports.push(key.clone());
             port_bindings.insert(
@@ -508,7 +653,7 @@ impl Runtime {
         }
 
         let host_config = HostConfig {
-            binds: Some(binds),
+            binds: Some(spec.binds.clone()),
             port_bindings: if port_bindings.is_empty() {
                 None
             } else {
@@ -524,19 +669,9 @@ impl Runtime {
             ..Default::default()
         };
 
-        let mut env = vec![
-            format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
-            format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
-            format!("OMNIFS_MOUNTS_DIR={HOST_MOUNTS_DIR}"),
-            format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
-            "SSH_AUTH_SOCK=/ssh-agent".to_string(),
-            "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
-        ];
-        env.extend(extras.env);
-
         ContainerCreateBody {
-            image: Some(self.image.as_str().to_string()),
-            env: Some(env),
+            image: Some(spec.image.clone()),
+            env: Some(spec.env.clone()),
             exposed_ports: if exposed_ports.is_empty() {
                 None
             } else {
@@ -652,5 +787,71 @@ mod tests {
     fn unparseable_label_is_permissive() {
         check_launcher_compat("0.2.0-dev.1", Some("not-semver"))
             .expect("garbage label should not block launch");
+    }
+
+    /// Verify that `ContainerLaunchSpec::from_session` assembles the spec
+    /// correctly: guest env vars are always present, creds/mounts binds come
+    /// first in that order, and extras are appended without clobbering the
+    /// base set.
+    #[test]
+    fn launch_spec_binds_and_env_ordering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cred_file = tmp.path().join("credentials.json");
+        let name = ContainerName::new("omnifs-test-spec").unwrap();
+        // Session::prepare creates the session dir under temp_dir keyed by
+        // container name. That's fine for a unit test — no container is started.
+        let session = Session::prepare(&name, &cred_file).unwrap();
+
+        let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
+        let extras = ContainerExtras {
+            binds: vec!["/extra:/extra:ro".to_string()],
+            env: vec!["FOO=bar".to_string()],
+            tcp_ports: vec![7878],
+        };
+
+        let spec = ContainerLaunchSpec::from_session(&image, &session, extras);
+
+        // Creds bind is first (read-only), mounts bind is second.
+        assert!(
+            spec.binds[0].ends_with(":ro"),
+            "creds bind should be read-only: {}",
+            spec.binds[0]
+        );
+        assert!(
+            spec.binds[0].contains(HOST_CRED_DIR),
+            "first bind should target HOST_CRED_DIR: {}",
+            spec.binds[0]
+        );
+        assert!(
+            spec.binds[1].contains(HOST_MOUNTS_DIR),
+            "second bind should target HOST_MOUNTS_DIR: {}",
+            spec.binds[1]
+        );
+
+        // Extras bind is appended after the base set. No credentials_file bind
+        // because cred_file doesn't exist in the temp dir.
+        assert_eq!(
+            spec.binds.last().map(String::as_str),
+            Some("/extra:/extra:ro"),
+            "extras bind should be last: {:?}",
+            spec.binds
+        );
+
+        // Required guest env vars are present.
+        assert!(
+            spec.env.iter().any(|e| e.starts_with("OMNIFS_CONFIG_DIR=")),
+            "OMNIFS_CONFIG_DIR must be set"
+        );
+        assert!(
+            spec.env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),
+            "SSH_AUTH_SOCK must be forwarded inside container"
+        );
+
+        // Extra env is appended after the base env.
+        assert_eq!(spec.env.last().map(String::as_str), Some("FOO=bar"));
+
+        // TCP port and image propagate correctly.
+        assert_eq!(spec.tcp_ports, vec![7878]);
+        assert_eq!(spec.image, "ghcr.io/0xff-ai/omnifs:test");
     }
 }
