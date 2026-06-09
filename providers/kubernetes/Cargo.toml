@@ -17,6 +17,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Pure-Rust YAML (via `unsafe-libyaml`, no C); builds for wasm32-wasip2.
 # Used to render manifest/status leaves as YAML from the API server's JSON.
+# Archived upstream (no successor blessed yet); kept deliberately — it is the
+# only YAML crate in the workspace and serialization-only here.
 serde_yaml = "0.9"
 
 [lints.rust]

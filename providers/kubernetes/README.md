@@ -18,11 +18,13 @@ is turned into callout URLs by the SDK's `HttpEndpoint`. Two transports work:
   upstream by kubectl. The host's `unix:` callout transport bypasses the
   HTTPS-only / private-IP egress restrictions that otherwise block local and
   in-cluster API servers.
-- **`https://` API server.** Works only for clusters reachable with
-  system-trust TLS (a public hostname + publicly-trusted cert) and a bearer
-  token configured in mount auth. The host callout currently has no custom-CA
-  or client-cert (mTLS) support, so self-signed clusters and private IPs are
-  not reachable over this transport. Prefer the `unix://` path.
+- **`https://` API server (limited).** The provider never sets an
+  `Authorization` header and its manifest declares no auth scheme or domain
+  capability, so an `https://` endpoint only works for an API server that
+  accepts anonymous/unauthenticated reads over publicly-trusted TLS on a
+  non-private address, with `capabilities.domains` hand-added to the mount
+  JSON. That combination is rare; treat `unix://` as the supported transport.
+  Bearer-token injection, custom CAs, and client certs (mTLS) are follow-ups.
 
 ### Running with kubectl proxy
 
@@ -35,6 +37,12 @@ kubectl proxy \
 
 `--reject-methods` keeps the proxy read-only (defense in depth — this provider
 only ever issues `GET`). `kubectl proxy` already rejects pod `exec`/`attach`.
+
+The socket path is resolved **inside the runtime container**: the proxy must
+run where the omnifs runtime can reach it (e.g. exec'd inside the container,
+or on a path bind-mounted into it). A proxy listening on a host-only path the
+container cannot see yields `Input/output error` on first browse, with the
+connect failure logged in `/tmp/omnifs.log`.
 
 ### Mount config
 
@@ -58,7 +66,9 @@ proxy socket.
 `/cluster` shows only resource types that currently have at least one instance,
 rather than the full discovery catalog (~40 namespaced types). It costs one
 batched `limit=1` probe per type per listing; empty types stay directly
-navigable (only `ls`/`readdir` is filtered, not `lookup`).
+navigable (only `ls`/`readdir` is filtered, not `lookup`). Exception: `pods`
+is always listed — it anchors the `logs/` route scaffolding, so the router
+keeps it visible even when a namespace has no pods.
 
 ## Filesystem layout
 
@@ -96,12 +106,13 @@ grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
 ## Scope and limitations (v1)
 
 - **Read-only.** No writes/mutations, consistent with the omnifs read model.
-- **No live watch.** Each read is an on-demand fetch; listings and objects are
-  re-fetched on access (the host caches bytes; `manifest`/`status` leaves are
-  marked mutable so reads stay fresh). A polling-based change feed
-  (periodic `LIST` keyed by `resourceVersion`, emitting cache invalidations) is
-  a natural follow-up using the runtime's `refresh-interval`/`timer-tick`
-  mechanism.
+- **No live watch.** Each read is an on-demand fetch: listings are non-exhaustive
+  (`open`), so every `ls` re-lists from the API, and `manifest`/`status`/log
+  leaves are marked mutable so reads stay fresh. Reading one object leaf
+  preloads its siblings (`manifest.yaml`/`manifest.json`/`status.yaml` come
+  from the same `GET`; oversize renders >64 KiB fall back to their own read).
+  A watch-based change feed is a natural follow-up using the runtime's
+  `refresh-interval`/`timer-tick` mechanism.
 - **`describe.txt`** is intentionally omitted — a faithful `kubectl describe`
   renderer is large and per-kind; the raw `manifest.yaml`/`status.yaml`/
   `events.txt` cover the same information for v1.
@@ -112,15 +123,28 @@ grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
 - **Listings** issue a single unpaginated `LIST` (the API returns the full
   collection — no silent truncation). Chunked listing (`limit`/`continue`, as
   `kubectl` does at 500) is a follow-up for very large namespaces.
-- **Discovery** walks `/api/v1` plus every API group once per instance and
-  caches it. Each group's versions are queried preferred-first, so a
-  multi-version resource resolves to its preferred version while a resource
-  present only in a non-preferred version still surfaces — matching client-go's
-  `ServerPreferredResources`. A group version whose discovery call fails (e.g. a
-  flaky aggregated API) is skipped rather than failing the whole tree.
+- **Discovery** walks `/api/v1` plus every API group once per instance (all
+  group versions fetched in one batched round) and caches it. Each group's
+  versions are folded preferred-first, so a multi-version resource resolves to
+  its preferred version while a resource present only in a non-preferred
+  version still surfaces — matching client-go's `ServerPreferredResources`. A
+  group version whose discovery call fails (e.g. a flaky aggregated API) is
+  skipped rather than failing the whole tree, but a failure of the root
+  discovery documents propagates (and is retried on the next browse) instead
+  of being cached as a half-empty catalog.
 - **`events.txt`** filters by `involvedObject.{name,namespace,kind,uid}` — the
-  same field selector `kubectl describe`/`kubectl get events` build — so events
-  of a same-named object of another kind (or a prior incarnation) don't leak in.
+  same field selector `kubectl describe`/`kubectl get events` build, with the
+  same `\`/`,`/`=` value escaping — so events of a same-named object of another
+  kind (or a prior incarnation) don't leak in. Cluster-scoped objects (e.g.
+  nodes) have no `events.txt` yet; their events live in a namespace with an
+  empty `involvedObject.namespace`, which this layout doesn't query.
 - **`manifest.yaml`/`manifest.json`** strip only `metadata.managedFields` (as
   `kubectl get -o yaml` does by default since v1.21); the
   `last-applied-configuration` annotation is preserved, matching `kubectl get`.
+- **YAML 1.1 readers**: string values that YAML 1.1 treats as booleans
+  (`yes`/`no`/`on`/`off`) render unquoted (YAML 1.2 style), unlike kubectl,
+  which quotes them. YAML 1.2 parsers (and `kubectl apply`) read them
+  correctly; old YAML 1.1 consumers (e.g. PyYAML) may coerce them.
+- **Pod logs** are buffered whole per read; multi-GB logs can exceed the
+  component memory budget and fail the read (ranged/streamed log reads are the
+  follow-up).

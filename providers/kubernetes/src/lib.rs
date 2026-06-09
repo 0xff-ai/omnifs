@@ -22,8 +22,6 @@
 
 use core::fmt;
 use core::str::FromStr;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 use omnifs_sdk::http::HttpEndpoint;
 use omnifs_sdk::prelude::*;
@@ -32,9 +30,9 @@ use serde_json::Value;
 mod api;
 
 use crate::api::{
-    Discovery, clean_manifest, endpoint, events_text, fetch_object, get_bytes_opt, list_names,
-    list_types_for_listing, path_exists, pod_container_names, pod_log, render_json, render_yaml,
-    resolve_type, status_of, text_bytes, text_file, type_is,
+    Discovery, TEXT, YAML, clean_manifest, endpoint, events_text, fetch_object, get_bytes_opt,
+    inline_sibling, json_bytes, list_names, list_types_for_listing, pod_container_names, pod_log,
+    resolve_type, status_of, text_bytes, yaml_bytes,
 };
 
 /// Core `v1` plural for pods — the only type that gets a `logs/` subtree.
@@ -70,18 +68,28 @@ fn default_endpoint() -> String {
 pub(crate) struct State {
     pub(crate) endpoint: HttpEndpoint,
     pub(crate) hide_empty_types: bool,
-    pub(crate) discovery: Rc<RefCell<Option<Discovery>>>,
+    pub(crate) discovery: Option<Discovery>,
 }
 
 // ===========================================================================
 // Path-segment capture types
 // ===========================================================================
 
-/// Charset gate for a path segment. Existence is proven by the API on lookup,
-/// so this only rejects clearly-invalid segments and lets the catalog/API be
-/// the authoritative name oracle.
+/// Charset gate for a path segment. Navigation into capture directories is
+/// optimistic (the router resolves them without an upstream probe; absence
+/// surfaces at API-backed listings and reads), so this gate's job is to reject
+/// segments that can never be a Kubernetes name and would corrupt a raw URL
+/// path: traversal tokens, separators, and URL metacharacters. `%` is also
+/// forbidden by Kubernetes' own loosest name validator
+/// (`ValidatePathSegmentName`); `?`/`#` would silently truncate the request
+/// path into query/fragment.
 fn valid_segment(s: &str) -> bool {
-    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\0')
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s
+            .chars()
+            .any(|c| matches!(c, '/' | '%' | '?' | '#') || c.is_ascii_control())
 }
 
 macro_rules! string_segment {
@@ -218,7 +226,7 @@ impl KubernetesProvider {
         Ok(State {
             endpoint: HttpEndpoint::parse(&config.endpoint),
             hide_empty_types: config.hide_empty_types,
-            discovery: Rc::new(RefCell::new(None)),
+            discovery: None,
         })
     }
 }
@@ -269,21 +277,17 @@ fn register_routes(r: &mut Router<State>) -> Result<()> {
 // Listing helpers
 // ===========================================================================
 
+/// Live API listings are `open` (non-exhaustive): the host then re-consults
+/// the provider on every readdir instead of freezing the first enumeration in
+/// its no-TTL dirent cache, and a name absent from one listing is not treated
+/// as an authoritative ENOENT (cluster contents churn between reads, and the
+/// `hide_empty_types` filter must not make hidden types unresolvable).
 fn empty_dir() -> DirProjection {
-    DirProjection::exhaustive(core::iter::empty::<Entry>())
+    DirProjection::open(core::iter::empty::<Entry>())
 }
 
 fn dir_listing(names: Vec<String>) -> DirProjection {
-    DirProjection::exhaustive(names.into_iter().map(Entry::dir))
-}
-
-/// A single-entry (or empty) listing for a `Lookup` existence check.
-fn lookup_dir(exists: bool, name: &str) -> DirProjection {
-    if exists {
-        DirProjection::exhaustive([Entry::dir(name)])
-    } else {
-        empty_dir()
-    }
+    DirProjection::open(names.into_iter().map(Entry::dir))
 }
 
 // ===========================================================================
@@ -292,19 +296,12 @@ fn lookup_dir(exists: bool, name: &str) -> DirProjection {
 
 async fn namespaces_dir(cx: DirCx<State>) -> Result<DirProjection> {
     let ep = endpoint(&cx);
-    if let DirIntent::Lookup { child } = cx.intent() {
-        let exists = path_exists(&cx, &ep, &format!("/api/v1/namespaces/{child}")).await?;
-        return Ok(lookup_dir(exists, child));
-    }
     Ok(dir_listing(
         list_names(&cx, &ep, "/api/v1/namespaces").await?,
     ))
 }
 
 async fn ns_types_dir(cx: DirCx<State>, key: NamespaceKey) -> Result<DirProjection> {
-    if let DirIntent::Lookup { child } = cx.intent() {
-        return Ok(lookup_dir(type_is(&cx, child, true).await?, child));
-    }
     let ep = endpoint(&cx);
     Ok(dir_listing(
         list_types_for_listing(&cx, &ep, Some(key.ns.as_str())).await?,
@@ -317,10 +314,6 @@ async fn ns_resources_dir(cx: DirCx<State>, key: NsTypeKey) -> Result<DirProject
         return Ok(empty_dir());
     }
     let ep = endpoint(&cx);
-    if let DirIntent::Lookup { child } = cx.intent() {
-        let path = resource.object_path(Some(key.ns.as_str()), child);
-        return Ok(lookup_dir(path_exists(&cx, &ep, &path).await?, child));
-    }
     let path = resource.collection_path(Some(key.ns.as_str()));
     Ok(dir_listing(list_names(&cx, &ep, &path).await?))
 }
@@ -338,37 +331,84 @@ async fn ns_resource_dir(_cx: DirCx<State>, key: NsResourceKey) -> Result<DirPro
     Ok(DirProjection::exhaustive(entries))
 }
 
+/// The three leaves derivable from one fetched object, in dirent order.
+fn object_leaves(object: Value) -> Result<Vec<(&'static str, Vec<u8>, ContentType)>> {
+    let status = yaml_bytes(&status_of(&object))?;
+    let cleaned = clean_manifest(object);
+    Ok(vec![
+        ("manifest.yaml", yaml_bytes(&cleaned)?, YAML),
+        ("manifest.json", json_bytes(&cleaned)?, ContentType::Json),
+        ("status.yaml", status, YAML),
+    ])
+}
+
+/// Project `bytes` as the read result and preload `siblings` (leaves derived
+/// from the same upstream fetch) into `dir`, so reading one leaf does not
+/// force a refetch for its siblings. Oversize siblings are skipped and served
+/// by their own handler instead.
+fn file_with_siblings(
+    bytes: Vec<u8>,
+    content_type: ContentType,
+    dir: &str,
+    siblings: Vec<(&'static str, Vec<u8>, ContentType)>,
+) -> FileProjection {
+    let mut builder = FileProjection::body(bytes)
+        .content_type(content_type)
+        .mutable();
+    for (name, bytes, content_type) in siblings {
+        if let Some(sibling) = inline_sibling(bytes, content_type) {
+            builder = builder.preload_file(format!("{dir}/{name}"), sibling);
+        }
+    }
+    builder.build()
+}
+
+/// Serve one object-derived leaf and preload the other two from the same GET.
+fn object_file(object: Value, primary: &str, dir: &str) -> Result<FileProjection> {
+    let mut leaves = object_leaves(object)?;
+    let index = leaves
+        .iter()
+        .position(|(name, ..)| *name == primary)
+        .expect("primary is one of the object-derived leaves");
+    let (_, bytes, content_type) = leaves.remove(index);
+    Ok(file_with_siblings(bytes, content_type, dir, leaves))
+}
+
+fn ns_object_dir(key: &NsResourceKey) -> String {
+    format!("namespaces/{}/{}/{}", key.ns, key.rtype, key.name)
+}
+
 async fn ns_manifest_yaml(cx: Cx<State>, key: NsResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(
+    let object = fetch_object(
         &cx,
         key.rtype.as_str(),
         Some(key.ns.as_str()),
         key.name.as_str(),
     )
     .await?;
-    render_yaml(&clean_manifest(value))
+    object_file(object, "manifest.yaml", &ns_object_dir(&key))
 }
 
 async fn ns_manifest_json(cx: Cx<State>, key: NsResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(
+    let object = fetch_object(
         &cx,
         key.rtype.as_str(),
         Some(key.ns.as_str()),
         key.name.as_str(),
     )
     .await?;
-    render_json(&clean_manifest(value))
+    object_file(object, "manifest.json", &ns_object_dir(&key))
 }
 
 async fn ns_status_yaml(cx: Cx<State>, key: NsResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(
+    let object = fetch_object(
         &cx,
         key.rtype.as_str(),
         Some(key.ns.as_str()),
         key.name.as_str(),
     )
     .await?;
-    render_yaml(&status_of(&value))
+    object_file(object, "status.yaml", &ns_object_dir(&key))
 }
 
 async fn ns_events_txt(cx: Cx<State>, key: NsResourceKey) -> Result<FileProjection> {
@@ -384,17 +424,27 @@ async fn ns_events_txt(cx: Cx<State>, key: NsResourceKey) -> Result<FileProjecti
         key.name.as_str(),
     )
     .await?;
-    let uid = object.pointer("/metadata/uid").and_then(Value::as_str);
+    let uid = object
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let text = events_text(
         &cx,
         &ep,
         key.ns.as_str(),
         resource.kind(),
         key.name.as_str(),
-        uid,
+        uid.as_deref(),
     )
     .await?;
-    Ok(text_file(text))
+    // The object fetched for its uid also yields the manifest/status leaves;
+    // project them rather than discarding the payload.
+    Ok(file_with_siblings(
+        text.into_bytes(),
+        TEXT,
+        &ns_object_dir(&key),
+        object_leaves(object)?,
+    ))
 }
 
 // ===========================================================================
@@ -416,7 +466,8 @@ async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirProjection
     let entries = pod_container_names(&pod)
         .into_iter()
         .map(|container| Entry::file(format!("{container}.log")));
-    Ok(DirProjection::exhaustive(entries))
+    // Open, not exhaustive: ephemeral containers can be added to a live pod.
+    Ok(DirProjection::open(entries))
 }
 
 async fn pod_log_file(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
@@ -437,9 +488,6 @@ async fn pod_log_file(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
 // ===========================================================================
 
 async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirProjection> {
-    if let DirIntent::Lookup { child } = cx.intent() {
-        return Ok(lookup_dir(type_is(&cx, child, false).await?, child));
-    }
     let ep = endpoint(&cx);
     Ok(dir_listing(list_types_for_listing(&cx, &ep, None).await?))
 }
@@ -450,10 +498,6 @@ async fn cluster_resources_dir(cx: DirCx<State>, key: ClusterTypeKey) -> Result<
         return Ok(empty_dir());
     }
     let ep = endpoint(&cx);
-    if let DirIntent::Lookup { child } = cx.intent() {
-        let path = resource.object_path(None, child);
-        return Ok(lookup_dir(path_exists(&cx, &ep, &path).await?, child));
-    }
     Ok(dir_listing(
         list_names(&cx, &ep, &resource.collection_path(None)).await?,
     ))
@@ -470,19 +514,23 @@ async fn cluster_resource_dir(
     ]))
 }
 
+fn cluster_object_dir(key: &ClusterResourceKey) -> String {
+    format!("cluster/{}/{}", key.rtype, key.name)
+}
+
 async fn cluster_manifest_yaml(cx: Cx<State>, key: ClusterResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
-    render_yaml(&clean_manifest(value))
+    let object = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
+    object_file(object, "manifest.yaml", &cluster_object_dir(&key))
 }
 
 async fn cluster_manifest_json(cx: Cx<State>, key: ClusterResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
-    render_json(&clean_manifest(value))
+    let object = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
+    object_file(object, "manifest.json", &cluster_object_dir(&key))
 }
 
 async fn cluster_status_yaml(cx: Cx<State>, key: ClusterResourceKey) -> Result<FileProjection> {
-    let value = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
-    render_yaml(&status_of(&value))
+    let object = fetch_object(&cx, key.rtype.as_str(), None, key.name.as_str()).await?;
+    object_file(object, "status.yaml", &cluster_object_dir(&key))
 }
 
 #[cfg(test)]
@@ -514,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_validation_rejects_traversal_and_separators() {
+    fn segment_validation_rejects_traversal_and_url_metacharacters() {
         assert!("default".parse::<Namespace>().is_ok());
         assert!("cert-manager".parse::<ResourceType>().is_ok());
         assert!(
@@ -522,9 +570,19 @@ mod tests {
                 .parse::<ResourceType>()
                 .is_ok()
         );
+        // RBAC-style path-segment names are legal and must stay addressable.
+        assert!("system:kube-scheduler".parse::<ResourceName>().is_ok());
         assert!("".parse::<Namespace>().is_err());
         assert!(".".parse::<ResourceName>().is_err());
         assert!("..".parse::<ResourceName>().is_err());
         assert!("a/b".parse::<ResourceName>().is_err());
+        // URL metacharacters would truncate or corrupt the raw request path
+        // (`x?watch=true` would smuggle a query); `%` is forbidden by
+        // Kubernetes' ValidatePathSegmentName, so nothing legal is lost.
+        assert!("x?watch=true".parse::<ResourceName>().is_err());
+        assert!("frag#ment".parse::<ResourceName>().is_err());
+        assert!("pct%2Fenc".parse::<ResourceName>().is_err());
+        assert!("ctl\u{1}char".parse::<ResourceName>().is_err());
+        assert!("nul\0byte".parse::<ResourceName>().is_err());
     }
 }

@@ -5,8 +5,9 @@
 //! local `kubectl proxy --unix-socket` socket: it rides the `unix:` callout
 //! transport (the same one the Docker provider uses), and kubectl terminates
 //! TLS and injects the active-context credentials, so this provider issues
-//! plain HTTP and never handles a token. An `https://` endpoint also works for
-//! clusters reachable with system-trust TLS.
+//! plain HTTP and never handles a token. An `https://` endpoint works only for
+//! API servers that accept unauthenticated reads over system-trust TLS (no
+//! Authorization header is sent in v1).
 //!
 //! Resource types are not hard-coded: [`fetch_discovery`] walks `/api/v1` and
 //! `/apis` once per instance and caches the catalog in [`crate::State`], so
@@ -24,7 +25,12 @@ use serde_json::Value;
 use crate::State;
 
 const ACCEPT_JSON: &str = "application/json";
-const ACCEPT_TEXT: &str = "text/plain";
+/// For the pod log subresource. The apiserver streams logs as text but its
+/// content negotiation validates `Accept` against the structured API media
+/// types, so `Accept: text/plain` is rejected with `406 Not Acceptable`
+/// (verified against a live server through `kubectl proxy`); `*/*` matches
+/// what curl/kubectl effectively send.
+const ACCEPT_ANY: &str = "*/*";
 
 // ===========================================================================
 // Discovery catalog
@@ -201,26 +207,42 @@ fn group_versions_preferred_first(group: &ApiGroup) -> Vec<String> {
 }
 
 /// Walk discovery: core (`/api/v1`) plus every named group. Each group's
-/// versions are queried preferred-first so a multi-version resource resolves to
+/// versions are folded preferred-first so a multi-version resource resolves to
 /// its preferred version, yet resources present only in a non-preferred version
-/// still surface (matching client-go `ServerPreferredResources`). A group
-/// version whose discovery call fails (e.g. a flaky aggregated API) is skipped
-/// rather than failing the whole catalog.
+/// still surface (matching client-go `ServerPreferredResources`). A *group
+/// version* whose discovery call fails (e.g. a flaky aggregated API) is skipped
+/// rather than failing the whole catalog, but failures of the two root
+/// documents (`/api/v1`, `/apis`) propagate: a transient error there must not
+/// be cached as a half-empty catalog (which would also misassign bare plural
+/// names that core normally claims). All per-group-version requests run in one
+/// batched callout round; the fold order stays deterministic (core first, then
+/// groups in server priority order).
 async fn fetch_discovery(cx: &Cx<State>, ep: &HttpEndpoint) -> Result<Discovery> {
+    let groups = get_json::<ApiGroupList>(cx, ep, "/apis").await?;
+    let group_roots: Vec<(String, String)> = groups
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group_versions_preferred_first(group)
+                .into_iter()
+                .map(|gv| (group.name.clone(), format!("/apis/{gv}")))
+        })
+        .collect();
+
+    let mut fetches = vec![get_json::<ApiResourceList>(cx, ep, "/api/v1")];
+    fetches.extend(
+        group_roots
+            .iter()
+            .map(|(_, api_root)| get_json::<ApiResourceList>(cx, ep, api_root)),
+    );
+    let mut results = join_all(fetches).await;
+
     let mut disc = Discovery::default();
-
-    if let Ok(core) = get_json::<ApiResourceList>(cx, ep, "/api/v1").await {
-        add_resources(&mut disc, "/api/v1", "", &core.resources);
-    }
-
-    if let Ok(groups) = get_json::<ApiGroupList>(cx, ep, "/apis").await {
-        for group in &groups.groups {
-            for group_version in group_versions_preferred_first(group) {
-                let api_root = format!("/apis/{group_version}");
-                if let Ok(list) = get_json::<ApiResourceList>(cx, ep, &api_root).await {
-                    add_resources(&mut disc, &api_root, &group.name, &list.resources);
-                }
-            }
+    let core = results.remove(0)?;
+    add_resources(&mut disc, "/api/v1", "", &core.resources);
+    for ((group, api_root), result) in group_roots.iter().zip(results) {
+        if let Ok(list) = result {
+            add_resources(&mut disc, api_root, group, &list.resources);
         }
     }
 
@@ -235,13 +257,13 @@ async fn fetch_discovery(cx: &Cx<State>, ep: &HttpEndpoint) -> Result<Discovery>
 
 /// Populate the per-instance discovery cache on first use. No-op afterwards.
 pub(crate) async fn ensure_discovery(cx: &Cx<State>) -> Result<()> {
-    if cx.state(|s| s.discovery.borrow().is_some()) {
+    if cx.state(|s| s.discovery.is_some()) {
         return Ok(());
     }
     let ep = cx.state(|s| s.endpoint.clone());
     let disc = fetch_discovery(cx, &ep).await?;
-    cx.state(|s| {
-        *s.discovery.borrow_mut() = Some(disc);
+    cx.state_mut(|s| {
+        s.discovery = Some(disc);
     });
     Ok(())
 }
@@ -251,23 +273,10 @@ pub(crate) async fn resolve_type(cx: &Cx<State>, fs_plural: &str) -> Result<ApiR
     ensure_discovery(cx).await?;
     cx.state(|s| {
         s.discovery
-            .borrow()
             .as_ref()
             .and_then(|d| d.get(fs_plural).cloned())
             .ok_or_else(|| ProviderError::not_found(format!("unknown resource type: {fs_plural}")))
     })
-}
-
-/// Does a discovered type exist with the requested scope?
-pub(crate) async fn type_is(cx: &Cx<State>, fs_plural: &str, namespaced: bool) -> Result<bool> {
-    ensure_discovery(cx).await?;
-    Ok(cx.state(|s| {
-        s.discovery
-            .borrow()
-            .as_ref()
-            .and_then(|d| d.get(fs_plural).map(|r| r.namespaced == namespaced))
-            .unwrap_or(false)
-    }))
 }
 
 /// Sorted filesystem plurals for the requested scope.
@@ -275,7 +284,6 @@ pub(crate) async fn list_types(cx: &Cx<State>, namespaced: bool) -> Result<Vec<S
     ensure_discovery(cx).await?;
     Ok(cx.state(|s| {
         s.discovery
-            .borrow()
             .as_ref()
             .map(|d| d.sorted_types(namespaced))
             .unwrap_or_default()
@@ -303,7 +311,7 @@ pub(crate) async fn list_types_for_listing(
     let mut names = Vec::new();
     let mut paths = Vec::new();
     cx.state(|s| {
-        if let Some(disc) = s.discovery.borrow().as_ref() {
+        if let Some(disc) = s.discovery.as_ref() {
             for plural in &types {
                 if let Some(resource) = disc.get(plural) {
                     names.push(plural.clone());
@@ -376,13 +384,6 @@ async fn get_json<T: DeserializeOwned>(cx: &Cx<State>, ep: &HttpEndpoint, path: 
     let bytes = get_bytes(cx, ep, path, &[], ACCEPT_JSON).await?;
     serde_json::from_slice(&bytes)
         .map_err(|e| ProviderError::internal(format!("kubernetes: parse {path}: {e}")))
-}
-
-/// True if the object at `path` exists (`GET` returns non-404).
-pub(crate) async fn path_exists(cx: &Cx<State>, ep: &HttpEndpoint, path: &str) -> Result<bool> {
-    Ok(get_bytes_opt(cx, ep, path, &[], ACCEPT_JSON)
-        .await?
-        .is_some())
 }
 
 #[derive(Deserialize)]
@@ -460,7 +461,7 @@ pub(crate) async fn pod_log(
     container: &str,
 ) -> Result<Vec<u8>> {
     let path = format!("/api/v1/namespaces/{namespace}/pods/{pod}/log");
-    get_bytes(cx, ep, &path, &[("container", container)], ACCEPT_TEXT).await
+    get_bytes(cx, ep, &path, &[("container", container)], ACCEPT_ANY).await
 }
 
 #[derive(Deserialize)]
@@ -483,6 +484,18 @@ struct EventItem {
     last_timestamp: Option<String>,
     #[serde(rename = "eventTime")]
     event_time: Option<String>,
+    /// New-style (events.k8s.io) recurring events carry their occurrence
+    /// count/time here and leave the deprecated `count`/`lastTimestamp` unset.
+    #[serde(default)]
+    series: Option<EventSeries>,
+}
+
+#[derive(Deserialize)]
+struct EventSeries {
+    #[serde(default)]
+    count: Option<u64>,
+    #[serde(rename = "lastObservedTime")]
+    last_observed_time: Option<String>,
 }
 
 /// Tab-separated events for a specific object, matching the involvedObject
@@ -517,22 +530,44 @@ pub(crate) async fn events_text(
 /// kubectl uses. Pure so the selector contract is unit-tested directly.
 fn event_field_selector(namespace: &str, kind: &str, name: &str, uid: Option<&str>) -> String {
     let mut terms = vec![
-        format!("involvedObject.name={name}"),
-        format!("involvedObject.namespace={namespace}"),
+        format!("involvedObject.name={}", escape_selector_value(name)),
+        format!(
+            "involvedObject.namespace={}",
+            escape_selector_value(namespace)
+        ),
     ];
     if !kind.is_empty() {
-        terms.push(format!("involvedObject.kind={kind}"));
+        terms.push(format!(
+            "involvedObject.kind={}",
+            escape_selector_value(kind)
+        ));
     }
     if let Some(uid) = uid.filter(|u| !u.is_empty()) {
-        terms.push(format!("involvedObject.uid={uid}"));
+        terms.push(format!("involvedObject.uid={}", escape_selector_value(uid)));
     }
     terms.join(",")
 }
 
+/// Escape a field selector value the way `fields.EscapeValue` does (`\` `,`
+/// `=` are the selector syntax characters). Path-segment-named kinds (RBAC)
+/// may legally contain `,`/`=`; without escaping the server rejects the whole
+/// selector.
+fn escape_selector_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if matches!(c, '\\' | ',' | '=') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Render a parsed event list as a tab-separated table. Pure (no I/O) so the
-/// formatting is unit-tested directly. `lastTimestamp` is preferred over the
-/// new-style `eventTime`; `count` defaults to 1; embedded newlines in messages
-/// are flattened so one event stays one line.
+/// formatting is unit-tested directly. Following kubectl's event printer:
+/// a `series` (new-style recurring event) wins for count/last-seen, then the
+/// deprecated `count`/`lastTimestamp`, then `eventTime`; `count` defaults to 1;
+/// embedded newlines in messages are flattened so one event stays one line.
 fn render_event_list(list: EventList) -> String {
     if list.items.is_empty() {
         return "No events.\n".to_string();
@@ -540,11 +575,13 @@ fn render_event_list(list: EventList) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "LAST SEEN\tCOUNT\tTYPE\tREASON\tMESSAGE");
     for event in list.items {
-        let timestamp = event
-            .last_timestamp
+        let series = event.series.as_ref();
+        let timestamp = series
+            .and_then(|s| s.last_observed_time.clone())
+            .or(event.last_timestamp)
             .or(event.event_time)
             .unwrap_or_else(|| "-".to_string());
-        let count = event.count.unwrap_or(1);
+        let count = series.and_then(|s| s.count).or(event.count).unwrap_or(1);
         let message = event.message.replace('\n', " ");
         let _ = writeln!(
             out,
@@ -576,34 +613,45 @@ pub(crate) fn status_of(value: &Value) -> Value {
     value.get("status").cloned().unwrap_or(Value::Null)
 }
 
-pub(crate) fn render_yaml(value: &Value) -> Result<FileProjection> {
-    let yaml = serde_yaml::to_string(value)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: render yaml: {e}")))?;
-    Ok(FileProjection::body(yaml.into_bytes())
-        .content_type(ContentType::Custom("application/yaml"))
-        .mutable()
-        .build())
+pub(crate) const YAML: ContentType = ContentType::Custom("application/yaml");
+pub(crate) const TEXT: ContentType = ContentType::Custom("text/plain");
+
+pub(crate) fn yaml_bytes(value: &Value) -> Result<Vec<u8>> {
+    serde_yaml::to_string(value)
+        .map(String::into_bytes)
+        .map_err(|e| ProviderError::internal(format!("kubernetes: render yaml: {e}")))
 }
 
-pub(crate) fn render_json(value: &Value) -> Result<FileProjection> {
+pub(crate) fn json_bytes(value: &Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| ProviderError::internal(format!("kubernetes: render json: {e}")))?;
     bytes.push(b'\n');
-    Ok(FileProjection::body(bytes)
-        .content_type(ContentType::Json)
-        .mutable()
-        .build())
+    Ok(bytes)
 }
 
-pub(crate) fn text_file(text: String) -> FileProjection {
-    text_bytes(text.into_bytes())
+/// The full-fidelity projection for the leaf actually being read.
+pub(crate) fn body_file(bytes: Vec<u8>, content_type: ContentType) -> FileProjection {
+    FileProjection::body(bytes)
+        .content_type(content_type)
+        .mutable()
+        .build()
+}
+
+/// A capped inline projection for preloading a sibling leaf derived from the
+/// same upstream fetch ("project all data you have already fetched"). Returns
+/// `None` when the rendering exceeds the inline preload cap; the sibling is
+/// then simply served by its own handler on demand.
+pub(crate) fn inline_sibling(bytes: Vec<u8>, content_type: ContentType) -> Option<FileProjection> {
+    (bytes.len() <= MAX_PROJECTED_BYTES).then(|| {
+        FileProjection::inline(bytes)
+            .content_type(content_type)
+            .mutable()
+            .build()
+    })
 }
 
 pub(crate) fn text_bytes(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::body(bytes)
-        .content_type(ContentType::Custom("text/plain"))
-        .mutable()
-        .build()
+    body_file(bytes, TEXT)
 }
 
 #[cfg(test)]
@@ -792,6 +840,18 @@ mod tests {
     }
 
     #[test]
+    fn event_field_selector_escapes_selector_syntax_like_kubectl() {
+        // fields.EscapeValue escapes `\` `,` `=`; RBAC path-segment names may
+        // legally contain them and must not break (or smuggle) selector terms.
+        assert_eq!(escape_selector_value(r"a=b,c\d"), r"a\=b\,c\\d");
+        assert_eq!(
+            event_field_selector("default", "Role", "edit=true,really", None),
+            "involvedObject.name=edit\\=true\\,really,involvedObject.namespace=default,\
+             involvedObject.kind=Role"
+        );
+    }
+
+    #[test]
     fn discovery_prefers_preferred_version_and_keeps_non_preferred_only_resources() {
         // A group with two versions: v2 is preferred. `bars` exists in both;
         // `legacies` only in the non-preferred v1. fetch_discovery queries
@@ -913,5 +973,24 @@ mod tests {
         ));
         // eventTime fallback when lastTimestamp absent; count defaults to 1.
         assert!(out.contains("2024-01-02T00:00:00Z\t1\tNormal\tScheduled\tassigned\n"));
+    }
+
+    #[test]
+    fn render_event_list_prefers_series_for_recurring_new_style_events() {
+        // events.k8s.io recurring events carry series{count,lastObservedTime}
+        // and leave the deprecated count/lastTimestamp unset; kubectl's printer
+        // reads the series. Without this an hourly-repeating event shows as
+        // COUNT 1 at its first occurrence time.
+        let list: EventList = serde_json::from_str(
+            r#"{"items":[
+                {"type":"Warning","reason":"FailedScheduling","message":"0/3 nodes available",
+                 "eventTime":"2024-01-01T00:00:00Z",
+                 "series":{"count":17,"lastObservedTime":"2024-01-01T04:00:00Z"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(render_event_list(list).contains(
+            "2024-01-01T04:00:00Z\t17\tWarning\tFailedScheduling\t0/3 nodes available\n"
+        ));
     }
 }

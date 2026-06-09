@@ -24,7 +24,7 @@
       "endpoint": {
         "type": "string",
         "default": "unix:///run/omnifs/k8s.sock",
-        "description": "Kubernetes API endpoint. A `unix://` socket served by `kubectl proxy --unix-socket` (recommended), or an `https://` API server reachable with system-trust TLS and a bearer token configured in mount auth."
+        "description": "Kubernetes API endpoint. A `unix://` socket served by `kubectl proxy --unix-socket` (recommended; the path is resolved inside the runtime container). An `https://` API server works only if it accepts unauthenticated reads over publicly-trusted TLS on a non-private address — the provider sends no Authorization header in v1."
       },
       "hide_empty_types": {
         "type": "boolean",
