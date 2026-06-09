@@ -86,9 +86,9 @@ impl ItemData {
                 "comments",
                 DirProjection::open(core::iter::empty::<Entry>()),
             )
-            .preload_file("title", inline_projection(self.title()?)?)
-            .preload_file("state", inline_projection(self.state()?)?)
-            .preload_file("user", inline_projection(self.user()?)?)
+            .preload_file("title", FileProjection::from_content(&self.title()?)?)
+            .preload_file("state", FileProjection::from_content(&self.state()?)?)
+            .preload_file("user", FileProjection::from_content(&self.user()?)?)
             .preload_file("body", body)
             .preload_file("item.md", item_md)
             .preload_file("item.json", item_json);
@@ -104,32 +104,6 @@ impl ItemData {
 
         Ok(projection)
     }
-}
-
-fn inline_projection(content: FileContent) -> Result<FileProjection> {
-    let attrs = content.attrs().clone();
-    let content_type = content.content_type();
-    let bytes = content
-        .content()
-        .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
-        .to_vec();
-    let mut builder = FileProjection::inline(bytes).size(attrs.size);
-    builder = match attrs.stability {
-        Stability::Immutable => builder.immutable(),
-        Stability::Mutable => builder.mutable(),
-        Stability::Volatile => {
-            return Err(ProviderError::internal(
-                "list preload cannot project volatile inline bytes",
-            ));
-        },
-    };
-    if let Some(version) = attrs.version {
-        builder = builder.version(version);
-    }
-    if let Some(content_type) = content_type {
-        builder = builder.content_type(content_type);
-    }
-    Ok(builder.build())
 }
 
 #[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey)]

@@ -12,7 +12,7 @@
 //! the carried validator, cursor, and extra-file preloads when it forms the
 //! WIT terminal.
 
-use crate::browse::{Effects, Entry as BrowseEntry, Listing};
+use crate::browse::{Effects, Entry as BrowseEntry, FileContent, Listing};
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::handler::{Cursor, RangeReader};
@@ -136,6 +136,36 @@ impl FileProjection {
             bytes,
             content_type: self.content_type,
         })
+    }
+
+    /// Inline projection assembled from a [`FileContent`]'s size, stability,
+    /// version evidence, and content type. Errors when the content bytes are
+    /// not inline or when the stability is `Volatile` (volatile requires a
+    /// ranged source, not an inline one).
+    pub fn from_content(content: &FileContent) -> Result<FileProjection> {
+        let attrs = content.attrs().clone();
+        let content_type = content.content_type();
+        let bytes = content
+            .content()
+            .ok_or_else(|| ProviderError::internal("list preload cannot project non-inline bytes"))?
+            .to_vec();
+        let mut builder = FileProjection::inline(bytes).size(attrs.size);
+        builder = match attrs.stability {
+            Stability::Immutable => builder.immutable(),
+            Stability::Mutable => builder.mutable(),
+            Stability::Volatile => {
+                return Err(ProviderError::internal(
+                    "list preload cannot project volatile inline bytes",
+                ));
+            },
+        };
+        if let Some(version) = attrs.version {
+            builder = builder.version(version);
+        }
+        if let Some(ct) = content_type {
+            builder = builder.content_type(ct);
+        }
+        Ok(builder.build())
     }
 
     /// Lower this projection to a browse [`crate::browse::FileContent`] terminal.
