@@ -172,6 +172,18 @@ const TOMBSTONE_SOFT_CAP: usize = 4096;
 /// Generations of tombstone history retained after GC.
 const TOMBSTONE_RETAIN_GENERATIONS: u64 = 1024;
 
+/// Soft cap on retained negatives per mount. `gc_negatives` fires past this.
+const NEGATIVES_SOFT_CAP: usize = 4096;
+
+/// Wall-clock milliseconds since the Unix epoch. Used only for GC sweep timing
+/// so that `delete_object` does not need a caller-supplied clock argument.
+fn now_millis_for_gc() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.
 ///
 /// `Caches::open(dir)` creates a durable `object.redb` and deletes+recreates
@@ -622,6 +634,9 @@ impl Store {
             .object
             .evict_object(&scoped_id, |scoped_leaf| view.delete_exact(scoped_leaf));
         self.gc_tombstones();
+        if self.negatives.len() > NEGATIVES_SOFT_CAP {
+            self.gc_negatives(now_millis_for_gc());
+        }
     }
 
     /// View-only listing invalidation at an exact path.
@@ -654,6 +669,38 @@ impl Store {
             .current_generation()
             .saturating_sub(TOMBSTONE_RETAIN_GENERATIONS);
         self.tombstones.retain(|_, g| *g >= cutoff);
+    }
+
+    /// Prune expired negative entries from `negatives` and keep `neg_by_id`
+    /// consistent. The caller is responsible for checking the soft cap before
+    /// calling (see `delete_object`).
+    fn gc_negatives(&self, now_millis: u64) {
+        // Collect paths of expired entries.
+        let expired: Vec<String> = self
+            .negatives
+            .iter()
+            .filter_map(|entry| {
+                let expired = entry
+                    .value()
+                    .expires_at
+                    .is_some_and(|exp| now_millis >= exp);
+                expired.then(|| entry.key().clone())
+            })
+            .collect();
+
+        for path in &expired {
+            if let Some((_, neg)) = self.negatives.remove(path) {
+                // Drop this path from the reverse index; remove empty sets.
+                if let Some(id) = &neg.id {
+                    if let Some(mut paths_set) = self.neg_by_id.get_mut(id) {
+                        paths_set.remove(path);
+                    }
+                    // Remove the reverse-index entry if its set is now empty.
+                    self.neg_by_id
+                        .remove_if(id, |_, paths_set| paths_set.is_empty());
+                }
+            }
+        }
     }
 }
 
@@ -978,6 +1025,75 @@ mod tests {
                 .cache_get(&p("/owner/repobaz"), RecordKind::Attr, None)
                 .is_some(),
             "/owner/repobaz should remain"
+        );
+    }
+
+    /// gc_negatives prunes expired entries, keeps fresh ones, and leaves
+    /// `neg_by_id` consistent after the sweep.
+    #[test]
+    fn gc_negatives_prunes_expired_keeps_fresh_and_stays_consistent() {
+        let (_dir, _caches, store) = open_store("m");
+        let now = 5_000_u64;
+        let expired_path = "/issues/1/missing";
+        let fresh_path = "/issues/2/missing";
+        let no_ttl_path = "/issues/3/missing";
+
+        let id_expired = b"obj:expired" as &[u8];
+        let id_fresh = b"obj:fresh" as &[u8];
+
+        // Expired: TTL puts deadline in the past relative to `now`.
+        assert!(store.put_negative(&p(expired_path), Some(id_expired), 0, 1_000, 1_000));
+        // Fresh: deadline is in the future relative to `now`.
+        assert!(store.put_negative(&p(fresh_path), Some(id_fresh), 0, 10_000, now));
+        // No TTL (no expiry): must never be swept.
+        assert!(store.put_negative(&p(no_ttl_path), None, 0, 0, now));
+
+        // Force gc_negatives by lowering the negatives count below threshold is
+        // impractical for a unit test, so call the private helper directly.
+        store.gc_negatives(now);
+
+        // The expired negative must be gone.
+        assert!(
+            store.negative_for(&p(expired_path), now).is_none(),
+            "expired negative should have been pruned"
+        );
+        // The fresh negative must survive.
+        assert!(
+            store.negative_for(&p(fresh_path), now).is_some(),
+            "fresh negative should be retained"
+        );
+        // The no-TTL negative must survive.
+        assert!(
+            store.negative_for(&p(no_ttl_path), now).is_some(),
+            "no-TTL negative should be retained"
+        );
+
+        // Reverse index consistency: id_expired must have no entry (or empty set).
+        let scoped_expired = {
+            let mut k = "m".as_bytes().to_vec();
+            k.push(0x1f);
+            k.extend_from_slice(id_expired);
+            k
+        };
+        let scoped_fresh = {
+            let mut k = "m".as_bytes().to_vec();
+            k.push(0x1f);
+            k.extend_from_slice(id_fresh);
+            k
+        };
+        assert!(
+            store
+                .neg_by_id
+                .get(&scoped_expired)
+                .map_or(true, |s| s.is_empty()),
+            "neg_by_id for expired id should be absent or empty"
+        );
+        assert!(
+            store
+                .neg_by_id
+                .get(&scoped_fresh)
+                .map_or(false, |s| !s.is_empty()),
+            "neg_by_id for fresh id should still have entries"
         );
     }
 }
