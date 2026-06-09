@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use omnifs_cache::{BatchRecord, Record, RecordKind, Store};
+use omnifs_cache::{BatchRecord, CanonicalBatchEntry, Record, RecordKind, Store};
 use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta, Stability};
 use tracing::{debug, warn};
@@ -68,18 +68,26 @@ impl<'a> Materializer<'a> {
         op_gen: u64,
         now_millis: u64,
     ) -> (Vec<String>, Vec<String>) {
-        for store in &effects.canonical {
-            let id = ObjectId::from_wit(&store.id);
-            if self.rejects_conflicting_id(&store.view_leaves, &id) {
-                continue;
-            }
-            self.store.put_canonical(
-                id.as_bytes(),
-                store.bytes.clone(),
-                store.validator.clone(),
-                &store.view_leaves,
-                op_gen,
-            );
+        // Collect canonical-store effects that pass conflict detection, then
+        // write them all in one redb write transaction via put_canonical_batch.
+        let canonical_batch: Vec<CanonicalBatchEntry> = effects
+            .canonical
+            .iter()
+            .filter_map(|store| {
+                let id = ObjectId::from_wit(&store.id);
+                if self.rejects_conflicting_id(&store.view_leaves, &id) {
+                    return None;
+                }
+                Some(CanonicalBatchEntry {
+                    id: id.as_bytes().to_vec(),
+                    bytes: store.bytes.clone(),
+                    validator: store.validator.clone(),
+                    view_leaves: store.view_leaves.clone(),
+                })
+            })
+            .collect();
+        if !canonical_batch.is_empty() {
+            self.store.put_canonical_batch(canonical_batch, op_gen);
         }
 
         let mut batch: Vec<BatchRecord> = Vec::new();

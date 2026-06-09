@@ -39,6 +39,14 @@ use dashmap::DashMap;
 /// Shared handle to a host view store.
 pub type Handle = Arc<Store>;
 
+/// One entry for `Store::put_canonical_batch`.
+pub struct CanonicalBatchEntry {
+    pub id: Vec<u8>,
+    pub bytes: Vec<u8>,
+    pub validator: Option<String>,
+    pub view_leaves: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum RecordKind {
@@ -429,6 +437,43 @@ impl Store {
             .store(&scoped_id, canonical, &scoped_leaves, |scoped_leaf| {
                 view.delete_exact(scoped_leaf);
             })
+    }
+
+    /// Batch canonical store for effect application. Fenced per-entry; rejected
+    /// entries are skipped and the rest of the batch proceeds. Prior-leaf view
+    /// evictions fire per-object before the batch redb commit.
+    ///
+    /// Ownership is consumed so the caller need not clone; the function drains
+    /// the Vec.
+    pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) {
+        let view = &self.caches.view;
+
+        // Per-entry fence check and view eviction; collect accepted entries.
+        let batch: Vec<object::StoreBatchEntry> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let scoped_id = self.scoped_id(&entry.id);
+                if self.id_tombstoned_after(&scoped_id, op_gen) {
+                    return None;
+                }
+                // Evict prior view leaves before the object is replaced.
+                for scoped_leaf in self.caches.object.leaves_of(&scoped_id) {
+                    view.delete_exact(&scoped_leaf);
+                }
+                let scoped_leaves: Vec<String> =
+                    entry.view_leaves.iter().map(|p| self.scoped(p)).collect();
+                Some(object::StoreBatchEntry {
+                    scoped_id,
+                    canonical: object::Canonical {
+                        bytes: entry.bytes,
+                        validator: entry.validator,
+                    },
+                    new_leaves: scoped_leaves,
+                })
+            })
+            .collect();
+
+        self.caches.object.store_batch(&batch);
     }
 
     /// Preload index-only store, fenced. Canonical-beats-preload in the object tier.
