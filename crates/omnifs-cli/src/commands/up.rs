@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use clap::Args;
 
 use crate::app_context::AppContext;
-use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
-use crate::session::{CredsBackend, HOST_FUSE_MOUNT, Session};
+use crate::launch::{LaunchSpec, launch_session};
+use crate::runtime::ContainerExtras;
+use crate::session::{CredsBackend, HOST_FUSE_MOUNT};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
@@ -50,6 +51,8 @@ impl UpArgs {
         let paths = ctx.paths();
         let runtime = ctx.runtime();
         let catalog = ctx.catalog();
+
+        // Bail early before touching session state if there is nothing to mount.
         let configs = catalog.session_mount_configs()?;
         if configs.is_empty() {
             anyhow::bail!(
@@ -58,31 +61,25 @@ impl UpArgs {
             );
         }
 
-        let session = Session::prepare(runtime.container_name(), &paths.credentials_file)?;
-        let mut cleanup = session.cleanup_on_drop();
-        anstream::println!("Preparing session at {}", session.root().display());
-        anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
+        let mounts_dir = paths.mounts_dir.clone();
         let store = CredsBackend::auto(&paths.credentials_file, true);
-        anstream::println!("Materializing mount configs and credentials");
-        let preopen_binds = session.populate(&configs, catalog, store.as_ref())?;
-        anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
-        let runtime_handle = Runtime::connect_ready(runtime, "omnifs up").await?;
+        launch_session(
+            LaunchSpec {
+                runtime,
+                credentials_file: &paths.credentials_file,
+                store,
+                verb: "omnifs up",
+                extras: ContainerExtras::default(),
+            },
+            catalog,
+            |_session| {
+                anstream::println!("Using mount configs from {}", mounts_dir.display());
+                Ok(configs)
+            },
+        )
+        .await?;
 
-        runtime_handle
-            .launch_container(
-                &session,
-                ContainerExtras {
-                    binds: preopen_binds,
-                    tcp_ports: vec![GUEST_INSPECTOR_PORT],
-                    ..ContainerExtras::default()
-                },
-            )
-            .await?;
-
-        runtime_handle.wait_for_fuse_mount().await?;
-        runtime_handle.verify_status(&configs).await?;
-        cleanup.disarm();
         anstream::println!(
             "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
             runtime.container_name()
