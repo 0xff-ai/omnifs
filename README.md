@@ -1,18 +1,18 @@
 <div align="center">
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/3b04a33c-2155-44a1-ba3a-6a285a89f215" width="960" alt="omnifs">
+  <img src="docs/assets/omnifs-hero.png" width="960" alt="omnifs">
 </p>
 
 <h1 align="center"><b>omnifs</b></h1>
 <h4 align="center">open a path, read the world.</h4>
-<p align="center"><a href="https://omnifs.dev">Website</a> | <a href="https://omnifs.dev/start">Docs</a> | <a href="#quickstart">Quickstart</a> | <a href="#what-you-can-read">What you can read</a> | <a href="#providers">Providers</a> | <a href="#how-it-works">How it works</a></p>
+<p align="center"><a href="#quickstart">quickstart</a> | <a href="https://omnifs.dev">homepage</a> | <a href="https://omnifs.dev/start">docs</a> | <a href="#things-to-try">things to try</a> | <a href="#providers">providers</a> | <a href="#how-it-works">how it works</a></p>
 </div>
 
 omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv, Docker, Linear, and SQLite become directories and files you can `cd`, `ls`, `cat`, `grep`, `find`, `jq`, and script against.
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The Linux FUSE mount runs inside the runtime container on macOS and Windows today; native host mounts are future work.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The filesystem is exposed through FUSE, and omnifs runs in a Docker container in supported environments for compatibility, rootless execution, and simpler setup across Linux, macOS, and Windows. NFSv4 and FSKit support are planned, and we will remove the Docker requirement when native mounts are ready.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -20,13 +20,7 @@ The goal is simple: if a tool can read files, it can read the outside world with
 
 ## Quickstart
 
-### Prerequisites
-
-- Node.js and npm for the packaged CLI.
-- Docker on Linux, or Docker Desktop on macOS.
-- A running SSH agent with a GitHub key loaded if you want GitHub repo trees under `/github/{owner}/{repo}/repo`.
-
-### Install and start
+omnifs is written in Rust. We build prebuilt binaries for all platforms and ship them through the npm registry. During alpha, you need Node.js, npm, and a Docker-compatible container engine such as Docker, OrbStack, or Podman.
 
 ```bash
 npm install -g @0xff-ai/omnifs
@@ -35,7 +29,13 @@ omnifs up
 omnifs shell
 ```
 
-`omnifs setup` walks through provider selection and auth. For a direct, scriptable path, initialize providers one at a time:
+`omnifs setup` is interactive. It pulls the Docker image and walks you through provider selection and auth.
+
+`omnifs shell` opens a shell against the running container. Inside the container, the filesystem is mounted at `/omnifs`, with convenience symlinks for every mount at the root, such as `/github`, `/dns`, and `/arxiv`.
+
+---
+
+For a direct, scriptable path, initialize providers one at a time with `omnifs init <provider>`. Each command writes a mount config under `~/.omnifs/config/mounts/`; `omnifs up` then materializes those mounts, credentials, and capability grants into the runtime container.
 
 ```bash
 omnifs init github
@@ -45,20 +45,18 @@ omnifs up
 omnifs shell
 ```
 
-The npm package installs only the host CLI. It does not pull the runtime image during `npm install`; `omnifs up` pulls the version-matched image and starts the container. Inside the container the filesystem is mounted at `/omnifs`, with provider-root symlinks such as `/github`, `/dns`, and `/arxiv` for convenience.
-
-User mount configuration lives in `~/.omnifs/config.toml`. Credentials are stored by default in `~/.omnifs/data/credentials.json` with private file permissions; set `OMNIFS_CREDS_BACKEND=keychain` if you want to opt into the OS keychain backend.
+---
 
 Useful commands:
 
 ```bash
 omnifs status      # runtime, mount, and auth state
 omnifs logs -f     # follow container and daemon logs
-omnifs inspect     # live TUI of FUSE, provider, cache, and callout activity
+omnifs inspect     # live TUI for FUSE, provider, cache, and callout activity
 omnifs down        # stop the container and clean up the session
 ```
 
-## What you can read
+## Things to try
 
 Once you are in `omnifs shell`, use normal shell tools.
 
@@ -66,16 +64,19 @@ Once you are in `omnifs shell`, use normal shell tools.
 # GitHub
 cd /github/ollama/ollama
 ls
+cat repo.json
 cat issues/open/12959/title
-cat pulls/open/1234/diff
+cat pulls/all/9585/diff
+# repository trees are cloned on demand
 cd repo && ls
 
 # DNS
 cat /dns/cloudflare.com/A
 cat /dns/@google/google.com/AAAA
+cat /dns/openai.com/TXT
 cat /dns/reverse/1.1.1.1
 
-# arXiv
+# arXiv -- "Attention is all you need"
 ls /arxiv/papers/1706.03762
 cat /arxiv/papers/1706.03762/@latest/paper.json | jq .title
 
@@ -84,17 +85,17 @@ cat /docker/system/version.json | jq .
 cat /docker/containers.json | jq .
 ls /docker/containers/running
 
-# Linear
+# Linear -- requires a Linear API key
 ls /linear/teams
 cat /linear/teams/ENG/issues/open/ENG-123/title
 
-# SQLite
+# SQLite -- download an example db and explore the data
+wget -O /tmp/chinook.sqlite https://github.com/lerocha/chinook-database/raw/refs/heads/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
+omnifs init db      # provide path: /tmp/chinook.sqlite
 ls /db/tables
 cat /db/tables/Album/schema.sql
 cat /db/tables/Album/sample.json | jq .
 ```
-
-Repository trees are cloned on demand over SSH when you enter `repo/`. omnifs forwards your SSH agent socket into the container; it does not copy your private key.
 
 <details>
 <summary>SSH agent troubleshooting</summary>
@@ -202,18 +203,18 @@ omnifs runs a Linux FUSE filesystem in a runtime container. The host CLI owns se
                                                                   +----------------+
 +-------------+          +-----------------------------+          | github.wasm    | -> GitHub
 | shell, app, |   FUSE   |        omnifs host          | callouts | dns.wasm       | -> DoH
-| CI, agent   | <------> | /github /dns /arxiv ...    | <------> | docker.wasm    | -> Docker socket
-|             |  files   | cache, auth, git, network  |          | linear.wasm    | -> Linear
+| CI, agent   | <------> | /github /dns /arxiv ...     | <------> | docker.wasm    | -> Docker socket
+|             |  files   | cache, auth, git, network   |          | linear.wasm    | -> Linear
 +-------------+          +-----------------------------+          +----------------+
 ```
 
-Providers are `wasm32-wasip2` WebAssembly components implementing the `omnifs:provider` interface. A provider answers filesystem operations such as `lookup_child`, `list_children`, and `read_file`. It declares its auth needs and capability grants in `omnifs.provider.json`.
+Providers are WebAssembly components implementing the [`omnifs:provider` WIT interface](crates/omnifs-wit/wit/provider.wit). Providers are self-contained: they declare required capabilities and offer an introspection surface via `omnifs.provider.json`, embedded in the Wasm bytecode. A provider's main job is to answer filesystem operations via entrypoint methods `lookup_child`, `list_children`, and `read_file`.
 
 Providers do not hold tokens, open sockets, or run Git themselves. They return callout requests such as HTTP fetches, blob downloads, archive opens, or repo tree handoffs. The host executes those requests, attaches credentials at the boundary, enforces declared capabilities, and owns caching.
 
 The cache is host-owned plain byte storage. Providers can return canonical upstream bytes and derived filesystem entries together, so one upstream payload can populate multiple files and child entries. Invalidations come from explicit provider effects and runtime events.
 
-## Contributor workflow
+## Development workflows
 
 Use `omnifs dev` when working from this repository. It builds the dev image, captures `gh auth token`, fetches the Chinook SQLite fixture, synthesizes dev mounts from the built-in provider manifests, and starts the container.
 
@@ -245,10 +246,32 @@ docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
 
 ## Roadmap
 
-- Write-back through explicit, auditable transaction directories.
-- Native macOS and Windows mount support.
-- More providers, including object stores, OCI registries, Kubernetes, model registries, Postgres, Slack, and Discord.
-- Better search, indexing, snapshots, and provider authoring documentation.
+### ✅ Working today
+
+- A Linux FUSE runtime you reach from macOS and Windows too, through the container and `omnifs shell`.
+- A host CLI on npm that handles setup, auth, lifecycle, logs, status, and inspection.
+- Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
+- Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
+- Six live providers: GitHub, DNS, arXiv, Docker, Linear, and SQLite.
+
+### 🚧 In progress
+
+- Making the provider SDK nicer to write against, especially for object-shaped providers.
+- Letting providers build paths from their registered routes instead of hand-formatting strings.
+- Caching polish: clearer traces, bounded disk usage, and identities that survive a remount.
+- Better behavior under stuck reads and aggressive directory walkers (shells, prompt tools, crawlers).
+- Smoother setup, auth, status, and `doctor` output, plus a hardened container test suite.
+- Provider reference docs generated straight from each provider's manifest and routes.
+
+### 🔭 Planned
+
+- Write support: stage your intent first, then apply it upstream.
+- Many more providers, including object stores, Kubernetes, Postgres, Redis, Slack, Discord, Google Drive, Gmail, Notion, Stripe, Cloudflare, Vercel, and Telegram.
+- A real provider ecosystem: standalone packaging, a community catalog, authoring docs, and sidecars for providers that need native dependencies.
+- Mount surfaces beyond Linux FUSE for environments where FUSE isn't the right fit, plus passthrough for host-backed subtrees.
+- Easier install and slimmer packaging: multi-arch runtime images, Homebrew or shell installers, and a cleaner split between the CLI and the runtime binary.
+- Going further than warm cache reads: offline snapshots, background indexing, semantic search, and DNS prefetch.
+- Trust and safety: signed provider manifests, tighter sandboxing for host-run tools, and metered filesystem access.
 
 ## License
 
