@@ -64,7 +64,7 @@ impl UpArgs {
         anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
         let store = CredsBackend::auto(&paths.credentials_file, true);
         anstream::println!("Materializing mount configs and credentials");
-        session.populate(&configs, catalog, store.as_ref())?;
+        let preopen_binds = session.populate(&configs, catalog, store.as_ref())?;
         anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
         let runtime_handle = Runtime::connect_ready(runtime, "omnifs up").await?;
@@ -73,6 +73,7 @@ impl UpArgs {
             .launch_container(
                 &session,
                 ContainerExtras {
+                    binds: preopen_binds,
                     tcp_ports: vec![GUEST_INSPECTOR_PORT],
                     ..ContainerExtras::default()
                 },

@@ -86,16 +86,16 @@ impl DevArgs {
         // contributor builds never trigger platform keychain prompts.
         let store = CredsBackend::file(&paths.credentials_file, true);
         anstream::println!("Materializing mount configs and credentials");
-        session.populate(&configs, ctx.catalog(), store.as_ref())?;
+        let preopen_binds = session.populate(&configs, ctx.catalog(), store.as_ref())?;
         anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
         let rt = Runtime::connect_ready(runtime, "omnifs dev").await?;
 
+        let mut binds = preopen_binds;
+        binds.push(format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()));
+        binds.push(format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()));
         let extras = ContainerExtras {
-            binds: vec![
-                format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
-                format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
-            ],
+            binds,
             env: vec![format!(
                 "OMNIFS_INSPECTOR_ADDR=0.0.0.0:{GUEST_INSPECTOR_PORT}"
             )],

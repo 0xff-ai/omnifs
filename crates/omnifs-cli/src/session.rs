@@ -9,6 +9,7 @@ use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::{CredentialStore, FileStore, KeyringStore};
 use omnifs_host::mounts::Spec;
+use omnifs_mount_schema::PreopenMode;
 use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::fs;
@@ -22,6 +23,7 @@ pub(crate) const CONTAINER_NAME: &str = "omnifs";
 pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 pub(crate) const HOST_CRED_DIR: &str = "/run/omnifs/creds";
 pub(crate) const HOST_FUSE_MOUNT: &str = "/omnifs";
+pub(crate) const HOST_PREOPENS_DIR: &str = "/run/omnifs/preopens";
 pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";
 pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 
@@ -94,16 +96,17 @@ impl Session {
         configs: &[MountConfig],
         catalog: &ProviderCatalog,
         store: &dyn CredentialStore,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<String>> {
         let materializer = SessionMaterializer {
             session: self,
             catalog,
             store,
         };
+        let mut binds = Vec::new();
         for cfg in configs {
-            materializer.materialize(cfg)?;
+            binds.extend(materializer.materialize(cfg)?);
         }
-        Ok(())
+        Ok(binds)
     }
 }
 
@@ -114,8 +117,13 @@ struct SessionMaterializer<'a> {
 }
 
 impl SessionMaterializer<'_> {
-    fn materialize(&self, cfg: &MountConfig) -> anyhow::Result<()> {
+    fn materialize(&self, cfg: &MountConfig) -> anyhow::Result<Vec<String>> {
         let mut instance = cfg.config.clone();
+        let user_preopen_count = instance
+            .capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.preopened_paths.as_ref())
+            .map_or(0, Vec::len);
         self.catalog
             .apply_metadata(&mut instance)
             .with_context(|| format!("apply provider metadata for {}", cfg.source.display()))?;
@@ -136,6 +144,8 @@ impl SessionMaterializer<'_> {
                     cfg.source.display()
                 )
             })?;
+        let preopen_binds =
+            self.materialize_preopened_paths(&mut instance, &cfg.name, user_preopen_count)?;
         let mut value = serde_json::to_value(&instance)
             .with_context(|| format!("serialize mount config for {}", cfg.source.display()))?;
         let obj = value
@@ -150,7 +160,50 @@ impl SessionMaterializer<'_> {
             serde_json::to_string_pretty(&value).context("serialize materialized mount config")?;
         fs::write(&out, format!("{pretty}\n"))
             .with_context(|| format!("write {}", out.display()))?;
-        Ok(())
+        Ok(preopen_binds)
+    }
+
+    fn materialize_preopened_paths(
+        &self,
+        instance: &mut Spec,
+        name: &MountName,
+        user_preopen_count: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        if user_preopen_count == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(preopens) = instance
+            .capabilities
+            .as_mut()
+            .and_then(|capabilities| capabilities.preopened_paths.as_mut())
+        else {
+            return Ok(Vec::new());
+        };
+
+        preopens
+            .iter_mut()
+            .take(user_preopen_count)
+            .enumerate()
+            .map(|(index, preopen)| {
+                let host_path = Path::new(&preopen.host)
+                    .canonicalize()
+                    .with_context(|| format!("canonicalize preopen {}", preopen.host))?;
+                if !host_path.is_dir() {
+                    anyhow::bail!("preopen {} is not a directory", host_path.display());
+                }
+
+                let container_path = format!("{HOST_PREOPENS_DIR}/{name}/{index}");
+                let bind_mode = match preopen.mode {
+                    PreopenMode::Ro => "ro",
+                    PreopenMode::Rw => "rw",
+                };
+                preopen.host = container_path.clone();
+                Ok(format!(
+                    "{}:{container_path}:{bind_mode}",
+                    host_path.display()
+                ))
+            })
+            .collect()
     }
 
     fn materialize_oauth(
@@ -773,6 +826,114 @@ mod tests {
         assert_eq!(
             written["capabilities"]["unix_sockets"],
             serde_json::json!(["/var/run/docker.sock"]),
+        );
+    }
+
+    #[test]
+    fn populate_session_rewrites_preopens_to_container_bind_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
+        let session = Session {
+            root: tmp.path().to_path_buf(),
+            creds_dir: tmp.path().join("creds"),
+            mounts_dir: tmp.path().join("mounts"),
+            credentials_file: tmp.path().join("credentials.json"),
+        };
+        fs::create_dir_all(&session.creds_dir).unwrap();
+        fs::create_dir_all(&session.mounts_dir).unwrap();
+
+        let store = MemoryStore::new();
+        let config = MountConfig {
+            name: MountName::try_from("db").unwrap(),
+            config: Spec::parse(&format!(
+                r#"{{
+                    "provider": "omnifs_provider_db.wasm",
+                    "mount": "db",
+                    "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                    "capabilities": {{
+                        "preopened_paths": [
+                            {{"host": "{}", "guest": "/data", "mode": "ro"}}
+                        ]
+                    }}
+                }}"#,
+                db_dir.display()
+            ))
+            .unwrap(),
+            source: PathBuf::from("/dev/null"),
+        };
+
+        let catalog = test_catalog(&session, tmp.path());
+        let binds = session.populate(&[config], &catalog, &store).unwrap();
+
+        assert_eq!(
+            binds,
+            vec![format!(
+                "{}:{HOST_PREOPENS_DIR}/db/0:ro",
+                db_dir.canonicalize().unwrap().display()
+            )],
+        );
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(session.mounts_dir.join("db.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["host"],
+            format!("{HOST_PREOPENS_DIR}/db/0"),
+        );
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["guest"],
+            "/data",
+        );
+        assert_eq!(
+            written["config"]["path"], "/data/chinook.sqlite",
+            "provider config should keep the guest path selected by init"
+        );
+    }
+
+    #[test]
+    fn populate_session_leaves_manifest_preopens_container_native() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session {
+            root: tmp.path().to_path_buf(),
+            creds_dir: tmp.path().join("creds"),
+            mounts_dir: tmp.path().join("mounts"),
+            credentials_file: tmp.path().join("credentials.json"),
+        };
+        fs::create_dir_all(&session.creds_dir).unwrap();
+        fs::create_dir_all(&session.mounts_dir).unwrap();
+
+        let store = MemoryStore::new();
+        let config = MountConfig {
+            name: MountName::try_from("db").unwrap(),
+            config: Spec::parse(
+                r#"{
+                    "provider": "omnifs_provider_db.wasm",
+                    "mount": "db",
+                    "config": {"database_type": "sqlite", "path": "/data/test.db"}
+                }"#,
+            )
+            .unwrap(),
+            source: PathBuf::from("/dev/null"),
+        };
+
+        let catalog = test_catalog(&session, tmp.path());
+        let binds = session.populate(&[config], &catalog, &store).unwrap();
+
+        assert!(
+            binds.is_empty(),
+            "manifest preopens are already container paths"
+        );
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(session.mounts_dir.join("db.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["host"],
+            "/data"
+        );
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["guest"],
+            "/data",
         );
     }
 
