@@ -15,8 +15,8 @@
 //! `immutable=1` so databases left in WAL mode and shipped as
 //! snapshots open without their `-wal` / `-shm` sidecars.
 
+use hashbrown::HashSet;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
 use std::str::FromStr;
