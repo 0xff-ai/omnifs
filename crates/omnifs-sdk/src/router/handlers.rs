@@ -1,11 +1,11 @@
 //! Handler arity unification and route entry storage types.
 
+use super::pattern::Pattern;
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::handler::{DirCx, TreeRef};
 use crate::projection::{DirProjection, FileProjection};
-use omnifs_core::path::Pattern;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

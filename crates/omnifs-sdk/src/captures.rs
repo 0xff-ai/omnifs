@@ -7,9 +7,10 @@
 //! a handler or `Object::load` runs.
 
 use crate::error::{ProviderError, Result};
+use crate::router::pattern::{Match as PatternMatch, Pattern};
 use core::fmt::Display;
 use core::str::FromStr;
-use omnifs_core::path::{Path, Pattern, pattern};
+use omnifs_core::path::Path;
 
 /// A capture type: validates one path segment (`FromStr`), renders back
 /// (`Display`), and optionally enumerates a finite child set.
@@ -82,7 +83,7 @@ impl Captures {
     }
 
     /// Build captures from a successful route pattern match.
-    pub fn from_match(matched: &pattern::Match) -> Self {
+    pub fn from_match(matched: &PatternMatch) -> Self {
         Self::new(
             matched
                 .captures()

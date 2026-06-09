@@ -3,7 +3,7 @@
 mod dispatch;
 mod handlers;
 mod object;
-mod pattern;
+pub(crate) mod pattern;
 mod projection;
 mod register;
 

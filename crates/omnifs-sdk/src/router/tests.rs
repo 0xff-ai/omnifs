@@ -264,7 +264,7 @@ fn object_listing_includes_top_level_handler_leaves_only() {
         Ok(())
     })
     .unwrap();
-    let pattern = omnifs_core::path::Pattern::parse("/items/{id}").unwrap();
+    let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
 
     let mounted = super::object::mount_object::<DemoObj, ()>(
         &pattern,
@@ -358,7 +358,7 @@ fn facet_excluded_from_identity() {
 
 #[test]
 fn facet_view_leaves_expand_across_aliases() {
-    let pattern = omnifs_core::path::Pattern::parse("/{owner}/issues/{filter}/{number}").unwrap();
+    let pattern = super::pattern::Pattern::parse("/{owner}/issues/{filter}/{number}").unwrap();
     let expansion = super::object::FacetExpansion::for_pattern::<FacetedKey>(&pattern).unwrap();
 
     let leaves = expansion

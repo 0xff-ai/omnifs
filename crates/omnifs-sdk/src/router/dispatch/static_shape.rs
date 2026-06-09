@@ -1,11 +1,12 @@
 //! Literal-prefix auto-navigation from the route table.
 
+use super::super::pattern::Pattern;
 use crate::browse::{Entry as BrowseEntry, EntryKind as BrowseEntryKind};
 use crate::captures::Captures;
 use crate::file_attrs::FileProj;
 use crate::object::ObjectShape;
 use crate::router::handlers::RouteValidator;
-use omnifs_core::path::{Path, Pattern};
+use omnifs_core::path::Path;
 
 use super::super::pattern::best_match;
 use super::route_shape::Shape;
