@@ -301,10 +301,7 @@ impl CategoryKey {
     }
 
     async fn recent(cx: DirCx, key: CategoryKey) -> Result<DirProjection> {
-        let page = match cx.cursor() {
-            Some(Cursor::Page(n)) => *n,
-            _ => 0,
-        };
+        let page = cx.page_cursor(0);
         let ids = fetch_category_page(&cx, key.category.as_ref(), page).await?;
         let exhaustive = ids.len() < CATEGORY_PAGE_SIZE as usize;
         let entries = ids.into_iter().filter_map(|raw| {

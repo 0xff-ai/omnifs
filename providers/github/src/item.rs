@@ -440,10 +440,7 @@ async fn comments_dir(
     repo: &RepoName,
     number: u64,
 ) -> Result<DirProjection> {
-    let page = match cx.cursor() {
-        Some(Cursor::Page(n)) => *n,
-        _ => 1,
-    };
+    let page = cx.page_cursor(1);
     let comments: Vec<CommentRecord> = cx
         .github_json(format!(
             "/repos/{owner}/{repo}/issues/{number}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
