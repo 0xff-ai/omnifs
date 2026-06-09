@@ -117,8 +117,10 @@ mod tests {
     #[test]
     #[allow(unsafe_code)]
     fn detect_github_env_var() {
-        // SAFETY: env mutation is isolated to the duration of this test.
-        // This test must not run concurrently with other tests that set GITHUB_TOKEN.
+        // SAFETY: this is the only test in this module and no other test in the
+        // crate mutates GITHUB_TOKEN, so no concurrent env write can race here.
+        // There is no explicit lock; adding one (e.g. a module-level Mutex) would
+        // be the right fix if a second GITHUB_TOKEN-mutating test is ever added.
         unsafe {
             std::env::set_var("GITHUB_TOKEN", "ghp_abc");
         }
@@ -127,6 +129,8 @@ mod tests {
             |d| matches!(d, DetectedCredential::EnvVar { name, .. } if name == "GITHUB_TOKEN"),
         );
         assert!(has_env_var, "found: {found:?}");
+        // SAFETY: same rationale as the set_var above; restoring the previous
+        // state before the test returns.
         unsafe {
             std::env::remove_var("GITHUB_TOKEN");
         }

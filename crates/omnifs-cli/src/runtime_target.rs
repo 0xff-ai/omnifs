@@ -68,6 +68,8 @@ mod tests {
             .map(|(key, _)| (*key, std::env::var(*key).ok()))
             .collect();
 
+        // SAFETY: ENV_LOCK is held for the entire duration of this call,
+        // so no other thread is reading or writing the environment concurrently.
         for (key, value) in vars {
             match value {
                 Some(v) => unsafe { std::env::set_var(key, v) },
@@ -77,6 +79,8 @@ mod tests {
 
         f();
 
+        // SAFETY: ENV_LOCK is still held; restoring the saved values is subject
+        // to the same serialization guarantee as the writes above.
         for (key, original) in &saved {
             match original {
                 Some(v) => unsafe { std::env::set_var(key, v) },

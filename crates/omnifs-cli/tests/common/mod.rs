@@ -32,6 +32,8 @@ pub fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
 
     f();
 
+    // SAFETY: ENV_LOCK is still held; restoring the saved values is subject
+    // to the same serialization guarantee as the writes above.
     for (key, original) in &saved {
         match original {
             Some(v) => unsafe { std::env::set_var(key, v) },
