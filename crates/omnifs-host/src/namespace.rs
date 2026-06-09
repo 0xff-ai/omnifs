@@ -98,28 +98,20 @@ impl Namespace<'_> {
             return Err(enoent(path.as_str()));
         }
 
-        let warm_id = self
-            .runtime
-            .cache
-            .cached_canonical_for(&path)
-            .map(|(host_id, _, _)| host_id);
-
-        let cached_canonical = self.runtime.cache.cached_canonical_for(&path).and_then(
-            |(host_id, bytes, validator)| {
-                ObjectId::from_bytes(host_id)
-                    .to_wit()
-                    .map(|id| wit_types::CanonicalInput {
+        // Single cache lookup: derive both the warm_id (for coalescing key and
+        // volatile check) and the CanonicalInput (byte buffer for the provider).
+        let (warm_id, cached_canonical) = match self.runtime.cache.cached_canonical_for(&path) {
+            Some((host_id, bytes, validator)) => {
+                let canonical = ObjectId::from_bytes(host_id.clone()).to_wit().map(|id| {
+                    wit_types::CanonicalInput {
                         id,
                         validator,
                         bytes,
-                    })
+                    }
+                });
+                (Some(host_id), canonical)
             },
-        );
-
-        let op = Op::ReadFile {
-            path: path.clone(),
-            content_type,
-            cached_canonical,
+            None => (None, None),
         };
 
         let volatile = warm_id
@@ -127,9 +119,21 @@ impl Namespace<'_> {
             .and_then(|_| leaf_stability(self, &path))
             .is_some_and(|s| s == Stability::Volatile);
 
+        // Cheap op for the error arm: no byte buffer, same path/content_type shape.
+        let op_for_error = Op::ReadFile {
+            path: path.clone(),
+            content_type: content_type.clone(),
+            cached_canonical: None,
+        };
+        let op = Op::ReadFile {
+            path: path.clone(),
+            content_type,
+            cached_canonical,
+        };
+
         let path_key = path.as_str();
         let result = if volatile {
-            self.runtime.run_op(op.clone(), fuse_trace).await?
+            self.runtime.run_op(op, fuse_trace).await?
         } else if let Some(host_id) = warm_id {
             let id_key = hex::encode(&host_id);
             self.coalesced(&id_key, || self.runtime.run_op(op.clone(), fuse_trace))
@@ -145,7 +149,7 @@ impl Namespace<'_> {
                 Err(enoent(path.as_str()))
             },
             wit_types::OpResult::Error(error) => Err(Error::ProviderError(error)),
-            result => Err(Error::unexpected_op_result(op, result)),
+            result => Err(Error::unexpected_op_result(op_for_error, result)),
         }
     }
 
