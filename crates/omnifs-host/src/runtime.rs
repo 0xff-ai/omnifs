@@ -12,7 +12,7 @@ use crate::cloner::GitCloner;
 use crate::git;
 use crate::http::HttpStack;
 use crate::inflight::InFlight;
-use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
+use crate::inspector::{self, InspectorProviderOp, InspectorSink, WitProviderErrorView};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::manifest::Artifact;
@@ -138,6 +138,9 @@ pub struct Runtime {
     // cache instead of EAGAIN until it clears. std Mutex: the critical section
     // is a single set/get with no await held across it.
     rate_limit_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Injected inspector sink. Defaults to the process-global configured sink
+    /// so production wiring is unchanged; tests can supply their own.
+    pub(crate) inspector: Option<Arc<InspectorSink>>,
 }
 
 pub struct TestOp<'a> {
@@ -361,6 +364,7 @@ impl Runtime {
             inflight: InFlight::new(),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
+            inspector: inspector::global(),
         })
     }
 
@@ -582,7 +586,7 @@ impl Runtime {
                     // reflects the resolution work.
                     if let (Some(trace), Ok(op_result)) = (trace_id, outcome.as_ref())
                         && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
-                        && let Some(sink) = inspector::global()
+                        && let Some(sink) = self.inspector.as_ref()
                     {
                         sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
                     }
