@@ -15,7 +15,7 @@ use crate::file_attrs::VersionToken;
 use crate::http::{BlobRequest, HttpEndpoint, Request, ResponseExt};
 use crate::object::{Canonical, Load};
 use core::fmt::Display;
-use http::{Response, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 
 /// Per-endpoint rate-limit policy. `Default` uses the breaker's default
 /// cooldown when a 429 carries no `Retry-After`; `Cooldown` overrides that
@@ -81,12 +81,13 @@ pub struct RequestBuilder<'a, E, S = ()> {
     method: http::Method,
     path: String,
     query: Vec<(String, String)>,
-    headers: Vec<(String, String)>,
+    headers: HeaderMap,
     body: Option<Vec<u8>>,
     body_is_json: bool,
-    /// A deferred body-serialization failure. `body_json` cannot return a
-    /// `Result` without breaking the builder chain, so it records the error
-    /// here and the terminal surfaces it instead of sending a malformed body.
+    /// Deferred header- or body-serialization failure. Neither `.header(..)`
+    /// nor `.body_json(..)` can return `Result` without breaking the builder
+    /// chain, so they record the first error here and the terminal surfaces it
+    /// instead of sending a malformed request.
     body_error: Option<ProviderError>,
     if_none_match: Option<String>,
     _endpoint: core::marker::PhantomData<E>,
@@ -99,7 +100,7 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             method,
             path,
             query: Vec::new(),
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
             body: None,
             body_is_json: false,
             body_error: None,
@@ -115,19 +116,42 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
         self
     }
 
-    /// Append a request header.
+    /// Append a request header. Invalid names or values are recorded as a
+    /// sticky error so the chainable builder stays infallible; the error is
+    /// surfaced by the terminal.
     #[must_use]
     pub fn header(mut self, key: &str, value: impl Into<String>) -> Self {
-        self.headers.push((key.to_string(), value.into()));
+        if self.body_error.is_some() {
+            return self;
+        }
+        let name = match HeaderName::try_from(key) {
+            Ok(n) => n,
+            Err(e) => {
+                self.body_error = Some(ProviderError::invalid_input(format!(
+                    "invalid header name: {e}"
+                )));
+                return self;
+            },
+        };
+        let val_str = value.into();
+        let value = match HeaderValue::try_from(val_str.as_str()) {
+            Ok(v) => v,
+            Err(e) => {
+                self.body_error = Some(ProviderError::invalid_input(format!(
+                    "invalid header value: {e}"
+                )));
+                return self;
+            },
+        };
+        self.headers.append(name, value);
         self
     }
 
-    /// Set the `Accept` header.
+    /// Set the `Accept` header. Invalid values follow the same sticky-error
+    /// path as `.header(..)`.
     #[must_use]
-    pub fn accept(mut self, content_type: &str) -> Self {
-        self.headers
-            .push(("accept".to_string(), content_type.to_string()));
-        self
+    pub fn accept(self, content_type: &str) -> Self {
+        self.header("accept", content_type)
     }
 
     /// Serialize `value` as the JSON request body and set `Content-Type:
@@ -183,9 +207,8 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
         for (name, value) in E::default_headers() {
             req = req.header(name, value);
         }
-        for (name, value) in &self.headers {
-            req = req.header(name, value);
-        }
+        // Merge the pre-parsed HeaderMap; extend_headers skips re-parsing.
+        req = req.extend_headers(self.headers);
         if let Some(v) = &self.if_none_match {
             req = req.header("if-none-match", v);
         }

@@ -121,17 +121,97 @@ pub fn write_truncated(f: &mut fmt::Formatter<'_>, value: &str, max: usize) -> f
 mod tests {
     use super::*;
 
+    // ── is_sensitive_header ───────────────────────────────────────────────
+
     #[test]
-    fn live_url_strips_query_and_credentials() {
-        let logged = redact_url_for_live(
+    fn sensitive_header_exact_names_are_matched_case_insensitively() {
+        // Exact entries in the allowlist, varied case.
+        assert!(is_sensitive_header("Authorization"));
+        assert!(is_sensitive_header("AUTHORIZATION"));
+        assert!(is_sensitive_header("authorization"));
+        assert!(is_sensitive_header("Proxy-Authorization"));
+        assert!(is_sensitive_header("Cookie"));
+        assert!(is_sensitive_header("Set-Cookie"));
+        assert!(is_sensitive_header("X-Api-Key"));
+        assert!(is_sensitive_header("X-GitHub-Token"));
+        assert!(is_sensitive_header("X-Auth-Token"));
+    }
+
+    #[test]
+    fn sensitive_header_dynamic_patterns_catch_token_secret_password_anywhere_in_name() {
+        // Dynamic rule: header name contains "token", "secret", or "password"
+        assert!(is_sensitive_header("X-My-Token"));
+        assert!(is_sensitive_header("X-ACCESS-TOKEN")); // uppercase "TOKEN"
+        assert!(is_sensitive_header("My-Secret-Header"));
+        assert!(is_sensitive_header("Password-Hint")); // "password" at start
+        assert!(is_sensitive_header("x-client-secret"));
+    }
+
+    #[test]
+    fn sensitive_header_safe_names_are_not_flagged() {
+        assert!(!is_sensitive_header("User-Agent"));
+        assert!(!is_sensitive_header("Content-Type"));
+        assert!(!is_sensitive_header("Accept"));
+        assert!(!is_sensitive_header("X-Request-Id"));
+    }
+
+    // ── is_sensitive_query_param ──────────────────────────────────────────
+
+    #[test]
+    fn sensitive_query_param_catches_token_secret_password_and_key_variants() {
+        assert!(is_sensitive_query_param("access_token"));
+        assert!(is_sensitive_query_param("client_secret"));
+        assert!(is_sensitive_query_param("password"));
+        assert!(is_sensitive_query_param("api_key"));
+        assert!(is_sensitive_query_param("key")); // exact "key"
+        assert!(is_sensitive_query_param("my_key")); // ends with "_key"
+    }
+
+    #[test]
+    fn sensitive_query_param_is_case_insensitive_on_dynamic_patterns() {
+        assert!(is_sensitive_query_param("ACCESS_TOKEN"));
+        assert!(is_sensitive_query_param("Client_Secret"));
+        assert!(is_sensitive_query_param("PASSWORD"));
+    }
+
+    #[test]
+    fn sensitive_query_param_safe_names_are_not_flagged() {
+        assert!(!is_sensitive_query_param("ref"));
+        assert!(!is_sensitive_query_param("page"));
+        assert!(!is_sensitive_query_param("per_page"));
+        assert!(!is_sensitive_query_param("format"));
+    }
+
+    // ── redact_url_for_live ───────────────────────────────────────────────
+
+    #[test]
+    fn live_url_strips_userinfo_and_query() {
+        let out = redact_url_for_live(
             "https://user:pass@api.github.com/repos/o/r?access_token=secret&ref=main",
         );
-        assert!(!logged.contains("user:pass"));
-        assert!(!logged.contains("access_token"));
-        assert!(!logged.contains("secret"));
-        assert!(!logged.contains('?'));
-        assert!(logged.contains("api.github.com/repos/o/r"));
+        assert!(!out.contains("user"), "username leaked");
+        assert!(!out.contains("pass"), "password leaked");
+        assert!(!out.contains("access_token"), "secret param name leaked");
+        assert!(!out.contains("secret"), "secret value leaked");
+        assert!(!out.contains('?'), "query separator leaked");
+        assert!(out.contains("api.github.com/repos/o/r"));
     }
+
+    #[test]
+    fn live_url_strips_credentials_even_without_query() {
+        let out = redact_url_for_live("https://token:x@api.github.com/data");
+        assert!(!out.contains("token:x"), "credentials leaked");
+        assert!(out.contains("api.github.com/data"));
+    }
+
+    #[test]
+    fn live_url_passes_through_unparseable_input_unchanged() {
+        // Not a valid URL: returned as-is rather than panicking or corrupting.
+        let raw = "not a url at all";
+        assert_eq!(redact_url_for_live(raw), raw);
+    }
+
+    // ── redact_http_url_for_summary ───────────────────────────────────────
 
     #[test]
     fn http_summary_uses_method_host_path() {
@@ -143,7 +223,18 @@ mod tests {
     }
 
     #[test]
-    fn git_remote_redacts_ssh_form() {
+    fn http_summary_falls_back_for_unparseable_url() {
+        let raw = "not-a-url";
+        let summary = redact_http_url_for_summary("POST", raw);
+        // Must not panic; must include the method and original text.
+        assert!(summary.starts_with("POST "));
+        assert!(summary.contains(raw));
+    }
+
+    // ── redact_git_remote ─────────────────────────────────────────────────
+
+    #[test]
+    fn git_remote_ssh_form_strips_dot_git() {
         assert_eq!(
             redact_git_remote("git@github.com:raulk/omnifs.git"),
             "github.com:raulk/omnifs"
@@ -151,14 +242,97 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_header_names_include_github_token() {
-        assert!(is_sensitive_header("X-GitHub-Token"));
-        assert!(!is_sensitive_header("User-Agent"));
+    fn git_remote_ssh_form_without_dot_git_is_unchanged() {
+        assert_eq!(
+            redact_git_remote("git@github.com:raulk/omnifs"),
+            "github.com:raulk/omnifs"
+        );
     }
 
     #[test]
-    fn cache_key_shaped_summary_rejects_urls() {
+    fn git_remote_https_with_embedded_credentials_are_stripped() {
+        // User info in an HTTPS remote must not appear in the display form.
+        let out = redact_git_remote("https://user:token@github.com/org/repo.git");
+        assert!(!out.contains("user"), "username leaked in https remote");
+        assert!(!out.contains("token"), "token leaked in https remote");
+        assert!(out.contains("github.com"), "host missing");
+        assert!(out.contains("org/repo"), "path missing");
+    }
+
+    #[test]
+    fn git_remote_plain_https_strips_dot_git() {
+        let out = redact_git_remote("https://github.com/org/repo.git");
+        assert_eq!(out, "github.com:org/repo");
+    }
+
+    #[test]
+    fn git_remote_non_url_non_ssh_returned_trimmed() {
+        // Something that is neither git@ nor a URL is returned as-is (trimmed).
+        assert_eq!(redact_git_remote("  somepath  "), "somepath");
+    }
+
+    // ── summary_is_cache_key_shaped ───────────────────────────────────────
+
+    #[test]
+    fn cache_key_shaped_accepts_plain_path_style_summaries() {
         assert!(summary_is_cache_key_shaped("arxiv/pdf/2401.12345"));
+        assert!(summary_is_cache_key_shaped("owner/repo/commit/abc123"));
+        assert!(summary_is_cache_key_shaped("")); // empty is technically fine
+    }
+
+    #[test]
+    fn cache_key_shaped_rejects_summaries_with_scheme() {
         assert!(!summary_is_cache_key_shaped("https://example.com/x"));
+        assert!(!summary_is_cache_key_shaped("http://example.com/y"));
+    }
+
+    #[test]
+    fn cache_key_shaped_rejects_summaries_with_query_string() {
+        assert!(!summary_is_cache_key_shaped("owner/repo?ref=main"));
+    }
+
+    #[test]
+    fn cache_key_shaped_rejects_summaries_longer_than_512_chars() {
+        let exactly_512 = "x".repeat(512);
+        let over_512 = "x".repeat(513);
+        assert!(summary_is_cache_key_shaped(&exactly_512));
+        assert!(!summary_is_cache_key_shaped(&over_512));
+    }
+
+    // ── write_truncated ───────────────────────────────────────────────────
+
+    fn truncated(value: &str, max: usize) -> String {
+        struct T<'a>(&'a str, usize);
+        impl std::fmt::Display for T<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write_truncated(f, self.0, self.1)
+            }
+        }
+        T(value, max).to_string()
+    }
+
+    #[test]
+    fn write_truncated_returns_full_string_when_under_limit() {
+        assert_eq!(truncated("hello", 10), "hello");
+    }
+
+    #[test]
+    fn write_truncated_returns_full_string_at_exact_limit() {
+        // 5 chars, max = 5: no ellipsis because the loop exits normally.
+        assert_eq!(truncated("hello", 5), "hello");
+    }
+
+    #[test]
+    fn write_truncated_appends_ellipsis_at_one_over_limit() {
+        // 6 chars, max = 5: truncated at index 5 → first 5 chars + "..."
+        assert_eq!(truncated("hello!", 5), "hello...");
+    }
+
+    #[test]
+    fn write_truncated_does_not_leak_chars_past_the_cutoff() {
+        // Regression guard: nothing after the max-th char may appear in output.
+        let out = truncated("abcdefghij", 3);
+        assert_eq!(out, "abc...");
+        assert!(!out.contains('d'));
     }
 }

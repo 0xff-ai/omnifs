@@ -436,13 +436,6 @@ pub(crate) async fn list_containers(cx: &Cx) -> Result<Vec<ContainerSummary>> {
     fetch_json(cx, "/containers/json", &[("all", "true")]).await
 }
 
-pub(crate) fn pretty_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| ProviderError::internal(format!("docker JSON encode error: {error}")))?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
 fn strip_leading_slash(raw: &str) -> &str {
     raw.strip_prefix('/').unwrap_or(raw)
 }

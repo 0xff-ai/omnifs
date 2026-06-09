@@ -13,12 +13,15 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
-// SAFETY: libc::getuid() and libc::getgid() are trivially safe.
+// SAFETY: getuid(2) takes no arguments, reads only kernel-maintained process state,
+// and is always safe to call on any POSIX system.
 #[allow(unsafe_code)]
 fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+// SAFETY: getgid(2) takes no arguments, reads only kernel-maintained process state,
+// and is always safe to call on any POSIX system.
 #[allow(unsafe_code)]
 fn current_gid() -> u32 {
     unsafe { libc::getgid() }

@@ -12,7 +12,7 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::Provider;
-use crate::runtime::HostState;
+use crate::wasi::HostState;
 use crate::wasm;
 use crate::{BuildError, Error, Op};
 use omnifs_mount_schema::{PreopenMode, PreopenedPath};

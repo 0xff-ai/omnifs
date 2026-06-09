@@ -48,6 +48,14 @@ impl StoredObject {
     }
 }
 
+/// One entry in a `Cache::store_batch` call. Fence checks and view evictions
+/// are the caller's responsibility; this type carries pre-validated data.
+pub struct StoreBatchEntry {
+    pub scoped_id: Vec<u8>,
+    pub canonical: Canonical,
+    pub new_leaves: Vec<String>,
+}
+
 /// Global, durable object-id cache. One instance per process; mount isolation
 /// is enforced by the `mount\x1f` key prefix injected by `Store`.
 pub struct Cache {
@@ -103,6 +111,64 @@ impl Cache {
         let merged_leaves = merge_leaves(&base_leaves, new_leaves);
         let stored = StoredObject::new(scoped_id, canonical, merged_leaves);
         self.commit_object(scoped_id, &stored, new_leaves)
+    }
+
+    /// Batch canonical store: commits all entries in ONE redb write transaction.
+    ///
+    /// Fence checks and prior-leaf view evictions are the caller's responsibility
+    /// (done before this call so they can be rejected individually without
+    /// aborting the batch). Each entry reads existing leaves, merges, serializes,
+    /// then all writes land in one commit.
+    pub fn store_batch(&self, entries: &[StoreBatchEntry]) {
+        if entries.is_empty() {
+            return;
+        }
+
+        // Read phase: collect prior leaves + build StoredObject for each entry.
+        let prepared: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .filter_map(|e| {
+                let prior_leaves = self.leaves_of(&e.scoped_id);
+                let merged_leaves = merge_leaves(&prior_leaves, &e.new_leaves);
+                let stored =
+                    StoredObject::new(&e.scoped_id, Some(e.canonical.clone()), merged_leaves);
+                let payload = match postcard::to_allocvec(&stored) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "object cache: batch serialize failed; skipping entry"
+                        );
+                        return None;
+                    },
+                };
+                Some((e.scoped_id.clone(), payload))
+            })
+            .collect();
+
+        if prepared.is_empty() {
+            return;
+        }
+
+        let result = (|| -> Result<()> {
+            let txn = self.disk.begin_write()?;
+            {
+                let mut objects = txn.open_table(OBJECTS_TABLE)?;
+                let mut paths = txn.open_table(PATHS_TABLE)?;
+                for ((scoped_id, payload), entry) in prepared.iter().zip(entries.iter()) {
+                    objects.insert(scoped_id.as_slice(), payload.as_slice())?;
+                    for leaf in &entry.new_leaves {
+                        paths.insert(leaf.as_bytes(), scoped_id.as_slice())?;
+                    }
+                }
+            }
+            txn.commit()?;
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "object cache: batch write failed");
+        }
     }
 
     pub fn get(&self, scoped_id: &[u8]) -> Option<StoredObject> {
@@ -227,9 +293,12 @@ fn decode_object(bytes: &[u8]) -> Option<StoredObject> {
 }
 
 fn merge_leaves(existing: &[String], new_leaves: &[String]) -> Vec<String> {
+    // Build a set over existing entries to avoid O(n²) scanning; new leaves
+    // are deduplicated in arrival order (first occurrence kept).
+    let mut seen: std::collections::HashSet<&str> = existing.iter().map(String::as_str).collect();
     let mut merged = existing.to_vec();
     for leaf in new_leaves {
-        if !merged.contains(leaf) {
+        if seen.insert(leaf.as_str()) {
             merged.push(leaf.clone());
         }
     }
@@ -392,5 +461,92 @@ mod tests {
                 .id_of(scoped_path("m", "/issues/42/other").as_slice())
                 .is_none()
         );
+    }
+
+    /// Batch-put of N objects yields identical observable state (`get`/`id_of`/`leaves_of`)
+    /// to N individual single puts, including a mixed case with one fence-rejected entry.
+    #[test]
+    fn store_batch_equivalent_to_single_puts() {
+        let (_dir_a, cache_a) = open_cache();
+        let (_dir_b, cache_b) = open_cache();
+
+        let id1 = scoped_id("m", b"obj:1");
+        let id2 = scoped_id("m", b"obj:2");
+        let id3 = scoped_id("m", b"obj:3"); // will be "fence-rejected" by the caller
+
+        let l1a = "m\x1f/issues/1/item.json".to_string();
+        let l1b = "m\x1f/issues/all/1/item.json".to_string();
+        let l2 = "m\x1f/issues/2/item.json".to_string();
+        let l3 = "m\x1f/issues/3/item.json".to_string();
+
+        // Single-put baseline: obj:3 is intentionally omitted (simulates rejection).
+        cache_a.store(
+            &id1,
+            Canonical {
+                bytes: b"payload1".to_vec(),
+                validator: Some("v1".to_string()),
+            },
+            &[l1a.clone(), l1b.clone()],
+            |_| {},
+        );
+        cache_a.store(
+            &id2,
+            Canonical {
+                bytes: b"payload2".to_vec(),
+                validator: None,
+            },
+            std::slice::from_ref(&l2),
+            |_| {},
+        );
+
+        // Batch-put equivalent (obj:3 excluded, same as single-put baseline).
+        cache_b.store_batch(&[
+            StoreBatchEntry {
+                scoped_id: id1.clone(),
+                canonical: Canonical {
+                    bytes: b"payload1".to_vec(),
+                    validator: Some("v1".to_string()),
+                },
+                new_leaves: vec![l1a.clone(), l1b.clone()],
+            },
+            StoreBatchEntry {
+                scoped_id: id2.clone(),
+                canonical: Canonical {
+                    bytes: b"payload2".to_vec(),
+                    validator: None,
+                },
+                new_leaves: vec![l2.clone()],
+            },
+        ]);
+        // obj:3 not included — caller (Store fence) would have dropped it.
+        let _ = (&id3, &l3); // suppress unused warnings
+
+        // Verify identical observable state.
+        for (desc, ca, cb, id, leaf_a, leaf_b) in [
+            ("obj:1 a leaf", &cache_a, &cache_b, &id1, &l1a, &l1a),
+            ("obj:1 b leaf", &cache_a, &cache_b, &id1, &l1b, &l1b),
+            ("obj:2 leaf", &cache_a, &cache_b, &id2, &l2, &l2),
+        ] {
+            let got_a = ca.get(id).unwrap();
+            let got_b = cb.get(id).unwrap();
+            assert_eq!(
+                got_a.canonical, got_b.canonical,
+                "{desc}: canonical mismatch"
+            );
+            assert!(
+                got_a.leaves.contains(leaf_a),
+                "{desc}: single-put missing leaf"
+            );
+            assert!(got_b.leaves.contains(leaf_b), "{desc}: batch missing leaf");
+            assert_eq!(
+                ca.id_of(leaf_a.as_bytes()).as_deref(),
+                cb.id_of(leaf_b.as_bytes()).as_deref(),
+                "{desc}: id_of mismatch"
+            );
+        }
+
+        // obj:3 should be absent in both (neither was written).
+        assert!(cache_a.get(&id3).is_none());
+        assert!(cache_b.get(&id3).is_none());
     }
 }

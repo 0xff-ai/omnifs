@@ -1,7 +1,8 @@
-//! WASM provider execution and callout handling.
+//! Engine/instance/mount lifecycle for one WASM provider.
 //!
-//! Manages the Wasmtime store, routes provider callouts to host
-//! implementations (HTTP, Git), and drives async continuations.
+//! `Runtime` manages the Wasmtime store lifetime, provider initialization,
+//! executor handles (HTTP, Git, Blob, Archive), and cache/mount lifecycle.
+//! Op execution is in `op_lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::archive::ArchiveExecutor;
 use crate::auth::{AuthManager, credential_store_for_config_dir};
@@ -12,7 +13,7 @@ use crate::cloner::GitCloner;
 use crate::git;
 use crate::http::HttpStack;
 use crate::inflight::InFlight;
-use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
+use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::manifest::Artifact;
@@ -25,17 +26,12 @@ use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
 use omnifs_core::MountName;
 use omnifs_core::path::Path as ProtocolPath;
-use omnifs_inspector::{InspectorOutcome, OutcomeFields, TraceId};
 use omnifs_mount_schema::ProviderConfig;
-use omnifs_wit::provider::log::Host as LogHost;
-use omnifs_wit::provider::types::{self as wit_types, Host as TypesHost};
+use omnifs_wit::provider::types as wit_types;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, warn};
-use wasmtime::component::{HasData, ResourceTable};
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::clock::{self, MUTABLE_TTL_MILLIS};
 use crate::object_id::ObjectId;
@@ -113,11 +109,11 @@ impl<'a> Dirs<'a> {
 /// Manages the Wasmtime store, routes callouts, and handles async
 /// continuations with operation ID allocation.
 pub struct Runtime {
-    instance: Instance,
+    pub(crate) instance: Instance,
     initialize_result: wit_types::InitializeResult,
-    mount_name: String,
-    provider_id: String,
-    operation_ids: OperationIds,
+    pub(crate) mount_name: String,
+    pub(crate) provider_id: String,
+    pub(crate) operation_ids: OperationIds,
     pub(crate) http: Arc<HttpStack>,
     pub(crate) git: git::GitExecutor,
     pub(crate) blob: BlobExecutor,
@@ -138,6 +134,9 @@ pub struct Runtime {
     // cache instead of EAGAIN until it clears. std Mutex: the critical section
     // is a single set/get with no await held across it.
     rate_limit_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Injected inspector sink. Defaults to the process-global configured sink
+    /// so production wiring is unchanged; tests can supply their own.
+    pub(crate) inspector: Option<Arc<InspectorSink>>,
 }
 
 pub struct TestOp<'a> {
@@ -158,37 +157,6 @@ enum TestOpState {
 
 pub struct Namespace<'a> {
     pub(crate) runtime: &'a Runtime,
-}
-
-pub(crate) struct HostState {
-    pub(crate) wasi: WasiCtx,
-    pub(crate) table: ResourceTable,
-}
-
-impl WasiView for HostState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl HasData for HostState {
-    type Data<'a> = &'a mut HostState;
-}
-
-impl TypesHost for HostState {}
-impl LogHost for HostState {
-    fn log(&mut self, entry: wit_types::LogEntry) {
-        match entry.level {
-            wit_types::LogLevel::Trace => trace!("{}", entry.message),
-            wit_types::LogLevel::Debug => debug!("{}", entry.message),
-            wit_types::LogLevel::Info => info!("{}", entry.message),
-            wit_types::LogLevel::Warn => warn!("{}", entry.message),
-            wit_types::LogLevel::Error => error!("{}", entry.message),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -361,6 +329,7 @@ impl Runtime {
             inflight: InFlight::new(),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
+            inspector: inspector::global(),
         })
     }
 
@@ -553,116 +522,6 @@ impl Runtime {
             None,
         )
         .await
-    }
-
-    pub(crate) async fn run_op(
-        &self,
-        op: Op,
-        fuse_trace: Option<TraceId>,
-    ) -> Result<wit_types::OpResult> {
-        // The generation captured here fences any `canonical-write` this op
-        // emits: a write is rejected if the anchor was invalidated after the
-        // op began (ADR-0001 §4.1).
-        let op_gen = self.cache.current_generation();
-        let id = self.operation_ids.allocate();
-        let trace_id = fuse_trace.or_else(inspector::current_trace_id);
-        let live_op = trace_id.and_then(|t| {
-            InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_id, t)
-        });
-        let mut resume_round = 0u32;
-        let mut step = self.instance.start_op(&op, id)?;
-        let result = loop {
-            match step {
-                wit_types::ProviderStep::Returned(ret) => {
-                    let handoff_start = std::time::Instant::now();
-                    let outcome = self.finish_provider_return(&op, ret, op_gen);
-                    // Emit subtree.start/end when the provider handed
-                    // off a tree-ref. Done here, after finish handles
-                    // the validation + effect-apply, so the elapsed
-                    // reflects the resolution work.
-                    if let (Some(trace), Ok(op_result)) = (trace_id, outcome.as_ref())
-                        && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
-                        && let Some(sink) = inspector::global()
-                    {
-                        sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
-                    }
-                    break outcome;
-                },
-                wit_types::ProviderStep::Suspended(callouts) => {
-                    if callouts.is_empty() {
-                        break Err(Error::ProviderProtocol(
-                            "provider suspended with no callouts".to_string(),
-                        ));
-                    }
-                    if let Some(live) = &live_op {
-                        live.suspend(callouts.len());
-                    }
-                    let results = self.dispatch_callouts(id, &callouts).await;
-                    if let Some(live) = &live_op {
-                        live.resume(resume_round, results.len());
-                    }
-                    resume_round += 1;
-                    step = self.instance.resume(id, results)?;
-                },
-            }
-        };
-        if let Some(live) = live_op {
-            let outcome = match &result {
-                Ok(_) => OutcomeFields::ok(),
-                Err(Error::ProviderError(error)) => {
-                    OutcomeFields::with_outcome(WitProviderErrorView(error).outcome())
-                },
-                Err(_) => OutcomeFields::with_outcome(InspectorOutcome::Internal),
-            };
-            live.finish(outcome);
-        }
-        if let Ok(result) = &result {
-            self.note_returned_result(result);
-        }
-        result
-    }
-
-    fn finish_provider_return(
-        &self,
-        op: &Op,
-        ret: wit_types::ProviderReturn,
-        op_gen: u64,
-    ) -> Result<wit_types::OpResult> {
-        op_validate::validate_return(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
-            .map_err(Error::ProviderProtocol)?;
-        let now = clock::now_millis();
-        let (prefixes, paths) =
-            crate::materialize::Materializer::new(&self.cache).apply(&ret.effects, op_gen, now);
-        self.record_view_invalidations(prefixes, paths);
-        self.store_read_not_found_negative(op, &ret.result, op_gen, now);
-        Ok(ret.result)
-    }
-
-    fn store_read_not_found_negative(
-        &self,
-        op: &Op,
-        result: &wit_types::OpResult,
-        op_gen: u64,
-        now_millis: u64,
-    ) {
-        if let (
-            Op::ReadFile { path, .. },
-            wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::NotFound(maybe_id)),
-        ) = (op, result)
-        {
-            self.apply_not_found_negative(path.as_str(), maybe_id.as_ref(), op_gen, now_millis);
-        }
-    }
-
-    fn note_returned_result(&self, result: &wit_types::OpResult) {
-        if let wit_types::OpResult::Error(e) = result
-            && e.kind == wit_types::ErrorKind::RateLimited
-        {
-            self.note_rate_limited(
-                e.retry_after
-                    .map(|s| std::time::Duration::from_secs(u64::from(s))),
-            );
-        }
     }
 
     /// Resolve a tree-ref handle to a real filesystem path.

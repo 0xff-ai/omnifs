@@ -1,12 +1,8 @@
 //! `omnifs logs` — tail container output.
 
-use anyhow::Context;
-use bollard::Docker;
-use bollard::query_parameters::LogsOptions;
 use clap::Args;
-use futures_util::StreamExt;
-use std::process::Command;
 
+use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -26,41 +22,14 @@ impl LogsArgs {
         use crate::paths::{PathOverrides, Paths};
 
         let (_paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
-        let container_name = RuntimeTarget::resolve_container_name(self.container_name, &config)?;
+        let target = RuntimeTarget::resolve(self.container_name, None, &config)?;
+        let runtime = Runtime::connect_ready(&target, "omnifs logs").await?;
+        let container_name = target.container_name().clone();
+
         if self.follow {
-            // Tail the daemon's file log; bollard's `logs` API only surfaces stdout
-            // and the entrypoint writes through a `tee` pipe that buffers at EOL
-            // boundaries.
-            let status = Command::new("docker")
-                .args([
-                    "exec",
-                    container_name.as_str(),
-                    "tail",
-                    "-F",
-                    "/tmp/omnifs.log",
-                ])
-                .status()
-                .context("spawn `docker exec ... tail -F`")?;
-            if !status.success() {
-                anyhow::bail!("docker exec exited with {status}");
-            }
-            return Ok(());
+            runtime.exec_follow_log(&container_name).await
+        } else {
+            runtime.container_logs(&container_name, None).await
         }
-        let docker = Docker::connect_with_local_defaults()
-            .context("connect to Docker daemon (is it running?)")?;
-        let mut stream = docker.logs(
-            container_name.as_str(),
-            Some(LogsOptions {
-                stdout: true,
-                stderr: true,
-                timestamps: false,
-                ..Default::default()
-            }),
-        );
-        while let Some(chunk) = stream.next().await {
-            let line = chunk.with_context(|| format!("read logs from `{container_name}`"))?;
-            anstream::print!("{line}");
-        }
-        Ok(())
     }
 }

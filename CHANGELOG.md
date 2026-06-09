@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
+
+### Changed
+
+- Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
+
+### Fixed
+
+- The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
+- The arXiv provider no longer crashes when it fails to encode a JSON response.
+
 ## [0.2.1] - 2026-06-08
 
 ### Fixed

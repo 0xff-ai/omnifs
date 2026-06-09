@@ -140,7 +140,7 @@ fn path_tail(path: &str) -> &str {
 }
 
 fn render_tree(data: &MountTreeData) -> String {
-    let mut handlers = data.handlers.clone();
+    let mut handlers: Vec<&mts::HandlerRecord> = data.handlers.iter().collect();
     handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
 
     let mut body = String::new();
@@ -159,7 +159,7 @@ fn render_tree(data: &MountTreeData) -> String {
 }
 
 fn render_paths(data: &MountTreeData) -> String {
-    let mut handlers = data.handlers.clone();
+    let mut handlers: Vec<&mts::HandlerRecord> = data.handlers.iter().collect();
     handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
 
     let col_width = handlers
@@ -223,7 +223,7 @@ fn render_by_type(data: &MountTreeData) -> String {
 }
 
 fn render_mutations(data: &MountTreeData) -> String {
-    let mut mutations = data.mutations.clone();
+    let mut mutations: Vec<&mts::MutationRecord> = data.mutations.iter().collect();
     mutations.sort_by(|left, right| left.path_template.cmp(&right.path_template));
 
     let mut body = String::new();

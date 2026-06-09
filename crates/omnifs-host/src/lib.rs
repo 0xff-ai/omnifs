@@ -35,6 +35,7 @@ pub mod mounts;
 mod namespace;
 mod object_id;
 mod op;
+mod op_lifecycle;
 mod op_validate;
 mod operation_ids;
 pub mod pagination;
@@ -45,6 +46,7 @@ pub(crate) mod sandbox;
 mod schema;
 pub mod tools;
 mod tree_refs;
+mod wasi;
 mod wasm;
 pub mod wit_protocol;
 

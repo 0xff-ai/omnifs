@@ -9,7 +9,6 @@
 
 use crate::blob::BlobId;
 use crate::cx::Cx;
-use crate::error::ProviderError;
 use crate::handler::TreeRef;
 use crate::http::CalloutFuture;
 use omnifs_wit::provider::types::{
@@ -93,16 +92,15 @@ impl<'cx, S> OpenRequest<'cx, S> {
             format: self.format.into(),
             strip_prefix: self.strip_prefix,
         };
-        CalloutFuture::new(
-            self.cx,
-            Callout::OpenArchive(request),
-            |result| match result {
-                CalloutResult::ArchiveOpened(opened) => Ok(TreeRef::new(opened.tree)),
-                CalloutResult::CalloutError(e) => Err(e.into()),
-                _ => Err(ProviderError::internal(
-                    "unexpected callout result for open-archive",
-                )),
-            },
-        )
+        CalloutFuture::new(self.cx, Callout::OpenArchive(request), |r| {
+            crate::http::expect_callout(
+                "open-archive",
+                |r| match r {
+                    CalloutResult::ArchiveOpened(opened) => Some(Ok(TreeRef::new(opened.tree))),
+                    _ => None,
+                },
+                r,
+            )
+        })
     }
 }

@@ -34,6 +34,8 @@ impl ScopedEnvVar {
     fn set(key: &str, value: &str) -> Self {
         let guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var_os(key);
+        // SAFETY: ENV_LOCK is held, so no other thread is reading or writing
+        // the environment concurrently.
         unsafe { std::env::set_var(key, value) };
         Self {
             _guard: guard,
@@ -45,6 +47,8 @@ impl ScopedEnvVar {
 
 impl Drop for ScopedEnvVar {
     fn drop(&mut self) {
+        // SAFETY: ENV_LOCK is still held via `_guard` in Self, so no other
+        // thread is reading or writing the environment concurrently.
         match &self.original {
             Some(value) => unsafe { std::env::set_var(&self.key, value) },
             None => unsafe { std::env::remove_var(&self.key) },

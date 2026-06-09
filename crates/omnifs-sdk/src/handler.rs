@@ -52,6 +52,14 @@ impl<S> DirCx<S> {
             _ => None,
         }
     }
+
+    /// The `Cursor::Page` value, or `default` when no page cursor is present.
+    pub fn page_cursor(&self, default: u32) -> u32 {
+        match self.cursor() {
+            Some(Cursor::Page(n)) => *n,
+            _ => default,
+        }
+    }
 }
 
 impl<S> std::ops::Deref for DirCx<S> {

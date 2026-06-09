@@ -116,13 +116,14 @@ pub(crate) fn blob_fetch_callout(
 }
 
 pub(crate) fn extract_blob(result: CalloutResult) -> Result<BlobRef> {
-    match result {
-        CalloutResult::BlobFetched(fetched) => Ok(BlobRef::from(fetched)),
-        CalloutResult::CalloutError(e) => Err(e.into()),
-        _ => Err(ProviderError::internal(
-            "unexpected callout result for fetch-blob",
-        )),
-    }
+    crate::http::expect_callout(
+        "fetch-blob",
+        |r| match r {
+            CalloutResult::BlobFetched(f) => Some(Ok(BlobRef::from(f))),
+            _ => None,
+        },
+        result,
+    )
 }
 
 /// Builder returned by `cx.blob(id)`.
@@ -175,11 +176,12 @@ impl<'cx, S> BlobReader<'cx, S> {
 }
 
 fn extract_blob_read(result: CalloutResult) -> Result<Vec<u8>> {
-    match result {
-        CalloutResult::BlobRead(bytes) => Ok(bytes),
-        CalloutResult::CalloutError(e) => Err(e.into()),
-        _ => Err(ProviderError::internal(
-            "unexpected callout result for read-blob",
-        )),
-    }
+    crate::http::expect_callout(
+        "read-blob",
+        |r| match r {
+            CalloutResult::BlobRead(bytes) => Some(Ok(bytes)),
+            _ => None,
+        },
+        result,
+    )
 }

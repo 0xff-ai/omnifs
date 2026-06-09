@@ -133,15 +133,16 @@ impl<'cx, S> Request<'cx, S> {
             headers: WitHeaders(&self.headers).into(),
             body: self.body,
         };
-        CalloutFuture::new(
-            self.cx,
-            Callout::Fetch(wit_request),
-            |result| match result {
-                CalloutResult::HttpResponse(resp) => response_from_wit(resp),
-                CalloutResult::CalloutError(e) => Err(e.into()),
-                _ => Err(ProviderError::internal("unexpected callout result type")),
-            },
-        )
+        CalloutFuture::new(self.cx, Callout::Fetch(wit_request), |r| {
+            expect_callout(
+                "fetch",
+                |r| match r {
+                    CalloutResult::HttpResponse(resp) => Some(response_from_wit(resp)),
+                    _ => None,
+                },
+                r,
+            )
+        })
     }
 
     fn open_breaker_error(&self) -> Option<ProviderError> {
@@ -151,6 +152,19 @@ impl<'cx, S> Request<'cx, S> {
             ProviderError::rate_limited(format!("endpoint breaker open for {authority}"))
                 .with_retry_after(Some(remaining)),
         )
+    }
+
+    /// Merge pre-validated headers into this request.
+    ///
+    /// The caller already holds a `HeaderMap` built through validated
+    /// `HeaderName`/`HeaderValue` insertions (e.g. from `endpoint::RequestBuilder`),
+    /// so no re-parsing is needed here.
+    pub(crate) fn extend_headers(mut self, headers: HeaderMap) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.headers.extend(headers);
+        self
     }
 
     /// Convert this request into a blob-fetch. The response body lands
@@ -303,6 +317,33 @@ fn status_error(resp: &Response<Vec<u8>>) -> ProviderError {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
     ProviderError::rate_limited(message).with_retry_after(retry_after_secs)
+}
+
+/// Unified callout result extractor.
+///
+/// Maps `CalloutError` to `Err` and routes the accepted variant through
+/// `pick`. Returns `Err` with a message naming `kind` when the result is
+/// neither `CalloutError` nor the expected variant (`pick` returns `None`).
+/// If `pick` returns `Some(Err(...))`, that error propagates as-is so
+/// fallible conversions (e.g. status parsing) preserve their message.
+///
+/// `pick` is a `fn` pointer so non-capturing closures at call sites coerce
+/// to it, keeping every extractor a plain `fn(CalloutResult) -> Result<T>`
+/// that `CalloutFuture::new` accepts without boxing.
+pub(crate) fn expect_callout<T>(
+    kind: &'static str,
+    pick: fn(CalloutResult) -> Option<Result<T>>,
+    result: CalloutResult,
+) -> Result<T> {
+    match result {
+        CalloutResult::CalloutError(e) => Err(e.into()),
+        other => match pick(other) {
+            Some(outcome) => outcome,
+            None => Err(ProviderError::internal(format!(
+                "unexpected callout result for {kind}"
+            ))),
+        },
+    }
 }
 
 pub enum CalloutFuture<'cx, S, T> {

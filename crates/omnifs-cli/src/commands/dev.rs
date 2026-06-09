@@ -15,11 +15,12 @@ use std::process::Command;
 use crate::app_context::AppContext;
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
+use crate::launch::{LaunchSpec, launch_session};
 use crate::paths::PathOverrides;
-use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
+use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT};
 use crate::session::{
-    CONTAINER_NAME, CredsBackend, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, Session, env_string,
-    set_private_dir, write_secret,
+    CONTAINER_NAME, CredsBackend, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, env_string, set_private_dir,
+    write_secret,
 };
 
 const CHINOOK_URL: &str = "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite";
@@ -76,36 +77,35 @@ impl DevArgs {
         let paths = ctx.paths();
         let runtime = ctx.runtime();
 
-        let session = Session::prepare(runtime.container_name(), &paths.credentials_file)?;
-        let mut cleanup = session.cleanup_on_drop();
-        anstream::println!("Preparing session at {}", session.root().display());
-        anstream::println!("Installing built-in dev mount configs");
-        let configs = dev_mounts::install(&session)?;
-
         // Use the same JSON credential store as the normal CLI path so
         // contributor builds never trigger platform keychain prompts.
         let store = CredsBackend::file(&paths.credentials_file, true);
-        anstream::println!("Materializing mount configs and credentials");
-        session.populate(&configs, ctx.catalog(), store.as_ref())?;
-        anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
-        let rt = Runtime::connect_ready(runtime, "omnifs dev").await?;
+        launch_session(
+            LaunchSpec {
+                runtime,
+                credentials_file: &paths.credentials_file,
+                store,
+                verb: "omnifs dev",
+                extras: ContainerExtras {
+                    binds: vec![
+                        format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
+                        format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
+                    ],
+                    env: vec![format!(
+                        "OMNIFS_INSPECTOR_ADDR=0.0.0.0:{GUEST_INSPECTOR_PORT}"
+                    )],
+                    tcp_ports: vec![],
+                },
+            },
+            ctx.catalog(),
+            |session| {
+                anstream::println!("Installing built-in dev mount configs");
+                dev_mounts::install(session)
+            },
+        )
+        .await?;
 
-        let extras = ContainerExtras {
-            binds: vec![
-                format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
-                format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
-            ],
-            env: vec![format!(
-                "OMNIFS_INSPECTOR_ADDR=0.0.0.0:{GUEST_INSPECTOR_PORT}"
-            )],
-            tcp_ports: vec![GUEST_INSPECTOR_PORT],
-        };
-        rt.launch_container(&session, extras).await?;
-
-        rt.wait_for_fuse_mount().await?;
-        rt.verify_status(&configs).await?;
-        cleanup.disarm();
         anstream::println!(
             "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
             runtime.container_name()

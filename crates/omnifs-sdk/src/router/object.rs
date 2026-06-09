@@ -1,5 +1,6 @@
 //! Object route registration, read path, and view-leaf expansion.
 
+use super::pattern::{CaptureLocation, Pattern};
 use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
@@ -8,7 +9,6 @@ use crate::file_attrs::{FileAttrs, FileProj, Size, Stability};
 use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object, ObjectShape, ProjectFn};
 use crate::repr::{RenderSet, RenderTable};
 use omnifs_core::ContentType;
-use omnifs_core::path::{CaptureLocation, Pattern};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

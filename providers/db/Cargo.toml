@@ -18,6 +18,7 @@ targets = []
 
 [dependencies]
 omnifs-sdk = { workspace = true }
+hashbrown = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }

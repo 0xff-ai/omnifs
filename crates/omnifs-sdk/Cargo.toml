@@ -14,6 +14,7 @@ omnifs-core = { workspace = true }
 omnifs-mount-schema = { workspace = true }
 omnifs-sdk-macros = { workspace = true }
 omnifs-wit = { workspace = true }
+thiserror = { workspace = true }
 lru = "0.16"
 hashbrown = { workspace = true }
 http = { workspace = true }

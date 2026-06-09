@@ -21,7 +21,7 @@ pub struct Router<S = ()> {
     pub(super) objects: Vec<super::object::ObjectEntry<S>>,
     pub(super) handler_files: Vec<super::handlers::FileEntry<S>>,
     pub(super) handler_dirs: Vec<super::handlers::DirEntry<S>>,
-    pub(super) leaf_claims: Vec<omnifs_core::path::Pattern>,
+    pub(super) leaf_claims: Vec<super::pattern::Pattern>,
 }
 
 impl<S> Default for Router<S> {

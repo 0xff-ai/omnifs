@@ -1,7 +1,6 @@
 //! Typed async Git callout builders.
 
 use crate::cx::Cx;
-use crate::error::ProviderError;
 use crate::http::CalloutFuture;
 use omnifs_wit::provider::types::{Callout, CalloutResult, GitOpenRequest, GitRepoInfo};
 
@@ -25,10 +24,15 @@ impl<'cx, S> Builder<'cx, S> {
                 cache_key: cache_key.into(),
                 clone_url: clone_url.into(),
             }),
-            |result| match result {
-                CalloutResult::GitRepoOpened(info) => Ok(info),
-                CalloutResult::CalloutError(e) => Err(e.into()),
-                _ => Err(ProviderError::internal("unexpected callout result type")),
+            |r| {
+                crate::http::expect_callout(
+                    "git-open-repo",
+                    |r| match r {
+                        CalloutResult::GitRepoOpened(info) => Some(Ok(info)),
+                        _ => None,
+                    },
+                    r,
+                )
             },
         )
     }

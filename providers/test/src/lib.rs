@@ -406,10 +406,7 @@ async fn bundle(_cx: DirCx<State>) -> Result<DirProjection> {
 }
 
 async fn feed(cx: DirCx<State>) -> Result<DirProjection> {
-    let page = match cx.cursor() {
-        Some(Cursor::Page(n)) => *n,
-        _ => 0,
-    };
+    let page = cx.page_cursor(0);
     let entries = [
         Entry::dir(format!("item-{}", page * 2)),
         Entry::dir(format!("item-{}", page * 2 + 1)),
@@ -423,10 +420,7 @@ async fn feed(cx: DirCx<State>) -> Result<DirProjection> {
 }
 
 async fn unbounded_feed(cx: DirCx<State>) -> Result<DirProjection> {
-    let page = match cx.cursor() {
-        Some(Cursor::Page(n)) => *n,
-        _ => 0,
-    };
+    let page = cx.page_cursor(0);
     let entries = [
         Entry::dir(format!("u-{}", page * 2)),
         Entry::dir(format!("u-{}", page * 2 + 1)),

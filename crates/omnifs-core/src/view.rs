@@ -5,7 +5,7 @@
 //! dirents payloads, and file content payloads. Keeping these types here keeps
 //! provider/WIT semantics out of the storage crate.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
@@ -279,7 +279,7 @@ impl DirentsPayload {
 
     pub fn merged(
         existing_record: Option<Self>,
-        new_children: BTreeMap<String, DirentRecord>,
+        mut new_children: BTreeMap<String, DirentRecord>,
         listing_exhaustive: bool,
     ) -> Self {
         if listing_exhaustive {
@@ -292,27 +292,36 @@ impl DirentsPayload {
             };
         }
 
-        let (previously_exhaustive, validator, next_cursor, paginated, mut existing) =
+        let (previously_exhaustive, validator, next_cursor, paginated, mut entries) =
             existing_record.map_or_else(
-                || (false, None, None, false, HashMap::new()),
+                || (false, None, None, false, Vec::new()),
                 |payload| {
                     (
                         payload.exhaustive,
                         payload.validator,
                         payload.next_cursor,
                         payload.paginated,
-                        payload
-                            .entries
-                            .into_iter()
-                            .map(|entry| (entry.name.clone(), entry))
-                            .collect(),
+                        payload.entries,
                     )
                 },
             );
-        let introduced = new_children.keys().any(|name| !existing.contains_key(name));
-        existing.extend(new_children);
+
+        // Replace matched entries in place; entries absent from new_children
+        // are untouched. No name cloning: BTreeMap::remove gives ownership of
+        // both key and value.
+        for entry in &mut entries {
+            if let Some(updated) = new_children.remove(&entry.name) {
+                *entry = updated;
+            }
+        }
+
+        // Any names still left in new_children are introductions. Append them
+        // in BTreeMap order (deterministic, sorted by name).
+        let introduced = !new_children.is_empty();
+        entries.extend(new_children.into_values());
+
         Self {
-            entries: existing.into_values().collect(),
+            entries,
             exhaustive: previously_exhaustive && !introduced,
             validator,
             next_cursor,
@@ -413,5 +422,115 @@ mod tests {
         let attrs = decoded.meta.attrs.expect("file should carry attrs");
         assert_eq!(attrs.stability, Stability::Volatile);
         assert_eq!(attrs.bytes, ByteSource::Deferred(ReadMode::Ranged));
+    }
+
+    // --- DirentsPayload::merged ---
+
+    fn dir_record(name: &str) -> DirentRecord {
+        DirentRecord {
+            name: name.to_string(),
+            meta: EntryMeta::directory(),
+        }
+    }
+
+    fn new_children(names: &[&str]) -> BTreeMap<String, DirentRecord> {
+        names
+            .iter()
+            .map(|&n| (n.to_string(), dir_record(n)))
+            .collect()
+    }
+
+    fn names(payload: &DirentsPayload) -> Vec<&str> {
+        payload.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    // Exhaustive short-circuit: replaces everything, marks exhaustive, clears
+    // pagination state.
+    #[test]
+    fn merged_exhaustive_replaces_all() {
+        let existing = DirentsPayload {
+            entries: vec![dir_record("old-a"), dir_record("old-b")],
+            exhaustive: false,
+            validator: Some("v0".to_string()),
+            next_cursor: Some(CachedCursor::Page(1)),
+            paginated: true,
+        };
+        let result = DirentsPayload::merged(Some(existing), new_children(&["new-x"]), true);
+        assert!(result.exhaustive);
+        assert_eq!(names(&result), vec!["new-x"]);
+        assert!(result.validator.is_none());
+        assert!(result.next_cursor.is_none());
+        assert!(!result.paginated);
+    }
+
+    // Replacement keeps position: an entry already in the vec is updated in
+    // place, not appended. Entry count does not grow.
+    #[test]
+    fn merged_replacement_keeps_position_and_count() {
+        let existing = DirentsPayload {
+            entries: vec![dir_record("alpha"), dir_record("beta"), dir_record("gamma")],
+            exhaustive: false,
+            validator: None,
+            next_cursor: None,
+            paginated: false,
+        };
+        let updated = new_children(&["beta"]);
+        let result = DirentsPayload::merged(Some(existing), updated, false);
+        // Count unchanged: beta was replaced, not appended.
+        assert_eq!(result.entries.len(), 3);
+        // Order unchanged: alpha, beta, gamma.
+        assert_eq!(names(&result), vec!["alpha", "beta", "gamma"]);
+        // No introduction: exhaustive flag is preserved as-is (false && !false = false).
+        assert!(!result.exhaustive);
+    }
+
+    // Introduction appends in name order and demotes exhaustive.
+    #[test]
+    fn merged_introduction_appends_and_demotes_exhaustive() {
+        let existing = DirentsPayload {
+            entries: vec![dir_record("alpha"), dir_record("beta")],
+            exhaustive: true, // previously exhaustive
+            validator: Some("v1".to_string()),
+            next_cursor: None,
+            paginated: false,
+        };
+        // Introduce two new names; BTreeMap order is "delta" then "gamma".
+        let result =
+            DirentsPayload::merged(Some(existing), new_children(&["gamma", "delta"]), false);
+        // No longer exhaustive because new names appeared.
+        assert!(!result.exhaustive);
+        // Existing entries first, introductions appended in name (BTreeMap) order.
+        assert_eq!(names(&result), vec!["alpha", "beta", "delta", "gamma"]);
+        // Validator and pagination state are carried through.
+        assert_eq!(result.validator.as_deref(), Some("v1"));
+    }
+
+    // No-overlap merge (empty existing): all children become introductions,
+    // appended in name order.
+    #[test]
+    fn merged_no_existing_record_appends_all_in_name_order() {
+        let result = DirentsPayload::merged(None, new_children(&["zed", "alpha", "mid"]), false);
+        // BTreeMap insertion order is alphabetical.
+        assert_eq!(names(&result), vec!["alpha", "mid", "zed"]);
+        assert!(!result.exhaustive);
+    }
+
+    // Mix: some names replaced in place, others introduced and appended.
+    #[test]
+    fn merged_mixed_replace_and_introduce() {
+        let existing = DirentsPayload {
+            entries: vec![dir_record("a"), dir_record("b"), dir_record("c")],
+            exhaustive: false,
+            validator: None,
+            next_cursor: None,
+            paginated: false,
+        };
+        // "b" is a replacement; "d" and "e" are introductions.
+        let result = DirentsPayload::merged(Some(existing), new_children(&["b", "e", "d"]), false);
+        assert_eq!(result.entries.len(), 5);
+        // Existing order preserved for a, b, c; introductions d, e appended in name order.
+        assert_eq!(names(&result), vec!["a", "b", "c", "d", "e"]);
+        // Introduction occurred: exhaustive demoted.
+        assert!(!result.exhaustive);
     }
 }
