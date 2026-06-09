@@ -145,7 +145,7 @@ impl SessionMaterializer<'_> {
                 )
             })?;
         let preopen_binds =
-            self.materialize_preopened_paths(&mut instance, &cfg.name, user_preopen_count)?;
+            Self::materialize_preopened_paths(&mut instance, &cfg.name, user_preopen_count)?;
         let mut value = serde_json::to_value(&instance)
             .with_context(|| format!("serialize mount config for {}", cfg.source.display()))?;
         let obj = value
@@ -164,7 +164,6 @@ impl SessionMaterializer<'_> {
     }
 
     fn materialize_preopened_paths(
-        &self,
         instance: &mut Spec,
         name: &MountName,
         user_preopen_count: usize,
@@ -197,7 +196,7 @@ impl SessionMaterializer<'_> {
                     PreopenMode::Ro => "ro",
                     PreopenMode::Rw => "rw",
                 };
-                preopen.host = container_path.clone();
+                preopen.host.clone_from(&container_path);
                 Ok(format!(
                     "{}:{container_path}:{bind_mode}",
                     host_path.display()
