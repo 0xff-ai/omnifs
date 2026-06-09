@@ -227,9 +227,12 @@ fn decode_object(bytes: &[u8]) -> Option<StoredObject> {
 }
 
 fn merge_leaves(existing: &[String], new_leaves: &[String]) -> Vec<String> {
+    // Build a set over existing entries to avoid O(n²) scanning; new leaves
+    // are deduplicated in arrival order (first occurrence kept).
+    let mut seen: std::collections::HashSet<&str> = existing.iter().map(String::as_str).collect();
     let mut merged = existing.to_vec();
     for leaf in new_leaves {
-        if !merged.contains(leaf) {
+        if seen.insert(leaf.as_str()) {
             merged.push(leaf.clone());
         }
     }
