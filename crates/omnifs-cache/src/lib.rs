@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    /// gc_negatives prunes expired entries, keeps fresh ones, and leaves
+    /// `gc_negatives` prunes expired entries, keeps fresh ones, and leaves
     /// `neg_by_id` consistent after the sweep.
     #[test]
     fn gc_negatives_prunes_expired_keeps_fresh_and_stays_consistent() {
@@ -1085,14 +1085,14 @@ mod tests {
             store
                 .neg_by_id
                 .get(&scoped_expired)
-                .map_or(true, |s| s.is_empty()),
+                .is_none_or(|s| s.is_empty()),
             "neg_by_id for expired id should be absent or empty"
         );
         assert!(
             store
                 .neg_by_id
                 .get(&scoped_fresh)
-                .map_or(false, |s| !s.is_empty()),
+                .is_some_and(|s| !s.is_empty()),
             "neg_by_id for fresh id should still have entries"
         );
     }

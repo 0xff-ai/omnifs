@@ -463,7 +463,7 @@ mod tests {
         );
     }
 
-    /// Batch-put of N objects yields identical observable state (get/id_of/leaves_of)
+    /// Batch-put of N objects yields identical observable state (`get`/`id_of`/`leaves_of`)
     /// to N individual single puts, including a mixed case with one fence-rejected entry.
     #[test]
     fn store_batch_equivalent_to_single_puts() {
@@ -495,7 +495,7 @@ mod tests {
                 bytes: b"payload2".to_vec(),
                 validator: None,
             },
-            &[l2.clone()],
+            std::slice::from_ref(&l2),
             |_| {},
         );
 
