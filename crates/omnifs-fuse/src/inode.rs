@@ -5,7 +5,7 @@
 
 use crate::Frontend;
 use fuser::{FileAttr, FileType, INodeNo};
-use omnifs_core::view::{ByteSource, EntryMeta, FileAttrsCache, FileSize, Stability};
+use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::path_key::PathKey;
 use omnifs_host::wit_protocol;
 use omnifs_wit::provider::types as wit_types;
@@ -42,6 +42,56 @@ pub(crate) struct NodeEntry {
     /// from a per-`fh` buffer instead of calling the provider. A real provider
     /// file of the same name is never marked synthetic, so it reads normally.
     pub(crate) synthetic: bool,
+}
+
+impl NodeEntry {
+    fn refresh(
+        &mut self,
+        incoming_kind: wit_types::EntryKind,
+        incoming_attrs: Option<&FileAttrsCache>,
+        fallback_size: u64,
+    ) {
+        let attrs = self.refreshed_attrs(&incoming_kind, incoming_attrs);
+        let size = attrs
+            .as_ref()
+            .map_or(fallback_size, FileAttrsCache::st_size);
+
+        self.kind = incoming_kind;
+        self.attrs = attrs;
+        self.size = size;
+    }
+
+    fn refreshed_attrs(
+        &self,
+        incoming_kind: &wit_types::EntryKind,
+        incoming_attrs: Option<&FileAttrsCache>,
+    ) -> Option<FileAttrsCache> {
+        match (self.attrs.as_ref(), incoming_attrs) {
+            (Some(existing), Some(incoming)) => {
+                // Keep the real, read-observed attrs when a silent refresh must
+                // not erase a learned size; otherwise take the incoming attrs.
+                let refreshed = if existing.keeps_learned_size_over(incoming) {
+                    existing.clone()
+                } else {
+                    incoming.clone()
+                };
+                Some(refreshed)
+            },
+            // A refresh that carries no attributes (a listing entry with only a
+            // kind) is silent about size, so keep the attrs (and learned size)
+            // we already hold for a file. Backing-FS files re-`stat` at getattr,
+            // so a stale value here never reaches them.
+            (Some(existing), None)
+                if matches!(
+                    (&self.kind, incoming_kind),
+                    (wit_types::EntryKind::File(_), wit_types::EntryKind::File(_))
+                ) =>
+            {
+                Some(existing.clone())
+            },
+            (_, incoming) => incoming.cloned(),
+        }
+    }
 }
 
 /// What the caller knows about an inode allocation, which drives how the
@@ -225,12 +275,7 @@ impl Frontend {
             .entry(key)
             .and_modify(|existing_ino| {
                 if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
-                    let merged_attrs =
-                        merge_inode_attrs(entry.attrs.as_ref(), incoming_attrs.clone());
-                    let merged_size = merged_attrs.as_ref().map_or(size, FileAttrsCache::st_size);
-                    entry.kind = kind.clone();
-                    entry.attrs = merged_attrs;
-                    entry.size = merged_size;
+                    entry.refresh(kind.clone(), incoming_attrs.as_ref(), size);
                     // A genuine provider/backing resolution (Clear) overrides a
                     // prior synthetic marker, so a `.gitignore` that later
                     // appears in the provider stops being host-synthesized. An
@@ -343,92 +388,149 @@ impl Frontend {
     }
 }
 
-fn merge_inode_attrs(
-    existing: Option<&FileAttrsCache>,
-    incoming: Option<FileAttrsCache>,
-) -> Option<FileAttrsCache> {
-    match (existing, incoming) {
-        (Some(existing), Some(incoming))
-            if should_preserve_learned_exact_size(existing, &incoming) =>
-        {
-            Some(existing.clone())
-        },
-        (_, incoming) => incoming,
-    }
-}
-
-fn should_preserve_learned_exact_size(
-    existing: &FileAttrsCache,
-    incoming: &FileAttrsCache,
-) -> bool {
-    matches!(existing.size, FileSize::Exact(_))
-        && !matches!(incoming.size, FileSize::Exact(_))
-        && byte_source_equal(&existing.bytes, &incoming.bytes)
-        && existing.stability == incoming.stability
-        && existing.version_token == incoming.version_token
-        && (matches!(existing.stability, Stability::Immutable)
-            || (matches!(existing.stability, Stability::Mutable)
-                && existing.version_token.is_some()))
-}
-
-fn byte_source_equal(a: &ByteSource, b: &ByteSource) -> bool {
-    a == b
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::file_kind_placeholder;
     use omnifs_core::view as view_types;
 
     fn attrs(size: view_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
+        attrs_with(size, view_types::Stability::Mutable, version_token)
+    }
+
+    fn attrs_with(
+        size: view_types::FileSize,
+        stability: view_types::Stability,
+        version_token: Option<&str>,
+    ) -> FileAttrsCache {
         FileAttrsCache {
             size,
             bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-            stability: view_types::Stability::Mutable,
+            stability,
             version_token: version_token.map(str::to_string),
         }
     }
 
-    fn attrs_eq(a: &FileAttrsCache, b: &FileAttrsCache) -> bool {
-        a.size == b.size
-            && a.bytes == b.bytes
-            && a.stability == b.stability
-            && a.version_token == b.version_token
+    fn file_entry(attrs: FileAttrsCache) -> NodeEntry {
+        let size = attrs.st_size();
+        NodeEntry {
+            mount_name: "test".to_string(),
+            path: "/hello/fresh-full".to_string(),
+            kind: file_kind_placeholder(),
+            attrs: Some(attrs),
+            size,
+            backing_path: None,
+            synthetic: false,
+        }
+    }
+
+    fn refresh_file(entry: &mut NodeEntry, incoming: &FileAttrsCache) {
+        entry.refresh(file_kind_placeholder(), Some(incoming), incoming.st_size());
+    }
+
+    struct RefreshCase {
+        name: &'static str,
+        existing: FileAttrsCache,
+        incoming: FileAttrsCache,
+        expected: FileAttrsCache,
     }
 
     #[test]
-    fn learned_exact_survives_same_version_non_exact_refresh() {
-        let existing = attrs(view_types::FileSize::Exact(42), Some("v1"));
-        let incoming = attrs(view_types::FileSize::Unknown, Some("v1"));
+    fn refresh_attrs_follow_learned_size_policy() {
+        let cases = [
+            {
+                let existing = attrs(view_types::FileSize::Exact(42), Some("v1"));
+                let incoming = attrs(view_types::FileSize::Unknown, Some("v1"));
+                RefreshCase {
+                    name: "silent same-version refresh keeps learned exact",
+                    existing: existing.clone(),
+                    incoming,
+                    expected: existing,
+                }
+            },
+            {
+                let incoming = attrs(view_types::FileSize::Exact(7), Some("v1"));
+                RefreshCase {
+                    name: "incoming exact replaces learned exact",
+                    existing: attrs(view_types::FileSize::Exact(42), Some("v1")),
+                    incoming: incoming.clone(),
+                    expected: incoming,
+                }
+            },
+            {
+                let incoming = attrs(view_types::FileSize::Unknown, Some("v2"));
+                RefreshCase {
+                    name: "version change drops learned exact",
+                    existing: attrs(view_types::FileSize::Exact(42), Some("v1")),
+                    expected: incoming.clone(),
+                    incoming,
+                }
+            },
+            {
+                let existing = attrs(view_types::FileSize::Exact(42), None);
+                let incoming = attrs(view_types::FileSize::Unknown, None);
+                RefreshCase {
+                    name: "unversioned mutable refresh keeps learned exact",
+                    existing: existing.clone(),
+                    incoming,
+                    expected: existing,
+                }
+            },
+            {
+                let existing = attrs_with(
+                    view_types::FileSize::Exact(42),
+                    view_types::Stability::Immutable,
+                    None,
+                );
+                let incoming = attrs_with(
+                    view_types::FileSize::Unknown,
+                    view_types::Stability::Immutable,
+                    None,
+                );
+                RefreshCase {
+                    name: "immutable silent refresh keeps learned exact",
+                    existing: existing.clone(),
+                    incoming,
+                    expected: existing,
+                }
+            },
+            {
+                let existing = attrs_with(
+                    view_types::FileSize::Exact(42),
+                    view_types::Stability::Mutable,
+                    None,
+                );
+                let incoming = attrs_with(
+                    view_types::FileSize::Unknown,
+                    view_types::Stability::Immutable,
+                    None,
+                );
+                RefreshCase {
+                    name: "placeholder stability mismatch keeps learned exact",
+                    existing: existing.clone(),
+                    incoming,
+                    expected: existing,
+                }
+            },
+        ];
 
-        let merged = merge_inode_attrs(Some(&existing), Some(incoming)).unwrap();
-        assert!(attrs_eq(&merged, &existing));
-    }
+        for case in cases {
+            let mut entry = file_entry(case.existing);
 
-    #[test]
-    fn incoming_exact_replaces_learned_exact() {
-        let existing = attrs(view_types::FileSize::Exact(42), Some("v1"));
-        let incoming = attrs(view_types::FileSize::Exact(7), Some("v1"));
+            refresh_file(&mut entry, &case.incoming);
 
-        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
-        assert!(attrs_eq(&merged, &incoming));
-    }
-
-    #[test]
-    fn version_change_drops_learned_exact() {
-        let existing = attrs(view_types::FileSize::Exact(42), Some("v1"));
-        let incoming = attrs(view_types::FileSize::Unknown, Some("v2"));
-
-        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
-        assert!(attrs_eq(&merged, &incoming));
-    }
-
-    #[test]
-    fn unversioned_mutable_refresh_drops_learned_exact() {
-        let existing = attrs(view_types::FileSize::Exact(42), None);
-        let incoming = attrs(view_types::FileSize::Unknown, None);
-
-        let merged = merge_inode_attrs(Some(&existing), Some(incoming.clone())).unwrap();
-        assert!(attrs_eq(&merged, &incoming));
+            let refreshed = entry.attrs.as_ref().expect("file attrs survive refresh");
+            assert_eq!(
+                refreshed, &case.expected,
+                "{}: refreshed attrs should match expected",
+                case.name
+            );
+            assert_eq!(
+                entry.size,
+                case.expected.st_size(),
+                "{}: inode size should follow refreshed attrs",
+                case.name
+            );
+        }
     }
 }

@@ -39,7 +39,7 @@ pub enum Stability {
     Volatile,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileAttrsCache {
     pub size: FileSize,
     pub bytes: ByteSource,
@@ -90,6 +90,29 @@ impl FileAttrsCache {
             Stability::Mutable => self.version_token.is_some(),
             Stability::Volatile => false,
         }
+    }
+
+    /// Whether a size learned from a complete read on `self` survives being
+    /// refreshed by `incoming`, so a kind-derived listing placeholder cannot
+    /// erase the real size after a `cat`.
+    ///
+    /// True only when `self` carries a learned `Exact` size, `incoming` is
+    /// silent about size (no `Exact` of its own), and the two share a content
+    /// identity: same byte source and version token. Stability is otherwise
+    /// ignored, because directory listings project a kind-derived placeholder
+    /// stability rather than the file's real one; only `Volatile` is rejected
+    /// outright (a volatile file is never durably size-learned, so the `Exact`
+    /// guard already excludes it, but the explicit check states the intent).
+    ///
+    /// Keeping `self`'s attributes is safe even for mutable files: the next
+    /// complete read re-learns the size from the bytes it returns, so a stale
+    /// value never reaches a read check.
+    pub fn keeps_learned_size_over(&self, incoming: &FileAttrsCache) -> bool {
+        matches!(self.size, FileSize::Exact(_))
+            && !matches!(incoming.size, FileSize::Exact(_))
+            && !matches!(self.stability, Stability::Volatile)
+            && self.bytes == incoming.bytes
+            && self.version_token == incoming.version_token
     }
 
     #[must_use]
