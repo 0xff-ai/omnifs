@@ -290,6 +290,10 @@ impl FuseHarness {
         (fh, bytes)
     }
 
+    fn inode_size(&self, ino: u64) -> u64 {
+        self.fs.inodes.get(&ino).expect("inode exists").size
+    }
+
     /// Item (non-`@`) entry names in a directory snapshot.
     fn item_names(snapshot: &DirSnapshot) -> Vec<String> {
         snapshot
@@ -551,6 +555,38 @@ fn mutable_unversioned_full_prefetch_is_per_handle_not_durable() {
     assert!(
         runtime.cache_get(path, RecordKind::File, None).is_none(),
         "unversioned mutable full-read bytes must not be written to durable view cache",
+    );
+}
+
+#[test]
+fn learned_full_read_size_survives_cached_non_exact_refresh() {
+    let h = build_harness();
+    let path = "/hello/fresh-full";
+    let ino = h.lookup_path(path).expect("path resolves before open");
+    assert_eq!(
+        h.inode_size(ino),
+        1,
+        "unknown full-deferred files start with the stat sentinel"
+    );
+
+    let (fh, bytes) = h.prefetch_mutable_unversioned_full(path);
+    assert_eq!(bytes, b"fresh-full-1\n");
+    h.release(fh);
+    assert_eq!(
+        h.inode_size(ino),
+        u64::try_from(bytes.len()).unwrap(),
+        "full-read prefetch publishes the learned exact size"
+    );
+
+    // A later listing re-describes the file with a kind-derived placeholder
+    // (unknown size, default stability). Replaying that metadata must not erase
+    // the exact size learned from the complete read.
+    let refreshed = h.lookup_path(path).expect("path resolves after refresh");
+    assert_eq!(refreshed, ino, "refresh reuses the existing inode");
+    assert_eq!(
+        h.inode_size(refreshed),
+        u64::try_from(bytes.len()).unwrap(),
+        "cached non-exact metadata does not downgrade learned size"
     );
 }
 

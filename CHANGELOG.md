@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
 - The arXiv provider no longer crashes when it fails to encode a JSON response.
+- A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
 
 ## [0.2.1] - 2026-06-08
 
