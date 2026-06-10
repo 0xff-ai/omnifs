@@ -229,6 +229,30 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: Build Linux x64 omnifsd
+        id: build_daemon
+        env:
+          OMNIFS_PACKAGE: omnifs-daemon
+          OMNIFS_BIN: omnifsd
+        run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
+
+      - name: Package Linux x64 omnifsd
+        run: |
+          set -euo pipefail
+          mkdir -p dist/daemon/linux-x64
+          staging="$(mktemp -d)"
+          cp "${{ steps.build_daemon.outputs.artifact }}" "$staging/omnifsd"
+          chmod 0755 "$staging/omnifsd"
+          tar -C "$staging" -cJf dist/daemon/linux-x64/omnifsd-linux-x64.tar.xz omnifsd
+
+      - name: Upload Linux x64 omnifsd archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifsd-linux-x64
+          path: dist/daemon/linux-x64/omnifsd-linux-x64.tar.xz
+          retention-days: 90
+          if-no-files-found: error
+
   cli-linux-arm64:
     name: cli linux arm64
     if: >-
@@ -278,6 +302,30 @@ jobs:
         with:
           name: omnifs-cli-linux-arm64
           path: dist/cli/linux-arm64/omnifs-cli-linux-arm64.tar.xz*
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Build Linux arm64 omnifsd
+        id: build_daemon
+        env:
+          OMNIFS_PACKAGE: omnifs-daemon
+          OMNIFS_BIN: omnifsd
+        run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
+
+      - name: Package Linux arm64 omnifsd
+        run: |
+          set -euo pipefail
+          mkdir -p dist/daemon/linux-arm64
+          staging="$(mktemp -d)"
+          cp "${{ steps.build_daemon.outputs.artifact }}" "$staging/omnifsd"
+          chmod 0755 "$staging/omnifsd"
+          tar -C "$staging" -cJf dist/daemon/linux-arm64/omnifsd-linux-arm64.tar.xz omnifsd
+
+      - name: Upload Linux arm64 omnifsd archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifsd-linux-arm64
+          path: dist/daemon/linux-arm64/omnifsd-linux-arm64.tar.xz
           retention-days: 90
           if-no-files-found: error
 
@@ -384,6 +432,19 @@ jobs:
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-x64.tar.xz
           test -x dist-cli/bin/omnifs
 
+      - name: Download Linux x64 omnifsd archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifsd-linux-x64
+          path: dist-daemon
+
+      - name: Extract Linux x64 omnifsd binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-daemon/bin
+          tar -C dist-daemon/bin -xJf dist-daemon/omnifsd-linux-x64.tar.xz
+          test -x dist-daemon/bin/omnifsd
+
       - name: Build and push amd64 Docker image
         id: docker
         env:
@@ -391,6 +452,7 @@ jobs:
           PLATFORM: linux/amd64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFSD_BINARY: ${{ github.workspace }}/dist-daemon/bin/omnifsd
           OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
         run: just ci-build-runtime
 
@@ -450,6 +512,19 @@ jobs:
           tar -C dist-cli/bin -xJf dist-cli/omnifs-cli-linux-arm64.tar.xz
           test -x dist-cli/bin/omnifs
 
+      - name: Download Linux arm64 omnifsd archive
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifsd-linux-arm64
+          path: dist-daemon
+
+      - name: Extract Linux arm64 omnifsd binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist-daemon/bin
+          tar -C dist-daemon/bin -xJf dist-daemon/omnifsd-linux-arm64.tar.xz
+          test -x dist-daemon/bin/omnifsd
+
       - name: Build and push arm64 Docker image
         id: docker
         env:
@@ -457,6 +532,7 @@ jobs:
           PLATFORM: linux/arm64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
+          OMNIFSD_BINARY: ${{ github.workspace }}/dist-daemon/bin/omnifsd
           OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
         run: just ci-build-runtime
 

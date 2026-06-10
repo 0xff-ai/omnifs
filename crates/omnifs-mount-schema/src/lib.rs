@@ -13,10 +13,12 @@ mod auth_wire;
 mod config;
 mod manifest;
 mod mount_config;
+pub mod mounts;
 mod records;
 mod resolve;
 mod runtime_grants;
 mod sections;
+mod validation;
 mod wasm;
 
 pub use auth_resolve::SchemeResolveError;
@@ -48,4 +50,5 @@ pub use sections::{
     ProviderMetadataError, provider_manifest_json, read_manifest_section,
     read_provider_metadata_section,
 };
+pub use validation::{SchemaError, validate_config};
 pub use wasm::{ProviderWasm, ProviderWasmError};

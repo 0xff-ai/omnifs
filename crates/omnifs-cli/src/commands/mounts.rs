@@ -36,7 +36,7 @@ pub enum MountsCommand {
 }
 
 impl MountsArgs {
-    pub fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<()> {
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
         let catalog = ctx.catalog();
@@ -45,12 +45,12 @@ impl MountsArgs {
                 name,
                 force,
                 keep_credentials,
-            } => rm(paths, catalog, &name, force, keep_credentials),
+            } => rm(paths, catalog, &name, force, keep_credentials).await,
         }
     }
 }
 
-pub fn rm(
+pub async fn rm(
     paths: &Paths,
     catalog: &ProviderCatalog,
     name: &str,
@@ -100,6 +100,18 @@ pub fn rm(
             .with_context(|| format!("remove {}", config_path.display()))?;
     }
     anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
+
+    match crate::live::remove_mount(name.as_str()).await {
+        Ok(crate::live::LiveApply::Applied) => {
+            anstream::println!("✓ Unloaded from the running daemon");
+        },
+        Ok(_) => {},
+        Err(error) => {
+            anstream::eprintln!(
+                "Mount config removed, but unloading it from the running daemon failed: {error:#}"
+            );
+        },
+    }
     Ok(())
 }
 
@@ -189,12 +201,14 @@ mod tests {
         ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir)
     }
 
-    #[test]
-    fn rejects_invalid_mount_name() {
+    #[tokio::test]
+    async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
         let catalog = catalog_for(&paths);
-        let err = rm(&paths, &catalog, "../leak", true, false).unwrap_err();
+        let err = rm(&paths, &catalog, "../leak", true, false)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
     #[test]

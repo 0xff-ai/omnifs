@@ -2,153 +2,35 @@
 
 use comfy_table::{Cell, ContentArrangement, Table, presets};
 use std::fmt::Write as _;
-use std::path::PathBuf;
 
 use crate::session::CredsBackend;
-use crate::{catalog::ProviderCatalog, paths::Paths, proc_mounts};
+use crate::{catalog::ProviderCatalog, paths::Paths};
+use omnifs_api::DaemonStatus;
 
 pub(crate) use crate::auth::AuthReadiness;
 use crate::auth::AuthTerminalKind;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};
 
-/// Canonical default for the FUSE mount point inside the container.
-pub(crate) fn default_mount_point() -> PathBuf {
-    PathBuf::from("/omnifs")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct StatusReport {
     pub(crate) paths: Paths,
-    pub(crate) mount_point: PathBuf,
-    pub(crate) runtime: RuntimeStatus,
-    pub(crate) mount: Option<proc_mounts::MountInfo>,
+    /// Daemon runtime facts from the control API; `None` when no daemon
+    /// answered on the control port.
+    pub(crate) runtime: Option<DaemonStatus>,
     pub(crate) user_mounts: Vec<UserMountStatus>,
     pub(crate) providers: Vec<ProviderConfigStatus>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeStatus {
-    Running(proc_mounts::RunningMountArgs),
-    Mounted,
-    NotRunning,
-}
-
-impl RuntimeStatus {
-    fn from_mount(
-        running_args: Option<proc_mounts::RunningMountArgs>,
-        mount: Option<&proc_mounts::MountInfo>,
-    ) -> Self {
-        if let Some(args) = running_args {
-            Self::Running(args)
-        } else if mount.is_some() {
-            Self::Mounted
-        } else {
-            Self::NotRunning
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Running(_) => "running",
-            Self::Mounted => "mounted",
-            Self::NotRunning => "not running",
-        }
-    }
-
-    fn to_json(&self) -> RuntimeJson {
-        match self {
-            Self::Running(args) => match (&args.mount_point, &args.config_dir, &args.cache_dir) {
-                (Some(mount_point), Some(config_dir), Some(cache_dir)) => RuntimeJson::Running {
-                    mount_point: mount_point.clone(),
-                    config_dir: config_dir.clone(),
-                    cache_dir: cache_dir.clone(),
-                },
-                _ => RuntimeJson::Unknown,
-            },
-            Self::Mounted | Self::NotRunning => RuntimeJson::Unknown,
-        }
-    }
-}
-
-pub(crate) fn resolve_paths(
-    mount_point: Option<String>,
-    config_dir: Option<String>,
-    cache_dir: Option<String>,
-) -> (Paths, PathBuf) {
-    use crate::paths::PathOverrides;
-    use crate::runtime_state::RuntimeState;
-
-    let config_dir_path = config_dir.as_ref().map(PathBuf::from);
-    let persisted = config_dir_path
-        .as_deref()
-        .and_then(RuntimeState::load)
-        .or_else(|| {
-            let paths = Paths::resolve(PathOverrides {
-                config_dir: config_dir_path.clone(),
-                cache_dir: cache_dir.as_ref().map(PathBuf::from),
-                ..Default::default()
-            });
-            RuntimeState::load(&paths.config_dir)
-        });
-
-    let inferred = persisted
-        .map(|state| proc_mounts::RunningMountArgs {
-            mount_point: Some(state.mount_point),
-            config_dir: Some(state.config_dir),
-            cache_dir: Some(state.cache_dir),
-        })
-        .unwrap_or_default();
-    let config_dir_override = config_dir
-        .clone()
-        .map(PathBuf::from)
-        .or(inferred.config_dir);
-    let cache_dir_override = cache_dir.clone().map(PathBuf::from).or(inferred.cache_dir);
-    let mount_point = mount_point
-        .map(PathBuf::from)
-        .or(inferred.mount_point)
-        .unwrap_or_else(default_mount_point);
-    let (paths, _config) = Paths::resolve_with_config(PathOverrides {
-        config_dir: config_dir_override,
-        cache_dir: cache_dir_override,
-        ..Default::default()
-    })
-    .unwrap_or_else(|_| {
-        // A malformed config.toml shouldn't crash `omnifs status`; fall back
-        // to pure flag + env + platform-default resolution so the user can
-        // still see what's broken.
-        (
-            Paths::resolve(PathOverrides {
-                config_dir: config_dir.map(PathBuf::from),
-                cache_dir: cache_dir.map(PathBuf::from),
-                ..Default::default()
-            }),
-            crate::config::Config::default(),
-        )
-    });
-    (paths, mount_point)
 }
 
 pub(crate) fn collect_status(
     catalog: &ProviderCatalog,
     paths: Paths,
-    mount_point: PathBuf,
+    runtime: Option<DaemonStatus>,
 ) -> anyhow::Result<StatusReport> {
     let store = CredsBackend::auto(&paths.credentials_file, true);
-    let running_args = crate::runtime_state::RuntimeState::load(&paths.config_dir).map(|state| {
-        proc_mounts::RunningMountArgs {
-            mount_point: Some(state.mount_point),
-            config_dir: Some(state.config_dir),
-            cache_dir: Some(state.cache_dir),
-        }
-    });
-    let mount = proc_mounts::find_mount(&mount_point)?;
-    let runtime = RuntimeStatus::from_mount(running_args, mount.as_ref());
     Ok(StatusReport {
         runtime,
-        mount,
         user_mounts: catalog.scan_user_mount_configs(store.as_ref())?,
         providers: catalog.scan_provider_configs()?,
-        mount_point,
         paths,
     })
 }
@@ -171,7 +53,20 @@ impl StatusReport {
         table.add_row(vec![
             Cell::new("  runtime"),
             Cell::new("│"),
-            Cell::new(self.runtime.label()),
+            Cell::new(match &self.runtime {
+                Some(runtime) if runtime.mounts.is_empty() => "running (no mounts loaded)".into(),
+                Some(runtime) => format!(
+                    "running ({} loaded: {})",
+                    runtime.mounts.len(),
+                    runtime
+                        .mounts
+                        .iter()
+                        .map(|mount| mount.mount.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => "not running".into(),
+            }),
         ]);
         table.add_row(vec![
             Cell::new("  mount"),
@@ -216,10 +111,15 @@ impl StatusReport {
 }
 
 fn format_mount(report: &StatusReport) -> String {
-    let mp = Paths::display(&report.mount_point);
-    match &report.mount {
-        Some(mount) => format!("{mp} ({})", mount.fs_type),
-        None => format!("{mp} (not mounted)"),
+    match &report.runtime {
+        Some(runtime) => {
+            let mp = Paths::display(&runtime.mount_point);
+            match &runtime.frontend {
+                Some(frontend) => format!("{mp} ({})", frontend.fs_type),
+                None => format!("{mp} (not mounted)"),
+            }
+        },
+        None => "—".to_string(),
     }
 }
 
@@ -319,42 +219,44 @@ pub(crate) fn write_runtime_providers(out: &mut String, providers: &[ProviderCon
 
 // ── JSON output ──────────────────────────────────────────────────────────────
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Serialize-only presentation DTO for `omnifs status --json`: the merged
+/// host config + daemon runtime view. The daemon's wire types live in
+/// `omnifs-api`.
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
     pub paths: PathsJson,
     pub mounts: Vec<MountStatusJson>,
-    /// Always present (may be empty) so that runtime status verification can rely on it.
     pub providers: Vec<ProviderStatusJson>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum RuntimeJson {
-    /// Daemon detected via persisted `runtime_state.json`.
+    /// A daemon answered on the control API.
     Running {
         mount_point: std::path::PathBuf,
         config_dir: std::path::PathBuf,
         cache_dir: std::path::PathBuf,
+        /// Mount names loaded in the daemon's registry.
+        mounts: Vec<String>,
     },
-    /// Host-side status invocation: runtime container probing is `omnifs doctor`'s job.
-    Unknown,
+    NotRunning,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct MountJson {
     pub source: String,
     pub mount_point: std::path::PathBuf,
     pub fs_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PathsJson {
-    pub mount_point: std::path::PathBuf,
     pub config_dir: std::path::PathBuf,
     pub data_dir: std::path::PathBuf,
     pub cache_dir: std::path::PathBuf,
@@ -364,7 +266,7 @@ pub(crate) struct PathsJson {
     pub config_file: std::path::PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum MountStatusJson {
     Ready {
@@ -381,7 +283,7 @@ pub(crate) enum MountStatusJson {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum AuthJson {
     None,
@@ -401,7 +303,7 @@ pub(crate) enum AuthJson {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ProviderStatusJson {
     Ready {
@@ -424,16 +326,26 @@ pub(crate) enum ProviderStatusJson {
 
 impl StatusReport {
     pub(crate) fn to_json(&self) -> StatusJson {
+        let runtime_json =
+            self.runtime
+                .as_ref()
+                .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
+                    mount_point: r.mount_point.clone(),
+                    config_dir: r.config_dir.clone(),
+                    cache_dir: r.cache_dir.clone(),
+                    mounts: r.mounts.iter().map(|mount| mount.mount.clone()).collect(),
+                });
         StatusJson {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            runtime: self.runtime.to_json(),
-            mount: self.mount.as_ref().map(|m| MountJson {
-                source: m.source.clone(),
-                mount_point: m.mount_point.clone(),
-                fs_type: m.fs_type.clone(),
+            runtime: runtime_json,
+            mount: self.runtime.as_ref().and_then(|r| {
+                r.frontend.as_ref().map(|frontend| MountJson {
+                    source: frontend.source.clone(),
+                    mount_point: r.mount_point.clone(),
+                    fs_type: frontend.fs_type.clone(),
+                })
             }),
             paths: PathsJson {
-                mount_point: self.mount_point.clone(),
                 config_dir: self.paths.config_dir.clone(),
                 data_dir: self.paths.data_dir.clone(),
                 cache_dir: self.paths.cache_dir.clone(),

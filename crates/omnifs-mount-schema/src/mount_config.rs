@@ -1,9 +1,11 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Provider-specific configuration object from a mount JSON file's `"config"` field.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[schema(value_type = Object)]
 #[serde(transparent)]
 pub struct ProviderConfig(serde_json::Value);
 
@@ -30,7 +32,7 @@ impl ProviderConfig {
 }
 
 /// Authentication configuration for HTTP requests.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Auth {
     StaticToken(StaticToken),
@@ -53,7 +55,7 @@ impl fmt::Display for AuthKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     /// Provider-declared auth scheme key for manifest-backed credentials.
@@ -66,7 +68,7 @@ pub struct StaticToken {
     pub token_file: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
     /// Provider-declared auth scheme key for manifest-backed credentials.

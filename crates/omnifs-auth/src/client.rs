@@ -235,6 +235,8 @@ impl DeviceCodePrompt {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[error("{0}")]
+    RequestConfig(String),
     #[error("oauth client_id is required")]
     MissingClientId,
     #[error("oauth client_secret is required for this token endpoint auth method")]

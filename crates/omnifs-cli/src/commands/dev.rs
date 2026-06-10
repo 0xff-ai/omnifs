@@ -17,7 +17,7 @@ use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
 use crate::launch::{LaunchSpec, launch_session};
 use crate::paths::PathOverrides;
-use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT};
+use crate::runtime::ContainerExtras;
 use crate::session::{
     CONTAINER_NAME, CredsBackend, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, env_string, set_private_dir,
     write_secret,
@@ -87,22 +87,15 @@ impl DevArgs {
                 credentials_file: &paths.credentials_file,
                 store,
                 verb: "omnifs dev",
+                configs: dev_mounts::configs()?,
                 extras: ContainerExtras {
                     binds: vec![
                         format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
                         format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
                     ],
-                    env: vec![format!(
-                        "OMNIFS_INSPECTOR_ADDR=0.0.0.0:{GUEST_INSPECTOR_PORT}"
-                    )],
-                    tcp_ports: vec![],
                 },
             },
             ctx.catalog(),
-            |session| {
-                anstream::println!("Installing built-in dev mount configs");
-                dev_mounts::install(session)
-            },
         )
         .await?;
 

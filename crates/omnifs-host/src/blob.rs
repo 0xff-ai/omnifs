@@ -18,8 +18,8 @@ use crate::callouts::{
 };
 use crate::http::{HttpStack, decode_response_headers};
 use crate::log_redaction::{LogUrl, WitHeaders};
-use crate::mounts::Resolved;
 use futures::StreamExt;
+use omnifs_mount_schema::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;

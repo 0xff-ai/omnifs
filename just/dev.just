@@ -39,12 +39,22 @@ scripts-test:
 
 # Run the full local validation path for broad changes.
 [group('dev')]
-check: fmt-check host-clippy test providers-check npm-validate scripts-test
+check: fmt-check openapi-check host-clippy test providers-check npm-validate scripts-test
 
 # Regenerate the provider JSON schema.
 [group('dev')]
 schema:
     cargo run -q -p omnifs-mount-schema --example write_provider > crates/omnifs-mount-schema/schema/omnifs.provider.schema.json
+
+# Regenerate the control API OpenAPI spec from the daemon implementation.
+[group('dev')]
+openapi:
+    bun scripts/openapi.ts generate
+
+# Check that the checked-in OpenAPI spec matches the implementation.
+[group('dev')]
+openapi-check:
+    bun scripts/openapi.ts check
 
 # Prepare smoke-test fixtures without launching the runtime.
 [group('dev')]

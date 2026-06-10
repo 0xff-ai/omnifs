@@ -1,7 +1,6 @@
 //! TUI state: operation store, mount windows, filters.
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 
 use omnifs_inspector::{InspectorRecord, TraceId};
 
@@ -29,7 +28,7 @@ pub struct App {
     pub connected: bool,
     /// Inspector address shown in the header while disconnected.
     /// `None` in [`ConnectionMode::Replay`].
-    pub addr: Option<SocketAddr>,
+    pub addr: Option<String>,
     pub paused: bool,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
@@ -73,11 +72,7 @@ pub struct TreeCursor {
 }
 
 impl App {
-    pub fn new(
-        mode: ConnectionMode,
-        container: impl Into<String>,
-        addr: Option<SocketAddr>,
-    ) -> Self {
+    pub fn new(mode: ConnectionMode, container: impl Into<String>, addr: Option<String>) -> Self {
         Self {
             mode,
             container: container.into(),

@@ -4,9 +4,11 @@ Repository-local guidance for working in `omnifs`.
 
 ## Project model
 
-`omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The host runtime loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
+`omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The runtime daemon (binary `omnifsd`, crate `crates/omnifs-daemon`) loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
 
-The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested.
+The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the session secrets directory is the only omnifs-owned bind. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
+
+The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested. `omnifsd` must stay free of container assumptions: Docker is one launch mechanism, and the daemon will later run host-native when NFSv4/FSKit mounts land.
 
 ## Supported workflow
 
@@ -155,10 +157,10 @@ Git clone currently uses SSH:
 
 ### Mount loading and resolved mounts
 
-- Host mount loading lives in `omnifs_host::mounts`.
-- `omnifs_host::mounts::Spec` is raw user-authored mount JSON.
-- `omnifs_host::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
-- `ProviderCatalog::load_mount()` returns `omnifs_host::mounts::Resolved` directly.
+- Mount loading lives in `omnifs_mount_schema::mounts` (shared by the CLI and the daemon).
+- `omnifs_mount_schema::mounts::Spec` is raw user-authored mount JSON.
+- `omnifs_mount_schema::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
+- `ProviderCatalog::load_mount()` returns `omnifs_mount_schema::mounts::Resolved` directly.
 - Use `resolve_mount_spec(spec, require_metadata)` for strict load versus best-effort delete/reset paths.
 - `CredentialTarget` and session materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
 - Host-managed credentials require `provider_id`, always on `Resolved`, plus `auth.scheme` and optional `auth.account`.
@@ -169,6 +171,7 @@ Git clone currently uses SSH:
 
 - Pick one backend at startup: keychain or file at `~/.omnifs/data/credentials.json`.
 - Keep `omnifs-creds` on the latest `keyring` 3.x line for now. `keyring` 4 split the application API into `keyring-core` and made the `keyring` crate a sample/connector bundle; depending on it directly pulls in every connector, including SQLite/Turso, instead of replacing the small file fallback cleanly.
+- `oauth2` 5.0.0 still binds its `reqwest` integration to `reqwest` 0.12. Keep `omnifs-auth` on a direct `reqwest` 0.12 dependency and use the `reqwest-oauth2` alias in `omnifs-host` for OAuth refresh clients until `oauth2` supports `reqwest` 0.13. The workspace `reqwest` dependency is for normal host/CLI HTTP clients and may be newer.
 - The file store is intentionally a local fallback and session-transfer store. It gives omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
 - `CredentialKey::storage_key()` is the only public wire form: `provider:scheme:account`.
 - `CredentialEntry.value` is private; callers use `access_token()`.
@@ -251,7 +254,7 @@ Host-side mutations travel as `effects` on the terminal, not as separate callout
 
 The WIT reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads.
 
-Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_host::mounts::Spec`, resolves it to `omnifs_host::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
+Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount_schema::mounts::Spec`, resolves it to `omnifs_mount_schema::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
 
 ## Caching model
 

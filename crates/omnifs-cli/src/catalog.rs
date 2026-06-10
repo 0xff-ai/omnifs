@@ -2,7 +2,7 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
-use omnifs_host::mounts::{Catalog as MountCatalog, Resolved, Spec};
+use omnifs_mount_schema::mounts::{Catalog as MountCatalog, Resolved, Spec};
 use omnifs_mount_schema::{AuthManifest, ProviderManifest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

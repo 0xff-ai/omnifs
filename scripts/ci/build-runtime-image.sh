@@ -24,10 +24,16 @@ case "$platform" in
 esac
 
 binary="${OMNIFS_BINARY:-$root/target/$target/release/omnifs}"
+daemon_binary="${OMNIFSD_BINARY:-$root/target/$target/release/omnifsd}"
 wasm_dir="${OMNIFS_WASM_DIR:-$root/target/wasm32-wasip2/release}"
 
 if [[ ! -x "$binary" ]]; then
   echo "missing native Linux binary: $binary" >&2
+  exit 1
+fi
+
+if [[ ! -x "$daemon_binary" ]]; then
+  echo "missing native Linux daemon binary: $daemon_binary" >&2
   exit 1
 fi
 
@@ -49,6 +55,7 @@ trap cleanup EXIT
 
 mkdir -p "$context/providers" "$context/scripts"
 cp "$binary" "$context/omnifs"
+cp "$daemon_binary" "$context/omnifsd"
 cp "$wasm_dir"/omnifs_provider_*.wasm "$context/providers/"
 cp "$wasm_dir"/omnifs_tool_archive.wasm "$context/providers/"
 cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
@@ -97,4 +104,5 @@ echo "image=$image"
 echo "platform=$platform"
 echo "digest=$digest"
 echo "binary=$binary"
+echo "daemon_binary=$daemon_binary"
 echo "providers=$(find "$context/providers" -maxdepth 1 -name 'omnifs_provider_*.wasm' | wc -l | tr -d ' ')"

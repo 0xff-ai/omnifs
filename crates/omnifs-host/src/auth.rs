@@ -8,13 +8,11 @@
 use arc_swap::ArcSwapOption;
 use async_singleflight::Group;
 use fs2::FileExt;
-use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, OAuthRequestConfig};
+use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialEntry, CredentialKind, CredentialStore, FileStore, StoreError};
-use omnifs_mount_schema::{
-    Auth, AuthKind, AuthManifest, OAuth, OauthScheme, SchemeResolveError, StaticToken,
-};
-use secrecy::{ExposeSecret, SecretString};
+use omnifs_mount_schema::{Auth, AuthKind, AuthManifest, OAuth, SchemeResolveError, StaticToken};
+use secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -24,8 +22,6 @@ const OAUTH_REFRESH_WINDOW: TimeDuration = TimeDuration::seconds(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    #[error("{0}")]
-    CredentialSourceMissing(String),
     #[error("auth manifest is required for auth type `{0}`")]
     ManifestRequired(AuthKind),
     #[error("no static-token auth scheme matches `{0}`")]
@@ -78,7 +74,7 @@ struct AuthStoreContext {
     provider_id: String,
     store: Arc<dyn CredentialStore>,
     refresh_lock_path: PathBuf,
-    oauth_http: reqwest::Client,
+    oauth_http: reqwest_oauth2::Client,
 }
 
 struct OAuth2PkceStrategy {
@@ -86,7 +82,7 @@ struct OAuth2PkceStrategy {
     credential_id: CredentialId,
     store: Arc<dyn CredentialStore>,
     refresh_lock_path: PathBuf,
-    oauth_http: reqwest::Client,
+    oauth_http: reqwest_oauth2::Client,
     current: ArcSwapOption<CredentialEntry>,
     refreshes: Group<String, Option<CredentialEntry>, String>,
 }
@@ -180,7 +176,7 @@ impl AuthManager {
         provider_id: impl Into<String>,
         store: Arc<dyn CredentialStore>,
         refresh_lock_path: PathBuf,
-        oauth_http: reqwest::Client,
+        oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
         let context = AuthStoreContext {
             provider_id: provider_id.into(),
@@ -198,8 +194,8 @@ impl AuthManager {
         store: Arc<dyn CredentialStore>,
         refresh_lock_path: PathBuf,
     ) -> Result<Self, AuthError> {
-        let oauth_http = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
+        let oauth_http = reqwest_oauth2::ClientBuilder::new()
+            .redirect(reqwest_oauth2::redirect::Policy::none())
             .build()
             .map_err(|e| AuthError::OAuth(e.to_string()))?;
         Self::from_configs_manifest_store_with_http(
@@ -294,38 +290,6 @@ pub(crate) fn credential_store_for_config_dir(config_dir: &Path) -> Arc<dyn Cred
     Arc::new(FileStore::new(config_dir.join("credentials.json")))
 }
 
-pub fn oauth_request_from_config(
-    config: Option<&OAuth>,
-    scheme: OauthScheme,
-) -> Result<OAuthRequest, AuthError> {
-    let Some(config) = config else {
-        return Ok(OAuthRequest::new(scheme));
-    };
-
-    let mut request_config = OAuthRequestConfig::default();
-    if let Some(scopes) = &config.scopes {
-        request_config = request_config.with_scopes(scopes.clone());
-    }
-    if let Some(domain) = non_empty_config_value(config.domain.as_deref(), "auth.domain")? {
-        request_config = request_config.with_inject_domain(domain);
-    }
-    if let Some(header) = non_empty_config_value(config.header.as_deref(), "auth.header")? {
-        request_config = request_config.with_inject_header(header);
-    }
-    if let Some(redirect_uri) =
-        non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
-    {
-        request_config = request_config.with_redirect_uri(redirect_uri);
-    }
-    if let Some(client_id) = non_empty_config_value(config.client_id.as_deref(), "auth.clientId")? {
-        request_config = request_config.with_client_id(client_id);
-    }
-    if let Some(client_secret) = read_oauth_client_secret(config)? {
-        request_config = request_config.with_client_secret(client_secret);
-    }
-    Ok(OAuthRequest::from_config(scheme, request_config))
-}
-
 impl StaticTokenStrategy {
     fn from_manifest_config(
         config: &StaticToken,
@@ -386,7 +350,7 @@ impl OAuth2PkceStrategy {
         provider_id: &str,
         store: Arc<dyn CredentialStore>,
         refresh_lock_path: PathBuf,
-        oauth_http: reqwest::Client,
+        oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
         let manifest = manifest.ok_or(AuthError::ManifestRequired(AuthKind::OAuth))?;
         let scheme = manifest
@@ -620,55 +584,6 @@ fn read_credential(token_file: Option<&str>, token_env: Option<&str>) -> Option<
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty())
         })
-}
-
-fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, AuthError> {
-    if let Some(path) = config.client_secret_file.as_deref() {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                return secret_from_config_value(
-                    contents.trim(),
-                    &format!("auth.clientSecretFile {path}"),
-                );
-            },
-            Err(error) if config.client_secret_env.is_none() => {
-                return Err(AuthError::CredentialSourceMissing(format!(
-                    "failed to read auth.clientSecretFile {path}: {error}"
-                )));
-            },
-            Err(_) => {},
-        }
-    }
-
-    let Some(env_var) = config.client_secret_env.as_deref() else {
-        return Ok(None);
-    };
-    let value = std::env::var(env_var).map_err(|error| {
-        AuthError::CredentialSourceMissing(format!(
-            "failed to read auth.clientSecretEnv {env_var}: {error}"
-        ))
-    })?;
-    secret_from_config_value(value.trim(), &format!("auth.clientSecretEnv {env_var}"))
-}
-
-fn secret_from_config_value(value: &str, source: &str) -> Result<Option<SecretString>, AuthError> {
-    non_empty_config_value(Some(value), source)
-        .map(|value| value.map(|value| SecretString::from(value.to_owned())))
-}
-
-fn non_empty_config_value<'a>(
-    value: Option<&'a str>,
-    source: &str,
-) -> Result<Option<&'a str>, AuthError> {
-    let Some(value) = value.map(str::trim) else {
-        return Ok(None);
-    };
-    if value.is_empty() {
-        return Err(AuthError::CredentialSourceMissing(format!(
-            "{source} is empty"
-        )));
-    }
-    Ok(Some(value))
 }
 
 async fn acquire_refresh_lock(path: &Path) -> Result<RefreshLock, AuthError> {

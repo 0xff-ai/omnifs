@@ -1,22 +1,17 @@
 # Inspector emission architecture
 
-Status: implemented (phase 3); TCP loopback transport instead of UDS
+Status: implemented; transport superseded by the daemon control API
 Scope: host-side `InspectorSink` emission path, transport from daemon to subscribers, history/replay semantics, recording, `omnifs dev` integration
 
-> **Architecture note — TCP, not UDS.** This document originally
-> proposed Unix-domain-socket transport bind-mounted from the
-> container to the host. That doesn't work across the Docker Desktop
-> VM boundary on macOS and Windows: the bind mount forwards the file
-> entry through virtio-fs, but the socket is bound inside the VM's
-> network namespace, so host `connect()` returns `ECONNREFUSED`.
-> Native Linux docker would work; Docker Desktop does not.
->
-> The implemented transport is TCP loopback. The daemon binds
-> `0.0.0.0:7878` inside the container; Docker forwards
-> `127.0.0.1:7878:7878/tcp` to the host; CLI connects via
-> `TcpStream::connect("127.0.0.1:7878")`. All other architecture
-> below (ring, broadcast, subscriber lifecycle, redaction, schema)
-> applies unchanged.
+> **Architecture note — transport now `GET /v1/events`.** This document
+> originally proposed Unix-domain-socket transport, which cannot cross
+> the Docker Desktop VM boundary; the first implementation was a raw
+> TCP loopback listener on port 7878. With the daemon/CLI split
+> (`docs/design/daemon-cli-split.md`), the raw listener was replaced by
+> a streaming `GET /v1/events` endpoint on omnifsd's control API —
+> same port, same newline-framed JSON wire format, chunk-encoded by
+> HTTP. All other architecture below (ring, broadcast, subscriber
+> lifecycle, redaction, schema) applies unchanged.
 
 ## Context
 

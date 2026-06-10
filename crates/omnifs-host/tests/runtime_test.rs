@@ -6,12 +6,12 @@ use omnifs_core::path::Path as OmnifsPath;
 use omnifs_core::view::{DirentsPayload, FilePayload, LookupPayload};
 use omnifs_host::clock::now_millis;
 use omnifs_host::cloner::GitCloner;
-use omnifs_host::mounts::Spec;
 use omnifs_host::{Dirs, LookupOutcome, Runtime};
 use omnifs_itest::{
     inline_content, make_engine, make_extractor, make_initialized_runtime, make_runtime,
     provider_wasm_path,
 };
+use omnifs_mount_schema::mounts::Spec;
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
 
 #[tokio::test]
@@ -812,12 +812,7 @@ async fn test_cache_isolated_by_mount_name() {
         &wasm_path,
         &resolved_a,
         cloner.clone(),
-        Dirs::new(
-            cache_dir.path(),
-            config_dir.path(),
-            config_dir.path(),
-            config_dir.path(),
-        ),
+        Dirs::new(cache_dir.path(), config_dir.path(), config_dir.path()),
         extractor.clone(),
         &caches,
     )
@@ -827,12 +822,7 @@ async fn test_cache_isolated_by_mount_name() {
         &wasm_path,
         &resolved_b,
         cloner,
-        Dirs::new(
-            cache_dir.path(),
-            config_dir.path(),
-            config_dir.path(),
-            config_dir.path(),
-        ),
+        Dirs::new(cache_dir.path(), config_dir.path(), config_dir.path()),
         extractor,
         &caches,
     )

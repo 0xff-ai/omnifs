@@ -2,8 +2,8 @@ use super::config_generation::GeneratedMountConfig;
 use crate::auth::AuthSelection;
 use anyhow::Context;
 use omnifs_core::MountName;
-use omnifs_host::mounts::Spec;
 use omnifs_mount_schema::ProviderConfig;
+use omnifs_mount_schema::mounts::Spec;
 use omnifs_mount_schema::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
 #[cfg(test)]

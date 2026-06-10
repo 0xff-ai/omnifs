@@ -26,8 +26,9 @@ impl Filesystem for Frontend {
         let _trace = FuseTrace::new("lookup", format!("parent={} name={}", parent.0, name_str));
         let _span = debug_span!("fuse::lookup", parent = parent.0, name = name_str).entered();
 
+        let root_mount = (parent.0 == ROOT_INO).then(|| self.sync_root_mount());
         // Synthetic root (no root_mount): mount points are children.
-        if parent.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
+        if root_mount.as_ref().is_some_and(Option::is_none) {
             if self.registry.get(name_str).is_some() {
                 let ino = self.get_or_alloc_ino(
                     name_str,
@@ -172,8 +173,9 @@ impl Filesystem for Frontend {
 
         let fh = self.alloc_fh();
 
+        let root_mount = (ino.0 == ROOT_INO).then(|| self.sync_root_mount());
         // Synthetic root (no root_mount): list mount points.
-        if ino.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
+        if root_mount.as_ref().is_some_and(Option::is_none) {
             let mounts = self.registry.mounts();
             let mut entries = Vec::new();
             for m in mounts {

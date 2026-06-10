@@ -48,7 +48,7 @@ impl ProviderCatalog {
     pub(crate) fn load_mount_by_name(
         &self,
         name: &MountName,
-    ) -> anyhow::Result<omnifs_host::mounts::Resolved> {
+    ) -> anyhow::Result<omnifs_mount_schema::mounts::Resolved> {
         let mount = self
             .session_mount_configs()?
             .into_iter()

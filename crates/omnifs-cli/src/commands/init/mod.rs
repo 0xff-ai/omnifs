@@ -204,6 +204,35 @@ impl InitArgs {
 
         anstream::println!();
         anstream::println!("Mount `{mount_name}` is ready.");
+
+        let config = crate::session::MountConfig::from_parsed(spec, paths.config_file.clone())?;
+        let store = CredsBackend::auto(&paths.credentials_file, false);
+        match crate::live::add_mount(
+            ctx.runtime().container_name(),
+            catalog,
+            store.as_ref(),
+            config,
+        )
+        .await
+        {
+            Ok(crate::live::LiveApply::Applied) => {
+                anstream::println!("✓ Loaded into the running daemon");
+            },
+            Ok(crate::live::LiveApply::NotRunning) => {
+                anstream::println!("Run `omnifs up` to start it.");
+            },
+            Ok(crate::live::LiveApply::RestartRequired(reason)) => {
+                anstream::println!(
+                    "A daemon is running, but this mount can't load live ({reason}). Run `omnifs up` to restart with it."
+                );
+            },
+            Err(error) => {
+                anstream::eprintln!(
+                    "Mount config saved, but loading it into the running daemon failed: {error:#}"
+                );
+                anstream::eprintln!("Run `omnifs up` to restart with the new mount.");
+            },
+        }
         Ok(())
     }
 }

@@ -56,7 +56,7 @@ A global `config.toml` under `config_dir` supplies defaults for the runtime imag
 
 ### Surface
 
-Top-level verbs: `init`, `up`, `down`, `status`, `doctor`, `mounts`, `dev`, `auth`, `shell`, `logs`, `completions`, `version`. Daemon entry points (`mount`, `unmount`) live under hidden `omnifs daemon`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The container entrypoint invokes `omnifs daemon mount ...`; in-container path inference parses argv with the daemon prefix.
+Top-level verbs: `init`, `up`, `down`, `status`, `doctor`, `mounts`, `dev`, `auth`, `shell`, `logs`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
 
 ### Tracing
 

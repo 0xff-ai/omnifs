@@ -11,16 +11,18 @@ use std::path::{Path, PathBuf};
 
 use builtins::Builtins;
 use omnifs_core::{IdError, ProviderId, mount};
-use omnifs_mount_schema::{
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::{
     Auth, AuthManifest, OAuth, ProviderCapabilities, ProviderConfig, ProviderManifest, StaticToken,
     UnixSocketEndpointError,
 };
-use serde::{Deserialize, Serialize};
 
 /// Raw user-authored mount JSON.
 ///
 /// Loaded from JSON files in the mount spec directory.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct Spec {
     /// Filename of the provider WASM component this mount loads, looked
     /// up in `providers_dir`.
@@ -29,16 +31,15 @@ pub struct Spec {
     /// Stable provider identity from the provider metadata custom section.
     /// This is runtime-derived, not a user-authored config field.
     #[serde(default, skip)]
+    #[schema(ignore)]
     provider_id: Option<String>,
     /// Provider config schema from the provider metadata custom section.
     #[serde(default, skip)]
+    #[schema(ignore)]
     provider_config_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub root_mount: bool,
-    #[serde(
-        default,
-        deserialize_with = "omnifs_mount_schema::deserialize_mount_auth"
-    )]
+    #[serde(default, deserialize_with = "crate::deserialize_mount_auth")]
     pub auth: Vec<Auth>,
     pub capabilities: Option<ProviderCapabilities>,
     #[serde(rename = "config")]
@@ -83,10 +84,12 @@ impl Spec {
             .map_or_else(|| b"{}".to_vec(), ProviderConfig::to_bytes)
     }
 
+    #[must_use]
     pub fn provider_id(&self) -> Option<&str> {
         self.provider_id.as_deref()
     }
 
+    #[must_use]
     pub fn provider_config_schema(&self) -> Option<&serde_json::Value> {
         self.provider_config_schema.as_ref()
     }
@@ -108,7 +111,7 @@ impl Spec {
 
     pub fn apply_provider_metadata(
         &mut self,
-        manifest: &omnifs_mount_schema::ProviderManifest,
+        manifest: &crate::ProviderManifest,
     ) -> Result<(), serde_json::Error> {
         self.provider_id = Some(manifest.id.clone());
         if self.auth.is_empty()
@@ -116,13 +119,11 @@ impl Spec {
             && let Some(default_scheme) = auth.schemes.get(&auth.default)
         {
             let auth = match default_scheme {
-                omnifs_mount_schema::ManifestAuthScheme::StaticToken(_) => {
-                    Auth::StaticToken(StaticToken {
-                        scheme: Some(auth.default.clone()),
-                        ..StaticToken::default()
-                    })
-                },
-                omnifs_mount_schema::ManifestAuthScheme::Oauth(_) => Auth::OAuth(OAuth {
+                crate::ManifestAuthScheme::StaticToken(_) => Auth::StaticToken(StaticToken {
+                    scheme: Some(auth.default.clone()),
+                    ..StaticToken::default()
+                }),
+                crate::ManifestAuthScheme::Oauth(_) => Auth::OAuth(OAuth {
                     scheme: Some(auth.default.clone()),
                     ..OAuth::default()
                 }),
@@ -134,7 +135,7 @@ impl Spec {
         }
         if let Some(schema) = manifest.config_schema.as_ref() {
             if self.config_raw.is_none() {
-                let config = omnifs_mount_schema::ConfigSchema::parse(schema)
+                let config = crate::ConfigSchema::parse(schema)
                     .map_err(serde::de::Error::custom)?
                     .defaults();
                 self.config_raw = Some(ProviderConfig::from_value(config));
@@ -147,14 +148,13 @@ impl Spec {
     pub fn into_resolved(
         mut self,
         fallback_provider_id: impl Into<String>,
-        manifest: Option<&omnifs_mount_schema::ProviderManifest>,
+        manifest: Option<&crate::ProviderManifest>,
     ) -> Result<Resolved, serde_json::Error> {
         if let Some(manifest) = manifest {
             self.apply_provider_metadata(manifest)?;
         }
         let provider_id = self
             .provider_id
-            .clone()
             .unwrap_or_else(|| fallback_provider_id.into());
         Ok(Resolved {
             provider: self.provider,
@@ -176,10 +176,12 @@ impl Resolved {
             .map_or_else(|| b"{}".to_vec(), ProviderConfig::to_bytes)
     }
 
+    #[must_use]
     pub fn provider_id(&self) -> &str {
         &self.provider_id
     }
 
+    #[must_use]
     pub fn provider_config_schema(&self) -> Option<&serde_json::Value> {
         self.provider_config_schema.as_ref()
     }
@@ -216,7 +218,7 @@ pub enum Error {
     #[error("failed to extract provider metadata from {}: {source}", path.display())]
     ExtractProviderMetadata {
         path: PathBuf,
-        source: omnifs_mount_schema::ProviderMetadataError,
+        source: crate::ProviderMetadataError,
     },
     #[error("failed to apply provider metadata from {}: {source}", path.display())]
     ApplyProviderMetadata {
@@ -321,6 +323,7 @@ impl Catalog {
         Ok(Builtins::embedded()?.auth_manifest_for(config))
     }
 
+    #[must_use]
     pub fn provider_path(&self, config: &Resolved) -> PathBuf {
         let provider = PathBuf::from(&config.provider);
         if provider.is_absolute() {
@@ -387,10 +390,10 @@ impl<'a> Resolver<'a> {
     }
 
     pub fn resolve_spec(&self, mut config: Spec) -> Result<Resolved, Error> {
+        // Best-effort for delete/reset paths; strict when metadata is required.
+        let applied = self.catalog.apply_metadata(&mut config);
         if self.require_metadata {
-            self.catalog.apply_metadata(&mut config)?;
-        } else {
-            let _ = self.catalog.apply_metadata(&mut config);
+            applied?;
         }
         let fallback_provider_id = Catalog::provider_id(&config).map_or_else(
             |_| {
@@ -450,11 +453,9 @@ fn read_provider_metadata_file(path: &Path) -> Result<Option<ProviderManifest>, 
             });
         },
     };
-    omnifs_mount_schema::read_provider_metadata_section(&bytes).map_err(|source| {
-        Error::ExtractProviderMetadata {
-            path: path.to_path_buf(),
-            source,
-        }
+    crate::read_provider_metadata_section(&bytes).map_err(|source| Error::ExtractProviderMetadata {
+        path: path.to_path_buf(),
+        source,
     })
 }
 
@@ -471,13 +472,13 @@ mod tests {
         "/../../providers/github/omnifs.provider.json"
     ));
 
-    fn linear_manifest() -> omnifs_mount_schema::ProviderManifest {
-        omnifs_mount_schema::ProviderManifest::from_bytes(LINEAR_METADATA_JSON.as_bytes())
+    fn linear_manifest() -> crate::ProviderManifest {
+        crate::ProviderManifest::from_bytes(LINEAR_METADATA_JSON.as_bytes())
             .expect("linear manifest must parse")
     }
 
-    fn github_manifest() -> omnifs_mount_schema::ProviderManifest {
-        omnifs_mount_schema::ProviderManifest::from_bytes(GITHUB_METADATA_JSON.as_bytes())
+    fn github_manifest() -> crate::ProviderManifest {
+        crate::ProviderManifest::from_bytes(GITHUB_METADATA_JSON.as_bytes())
             .expect("github manifest must parse")
     }
 
@@ -486,11 +487,8 @@ mod tests {
         let manifest = linear_manifest();
         let auth = manifest.auth.as_ref().expect("linear auth block");
         let pat = auth.schemes.get("pat").expect("linear pat scheme");
-        assert!(matches!(
-            pat,
-            omnifs_mount_schema::ManifestAuthScheme::StaticToken(_)
-        ));
-        let omnifs_mount_schema::ManifestAuthScheme::StaticToken(static_token) = pat else {
+        assert!(matches!(pat, crate::ManifestAuthScheme::StaticToken(_)));
+        let crate::ManifestAuthScheme::StaticToken(static_token) = pat else {
             unreachable!()
         };
         assert!(static_token.creation_url.is_some());
@@ -504,7 +502,7 @@ mod tests {
         let manifest = github_manifest();
         let auth = manifest.auth.as_ref().expect("github auth block");
         let pat = auth.schemes.get("pat").expect("github pat scheme");
-        let omnifs_mount_schema::ManifestAuthScheme::StaticToken(static_token) = pat else {
+        let crate::ManifestAuthScheme::StaticToken(static_token) = pat else {
             panic!("expected static token");
         };
         assert_eq!(auth.inject.prefix, "Bearer ");

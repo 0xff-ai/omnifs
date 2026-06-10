@@ -2,10 +2,12 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
 use omnifs_creds::CredentialStore;
 
 use crate::catalog::ProviderCatalog;
-use crate::runtime::{ContainerExtras, GUEST_INSPECTOR_PORT, Runtime};
+use crate::client::DaemonClient;
+use crate::runtime::{ContainerExtras, Runtime};
 use crate::runtime_target::RuntimeTarget;
 use crate::session::{MountConfig, Session};
 
@@ -16,32 +18,29 @@ pub(crate) struct LaunchSpec<'a> {
     pub store: Box<dyn CredentialStore>,
     /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
     pub verb: &'static str,
-    /// Extra binds, env vars, and ports layered on top of the session-populated
-    /// preopens. `launch_session` always exposes the inspector port.
+    /// Mount configs to materialize and push to the daemon.
+    pub configs: Vec<MountConfig>,
+    /// Extra binds layered on top of the session-populated preopens.
     pub extras: ContainerExtras,
 }
 
-/// Run the full prepare → populate → connect → launch → wait → verify →
-/// disarm sequence.
+/// Run the full prepare → populate → connect → launch → wait → push
+/// sequence.
 ///
-/// `make_configs` receives the freshly-prepared `Session` and returns the
-/// mount configs to materialise. It runs after `Session::prepare` so that
-/// dev-only config installation (writing configs into the session dir) can
-/// happen before populate.
-///
-/// The `cleanup` guard is armed on entry and disarmed only after
-/// `verify_status` succeeds, so the session directory is always removed on
-/// error or early return.
+/// The `cleanup` guard is armed on entry and disarmed only after every
+/// mount is loaded, so the session directory is always removed on error —
+/// and once the container is running, a failure also tears the container
+/// down so it never outlives the session files its binds point at.
 pub(crate) async fn launch_session(
     spec: LaunchSpec<'_>,
     catalog: &ProviderCatalog,
-    make_configs: impl FnOnce(&Session) -> anyhow::Result<Vec<MountConfig>>,
 ) -> anyhow::Result<()> {
     let LaunchSpec {
         runtime,
         credentials_file,
         store,
         verb,
+        configs,
         mut extras,
     } = spec;
 
@@ -49,10 +48,8 @@ pub(crate) async fn launch_session(
     let mut cleanup = session.cleanup_on_drop();
     anstream::println!("Preparing session at {}", session.root().display());
 
-    let configs = make_configs(&session)?;
-
     anstream::println!("Materializing mount configs and credentials");
-    let preopen_binds = session.populate(&configs, catalog, store.as_ref())?;
+    let (preopen_binds, payloads) = session.populate(&configs, catalog, store.as_ref())?;
     anstream::println!("✓ Materialized {} mount(s)", configs.len());
 
     // Session-populated preopen binds come first; caller extras append after.
@@ -60,16 +57,41 @@ pub(crate) async fn launch_session(
     binds.append(&mut extras.binds);
     extras.binds = binds;
 
-    // Inspector port is always exposed.
-    if !extras.tcp_ports.contains(&GUEST_INSPECTOR_PORT) {
-        extras.tcp_ports.push(GUEST_INSPECTOR_PORT);
-    }
-
     let rt = Runtime::connect_ready(runtime, verb).await?;
     rt.launch_container(&session, extras).await?;
-    rt.wait_for_fuse_mount().await?;
-    rt.verify_status(&configs).await?;
+
+    if let Err(error) = push_mounts(&rt, &payloads).await {
+        // The container's creds bind points into the session dir the armed
+        // cleanup is about to delete; don't leave it running half-mounted.
+        if let Err(teardown) = rt.remove().await {
+            anstream::eprintln!("also failed to remove the container: {teardown:#}");
+        }
+        return Err(error);
+    }
     cleanup.disarm();
 
+    Ok(())
+}
+
+async fn push_mounts(
+    rt: &Runtime,
+    payloads: &[crate::session::MountPayload],
+) -> anyhow::Result<()> {
+    rt.wait_for_daemon_ready().await?;
+
+    let client = DaemonClient::new();
+    client.require_compatible().await?;
+    anstream::println!("Loading {} mount(s) into the daemon", payloads.len());
+    futures_util::future::try_join_all(payloads.iter().map(|payload| {
+        let client = &client;
+        async move {
+            client
+                .add_mount(&payload.spec)
+                .await
+                .with_context(|| format!("load mount `{}`", payload.name))
+        }
+    }))
+    .await?;
+    anstream::println!("✓ Runtime sees {} provider(s)", payloads.len());
     Ok(())
 }

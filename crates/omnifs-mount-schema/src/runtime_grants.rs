@@ -1,8 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use utoipa::ToSchema;
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
 pub struct PreopenedPath {
     pub host: String,
     pub guest: String,
@@ -10,7 +11,9 @@ pub struct PreopenedPath {
     pub mode: PreopenMode,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PreopenMode {
     #[default]
@@ -23,7 +26,7 @@ pub enum PreopenMode {
 /// This type is user-authored in mount JSON configs and controls what
 /// sandbox capabilities are granted. It is distinct from `CapabilityEntry`
 /// which is the provider-manifest declaration of what a provider needs.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
 pub struct ProviderCapabilities {
     #[serde(default)]
     pub domains: Option<Vec<String>>,

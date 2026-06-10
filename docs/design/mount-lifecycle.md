@@ -28,7 +28,7 @@ This gives the implementation a simple ownership boundary:
 
 - shipped provider metadata says what can be configured
 - user mount config says what is enabled for normal `omnifs up`
-- dev mount configs live in `providers/<name>/dev-mount.json` when dev wiring differs from `{provider, mount}` defaults; `build.rs` embeds them into the CLI and container entrypoint materializes them at `/root/.omnifs/mounts/`
+- dev mount configs live in `providers/<name>/dev-mount.json` when dev wiring differs from `{provider, mount}` defaults; `build.rs` embeds them into the CLI, and `omnifs dev` pushes them to the daemon over the control API like any other mount
 - the credential store is durable
 - the session credential directory is temporary
 

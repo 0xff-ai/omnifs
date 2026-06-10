@@ -18,8 +18,7 @@ name = "omnifs_cli"
 path = "src/lib.rs"
 
 [dependencies]
-omnifs-fuse = { workspace = true }
-omnifs-host = { workspace = true }
+omnifs-api = { workspace = true }
 omnifs-mount-schema = { workspace = true }
 omnifs-creds = { workspace = true }
 omnifs-auth = { workspace = true }

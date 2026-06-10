@@ -80,9 +80,6 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
     let providers_dir = tempfile::tempdir().expect("providers dir");
-    let mounts_dir = config_dir.path().join("mounts");
-    std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-
     for wasm in ["test_provider.wasm", ARCHIVE_TOOL_WASM] {
         let src = wasm_artifact_path(wasm);
         assert!(
@@ -102,25 +99,23 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
                 "config": {provider_config}
             }}"#
     );
-    std::fs::write(mounts_dir.join("test.json"), mount_config).expect("write mount config");
 
     let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-    let registry = ProviderRegistry::load(
-        Dirs::new(
-            cache_dir.path(),
-            config_dir.path(),
-            &mounts_dir,
-            providers_dir.path(),
-        ),
-        &cloner,
+    let registry = ProviderRegistry::new(
+        Dirs::new(cache_dir.path(), config_dir.path(), providers_dir.path()),
+        cloner,
     )
-    .expect("registry load");
+    .expect("registry init");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("tokio runtime");
+    let spec = omnifs_mount_schema::mounts::Spec::parse(&mount_config).expect("parse mount spec");
+    registry
+        .add_mount(spec, rt.handle())
+        .expect("add test mount");
     let fs = Frontend::new(rt.handle().clone(), Arc::new(registry));
 
     FuseHarness {

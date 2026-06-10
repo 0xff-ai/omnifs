@@ -8,10 +8,9 @@
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::{CredentialStore, FileStore, KeyringStore};
-use omnifs_host::mounts::Spec;
 use omnifs_mount_schema::PreopenMode;
+use omnifs_mount_schema::mounts::Spec;
 use secrecy::ExposeSecret;
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +29,6 @@ pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 pub(crate) struct Session {
     root: PathBuf,
     creds_dir: PathBuf,
-    mounts_dir: PathBuf,
     credentials_file: PathBuf,
 }
 
@@ -56,17 +54,27 @@ impl Session {
         fs::create_dir_all(&root)
             .with_context(|| format!("create session dir {}", root.display()))?;
         let creds_dir = root.join("creds");
-        let mounts_dir = root.join("mounts");
         let credentials_file = root.join("credentials.json");
         fs::create_dir_all(&creds_dir)?;
-        fs::create_dir_all(&mounts_dir)?;
         set_private_dir(&root)?;
         set_private_dir(&creds_dir)?;
-        set_private_dir(&mounts_dir)?;
         Ok(Self {
             root,
             creds_dir,
-            mounts_dir,
+            credentials_file,
+        })
+    }
+
+    /// Attach to the live session directory created by `omnifs up`,
+    /// without clearing it. `None` when no session exists (daemon not
+    /// started through this host, or never started).
+    pub(crate) fn attach(container_name: &ContainerName) -> Option<Self> {
+        let root = container_name.session_root();
+        let creds_dir = root.join("creds");
+        let credentials_file = root.join("credentials.json");
+        creds_dir.is_dir().then_some(Self {
+            root,
+            creds_dir,
             credentials_file,
         })
     }
@@ -79,10 +87,6 @@ impl Session {
         &self.creds_dir
     }
 
-    pub(crate) fn mounts_dir(&self) -> &Path {
-        &self.mounts_dir
-    }
-
     pub(crate) fn credentials_file(&self) -> &Path {
         &self.credentials_file
     }
@@ -91,23 +95,37 @@ impl Session {
         SessionCleanup::armed(self)
     }
 
+    /// Materialize credentials into the session and produce the rewritten
+    /// mount spec payloads the CLI pushes to the daemon over the control
+    /// API. Returns the extra container binds (user preopens) alongside.
     pub(crate) fn populate(
         &self,
         configs: &[MountConfig],
         catalog: &ProviderCatalog,
         store: &dyn CredentialStore,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<(Vec<String>, Vec<MountPayload>)> {
         let materializer = SessionMaterializer {
             session: self,
             catalog,
             store,
         };
         let mut binds = Vec::new();
+        let mut payloads = Vec::new();
         for cfg in configs {
-            binds.extend(materializer.materialize(cfg)?);
+            let (preopen_binds, payload) = materializer.materialize(cfg)?;
+            binds.extend(preopen_binds);
+            payloads.push(payload);
         }
-        Ok(binds)
+        Ok((binds, payloads))
     }
+}
+
+/// One mount ready for `POST /v1/mounts`: the session-rewritten spec.
+/// Secret values stay in session files; the spec carries only their paths.
+#[derive(Debug, Clone)]
+pub(crate) struct MountPayload {
+    pub(crate) name: MountName,
+    pub(crate) spec: Spec,
 }
 
 struct SessionMaterializer<'a> {
@@ -117,7 +135,7 @@ struct SessionMaterializer<'a> {
 }
 
 impl SessionMaterializer<'_> {
-    fn materialize(&self, cfg: &MountConfig) -> anyhow::Result<Vec<String>> {
+    fn materialize(&self, cfg: &MountConfig) -> anyhow::Result<(Vec<String>, MountPayload)> {
         let mut instance = cfg.config.clone();
         let user_preopen_count = instance
             .capabilities
@@ -146,21 +164,15 @@ impl SessionMaterializer<'_> {
             })?;
         let preopen_binds =
             Self::materialize_preopened_paths(&mut instance, &cfg.name, user_preopen_count)?;
-        let mut value = serde_json::to_value(&instance)
-            .with_context(|| format!("serialize mount config for {}", cfg.source.display()))?;
-        let obj = value
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("{} is not a JSON object", cfg.source.display()))?;
-        if let Some(auth) = obj.get_mut("auth") {
-            Self::patch_auth_json(auth, &mount_auth)?;
-        }
+        Self::patch_auth(&mut instance, &mount_auth)?;
 
-        let out = crate::paths::mount_config_path_for(self.session.mounts_dir(), &cfg.name);
-        let pretty =
-            serde_json::to_string_pretty(&value).context("serialize materialized mount config")?;
-        fs::write(&out, format!("{pretty}\n"))
-            .with_context(|| format!("write {}", out.display()))?;
-        Ok(preopen_binds)
+        Ok((
+            preopen_binds,
+            MountPayload {
+                name: cfg.name.clone(),
+                spec: instance,
+            },
+        ))
     }
 
     fn materialize_preopened_paths(
@@ -271,50 +283,33 @@ impl SessionMaterializer<'_> {
         Ok(())
     }
 
-    fn patch_auth_json(auth: &mut Value, mount_auth: &MountAuth) -> anyhow::Result<()> {
-        match auth {
-            Value::Array(items) => {
-                for (item, auth_config) in items.iter_mut().zip(mount_auth.config().auth.iter()) {
-                    Self::patch_auth_entry(item, auth_config, mount_auth)?;
-                }
-            },
-            Value::Object(_) if mount_auth.config().auth.len() == 1 => {
-                Self::patch_auth_entry(auth, &mount_auth.config().auth[0], mount_auth)?;
-            },
-            _ => {},
+    /// Rewrite host-managed static-token entries to point at their session
+    /// secret files. The spec stays typed end-to-end; the daemon parses the
+    /// same `Spec` this produces.
+    fn patch_auth(instance: &mut Spec, mount_auth: &MountAuth) -> anyhow::Result<()> {
+        for (entry, auth_config) in instance
+            .auth
+            .iter_mut()
+            .zip(mount_auth.config().auth.iter())
+        {
+            if auth_config.is_oauth()
+                || auth_config.token_file().is_some()
+                || auth_config.token_env().is_some()
+                || auth_config.scheme().is_none()
+            {
+                continue;
+            }
+            let target = mount_auth
+                .configured_target(auth_config, auth_config.account())
+                .map_err(|error| anyhow!("invalid credential id: {error}"))?;
+            let key = target
+                .primary_key()
+                .expect("credential target for scheme is internal");
+            if let omnifs_mount_schema::Auth::StaticToken(static_token) = entry {
+                static_token.token_env = None;
+                static_token.token_file = Some(format!("{HOST_CRED_DIR}/{}", key.storage_key()));
+            }
         }
-        Ok(())
-    }
-
-    fn patch_auth_entry(
-        entry: &mut Value,
-        auth_config: &omnifs_mount_schema::Auth,
-        mount_auth: &MountAuth,
-    ) -> anyhow::Result<()> {
-        let Some(obj) = entry.as_object_mut() else {
-            return Ok(());
-        };
-        if auth_config.is_oauth() {
-            return Ok(());
-        }
-        if auth_config.token_file().is_some() || auth_config.token_env().is_some() {
-            return Ok(());
-        }
-        if auth_config.scheme().is_none() {
-            return Ok(());
-        }
-        let target = mount_auth
-            .configured_target(auth_config, auth_config.account())
-            .map_err(|error| anyhow!("invalid credential id: {error}"))?;
-        let key = target
-            .primary_key()
-            .expect("credential target for scheme is internal");
-        let key_name = key.storage_key();
-        obj.remove("token_env");
-        obj.insert(
-            "token_file".into(),
-            Value::String(format!("{HOST_CRED_DIR}/{key_name}")),
-        );
         Ok(())
     }
 }
@@ -512,8 +507,9 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::{CredentialEntry, MemoryStore};
-    use omnifs_host::mounts::Spec;
+    use omnifs_mount_schema::mounts::Spec;
     use secrecy::{ExposeSecret, SecretString};
+    use serde_json::Value;
     use time::OffsetDateTime;
 
     fn sample_entry(value: &str) -> CredentialEntry {
@@ -525,8 +521,19 @@ mod tests {
 
     use crate::test_support::wasm_with_provider_metadata;
 
-    fn test_catalog(session: &Session, providers_dir: &Path) -> ProviderCatalog {
-        ProviderCatalog::new(&session.mounts_dir, providers_dir)
+    fn test_catalog(providers_dir: &Path) -> ProviderCatalog {
+        ProviderCatalog::new(providers_dir.join("mounts"), providers_dir)
+    }
+
+    fn payload_for(payloads: &[MountPayload], name: &str) -> Value {
+        serde_json::to_value(
+            &payloads
+                .iter()
+                .find(|payload| payload.name.as_str() == name)
+                .unwrap_or_else(|| panic!("payload for mount `{name}`"))
+                .spec,
+        )
+        .expect("serialize payload spec")
     }
 
     #[test]
@@ -535,11 +542,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
@@ -563,13 +568,10 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
-        session.populate(&[config], &catalog, &store).unwrap();
+        let catalog = test_catalog(tmp.path());
+        let (_, payloads) = session.populate(&[config], &catalog, &store).unwrap();
 
-        let written: Value = serde_json::from_str(
-            &fs::read_to_string(session.mounts_dir.join("github.json")).unwrap(),
-        )
-        .unwrap();
+        let written = payload_for(&payloads, "github");
         assert_eq!(
             written["auth"][0]["token_file"], "/run/omnifs/creds/github:pat:default",
             "host-managed static token should rewrite to a session token_file"
@@ -603,11 +605,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -618,11 +618,9 @@ mod tests {
             .unwrap(),
             source: PathBuf::from("/dev/null"),
         };
-        let catalog = test_catalog(&session, tmp.path());
-        session.populate(&[config], &catalog, &store).unwrap();
-        let written: Value =
-            serde_json::from_str(&fs::read_to_string(session.mounts_dir.join("dns.json")).unwrap())
-                .unwrap();
+        let catalog = test_catalog(tmp.path());
+        let (_, payloads) = session.populate(&[config], &catalog, &store).unwrap();
+        let written = payload_for(&payloads, "dns");
         assert_eq!(written["auth"][0]["token_env"], "FOO");
     }
 
@@ -632,11 +630,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -673,7 +669,7 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = test_catalog(&session, tmp.path());
+        let catalog = test_catalog(tmp.path());
         session.populate(&[config], &catalog, &store).unwrap();
 
         let session_store = FileStore::new(&session.credentials_file);
@@ -690,11 +686,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
@@ -729,7 +723,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
+        let catalog = test_catalog(tmp.path());
         session.populate(&[config], &catalog, &store).unwrap();
 
         let session_store = FileStore::new(&session.credentials_file);
@@ -745,11 +739,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -779,7 +771,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
+        let catalog = test_catalog(tmp.path());
         session.populate(&[config], &catalog, &store).unwrap();
 
         let session_store = FileStore::new(&session.credentials_file);
@@ -795,11 +787,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -815,13 +805,10 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
-        session.populate(&[config], &catalog, &store).unwrap();
+        let catalog = test_catalog(tmp.path());
+        let (_, payloads) = session.populate(&[config], &catalog, &store).unwrap();
 
-        let written: Value = serde_json::from_str(
-            &fs::read_to_string(session.mounts_dir.join("docker.json")).unwrap(),
-        )
-        .unwrap();
+        let written = payload_for(&payloads, "docker");
         assert_eq!(
             written["capabilities"]["unix_sockets"],
             serde_json::json!(["/var/run/docker.sock"]),
@@ -837,11 +824,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -863,8 +848,8 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
-        let binds = session.populate(&[config], &catalog, &store).unwrap();
+        let catalog = test_catalog(tmp.path());
+        let (binds, payloads) = session.populate(&[config], &catalog, &store).unwrap();
 
         assert_eq!(
             binds,
@@ -873,9 +858,7 @@ mod tests {
                 db_dir.canonicalize().unwrap().display()
             )],
         );
-        let written: Value =
-            serde_json::from_str(&fs::read_to_string(session.mounts_dir.join("db.json")).unwrap())
-                .unwrap();
+        let written = payload_for(&payloads, "db");
         assert_eq!(
             written["capabilities"]["preopened_paths"][0]["host"],
             format!("{HOST_PREOPENS_DIR}/db/0"),
@@ -896,11 +879,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -916,16 +897,14 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
 
-        let catalog = test_catalog(&session, tmp.path());
-        let binds = session.populate(&[config], &catalog, &store).unwrap();
+        let catalog = test_catalog(tmp.path());
+        let (binds, payloads) = session.populate(&[config], &catalog, &store).unwrap();
 
         assert!(
             binds.is_empty(),
             "manifest preopens are already container paths"
         );
-        let written: Value =
-            serde_json::from_str(&fs::read_to_string(session.mounts_dir.join("db.json")).unwrap())
-                .unwrap();
+        let written = payload_for(&payloads, "db");
         assert_eq!(
             written["capabilities"]["preopened_paths"][0]["host"],
             "/data"
@@ -942,11 +921,9 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            mounts_dir: tmp.path().join("mounts"),
             credentials_file: tmp.path().join("credentials.json"),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
-        fs::create_dir_all(&session.mounts_dir).unwrap();
         std::fs::write(
             tmp.path().join("omnifs_provider_github.wasm"),
             wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
@@ -962,7 +939,7 @@ mod tests {
             .unwrap(),
             source: PathBuf::from("/dev/null"),
         };
-        let catalog = test_catalog(&session, tmp.path());
+        let catalog = test_catalog(tmp.path());
         let err = session.populate(&[config], &catalog, &store).unwrap_err();
         let chain = format!("{err:#}");
         assert!(

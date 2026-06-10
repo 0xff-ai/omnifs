@@ -10,13 +10,6 @@ pub(crate) struct MountInfo {
     pub(crate) fs_type: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RunningMountArgs {
-    pub(crate) mount_point: Option<PathBuf>,
-    pub(crate) config_dir: Option<PathBuf>,
-    pub(crate) cache_dir: Option<PathBuf>,
-}
-
 pub(crate) fn decode_mount_field(field: &str) -> String {
     let bytes = field.as_bytes();
     let mut out = String::with_capacity(field.len());
@@ -59,17 +52,12 @@ pub(crate) fn parse_proc_mounts(contents: &str) -> Vec<MountInfo> {
         .collect()
 }
 
-pub(crate) fn find_mount(path: &Path) -> anyhow::Result<Option<MountInfo>> {
-    use anyhow::Context;
-    let mounts = match fs::read_to_string("/proc/mounts") {
-        Ok(mounts) => mounts,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("failed to read /proc/mounts"),
-    };
+pub(crate) fn find_mount(path: &Path) -> Option<MountInfo> {
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
     let wanted = normalize_path(path);
-    Ok(parse_proc_mounts(&mounts)
+    parse_proc_mounts(&mounts)
         .into_iter()
-        .find(|mount| normalize_path(&mount.mount_point) == wanted))
+        .find(|mount| normalize_path(&mount.mount_point) == wanted)
 }
 
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
