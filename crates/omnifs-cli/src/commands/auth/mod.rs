@@ -19,9 +19,6 @@ pub(crate) use login::login_with_paths;
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthArgs {
-    /// Override the directory holding host-side mount configs.
-    #[arg(long)]
-    pub mounts_dir: Option<PathBuf>,
     /// Override the directory holding provider WASM components.
     #[arg(long)]
     pub providers_dir: Option<PathBuf>,
@@ -71,7 +68,6 @@ impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let ctx = AppContext::resolve(
             PathOverrides {
-                mounts_dir: self.mounts_dir.clone(),
                 providers_dir: self.providers_dir.clone(),
                 ..Default::default()
             },
@@ -83,25 +79,35 @@ impl AuthArgs {
             paths.credentials_file = creds;
         }
         let catalog = ctx.catalog();
+        let mounts = ctx.workspace().mounts()?;
         let store = CredsBackend::auto(&paths.credentials_file, true);
         match self.command {
             AuthCommand::Login {
                 mount,
                 no_browser,
                 scopes,
-            } => login::login(&paths, catalog, store, &mount, None, no_browser, &scopes).await,
+            } => login::login(catalog, &mounts, store, &mount, None, no_browser, &scopes).await,
             AuthCommand::Logout { mount, revoke } => {
-                logout::logout(&paths, catalog, store.as_ref(), &mount, None, revoke).await
+                logout::logout(
+                    &paths,
+                    catalog,
+                    &mounts,
+                    store.as_ref(),
+                    &mount,
+                    None,
+                    revoke,
+                )
+                .await
             },
             AuthCommand::Status { json } => match OutputFormat::from(json) {
-                OutputFormat::Json => status::status_json(&paths, catalog, store.as_ref()),
-                OutputFormat::Text => status::status(&paths, catalog, store.as_ref()),
+                OutputFormat::Json => status::status_json(&paths, catalog, mounts, store.as_ref()),
+                OutputFormat::Text => status::status(&paths, catalog, mounts, store.as_ref()),
             },
             AuthCommand::Refresh { mount } => {
-                import::refresh(&paths, catalog, store, &mount, None).await
+                import::refresh(&paths, catalog, &mounts, store, &mount, None).await
             },
             AuthCommand::Scopes { mount } => {
-                import::scopes(&paths, catalog, store.as_ref(), &mount, None)
+                import::scopes(&paths, catalog, &mounts, store.as_ref(), &mount, None)
             },
             AuthCommand::Import {
                 mount,
@@ -117,6 +123,7 @@ impl AuthArgs {
                 let token = source.read()?;
                 import::import_static_token_value(
                     catalog,
+                    &mounts,
                     store.as_ref(),
                     &mount,
                     token,

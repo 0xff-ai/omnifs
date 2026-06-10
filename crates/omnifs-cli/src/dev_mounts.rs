@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 
 use crate::session::MountConfig;
 

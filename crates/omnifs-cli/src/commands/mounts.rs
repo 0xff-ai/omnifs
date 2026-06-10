@@ -10,10 +10,10 @@ use std::path::Path;
 
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
-use crate::config::ConfigFile;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
-use crate::session::CredsBackend;
+use crate::session::{CredsBackend, MountConfig};
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -40,12 +40,25 @@ impl MountsArgs {
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
         let catalog = ctx.catalog();
+        let workspace = ctx.workspace();
+        let mounts = workspace.mounts()?;
         match self.command {
             MountsCommand::Rm {
                 name,
                 force,
                 keep_credentials,
-            } => rm(paths, catalog, &name, force, keep_credentials).await,
+            } => {
+                rm(
+                    paths,
+                    catalog,
+                    workspace,
+                    &mounts,
+                    &name,
+                    force,
+                    keep_credentials,
+                )
+                .await
+            },
         }
     }
 }
@@ -53,6 +66,8 @@ impl MountsArgs {
 pub async fn rm(
     paths: &Paths,
     catalog: &ProviderCatalog,
+    workspace: &Workspace,
+    mounts: &[MountConfig],
     name: &str,
     force: bool,
     keep_credentials: bool,
@@ -60,14 +75,13 @@ pub async fn rm(
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
-    let mount = catalog
-        .session_mount_configs()?
-        .into_iter()
-        .find(|mount| mount.name == name)
-        .ok_or_else(|| missing_mount_error(paths, catalog, name.as_str()).unwrap_err())?;
+    let mount = mounts
+        .iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| missing_mount_error(paths, mounts, name.as_str()).unwrap_err())?;
     let config_path = mount.source.clone();
     let inline = config_path == paths.config_file;
-    let config = mount.config;
+    let config = mount.config.clone();
     let resolved = catalog
         .resolve_mount_spec(config, false)
         .with_context(|| format!("resolve mount config for `{name}`"))?;
@@ -92,9 +106,7 @@ pub async fn rm(
     )?;
 
     if inline {
-        let mut config = ConfigFile::load(&paths.config_file)?;
-        config.remove_mount(name.as_str())?;
-        config.save()?;
+        workspace.remove_inline_mount(name.as_str())?;
     } else {
         std::fs::remove_file(&config_path)
             .with_context(|| format!("remove {}", config_path.display()))?;
@@ -166,8 +178,8 @@ pub(crate) fn delete_credentials(
     target.delete_from(store, name)
 }
 
-fn missing_mount_error(paths: &Paths, catalog: &ProviderCatalog, name: &str) -> anyhow::Result<()> {
-    let suggestion = catalog.closest_mount_name(name)?;
+fn missing_mount_error(paths: &Paths, mounts: &[MountConfig], name: &str) -> anyhow::Result<()> {
+    let suggestion = crate::mount_report::closest_mount_name(mounts, name);
     let mut message = format!(
         "no mount config named `{name}` in {}",
         Paths::display(&paths.config_file)
@@ -198,7 +210,7 @@ mod tests {
     }
 
     fn catalog_for(paths: &Paths) -> ProviderCatalog {
-        ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir)
+        ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
     }
 
     #[tokio::test]
@@ -206,9 +218,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
         let catalog = catalog_for(&paths);
-        let err = rm(&paths, &catalog, "../leak", true, false)
-            .await
-            .unwrap_err();
+        let workspace = Workspace::new(paths.clone(), Vec::new());
+        let mounts = workspace.mounts().unwrap();
+        let err = rm(
+            &paths, &catalog, &workspace, &mounts, "../leak", true, false,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
     #[test]

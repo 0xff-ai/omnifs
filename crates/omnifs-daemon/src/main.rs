@@ -6,7 +6,8 @@
 //! host-native (see `docs/design/daemon-cli-split.md`).
 
 use clap::Parser;
-use omnifs_daemon::{frontends, paths, server};
+use omnifs_daemon::{frontends, server};
+use omnifs_home::{PathOverrides, Paths};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
@@ -53,9 +54,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn run(args: Args) -> anyhow::Result<()> {
-    let paths = paths::Paths::resolve(paths::Overrides {
+    let paths = Paths::resolve(PathOverrides {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
+        ..PathOverrides::default()
     });
 
     std::fs::create_dir_all(&args.mount_point)?;

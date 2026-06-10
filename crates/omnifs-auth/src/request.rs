@@ -4,8 +4,9 @@ use oauth2::{
     AuthType, AuthUrl, ClientId, ClientSecret, DeviceAuthorizationUrl, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, RedirectUrl, RevocationUrl, TokenUrl,
 };
-use omnifs_mount_schema::{
-    DeviceCodeConfig, OAuth, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
+use omnifs_mount::OAuth;
+use omnifs_provider::{
+    DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
     TokenEndpointAuthMethod,
 };
 use secrecy::{ExposeSecret, SecretString};

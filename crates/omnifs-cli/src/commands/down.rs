@@ -21,13 +21,13 @@ pub struct DownArgs {
 
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::{PathOverrides, Paths};
+        use crate::paths::PathOverrides;
 
         let DownArgs {
             container_name,
             keep_session,
         } = self;
-        let (paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
+        let (paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
         let container_name = RuntimeTarget::resolve_container_name(container_name, &config)?;
         let remove_result = match Runtime::connect_docker() {
             Ok(runtime) => runtime.remove_existing(&container_name).await,

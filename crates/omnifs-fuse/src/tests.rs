@@ -112,7 +112,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let spec = omnifs_mount_schema::mounts::Spec::parse(&mount_config).expect("parse mount spec");
+    let spec = omnifs_mount::mounts::Spec::parse(&mount_config).expect("parse mount spec");
     registry
         .add_mount(spec, rt.handle())
         .expect("add test mount");

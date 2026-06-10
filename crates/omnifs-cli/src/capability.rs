@@ -1,6 +1,6 @@
 //! Human-readable formatting for provider capability manifest entries.
 
-use omnifs_mount_schema::{CapabilityEntry, PreopenMode, PreopenedPath};
+use omnifs_provider::{CapabilityEntry, PreopenMode, PreopenedPath};
 
 pub(crate) fn capability_label(entry: &CapabilityEntry) -> &'static str {
     match entry {

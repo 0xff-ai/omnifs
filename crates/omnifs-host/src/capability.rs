@@ -7,7 +7,7 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use omnifs_mount_schema::mounts::Resolved;
+use omnifs_mount::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 use url::Url;
 
@@ -27,7 +27,7 @@ impl CapabilityGrants {
         config: &Resolved,
         provider_caps: &wit_types::RequestedCapabilities,
     ) -> Self {
-        let caps = config.capabilities.as_ref();
+        let caps = config.spec.capabilities.as_ref();
         let mut unix_sockets: Vec<PathBuf> = caps
             .and_then(|c| c.unix_sockets.clone())
             .unwrap_or_default()

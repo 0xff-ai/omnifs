@@ -20,7 +20,6 @@ fn resolve_flag_overrides_win_over_env() {
             ("OMNIFS_HOME", None),
             ("XDG_CONFIG_HOME", None),
             ("OMNIFS_CACHE_DIR", None),
-            ("OMNIFS_MOUNTS_DIR", None),
             ("OMNIFS_PROVIDERS_DIR", None),
         ],
         || {
@@ -33,7 +32,7 @@ fn resolve_flag_overrides_win_over_env() {
             assert_eq!(paths.config_file, paths.config_dir.join("config.toml"));
             assert_eq!(
                 paths.credentials_file,
-                paths.data_dir.join("credentials.json")
+                paths.config_dir.join("credentials.json")
             );
         },
     );

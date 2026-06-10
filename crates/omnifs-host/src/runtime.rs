@@ -23,8 +23,8 @@ use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
 use omnifs_core::path::Path as ProtocolPath;
-use omnifs_mount_schema::ProviderConfig;
-use omnifs_mount_schema::mounts::Resolved;
+use omnifs_mount::ProviderConfig;
+use omnifs_mount::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -232,16 +232,17 @@ impl Runtime {
         extractor: Arc<ArchiveExtractorComponent>,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
-        let mount_name = config.mount.as_str();
+        let mount_name = config.spec.mount.as_str();
         let config_bytes = config.config_bytes();
         let preopens = config
+            .spec
             .capabilities
             .as_ref()
             .and_then(|c| c.preopened_paths.as_deref())
             .unwrap_or(&[]);
         let instance = Instance::new(engine, wasm_path, config_bytes, preopens)?;
 
-        validate_instance_config(config.provider_config_schema(), config, mount_name)?;
+        validate_instance_config(config.spec.provider_config_schema(), config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
@@ -251,16 +252,16 @@ impl Runtime {
         let auth_manifest = Artifact::load(wasm_path)
             .and_then(|artifact| artifact.auth_manifest())
             .map_err(BuildError::InvalidConfig)?;
-        let auth = if config.auth.is_empty() {
+        let auth = if config.spec.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
             let store = credential_store_for_config_dir(dirs.config_dir);
             let refresh_lock_path = dirs.config_dir.join("credentials.lock");
             Arc::new(
                 AuthManager::from_configs_manifest_store_with_store(
-                    &config.auth,
+                    &config.spec.auth,
                     auth_manifest.as_ref(),
-                    config.provider_id(),
+                    &config.provider_id,
                     store,
                     refresh_lock_path,
                 )
@@ -290,7 +291,7 @@ impl Runtime {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
-            provider_id: config.provider_id().to_string(),
+            provider_id: config.provider_id.clone(),
             operation_ids: OperationIds::new(),
             http,
             git,
@@ -680,15 +681,16 @@ fn validate_instance_config(
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
     let config_value = config
+        .spec
         .config_raw
         .as_ref()
         .map_or(&empty_config, ProviderConfig::as_value);
-    match omnifs_mount_schema::validate_config(schema, config_value) {
+    match omnifs_provider::validate_config(schema, config_value) {
         Ok(()) => Ok(()),
-        Err(omnifs_mount_schema::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
+        Err(omnifs_provider::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
             format!("config for mount {mount_name} failed validation: {error}"),
         )),
-        Err(omnifs_mount_schema::SchemaError::InvalidSchema(error)) => {
+        Err(omnifs_provider::SchemaError::InvalidSchema(error)) => {
             Err(BuildError::ProviderProtocol(format!(
                 "provider config schema for mount {mount_name} is invalid: {error}"
             )))

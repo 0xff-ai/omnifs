@@ -21,10 +21,10 @@ pub struct ShellArgs {
 
 impl ShellArgs {
     pub fn run(self) -> anyhow::Result<()> {
-        use crate::paths::{PathOverrides, Paths};
+        use crate::paths::PathOverrides;
         use std::io::IsTerminal as _;
 
-        let (_paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
+        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
         let container_name = RuntimeTarget::resolve_container_name(self.container_name, &config)?;
         let mut cmd = Command::new("docker");
         cmd.arg("exec").arg("-i");

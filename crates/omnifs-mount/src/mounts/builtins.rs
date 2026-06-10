@@ -1,6 +1,6 @@
 //! Parsed index of embedded built-in provider manifests.
 
-use crate::{AuthManifest, ProviderManifest};
+use omnifs_provider::{AuthManifest, ProviderManifest};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -84,8 +84,8 @@ impl Builtins {
     }
 
     fn manifest_for_resolved(&self, config: &Resolved) -> Option<&ProviderManifest> {
-        self.by_id(config.provider_id()).or_else(|| {
-            provider_file_name(&config.provider)
+        self.by_id(&config.provider_id).or_else(|| {
+            provider_file_name(&config.spec.provider)
                 .and_then(|file_name| self.by_provider_file(file_name))
         })
     }
@@ -144,7 +144,11 @@ mod tests {
         )
         .unwrap();
         assert!(index.apply_metadata_to(&mut config).unwrap());
-        assert_eq!(config.provider_id(), Some("github"));
+        assert_eq!(
+            config.provider_id(),
+            Some("github"),
+            "provider_id set after apply_metadata_to"
+        );
     }
 
     #[test]

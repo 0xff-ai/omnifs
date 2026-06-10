@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_mount_schema::mounts::Resolved;
+use omnifs_mount::mounts::Resolved;
 
 use crate::credential_target::CredentialTarget;
 
@@ -72,7 +72,7 @@ impl AuthReadiness {
         match target.lookup(store) {
             Ok(Some(entry)) => Self::from_entry(entry),
             Ok(None) => Self::Missing {
-                command: format!("omnifs auth login {}", config.mount),
+                command: format!("omnifs auth login {}", config.spec.mount),
             },
             Err(error) => Self::Error(error.to_string()),
         }
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::MemoryStore;
-    use omnifs_mount_schema::mounts::Spec;
+    use omnifs_mount::mounts::Spec;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 

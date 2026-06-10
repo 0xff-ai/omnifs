@@ -19,9 +19,9 @@ pub struct LogsArgs {
 
 impl LogsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::{PathOverrides, Paths};
+        use crate::paths::PathOverrides;
 
-        let (_paths, config) = Paths::resolve_with_config(PathOverrides::default())?;
+        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
         let target = RuntimeTarget::resolve(self.container_name, None, &config)?;
         let runtime = Runtime::connect_ready(&target, "omnifs logs").await?;
         let container_name = target.container_name().clone();

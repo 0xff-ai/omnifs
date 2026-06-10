@@ -8,7 +8,7 @@ use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::{Artifact, BuildError, Dirs, Runtime, component_engine};
 use omnifs_cache::Caches;
-use omnifs_mount_schema::mounts::{Resolved, Spec};
+use omnifs_mount::mounts::{Resolved, Spec};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -95,7 +95,7 @@ impl ProviderRegistry {
         }
         let resolved = resolve_mount_for_wasm(&wasm_path, spec)
             .map_err(|error| registry_error(&mount, error))?;
-        let is_root = resolved.root_mount;
+        let is_root = resolved.spec.root_mount;
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = Runtime::new(
@@ -282,7 +282,7 @@ mod tests {
     use crate::Dirs;
     use crate::cloner::GitCloner;
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
-    use omnifs_mount_schema::mounts::Spec;
+    use omnifs_mount::mounts::Spec;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 

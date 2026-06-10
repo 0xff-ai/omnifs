@@ -36,7 +36,8 @@ moka = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 omnifs-core = { workspace = true }
-omnifs-mount-schema = { workspace = true }
+omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 omnifs-cache = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-creds = { workspace = true }

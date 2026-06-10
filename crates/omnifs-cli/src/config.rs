@@ -5,7 +5,7 @@
 //! once and threaded into commands that need it.
 
 use anyhow::{Context, Result};
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,6 @@ pub struct ConfigSystem {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigPaths {
-    /// Legacy per-mount JSON directory.
-    pub mounts_dir: Option<PathBuf>,
     /// Compiled provider WASM components directory.
     pub providers_dir: Option<PathBuf>,
 }
@@ -52,7 +50,6 @@ impl Config {
         let mut config: Self =
             toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))?;
         config.apply_system_section();
-        config.paths.mounts_dir = config.paths.mounts_dir.map(expand_tilde);
         config.paths.providers_dir = config.paths.providers_dir.map(expand_tilde);
         Ok(config)
     }

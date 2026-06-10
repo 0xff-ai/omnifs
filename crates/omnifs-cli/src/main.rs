@@ -31,6 +31,7 @@ mod status;
 mod style;
 mod test_support;
 mod token_source;
+mod workspace;
 
 use clap::Parser;
 use cli::Cli;

@@ -157,10 +157,10 @@ Git clone currently uses SSH:
 
 ### Mount loading and resolved mounts
 
-- Mount loading lives in `omnifs_mount_schema::mounts` (shared by the CLI and the daemon).
-- `omnifs_mount_schema::mounts::Spec` is raw user-authored mount JSON.
-- `omnifs_mount_schema::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
-- `ProviderCatalog::load_mount()` returns `omnifs_mount_schema::mounts::Resolved` directly.
+- Mount config types (`Spec`, `Resolved`, `Catalog`, builtins) live in `omnifs_mount::mounts` (shared by the CLI and the daemon).
+- `omnifs_mount::mounts::Spec` is raw user-authored mount JSON.
+- `omnifs_mount::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
+- Provider-contract types (`ProviderManifest`, manifest parsing, `AuthScheme`) live in `omnifs_provider`.
 - Use `resolve_mount_spec(spec, require_metadata)` for strict load versus best-effort delete/reset paths.
 - `CredentialTarget` and session materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
 - Host-managed credentials require `provider_id`, always on `Resolved`, plus `auth.scheme` and optional `auth.account`.
@@ -254,7 +254,7 @@ Host-side mutations travel as `effects` on the terminal, not as separate callout
 
 The WIT reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads.
 
-Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount_schema::mounts::Spec`, resolves it to `omnifs_mount_schema::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
+Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount::mounts::Spec`, resolves it to `omnifs_mount::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
 
 ## Caching model
 
@@ -300,7 +300,7 @@ The full design lives in `docs/design/file-attributes.md`, including enum defini
 
 ### CLI presentation vs schema types
 
-- `omnifs-mount-schema` types are wire/config truth. Do not add human-facing CLI labels or terminal formatting there.
+- `omnifs-mount` types (`Spec`, `Resolved`, `Auth`, `AuthKind`) are wire/config truth. Do not add human-facing CLI labels or terminal formatting there.
 - Provider capability display uses the schema `CapabilityEntry` enum directly. Format at use site through `crates/omnifs-cli/src/capability.rs`, with `capability_label` and `capability_value`. Do not introduce parallel CLI view-model structs for the same schema type.
 - Status/JSON output helpers such as `*_to_json` are DTO serialization, not domain types. Keep them separate from schema conversions.
 

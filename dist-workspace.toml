@@ -21,6 +21,6 @@ pr-run-mode = "skip"
 # Hand-maintained workflow customizations:
 # - ci.yml: native Cargo artifact factory + Docker runtime assembly on main
 # - release.yml: workflow_run after green CI — softprops GH release + promote + npm
-# - omnifs-mount-schema: [package.metadata.dist] dist = false (dump-provider is dev-only)
+# - omnifs-dump (dev-only tool): [package.metadata.dist] dist = false
 # Without allow-dirty, `dist init` would overwrite ci.yml on upgrade.
 allow-dirty = ["ci"]

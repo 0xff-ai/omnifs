@@ -10,6 +10,7 @@ categories = ["filesystem", "development-tools"]
 keywords = ["omnifs", "filesystem", "protocol"]
 
 [dependencies]
+strum = { workspace = true }
 mime = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }

@@ -6,9 +6,11 @@ use omnifs_host::auth::{AuthManager, RefreshOutcome};
 use omnifs_host::blob::{BlobCache, BlobExecutor, BlobLimits};
 use omnifs_host::capability::{CapabilityChecker, CapabilityGrants};
 use omnifs_host::http::HttpStack;
-use omnifs_mount_schema::{
-    Auth as AuthConfig, AuthManifest, AuthScheme, OAuth as OAuthMountConfig, OAuthFlow,
-    OauthScheme, PkceManualCodeConfig, StaticToken as StaticTokenConfig, StaticTokenScheme,
+use omnifs_mount::{
+    Auth as AuthConfig, OAuth as OAuthMountConfig, StaticToken as StaticTokenConfig,
+};
+use omnifs_provider::{
+    AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, StaticTokenScheme,
     TokenEndpointAuthMethod,
 };
 use omnifs_wit::provider::types as wit_types;
@@ -64,6 +66,8 @@ fn github_pat_manifest() -> AuthManifest {
             value_prefix: "Bearer ".to_string(),
             description: "pat".to_string(),
             inject_domains: vec!["api.github.com".to_string()],
+            creation_url: None,
+            validation: None,
         })],
     }
 }
@@ -165,6 +169,8 @@ fn test_auth_manifest_backed_static_token_injection() {
             value_prefix: "token ".to_string(),
             description: "test token".to_string(),
             inject_domains: vec!["api.example.com".to_string()],
+            creation_url: None,
+            validation: None,
         })],
     };
     let _env = ScopedEnvVar::set("OMNIFS_TEST_MANIFEST_TOKEN", "secret");
@@ -199,6 +205,8 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
             value_prefix: "Bearer ".to_string(),
             description: "test token".to_string(),
             inject_domains: vec!["api.example.com".to_string()],
+            creation_url: None,
+            validation: None,
         })],
     };
 

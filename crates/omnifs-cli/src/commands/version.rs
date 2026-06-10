@@ -56,7 +56,6 @@ impl VersionArgs {
             "  config:       {}",
             Paths::display(&ctx.paths().config_dir)
         );
-        anstream::println!("  data:         {}", Paths::display(&ctx.paths().data_dir));
         anstream::println!("  cache:        {}", Paths::display(&ctx.paths().cache_dir));
         anstream::println!(
             "  mounts:       {}",

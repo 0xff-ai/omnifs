@@ -9,12 +9,13 @@ use crate::paths::Paths;
 pub(super) async fn logout(
     _paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: &[crate::session::MountConfig],
     store: &dyn CredentialStore,
     mount: &str,
     account: Option<&str>,
     revoke: bool,
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth_tolerating_manifest_errors(mount)?;
+    let mount_auth = catalog.load_mount_auth_tolerating_manifest_errors(mounts, mount)?;
     let target = if let Ok((request, target)) = mount_auth.oauth_request(account, &[]) {
         if revoke
             && let Some(entry) = target.lookup(store)?

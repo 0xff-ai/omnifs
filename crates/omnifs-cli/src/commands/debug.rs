@@ -49,7 +49,8 @@ impl DebugArgs {
             },
             DebugCommand::AuthManifest { mount } => {
                 let ctx = crate::app_context::AppContext::resolve_default()?;
-                crate::commands::auth::run_auth_manifest(ctx.catalog(), &mount)
+                let mounts = ctx.workspace().mounts()?;
+                crate::commands::auth::run_auth_manifest(ctx.catalog(), &mounts, &mount)
             },
             DebugCommand::PushDevMounts => push_dev_mounts().await,
         }

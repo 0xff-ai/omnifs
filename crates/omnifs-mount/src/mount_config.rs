@@ -1,7 +1,7 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+pub use omnifs_core::AuthKind;
 
 /// Provider-specific configuration object from a mount JSON file's `"config"` field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -38,21 +38,6 @@ pub enum Auth {
     StaticToken(StaticToken),
     #[serde(rename = "oauth")]
     OAuth(OAuth),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthKind {
-    StaticToken,
-    OAuth,
-}
-
-impl fmt::Display for AuthKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StaticToken => f.write_str("static-token"),
-            Self::OAuth => f.write_str("oauth"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]

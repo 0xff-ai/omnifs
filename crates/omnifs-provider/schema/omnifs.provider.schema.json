@@ -52,6 +52,7 @@
   ],
   "$defs": {
     "AuthBlock": {
+      "description": "Wire form of the whole auth block as it appears in `omnifs.provider.json`.",
       "type": "object",
       "properties": {
         "default": {
@@ -284,8 +285,10 @@
       ]
     },
     "ManifestAuthScheme": {
+      "description": "On-disk discriminant for a scheme entry.",
       "oneOf": [
         {
+          "description": "On-disk compact form of a static-token scheme inside `omnifs.provider.json`.",
           "type": "object",
           "properties": {
             "creationUrl": {
@@ -319,6 +322,7 @@
           ]
         },
         {
+          "description": "On-disk compact form of an OAuth scheme inside `omnifs.provider.json`.",
           "type": "object",
           "properties": {
             "clientId": {
@@ -352,6 +356,7 @@
       ]
     },
     "ManifestOAuthFlow": {
+      "description": "On-disk compact flow descriptor inside an OAuth scheme.",
       "oneOf": [
         {
           "type": "object",
@@ -463,6 +468,7 @@
       ]
     },
     "TokenValidation": {
+      "description": "Token self-validation probe, carried by a provider's static-token scheme.\n\nThe host uses this to verify a newly-entered token before storing it.",
       "type": "object",
       "properties": {
         "body": {

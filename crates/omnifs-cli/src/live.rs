@@ -46,12 +46,7 @@ pub(crate) async fn add_mount(
     let payload = payloads
         .first()
         .expect("populate returns one payload per config");
-    if payload
-        .spec
-        .auth
-        .iter()
-        .any(omnifs_mount_schema::Auth::is_oauth)
-    {
+    if payload.spec.auth.iter().any(omnifs_mount::Auth::is_oauth) {
         // OAuth credentials live in the session `credentials.json`, which is
         // a single-file bind: it only exists in the container if it was
         // present at launch, and host-side atomic rewrites replace the inode

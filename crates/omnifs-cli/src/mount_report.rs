@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::auth::AuthReadiness;
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
+use crate::session::MountConfig;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,37 +48,23 @@ pub(crate) struct UserMountReadyStatus {
 impl ProviderCatalog {
     pub(crate) fn load_mount_by_name(
         &self,
+        mounts: &[MountConfig],
         name: &MountName,
-    ) -> anyhow::Result<omnifs_mount_schema::mounts::Resolved> {
-        let mount = self
-            .session_mount_configs()?
-            .into_iter()
-            .find(|mount| &mount.name == name)
+    ) -> anyhow::Result<omnifs_mount::mounts::Resolved> {
+        let mount = mounts
+            .iter()
+            .find(|m| &m.name == name)
             .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
-        self.resolve_mount_spec(mount.config, true)
-    }
-
-    pub(crate) fn closest_mount_name(&self, target: &str) -> anyhow::Result<Option<String>> {
-        let mut best: Option<(usize, String)> = None;
-        for mount in self.session_mount_configs()? {
-            let name = mount.name.to_string();
-            let distance = strsim::damerau_levenshtein(target, &name);
-            if distance <= target.len() / 2 + 1 {
-                match &best {
-                    Some((current, _)) if *current <= distance => {},
-                    _ => best = Some((distance, name)),
-                }
-            }
-        }
-        Ok(best.map(|(_, stem)| stem))
+        self.resolve_mount_spec(mount.config.clone(), true)
     }
 
     pub(crate) fn configured_mounts_by_provider(
         &self,
+        mounts: &[MountConfig],
         templates: &BTreeMap<String, ProviderTemplate>,
-    ) -> anyhow::Result<BTreeMap<String, String>> {
+    ) -> BTreeMap<String, String> {
         let mut by_provider: BTreeMap<String, String> = BTreeMap::new();
-        for configured in self.session_mount_configs()? {
+        for configured in mounts {
             let mount = match self.resolve_mount_spec(configured.config.clone(), true) {
                 Ok(mount) => mount,
                 Err(error) => {
@@ -85,13 +72,13 @@ impl ProviderCatalog {
                     continue;
                 },
             };
-            let mount_name = &mount.mount;
-            let provider_id = mount.provider_id();
+            let mount_name = &mount.spec.mount;
+            let provider_id = &mount.provider_id;
             if templates.contains_key(provider_id) {
                 by_provider.insert(provider_id.to_owned(), mount_name.clone());
                 continue;
             }
-            let provider_file = &mount.provider;
+            let provider_file = &mount.spec.provider;
             if let Some((id, _)) = templates
                 .iter()
                 .find(|(_, tmpl)| tmpl.manifest.provider == provider_file.as_str())
@@ -99,13 +86,15 @@ impl ProviderCatalog {
                 by_provider.insert(id.clone(), mount_name.clone());
             }
         }
-        Ok(by_provider)
+        by_provider
     }
 
-    pub(crate) fn scan_provider_configs(&self) -> anyhow::Result<Vec<ProviderConfigStatus>> {
-        let configs = self.session_mount_configs()?;
-        let mut providers = Vec::with_capacity(configs.len());
-        for configured in configs {
+    pub(crate) fn scan_provider_configs(
+        &self,
+        mounts: Vec<MountConfig>,
+    ) -> Vec<ProviderConfigStatus> {
+        let mut providers = Vec::with_capacity(mounts.len());
+        for configured in mounts {
             let config_path = configured.source.clone();
             match self.resolve_mount_spec(configured.config, true) {
                 Ok(config) => {
@@ -114,23 +103,25 @@ impl ProviderCatalog {
                     let metadata_available = true;
                     providers.push(ProviderConfigStatus::Ready(ProviderReadyStatus {
                         config_path,
-                        mount: config.mount,
-                        provider: config.provider,
+                        mount: config.spec.mount,
+                        provider: config.spec.provider,
                         provider_present,
                         metadata_available,
-                        root_mount: config.root_mount,
-                        auth_count: config.auth.len(),
+                        root_mount: config.spec.root_mount,
+                        auth_count: config.spec.auth.len(),
                         domain_count: config
+                            .spec
                             .capabilities
                             .as_ref()
                             .and_then(|caps| caps.domains.as_ref())
                             .map_or(0, Vec::len),
                         git_repo_count: config
+                            .spec
                             .capabilities
                             .as_ref()
                             .and_then(|caps| caps.git_repos.as_ref())
                             .map_or(0, Vec::len),
-                        max_memory_mb: config.capabilities.and_then(|caps| caps.max_memory_mb),
+                        max_memory_mb: config.spec.capabilities.and_then(|caps| caps.max_memory_mb),
                     }));
                 },
                 Err(error) => providers.push(ProviderConfigStatus::Invalid {
@@ -139,32 +130,31 @@ impl ProviderCatalog {
                 }),
             }
         }
-
-        Ok(providers)
+        providers
     }
 
     pub(crate) fn scan_user_mount_configs(
         &self,
+        mounts: Vec<MountConfig>,
         store: &dyn CredentialStore,
-    ) -> anyhow::Result<Vec<UserMountStatus>> {
-        let configs = self.session_mount_configs()?;
-        let mut mounts = Vec::with_capacity(configs.len());
-        for configured in configs {
+    ) -> Vec<UserMountStatus> {
+        let mut statuses = Vec::with_capacity(mounts.len());
+        for configured in mounts {
             let config_path = configured.source.clone();
             match self.read_user_mount_status(configured, store) {
-                Ok(status) => mounts.push(UserMountStatus::Ready(status)),
-                Err(error) => mounts.push(UserMountStatus::Invalid {
+                Ok(status) => statuses.push(UserMountStatus::Ready(status)),
+                Err(error) => statuses.push(UserMountStatus::Invalid {
                     config_path,
                     error: error.to_string(),
                 }),
             }
         }
-        Ok(mounts)
+        statuses
     }
 
     fn read_user_mount_status(
         &self,
-        configured: crate::session::MountConfig,
+        configured: MountConfig,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<UserMountReadyStatus> {
         let config_path = configured.source.clone();
@@ -175,11 +165,28 @@ impl ProviderCatalog {
         let auth = AuthReadiness::from_config(&config, store);
         Ok(UserMountReadyStatus {
             config_path: config_path.clone(),
-            mount: config.mount,
-            provider: config.provider,
+            mount: config.spec.mount,
+            provider: config.spec.provider,
             provider_present,
             metadata_available,
             auth,
         })
     }
+}
+
+/// Returns the mount name closest to `target` by edit distance, or `None`
+/// if no name is within half the target length.
+pub(crate) fn closest_mount_name(mounts: &[MountConfig], target: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for mount in mounts {
+        let name = mount.name.to_string();
+        let distance = strsim::damerau_levenshtein(target, &name);
+        if distance <= target.len() / 2 + 1 {
+            match &best {
+                Some((current, _)) if *current <= distance => {},
+                _ => best = Some((distance, name)),
+            }
+        }
+    }
+    best.map(|(_, stem)| stem)
 }

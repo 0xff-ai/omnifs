@@ -10,8 +10,9 @@ use async_singleflight::Group;
 use fs2::FileExt;
 use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
 use omnifs_core::CredentialId;
-use omnifs_creds::{CredentialEntry, CredentialKind, CredentialStore, FileStore, StoreError};
-use omnifs_mount_schema::{Auth, AuthKind, AuthManifest, OAuth, SchemeResolveError, StaticToken};
+use omnifs_creds::{CredentialEntry, CredentialStore, FileStore, StoreError};
+use omnifs_mount::{Auth, AuthKind, OAuth, StaticToken};
+use omnifs_provider::{AuthManifest, SchemeResolveError};
 use secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -474,7 +475,7 @@ impl OAuth2PkceStrategy {
 
     fn load_store_entry(&self) -> Result<Option<CredentialEntry>, AuthError> {
         let entry = self.store.get(&self.credential_id)?;
-        Ok(entry.filter(|entry| entry.kind() == CredentialKind::OAuth))
+        Ok(entry.filter(|entry| entry.kind() == AuthKind::OAuth))
     }
 }
 

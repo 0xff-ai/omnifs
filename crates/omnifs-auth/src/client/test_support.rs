@@ -1,5 +1,5 @@
 use super::{AuthError, BoxFuture, ManualCode, UrlOpener, parse_callback_url};
-use omnifs_mount_schema::{
+use omnifs_provider::{
     DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
     TokenEndpointAuthMethod,
 };

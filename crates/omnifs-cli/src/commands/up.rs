@@ -11,11 +11,6 @@ use crate::session::{CredsBackend, HOST_FUSE_MOUNT};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Override the directory holding user-scope mount configs.
-    ///
-    /// Defaults to `OMNIFS_MOUNTS_DIR`, then the default config mounts dir.
-    #[arg(long)]
-    pub mounts_dir: Option<PathBuf>,
     /// Container image to run.
     ///
     /// Defaults to `OMNIFS_IMAGE`, then configured image, then the
@@ -41,7 +36,6 @@ impl UpArgs {
 
         let ctx = AppContext::resolve(
             PathOverrides {
-                mounts_dir: self.mounts_dir,
                 providers_dir: self.providers_dir,
                 ..Default::default()
             },
@@ -53,7 +47,7 @@ impl UpArgs {
         let catalog = ctx.catalog();
 
         // Bail early before touching session state if there is nothing to mount.
-        let configs = catalog.session_mount_configs()?;
+        let configs = ctx.workspace().mounts()?;
         if configs.is_empty() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs init <provider>` to add one directly",

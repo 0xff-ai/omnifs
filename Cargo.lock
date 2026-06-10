@@ -3611,7 +3611,8 @@ dependencies = [
  "http",
  "oauth2",
  "omnifs-creds",
- "omnifs-mount-schema",
+ "omnifs-mount",
+ "omnifs-provider",
  "rcgen",
  "reqwest 0.12.28",
  "secrecy",
@@ -3659,8 +3660,10 @@ dependencies = [
  "omnifs-auth",
  "omnifs-core",
  "omnifs-creds",
+ "omnifs-home",
  "omnifs-inspector",
- "omnifs-mount-schema",
+ "omnifs-mount",
+ "omnifs-provider",
  "owo-colors",
  "ratatui",
  "reqwest 0.13.4",
@@ -3687,6 +3690,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "strum 0.27.2",
  "thiserror 2.0.18",
 ]
 
@@ -3701,7 +3705,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "strum 0.27.2",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -3716,9 +3719,11 @@ dependencies = [
  "clap",
  "omnifs-api",
  "omnifs-fuse",
+ "omnifs-home",
  "omnifs-host",
  "omnifs-inspector",
- "omnifs-mount-schema",
+ "omnifs-mount",
+ "omnifs-provider",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -3739,13 +3744,20 @@ dependencies = [
  "omnifs-core",
  "omnifs-host",
  "omnifs-inspector",
- "omnifs-mount-schema",
+ "omnifs-mount",
  "omnifs-wit",
  "parking_lot",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "omnifs-home"
+version = "0.2.1"
+dependencies = [
+ "omnifs-core",
 ]
 
 [[package]]
@@ -3773,7 +3785,8 @@ dependencies = [
  "omnifs-creds",
  "omnifs-inspector",
  "omnifs-itest",
- "omnifs-mount-schema",
+ "omnifs-mount",
+ "omnifs-provider",
  "omnifs-wit",
  "parking_lot",
  "postcard",
@@ -3823,7 +3836,7 @@ dependencies = [
  "omnifs-cache",
  "omnifs-core",
  "omnifs-host",
- "omnifs-mount-schema",
+ "omnifs-mount",
  "omnifs-wit",
  "rusqlite",
  "serde",
@@ -3834,7 +3847,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnifs-mount-schema"
+name = "omnifs-mount"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "omnifs-core",
+ "omnifs-provider",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "utoipa",
+]
+
+[[package]]
+name = "omnifs-provider"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -3923,7 +3950,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "http",
  "omnifs-core",
- "omnifs-mount-schema",
+ "omnifs-provider",
  "omnifs-sdk",
  "serde",
  "serde_json",
@@ -3940,7 +3967,7 @@ dependencies = [
  "lru 0.16.4",
  "mime",
  "omnifs-core",
- "omnifs-mount-schema",
+ "omnifs-provider",
  "omnifs-sdk-macros",
  "omnifs-wit",
  "postcard",
@@ -3954,7 +3981,7 @@ dependencies = [
 name = "omnifs-sdk-macros"
 version = "0.2.1"
 dependencies = [
- "omnifs-mount-schema",
+ "omnifs-provider",
  "proc-macro2",
  "quote",
  "serde_json",

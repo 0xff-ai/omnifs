@@ -3,11 +3,17 @@ use super::login::manual_code_from_input;
 use super::status::status;
 use crate::catalog::ProviderCatalog;
 use crate::paths::Paths;
+use crate::session::MountConfig;
+use crate::workspace::Workspace;
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialStore, MemoryStore};
-use omnifs_mount_schema::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
+use omnifs_provider::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
+
+fn mounts_for(paths: &Paths) -> Vec<MountConfig> {
+    Workspace::new(paths.clone(), Vec::new()).mounts().unwrap()
+}
 
 #[test]
 fn static_token_import_stores_typed_entry() {
@@ -24,10 +30,12 @@ fn static_token_import_stores_typed_entry() {
     );
     write_provider(&paths, None);
     let store = MemoryStore::new();
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
 
     import_static_token_value(
         &catalog,
+        &mounts,
         &store,
         "github",
         SecretString::from("secret".to_owned()),
@@ -58,8 +66,15 @@ fn status_does_not_require_store_listing() {
         r#"{"provider":"github.wasm","mount":"github","auth":{"type":"static-token","scheme":"pat"}}"#,
     );
     write_provider(&paths, None);
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    status(&paths, &catalog, &crate::test_support::NonListingStore).unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    status(
+        &paths,
+        &catalog,
+        mounts,
+        &crate::test_support::NonListingStore,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -78,13 +93,16 @@ fn schemes_reads_manifest_from_provider() {
             value_prefix: "Bearer ".to_owned(),
             description: "token".to_owned(),
             inject_domains: vec!["api.github.com".to_owned()],
+            creation_url: None,
+            validation: None,
         })],
     };
     write_provider(&paths, Some(&manifest));
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
     let loaded = catalog
-        .load_mount_auth("github")
+        .load_mount_auth(&mounts, "github")
         .unwrap()
         .auth_manifest()
         .unwrap()
@@ -110,8 +128,9 @@ fn oauth_request_uses_builtin_github_manifest_without_provider_file() {
             }"#,
     );
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    let mount = catalog.load_mount_auth("github").unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    let mount = catalog.load_mount_auth(&mounts, "github").unwrap();
     let (request, target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(target.primary_key().unwrap().provider_id(), "github");
@@ -151,10 +170,10 @@ fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
             revocation_endpoint: None,
             default_client_id: None,
             default_scopes: vec!["read".to_owned()],
-            flow: OAuthFlow::PkceManualCode(omnifs_mount_schema::PkceManualCodeConfig {
+            flow: OAuthFlow::PkceManualCode(omnifs_provider::PkceManualCodeConfig {
                 redirect_uri: "http://localhost/callback".to_owned(),
             }),
-            token_endpoint_auth: omnifs_mount_schema::TokenEndpointAuthMethod::None,
+            token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
             refresh_token_rotates: true,
             extra_authorize_params: vec![],
             extra_token_params: vec![],
@@ -165,8 +184,9 @@ fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
     };
     write_provider(&paths, Some(&manifest));
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    let mount = catalog.load_mount_auth("example").unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(request.client_id(), Some("byo-client"));
@@ -201,10 +221,10 @@ fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
             revocation_endpoint: None,
             default_client_id: Some("provider-client".to_owned()),
             default_scopes: vec!["read".to_owned()],
-            flow: OAuthFlow::PkceManualCode(omnifs_mount_schema::PkceManualCodeConfig {
+            flow: OAuthFlow::PkceManualCode(omnifs_provider::PkceManualCodeConfig {
                 redirect_uri: "http://localhost/callback".to_owned(),
             }),
-            token_endpoint_auth: omnifs_mount_schema::TokenEndpointAuthMethod::None,
+            token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
             refresh_token_rotates: true,
             extra_authorize_params: vec![],
             extra_token_params: vec![],
@@ -215,8 +235,9 @@ fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
     };
     write_provider(&paths, Some(&manifest));
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    let mount = catalog.load_mount_auth("example").unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(request.client_id(), None);
@@ -253,10 +274,10 @@ fn oauth_request_cli_scopes_override_config_scopes() {
             revocation_endpoint: None,
             default_client_id: Some("provider-client".to_owned()),
             default_scopes: vec![],
-            flow: OAuthFlow::PkceManualCode(omnifs_mount_schema::PkceManualCodeConfig {
+            flow: OAuthFlow::PkceManualCode(omnifs_provider::PkceManualCodeConfig {
                 redirect_uri: "http://localhost/callback".to_owned(),
             }),
-            token_endpoint_auth: omnifs_mount_schema::TokenEndpointAuthMethod::None,
+            token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
             refresh_token_rotates: true,
             extra_authorize_params: vec![],
             extra_token_params: vec![],
@@ -267,8 +288,9 @@ fn oauth_request_cli_scopes_override_config_scopes() {
     };
     write_provider(&paths, Some(&manifest));
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    let mount = catalog.load_mount_auth("example").unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &["repo".to_owned()]).unwrap();
 
     assert_eq!(request.scheme().default_scopes, vec!["repo".to_owned()]);
@@ -299,10 +321,10 @@ fn oauth_request_uses_provider_metadata_id_for_credential_id() {
             revocation_endpoint: None,
             default_client_id: Some("provider-client".to_owned()),
             default_scopes: vec![],
-            flow: OAuthFlow::PkceManualCode(omnifs_mount_schema::PkceManualCodeConfig {
+            flow: OAuthFlow::PkceManualCode(omnifs_provider::PkceManualCodeConfig {
                 redirect_uri: "http://localhost/callback".to_owned(),
             }),
-            token_endpoint_auth: omnifs_mount_schema::TokenEndpointAuthMethod::None,
+            token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
             refresh_token_rotates: true,
             extra_authorize_params: vec![],
             extra_token_params: vec![],
@@ -313,8 +335,9 @@ fn oauth_request_uses_provider_metadata_id_for_credential_id() {
     };
     write_provider_with_metadata(&paths, Some(&manifest), "github-real");
 
-    let catalog = ProviderCatalog::new(&paths.mounts_dir, &paths.providers_dir);
-    let mount = catalog.load_mount_auth("example").unwrap();
+    let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+    let mounts = mounts_for(&paths);
+    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
     let (_request, target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(target.primary_key().unwrap().provider_id(), "github-real");
@@ -328,11 +351,7 @@ fn manual_code_input_accepts_redirect_url() {
 }
 
 fn fixture_paths(root: &Path) -> Paths {
-    let mut paths = Paths::resolve(crate::paths::PathOverrides {
-        mounts_dir: Some(root.join("mounts")),
-        providers_dir: Some(root.join("providers")),
-        ..Default::default()
-    });
+    let mut paths = Paths::under_root(root);
     paths.credentials_file = root.join("credentials.json");
     std::fs::create_dir_all(&paths.mounts_dir).unwrap();
     std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -340,8 +359,7 @@ fn fixture_paths(root: &Path) -> Paths {
 }
 
 fn write_mount(paths: &Paths, name: &str, json: &str) {
-    let mount = omnifs_core::MountName::new(name.to_owned()).unwrap();
-    std::fs::write(paths.mount_config_path(&mount), json).unwrap();
+    std::fs::write(paths.mounts_dir.join(format!("{name}.json")), json).unwrap();
 }
 
 fn write_provider(paths: &Paths, manifest: Option<&AuthManifest>) {
@@ -363,10 +381,10 @@ fn write_provider_with_metadata(paths: &Paths, manifest: Option<&AuthManifest>, 
     let mut wasm = b"\0asm\x01\0\0\0".to_vec();
     let mut section = Vec::new();
     push_uleb(
-        omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME.len(),
+        omnifs_provider::PROVIDER_METADATA_SECTION_NAME.len(),
         &mut section,
     );
-    section.extend_from_slice(omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME.as_bytes());
+    section.extend_from_slice(omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes());
     section.extend_from_slice(&data);
     wasm.push(0);
     push_uleb(section.len(), &mut wasm);

@@ -6,7 +6,7 @@
 
 use anyhow::{Context as _, Result};
 use omnifs_api::{API_VERSION, DaemonStatus, VersionInfo};
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 use std::time::Duration;
 
 use crate::inspector::daemon_addr;

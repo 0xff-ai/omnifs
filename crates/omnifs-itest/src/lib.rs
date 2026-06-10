@@ -3,7 +3,7 @@ use omnifs_core::path::{Path as OmnifsPath, Segment};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use omnifs_host::{BuildError, Dirs, Error, Op, Runtime, TestOp};
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
@@ -46,7 +46,7 @@ impl RuntimeHarness {
             source,
         })?;
         let provider_dir = provider_artifact_dir();
-        let catalog = omnifs_mount_schema::mounts::Catalog::new(config_dir.path(), &provider_dir);
+        let catalog = omnifs_mount::mounts::Catalog::new(config_dir.path(), &provider_dir);
         let resolved = catalog
             .resolve_spec(spec, false)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;

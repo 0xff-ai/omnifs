@@ -19,10 +19,7 @@ use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
 use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Session};
 
-const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
-const GUEST_CONFIG_DIR: &str = "/root/.omnifs/config";
-const GUEST_CACHE_DIR: &str = "/root/.omnifs/cache";
-const GUEST_PROVIDERS_DIR: &str = "/root/.omnifs/providers";
+const GUEST_ROOT: &str = "/root/.omnifs";
 
 /// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
 /// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
@@ -59,14 +56,17 @@ impl ContainerLaunchSpec {
         session: &Session,
         extras: ContainerExtras,
     ) -> Self {
+        let guest = omnifs_home::Paths::under_root(std::path::Path::new(GUEST_ROOT));
+
         let mut binds = vec![format!(
             "{}:{HOST_CRED_DIR}:ro",
             session.creds_dir().display()
         )];
         if session.credentials_file().exists() {
             binds.push(format!(
-                "{}:{HOST_CREDENTIALS_FILE}",
-                session.credentials_file().display()
+                "{}:{}",
+                session.credentials_file().display(),
+                guest.credentials_file.display(),
             ));
         }
 
@@ -93,9 +93,9 @@ impl ContainerLaunchSpec {
         binds.extend(extras.binds);
 
         let env = vec![
-            format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
-            format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
-            format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
+            format!("OMNIFS_CONFIG_DIR={}", guest.config_dir.display()),
+            format!("OMNIFS_CACHE_DIR={}", guest.cache_dir.display()),
+            format!("OMNIFS_PROVIDERS_DIR={}", guest.providers_dir.display()),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];

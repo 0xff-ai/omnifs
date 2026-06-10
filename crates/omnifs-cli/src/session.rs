@@ -8,8 +8,8 @@
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::{CredentialStore, FileStore, KeyringStore};
-use omnifs_mount_schema::PreopenMode;
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
+use omnifs_provider::PreopenMode;
 use secrecy::ExposeSecret;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -224,6 +224,7 @@ impl SessionMaterializer<'_> {
     ) -> anyhow::Result<()> {
         for auth in mount_auth
             .config()
+            .spec
             .auth
             .iter()
             .filter(|auth| auth.is_oauth())
@@ -256,7 +257,7 @@ impl SessionMaterializer<'_> {
         mount_auth: &MountAuth,
         mount_name: &MountName,
     ) -> anyhow::Result<()> {
-        for auth in &mount_auth.config().auth {
+        for auth in &mount_auth.config().spec.auth {
             if auth.is_oauth() {
                 continue;
             }
@@ -290,7 +291,7 @@ impl SessionMaterializer<'_> {
         for (entry, auth_config) in instance
             .auth
             .iter_mut()
-            .zip(mount_auth.config().auth.iter())
+            .zip(mount_auth.config().spec.auth.iter())
         {
             if auth_config.is_oauth()
                 || auth_config.token_file().is_some()
@@ -305,7 +306,7 @@ impl SessionMaterializer<'_> {
             let key = target
                 .primary_key()
                 .expect("credential target for scheme is internal");
-            if let omnifs_mount_schema::Auth::StaticToken(static_token) = entry {
+            if let omnifs_mount::Auth::StaticToken(static_token) = entry {
                 static_token.token_env = None;
                 static_token.token_file = Some(format!("{HOST_CRED_DIR}/{}", key.storage_key()));
             }
@@ -507,7 +508,7 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::{CredentialEntry, MemoryStore};
-    use omnifs_mount_schema::mounts::Spec;
+    use omnifs_mount::mounts::Spec;
     use secrecy::{ExposeSecret, SecretString};
     use serde_json::Value;
     use time::OffsetDateTime;
@@ -522,7 +523,7 @@ mod tests {
     use crate::test_support::wasm_with_provider_metadata;
 
     fn test_catalog(providers_dir: &Path) -> ProviderCatalog {
-        ProviderCatalog::new(providers_dir.join("mounts"), providers_dir)
+        ProviderCatalog::for_dirs(providers_dir.join("mounts"), providers_dir)
     }
 
     fn payload_for(payloads: &[MountPayload], name: &str) -> Value {

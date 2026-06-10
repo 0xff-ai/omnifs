@@ -11,7 +11,7 @@ use omnifs_itest::{
     inline_content, make_engine, make_extractor, make_initialized_runtime, make_runtime,
     provider_wasm_path,
 };
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
 
 #[tokio::test]

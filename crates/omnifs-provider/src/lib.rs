@@ -1,5 +1,7 @@
-//! Wire schema for the `omnifs.provider-manifest.v1` and
-//! `omnifs.provider-metadata.v1` custom sections.
+//! The provider contract: the `omnifs.provider-manifest.v1` and
+//! `omnifs.provider-metadata.v1` custom sections, route resolution, the
+//! provider capability model, the config schema, and the single
+//! auth-scheme model.
 //!
 //! The section is a concatenation of length-framed records. Each record is
 //! `u32 length_le + u8 tag + u8 reserved + body_bytes`. `length_le` covers
@@ -12,8 +14,6 @@ mod auth_resolve;
 mod auth_wire;
 mod config;
 mod manifest;
-mod mount_config;
-pub mod mounts;
 mod records;
 mod resolve;
 mod runtime_grants;
@@ -25,17 +25,12 @@ pub use auth_resolve::SchemeResolveError;
 pub use auth_wire::{
     AuthManifest, AuthScheme, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme,
     PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod,
+    TokenValidation,
 };
 pub use config::{
     ConfigProperty, ConfigSchema, ConfigSchemaType, InitHint, InitInput, PreopenStrategy,
 };
-pub use manifest::{
-    AuthInject, CapabilityEntry, ManifestAuthScheme, ManifestOAuthFlow, ManifestOauthScheme,
-    ManifestStaticTokenScheme, ProviderAuthManifest, ProviderManifest, TokenValidation,
-};
-pub use mount_config::{
-    Auth, AuthKind, OAuth, ProviderConfig, StaticToken, deserialize_auth as deserialize_mount_auth,
-};
+pub use manifest::{AuthInject, CapabilityEntry, ProviderAuthManifest, ProviderManifest};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
