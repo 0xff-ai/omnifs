@@ -44,7 +44,7 @@ check: fmt-check openapi-check host-clippy test providers-check npm-validate scr
 # Regenerate the provider JSON schema.
 [group('dev')]
 schema:
-    cargo run -q -p omnifs-mount-schema --example write_provider > crates/omnifs-mount-schema/schema/omnifs.provider.schema.json
+    cargo run -q -p omnifs-provider --example write_provider > crates/omnifs-provider/schema/omnifs.provider.schema.json
 
 # Regenerate the control API OpenAPI spec from the daemon implementation.
 [group('dev')]

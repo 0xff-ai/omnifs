@@ -101,7 +101,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Sandboxed archive extraction via a host-owned `omnifs-tool-archive` Wasm component. `BlobExecutor` streams `fetch-blob` responses into a staged temp file and commits metadata before the body is visible; `ArchiveExecutor` keys extracted trees by `(cache-key, format, strip-prefix)` and coalesces concurrent extractions through `TreeMaterializer`. The extractor runs path sanitization, depth/length/entry-count/per-file/total-byte limits inside the sandbox and publishes completed trees via atomic directory rename so tree refs never observe partial output.
 - `EffectiveConfig` type representing a mount after provider metadata has been merged in. `ProviderCatalog::load_mount()` returns one; credential targeting, session materialisation, and runtime construction all consume it. The previous `InstanceConfig`-plus-late-`apply_metadata` pattern is removed.
 - Provider runtime capabilities now come back from `init` as `(State, ProviderInfo, RequestedCapabilities)` instead of a separate WIT export. Initialisation runs exactly once in `ProviderRuntime::new`. Capability entries can be marked `dynamic: true` when the concrete grant depends on mount config (Docker's socket path is the motivating case).
-- `omnifs-mount-schema` crate is split into typed modules with a checked-in JSON schema at `crates/omnifs-mount-schema/schema/omnifs.provider.schema.json` (regenerate with `just regen-schema`).
+- `omnifs-mount-schema` crate is split into `omnifs-mount` and `omnifs-provider`, with a checked-in provider JSON schema at `crates/omnifs-provider/schema/omnifs.provider.schema.json` (regenerate with `just schema`).
 - Per-crate README files for all published crates.
 
 ### Changed

@@ -114,7 +114,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     # those artifacts exist in the target dir.
     cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
     cargo clippy -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings; \
+        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider -- -D warnings; \
     cargo clippy -p 'omnifs-provider-*' -p test-provider \
         -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
 
@@ -132,7 +132,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release --target wasm32-wasip2 \
         -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'; \
     cargo test --release -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount-schema; \
+        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider; \
     cargo test -p 'omnifs-provider-*' -p test-provider \
         --target wasm32-wasip2 --no-run
 
