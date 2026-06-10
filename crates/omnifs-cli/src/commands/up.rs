@@ -64,19 +64,17 @@ impl UpArgs {
         let mounts_dir = paths.mounts_dir.clone();
         let store = CredsBackend::auto(&paths.credentials_file, true);
 
+        anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_session(
             LaunchSpec {
                 runtime,
                 credentials_file: &paths.credentials_file,
                 store,
                 verb: "omnifs up",
+                configs,
                 extras: ContainerExtras::default(),
             },
             catalog,
-            |_session| {
-                anstream::println!("Using mount configs from {}", mounts_dir.display());
-                Ok(configs)
-            },
         )
         .await?;
 

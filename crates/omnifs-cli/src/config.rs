@@ -5,7 +5,7 @@
 //! once and threaded into commands that need it.
 
 use anyhow::{Context, Result};
-use omnifs_host::mounts::Spec;
+use omnifs_mount_schema::mounts::Spec;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 

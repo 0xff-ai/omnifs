@@ -13,7 +13,7 @@ omnifs-creds = { workspace = true }
 omnifs-mount-schema = { workspace = true }
 http = { workspace = true }
 oauth2 = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 secrecy = "0.10"
 serde_json = { workspace = true }
 thiserror = { workspace = true }

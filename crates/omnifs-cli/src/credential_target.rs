@@ -3,8 +3,8 @@ use std::fmt;
 use anyhow::Context;
 use omnifs_core::{AccountId, AuthSchemeId, CredentialId, IdError, ProviderId};
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_host::mounts::Resolved;
 use omnifs_mount_schema::Auth;
+use omnifs_mount_schema::mounts::Resolved;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

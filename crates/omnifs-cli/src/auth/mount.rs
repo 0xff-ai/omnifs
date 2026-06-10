@@ -2,10 +2,10 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
+use omnifs_auth::oauth_request_from_config;
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_host::auth::oauth_request_from_config;
-use omnifs_host::mounts::Resolved;
 use omnifs_mount_schema::Auth;
+use omnifs_mount_schema::mounts::Resolved;
 use omnifs_mount_schema::{
     AuthInject, AuthManifest, ManifestAuthScheme, ManifestStaticTokenScheme, ProviderManifest,
 };

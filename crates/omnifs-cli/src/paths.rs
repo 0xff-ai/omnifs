@@ -117,16 +117,12 @@ impl Paths {
     }
 
     pub fn mount_config_path(&self, name: &MountName) -> PathBuf {
-        mount_config_path_for(&self.mounts_dir, name)
+        self.mounts_dir.join(format!("{name}.json"))
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {
         provider_path_for(&self.providers_dir, provider)
     }
-}
-
-pub(crate) fn mount_config_path_for(mounts_dir: &Path, name: &MountName) -> PathBuf {
-    mounts_dir.join(format!("{name}.json"))
 }
 
 pub(crate) fn provider_path_for(providers_dir: &Path, provider: &str) -> PathBuf {

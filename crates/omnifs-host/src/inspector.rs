@@ -8,7 +8,6 @@
 //! without explicit threading.
 
 use std::cell::Cell;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,25 +16,16 @@ use std::time::{Duration, Instant};
 use crossbeam_queue::ArrayQueue;
 use omnifs_inspector::{
     CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
-    OpEnd, OutcomeFields, TraceId, serialize_record,
+    OpEnd, OutcomeFields, TraceId,
 };
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::Handle;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::op::Op;
 use omnifs_wit::provider::types as wit_types;
 
 const DEFAULT_HISTORY_CAP: usize = 1024;
 const DEFAULT_BROADCAST_CAP: usize = 256;
-/// Default TCP loopback address the daemon binds for the inspector stream
-/// subscribers. Docker-Desktop hosts reach this through a port
-/// forward; native-Linux hosts reach it via the container's network
-/// namespace bridge.
-const DEFAULT_LIVE_ADDR: &str = "0.0.0.0:7878";
 
 static GLOBAL: OnceLock<Arc<InspectorSink>> = OnceLock::new();
 
@@ -74,9 +64,6 @@ pub struct InspectorConfig {
     pub broadcast_cap: usize,
     /// Optional opt-in file tee path. `OMNIFS_INSPECTOR_PATH` sets it.
     pub tee_path: Option<PathBuf>,
-    /// TCP listen address for the subscriber server.
-    /// `OMNIFS_INSPECTOR_ADDR` overrides; empty string disables.
-    pub socket_addr: Option<SocketAddr>,
 }
 
 impl InspectorConfig {
@@ -90,7 +77,6 @@ impl InspectorConfig {
             tee_path: std::env::var("OMNIFS_INSPECTOR_PATH")
                 .ok()
                 .map(PathBuf::from),
-            socket_addr: live_addr_from_env(),
         }
     }
 }
@@ -115,9 +101,6 @@ pub struct InspectorSink {
     next_trace: AtomicU64,
     next_seq: AtomicU64,
     dropped_history: AtomicU64,
-    /// Address the subscriber server should bind on if `spawn_socket_server`
-    /// is called. Resolved once at construction from `InspectorConfig`.
-    socket_addr: Option<SocketAddr>,
 }
 
 /// One subscriber's view onto the sink: a snapshot of the history ring
@@ -139,7 +122,6 @@ impl InspectorSink {
             history_cap,
             broadcast_cap,
             tee_path,
-            socket_addr,
         } = config;
         if !enabled {
             return None;
@@ -160,7 +142,6 @@ impl InspectorSink {
             next_trace: AtomicU64::new(1),
             next_seq: AtomicU64::new(1),
             dropped_history: AtomicU64::new(0),
-            socket_addr,
         })
     }
 
@@ -250,69 +231,6 @@ impl InspectorSink {
             && let Err(error) = writer.write_record(&record)
         {
             warn!(%error, "failed to write inspector record to tee");
-        }
-    }
-
-    /// Bind a TCP loopback socket and spawn an accept loop that fans
-    /// the live stream out to connected subscribers. Returns `None`
-    /// when this sink was constructed without a socket address, or
-    /// when the bind itself fails. The returned `JoinHandle` aborts
-    /// the accept loop when dropped.
-    pub fn spawn_socket_server(self: &Arc<Self>, rt: &Handle) -> Option<JoinHandle<()>> {
-        let addr = self.socket_addr?;
-        // Bind synchronously through std then convert; the FUSE mount runner
-        // is on the tokio main thread, so `rt.block_on` here would nest
-        // runtimes and panic.
-        let std_listener = match std::net::TcpListener::bind(addr) {
-            Ok(l) => l,
-            Err(error) => {
-                warn!(%error, %addr, "failed to bind inspector TCP socket");
-                return None;
-            },
-        };
-        if let Err(error) = std_listener.set_nonblocking(true) {
-            warn!(%error, "failed to set listener nonblocking");
-            return None;
-        }
-        let listener = match TcpListener::from_std(std_listener) {
-            Ok(l) => l,
-            Err(error) => {
-                warn!(%error, "failed to register listener with tokio runtime");
-                return None;
-            },
-        };
-        Some(self.spawn_with_listener(listener, rt))
-    }
-
-    /// Like [`spawn_socket_server`] but takes an already-bound listener,
-    /// useful for tests that need a free ephemeral port.
-    pub fn spawn_with_listener(
-        self: &Arc<Self>,
-        listener: TcpListener,
-        rt: &Handle,
-    ) -> JoinHandle<()> {
-        if let Ok(addr) = listener.local_addr() {
-            debug!(%addr, "inspector TCP socket bound");
-        }
-        let sink = Arc::clone(self);
-        rt.spawn(sink.accept_loop(listener))
-    }
-
-    /// Accept incoming connections and spawn one subscriber task per
-    /// connection. Exits when the listener errors out or the task is
-    /// aborted (e.g. on daemon shutdown).
-    async fn accept_loop(self: Arc<Self>, listener: TcpListener) {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    tokio::spawn(self.subscribe().serve(stream));
-                },
-                Err(error) => {
-                    warn!(%error, "inspector socket accept failed");
-                    // Brief backoff; otherwise a persistent error spins.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                },
-            }
         }
     }
 
@@ -811,73 +729,6 @@ fn parse_env_positive_usize(name: &str) -> Option<usize> {
         .filter(|n: &usize| *n > 0)
 }
 
-/// Resolve the TCP listen address from env. Empty string disables.
-fn live_addr_from_env() -> Option<SocketAddr> {
-    let raw = match std::env::var("OMNIFS_INSPECTOR_ADDR").ok() {
-        Some(s) if s.is_empty() => return None,
-        Some(s) => s,
-        None => DEFAULT_LIVE_ADDR.to_string(),
-    };
-    match raw.parse() {
-        Ok(addr) => Some(addr),
-        Err(error) => {
-            warn!(%error, %raw, "OMNIFS_INSPECTOR_ADDR is not a valid socket address");
-            None
-        },
-    }
-}
-
-impl Subscription {
-    /// Drive this subscriber: write the history snapshot then forward
-    /// future live records as JSONL. Exits on write error, broadcast
-    /// closure, or client disconnect. `Lagged` recvs emit a
-    /// `# dropped N events` comment line and resume from the most
-    /// recent record.
-    async fn serve(mut self, mut stream: TcpStream) {
-        for record in &self.history {
-            if write_record_line(&mut stream, record).await.is_err() {
-                return;
-            }
-        }
-        loop {
-            match self.live.recv().await {
-                Ok(record) => {
-                    if write_record_line(&mut stream, &record).await.is_err() {
-                        return;
-                    }
-                },
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    let line = format!("# dropped {n} events\n");
-                    if stream.write_all(line.as_bytes()).await.is_err() {
-                        return;
-                    }
-                },
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
-    }
-}
-
-/// Serialize one record to JSON, append a newline, and write to the
-/// stream. Returns the write error so the caller can disconnect a
-/// dead subscriber. Kept as a free helper rather than a method
-/// because the receiver would be the stream (not ours to extend) and
-/// the function has no policy worth a wrapper type.
-async fn write_record_line(
-    stream: &mut TcpStream,
-    record: &InspectorRecord,
-) -> std::io::Result<()> {
-    let mut line = match serialize_record(record) {
-        Ok(json) => json,
-        Err(error) => {
-            warn!(%error, "failed to serialize inspector record");
-            return Ok(()); // Skip this record but keep the subscriber.
-        },
-    };
-    line.push('\n');
-    stream.write_all(line.as_bytes()).await
-}
-
 #[cfg(test)]
 impl InspectorSink {
     /// Test-only constructor: no env var dependency, no file tee, no
@@ -889,7 +740,6 @@ impl InspectorSink {
             history_cap,
             broadcast_cap: DEFAULT_BROADCAST_CAP,
             tee_path: None,
-            socket_addr: None,
         })
         .expect("test config is enabled")
     }
@@ -974,44 +824,6 @@ mod tests {
         // After Lag, recv resumes from the most recent record.
         let last = rx.recv().await.expect("recv after lag");
         assert!(last.seq >= 6, "should have advanced past the lag");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn socket_server_writes_snapshot_and_live_records_to_client() {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        // Bind an ephemeral port so concurrent tests don't collide.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-
-        let sink = Arc::new(InspectorSink::new_for_test(16));
-        // One pre-subscribe emit lands in the history snapshot.
-        sink.emit(1, dummy_event());
-
-        let handle = sink.spawn_with_listener(listener, &Handle::current());
-
-        // Connect as a client and read framed JSONL records.
-        let stream = TcpStream::connect(&addr).await.expect("client connect");
-        let mut reader = BufReader::new(stream);
-
-        // Read the snapshot line.
-        let mut snapshot = String::new();
-        reader
-            .read_line(&mut snapshot)
-            .await
-            .expect("read snapshot line");
-        assert!(snapshot.contains("\"seq\":1"), "got: {snapshot}");
-
-        // Emit one more record and verify it streams to the client.
-        sink.emit(2, dummy_event());
-        let mut live_line = String::new();
-        reader
-            .read_line(&mut live_line)
-            .await
-            .expect("read live line");
-        assert!(live_line.contains("\"seq\":2"), "got: {live_line}");
-
-        handle.abort();
     }
 
     #[test]

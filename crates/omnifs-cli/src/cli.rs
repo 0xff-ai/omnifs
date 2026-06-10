@@ -75,10 +75,6 @@ pub enum Commands {
     /// store / provider count alongside the CLI version.
     Version(commands::version::VersionArgs),
 
-    /// Daemon verbs. Internal; users should run `omnifs up` instead.
-    #[command(hide = true)]
-    Daemon(commands::daemon::DaemonArgs),
-
     /// Debug utilities. Hidden from `--help`.
     #[command(hide = true)]
     Debug(commands::debug::DebugArgs),
@@ -101,15 +97,14 @@ impl Commands {
             Self::Logs(args) => args.run().await,
             Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run(),
-            Self::Mounts(args) => args.run(),
+            Self::Mounts(args) => args.run().await,
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();
                 Ok(())
             },
             Self::Version(args) => args.run().await,
-            Self::Daemon(args) => args.run(),
-            Self::Debug(args) => args.run(),
+            Self::Debug(args) => args.run().await,
         }
     }
 }

@@ -9,6 +9,7 @@ description = "Centralized integration tests and harnesses for omnifs providers"
 
 [dependencies]
 omnifs-host = { path = "../omnifs-host" }
+omnifs-mount-schema = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-cache = { path = "../omnifs-cache" }
 omnifs-core = { path = "../omnifs-core" }

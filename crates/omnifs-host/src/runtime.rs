@@ -17,16 +17,14 @@ use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::manifest::Artifact;
-use crate::mounts::Resolved;
 use crate::operation_ids::OperationIds;
-use crate::schema;
 use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
-use omnifs_core::MountName;
 use omnifs_core::path::Path as ProtocolPath;
 use omnifs_mount_schema::ProviderConfig;
+use omnifs_mount_schema::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -50,43 +48,16 @@ const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_s
 pub struct Dirs<'a> {
     pub cache_dir: &'a Path,
     pub config_dir: &'a Path,
-    pub mounts_dir: &'a Path,
     pub providers_dir: &'a Path,
 }
 
 impl<'a> Dirs<'a> {
-    pub fn new(
-        cache_dir: &'a Path,
-        config_dir: &'a Path,
-        mounts_dir: &'a Path,
-        providers_dir: &'a Path,
-    ) -> Self {
+    pub fn new(cache_dir: &'a Path, config_dir: &'a Path, providers_dir: &'a Path) -> Self {
         Self {
             cache_dir,
             config_dir,
-            mounts_dir,
             providers_dir,
         }
-    }
-
-    pub fn mount_config_path(&self, name: &MountName) -> PathBuf {
-        self.mounts_dir.join(format!("{name}.json"))
-    }
-
-    pub fn mount_config_paths(&self) -> io::Result<Vec<PathBuf>> {
-        let read = match std::fs::read_dir(self.mounts_dir) {
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-
-        let mut files = read
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| Self::is_json_config_file(path))
-            .collect::<Vec<_>>();
-        files.sort();
-        Ok(files)
     }
 
     pub fn provider_path(&self, provider: &str) -> PathBuf {
@@ -96,11 +67,6 @@ impl<'a> Dirs<'a> {
         } else {
             self.providers_dir.join(provider)
         }
-    }
-
-    fn is_json_config_file(path: &Path) -> bool {
-        path.extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
     }
 }
 
@@ -245,6 +211,14 @@ impl From<Error> for BuildError {
 
 impl Runtime {
     #[must_use]
+    pub fn mount_name(&self) -> &str {
+        &self.mount_name
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
     pub fn namespace(&self) -> Namespace<'_> {
         Namespace { runtime: self }
     }
@@ -709,14 +683,16 @@ fn validate_instance_config(
         .config_raw
         .as_ref()
         .map_or(&empty_config, ProviderConfig::as_value);
-    match schema::validate_config(schema, config_value) {
+    match omnifs_mount_schema::validate_config(schema, config_value) {
         Ok(()) => Ok(()),
-        Err(schema::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(format!(
-            "config for mount {mount_name} failed validation: {error}"
-        ))),
-        Err(schema::SchemaError::InvalidSchema(error)) => Err(BuildError::ProviderProtocol(
-            format!("provider config schema for mount {mount_name} is invalid: {error}"),
+        Err(omnifs_mount_schema::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
+            format!("config for mount {mount_name} failed validation: {error}"),
         )),
+        Err(omnifs_mount_schema::SchemaError::InvalidSchema(error)) => {
+            Err(BuildError::ProviderProtocol(format!(
+                "provider config schema for mount {mount_name} is invalid: {error}"
+            )))
+        },
     }
 }
 

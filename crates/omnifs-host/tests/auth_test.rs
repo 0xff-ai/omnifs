@@ -395,7 +395,7 @@ async fn independent_oauth_strategies_share_refresh_lock() {
             "test-provider",
             store,
             refresh_lock.clone(),
-            reqwest::Client::new(),
+            reqwest_oauth2::Client::new(),
         )
         .unwrap()
     };
@@ -550,7 +550,7 @@ async fn oauth_config_client_id_overrides_missing_manifest_default_for_refresh()
         "test-provider",
         Arc::clone(&store),
         tempfile::tempdir().unwrap().path().join("credentials.lock"),
-        reqwest::Client::new(),
+        reqwest_oauth2::Client::new(),
     )
     .unwrap();
 
@@ -613,7 +613,7 @@ fn oauth_manager(
         "test-provider",
         Arc::clone(&store),
         tempfile::tempdir().unwrap().path().join("credentials.lock"),
-        reqwest::Client::new(),
+        reqwest_oauth2::Client::new(),
     )
     .unwrap();
     (Arc::new(auth), store, key)

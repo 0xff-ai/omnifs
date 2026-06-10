@@ -1,0 +1,44 @@
+[package]
+name = "omnifs-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "omnifs runtime daemon: provider registry and FUSE mount loop"
+categories = ["filesystem"]
+keywords = ["omnifs", "fuse", "filesystem", "wasm", "daemon"]
+
+[[bin]]
+name = "omnifsd"
+path = "src/main.rs"
+
+[[bin]]
+name = "omnifsd-openapi"
+path = "src/bin/openapi.rs"
+
+[dependencies]
+omnifs-api = { workspace = true }
+omnifs-fuse = { workspace = true }
+omnifs-host = { workspace = true }
+omnifs-inspector = { workspace = true }
+omnifs-mount-schema = { workspace = true }
+anyhow = { workspace = true }
+axum = "0.8"
+clap = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# Image-only artifact; cargo-dist packages the CLI for macOS only.
+[package.metadata.dist]
+dist = false
+
+[lints]
+workspace = true

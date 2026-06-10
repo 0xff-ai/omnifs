@@ -1,6 +1,6 @@
 //! Parsed index of embedded built-in provider manifests.
 
-use omnifs_mount_schema::{AuthManifest, ProviderManifest};
+use crate::{AuthManifest, ProviderManifest};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;

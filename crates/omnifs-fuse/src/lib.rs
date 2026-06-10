@@ -39,7 +39,25 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tokio::runtime::Handle;
 
-pub(crate) type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
+/// Shared slot for the kernel notifier. The daemon owns one, passes it to
+/// [`mount::run_blocking`] (which fills it once the session is up), and uses
+/// it to invalidate dentries when mounts are removed at runtime.
+pub type NotifierHandle = Arc<Mutex<Option<Notifier>>>;
+
+#[must_use]
+pub fn new_notifier_handle() -> NotifierHandle {
+    Arc::new(Mutex::new(None))
+}
+
+/// Invalidate the kernel dentry for a direct child of the filesystem root.
+/// Entries are served with effectively-infinite TTLs on the premise that
+/// the daemon invalidates them on change; call this when a mount is
+/// removed so it does not linger as a phantom directory.
+pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
+    if let Some(notifier) = notifier.lock().as_ref() {
+        let _ = notifier.inval_entry(INodeNo(ROOT_INO), std::ffi::OsStr::new(name));
+    }
+}
 
 fn path_prefix_matches(prefix: &str, path: &str) -> bool {
     let Ok(prefix) = omnifs_core::path::Path::parse(prefix) else {
@@ -97,7 +115,7 @@ impl Frontend {
         let inodes = DashMap::new();
 
         let root_entry = NodeEntry {
-            mount_name: registry.root_mount_name().unwrap_or("").to_string(),
+            mount_name: registry.root_mount_name().unwrap_or_default(),
             path: omnifs_core::path::Path::ROOT.to_string(),
             kind: wit_types::EntryKind::Directory,
             attrs: None,
@@ -128,7 +146,25 @@ impl Frontend {
     }
 
     pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Runtime>> {
-        self.registry.get(mount).cloned()
+        self.registry.get(mount)
+    }
+
+    /// Re-bind the cached root inode to the live root mount and return the
+    /// current binding. Mounts arrive at runtime, so a root-mounted
+    /// provider may appear (or disappear) after the `Frontend` was
+    /// constructed. The stale check uses a shared read; the write lock is
+    /// taken only on an actual root-mount change (once per add/remove).
+    pub(crate) fn sync_root_mount(&self) -> Option<String> {
+        let current = self.registry.root_mount_name();
+        let name = current.clone().unwrap_or_default();
+        let stale = self
+            .inodes
+            .get(&ROOT_INO)
+            .is_some_and(|entry| entry.mount_name != name);
+        if stale && let Some(mut entry) = self.inodes.get_mut(&ROOT_INO) {
+            entry.mount_name = name;
+        }
+        current
     }
 
     pub(crate) fn mem_get(

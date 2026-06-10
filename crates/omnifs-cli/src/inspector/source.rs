@@ -1,8 +1,7 @@
-//! Event sources: replay file, live TCP subscriber.
+//! Event sources: replay file, live `GET /v1/events` subscriber.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -10,23 +9,89 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// TCP loopback address that `omnifs inspect` connects to by default.
-/// Mirrors the port the daemon's `OMNIFS_INSPECTOR_ADDR` binds (and the
-/// port `omnifs dev` forwards through Docker). Both sides keep their
-/// own constant because the bind side is `0.0.0.0:...` and the
-/// client side is `127.0.0.1:...`.
-pub fn default_inspector_addr() -> SocketAddr {
-    "127.0.0.1:7878"
-        .parse()
-        .expect("valid hard-coded loopback addr")
+/// Resolve the daemon control address (`host:port`): `OMNIFS_DAEMON_ADDR`
+/// when set, else the loopback port the container publishes on the host.
+/// Single source of truth for every consumer of the control API.
+pub fn daemon_addr() -> String {
+    std::env::var("OMNIFS_DAEMON_ADDR")
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT))
+}
+
+/// Outcome of one [`EventsClient::attach`] call.
+pub enum AttachOutcome {
+    /// Could not connect or the daemon refused the stream; retry later.
+    Unreachable,
+    /// Connected and streamed until the daemon closed the response.
+    Ended,
+}
+
+/// Blocking line-oriented client for the daemon's `GET /v1/events`
+/// stream. Owns a single-thread tokio runtime so callers can drive the
+/// HTTP stream from plain threads.
+pub struct EventsClient {
+    rt: tokio::runtime::Runtime,
+    http: reqwest::Client,
+    url: String,
+}
+
+impl EventsClient {
+    pub fn new(addr: &str) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build events client runtime")?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(500))
+            .build()
+            .context("build events HTTP client")?;
+        Ok(Self {
+            rt,
+            http,
+            url: format!("http://{addr}/v1/events"),
+        })
+    }
+
+    /// Try to connect once. On success, call `on_connect`, then `on_line`
+    /// for every newline-framed record until the stream ends or `on_line`
+    /// returns an error (which propagates to the caller).
+    pub fn attach<E>(
+        &self,
+        on_connect: impl FnOnce(),
+        mut on_line: impl FnMut(&str) -> std::result::Result<(), E>,
+    ) -> std::result::Result<AttachOutcome, E> {
+        use futures_util::StreamExt as _;
+        use omnifs_inspector::split_complete_lines;
+
+        self.rt.block_on(async {
+            let response = match self.http.get(&self.url).send().await {
+                Ok(response) if response.status().is_success() => response,
+                _ => return Ok(AttachOutcome::Unreachable),
+            };
+            on_connect();
+            let mut stream = response.bytes_stream();
+            let mut buf = String::new();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else {
+                    return Ok(AttachOutcome::Ended);
+                };
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                let (lines, rest) = split_complete_lines(&buf);
+                for line in &lines {
+                    on_line(line)?;
+                }
+                buf = rest.to_string();
+            }
+            Ok(AttachOutcome::Ended)
+        })
+    }
 }
 
 pub enum SourceKind {
     Replay(PathBuf),
-    /// Connect to the daemon's inspector TCP socket. Optional
-    /// `record` also appends every line read to a host-side file.
+    /// Subscribe to the daemon's event stream. Optional `record` also
+    /// appends every line read to a host-side file.
     Socket {
-        addr: SocketAddr,
+        addr: String,
         record: Option<PathBuf>,
     },
 }
@@ -56,7 +121,7 @@ impl EventSource {
             SourceKind::Socket { addr, record } => {
                 // The live socket source reconnects forever; detach it
                 // so quitting the TUI never waits on the reconnect loop.
-                let handle = thread::spawn(move || socket_source(addr, record.as_deref(), &tx));
+                let handle = thread::spawn(move || socket_source(&addr, record.as_deref(), &tx));
                 drop(handle);
                 None
             },
@@ -98,13 +163,16 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
     }
 }
 
-/// Connect to the daemon's TCP loopback and forward every received
+/// Subscribe to the daemon's event stream and forward every received
 /// line into `tx`. Reconnects with a short backoff if the daemon is
 /// not yet listening — useful for `omnifs inspect` racing
 /// `omnifs dev`. Connect/disconnect transitions are reported through
 /// `SourceMessage` so the front-end never claims "connected" while the
-/// socket is still failing.
-fn socket_source(addr: SocketAddr, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+/// stream is still failing.
+fn socket_source(addr: &str, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+    /// Receiver hung up; stop the source thread.
+    struct Hangup;
+
     let mut record_file = record.and_then(|path| {
         std::fs::OpenOptions::new()
             .create(true)
@@ -112,32 +180,37 @@ fn socket_source(addr: SocketAddr, record: Option<&Path>, tx: &Sender<SourceMess
             .open(path)
             .ok()
     });
+    let Ok(client) = EventsClient::new(addr) else {
+        return;
+    };
 
     loop {
-        let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
-            thread::sleep(Duration::from_millis(250));
-            continue;
-        };
-        if tx.send(SourceMessage::Connected).is_err() {
-            return;
+        let outcome = client.attach(
+            || {
+                let _ = tx.send(SourceMessage::Connected);
+            },
+            |line| {
+                if let Some(file) = record_file.as_mut() {
+                    let _ = writeln!(file, "{}", line.trim());
+                    let _ = file.flush();
+                }
+                tx.send(SourceMessage::Line(line.to_string()))
+                    .map_err(|_| Hangup)
+            },
+        );
+        match outcome {
+            Ok(AttachOutcome::Unreachable) => thread::sleep(Duration::from_millis(250)),
+            // Stream closed (daemon shutdown or transient drop). Brief
+            // backoff then reconnect; the daemon serves a fresh history
+            // snapshot on the next attach.
+            Ok(AttachOutcome::Ended) => {
+                if tx.send(SourceMessage::Disconnected).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(500));
+            },
+            Err(Hangup) => return,
         }
-        let reader = BufReader::new(stream);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(file) = record_file.as_mut() {
-                let _ = writeln!(file, "{}", line.trim());
-                let _ = file.flush();
-            }
-            if tx.send(SourceMessage::Line(line)).is_err() {
-                return;
-            }
-        }
-        // Stream closed (daemon shutdown or transient drop). Brief
-        // backoff then try to reconnect; the daemon will restart with
-        // a fresh history snapshot.
-        if tx.send(SourceMessage::Disconnected).is_err() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(500));
     }
 }
 

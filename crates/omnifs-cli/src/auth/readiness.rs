@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_host::mounts::Resolved;
+use omnifs_mount_schema::mounts::Resolved;
 
 use crate::credential_target::CredentialTarget;
 
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::MemoryStore;
-    use omnifs_host::mounts::Spec;
+    use omnifs_mount_schema::mounts::Spec;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 

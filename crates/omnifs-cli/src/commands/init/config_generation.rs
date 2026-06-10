@@ -145,7 +145,7 @@ impl<'a> MountConfigGenerator<'a> {
             .config_schema
             .as_ref()
             .ok_or_else(|| anyhow!("provider `{}` has no configSchema", self.manifest.id))?;
-        omnifs_host::config::validate_config(schema.as_value(), config)
+        omnifs_mount_schema::validate_config(schema.as_value(), config)
             .map_err(|error| anyhow!("generated provider config failed schema validation: {error}"))
     }
 }

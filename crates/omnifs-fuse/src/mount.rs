@@ -3,13 +3,11 @@
 //! Provides `run_blocking` to start the FUSE filesystem and
 //! `unmount` for clean teardown via fusermount.
 
-use crate::Frontend;
+use crate::{Frontend, NotifierHandle};
 use dashmap::DashMap;
-use fuser::{Notifier, Session};
-use omnifs_host::inspector;
+use fuser::Session;
 use omnifs_host::path_key::PathToInode;
 use omnifs_host::registry::ProviderRegistry;
-use parking_lot::Mutex;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -18,39 +16,26 @@ use tracing::info;
 
 /// Mount the FUSE filesystem and block until it exits. Calls
 /// `registry.shutdown_all()` on exit regardless of how the mount ends.
+/// `notifier` is the caller's handle for kernel invalidation; it is filled
+/// once the session is up and cleared on exit.
 pub fn run_blocking(
     mount_point: &Path,
     registry: &Arc<ProviderRegistry>,
     rt: &Handle,
+    notifier: &NotifierHandle,
 ) -> Result<(), Error> {
     // Create shared path_to_inode map for invalidation.
     let path_to_inode: Arc<PathToInode> = Arc::new(DashMap::new());
-    let notifier: Arc<Mutex<Option<Notifier>>> = Arc::new(Mutex::new(None));
 
     let fs = Frontend::new_with_path_map_and_notifier(
         rt.clone(),
         Arc::clone(registry),
         Arc::clone(&path_to_inode),
-        Arc::clone(&notifier),
+        Arc::clone(notifier),
     );
     let config = Frontend::mount_config();
 
     info!(mount = %mount_point.display(), "starting FUSE mount");
-
-    if let Some(sink) = inspector::init_global_from_env() {
-        if let Some(path) = sink.tee_path() {
-            info!(path = %path.display(), "inspector stream enabled (in-memory ring + file tee)");
-        } else {
-            info!("inspector stream enabled (in-memory ring only)");
-        }
-        // Spawn the UDS subscriber server on the runtime that drives
-        // callouts. The returned JoinHandle is leaked intentionally:
-        // the server should live as long as the daemon, and tokio
-        // aborts the task when the runtime shuts down at process exit.
-        if let Some(_handle) = sink.spawn_socket_server(rt) {
-            info!("inspector socket server spawned");
-        }
-    }
 
     let session =
         Session::new(fs, mount_point, &config).map_err(|e| Error::FuseFailed(e.to_string()))?;

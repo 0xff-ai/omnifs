@@ -1,7 +1,6 @@
 //! `omnifs inspect` — live JSONL inspector TUI.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,7 +11,8 @@ use omnifs_inspector::parse_record_line;
 
 use crate::container_name::ContainerName;
 use crate::inspector::{
-    ConnectionMode, SourceKind, default_inspector_addr, format_record, run_plain, run_tui,
+    AttachOutcome, ConnectionMode, EventsClient, SourceKind, daemon_addr, format_record, run_plain,
+    run_tui,
 };
 use crate::paths::{PathOverrides, Paths};
 use crate::runtime_target::RuntimeTarget;
@@ -53,7 +53,7 @@ impl InspectArgs {
             )
         } else {
             let container = self.resolve_container()?;
-            let addr = default_inspector_addr();
+            let addr = daemon_addr();
             let label = container.as_str().to_string();
             (
                 ConnectionMode::Inspector,
@@ -76,9 +76,9 @@ impl InspectArgs {
             return run_plain(SourceKind::Replay(path));
         }
         let _container = self.resolve_container()?;
-        let addr = default_inspector_addr();
+        let addr = daemon_addr();
         let record = self.record.clone();
-        tokio::task::spawn_blocking(move || socket_plain_attach(addr, record.as_deref()))
+        tokio::task::spawn_blocking(move || socket_plain_attach(&addr, record.as_deref()))
             .await
             .context("inspector plain task")?
     }
@@ -97,46 +97,49 @@ const PLAIN_WAITING_ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
 /// Re-announce cadence while still waiting on a never-reached peer.
 const PLAIN_WAITING_REMIND_EVERY: Duration = Duration::from_secs(15);
 
-/// Plain-mode driver: connect to the TCP socket, forward each line
-/// to stdout (formatted on parse, raw on parse-failure), and
+/// Plain-mode driver: subscribe to the daemon's event stream, forward
+/// each line to stdout (formatted on parse, raw on parse-failure), and
 /// optionally append to a host-side record file.
 ///
 /// Connection-state transitions are reported to stderr so the user
 /// can tell "still waiting on the daemon" apart from "connected but
 /// quiet".
-fn socket_plain_attach(
-    addr: SocketAddr,
-    record_path: Option<&std::path::Path>,
-) -> anyhow::Result<()> {
+fn socket_plain_attach(addr: &str, record_path: Option<&std::path::Path>) -> anyhow::Result<()> {
     let mut record = record_path.map(open_record_file).transpose()?;
     anstream::eprintln!("omnifs inspect: connecting to {addr}…");
+    let client = EventsClient::new(addr)?;
     let mut ever_connected = false;
     let mut wait_started = Instant::now();
     let mut last_waiting_announce: Option<Instant> = None;
     // Reconnect loop: lets the user start `omnifs inspect` before
-    // `omnifs dev` finishes binding the socket.
+    // `omnifs dev` finishes binding the listener.
     loop {
-        let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
-            announce_waiting(
-                addr,
-                ever_connected,
-                wait_started,
-                &mut last_waiting_announce,
-            );
-            thread::sleep(Duration::from_millis(250));
-            continue;
-        };
-        anstream::eprintln!("omnifs inspect: connected to {addr}");
-        ever_connected = true;
-        last_waiting_announce = None;
-        let reader = BufReader::new(stream);
-        for line in reader.lines() {
-            let line = line.context("read inspector stream")?;
-            emit_plain_line(&line, record.as_mut())?;
+        let outcome = client
+            .attach(
+                || {
+                    anstream::eprintln!("omnifs inspect: connected to {addr}");
+                },
+                |line| emit_plain_line(line, record.as_mut()),
+            )
+            .context("write inspector stream")?;
+        match outcome {
+            AttachOutcome::Unreachable => {
+                announce_waiting(
+                    addr,
+                    ever_connected,
+                    wait_started,
+                    &mut last_waiting_announce,
+                );
+                thread::sleep(Duration::from_millis(250));
+            },
+            AttachOutcome::Ended => {
+                ever_connected = true;
+                last_waiting_announce = None;
+                anstream::eprintln!("omnifs inspect: disconnected from {addr}, reconnecting…");
+                wait_started = Instant::now();
+                thread::sleep(Duration::from_millis(500));
+            },
         }
-        anstream::eprintln!("omnifs inspect: disconnected from {addr}, reconnecting…");
-        wait_started = Instant::now();
-        thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -145,7 +148,7 @@ fn socket_plain_attach(
 /// `PLAIN_WAITING_ANNOUNCE_AFTER`; rate-limited after that to avoid
 /// spamming a tail-style invocation.
 fn announce_waiting(
-    addr: SocketAddr,
+    addr: &str,
     ever_connected: bool,
     wait_started: Instant,
     last_announce: &mut Option<Instant>,

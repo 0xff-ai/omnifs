@@ -66,6 +66,11 @@ if ! docker exec "$CONTAINER" sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
   exit 1
 fi
 
+# The daemon starts with an empty registry; seed the built-in dev mounts
+# through the control API (mounts only otherwise arrive from a host-side
+# `omnifs up`/`omnifs dev`).
+docker exec "$CONTAINER" omnifs debug push-dev-mounts || { SMOKE_FAILED=1; exit 1; }
+
 docker exec "$CONTAINER" env \
   OMNIFS_DEMO_MODE=smoke \
   OMNIFS_DEMO_OWNER=ollama \

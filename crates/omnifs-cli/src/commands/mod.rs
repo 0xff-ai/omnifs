@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod completions;
-pub mod daemon;
 pub mod debug;
 pub mod dev;
 pub mod doctor;

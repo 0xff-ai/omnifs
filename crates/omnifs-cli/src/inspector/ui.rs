@@ -61,7 +61,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             let state = if app.connected {
                 "connected".to_string()
             } else {
-                match app.addr {
+                match &app.addr {
                     Some(addr) => format!("waiting on {addr}"),
                     None => "disconnected".to_string(),
                 }

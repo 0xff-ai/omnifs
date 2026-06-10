@@ -17,17 +17,12 @@ use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, MountConfig, Session};
+use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Session};
 
-const HOST_MOUNTS_DIR: &str = "/root/.omnifs/config/mounts";
 const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
 const GUEST_CONFIG_DIR: &str = "/root/.omnifs/config";
 const GUEST_CACHE_DIR: &str = "/root/.omnifs/cache";
 const GUEST_PROVIDERS_DIR: &str = "/root/.omnifs/providers";
-
-/// TCP port the daemon's inspector server binds inside the container.
-/// Forwarded to host loopback by `omnifs dev` and `omnifs up`.
-pub(crate) const GUEST_INSPECTOR_PORT: u16 = 7878;
 
 /// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
 /// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
@@ -41,10 +36,6 @@ const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
 #[derive(Debug, Default)]
 pub(crate) struct ContainerExtras {
     pub(crate) binds: Vec<String>,
-    pub(crate) env: Vec<String>,
-    /// TCP ports the container should expose to the host loopback.
-    /// Each port `N` is forwarded as `127.0.0.1:N:N`.
-    pub(crate) tcp_ports: Vec<u16>,
 }
 
 /// Pure description of a container launch: all bind mounts, env vars, and TCP
@@ -68,10 +59,10 @@ impl ContainerLaunchSpec {
         session: &Session,
         extras: ContainerExtras,
     ) -> Self {
-        let mut binds = vec![
-            format!("{}:{HOST_CRED_DIR}:ro", session.creds_dir().display()),
-            format!("{}:{HOST_MOUNTS_DIR}:ro", session.mounts_dir().display()),
-        ];
+        let mut binds = vec![format!(
+            "{}:{HOST_CRED_DIR}:ro",
+            session.creds_dir().display()
+        )];
         if session.credentials_file().exists() {
             binds.push(format!(
                 "{}:{HOST_CREDENTIALS_FILE}",
@@ -101,21 +92,19 @@ impl ContainerLaunchSpec {
 
         binds.extend(extras.binds);
 
-        let mut env = vec![
+        let env = vec![
             format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
             format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
-            format!("OMNIFS_MOUNTS_DIR={HOST_MOUNTS_DIR}"),
             format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];
-        env.extend(extras.env);
-
         Self {
             image: image.as_str().to_string(),
             binds,
             env,
-            tcp_ports: extras.tcp_ports,
+            // The control API port is always published on the host loopback.
+            tcp_ports: vec![omnifs_api::DEFAULT_PORT],
         }
     }
 }
@@ -416,42 +405,16 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn wait_for_fuse_mount(&self) -> Result<()> {
-        use bollard::exec::{CreateExecOptions, StartExecResults};
-
+    pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
+        let client = crate::client::DaemonClient::new();
         anstream::println!(
             "Waiting for {HOST_FUSE_MOUNT} inside `{}`",
             self.container_name
         );
         for attempt in 0..60 {
-            let exec = self
-                .docker
-                .create_exec(
-                    self.container_name.as_str(),
-                    CreateExecOptions::<&str> {
-                        cmd: Some(vec![
-                            "sh",
-                            "-lc",
-                            &format!("grep -qs ' {HOST_FUSE_MOUNT} ' /proc/mounts"),
-                        ]),
-                        attach_stdout: Some(true),
-                        attach_stderr: Some(true),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            if let Ok(exec) = exec
-                && let Ok(StartExecResults::Attached { mut output, .. }) =
-                    self.docker.start_exec(&exec.id, None).await
-            {
-                // Drain output so the exec finishes before we inspect its exit code.
-                while output.next().await.is_some() {}
-                if let Ok(info) = self.docker.inspect_exec(&exec.id).await
-                    && info.exit_code == Some(0)
-                {
-                    anstream::println!("✓ FUSE mount is ready");
-                    return Ok(());
-                }
+            if client.ready().await {
+                anstream::println!("✓ FUSE mount is ready");
+                return Ok(());
             }
             if let Ok(container) = self
                 .docker
@@ -492,110 +455,6 @@ impl Runtime {
             self.container_name
         ))
         .with_hint("Run `omnifs doctor` to verify Docker, FUSE, and image cache")
-    }
-
-    pub(crate) async fn verify_status(&self, configs: &[MountConfig]) -> Result<()> {
-        use bollard::container::LogOutput;
-        use bollard::exec::{CreateExecOptions, StartExecResults};
-
-        anstream::println!("Checking runtime provider status");
-        let exec = self
-            .docker
-            .create_exec(
-                self.container_name.as_str(),
-                CreateExecOptions::<&str> {
-                    cmd: Some(vec!["omnifs", "status", "--json"]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .with_context(|| format!("create exec in `{}`", self.container_name))?;
-
-        let StartExecResults::Attached { mut output, .. } = self
-            .docker
-            .start_exec(&exec.id, None)
-            .await
-            .with_context(|| format!("start exec in `{}`", self.container_name))?
-        else {
-            anyhow::bail!("expected attached exec output");
-        };
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        while let Some(msg) = output.next().await {
-            match msg.context("read exec output")? {
-                LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
-                LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
-                _ => {},
-            }
-        }
-
-        let info = self
-            .docker
-            .inspect_exec(&exec.id)
-            .await
-            .context("inspect exec")?;
-        let exit_code = info.exit_code.unwrap_or(-1);
-
-        if exit_code != 0 {
-            anyhow::bail!(
-                "`omnifs status --json` inside `{container_name}` exited with {}:\n{}{}",
-                exit_code,
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-                container_name = self.container_name
-            );
-        }
-        let payload: crate::status::StatusJson =
-            serde_json::from_slice(&stdout).with_context(|| {
-                format!(
-                    "parse `omnifs status --json` output from `{}`:\n{}",
-                    self.container_name,
-                    String::from_utf8_lossy(&stdout)
-                )
-            })?;
-        let missing = configs
-            .iter()
-            .filter(|cfg| {
-                !payload.providers.iter().any(|p| match p {
-                    crate::status::ProviderStatusJson::Ready {
-                        mount,
-                        provider_present,
-                        ..
-                    } => mount == cfg.name.as_str() && *provider_present,
-                    crate::status::ProviderStatusJson::Invalid { .. } => false,
-                })
-            })
-            .map(|cfg| cfg.name.to_string())
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "container started, but provider status is not ready (missing/unready: {}):\n{}",
-                missing.join(", "),
-                serde_json::to_string_pretty(&payload).unwrap_or_default()
-            );
-        }
-        let invalid: Vec<_> = payload
-            .providers
-            .iter()
-            .filter_map(|p| match p {
-                crate::status::ProviderStatusJson::Invalid { config_path, .. } => {
-                    Some(config_path.display().to_string())
-                },
-                crate::status::ProviderStatusJson::Ready { .. } => None,
-            })
-            .collect();
-        if !invalid.is_empty() {
-            anyhow::bail!(
-                "container started, but {} provider config(s) are invalid: {}",
-                invalid.len(),
-                invalid.join(", ")
-            );
-        }
-        anstream::println!("✓ Runtime sees {} provider(s)", configs.len());
-        Ok(())
     }
 
     async fn ensure_image(&self) -> Result<()> {
@@ -805,13 +664,11 @@ mod tests {
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
         let extras = ContainerExtras {
             binds: vec!["/extra:/extra:ro".to_string()],
-            env: vec!["FOO=bar".to_string()],
-            tcp_ports: vec![7878],
         };
 
         let spec = ContainerLaunchSpec::from_session(&image, &session, extras);
 
-        // Creds bind is first (read-only), mounts bind is second.
+        // Creds bind is first (read-only).
         assert!(
             spec.binds[0].ends_with(":ro"),
             "creds bind should be read-only: {}",
@@ -821,11 +678,6 @@ mod tests {
             spec.binds[0].contains(HOST_CRED_DIR),
             "first bind should target HOST_CRED_DIR: {}",
             spec.binds[0]
-        );
-        assert!(
-            spec.binds[1].contains(HOST_MOUNTS_DIR),
-            "second bind should target HOST_MOUNTS_DIR: {}",
-            spec.binds[1]
         );
 
         // Extras bind is appended after the base set. No credentials_file bind
@@ -847,11 +699,8 @@ mod tests {
             "SSH_AUTH_SOCK must be forwarded inside container"
         );
 
-        // Extra env is appended after the base env.
-        assert_eq!(spec.env.last().map(String::as_str), Some("FOO=bar"));
-
-        // TCP port and image propagate correctly.
-        assert_eq!(spec.tcp_ports, vec![7878]);
+        // The control API port is always published; image propagates.
+        assert_eq!(spec.tcp_ports, vec![omnifs_api::DEFAULT_PORT]);
         assert_eq!(spec.image, "ghcr.io/0xff-ai/omnifs:test");
     }
 }

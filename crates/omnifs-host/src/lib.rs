@@ -10,7 +10,6 @@
 //! - `Runtime`, `Instance`, `Namespace`: WASM provider execution and namespace
 //!   operation handles
 
-pub mod config;
 pub mod path_key;
 pub mod registry;
 
@@ -31,7 +30,6 @@ mod invalidation;
 pub(crate) mod log_redaction;
 mod manifest;
 pub(crate) mod materialize;
-pub mod mounts;
 mod namespace;
 mod object_id;
 mod op;
@@ -43,7 +41,6 @@ mod projection;
 mod protocol_path;
 mod runtime;
 pub(crate) mod sandbox;
-mod schema;
 pub mod tools;
 mod tree_refs;
 mod wasi;

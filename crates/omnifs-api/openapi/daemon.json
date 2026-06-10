@@ -1,0 +1,623 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "omnifs daemon control API",
+    "description": "omnifs runtime daemon: provider registry and FUSE mount loop",
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.2.1"
+  },
+  "paths": {
+    "/v1/events": {
+      "get": {
+        "tags": [],
+        "summary": "Stream the inspector history snapshot followed by live records as\nnewline-framed JSON using the same wire format the raw TCP listener used to\nspeak, now chunk-encoded by HTTP. A lagged subscriber gets a\n`# dropped N events` comment line and resumes from the newest record.",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "description": "newline-framed inspector event stream",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "inspector stream disabled",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mounts": {
+      "post": {
+        "tags": [],
+        "summary": "`POST /v1/mounts`: resolve and load one mount from a raw mount spec.\nSecret material never rides this call: specs reference credential files\nmaterialized into the session by the CLI.",
+        "operationId": "add_mount",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Spec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "mount loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid mount spec",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "provider not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "mount already loaded",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "mount load failed",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mounts/{name}": {
+      "delete": {
+        "tags": [],
+        "summary": "`DELETE /v1/mounts/{name}`: shut down and unregister a mount.",
+        "operationId": "remove_mount",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "mount name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "mount removed"
+          },
+          "404": {
+            "description": "mount not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "mount remove failed",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ready": {
+      "get": {
+        "tags": [],
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "filesystem frontend is serving",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyInfo"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "filesystem frontend is not serving yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [],
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "daemon runtime facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DaemonStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/version": {
+      "get": {
+        "tags": [],
+        "operationId": "version",
+        "responses": {
+          "200": {
+            "description": "daemon control API version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Auth": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StaticToken"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "static-token"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/OAuth"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "oauth"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "Authentication configuration for HTTP requests."
+      },
+      "DaemonStatus": {
+        "type": "object",
+        "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
+        "required": [
+          "version",
+          "mount_point",
+          "config_dir",
+          "cache_dir",
+          "providers_dir",
+          "mounts"
+        ],
+        "properties": {
+          "cache_dir": {
+            "type": "string"
+          },
+          "config_dir": {
+            "type": "string"
+          },
+          "frontend": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FrontendInfo",
+                "description": "The serving filesystem frontend (FUSE today; the protocol stays\nfrontend-agnostic for future NFSv4/FSKit modes), when one is up."
+              }
+            ]
+          },
+          "mount_point": {
+            "type": "string"
+          },
+          "mounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MountInfo"
+            },
+            "description": "Provider mounts loaded in the registry."
+          },
+          "providers_dir": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "FrontendInfo": {
+        "type": "object",
+        "required": [
+          "source",
+          "fs_type"
+        ],
+        "properties": {
+          "fs_type": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "MountInfo": {
+        "type": "object",
+        "required": [
+          "mount",
+          "provider_id",
+          "root_mount"
+        ],
+        "properties": {
+          "mount": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "root_mount": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OAuth": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User-chosen account handle for host-managed credentials."
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth public client id override for BYO OAuth applications."
+          },
+          "client_secret_env": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Environment variable containing an OAuth client secret."
+          },
+          "client_secret_file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "File containing an OAuth client secret."
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "header": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redirect_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth redirect URI override for BYO apps that require an exact\nregistered callback."
+          },
+          "scheme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider-declared auth scheme key for manifest-backed credentials."
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PreopenMode": {
+        "type": "string",
+        "enum": [
+          "ro",
+          "rw"
+        ]
+      },
+      "PreopenedPath": {
+        "type": "object",
+        "required": [
+          "host",
+          "guest"
+        ],
+        "properties": {
+          "guest": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PreopenMode"
+          }
+        }
+      },
+      "ProviderCapabilities": {
+        "type": "object",
+        "description": "Runtime capability grants for a mounted provider instance.\n\nThis type is user-authored in mount JSON configs and controls what\nsandbox capabilities are granted. It is distinct from `CapabilityEntry`\nwhich is the provider-manifest declaration of what a provider needs.",
+        "properties": {
+          "domains": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "git_repos": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_fetch_blob_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_read_blob_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "preopened_paths": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PreopenedPath"
+            }
+          },
+          "unix_sockets": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ProviderConfig": {
+        "type": "object",
+        "description": "Provider-specific configuration object from a mount JSON file's `\"config\"` field."
+      },
+      "ReadyInfo": {
+        "type": "object",
+        "description": "`GET /v1/ready`: 200 with `ready: true` once the filesystem is\nserving; 503 with `ready: false` while starting up.",
+        "required": [
+          "ready"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Spec": {
+        "type": "object",
+        "description": "Raw user-authored mount JSON.\n\nLoaded from JSON files in the mount spec directory.",
+        "required": [
+          "provider",
+          "mount"
+        ],
+        "properties": {
+          "auth": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Auth"
+            }
+          },
+          "capabilities": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderCapabilities"
+              }
+            ]
+          },
+          "config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderConfig"
+              }
+            ]
+          },
+          "mount": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Filename of the provider WASM component this mount loads, looked\nup in `providers_dir`."
+          },
+          "root_mount": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StaticToken": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User-chosen account handle for host-managed credentials."
+          },
+          "scheme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider-declared auth scheme key for manifest-backed credentials."
+          },
+          "token_env": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "VersionInfo": {
+        "type": "object",
+        "description": "`GET /v1/version`",
+        "required": [
+          "version",
+          "api_version"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

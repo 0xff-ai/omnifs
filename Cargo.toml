@@ -10,7 +10,7 @@ members = [
     "providers/linear",
     "providers/test",
 ]
-default-members = ["crates/omnifs-cli", "crates/omnifs-host"]
+default-members = ["crates/omnifs-cli", "crates/omnifs-host", "crates/omnifs-daemon"]
 
 [workspace.package]
 version = "0.2.1"
@@ -21,6 +21,7 @@ homepage = "https://github.com/0xff-ai/omnifs"
 readme = "README.md"
 
 [workspace.dependencies]
+omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-creds = { version = "0.2.1", path = "crates/omnifs-creds" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
@@ -34,10 +35,11 @@ omnifs-cache = { version = "0.2.1", path = "crates/omnifs-cache" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+utoipa = "5.5"
 indexmap = { version = "2", features = ["serde"] }
 schemars = "1"
 jsonschema = { version = "0.46", default-features = false }

@@ -12,8 +12,10 @@ if [[ ! -x "$omnifs_bin" ]]; then
   cargo build --release -p omnifs-cli --manifest-path "$root/Cargo.toml"
 fi
 
-# Scrub env vars that would taint the test.
+# Scrub env vars that would taint the test, and point the daemon address at
+# a dead port so init never live-pushes the mount into a running dev daemon.
 unset OMNIFS_MOUNTS_DIR OMNIFS_CONFIG_DIR OMNIFS_CACHE_DIR
+export OMNIFS_DAEMON_ADDR="127.0.0.1:1"
 
 # Isolated tmp dir; cleaned on exit.
 tmpdir="$(mktemp -d)"

@@ -7,7 +7,7 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use crate::mounts::Resolved;
+use omnifs_mount_schema::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 use url::Url;
 

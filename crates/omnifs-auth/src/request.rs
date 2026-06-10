@@ -5,7 +5,7 @@ use oauth2::{
     EndpointNotSet, EndpointSet, RedirectUrl, RevocationUrl, TokenUrl,
 };
 use omnifs_mount_schema::{
-    DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
+    DeviceCodeConfig, OAuth, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
     TokenEndpointAuthMethod,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -271,4 +271,85 @@ fn token_endpoint_secret(
         ClientSecret::new(secret.expose_secret().to_owned()),
         auth_type,
     )))
+}
+
+/// Build an [`OAuthRequest`] from a mount's `auth` config block, applying
+/// scope, injection, redirect, and client credential overrides.
+pub fn oauth_request_from_config(
+    config: Option<&OAuth>,
+    scheme: OauthScheme,
+) -> Result<OAuthRequest, AuthError> {
+    let Some(config) = config else {
+        return Ok(OAuthRequest::new(scheme));
+    };
+
+    let mut request_config = OAuthRequestConfig::default();
+    if let Some(scopes) = &config.scopes {
+        request_config = request_config.with_scopes(scopes.clone());
+    }
+    if let Some(domain) = non_empty_config_value(config.domain.as_deref(), "auth.domain")? {
+        request_config = request_config.with_inject_domain(domain);
+    }
+    if let Some(header) = non_empty_config_value(config.header.as_deref(), "auth.header")? {
+        request_config = request_config.with_inject_header(header);
+    }
+    if let Some(redirect_uri) =
+        non_empty_config_value(config.redirect_uri.as_deref(), "auth.redirectUri")?
+    {
+        request_config = request_config.with_redirect_uri(redirect_uri);
+    }
+    if let Some(client_id) = non_empty_config_value(config.client_id.as_deref(), "auth.clientId")? {
+        request_config = request_config.with_client_id(client_id);
+    }
+    if let Some(client_secret) = read_oauth_client_secret(config)? {
+        request_config = request_config.with_client_secret(client_secret);
+    }
+    Ok(OAuthRequest::from_config(scheme, request_config))
+}
+
+fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, AuthError> {
+    if let Some(path) = config.client_secret_file.as_deref() {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                return secret_from_config_value(
+                    contents.trim(),
+                    &format!("auth.clientSecretFile {path}"),
+                );
+            },
+            Err(error) if config.client_secret_env.is_none() => {
+                return Err(AuthError::RequestConfig(format!(
+                    "failed to read auth.clientSecretFile {path}: {error}"
+                )));
+            },
+            Err(_) => {},
+        }
+    }
+
+    let Some(env_var) = config.client_secret_env.as_deref() else {
+        return Ok(None);
+    };
+    let value = std::env::var(env_var).map_err(|error| {
+        AuthError::RequestConfig(format!(
+            "failed to read auth.clientSecretEnv {env_var}: {error}"
+        ))
+    })?;
+    secret_from_config_value(value.trim(), &format!("auth.clientSecretEnv {env_var}"))
+}
+
+fn secret_from_config_value(value: &str, source: &str) -> Result<Option<SecretString>, AuthError> {
+    non_empty_config_value(Some(value), source)
+        .map(|value| value.map(|value| SecretString::from(value.to_owned())))
+}
+
+fn non_empty_config_value<'a>(
+    value: Option<&'a str>,
+    source: &str,
+) -> Result<Option<&'a str>, AuthError> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(AuthError::RequestConfig(format!("{source} is empty")));
+    }
+    Ok(Some(value))
 }

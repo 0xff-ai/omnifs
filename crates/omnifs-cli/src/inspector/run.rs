@@ -22,7 +22,7 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     let addr = match &source {
-        SourceKind::Socket { addr, .. } => Some(*addr),
+        SourceKind::Socket { addr, .. } => Some(addr.clone()),
         SourceKind::Replay(_) => None,
     };
     let mut app = App::new(mode, container, addr);
