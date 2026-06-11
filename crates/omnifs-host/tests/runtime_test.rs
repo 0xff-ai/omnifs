@@ -14,6 +14,15 @@ use omnifs_itest::{
 use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
 
+fn test_dirs<'a>(
+    cache_dir: &'a std::path::Path,
+    config_dir: &'a std::path::Path,
+    providers_dir: &'a std::path::Path,
+    credentials_file: &'a std::path::Path,
+) -> Dirs<'a> {
+    Dirs::new(cache_dir, config_dir, providers_dir, credentials_file)
+}
+
 #[tokio::test]
 async fn test_initialize() {
     let engine = make_engine();
@@ -807,12 +816,18 @@ async fn test_cache_isolated_by_mount_name() {
     let resolved_b = config_b.into_resolved("test_provider", None).unwrap();
     // Both runtimes share the same global Caches; mount isolation is via key prefix.
     let caches = Caches::open(cache_dir.path()).unwrap();
+    let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
     let runtime_a = Runtime::new(
         &engine,
         &wasm_path,
         &resolved_a,
         cloner.clone(),
-        Dirs::new(cache_dir.path(), config_dir.path(), config_dir.path()),
+        test_dirs(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            &credentials_file,
+        ),
         extractor.clone(),
         &caches,
     )
@@ -822,7 +837,12 @@ async fn test_cache_isolated_by_mount_name() {
         &wasm_path,
         &resolved_b,
         cloner,
-        Dirs::new(cache_dir.path(), config_dir.path(), config_dir.path()),
+        test_dirs(
+            cache_dir.path(),
+            config_dir.path(),
+            config_dir.path(),
+            &credentials_file,
+        ),
         extractor,
         &caches,
     )

@@ -22,7 +22,6 @@ use crate::app_context::AppContext;
 use crate::catalog;
 use crate::commands::{init, up};
 use crate::error::WithHint;
-use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
 use crate::session::HOST_FUSE_MOUNT;
@@ -77,7 +76,7 @@ impl SetupArgs {
         let configured = catalog.configured_mounts_by_provider(&mounts, &templates);
 
         let selected = resolve_selection(&self, &templates, &configured)?;
-        let results = run_init_loop(&selected, &self, paths, &templates).await;
+        let results = run_init_loop(&selected, &self, &templates).await;
 
         let report = summary::SetupSummary::new(
             paths,
@@ -271,7 +270,6 @@ fn validate_preselected(
 async fn run_init_loop(
     selected: &[String],
     args: &SetupArgs,
-    paths: &Paths,
     templates: &BTreeMap<String, catalog::ProviderTemplate>,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
@@ -325,7 +323,6 @@ async fn run_init_loop(
             token: None,
             token_env: None,
             scopes: Vec::new(),
-            providers_dir: Some(paths.providers_dir.clone()),
             show_capabilities: false,
         };
         let outcome = init_args.run().await.map_err(|e| e.to_string());
@@ -344,7 +341,6 @@ async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
     up::UpArgs {
         image: config.image.clone(),
         container_name: config.container_name.clone(),
-        providers_dir: None,
     }
     .run()
     .await

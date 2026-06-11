@@ -1,7 +1,5 @@
 //! `omnifs up` — container lifecycle: start.
 
-use std::path::PathBuf;
-
 use clap::Args;
 
 use crate::app_context::AppContext;
@@ -17,11 +15,6 @@ pub struct UpArgs {
     /// version-matched runtime image.
     #[arg(long)]
     pub image: Option<String>,
-    /// Directory holding provider WASM components for host-side metadata.
-    ///
-    /// Defaults to `OMNIFS_PROVIDERS_DIR`, then the default config providers dir.
-    #[arg(long)]
-    pub providers_dir: Option<PathBuf>,
     /// Container name.
     ///
     /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
@@ -34,14 +27,7 @@ impl UpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         use crate::paths::PathOverrides;
 
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                providers_dir: self.providers_dir,
-                ..Default::default()
-            },
-            self.container_name,
-            self.image,
-        )?;
+        let ctx = AppContext::resolve(PathOverrides::default(), self.container_name, self.image)?;
         let paths = ctx.paths();
         let runtime = ctx.runtime();
         let catalog = ctx.catalog();
@@ -58,10 +44,13 @@ impl UpArgs {
         let mounts_dir = paths.mounts_dir.clone();
         let store = CredsBackend::auto(&paths.credentials_file, true);
 
+        crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
+
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_session(
             LaunchSpec {
                 runtime,
+                runtime_home: &paths.config_dir,
                 credentials_file: &paths.credentials_file,
                 store,
                 verb: "omnifs up",

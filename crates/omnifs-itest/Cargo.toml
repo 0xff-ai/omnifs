@@ -13,6 +13,7 @@ omnifs-mount = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-cache = { path = "../omnifs-cache" }
 omnifs-core = { path = "../omnifs-core" }
+omnifs-home = { workspace = true }
 wasmtime = { workspace = true }
 tempfile = { workspace = true }
 http = { workspace = true }

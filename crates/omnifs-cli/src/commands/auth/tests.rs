@@ -7,6 +7,7 @@ use crate::session::MountConfig;
 use crate::workspace::Workspace;
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialStore, MemoryStore};
+use omnifs_home::CREDENTIALS_FILE;
 use omnifs_provider::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -352,7 +353,7 @@ fn manual_code_input_accepts_redirect_url() {
 
 fn fixture_paths(root: &Path) -> Paths {
     let mut paths = Paths::under_root(root);
-    paths.credentials_file = root.join("credentials.json");
+    paths.credentials_file = root.join(CREDENTIALS_FILE);
     std::fs::create_dir_all(&paths.mounts_dir).unwrap();
     std::fs::create_dir_all(&paths.providers_dir).unwrap();
     paths

@@ -7,15 +7,12 @@
 //!
 //! Resolution order (per directory):
 //!   1. Explicit override from `PathOverrides` (CLI flag)
-//!   2. Per-purpose env var (`OMNIFS_CONFIG_DIR`, `OMNIFS_CACHE_DIR`,
-//!      `OMNIFS_PROVIDERS_DIR`)
-//!   3. `OMNIFS_HOME` (fans out: all dirs under `$OMNIFS_HOME`)
-//!   4. Default: `$HOME/.omnifs/{...}` or `/root/.omnifs/{...}` if HOME unset
+//!   2. `OMNIFS_HOME` (fans out: all dirs under `$OMNIFS_HOME`)
+//!   3. Default: `$HOME/.omnifs/{...}`
 
 use std::path::{Path, PathBuf};
 
 const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
-const FALLBACK_ROOT: &str = "/root/.omnifs";
 
 // The on-disk structure of an omnifs root, relative to the root directory.
 // Every concrete path (host default resolution and the in-container guest
@@ -26,13 +23,13 @@ pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
+pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 
 /// Explicit (CLI flag) relocations for individual directories.
 #[derive(Debug, Clone, Default)]
 pub struct PathOverrides {
     pub config_dir: Option<PathBuf>,
     pub cache_dir: Option<PathBuf>,
-    pub providers_dir: Option<PathBuf>,
 }
 
 /// The fully resolved omnifs directory layout.
@@ -49,46 +46,48 @@ pub struct Paths {
     pub config_file: PathBuf,
 }
 
+/// Path resolution failed because no default root could be derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolveError;
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cannot resolve omnifs home: set HOME or OMNIFS_HOME")
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
 impl Paths {
     /// Resolve paths from overrides, env, `OMNIFS_HOME`, then the
     /// `$HOME/.omnifs` default.
     ///
     /// Resolution order per directory:
     ///   1. `overrides` field (CLI flag)
-    ///   2. Per-purpose env var (`OMNIFS_CONFIG_DIR`, `OMNIFS_CACHE_DIR`,
-    ///      `OMNIFS_PROVIDERS_DIR`)
-    ///   3. `OMNIFS_HOME`
-    ///   4. Default root (`$HOME/.omnifs` or `/root/.omnifs`)
-    pub fn resolve(overrides: PathOverrides) -> Self {
-        let omnifs_home = std::env::var_os("OMNIFS_HOME").map(PathBuf::from);
-        let default_root = default_omnifs_root();
+    ///   2. `OMNIFS_HOME`
+    ///   3. Default root (`$HOME/.omnifs`)
+    pub fn resolve(overrides: PathOverrides) -> Result<Self, ResolveError> {
+        let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
+        let default_root =
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
 
         let config_dir = overrides
             .config_dir
-            .or_else(|| std::env::var_os("OMNIFS_CONFIG_DIR").map(PathBuf::from))
             .or_else(|| omnifs_home.clone())
-            .unwrap_or_else(|| default_root.clone());
+            .or_else(|| default_root.clone())
+            .ok_or(ResolveError)?;
 
         // Start from the canonical flat layout under config_dir, then let
         // per-purpose overrides and env vars relocate individual dirs.
         let mut paths = Self::under_root(&config_dir);
 
-        // cache_dir is rooted at OMNIFS_HOME / the default root, not config_dir,
-        // so a lone OMNIFS_CONFIG_DIR does not drag the cache with it.
         paths.cache_dir = overrides
             .cache_dir
-            .or_else(|| std::env::var_os("OMNIFS_CACHE_DIR").map(PathBuf::from))
             .or_else(|| omnifs_home.as_ref().map(|h| h.join(CACHE_SUBDIR)))
-            .unwrap_or_else(|| default_root.join(CACHE_SUBDIR));
+            .or_else(|| default_root.map(|root| root.join(CACHE_SUBDIR)))
+            .ok_or(ResolveError)?;
 
-        if let Some(providers_dir) = overrides
-            .providers_dir
-            .or_else(|| std::env::var_os("OMNIFS_PROVIDERS_DIR").map(PathBuf::from))
-        {
-            paths.providers_dir = providers_dir;
-        }
-
-        paths
+        Ok(paths)
     }
 
     /// Assemble the canonical flat layout under a single `root`.
@@ -119,11 +118,4 @@ impl Paths {
         }
         path.display().to_string()
     }
-}
-
-fn default_omnifs_root() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(FALLBACK_ROOT),
-        |home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR),
-    )
 }

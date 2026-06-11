@@ -24,12 +24,10 @@ struct Args {
     /// Directory to serve the FUSE filesystem at.
     #[arg(long)]
     mount_point: PathBuf,
-    /// Config directory. Defaults to `$OMNIFS_CONFIG_DIR`, then
-    /// `$OMNIFS_HOME`, then `~/.omnifs`.
+    /// Config directory. Defaults through omnifs home resolution.
     #[arg(long)]
     config_dir: Option<PathBuf>,
-    /// Cache directory. Defaults to `$OMNIFS_CACHE_DIR`, then
-    /// `$OMNIFS_HOME/cache`, then `~/.omnifs/cache`.
+    /// Cache directory. Defaults through omnifs home resolution.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
     /// Control API listen address. The container entrypoint passes
@@ -58,13 +56,18 @@ fn run(args: Args) -> anyhow::Result<()> {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
         ..PathOverrides::default()
-    });
+    })?;
 
     std::fs::create_dir_all(&args.mount_point)?;
     std::fs::create_dir_all(&paths.cache_dir)?;
 
     let cloner = Arc::new(GitCloner::new(paths.cache_dir.clone()));
-    let dirs = Dirs::new(cloner.cache_dir(), &paths.config_dir, &paths.providers_dir);
+    let dirs = Dirs::new(
+        cloner.cache_dir(),
+        &paths.config_dir,
+        &paths.providers_dir,
+        &paths.credentials_file,
+    );
 
     info!(
         mount_point = %args.mount_point.display(),

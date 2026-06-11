@@ -45,6 +45,7 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
+        let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
         let provider_dir = provider_artifact_dir();
         let catalog = omnifs_mount::mounts::Catalog::new(config_dir.path(), &provider_dir);
         let resolved = catalog
@@ -61,7 +62,12 @@ impl RuntimeHarness {
             &wasm_path,
             &resolved,
             cloner,
-            Dirs::new(cache_dir.path(), config_dir.path(), &provider_dir),
+            Dirs::new(
+                cache_dir.path(),
+                config_dir.path(),
+                &provider_dir,
+                &credentials_file,
+            ),
             make_extractor(),
             &caches,
         )?;

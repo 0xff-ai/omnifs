@@ -23,8 +23,8 @@ struct FileStoreData {
 /// Credential store backed by a JSON file on disk.
 ///
 /// The caller supplies the file path; this type does not resolve home
-/// directories or create parent directories. The CLI resolves
-/// `~/.omnifs/data/credentials.json` before constructing this type.
+/// directories or create parent directories. The CLI resolves the concrete
+/// credentials file path before constructing this type.
 pub struct FileStore {
     path: PathBuf,
     lock_path: PathBuf,
@@ -35,8 +35,15 @@ impl FileStore {
     /// the first `put` call.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let lock_path = default_lock_path(&path);
+        let lock_path = Self::lock_path_for(&path);
         Self { path, lock_path }
+    }
+
+    /// Returns the sidecar lock path used by [`FileStore::new`].
+    pub fn lock_path_for(path: &Path) -> PathBuf {
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        PathBuf::from(lock)
     }
 
     /// Creates a `FileStore` with an explicit lock path. Tests use this to
@@ -109,12 +116,6 @@ impl FileStore {
             (Ok(()), Err(e)) => Err(e.into()),
         }
     }
-}
-
-fn default_lock_path(path: &Path) -> PathBuf {
-    let mut lock = path.as_os_str().to_owned();
-    lock.push(".lock");
-    PathBuf::from(lock)
 }
 
 fn ensure_private_dir(path: &Path) -> Result<(), StoreError> {

@@ -2,7 +2,7 @@
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
 //! the built-in catalog or provider wasm metadata, writes the resulting mount config to
-//! `~/.omnifs/config.toml`, and runs the provider's default auth flow
+//! the resolved omnifs config file, and runs the provider's default auth flow
 //! when one is declared.
 
 mod auth_import;
@@ -19,7 +19,7 @@ use clap::Args;
 use omnifs_creds::CredentialEntry;
 use omnifs_provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::app_context::AppContext;
@@ -60,11 +60,6 @@ pub struct InitArgs {
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
-    /// Override the directory holding provider WASM components.
-    ///
-    /// Defaults to `OMNIFS_PROVIDERS_DIR`, then the default config providers dir.
-    #[arg(long)]
-    pub providers_dir: Option<PathBuf>,
     /// Print the provider capability table at the start of the flow.
     /// Setup-driven runs suppress this because the picker already showed it.
     #[arg(skip = true)]
@@ -74,17 +69,9 @@ pub struct InitArgs {
 impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                providers_dir: self.providers_dir.clone(),
-                ..Default::default()
-            },
-            None,
-            None,
-        )?;
+        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
         let paths = ctx.paths();
         let interactive = !self.no_input;
-        let providers_dir = paths.providers_dir.clone();
         let catalog = ctx.catalog();
         let workspace = ctx.workspace();
         let mounts = workspace.mounts()?;
@@ -112,7 +99,7 @@ impl InitArgs {
             .with_hint("Run `omnifs init` (no args) to see the picker of available providers")
             .with_hint(format!(
                 "Or place a provider wasm in {}",
-                providers_dir.display()
+                paths.providers_dir.display()
             ))?;
         let default_auth = AuthSelection::from_provider_default(&template.manifest);
         if interactive && self.show_capabilities {
@@ -168,7 +155,6 @@ impl InitArgs {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
                 auth::login_with_paths(
                     paths.config_dir.clone(),
-                    providers_dir.clone(),
                     paths.credentials_file.clone(),
                     mount_name.as_str(),
                     auth.account.as_deref(),
@@ -312,6 +298,7 @@ mod tests {
     use crate::auth::AuthSelection;
     use crate::catalog::{ProviderCatalog, ProviderSource};
     use omnifs_core::MountName;
+    use omnifs_home::MOUNTS_SUBDIR;
     use omnifs_provider::{
         AuthManifest, AuthScheme, InitHint, InitInput, PreopenMode, PreopenStrategy, PreopenedPath,
         ProviderCapabilities, ProviderManifest,
@@ -627,7 +614,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
 
-        let templates = ProviderCatalog::for_dirs(dir.path().join("mounts"), dir.path())
+        let templates = ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path())
             .provider_templates()
             .unwrap();
 
@@ -643,7 +630,7 @@ mod tests {
     fn load_provider_templates_includes_builtins_without_provider_dir() {
         let dir = tempfile::tempdir().unwrap();
         let templates =
-            ProviderCatalog::for_dirs(dir.path().join("mounts"), dir.path().join("missing"))
+            ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path().join("missing"))
                 .provider_templates()
                 .unwrap();
 
@@ -675,7 +662,7 @@ mod tests {
         )
         .unwrap();
 
-        let templates = ProviderCatalog::for_dirs(dir.path().join("mounts"), dir.path())
+        let templates = ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path())
             .provider_templates()
             .unwrap();
 

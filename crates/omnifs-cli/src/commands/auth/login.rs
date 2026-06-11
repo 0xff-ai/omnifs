@@ -100,7 +100,6 @@ pub(super) async fn login(
 
 pub(crate) async fn login_with_paths(
     config_dir: PathBuf,
-    providers_dir: PathBuf,
     credentials_file: PathBuf,
     mount: &str,
     account: Option<&str>,
@@ -110,7 +109,6 @@ pub(crate) async fn login_with_paths(
     let ctx = AppContext::resolve(
         PathOverrides {
             config_dir: Some(config_dir),
-            providers_dir: Some(providers_dir),
             ..Default::default()
         },
         None,

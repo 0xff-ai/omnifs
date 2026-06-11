@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -18,6 +18,7 @@ use crate::error::WithHint;
 use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
 use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Session};
+use omnifs_home::OMNIFS_HOME_ENV;
 
 const GUEST_ROOT: &str = "/root/.omnifs";
 
@@ -53,15 +54,17 @@ impl ContainerLaunchSpec {
     /// extras, without making any bollard calls.
     pub(crate) fn from_session(
         image: &ImageRef,
+        runtime_home: &Path,
         session: &Session,
         extras: ContainerExtras,
     ) -> Self {
         let guest = omnifs_home::Paths::under_root(std::path::Path::new(GUEST_ROOT));
 
-        let mut binds = vec![format!(
+        let mut binds = vec![format!("{}:{GUEST_ROOT}", runtime_home.display())];
+        binds.push(format!(
             "{}:{HOST_CRED_DIR}:ro",
             session.creds_dir().display()
-        )];
+        ));
         if session.credentials_file().exists() {
             binds.push(format!(
                 "{}:{}",
@@ -93,9 +96,7 @@ impl ContainerLaunchSpec {
         binds.extend(extras.binds);
 
         let env = vec![
-            format!("OMNIFS_CONFIG_DIR={}", guest.config_dir.display()),
-            format!("OMNIFS_CACHE_DIR={}", guest.cache_dir.display()),
-            format!("OMNIFS_PROVIDERS_DIR={}", guest.providers_dir.display()),
+            format!("{OMNIFS_HOME_ENV}={}", guest.config_dir.display()),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];
@@ -323,6 +324,7 @@ impl Runtime {
 
     pub(crate) async fn launch_container(
         &self,
+        runtime_home: &Path,
         session: &Session,
         extras: ContainerExtras,
     ) -> Result<()> {
@@ -330,7 +332,7 @@ impl Runtime {
         self.verify_launcher_compat().await?;
         self.remove().await?;
 
-        let spec = ContainerLaunchSpec::from_session(&self.image, session, extras);
+        let spec = ContainerLaunchSpec::from_session(&self.image, runtime_home, session, extras);
         anstream::println!(
             "Creating container `{}` from image `{}`",
             self.container_name,
@@ -602,6 +604,7 @@ fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_home::CREDENTIALS_FILE;
 
     #[test]
     fn missing_label_is_allowed_with_warning() {
@@ -655,7 +658,9 @@ mod tests {
     #[test]
     fn launch_spec_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
-        let cred_file = tmp.path().join("credentials.json");
+        let cred_file = tmp.path().join(CREDENTIALS_FILE);
+        let runtime_home = tmp.path().join(".omnifs");
+        std::fs::create_dir_all(&runtime_home).unwrap();
         let name = ContainerName::new("omnifs-test-spec").unwrap();
         // Session::prepare creates the session dir under temp_dir keyed by
         // container name. That's fine for a unit test — no container is started.
@@ -666,18 +671,23 @@ mod tests {
             binds: vec!["/extra:/extra:ro".to_string()],
         };
 
-        let spec = ContainerLaunchSpec::from_session(&image, &session, extras);
+        let spec = ContainerLaunchSpec::from_session(&image, &runtime_home, &session, extras);
 
-        // Creds bind is first (read-only).
+        assert_eq!(
+            spec.binds[0],
+            format!("{}:{GUEST_ROOT}", runtime_home.display())
+        );
+
+        // Creds bind is read-only and follows the runtime home bind.
         assert!(
-            spec.binds[0].ends_with(":ro"),
+            spec.binds[1].ends_with(":ro"),
             "creds bind should be read-only: {}",
-            spec.binds[0]
+            spec.binds[1]
         );
         assert!(
-            spec.binds[0].contains(HOST_CRED_DIR),
-            "first bind should target HOST_CRED_DIR: {}",
-            spec.binds[0]
+            spec.binds[1].contains(HOST_CRED_DIR),
+            "creds bind should target HOST_CRED_DIR: {}",
+            spec.binds[1]
         );
 
         // Extras bind is appended after the base set. No credentials_file bind
@@ -690,9 +700,10 @@ mod tests {
         );
 
         // Required guest env vars are present.
+        let expected_home_env = format!("{OMNIFS_HOME_ENV}={GUEST_ROOT}");
         assert!(
-            spec.env.iter().any(|e| e.starts_with("OMNIFS_CONFIG_DIR=")),
-            "OMNIFS_CONFIG_DIR must be set"
+            spec.env.iter().any(|e| e == &expected_home_env),
+            "{OMNIFS_HOME_ENV} must be set"
         );
         assert!(
             spec.env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),

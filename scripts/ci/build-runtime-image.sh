@@ -25,7 +25,6 @@ esac
 
 binary="${OMNIFS_BINARY:-$root/target/$target/release/omnifs}"
 daemon_binary="${OMNIFSD_BINARY:-$root/target/$target/release/omnifsd}"
-wasm_dir="${OMNIFS_WASM_DIR:-$root/target/wasm32-wasip2/release}"
 
 if [[ ! -x "$binary" ]]; then
   echo "missing native Linux binary: $binary" >&2
@@ -37,27 +36,15 @@ if [[ ! -x "$daemon_binary" ]]; then
   exit 1
 fi
 
-if ! compgen -G "$wasm_dir/omnifs_provider_*.wasm" >/dev/null; then
-  echo "missing provider WASM artifacts in $wasm_dir" >&2
-  exit 1
-fi
-
-if [[ ! -f "$wasm_dir/omnifs_tool_archive.wasm" ]]; then
-  echo "missing archive tool WASM artifact in $wasm_dir" >&2
-  exit 1
-fi
-
 context="$(mktemp -d)"
 cleanup() {
   rm -rf "$context"
 }
 trap cleanup EXIT
 
-mkdir -p "$context/providers" "$context/scripts"
+mkdir -p "$context/scripts"
 cp "$binary" "$context/omnifs"
 cp "$daemon_binary" "$context/omnifsd"
-cp "$wasm_dir"/omnifs_provider_*.wasm "$context/providers/"
-cp "$wasm_dir"/omnifs_tool_archive.wasm "$context/providers/"
 cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
 cp "$root/scripts/container-entrypoint.sh" "$context/scripts/container-entrypoint.sh"
 cp "$root/scripts/container-zshrc.zsh" "$context/scripts/container-zshrc.zsh"
@@ -105,4 +92,3 @@ echo "platform=$platform"
 echo "digest=$digest"
 echo "binary=$binary"
 echo "daemon_binary=$daemon_binary"
-echo "providers=$(find "$context/providers" -maxdepth 1 -name 'omnifs_provider_*.wasm' | wc -l | tr -d ' ')"

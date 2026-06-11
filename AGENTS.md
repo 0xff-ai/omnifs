@@ -71,7 +71,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 
 CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers-build` with WASI SDK pins from `tools/versions.toml`.
 
-`Dockerfile` remains the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages a prebuilt Linux CLI binary plus provider WASM components into a small Ubuntu runtime context. Keep `omnifs dev` working when changing Docker-related files.
+`Dockerfile` remains the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI and daemon into a small Ubuntu runtime context. Provider and tool WASM artifacts are published as GitHub Release assets and installed into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `omnifs dev` working when changing Docker-related files.
 
 ## Release and npm packaging
 
@@ -147,13 +147,19 @@ Provider auth manifests live in `omnifs.provider.json` and are embedded in WASM 
 
 For the contributor sandbox, `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container.
 
-For the normal user path, `omnifs init` plus `omnifs up`, OAuth credentials live in the host credential store: keychain or `~/.omnifs/data/credentials.json` fallback.
+For the normal user path, `omnifs init` plus `omnifs up`, OAuth credentials live in the host credential store: keychain or `~/.omnifs/credentials.json` fallback.
 
 Git clone currently uses SSH:
 
 - remote format: `git@github.com:<owner>/<repo>.git`
 - auth comes from forwarded `SSH_AUTH_SOCK`
 - do not mount host private keys into the container
+
+### Runtime trust boundary
+
+Treat the omnifs host runtime as trusted: the host CLI, `omnifsd`, and its Docker container are one trusted control plane for local execution. Do not design credential or layout boundaries around hiding `~/.omnifs` from the container when the runtime needs that state; the container already runs trusted host code and receives host authority such as the SSH agent, selected secrets, preopens, and sometimes Docker access.
+
+The untrusted boundary is provider code. Providers are `wasm32-wasip2` components and must remain constrained by WASI preopens, host-mediated callouts, capability checks, and mount-specific auth materialization. Sharing runtime-home state with the trusted daemon is acceptable; exposing additional filesystem authority directly to provider WASM is not.
 
 ### Mount loading and resolved mounts
 
@@ -169,7 +175,7 @@ Git clone currently uses SSH:
 
 ### Credentials store
 
-- Pick one backend at startup: keychain or file at `~/.omnifs/data/credentials.json`.
+- Pick one backend at startup: keychain or file at `~/.omnifs/credentials.json`.
 - Keep `omnifs-creds` on the latest `keyring` 3.x line for now. `keyring` 4 split the application API into `keyring-core` and made the `keyring` crate a sample/connector bundle; depending on it directly pulls in every connector, including SQLite/Turso, instead of replacing the small file fallback cleanly.
 - `oauth2` 5.0.0 still binds its `reqwest` integration to `reqwest` 0.12. Keep `omnifs-auth` on a direct `reqwest` 0.12 dependency and use the `reqwest-oauth2` alias in `omnifs-host` for OAuth refresh clients until `oauth2` supports `reqwest` 0.13. The workspace `reqwest` dependency is for normal host/CLI HTTP clients and may be newer.
 - The file store is intentionally a local fallback and session-transfer store. It gives omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.

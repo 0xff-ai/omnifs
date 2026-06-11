@@ -24,6 +24,7 @@ mod mount_report;
 mod mount_tree;
 pub mod paths;
 mod presentation;
+mod provider_bundle;
 mod runtime;
 mod runtime_target;
 mod session;

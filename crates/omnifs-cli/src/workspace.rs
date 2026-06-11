@@ -59,7 +59,7 @@ impl Workspace {
 
     /// Write `spec` into `config.toml`, inserting or replacing by mount name.
     ///
-    /// Preserves all existing sections (`[system]`, `[paths]`) and comments.
+    /// Preserves all existing sections and comments.
     pub(crate) fn upsert_mount(&self, spec: &Spec) -> anyhow::Result<()> {
         let mut file = ConfigFile::load(&self.paths.config_file)?;
         file.upsert_mount(spec)?;

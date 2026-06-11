@@ -70,7 +70,7 @@ impl<'a> MountFile<'a> {
     }
 }
 
-/// Typed mount config persisted into `~/.omnifs/config.toml`.
+/// Typed mount config persisted into the resolved omnifs config file.
 ///
 /// Field declaration order is the serialization order; using a struct
 /// instead of an ad-hoc `serde_json::Map` removes the need for

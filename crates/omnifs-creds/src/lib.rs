@@ -248,8 +248,7 @@ pub trait CredentialStore: Send + Sync {
     /// Lists known credential ids. Backends that cannot enumerate return
     /// `Ok(None)`.
     fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError>;
-    /// Human-readable backend name shown in UX (e.g. "macOS Keychain",
-    /// "file: ~/.omnifs/data/credentials.json").
+    /// Human-readable backend name shown in UX.
     fn backend_label(&self) -> String;
 }
 

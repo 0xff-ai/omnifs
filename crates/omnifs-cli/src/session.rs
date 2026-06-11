@@ -8,6 +8,7 @@
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::{CredentialStore, FileStore, KeyringStore};
+use omnifs_home::CREDENTIALS_FILE;
 use omnifs_mount::mounts::Spec;
 use omnifs_provider::PreopenMode;
 use secrecy::ExposeSecret;
@@ -54,7 +55,7 @@ impl Session {
         fs::create_dir_all(&root)
             .with_context(|| format!("create session dir {}", root.display()))?;
         let creds_dir = root.join("creds");
-        let credentials_file = root.join("credentials.json");
+        let credentials_file = root.join(CREDENTIALS_FILE);
         fs::create_dir_all(&creds_dir)?;
         set_private_dir(&root)?;
         set_private_dir(&creds_dir)?;
@@ -71,7 +72,7 @@ impl Session {
     pub(crate) fn attach(container_name: &ContainerName) -> Option<Self> {
         let root = container_name.session_root();
         let creds_dir = root.join("creds");
-        let credentials_file = root.join("credentials.json");
+        let credentials_file = root.join(CREDENTIALS_FILE);
         creds_dir.is_dir().then_some(Self {
             root,
             creds_dir,
@@ -473,7 +474,7 @@ pub(crate) fn sync_session_credentials_to_host(
     container_name: &ContainerName,
     credentials_file: &Path,
 ) -> anyhow::Result<usize> {
-    let session_credentials = container_name.session_root().join("credentials.json");
+    let session_credentials = container_name.session_root().join(CREDENTIALS_FILE);
     if !session_credentials.exists() {
         return Ok(0);
     }
@@ -508,6 +509,7 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::{CredentialEntry, MemoryStore};
+    use omnifs_home::MOUNTS_SUBDIR;
     use omnifs_mount::mounts::Spec;
     use secrecy::{ExposeSecret, SecretString};
     use serde_json::Value;
@@ -523,7 +525,7 @@ mod tests {
     use crate::test_support::wasm_with_provider_metadata;
 
     fn test_catalog(providers_dir: &Path) -> ProviderCatalog {
-        ProviderCatalog::for_dirs(providers_dir.join("mounts"), providers_dir)
+        ProviderCatalog::for_dirs(providers_dir.join(MOUNTS_SUBDIR), providers_dir)
     }
 
     fn payload_for(payloads: &[MountPayload], name: &str) -> Value {
@@ -543,7 +545,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
         std::fs::write(
@@ -606,7 +608,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -631,7 +633,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -687,7 +689,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
         std::fs::write(
@@ -740,7 +742,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -788,7 +790,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -825,7 +827,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -880,7 +882,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
 
@@ -922,7 +924,7 @@ mod tests {
         let session = Session {
             root: tmp.path().to_path_buf(),
             creds_dir: tmp.path().join("creds"),
-            credentials_file: tmp.path().join("credentials.json"),
+            credentials_file: tmp.path().join(CREDENTIALS_FILE),
         };
         fs::create_dir_all(&session.creds_dir).unwrap();
         std::fs::write(

@@ -14,6 +14,7 @@ use crate::session::{MountConfig, Session};
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
     pub runtime: &'a RuntimeTarget,
+    pub runtime_home: &'a Path,
     pub credentials_file: &'a Path,
     pub store: Box<dyn CredentialStore>,
     /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
@@ -37,6 +38,7 @@ pub(crate) async fn launch_session(
 ) -> anyhow::Result<()> {
     let LaunchSpec {
         runtime,
+        runtime_home,
         credentials_file,
         store,
         verb,
@@ -47,6 +49,8 @@ pub(crate) async fn launch_session(
     let session = Session::prepare(runtime.container_name(), credentials_file)?;
     let mut cleanup = session.cleanup_on_drop();
     anstream::println!("Preparing session at {}", session.root().display());
+    std::fs::create_dir_all(runtime_home)
+        .with_context(|| format!("create runtime home {}", runtime_home.display()))?;
 
     anstream::println!("Materializing mount configs and credentials");
     let (preopen_binds, payloads) = session.populate(&configs, catalog, store.as_ref())?;
@@ -58,7 +62,7 @@ pub(crate) async fn launch_session(
     extras.binds = binds;
 
     let rt = Runtime::connect_ready(runtime, verb).await?;
-    rt.launch_container(&session, extras).await?;
+    rt.launch_container(runtime_home, &session, extras).await?;
 
     if let Err(error) = push_mounts(&rt, &payloads).await {
         // The container's creds bind points into the session dir the armed

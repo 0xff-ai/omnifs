@@ -19,9 +19,6 @@ pub(crate) use login::login_with_paths;
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthArgs {
-    /// Override the directory holding provider WASM components.
-    #[arg(long)]
-    pub providers_dir: Option<PathBuf>,
     /// Override the credential file path.
     #[arg(long)]
     pub credentials_file: Option<PathBuf>,
@@ -66,14 +63,7 @@ pub enum AuthCommand {
 
 impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                providers_dir: self.providers_dir.clone(),
-                ..Default::default()
-            },
-            None,
-            None,
-        )?;
+        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
         let mut paths = ctx.paths().clone();
         if let Some(creds) = self.credentials_file.clone() {
             paths.credentials_file = creds;

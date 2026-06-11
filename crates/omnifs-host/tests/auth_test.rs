@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
 use omnifs_core::CredentialId;
-use omnifs_creds::{CredentialEntry, CredentialStore, FileStore, MemoryStore};
+use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
 use omnifs_host::auth::{AuthManager, RefreshOutcome};
 use omnifs_host::blob::{BlobCache, BlobExecutor, BlobLimits};
 use omnifs_host::capability::{CapabilityChecker, CapabilityGrants};
@@ -374,70 +374,6 @@ async fn concurrent_oauth_refreshes_coalesce_inside_one_process() {
 }
 
 #[tokio::test]
-async fn independent_oauth_strategies_share_refresh_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    let store_path = temp.path().join("credentials.json");
-    let store_lock = temp.path().join("credentials.json.lock");
-    let refresh_lock = temp.path().join("credentials.lock");
-    let key = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    FileStore::with_lock_path(&store_path, &store_lock)
-        .put(
-            &key,
-            &oauth_entry(
-                "old-access",
-                "refresh-1",
-                OffsetDateTime::now_utc() + time::Duration::hours(1),
-            ),
-        )
-        .unwrap();
-
-    let tokens = FakeTokenServer::start(false).await;
-    let manifest = oauth_manifest(tokens.endpoint(), "localhost".to_string());
-    let config = oauth_config();
-    let make_auth = || {
-        let store: Arc<dyn CredentialStore> =
-            Arc::new(FileStore::with_lock_path(&store_path, &store_lock));
-        AuthManager::from_configs_manifest_store_with_http(
-            std::slice::from_ref(&config),
-            Some(&manifest),
-            "test-provider",
-            store,
-            refresh_lock.clone(),
-            reqwest_oauth2::Client::new(),
-        )
-        .unwrap()
-    };
-    let auth_a = Arc::new(make_auth());
-    let auth_b = Arc::new(make_auth());
-    auth_a
-        .prepare_for_url("https://localhost/resource")
-        .await
-        .unwrap();
-    auth_b
-        .prepare_for_url("https://localhost/resource")
-        .await
-        .unwrap();
-
-    let (left, right) = tokio::join!(
-        auth_a.refresh_for_url("https://localhost/resource"),
-        auth_b.refresh_for_url("https://localhost/resource")
-    );
-
-    assert_eq!(left.unwrap(), RefreshOutcome::Refreshed);
-    assert_eq!(right.unwrap(), RefreshOutcome::Refreshed);
-    assert_eq!(tokens.refreshes(), 1);
-    assert_eq!(
-        FileStore::with_lock_path(&store_path, &store_lock)
-            .get(&key)
-            .unwrap()
-            .unwrap()
-            .access_token()
-            .expose_secret(),
-        "access-refresh-1"
-    );
-}
-
-#[tokio::test]
 async fn fetch_blob_uses_same_oauth_retry_path() {
     let tokens = FakeTokenServer::start(false).await;
     let api = FakeHttpsApiServer::start("Bearer access-refresh-1", "blob-body").await;
@@ -557,7 +493,6 @@ async fn oauth_config_client_id_overrides_missing_manifest_default_for_refresh()
         Some(&manifest),
         "test-provider",
         Arc::clone(&store),
-        tempfile::tempdir().unwrap().path().join("credentials.lock"),
         reqwest_oauth2::Client::new(),
     )
     .unwrap();
@@ -620,7 +555,6 @@ fn oauth_manager(
         Some(&oauth_manifest(token_endpoint, inject_domain)),
         "test-provider",
         Arc::clone(&store),
-        tempfile::tempdir().unwrap().path().join("credentials.lock"),
         reqwest_oauth2::Client::new(),
     )
     .unwrap();

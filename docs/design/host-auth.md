@@ -347,11 +347,9 @@ Mid-callout 401 retry in `HttpStack::send`:
 1. Dispatch the request. On 200-2xx or non-auth error, return.
 2. On 401 (or 403 with `WWW-Authenticate: Bearer error="invalid_token"`), call `auth.refresh_for_url(url)`. If refresh succeeds, rebuild headers and retry once. If the retry also 401s, surface the original response to the provider.
 
-In-process refresh coalescing: a singleflight group keyed by `CredentialKey` collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future.
+In-process refresh coalescing: a singleflight group keyed by `CredentialKey` collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future. `FileStore` still locks its own JSON read-modify-write operations, but OAuth refresh itself is not a separate cross-process file protocol.
 
-Cross-process correctness comes from a file lock on `~/.omnifs/data/credentials.lock`. The singleflight leader holds the exclusive lock while it (1) re-reads the durable store, (2) returns the freshly stored entry if another process already refreshed it, (3) calls the token endpoint with the latest refresh token, (4) writes the replacement entry, (5) updates the in-process slot.
-
-The in-process current-token slot is an atomic swap container, so readers see either the pre-rotation or post-rotation `(access, refresh)` pair atomically, never torn. The provider's declared `refreshTokenRotates: true/false` is only a scheduling hint; the store re-read under the file lock is mandatory for all refreshes because a peer process may have rotated the token.
+The in-process current-token slot is an atomic swap container, so readers see either the pre-rotation or post-rotation `(access, refresh)` pair atomically, never torn. The provider's declared `refreshTokenRotates: true/false` is only a scheduling hint.
 
 Refresh fires when `expires_at - now() < 60 s`.
 

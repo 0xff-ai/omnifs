@@ -38,20 +38,14 @@ Pre-1.0. CLI surface and config format may evolve before v1.
 
 ## Configuration file
 
-Optional. Lives at `~/.omnifs/config/config.toml` by default, or `$OMNIFS_HOME/config/config.toml` when `OMNIFS_HOME` is set.
+Optional. Lives at `~/.omnifs/config.toml` by default, or `$OMNIFS_HOME/config.toml` when `OMNIFS_HOME` is set.
 
-Precedence: CLI flag > env var > config file > built-in default.
+Precedence: CLI flag > config file > built-in default.
 
 ```toml
 container_name = "omnifs"
 image = "ghcr.io/0xff-ai/omnifs:0.4"
-
-[paths]
-mounts_dir = "~/work/omnifs-mounts"
-providers_dir = "~/.omnifs/data/providers"
 ```
-
-`~/` in path values expands against `$HOME`.
 
 ## License
 

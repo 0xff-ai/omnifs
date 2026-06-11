@@ -2,19 +2,17 @@
 //!
 //! `AuthManager` owns provider-agnostic HTTP auth strategies. Static tokens
 //! inject headers directly. OAuth strategies keep tokens outside the provider
-//! sandbox, refresh them under a durable lock, and let `HttpStack` retry once
-//! with rebuilt headers.
+//! sandbox and let `HttpStack` retry once with rebuilt headers.
 
 use arc_swap::ArcSwapOption;
 use async_singleflight::Group;
-use fs2::FileExt;
 use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialEntry, CredentialStore, FileStore, StoreError};
 use omnifs_mount::{Auth, AuthKind, OAuth, StaticToken};
 use omnifs_provider::{AuthManifest, SchemeResolveError};
 use secrecy::ExposeSecret;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use time::{Duration as TimeDuration, OffsetDateTime};
 
@@ -43,8 +41,6 @@ pub enum AuthError {
     OAuth(String),
     #[error("oauth refresh failed: {0}")]
     RefreshFailed(String),
-    #[error("refresh lock failed: {0}")]
-    RefreshLock(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +70,6 @@ struct StaticTokenStrategy {
 struct AuthStoreContext {
     provider_id: String,
     store: Arc<dyn CredentialStore>,
-    refresh_lock_path: PathBuf,
     oauth_http: reqwest_oauth2::Client,
 }
 
@@ -82,18 +77,9 @@ struct OAuth2PkceStrategy {
     request: OAuthRequest,
     credential_id: CredentialId,
     store: Arc<dyn CredentialStore>,
-    refresh_lock_path: PathBuf,
     oauth_http: reqwest_oauth2::Client,
     current: ArcSwapOption<CredentialEntry>,
     refreshes: Group<String, Option<CredentialEntry>, String>,
-}
-
-struct RefreshLock(std::fs::File);
-
-impl Drop for RefreshLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
 }
 
 impl AuthStrategy {
@@ -176,13 +162,11 @@ impl AuthManager {
         manifest: Option<&AuthManifest>,
         provider_id: impl Into<String>,
         store: Arc<dyn CredentialStore>,
-        refresh_lock_path: PathBuf,
         oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
         let context = AuthStoreContext {
             provider_id: provider_id.into(),
             store,
-            refresh_lock_path,
             oauth_http,
         };
         Self::from_configs_manifest_store(configs, manifest, Some(&context))
@@ -193,7 +177,6 @@ impl AuthManager {
         manifest: Option<&AuthManifest>,
         provider_id: impl Into<String>,
         store: Arc<dyn CredentialStore>,
-        refresh_lock_path: PathBuf,
     ) -> Result<Self, AuthError> {
         let oauth_http = reqwest_oauth2::ClientBuilder::new()
             .redirect(reqwest_oauth2::redirect::Policy::none())
@@ -204,7 +187,6 @@ impl AuthManager {
             manifest,
             provider_id,
             store,
-            refresh_lock_path,
             oauth_http,
         )
     }
@@ -227,7 +209,6 @@ impl AuthManager {
                     manifest,
                     context.provider_id.as_str(),
                     Arc::clone(&context.store),
-                    context.refresh_lock_path.clone(),
                     context.oauth_http.clone(),
                 )?;
                 Ok(vec![AuthStrategy::OAuth(Box::new(strategy))])
@@ -287,8 +268,8 @@ impl AuthManager {
     }
 }
 
-pub(crate) fn credential_store_for_config_dir(config_dir: &Path) -> Arc<dyn CredentialStore> {
-    Arc::new(FileStore::new(config_dir.join("credentials.json")))
+pub(crate) fn credential_store_for_file(credentials_file: &Path) -> Arc<dyn CredentialStore> {
+    Arc::new(FileStore::new(credentials_file))
 }
 
 impl StaticTokenStrategy {
@@ -350,7 +331,6 @@ impl OAuth2PkceStrategy {
         manifest: Option<&AuthManifest>,
         provider_id: &str,
         store: Arc<dyn CredentialStore>,
-        refresh_lock_path: PathBuf,
         oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
         let manifest = manifest.ok_or(AuthError::ManifestRequired(AuthKind::OAuth))?;
@@ -370,7 +350,6 @@ impl OAuth2PkceStrategy {
             request,
             credential_id,
             store,
-            refresh_lock_path,
             oauth_http,
             current: ArcSwapOption::from(current.map(Arc::new)),
             refreshes: Group::new(),
@@ -431,7 +410,6 @@ impl OAuth2PkceStrategy {
     }
 
     async fn refresh_under_lock(&self, force: bool) -> Result<Option<CredentialEntry>, AuthError> {
-        let _lock = acquire_refresh_lock(&self.refresh_lock_path).await?;
         let current = self.current.load_full();
         let Some(stored) = self.load_store_entry()? else {
             self.current.store(None);
@@ -585,26 +563,6 @@ fn read_credential(token_file: Option<&str>, token_env: Option<&str>) -> Option<
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty())
         })
-}
-
-async fn acquire_refresh_lock(path: &Path) -> Result<RefreshLock, AuthError> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock_exclusive()?;
-        Ok::<_, std::io::Error>(RefreshLock(file))
-    })
-    .await
-    .map_err(|e| AuthError::RefreshLock(e.to_string()))?
-    .map_err(|e| AuthError::RefreshLock(e.to_string()))
 }
 
 fn oauth_entry_is_valid(entry: &CredentialEntry) -> bool {

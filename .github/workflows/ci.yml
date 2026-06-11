@@ -453,7 +453,6 @@ jobs:
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
           OMNIFSD_BINARY: ${{ github.workspace }}/dist-daemon/bin/omnifsd
-          OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
         run: just ci-build-runtime
 
       - name: Export amd64 image digest
@@ -533,7 +532,6 @@ jobs:
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
           OMNIFSD_BINARY: ${{ github.workspace }}/dist-daemon/bin/omnifsd
-          OMNIFS_WASM_DIR: ${{ github.workspace }}/dist-wasm
         run: just ci-build-runtime
 
       - name: Export arm64 image digest

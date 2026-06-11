@@ -38,7 +38,7 @@ impl StatusArgs {
             },
             Err(error) => {
                 anstream::eprintln!("warning: {error:#}");
-                let paths = Paths::resolve(overrides);
+                let paths = Paths::resolve(overrides)?;
                 let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
                 (paths, catalog, Vec::new())
             },

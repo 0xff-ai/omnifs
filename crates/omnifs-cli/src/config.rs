@@ -17,7 +17,6 @@ pub struct Config {
     pub container_name: Option<String>,
     /// Legacy top-level setting, still accepted for existing config files.
     pub image: Option<String>,
-    pub paths: ConfigPaths,
     pub mounts: Vec<Spec>,
 }
 
@@ -26,14 +25,6 @@ pub struct Config {
 pub struct ConfigSystem {
     pub container_name: Option<String>,
     pub image: Option<String>,
-    pub providers_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ConfigPaths {
-    /// Compiled provider WASM components directory.
-    pub providers_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -50,7 +41,6 @@ impl Config {
         let mut config: Self =
             toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))?;
         config.apply_system_section();
-        config.paths.providers_dir = config.paths.providers_dir.map(expand_tilde);
         Ok(config)
     }
 
@@ -60,11 +50,6 @@ impl Config {
             .clone()
             .or(self.system.container_name.clone());
         self.image = self.image.clone().or(self.system.image.clone());
-        self.paths.providers_dir = self
-            .paths
-            .providers_dir
-            .clone()
-            .or(self.system.providers_dir.clone());
     }
 }
 
@@ -135,15 +120,6 @@ impl ConfigFile {
     }
 }
 
-fn expand_tilde(p: PathBuf) -> PathBuf {
-    if let Ok(stripped) = p.strip_prefix("~")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(stripped);
-    }
-    p
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,7 +153,6 @@ mod tests {
                 [system]
                 container_name = "omnifs-test"
                 image = "ghcr.io/example/omnifs:test"
-                providers_dir = "~/providers"
             "#,
         )
         .unwrap();
@@ -186,9 +161,5 @@ mod tests {
 
         assert_eq!(config.container_name.as_deref(), Some("omnifs-test"));
         assert_eq!(config.image.as_deref(), Some("ghcr.io/example/omnifs:test"));
-        assert_eq!(
-            config.paths.providers_dir,
-            Some(PathBuf::from("~/providers"))
-        );
     }
 }

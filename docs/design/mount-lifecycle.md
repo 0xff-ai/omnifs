@@ -151,8 +151,8 @@ The later interactive lifecycle is still valid as a design direction, but it is 
 
 Current shipped flow:
 
-1. `omnifs init github` creates `~/.omnifs/config/mounts/github.json` and runs the GitHub device flow.
-2. `omnifs init linear` creates `~/.omnifs/config/mounts/linear.json` and runs the Linear OAuth flow.
+1. `omnifs init github` writes a `[[mounts]]` entry in `~/.omnifs/config.toml` and runs the GitHub device flow.
+2. `omnifs init linear` writes a `[[mounts]]` entry in `~/.omnifs/config.toml` and runs the Linear OAuth flow.
 3. `omnifs up` materializes the selected credentials and starts the container.
 
 Future docs should keep this distinction clear: `init` owns mount generation for normal users; provider-owned defaults live in the CLI catalog and wasm metadata, both derived from `providers/<name>/omnifs.provider.json`; `omnifs dev` is the contributor sandbox path, synthesizing mount configs from the built-in provider manifests and launching the dev container directly.

@@ -28,6 +28,7 @@ pub struct ProviderRegistry {
     cache_dir: PathBuf,
     config_dir: PathBuf,
     providers_dir: PathBuf,
+    credentials_file: PathBuf,
     instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
@@ -65,6 +66,7 @@ impl ProviderRegistry {
             cache_dir: dirs.cache_dir.to_path_buf(),
             config_dir: dirs.config_dir.to_path_buf(),
             providers_dir: dirs.providers_dir.to_path_buf(),
+            credentials_file: dirs.credentials_file.to_path_buf(),
             instances: parking_lot::RwLock::new(HashMap::new()),
             root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
@@ -86,7 +88,12 @@ impl ProviderRegistry {
             return Err(RegistryError::DuplicateMount(mount));
         }
 
-        let dirs = Dirs::new(&self.cache_dir, &self.config_dir, &self.providers_dir);
+        let dirs = Dirs::new(
+            &self.cache_dir,
+            &self.config_dir,
+            &self.providers_dir,
+            &self.credentials_file,
+        );
         let wasm_path = dirs.provider_path(&spec.provider);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
@@ -166,7 +173,12 @@ impl ProviderRegistry {
 
     /// The directories this registry resolves mounts against.
     pub fn dirs(&self) -> Dirs<'_> {
-        Dirs::new(&self.cache_dir, &self.config_dir, &self.providers_dir)
+        Dirs::new(
+            &self.cache_dir,
+            &self.config_dir,
+            &self.providers_dir,
+            &self.credentials_file,
+        )
     }
 
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
@@ -315,6 +327,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -338,7 +351,12 @@ mod tests {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
-            Dirs::new(cache_dir.path(), config_dir.path(), providers_dir.path()),
+            Dirs::new(
+                cache_dir.path(),
+                config_dir.path(),
+                providers_dir.path(),
+                &credentials_file,
+            ),
             cloner,
         )
         .expect("registry init");

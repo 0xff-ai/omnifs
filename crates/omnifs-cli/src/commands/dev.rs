@@ -80,10 +80,12 @@ impl DevArgs {
         // Use the same JSON credential store as the normal CLI path so
         // contributor builds never trigger platform keychain prompts.
         let store = CredsBackend::file(&paths.credentials_file, true);
+        crate::provider_bundle::install_workspace_bundle(workspace.path(), &paths.providers_dir)?;
 
         launch_session(
             LaunchSpec {
                 runtime,
+                runtime_home: &paths.config_dir,
                 credentials_file: &paths.credentials_file,
                 store,
                 verb: "omnifs dev",

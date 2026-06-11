@@ -10,6 +10,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 CONTAINER="${CONTAINER:-omnifs}"
 WORKSPACE="${GITHUB_WORKSPACE:-$root}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
+WASM_DIR="${OMNIFS_WASM_DIR:-$root/target/wasm32-wasip2/release}"
+OMNIFS_HOME_DIR="$RUNNER_TEMP/omnifs-home"
+providers_dir="$OMNIFS_HOME_DIR/providers"
+OMNIFS_GUEST_HOME="/root/.omnifs"
 
 cleanup() {
   if [[ "${SMOKE_FAILED:-0}" == "1" ]]; then
@@ -26,6 +30,9 @@ if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
 fi
 
 mkdir -p "$WORKSPACE/.secrets/db"
+mkdir -p "$providers_dir"
+cp "$WASM_DIR"/omnifs_provider_*.wasm "$providers_dir/"
+cp "$WASM_DIR"/omnifs_tool_archive.wasm "$providers_dir/"
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN must be set for the github provider fixture" >&2
   exit 1
@@ -43,6 +50,8 @@ docker run -d \
   --security-opt apparmor:unconfined \
   -e SSH_AUTH_SOCK=/ssh-agent \
   -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
+  -e "OMNIFS_HOME=$OMNIFS_GUEST_HOME" \
+  -v "$OMNIFS_HOME_DIR:$OMNIFS_GUEST_HOME" \
   -v "$WORKSPACE/.secrets/github_token:/run/secrets/github_token:ro" \
   -v "$WORKSPACE/.secrets/db:/data:ro" \
   -v "$WORKSPACE/scripts/demo.sh:/tmp/demo.sh:ro" \

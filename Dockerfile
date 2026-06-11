@@ -159,12 +159,12 @@ COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
 
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
+ENV SHELL=/bin/zsh \
+    OMNIFS_HOME=/root/.omnifs
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
-    && mkdir -p /root/.omnifs/mounts /root/.omnifs/cache /root/.omnifs/providers /tmp/omnifs-provider-manifests
+    && mkdir -p "$OMNIFS_HOME/cache" /tmp/omnifs-provider-manifests
 
 SHELL ["/bin/zsh", "-c"]
-ENV SHELL=/bin/zsh \
-    OMNIFS_PROVIDERS_DIR=/root/.omnifs/providers
 WORKDIR /
 ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
@@ -182,8 +182,4 @@ ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 
 COPY --from=builder /omnifs /omnifsd /usr/local/bin/
-COPY --from=providers /out/wasm/omnifs_provider_*.wasm \
-     /root/.omnifs/providers/
-COPY --from=providers /out/wasm/omnifs_tool_archive.wasm \
-     /root/.omnifs/providers/
 RUN chmod 0755 /usr/local/bin/omnifs /usr/local/bin/omnifsd
