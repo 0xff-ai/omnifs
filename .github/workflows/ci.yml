@@ -579,6 +579,12 @@ jobs:
           name: docker-digest-amd64
           path: /tmp/digests
 
+      - name: Download WASM components
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: target/wasm32-wasip2/release
+
       - name: Pull the amd64 image and tag it for smoke
         run: |
           set -euo pipefail
@@ -622,6 +628,12 @@ jobs:
         with:
           name: docker-digest-arm64
           path: /tmp/digests
+
+      - name: Download WASM components
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: target/wasm32-wasip2/release
 
       - name: Pull the arm64 image and tag it for smoke
         run: |

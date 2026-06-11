@@ -55,7 +55,6 @@ fn run(args: Args) -> anyhow::Result<()> {
     let paths = Paths::resolve(PathOverrides {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
-        ..PathOverrides::default()
     })?;
 
     std::fs::create_dir_all(&args.mount_point)?;
