@@ -130,7 +130,7 @@ impl Key for IssueKey {
 r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
     o.representations("item", (Markdown,))?;   // item.md (+ item.json from canonical)
     o.file("title").project(Issue::title)?;    // eager leaf from the loaded object
-    o.file("body").project(Issue::body)?;      // do NOT chain .lazy() here; see pitfall 11
+    o.file("body").lazy().project(Issue::body)?; // listed, but not eager-preloaded
     o.dir("comments").handler(IssueKey::comments)?; // dynamic child under the object
     Ok(())
 })?;
@@ -179,7 +179,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched today.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
-11. **Known SDK bug**: `FileLeafBuilder::lazy()/immutable()/mutable()` mutate the most recently *pushed* leaf, and `.project()` is what pushes. `o.file("body").lazy().project(f)` therefore flags the PREVIOUS leaf, not `body` (the github provider currently hits this). Until the fix lands, do not chain these modifiers before `.project()`; rely on object `stability = ..` defaults and treat per-leaf laziness as unavailable.
+11. Put projected-leaf modifiers before `.project()`: `o.file("body").lazy().project(f)` marks `body` lazy; `.project()` is the terminal registration call.
 
 ## Where to look
 

@@ -34,6 +34,7 @@ use super::pattern::parse_pattern;
 ///     r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
 ///         o.representations("item", (Markdown,))?;
 ///         o.file("title").project(Issue::title)?;
+///         o.file("body").lazy().project(Issue::body)?;
 ///         Ok(())
 ///     })?;
 ///     Ok(State::default())

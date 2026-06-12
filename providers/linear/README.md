@@ -91,10 +91,11 @@ schema. The three-query surface is small enough that hand-written
 queries are simpler and easier to audit.
 
 Issue listings preload the per-issue inline files (`title`, `state`,
-`priority`, `assignee`, and the description if it fits in 4 KiB) into
-the response's projection map. A `cat` after an `ls` is served from
-cache without an additional Linear round trip. Descriptions over 4 KiB
-fall back to a deferred file handler (registered with `r.file(...).handler(h)`) that fetches the issue body on demand.
+`priority`, and `assignee`) into the response's projection map. A `cat`
+after an `ls` for those hot fields is served from cache without an
+additional Linear round trip. `description.md` is listed but not
+eager-preloaded, because the list query omits the description and the
+single-issue payload is the body contract.
 
 The polling interval (`refresh_interval_secs`) is 120 s. With Linear's
 3M-point-per-hour API key budget, a few-team workspace stays well

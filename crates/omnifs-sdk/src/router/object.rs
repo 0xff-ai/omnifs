@@ -176,6 +176,8 @@ pub struct FileObjectBlock<O: Object> {
 pub struct FileLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
+    lazy: bool,
+    stability: Option<Stability>,
 }
 
 /// A pending dir leaf named in [`DirObjectBlock::dir`]; finish with
@@ -252,7 +254,12 @@ impl<O: Object> DirObjectBlock<O> {
     /// suffix with captures (`"comments/{idx}"`) when finished with
     /// `.handler(..)`; projected leaves use a single literal name.
     pub fn file(&mut self, name: &'static str) -> FileLeafBuilder<'_, O> {
-        FileLeafBuilder { block: self, name }
+        FileLeafBuilder {
+            block: self,
+            name,
+            lazy: false,
+            stability: None,
+        }
     }
 
     /// Begin a directory leaf under the anchor; finished with `.handler(..)`
@@ -332,8 +339,8 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
             leaf_name: self.name.to_string(),
             project: method,
             content_type: ContentType::Custom("text/plain"),
-            lazy: false,
-            stability: O::default_stability(),
+            lazy: self.lazy,
+            stability: self.stability.unwrap_or_else(O::default_stability),
         });
         Ok(self.block)
     }
@@ -364,39 +371,35 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         Ok(self.block)
     }
 
-    /// Exclude a projected leaf from listing-time eager preloads; reads still
-    /// serve it from canonical bytes. Use for large fields (an issue body)
-    /// where preloading every list row would bloat the view cache.
+    /// Exclude this projected leaf from listing-time eager preloads; reads
+    /// still serve it from canonical bytes. Use for large fields (an issue
+    /// body) where preloading every list row would bloat the view cache.
     ///
-    /// Gotcha: this mutates the most recently *pushed* `Projected` leaf, and
-    /// `.project()` is what pushes (it also consumes the builder, so it must
-    /// come last in a chain). In `o.file("body").lazy().project(f)` the flag
-    /// therefore lands on the projected leaf registered by the previous
-    /// call, not on `"body"`. It is a no-op when the last pushed leaf is not
-    /// a projection.
-    pub fn lazy(self) -> Self {
-        if let Some(ObjectLeaf::Projected { lazy, .. }) = self.block.leaves.last_mut() {
-            *lazy = true;
-        }
+    /// This is a modifier for the pending [`Self::project`] leaf:
+    /// `o.file("body").lazy().project(Issue::body)?`.
+    #[must_use]
+    pub fn lazy(mut self) -> Self {
+        self.lazy = true;
         self
     }
 
-    /// Set the most recently pushed projected leaf's stability to immutable.
-    /// Same ordering gotcha as [`Self::lazy`]: it targets the last pushed
-    /// `Projected` leaf, not the name passed to the current `.file(..)`.
-    pub fn immutable(self) -> Self {
-        if let Some(ObjectLeaf::Projected { stability, .. }) = self.block.leaves.last_mut() {
-            *stability = Stability::Immutable;
-        }
+    /// Set this projected leaf's stability to immutable.
+    ///
+    /// This is a modifier for the pending [`Self::project`] leaf:
+    /// `o.file("version").immutable().project(Item::version)?`.
+    #[must_use]
+    pub fn immutable(mut self) -> Self {
+        self.stability = Some(Stability::Immutable);
         self
     }
 
-    /// Set the most recently pushed projected leaf's stability to mutable.
-    /// Same ordering gotcha as [`Self::lazy`].
-    pub fn mutable(self) -> Self {
-        if let Some(ObjectLeaf::Projected { stability, .. }) = self.block.leaves.last_mut() {
-            *stability = Stability::Mutable;
-        }
+    /// Set this projected leaf's stability to mutable.
+    ///
+    /// This is a modifier for the pending [`Self::project`] leaf:
+    /// `o.file("state").mutable().project(Item::state)?`.
+    #[must_use]
+    pub fn mutable(mut self) -> Self {
+        self.stability = Some(Stability::Mutable);
         self
     }
 

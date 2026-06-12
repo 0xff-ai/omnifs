@@ -1,6 +1,7 @@
 //! Router unit tests for the object model contracts.
 
 use super::*;
+use crate::browse::FileContent;
 use crate::captures::{Capture, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, ProviderErrorKind, Result};
@@ -10,8 +11,12 @@ use crate::object::{Canonical, Key, Load, Object, ObjectKind, ObjectShape};
 use crate::projection::{DirProjection, Entry, FileProjection};
 use crate::repr::{Markdown, Representable};
 use omnifs_core::ContentType;
+use omnifs_wit::provider::types as wit_types;
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::Rc;
 use std::str::FromStr;
+use std::task::{Context, Poll, Waker};
 
 // ---------------------------------------------------------------------------
 // Test object + key types
@@ -37,6 +42,29 @@ impl Object for DemoObj {
 impl Representable<Markdown> for DemoObj {
     fn represent(&self) -> Vec<u8> {
         format!("# {}", self.title).into_bytes()
+    }
+}
+
+impl DemoObj {
+    fn title(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
+        Ok(FileContent::new(self.title.clone()))
+    }
+
+    fn body(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
+        Ok(FileContent::new(format!("body: {}", self.title)))
+    }
+
+    fn state(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
+        Ok(FileContent::new("open"))
     }
 }
 
@@ -286,6 +314,57 @@ fn object_listing_includes_top_level_handler_leaves_only() {
     );
     assert_eq!(mounted.handler_files.len(), 2);
     assert_eq!(mounted.handler_dirs.len(), 1);
+}
+
+#[test]
+fn projected_leaf_modifiers_apply_to_pending_leaf() {
+    let handle = object("/items/{id}", |o| {
+        o.representations("item", (Markdown,))?;
+        o.file("title").project(DemoObj::title)?;
+        o.file("body").lazy().project(DemoObj::body)?;
+        o.file("state").immutable().project(DemoObj::state)?;
+        Ok(())
+    })
+    .unwrap();
+    let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
+    let mounted = super::object::mount_object::<DemoObj, ()>(
+        &pattern,
+        ObjectShape::Dir,
+        &handle.spec,
+        "/items/{id}",
+    )
+    .unwrap();
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+    let caps = Captures::new(vec![Capture {
+        name: "id".into(),
+        value: "42".into(),
+    }]);
+    let mut list = (mounted.entry.list)(&cx, caps, "/items/42".to_string());
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
+    let effects = match list.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => panic!("object listing should complete without callouts"),
+    };
+    let mut fs: Vec<_> = effects.into_wit().fs;
+    fs.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let projected: Vec<_> = fs
+        .iter()
+        .map(|write| match &write.kind {
+            wit_types::FsKind::File(file) => (write.path.as_str(), file.attrs.stability),
+            wit_types::FsKind::Directory(_) => panic!("object field preload should write files"),
+        })
+        .collect();
+
+    assert_eq!(
+        projected,
+        vec![
+            ("/items/42/state", wit_types::Stability::Immutable),
+            ("/items/42/title", wit_types::Stability::Mutable),
+        ],
+        "lazy body must not eager-project, and stability must apply to the pending state leaf"
+    );
 }
 
 #[test]
