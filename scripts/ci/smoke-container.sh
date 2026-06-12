@@ -12,8 +12,8 @@ WORKSPACE="${GITHUB_WORKSPACE:-$root}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 WASM_DIR="${OMNIFS_WASM_DIR:-$root/target/wasm32-wasip2/release}"
 OMNIFS_HOME_DIR="$RUNNER_TEMP/omnifs-home"
+OMNIFS_HOME="/root/.omnifs"
 providers_dir="$OMNIFS_HOME_DIR/providers"
-OMNIFS_GUEST_HOME="/root/.omnifs"
 
 cleanup() {
   if [[ "${SMOKE_FAILED:-0}" == "1" ]]; then
@@ -50,8 +50,8 @@ docker run -d \
   --security-opt apparmor:unconfined \
   -e SSH_AUTH_SOCK=/ssh-agent \
   -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-  -e "OMNIFS_HOME=$OMNIFS_GUEST_HOME" \
-  -v "$OMNIFS_HOME_DIR:$OMNIFS_GUEST_HOME" \
+  -e "OMNIFS_HOME=$OMNIFS_HOME" \
+  -v "$OMNIFS_HOME_DIR:$OMNIFS_HOME" \
   -v "$WORKSPACE/.secrets/github_token:/run/secrets/github_token:ro" \
   -v "$WORKSPACE/.secrets/db:/data:ro" \
   -v "$WORKSPACE/scripts/demo.sh:/tmp/demo.sh:ro" \

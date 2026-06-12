@@ -1,8 +1,6 @@
 pub mod file_store;
-pub mod keyring_store;
 pub mod memory_store;
 pub use file_store::FileStore;
-pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryStore;
 
 use secrecy::SecretString;

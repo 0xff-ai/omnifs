@@ -4,7 +4,7 @@
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use omnifs_core::MountName;
-use omnifs_creds::CredentialStore;
+use omnifs_creds::{CredentialStore, FileStore};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
-use crate::session::{CredsBackend, MountConfig};
+use crate::session::MountConfig;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
@@ -97,13 +97,8 @@ pub async fn rm(
         )?;
     }
 
-    let store = CredsBackend::auto(&paths.credentials_file, false);
-    delete_credentials(
-        store.as_ref(),
-        &credential_target,
-        keep_credentials,
-        name.as_str(),
-    )?;
+    let store = FileStore::new(&paths.credentials_file);
+    delete_credentials(&store, &credential_target, keep_credentials, name.as_str())?;
 
     if inline {
         workspace.remove_inline_mount(name.as_str())?;

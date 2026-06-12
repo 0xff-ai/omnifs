@@ -3,8 +3,8 @@
 //! `Workspace` owns the host user's `config.toml` (immutable read view and
 //! doc-preserving surgical mutators) and provides the one path every command
 //! uses to enumerate configured mounts. `Spec`-to-`Resolved` conversion stays
-//! in `omnifs_mount::mounts::Catalog`; credential materialization stays in
-//! `Session`.
+//! in `omnifs_mount::mounts::Catalog`; runtime payload preparation stays in
+//! `MountConfig`.
 //!
 //! The mount funnel merges two sources in order:
 //! 1. `[[mounts]]` entries inline in `config.toml`, in declaration order.

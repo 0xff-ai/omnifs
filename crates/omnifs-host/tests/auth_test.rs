@@ -126,6 +126,35 @@ fn test_static_token_injection_from_file() {
 }
 
 #[test]
+fn test_static_token_injection_from_store() {
+    let auth = github_pat_auth(None, None);
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    let key = CredentialId::new("github", "pat", "default").unwrap();
+    store
+        .put(
+            &key,
+            &CredentialEntry::static_token(
+                SecretString::from("ghp_store_token".to_string()),
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+        )
+        .unwrap();
+    let manager = AuthManager::from_configs_manifest_store_with_http(
+        &[auth],
+        Some(&github_pat_manifest()),
+        "github",
+        store,
+        reqwest_oauth2::Client::new(),
+    )
+    .unwrap();
+
+    let headers = manager.headers_for_url("https://api.github.com/repos");
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].0, "Authorization");
+    assert_eq!(headers[0].1, "Bearer ghp_store_token");
+}
+
+#[test]
 fn test_token_file_takes_precedence_over_env() {
     let dir = tempfile::tempdir().unwrap();
     let token_file = dir.path().join("github_token");

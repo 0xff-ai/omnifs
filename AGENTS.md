@@ -6,16 +6,16 @@ Repository-local guidance for working in `omnifs`.
 
 `omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The runtime daemon (binary `omnifsd`, crate `crates/omnifs-daemon`) loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
 
-The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the session secrets directory is the only omnifs-owned bind. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
+The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the host `OMNIFS_HOME` tree is bind-mounted writable as the daemon's runtime home. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
 
 The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested. `omnifsd` must stay free of container assumptions: Docker is one launch mechanism, and the daemon will later run host-native when NFSv4/FSKit mounts land.
 
 ## Supported workflow
 
-The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, validates stored credentials, materializes fixtures, and launches the container directly through the Docker API.
 
 ```bash
-omnifs dev          # build dev image, materialize secrets/fixtures, launch container
+omnifs dev          # build dev image, materialize fixtures, launch container
 omnifs shell        # attach a zsh shell
 omnifs logs -f      # follow container output
 omnifs status       # inspect mounts, providers, auth state
@@ -147,7 +147,7 @@ Provider auth manifests live in `omnifs.provider.json` and are embedded in WASM 
 
 For the contributor sandbox, `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container.
 
-For the normal user path, `omnifs init` plus `omnifs up`, OAuth credentials live in the host credential store: keychain or `~/.omnifs/credentials.json` fallback.
+For the normal user path, `omnifs init` plus `omnifs up`, OAuth and static-token credentials live in the file-backed host credential store at `~/.omnifs/credentials.json`.
 
 Git clone currently uses SSH:
 
@@ -168,17 +168,15 @@ The untrusted boundary is provider code. Providers are `wasm32-wasip2` component
 - `omnifs_mount::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
 - Provider-contract types (`ProviderManifest`, manifest parsing, `AuthScheme`) live in `omnifs_provider`.
 - Use `resolve_mount_spec(spec, require_metadata)` for strict load versus best-effort delete/reset paths.
-- `CredentialTarget` and session materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
+- `CredentialTarget` and runtime payload materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
 - Host-managed credentials require `provider_id`, always on `Resolved`, plus `auth.scheme` and optional `auth.account`.
-- Static mounts may still use `token_env` or `token_file` for external secrets. Do not add keychain indirection to mount JSON.
-- Session secret filenames use `CredentialKey::storage_key()`, for example `github:pat:default`.
+- Static mounts may still use `token_env` or `token_file` for external user-managed secrets. Do not move host-managed credential state into mount JSON.
 
 ### Credentials store
 
-- Pick one backend at startup: keychain or file at `~/.omnifs/credentials.json`.
-- Keep `omnifs-creds` on the latest `keyring` 3.x line for now. `keyring` 4 split the application API into `keyring-core` and made the `keyring` crate a sample/connector bundle; depending on it directly pulls in every connector, including SQLite/Turso, instead of replacing the small file fallback cleanly.
+- The production credential backend is the file store at `~/.omnifs/credentials.json`.
 - `oauth2` 5.0.0 still binds its `reqwest` integration to `reqwest` 0.12. Keep `omnifs-auth` on a direct `reqwest` 0.12 dependency and use the `reqwest-oauth2` alias in `omnifs-host` for OAuth refresh clients until `oauth2` supports `reqwest` 0.13. The workspace `reqwest` dependency is for normal host/CLI HTTP clients and may be newer.
-- The file store is intentionally a local fallback and session-transfer store. It gives omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
+- The file store is intentionally the local runtime credential contract. The trusted daemon reads and writes the same `credentials.json` file through the writable `OMNIFS_HOME` bind, giving omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
 - `CredentialKey::storage_key()` is the only public wire form: `provider:scheme:account`.
 - `CredentialEntry.value` is private; callers use `access_token()`.
 

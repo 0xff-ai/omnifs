@@ -45,9 +45,9 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
-        let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
+        let paths = omnifs_home::Paths::under_root(config_dir.path());
         let provider_dir = provider_artifact_dir();
-        let catalog = omnifs_mount::mounts::Catalog::new(config_dir.path(), &provider_dir);
+        let catalog = omnifs_mount::mounts::Catalog::new(&paths.mounts_dir, &provider_dir);
         let resolved = catalog
             .resolve_spec(spec, false)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
@@ -64,9 +64,9 @@ impl RuntimeHarness {
             cloner,
             Dirs::new(
                 cache_dir.path(),
-                config_dir.path(),
+                &paths.config_dir,
                 &provider_dir,
-                &credentials_file,
+                &paths.credentials_file,
             ),
             make_extractor(),
             &caches,

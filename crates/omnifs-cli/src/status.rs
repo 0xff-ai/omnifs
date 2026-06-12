@@ -1,9 +1,9 @@
 //! Status report: data types, collection, and rendering.
 
 use comfy_table::{Cell, ContentArrangement, Table, presets};
+use omnifs_creds::FileStore;
 use std::fmt::Write as _;
 
-use crate::session::CredsBackend;
 use crate::{catalog::ProviderCatalog, paths::Paths};
 use omnifs_api::DaemonStatus;
 
@@ -27,10 +27,10 @@ pub(crate) fn collect_status(
     runtime: Option<DaemonStatus>,
     mounts: Vec<crate::session::MountConfig>,
 ) -> StatusReport {
-    let store = CredsBackend::auto(&paths.credentials_file, true);
+    let store = FileStore::new(&paths.credentials_file);
     StatusReport {
         runtime,
-        user_mounts: catalog.scan_user_mount_configs(mounts.clone(), store.as_ref()),
+        user_mounts: catalog.scan_user_mount_configs(mounts.clone(), &store),
         providers: catalog.scan_provider_configs(mounts),
         paths,
     }

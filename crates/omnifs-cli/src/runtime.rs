@@ -17,10 +17,8 @@ use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Session};
+use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
 use omnifs_home::OMNIFS_HOME_ENV;
-
-const GUEST_ROOT: &str = "/root/.omnifs";
 
 /// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
 /// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
@@ -28,7 +26,7 @@ const GUEST_ROOT: &str = "/root/.omnifs";
 /// from a newer source tree than the launcher itself.
 const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
 
-/// Extras layered on top of the canonical session wiring.
+/// Extras layered on top of the canonical runtime wiring.
 /// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
 /// both `omnifs dev` and `omnifs up` expose the inspector TCP port.
 #[derive(Debug, Default)]
@@ -37,9 +35,9 @@ pub(crate) struct ContainerExtras {
 }
 
 /// Pure description of a container launch: all bind mounts, env vars, and TCP
-/// port forwards assembled from the session and extras without touching any
-/// bollard types. Constructed by [`ContainerLaunchSpec::from_session`];
-/// mapped to a [`ContainerCreateBody`] by [`Runtime::build_container_body`].
+/// port forwards assembled without touching any bollard types. Constructed by
+/// [`ContainerLaunchSpec::from_runtime_home`]; mapped to a
+/// [`ContainerCreateBody`] by [`Runtime::build_container_body`].
 #[derive(Debug, Default)]
 pub(crate) struct ContainerLaunchSpec {
     pub(crate) image: String,
@@ -50,28 +48,14 @@ pub(crate) struct ContainerLaunchSpec {
 }
 
 impl ContainerLaunchSpec {
-    /// Assemble the launch spec from the session state and caller-supplied
+    /// Assemble the launch spec from the host runtime home and caller-supplied
     /// extras, without making any bollard calls.
-    pub(crate) fn from_session(
+    pub(crate) fn from_runtime_home(
         image: &ImageRef,
         runtime_home: &Path,
-        session: &Session,
         extras: ContainerExtras,
     ) -> Self {
-        let guest = omnifs_home::Paths::under_root(std::path::Path::new(GUEST_ROOT));
-
-        let mut binds = vec![format!("{}:{GUEST_ROOT}", runtime_home.display())];
-        binds.push(format!(
-            "{}:{HOST_CRED_DIR}:ro",
-            session.creds_dir().display()
-        ));
-        if session.credentials_file().exists() {
-            binds.push(format!(
-                "{}:{}",
-                session.credentials_file().display(),
-                guest.credentials_file.display(),
-            ));
-        }
+        let mut binds = vec![format!("{}:{OMNIFS_HOME}", runtime_home.display())];
 
         // SSH_AUTH_SOCK bind enables git callouts. Skip if unset; only providers
         // that perform git operations will notice (and they'll error clearly).
@@ -96,7 +80,7 @@ impl ContainerLaunchSpec {
         binds.extend(extras.binds);
 
         let env = vec![
-            format!("{OMNIFS_HOME_ENV}={}", guest.config_dir.display()),
+            format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];
@@ -325,14 +309,13 @@ impl Runtime {
     pub(crate) async fn launch_container(
         &self,
         runtime_home: &Path,
-        session: &Session,
         extras: ContainerExtras,
     ) -> Result<()> {
         self.ensure_image().await?;
         self.verify_launcher_compat().await?;
         self.remove().await?;
 
-        let spec = ContainerLaunchSpec::from_session(&self.image, runtime_home, session, extras);
+        let spec = ContainerLaunchSpec::from_runtime_home(&self.image, runtime_home, extras);
         anstream::println!(
             "Creating container `{}` from image `{}`",
             self.container_name,
@@ -410,7 +393,7 @@ impl Runtime {
     pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
         let client = crate::client::DaemonClient::new();
         anstream::println!(
-            "Waiting for {HOST_FUSE_MOUNT} inside `{}`",
+            "Waiting for {GUEST_FUSE_MOUNT} inside `{}`",
             self.container_name
         );
         for attempt in 0..60 {
@@ -433,7 +416,7 @@ impl Runtime {
                     .status
                     .map_or_else(|| "exited".to_string(), |status| status.to_string());
                 return Err(anyhow::anyhow!(
-                    "container `{}` {status} before {HOST_FUSE_MOUNT} became available (exit {exit_code})",
+                    "container `{}` {status} before {GUEST_FUSE_MOUNT} became available (exit {exit_code})",
                     self.container_name
                 ))
                 .with_hint(format!(
@@ -449,7 +432,7 @@ impl Runtime {
         }
         anstream::println!();
         Err(anyhow::anyhow!(
-            "{HOST_FUSE_MOUNT} did not become available inside `{}` within 60s",
+            "{GUEST_FUSE_MOUNT} did not become available inside `{}` within 60s",
             self.container_name
         ))
         .with_hint(format!(
@@ -604,7 +587,6 @@ fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_home::CREDENTIALS_FILE;
 
     #[test]
     fn missing_label_is_allowed_with_warning() {
@@ -651,47 +633,28 @@ mod tests {
             .expect("garbage label should not block launch");
     }
 
-    /// Verify that `ContainerLaunchSpec::from_session` assembles the spec
-    /// correctly: guest env vars are always present, creds/mounts binds come
-    /// first in that order, and extras are appended without clobbering the
-    /// base set.
+    /// Verify that `ContainerLaunchSpec::from_runtime_home` assembles the spec
+    /// correctly: guest env vars are always present and extras are appended
+    /// without clobbering the base set.
     #[test]
     fn launch_spec_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
-        let cred_file = tmp.path().join(CREDENTIALS_FILE);
-        let runtime_home = tmp.path().join(".omnifs");
-        std::fs::create_dir_all(&runtime_home).unwrap();
-        let name = ContainerName::new("omnifs-test-spec").unwrap();
-        // Session::prepare creates the session dir under temp_dir keyed by
-        // container name. That's fine for a unit test — no container is started.
-        let session = Session::prepare(&name, &cred_file).unwrap();
+        let paths = omnifs_home::Paths::under_root(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
         let extras = ContainerExtras {
             binds: vec!["/extra:/extra:ro".to_string()],
         };
 
-        let spec = ContainerLaunchSpec::from_session(&image, &runtime_home, &session, extras);
+        let spec = ContainerLaunchSpec::from_runtime_home(&image, &paths.config_dir, extras);
 
         assert_eq!(
             spec.binds[0],
-            format!("{}:{GUEST_ROOT}", runtime_home.display())
+            format!("{}:{OMNIFS_HOME}", paths.config_dir.display())
         );
 
-        // Creds bind is read-only and follows the runtime home bind.
-        assert!(
-            spec.binds[1].ends_with(":ro"),
-            "creds bind should be read-only: {}",
-            spec.binds[1]
-        );
-        assert!(
-            spec.binds[1].contains(HOST_CRED_DIR),
-            "creds bind should target HOST_CRED_DIR: {}",
-            spec.binds[1]
-        );
-
-        // Extras bind is appended after the base set. No credentials_file bind
-        // because cred_file doesn't exist in the temp dir.
+        // Extras bind is appended after the runtime home bind.
         assert_eq!(
             spec.binds.last().map(String::as_str),
             Some("/extra:/extra:ro"),
@@ -700,7 +663,7 @@ mod tests {
         );
 
         // Required guest env vars are present.
-        let expected_home_env = format!("{OMNIFS_HOME_ENV}={GUEST_ROOT}");
+        let expected_home_env = format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}");
         assert!(
             spec.env.iter().any(|e| e == &expected_home_env),
             "{OMNIFS_HOME_ENV} must be set"

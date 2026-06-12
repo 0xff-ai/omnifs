@@ -1,11 +1,12 @@
 //! `omnifs up` — container lifecycle: start.
 
 use clap::Args;
+use omnifs_creds::FileStore;
 
 use crate::app_context::AppContext;
-use crate::launch::{LaunchSpec, launch_session};
+use crate::launch::{LaunchSpec, launch_runtime};
 use crate::runtime::ContainerExtras;
-use crate::session::{CredsBackend, HOST_FUSE_MOUNT};
+use crate::session::GUEST_FUSE_MOUNT;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
@@ -32,7 +33,7 @@ impl UpArgs {
         let runtime = ctx.runtime();
         let catalog = ctx.catalog();
 
-        // Bail early before touching session state if there is nothing to mount.
+        // Bail early before touching runtime state if there is nothing to mount.
         let configs = ctx.workspace().mounts()?;
         if configs.is_empty() {
             anyhow::bail!(
@@ -42,16 +43,15 @@ impl UpArgs {
         }
 
         let mounts_dir = paths.mounts_dir.clone();
-        let store = CredsBackend::auto(&paths.credentials_file, true);
+        let store = Box::new(FileStore::new(&paths.credentials_file));
 
         crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
 
         anstream::println!("Using mount configs from {}", mounts_dir.display());
-        launch_session(
+        launch_runtime(
             LaunchSpec {
                 runtime,
                 runtime_home: &paths.config_dir,
-                credentials_file: &paths.credentials_file,
                 store,
                 verb: "omnifs up",
                 configs,
@@ -62,12 +62,12 @@ impl UpArgs {
         .await?;
 
         anstream::println!(
-            "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
+            "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
             runtime.container_name()
         );
         anstream::println!();
         anstream::println!(
-            "Run `{}` to open a shell inside the container and browse {HOST_FUSE_MOUNT}.",
+            "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
             crate::style::bold("omnifs shell"),
         );
         Ok(())

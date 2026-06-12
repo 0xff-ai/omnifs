@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest, UrlOpener,
 };
-use omnifs_creds::CredentialStore;
+use omnifs_creds::{CredentialStore, FileStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -16,7 +16,6 @@ use super::shared::format_scopes;
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
 use crate::paths::PathOverrides;
-use crate::session::CredsBackend;
 
 pub(super) async fn login(
     catalog: &ProviderCatalog,
@@ -116,7 +115,7 @@ pub(crate) async fn login_with_paths(
     )?;
     let mut paths = ctx.paths().clone();
     paths.credentials_file = credentials_file;
-    let store = CredsBackend::auto(&paths.credentials_file, true);
+    let store = Box::new(FileStore::new(&paths.credentials_file));
     let mounts = ctx.workspace().mounts()?;
     login(
         ctx.catalog(),

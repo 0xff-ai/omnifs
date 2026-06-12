@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContainerName(String);
@@ -13,10 +12,6 @@ impl ContainerName {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-
-    pub(crate) fn session_root(&self) -> PathBuf {
-        std::env::temp_dir().join(format!("omnifs-session-{self}"))
     }
 }
 

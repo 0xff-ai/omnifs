@@ -24,7 +24,7 @@ use crate::commands::{init, up};
 use crate::error::WithHint;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::HOST_FUSE_MOUNT;
+use crate::session::GUEST_FUSE_MOUNT;
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
@@ -81,7 +81,7 @@ impl SetupArgs {
         let report = summary::SetupSummary::new(
             paths,
             ctx.runtime().container_name().as_str(),
-            HOST_FUSE_MOUNT,
+            GUEST_FUSE_MOUNT,
             &configured,
             &results,
         );

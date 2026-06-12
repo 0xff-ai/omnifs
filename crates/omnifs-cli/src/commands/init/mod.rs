@@ -13,10 +13,9 @@ mod provider_selection;
 mod token_validation;
 
 use crate::error::WithHint;
-use crate::session::CredsBackend;
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_creds::CredentialEntry;
+use omnifs_creds::{CredentialEntry, CredentialStore, FileStore};
 use omnifs_provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -183,15 +182,8 @@ impl InitArgs {
         anstream::println!("Mount `{mount_name}` is ready.");
 
         let config = crate::session::MountConfig::from_parsed(spec, paths.config_file.clone())?;
-        let store = CredsBackend::auto(&paths.credentials_file, false);
-        match crate::live::add_mount(
-            ctx.runtime().container_name(),
-            catalog,
-            store.as_ref(),
-            config,
-        )
-        .await
-        {
+        let store = FileStore::new(&paths.credentials_file);
+        match crate::live::add_mount(catalog, &store, config).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },
@@ -262,7 +254,7 @@ async fn run_static_token_init(
         }
     }
 
-    let store = CredsBackend::auto(credentials_file, true);
+    let store = FileStore::new(credentials_file);
     anstream::println!("Storing credential in {} ...", store.backend_label());
     let now = OffsetDateTime::now_utc();
     let mut entry = CredentialEntry::static_token(token, now);
@@ -298,7 +290,6 @@ mod tests {
     use crate::auth::AuthSelection;
     use crate::catalog::{ProviderCatalog, ProviderSource};
     use omnifs_core::MountName;
-    use omnifs_home::MOUNTS_SUBDIR;
     use omnifs_provider::{
         AuthManifest, AuthScheme, InitHint, InitInput, PreopenMode, PreopenStrategy, PreopenedPath,
         ProviderCapabilities, ProviderManifest,
@@ -602,19 +593,21 @@ mod tests {
     #[test]
     fn load_provider_templates_reads_metadata_from_wasm() {
         let dir = tempfile::tempdir().unwrap();
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
         std::fs::write(
-            dir.path().join("omnifs_provider_linear.wasm"),
+            paths.providers_dir.join("omnifs_provider_linear.wasm"),
             wasm_with_custom_section(
                 omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
                 &serde_json::to_vec(&manifest).unwrap(),
             ),
         )
         .unwrap();
-        std::fs::write(dir.path().join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(paths.providers_dir.join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
 
-        let templates = ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path())
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
             .provider_templates()
             .unwrap();
 
@@ -622,17 +615,17 @@ mod tests {
         assert_eq!(templates["linear"].manifest.default_mount, "linear-dev");
         assert_eq!(
             templates["linear"].source,
-            ProviderSource::Disk(dir.path().join("omnifs_provider_linear.wasm"))
+            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_linear.wasm"))
         );
     }
 
     #[test]
     fn load_provider_templates_includes_builtins_without_provider_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let templates =
-            ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path().join("missing"))
-                .provider_templates()
-                .unwrap();
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+            .provider_templates()
+            .unwrap();
 
         assert_eq!(
             templates["github"].manifest.provider,
@@ -648,13 +641,15 @@ mod tests {
     #[test]
     fn load_provider_templates_prefers_disk_metadata_over_builtin_by_id() {
         let dir = tempfile::tempdir().unwrap();
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.id = "github".to_string();
         manifest.display_name = "GitHub dev".to_string();
         manifest.provider = "omnifs_provider_github.wasm".to_string();
         manifest.default_mount = "github-dev".to_string();
         std::fs::write(
-            dir.path().join("omnifs_provider_github.wasm"),
+            paths.providers_dir.join("omnifs_provider_github.wasm"),
             wasm_with_custom_section(
                 omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
                 &serde_json::to_vec(&manifest).unwrap(),
@@ -662,14 +657,14 @@ mod tests {
         )
         .unwrap();
 
-        let templates = ProviderCatalog::for_dirs(dir.path().join(MOUNTS_SUBDIR), dir.path())
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
             .provider_templates()
             .unwrap();
 
         assert_eq!(templates["github"].manifest.default_mount, "github-dev");
         assert_eq!(
             templates["github"].source,
-            ProviderSource::Disk(dir.path().join("omnifs_provider_github.wasm"))
+            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_github.wasm"))
         );
     }
 

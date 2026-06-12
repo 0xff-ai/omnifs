@@ -79,7 +79,7 @@ fn build_harness() -> FuseHarness {
 fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
-    let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
+    let paths = omnifs_home::Paths::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
     for wasm in ["test_provider.wasm", ARCHIVE_TOOL_WASM] {
         let src = wasm_artifact_path(wasm);
@@ -105,9 +105,9 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let registry = ProviderRegistry::new(
         Dirs::new(
             cache_dir.path(),
-            config_dir.path(),
+            &paths.config_dir,
             providers_dir.path(),
-            &credentials_file,
+            &paths.credentials_file,
         ),
         cloner,
     )

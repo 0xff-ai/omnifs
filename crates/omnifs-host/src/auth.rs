@@ -198,7 +198,7 @@ impl AuthManager {
     ) -> Result<Vec<AuthStrategy>, AuthError> {
         match config {
             Auth::StaticToken(config) => {
-                StaticTokenStrategy::from_manifest_config(config, manifest)
+                StaticTokenStrategy::from_manifest_config(config, manifest, store_context)
                     .map(|strategies| strategies.into_iter().map(AuthStrategy::Static).collect())
             },
             Auth::OAuth(config) => {
@@ -276,13 +276,14 @@ impl StaticTokenStrategy {
     fn from_manifest_config(
         config: &StaticToken,
         manifest: Option<&AuthManifest>,
+        store_context: Option<&AuthStoreContext>,
     ) -> Result<Vec<Self>, AuthError> {
         let manifest = manifest.ok_or(AuthError::ManifestRequired(AuthKind::StaticToken))?;
         let scheme = manifest
             .resolve_static_scheme(config.scheme.as_deref())
             .map_err(AuthError::from)?;
-        let header_value =
-            read_static_credential(config).map(|token| format!("{}{}", scheme.value_prefix, token));
+        let header_value = Self::credential_value(config, &scheme.key, store_context)?
+            .map(|token| format!("{}{}", scheme.value_prefix, token));
         let header_name = scheme
             .header_name
             .clone()
@@ -296,6 +297,33 @@ impl StaticTokenStrategy {
                 header_value: header_value.clone(),
             })
             .collect())
+    }
+
+    fn credential_value(
+        config: &StaticToken,
+        scheme: &str,
+        store_context: Option<&AuthStoreContext>,
+    ) -> Result<Option<String>, AuthError> {
+        if config.token_file.is_some() || config.token_env.is_some() {
+            return Ok(read_credential(
+                config.token_file.as_deref(),
+                config.token_env.as_deref(),
+            ));
+        }
+
+        let context =
+            store_context.ok_or(AuthError::CredentialStoreRequired(AuthKind::StaticToken))?;
+        let account = config
+            .account
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string());
+        let credential_id = CredentialId::new(&context.provider_id, scheme, account)
+            .map_err(|e| AuthError::CredentialId(e.to_string()))?;
+        Ok(context
+            .store
+            .get(&credential_id)?
+            .filter(|entry| entry.kind() == AuthKind::StaticToken)
+            .map(|entry| entry.access_token().expose_secret().to_string()))
     }
 
     fn applies_to_url(&self, url: &str) -> bool {
@@ -543,10 +571,6 @@ impl From<SchemeResolveError> for AuthError {
             },
         }
     }
-}
-
-fn read_static_credential(config: &StaticToken) -> Option<String> {
-    read_credential(config.token_file.as_deref(), config.token_env.as_deref())
 }
 
 fn read_credential(token_file: Option<&str>, token_env: Option<&str>) -> Option<String> {

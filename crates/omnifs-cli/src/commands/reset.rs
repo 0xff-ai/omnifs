@@ -18,7 +18,7 @@ use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::CredsBackend;
+use omnifs_creds::FileStore;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {
@@ -73,14 +73,9 @@ impl ResetArgs {
         // Docker (or an absent container) isn't a reset failure.
         teardown_container(&container_name).await;
 
-        let store = CredsBackend::auto(&paths.credentials_file, false);
+        let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
-            delete_credentials(
-                store.as_ref(),
-                &target.credential,
-                keep_credentials,
-                &target.name,
-            )?;
+            delete_credentials(&store, &target.credential, keep_credentials, &target.name)?;
             if target.path == paths.config_file {
                 workspace.remove_inline_mount(&target.name)?;
             } else {

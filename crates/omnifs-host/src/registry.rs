@@ -327,7 +327,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let credentials_file = config_dir.path().join(omnifs_home::CREDENTIALS_FILE);
+        let paths = omnifs_home::Paths::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -353,9 +353,9 @@ mod tests {
         let registry = ProviderRegistry::new(
             Dirs::new(
                 cache_dir.path(),
-                config_dir.path(),
+                &paths.config_dir,
                 providers_dir.path(),
-                &credentials_file,
+                &paths.credentials_file,
             ),
             cloner,
         )

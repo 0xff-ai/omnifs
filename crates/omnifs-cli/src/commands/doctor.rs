@@ -5,12 +5,13 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use omnifs_creds::FileStore;
+
 use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
 use crate::runtime::Runtime;
-use crate::session::CredsBackend;
 use crate::status::UserMountStatus;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
@@ -296,8 +297,8 @@ fn probe_mount_configs(
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {
-    let store = CredsBackend::auto(&paths.credentials_file, false);
-    let mounts = catalog.scan_user_mount_configs(mounts, store.as_ref());
+    let store = FileStore::new(&paths.credentials_file);
+    let mounts = catalog.scan_user_mount_configs(mounts, &store);
     let invalid: Vec<_> = mounts
         .iter()
         .filter_map(|m| match m {

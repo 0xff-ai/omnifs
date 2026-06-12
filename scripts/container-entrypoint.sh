@@ -6,8 +6,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 : "${OMNIFS_MOUNT_POINT:=/omnifs}"
-: "${OMNIFS_GUEST_HOME:=/root/.omnifs}"
-: "${OMNIFS_HOME:=$OMNIFS_GUEST_HOME}"
+: "${OMNIFS_HOME:=/root/.omnifs}"
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
 : "${OMNIFS_LISTEN:=0.0.0.0:7878}"
 : "${RUST_LOG:=info}"
