@@ -390,4 +390,3 @@ Do not make projected issue/PR files directly writable as an implicit mutation m
 
 - Incomplete fuse module split, `attrs.rs` and `trace.rs`, was reverted. Revisit only if `fuse.rs` growth becomes a maintenance problem.
 - Non-timer provider events (`webhook-received`, `file-changed`, `auth-refreshed`) are currently swallowed with empty effects in the provider macro; surface them before building on event-driven freshness.
-- `FileLeafBuilder::{lazy,immutable,mutable}` mutate the most recently pushed leaf while `.project()` is what pushes (crates/omnifs-sdk/src/router/object.rs), so chaining a modifier before `.project()` flags the previous leaf; the github provider's `.lazy()` call sites hit this. Fix the builder (pending flags applied by `.project()`), then audit provider call sites.
