@@ -44,6 +44,6 @@ if [[ -o interactive ]]; then
     print -P "  %F{7}\$ omnifs logs -f%f"
     print
     print -P "  %F{8}# inspect stored credentials%f"
-    print -P "  %F{7}\$ omnifs auth list%f"
+    print -P "  %F{7}\$ omnifs auth status%f"
     print
 fi

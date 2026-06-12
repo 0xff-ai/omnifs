@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
 - The arXiv provider no longer crashes when it fails to encode a JSON response.
 - A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
+- The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
 
 ## [0.2.1] - 2026-06-08
 
@@ -50,7 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Container shell now greets interactive users with a welcome banner: an "OMNIFS" wordmark, the tagline `open a path, read the world.`, and indented blocks of example paths (`ls /github/<owner>/<repo>/repo`, `cat /dns/<domain>/TXT`, an arXiv `find` pipeline) and useful commands (`omnifs status`, `omnifs logs -f`, `omnifs auth list`). Gated on `[[ -o interactive ]]` so `zsh -c '...'` invocations stay silent. Lives in `scripts/container-zshrc.zsh`, copied into both the dev `Dockerfile` and the release `scripts/ci/Dockerfile.runtime`.
+- Container shell now greets interactive users with a welcome banner: an "OMNIFS" wordmark, the tagline `open a path, read the world.`, and indented blocks of example paths (`ls /github/<owner>/<repo>/repo`, `cat /dns/<domain>/TXT`, an arXiv `find` pipeline) and useful commands (`omnifs status`, `omnifs logs -f`, `omnifs auth status`). Gated on `[[ -o interactive ]]` so `zsh -c '...'` invocations stay silent. Lives in `scripts/container-zshrc.zsh`, copied into both the dev `Dockerfile` and the release `scripts/ci/Dockerfile.runtime`.
 - `omnifs up` now prints a hint pointing at `omnifs shell` after the FUSE mount comes online, so new users immediately know how to enter the projected filesystem.
 - `omnifs inspect` shows a live JSONL observability stream from the host daemon as a ratatui TUI: a path-tree of mount activity, a per-mount sparkline strip, an operations log (retention 4096), and an inline waterfall for the selected trace. Use `--replay <file>` for a captured JSONL trace, `--record <file>` to tee the live stream to a host path while attached, and `--plain` for line-oriented output. The host daemon emits typed `InspectorEvent` records (FUSE, provider, callout, subtree, clone, cache) through a non-blocking sink (lock-free `crossbeam_queue::ArrayQueue` history ring plus `tokio::sync::broadcast` for live subscribers) over TCP loopback `127.0.0.1:7878`. Schema lives in the new `omnifs-inspector` crate with redaction at the wire boundary. File tee is opt-in via `OMNIFS_INSPECTOR_PATH`. `omnifs up` exposes the inspector port to host loopback so `omnifs inspect` works against the standard runtime container, not just `omnifs dev`.
 - Runtime images now carry an `ai.0xff.omnifs.min-launcher-version` label, and `omnifs dev` refuses to start an image that requires a newer launcher. This catches source-image versus installed-CLI skew before Docker starts a container with missing port mappings or environment wiring.
