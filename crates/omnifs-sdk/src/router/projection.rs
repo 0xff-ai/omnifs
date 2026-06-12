@@ -1,7 +1,11 @@
 //! Router-side projection helpers.
 
-/// Merge projection entry names (resolved through `resolve`) with static
-/// sibling entries, projection winning on name collisions, ordered by name.
+/// Merge a handler's enumerated entries with the static sibling entries the
+/// route table contributes at the same depth: the projection wins name
+/// collisions (the handler knows more about a child than the table does),
+/// and the result is name-ordered. This merge is why a dir handler only
+/// enumerates its dynamic children; literal sibling routes appear in its
+/// listing without being re-declared.
 pub(super) fn merge_entries<'a>(
     names: impl Iterator<Item = &'a str>,
     resolve: impl Fn(&str) -> Option<crate::browse::Entry>,

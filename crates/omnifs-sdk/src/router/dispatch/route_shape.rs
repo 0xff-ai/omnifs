@@ -1,4 +1,9 @@
 //! Route-table shape used by lookup, listing, and read dispatch.
+//!
+//! [`Shape`] is a borrowed view over the sealed router that centralizes
+//! route selection (per-kind `best_match` queries) and result assembly
+//! (static lookups, projection-to-listing lowering, entry merging), so the
+//! three entry points share one set of rules.
 
 use crate::browse::{Entry as BrowseEntry, List, Listing, Lookup};
 use crate::captures::Captures;
@@ -15,10 +20,13 @@ use super::super::pattern::best_match;
 use super::super::projection::merge_entries;
 use super::super::register::Router;
 
+/// A borrowed dispatch view over the sealed route tables.
 pub(in crate::router) struct Shape<'a, S> {
     pub(super) router: &'a Router<S>,
 }
 
+/// A selected route plus the captures its pattern decoded from the path;
+/// the validator has already accepted them.
 pub(in crate::router) struct RouteMatch<'a, E> {
     pub(super) entry: &'a E,
     pub(super) captures: Captures,
@@ -30,6 +38,8 @@ impl<'a, E> RouteMatch<'a, E> {
     }
 }
 
+/// How a read path resolves: through a file handler, or through the object
+/// read path with a resolved target.
 pub(super) enum ReadRoute<'a, S> {
     File(RouteMatch<'a, FileEntry<S>>),
     Object {
@@ -49,10 +59,14 @@ impl<S> Shape<'_, S> {
         route_match(self.router.treerefs.iter(), abs)
     }
 
+    /// Dir routes registered via `r.dir(..)` only; object handler dirs are
+    /// excluded. Lookup uses this for its file-vs-dir precedence comparison.
     pub(super) fn direct_dir_route(&self, abs: &Path) -> Option<RouteMatch<'_, DirEntry<S>>> {
         route_match(self.router.dirs.iter(), abs)
     }
 
+    /// Dir routes including object handler dirs: the set whose handlers can
+    /// answer a listing or a lookup fallback.
     pub(in crate::router) fn list_dir_route(
         &self,
         abs: &Path,
@@ -66,6 +80,7 @@ impl<S> Shape<'_, S> {
         )
     }
 
+    /// File routes including object handler files.
     pub(in crate::router) fn file_route(&self, abs: &Path) -> Option<RouteMatch<'_, FileEntry<S>>> {
         route_match(
             self.router
@@ -80,6 +95,11 @@ impl<S> Shape<'_, S> {
         route_match(self.router.objects.iter(), abs)
     }
 
+    /// Resolve a read path: file route first; then an object anchor at the
+    /// path (representation chosen by the requested content type); then a
+    /// leaf one level under a dir-shaped anchor, where the leaf name
+    /// resolves to a representation (`stem.ext` against the render table)
+    /// before a projected field.
     pub(super) fn read_route(&self, abs: &Path, content_type: &str) -> Option<ReadRoute<'_, S>> {
         if let Some(route) = self.file_route(abs) {
             return Some(ReadRoute::File(route));
@@ -111,6 +131,10 @@ impl<S> Shape<'_, S> {
         })
     }
 
+    /// A directory answer synthesized from the route table: no handler runs.
+    /// Carries the parent's other static entries as siblings (one host
+    /// round trip warms the whole directory) and is exhaustive only when no
+    /// capture sibling can bind further names at this depth.
     pub(super) fn static_dir_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         let mut siblings = self.static_entries_for_parent(parent_abs);
         siblings.retain(|entry| entry.name() != name);
@@ -120,6 +144,9 @@ impl<S> Shape<'_, S> {
             .exhaustive(exhaustive)
     }
 
+    /// The file analog of [`Self::static_dir_lookup`]; the entry carries the
+    /// default listing-shape projection (size and bytes resolve at read
+    /// time).
     pub(super) fn static_file_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         let mut siblings = self.static_entries_for_parent(parent_abs);
         siblings.retain(|entry| entry.name() != name);
@@ -129,6 +156,8 @@ impl<S> Shape<'_, S> {
             .exhaustive(exhaustive)
     }
 
+    /// Resolve `name` as a leaf of an object anchored at `parent_abs`;
+    /// not-found when no object is anchored there.
     pub(super) fn object_leaf_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         let Some(route) = self.object_route(parent_abs) else {
             return Lookup::not_found();
@@ -136,6 +165,9 @@ impl<S> Shape<'_, S> {
         route.entry.child_file_lookup(parent_abs, name)
     }
 
+    /// List an auto-navigable literal prefix from the route table alone:
+    /// partial when a capture sibling at the next depth can bind names this
+    /// enumeration cannot produce, complete otherwise.
     pub(super) fn implicit_dir_listing(&self, abs: &Path) -> Option<Listing> {
         self.is_implicit_prefix_dir(abs).then(|| {
             let entries = self.static_entries_for_parent(abs);
@@ -147,6 +179,13 @@ impl<S> Shape<'_, S> {
         })
     }
 
+    /// Resolve a lookup through the parent handler's enumeration: merge the
+    /// projection's entries with the static siblings (projection wins name
+    /// collisions), pick the target by name, and carry the rest as
+    /// siblings together with the projection's preload effects, so a single
+    /// lookup warms everything the handler already computed. The
+    /// `Unchanged` outcome resolves to not-found here: it enumerates
+    /// nothing to match against.
     pub(super) fn projection_lookup(
         &self,
         parent_abs: &Path,
@@ -183,6 +222,10 @@ impl<S> Shape<'_, S> {
         Ok(Lookup::not_found())
     }
 
+    /// Lower a [`DirProjection`] to the wire listing: merge with static
+    /// siblings, honor the handler's exhaustive flag, and attach the
+    /// preload effects, re-list validator, and resume cursor the projection
+    /// carries.
     pub(super) fn dir_projection_into_list(
         &self,
         abs: &Path,
@@ -224,6 +267,9 @@ impl<S> Shape<'_, S> {
         }
     }
 
+    /// An object anchor's listing: the precomputed leaf names merged over
+    /// the static entries (leaves win collisions), always complete because
+    /// an anchor's children are statically declared.
     pub(super) fn object_dir_listing(&self, entry: &ObjectEntry<S>, anchor_abs: &Path) -> Listing {
         let static_entries = self.static_entries_for_parent(anchor_abs);
         let object_entries = entry.leaves.iter().map(|leaf| {
@@ -245,6 +291,10 @@ impl<S> Shape<'_, S> {
 }
 
 impl<S> ObjectEntry<S> {
+    /// Resolve a leaf name against this entry's declared file leaves. For a
+    /// dir-shaped object, `name` must be one of the anchor's file leaves;
+    /// the file-shaped branch instead tests `parent_abs`'s final segment
+    /// against the leaf names.
     pub(super) fn child_file_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         if self.shape == ObjectShape::File {
             if parent_abs.is_root() {
@@ -268,6 +318,9 @@ impl<S> ObjectEntry<S> {
             .any(|leaf| leaf.name == name && !leaf.is_dir)
     }
 
+    /// Map a `stem.ext` leaf name back to its representation content type:
+    /// the canonical source first, then each registered render by its
+    /// extension.
     fn representation_ct_for_leaf(&self, leaf: &str) -> Option<ContentType> {
         let source = format!("{}.{}", self.source_stem, self.source_ext);
         if leaf == source {

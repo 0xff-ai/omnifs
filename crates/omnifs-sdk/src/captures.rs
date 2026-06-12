@@ -13,12 +13,24 @@ use core::str::FromStr;
 use omnifs_core::path::Path;
 
 /// A capture type: validates one path segment (`FromStr`), renders back
-/// (`Display`), and optionally enumerates a finite child set.
+/// (`Display`), and optionally declares a finite value set.
 ///
-/// A `Some(..)` choice set enumerates a directory's children without a
-/// directory projection; `None` is an unbounded capture.
+/// The `FromStr` impl is the segment validator: a parse rejection makes
+/// the route a non-candidate, falling through to the next-most-specific
+/// route rather than to "not found". `Display` must round-trip what
+/// `FromStr` accepted, because rendered values become path segments again
+/// (see how arxiv percent-encodes paper ids in `Display` and decodes in
+/// `FromStr`).
 pub trait PathSegment: FromStr + Display + 'static {
-    /// The finite set of allowed values, or `None` for an unbounded capture.
+    /// The finite set of allowed values, or `None` for an unbounded
+    /// capture.
+    ///
+    /// For a `Some(..)` set, keep `FromStr` consistent: accept exactly the
+    /// listed values. When such a type sits in a [`crate::identity::Facet`]
+    /// key field, the `#[path_captures]` macro turns the set into a
+    /// [`crate::object::FacetAxis`] and the SDK expands canonical-store
+    /// view leaves across every choice, so all facet values are served
+    /// from one cached object.
     fn choices() -> Option<&'static [&'static str]> {
         None
     }

@@ -1,11 +1,142 @@
-//! omnifs provider SDK.
+//! omnifs provider SDK: build a WASM component that teaches the omnifs
+//! filesystem a new region of the world.
 //!
-//! Provides WIT bindings, helper types, and proc macros for building
-//! omnifs providers. Providers depend only on this crate.
+//! A provider is a `wasm32-wasip2` component implementing the
+//! `omnifs:provider` WIT contract. The host mounts it, sends it browse
+//! operations (lookup a child, list a directory, read a file), and runs
+//! every side effect (HTTP, git, blobs, archives) on the provider's behalf
+//! through a strict request/response callout protocol. Providers never open
+//! sockets, never touch credentials, and never cache: the host owns trust,
+//! caching, and I/O; the provider owns meaning (what paths exist and what
+//! bytes they hold).
 //!
-//! Usage: `#[omnifs_sdk::config]` on config types, `#[omnifs_sdk::provider]`
-//! on a provider lifecycle impl, and `#[dir("...")]`, `#[file("...")]`, or
-//! `#[treeref("...")]` on path handlers.
+//! # Anatomy of a provider
+//!
+//! One `#[omnifs_sdk::provider(..)]` impl block is the whole entry surface:
+//!
+//! ```ignore
+//! #[omnifs_sdk::config]
+//! pub struct Config { api_key: String }
+//!
+//! pub struct State { /* parsed config, adapters, route policy */ }
+//!
+//! #[omnifs_sdk::provider(
+//!     metadata = "omnifs.provider.json",
+//!     resources(endpoints = [Api]),
+//! )]
+//! impl MyProvider {
+//!     type Config = Config;   // defaults to NoConfig when omitted
+//!     type State = State;     // defaults to () when omitted
+//!
+//!     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
+//!         r.dir("/").handler(root_list)?;
+//!         r.file("/items/{id}/title").handler(read_title)?;
+//!         Ok(State::from(config))
+//!     }
+//! }
+//! ```
+//!
+//! `start` registers routes imperatively on a [`router::Router`] and returns
+//! the provider state. There are no per-route attribute macros; the route
+//! topology lives in `start`, readable top to bottom. After `start` returns,
+//! the generated glue seals the router (overlapping routes fail
+//! initialization loudly) and wires the WIT exports.
+//!
+//! # The two provider flavours
+//!
+//! Pick per route family, not per provider (hybrids are normal):
+//!
+//! - **Object-oriented** (`r.object::<O>(template, |o| ..)`): use when a path
+//!   family has one canonical upstream payload (a GitHub issue, a Linear
+//!   ticket) and several derived leaves (`title`, `body`, `item.json`). You
+//!   implement [`object::Key::load`] once; the SDK emits the canonical-store
+//!   effect, the host caches the verbatim upstream bytes, and later reads
+//!   re-render from cache without refetching. Identity comes from the key's
+//!   captures; route-context captures that must not affect identity (a list
+//!   filter, a version selector) are wrapped in [`identity::Facet`].
+//! - **Path-oriented** (`r.dir`/`r.file`/`r.treeref` with plain handlers):
+//!   use when the path is a direct operation with no stable canonical object
+//!   behind it: a DNS query, a Docker daemon listing, a database row read.
+//!   Do not invent fake objects for query results; serving fresh bytes with
+//!   honest [`file_attrs::Stability`] is the correct behavior.
+//!
+//! `r.treeref(..)` is the third, narrower verb: hand a whole subtree to the
+//! host (a git clone, an extracted archive) by returning a
+//! [`handler::TreeRef`]; the host bind-mounts the resolved tree and provider
+//! dispatch stops there.
+//!
+//! # Routes, captures, and dispatch
+//!
+//! Templates are absolute paths with literal segments and captures:
+//! `/items/{id}`, prefix captures like `/@{resolver}` or `/v{version}`, and
+//! a trailing multi-segment rest capture `/{*rest}`. A `#[path_captures]`
+//! struct gives a route a typed key; each field parses its segment via
+//! `FromStr`, and a parse rejection makes the route a non-candidate (falling
+//! through to the next-most-specific route, not to "not found"). Types
+//! implementing [`captures::PathSegment::choices`] declare finite segment
+//! sets, which tightens validation and feeds facet view-leaf expansion for
+//! objects.
+//!
+//! Dispatch rules worth internalizing (they shape what you must and must
+//! not write):
+//!
+//! - Any registered route's literal prefix is auto-navigable: never write
+//!   no-op handlers for intermediate directories.
+//! - `lookup` is the authoritative name oracle; `readdir` may be
+//!   non-exhaustive. A listing's `exhaustive` flag means "these are all the
+//!   names I know," and lookup may still resolve names a listing omitted.
+//! - Listings merge your enumeration with literal sibling routes registered
+//!   at the same depth.
+//!
+//! # The async model
+//!
+//! Handlers are plain `async fn`s. Awaiting an HTTP call (or git, blob,
+//! archive callout) suspends the whole operation: the SDK yields the callout
+//! batch to the host, the host runs it (concurrently, for batches), and
+//! `resume` continues your future with the results. Your code reads as
+//! straight-line async; there is no executor, no `Send` bounds, and state is
+//! single-threaded by construction. Use [`cx::join_all`] to issue N callouts
+//! in one suspension round instead of serially.
+//!
+//! # Caching and effects: the rules
+//!
+//! The host owns all caching as plain bytes; providers must not add their
+//! own caches, LRUs, or TTLs. What you control is what you emit:
+//!
+//! - Object loads emit canonical-store effects automatically; the host
+//!   pushes cached canonical bytes back into `read-file` so re-renders cost
+//!   no upstream call.
+//! - **Preload discipline:** if an upstream payload in hand already contains
+//!   sibling fields or children the user can read next, emit them now
+//!   (eager projections, listing entries with attrs) instead of forcing a
+//!   refetch later. If the list payload is not the full leaf contract, emit
+//!   a deferred file with honest attrs instead of pretending it is.
+//! - Freshness is event-driven, not TTL-driven: emit invalidations from
+//!   event handlers, or attach [`file_attrs::VersionToken`]s so conditional
+//!   reloads (`Load::Unchanged`) are cheap.
+//! - [`file_attrs::Stability::Volatile`] content (changes mid-read) must use
+//!   deferred ranged reads; the projection validator enforces this.
+//!
+//! # Module map
+//!
+//! | Module | What it owns |
+//! |---|---|
+//! | [`router`] | Route registration ([`router::Router`]) and dispatch |
+//! | [`captures`] | Typed segment parsing, [`captures::Captures`], choices |
+//! | [`object`] / [`identity`] | The object model: [`object::Key`], [`object::Load`], logical ids, facets |
+//! | [`projection`] | What handlers return: [`projection::DirProjection`], [`projection::FileProjection`], [`projection::Entry`] |
+//! | [`file_attrs`] | Size, stability, version tokens, projection validation |
+//! | [`repr`] | Multi-format object representations (`item.md`, `item.json`) |
+//! | [`cx`] | Handler context: state access, callout builders, [`cx::join_all`] |
+//! | [`endpoint`] | Declared HTTP endpoints: typed request builder, conditional loads, rate-limit breaker |
+//! | [`browse`] | Wire-facing results and [`browse::Effects`] |
+//! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::TreeRef`] |
+//! | [`blob`] / [`archives`] / [`git`] | Host-side large bytes, archive trees, git clones |
+//! | [`error`] | [`error::ProviderError`]: kinds, retryability, HTTP status mapping |
+//!
+//! Providers depend only on this crate; `hashbrown`, `serde`, and
+//! `serde_json` are re-exported for generated code and provider maps (use
+//! `hashbrown::HashMap` for provider-internal maps).
 
 #[doc(hidden)]
 pub use omnifs_wit as __wit;

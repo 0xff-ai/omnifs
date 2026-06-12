@@ -1,4 +1,9 @@
 //! Handler arity unification and route entry storage types.
+//!
+//! The `Into*Handler` traits erase the four supported handler shapes into one
+//! boxed closure per route kind, and pair each with the [`RouteValidator`]
+//! that makes typed captures part of route candidacy: a key that fails to
+//! parse removes the route from dispatch instead of erroring the request.
 
 use super::pattern::Pattern;
 use crate::captures::{Captures, FromCaptures};
@@ -10,16 +15,28 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// A boxed `'static` future the dispatch path awaits.
+/// A boxed `'static` future the dispatch path awaits. Not `Send`: providers
+/// are single-threaded WASM components.
 type HandlerFuture<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 
-/// The supported `dir` handler shapes box into a uniform call closure.
+/// The supported handler shapes box into one uniform call closure per route
+/// kind; captures travel alongside the context so the closure can parse the
+/// typed key at call time.
 pub(super) type BoxedDirHandler<S> =
     Arc<dyn Fn(DirCx<S>, Captures) -> HandlerFuture<DirProjection>>;
 pub(super) type BoxedFileHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<FileProjection>>;
 pub(super) type BoxedTreeRefHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<TreeRef>>;
 
-/// A per-route capture validator.
+/// A per-route capture validator derived from the handler's key type.
+///
+/// `full` runs `FromCaptures::from_captures` over a complete capture set and
+/// gates route candidacy in dispatch: rejection means "this route does not
+/// bind this path," and matching falls through to the next-most-specific
+/// candidate. `present` runs
+/// [`crate::captures::FromCaptures::validate_present_captures`] over a path
+/// prefix where later captures are not yet available; static directory
+/// discovery uses it so a future capture's absence cannot hide a literal
+/// ancestor.
 #[derive(Clone)]
 pub struct RouteValidator {
     full: Arc<dyn Fn(&Captures) -> bool>,
@@ -36,29 +53,45 @@ impl RouteValidator {
     }
 }
 
+/// Accepted directory handler shapes. `Marker` exists only to keep the
+/// blanket impls coherent (a closure could otherwise satisfy several); the
+/// compiler infers it, authors never name it. Shapes: `async fn(DirCx<S>)`
+/// ([`NoCaptures`]), `async fn(DirCx<S>, C)` ([`WithCaptures`]),
+/// `async fn(C, DirCx<S>)` ([`WithKeyMethod`]), and sync `fn(C, DirCx<S>)`
+/// ([`WithSyncKeyMethod`]), where `C: FromCaptures`.
 pub trait IntoDirHandler<S, Marker> {
     fn into_dir_handler(self) -> (BoxedDirHandler<S>, RouteValidator);
 }
 
+/// Accepted file handler shapes: `async fn(Cx<S>)`, `async fn(Cx<S>, C)`, or
+/// `async fn(C, Cx<S>)`, where `C: FromCaptures`. See [`IntoDirHandler`] for
+/// the role of `Marker`.
 pub trait IntoFileHandler<S, Marker> {
     fn into_file_handler(self) -> (BoxedFileHandler<S>, RouteValidator);
 }
 
+/// Accepted treeref handler shapes: `async fn(Cx<S>)`, `async fn(Cx<S>, C)`,
+/// or `async fn(C, Cx<S>)`, returning [`TreeRef`]. See [`IntoDirHandler`]
+/// for the role of `Marker`.
 pub trait IntoTreeRefHandler<S, Marker> {
     fn into_treeref_handler(self) -> (BoxedTreeRefHandler<S>, RouteValidator);
 }
 
+/// Marker: context-only handlers, `fn(Cx)` / `fn(DirCx)`.
 #[doc(hidden)]
 pub struct NoCaptures(());
+/// Marker: context-first captured handlers, `fn(Cx, Key)` / `fn(DirCx, Key)`.
 #[doc(hidden)]
 pub struct WithCaptures<C>(core::marker::PhantomData<C>);
-/// Captured route handlers keyed as `fn(Key, Cx)` / `fn(Key, DirCx)`.
+/// Marker: key-first captured handlers, `fn(Key, Cx)` / `fn(Key, DirCx)`.
 #[doc(hidden)]
 pub struct WithKeyMethod<C>(core::marker::PhantomData<C>);
-/// Captured route handlers keyed as synchronous `fn(Key, DirCx)`.
+/// Marker: key-first synchronous dir handlers, `fn(Key, DirCx)`.
 #[doc(hidden)]
 pub struct WithSyncKeyMethod<C>(core::marker::PhantomData<C>);
 
+/// The validator pair for a typed key `C`; this is the bridge that turns a
+/// `FromStr` rejection in a `#[path_captures]` field into route fallthrough.
 pub(super) fn captures_validator<C: FromCaptures>() -> RouteValidator {
     RouteValidator {
         full: Arc::new(|caps: &Captures| C::from_captures(caps).is_ok()),
@@ -66,6 +99,8 @@ pub(super) fn captures_validator<C: FromCaptures>() -> RouteValidator {
     }
 }
 
+/// The validator for capture-less handlers: every path the pattern matches
+/// is accepted.
 pub(super) fn accept_validator() -> RouteValidator {
     RouteValidator {
         full: Arc::new(|_caps: &Captures| true),
@@ -240,6 +275,7 @@ where
     }
 }
 
+/// One row of the dir route table: pattern, erased handler, validator.
 pub(super) struct DirEntry<S> {
     pub(super) pattern: Pattern,
     pub(super) handler: BoxedDirHandler<S>,
@@ -258,6 +294,7 @@ pub(super) struct TreeRefEntry<S> {
     pub(super) validator: RouteValidator,
 }
 
-/// A typed route handle returned at registration.
+/// An opaque route identifier. Reserved in the public surface; no current
+/// registration verb returns one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteHandle(pub u32);

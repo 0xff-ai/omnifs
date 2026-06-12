@@ -4,11 +4,20 @@ Repository-local guidance for working in `omnifs`.
 
 ## Project model
 
-`omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The runtime daemon (binary `omnifsd`, crate `crates/omnifs-daemon`) loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
+`omnifs` is a projected filesystem that mirrors external services into local paths. The runtime daemon (binary `omnifsd`, crate `crates/omnifs-daemon`) loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface. The host owns trust, caching, auth, and I/O; providers own meaning (what paths exist, what bytes they hold). Every consumer of the projected tree (shells, scripts, editors, agents, applications) is served by the same mount; nothing in the system may assume a single privileged consumer.
 
-The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the host `OMNIFS_HOME` tree is bind-mounted writable as the daemon's runtime home. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
+The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API; mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the host `OMNIFS_HOME` tree is bind-mounted writable as the daemon's runtime home. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
 
-The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested. `omnifsd` must stay free of container assumptions: Docker is one launch mechanism, and the daemon will later run host-native when NFSv4/FSKit mounts land.
+The runtime FUSE mount is Linux-only today. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested. `omnifsd` must stay free of container assumptions: Docker is one launch mechanism, and the daemon will later run host-native when NFSv4/FSKit mounts land.
+
+### Architecture direction guardrails
+
+These keep day-to-day changes compatible with where the runtime is going (host-native daemon, additional mount frontends beyond FUSE):
+
+- **Renderer neutrality.** FUSE is one frontend of the projected tree, not its definition. New traversal, caching-policy, coalescing, or invalidation logic must not be expressed in fuser vocabulary or live in `omnifs-fuse` unless it is genuinely kernel-FUSE-specific (inode tables, kernel notifier, reply types). When adding such logic, keep the seam clean so a second frontend can consume the same decision without re-implementing it.
+- **Contract evolution discipline.** The WIT contract (`crates/omnifs-wit/wit/provider.wit`, package `omnifs:provider@0.4.0`) has no negotiation story yet: a contract change strands every built provider binary. Treat WIT changes as breaking releases; batch them, call them out explicitly in PRs, and do not widen the contract for one provider's convenience.
+- **Capability surface conservatism.** Anything that grants provider WASM more authority (new callout families, new preopens, process or socket effects) changes the security model and needs explicit sign-off, not incidental inclusion.
+- **Consumer universality.** Features are judged against every consumer of the mount (the bash-tool compatibility list below), not against one calling pattern. A change that helps one client by breaking `tar` or `find` is wrong.
 
 ## Supported workflow
 
@@ -47,7 +56,7 @@ The root `justfile` is the human command surface. Run `just` to list grouped com
 
 Package selection uses cargo `-p` / `--exclude` globs (`omnifs-provider-*`, `omnifs-tool-*`, `test-provider`), not a hand-maintained crate list.
 
-Host crates such as `omnifs-cli` and `omnifs-host` build for the native target. Providers build directly as components with the Rust `wasm32-wasip2` target. `cargo build --target wasm32-wasip2` emits provider component artifacts directly; WIT bindings are generated by `wit_bindgen::generate!` in each provider's `lib.rs`.
+Host crates such as `omnifs-cli` and `omnifs-host` build for the native target. Providers build directly as components with the Rust `wasm32-wasip2` target. `cargo build --target wasm32-wasip2` emits provider component artifacts directly; WIT bindings are generated through the SDK.
 
 Provider clippy and test commands must include `--target wasm32-wasip2` and `-p` globs:
 
@@ -226,15 +235,17 @@ The runtime image uses Ubuntu 25.10 and `zsh`. Interactive shells should have `l
 
 ## Provider architecture
 
-Each provider is a WASM component implementing the `omnifs:provider` WIT interface. A provider is one `#[omnifs_sdk::provider(...)] impl P` block whose `start(config, r: &mut Router<State, Routes>)` registers routes **imperatively** (there are no per-route attribute macros). The registration verbs:
+Each provider is a WASM component implementing the `omnifs:provider` WIT interface. **Before writing or modifying a provider, read `skills/omnifs-provider-sdk/SKILL.md`** (the operational guide with the flavour decision table), `providers/DESIGN.md` (the flavour doctrine with per-provider rationale), and the crate-level rustdocs in `crates/omnifs-sdk/src/lib.rs`.
 
-- `r.dir(t).handler(h)`: a directory route family
+A provider is one `#[omnifs_sdk::provider(..)]` impl block containing optional `type Config`/`type State` aliases and a synchronous `fn start` that registers routes **imperatively** on a `Router<State>` (there are no per-route attribute macros). The registration verbs:
+
+- `r.dir(t).handler(h)`: a directory route family (one handler serves lookup, list, and read-file intents via `DirCx`)
 - `r.file(t).handler(h)`: a file route family
-- `r.treeref(t).handler(h)`: a subtree-handoff route family that returns a `TreeRef` the host resolves to a bind-mounted clone directory
-- `r.bind::<O>(t)`: attach an Object `O` to a route (object-shaped providers); `O` supplies `load` + `render`, so there is no separate fetcher
-- `r.subtree(t).nest(&s)`: mount a typed subtree registry `s` at `t`; the host parses the prefix captures and dispatches the suffix through `s`
+- `r.treeref(t).handler(h)`: a subtree-handoff route returning a `TreeRef` the host resolves to a bind-mounted tree
+- `r.object::<O>(t, |o| ..)` / `r.file_object::<O>(t, |o| ..)`: attach an Object `O` (object-shaped providers); the key's `load` supplies the canonical payload, and the block declares representations, projected leaves (`o.file("title").project(..)`, `.lazy()` for deferred), and dynamic children
+- `r.attach(prefix, &handle)`: mount a detached `object(..)` handle under a prefix
 
-The supporting attribute macros are top-level only: `#[omnifs_sdk::provider(...)]` (entrypoint), `#[omnifs_sdk::object(kind, represents(...), fields(...), repr_stem)]` (an Object's static facts), `#[omnifs_sdk::config]` (JSON config struct), `#[omnifs_sdk::path_captures]` (a typed multi-segment key), and `#[derive(omnifs_sdk::Endpoint)]` (an outbound host). There is no `#[handlers]`, `#[dir]`, `#[file]`, `#[treeref]`, `#[bind]`, `#[mutate]`, or `#[subtree]` attribute.
+The supporting macros are top-level only: `#[omnifs_sdk::provider(metadata = "..", resources(git, memory_mb, endpoints = [..]), events(timer(..)))]`, `#[omnifs_sdk::object(kind = "..", key = KeyType, canonical = .., parse = .., stability = ..)]`, `#[omnifs_sdk::config]`, `#[omnifs_sdk::path_captures]` (typed multi-segment keys; `Facet<T>` fields are route context excluded from identity; `Option<T>` for keys shared across routes; `#[flatten]` for key composition), and `#[derive(omnifs_sdk::Endpoint)]`. There is no `#[handlers]`, `#[dir]`, `#[file]`, `#[treeref]`, `#[bind]`, `#[mutate]`, or `#[subtree]` attribute, and no `r.bind`/`r.subtree` registration verbs.
 
 The host browse surface is byte-level:
 
@@ -251,14 +262,13 @@ Dispatch (the SDK router under `crates/omnifs-sdk/src/router/`; ADR-0001 §8 is 
 - Per-segment validators (capture parse functions) participate in match candidacy. A parse rejection falls through to the next-most-specific candidate route, not to ENOENT.
 - `lookup` is the authoritative name oracle; `readdir` may be non-exhaustive. An `exhaustive` listing means "these are the names I am aware of," and `lookup(parent, name)` may resolve a name absent from the latest `readdir`.
 - A directory listing merges the literal sibling routes registered at that depth with the handler's enumeration; an auto-navigable listing is `exhaustive=false` whenever a capture sibling exists at the next depth.
+- The provider macro seals the router after `start`: overlapping leaf claims fail initialization.
 
-Providers return either a terminal `op-result`, wrapped in a `provider-return` with `effects`, or suspend with a list of `callout`s (HTTP fetch, git open, fetch-blob, open-archive). The host runs the batch and calls `resume(id, results)`. Providers store continuations keyed by correlation ID. Callouts are strictly request/response; there are no fire-and-forget callouts.
+Providers return either a terminal `op-result`, wrapped in a `provider-return` with `effects`, or suspend with a list of `callout`s (HTTP fetch, git open, fetch-blob, open-archive, read-blob). The host runs the batch and calls `resume(id, results)`. Providers' suspended futures are resumed by the SDK's async runtime; callouts are strictly request/response, and there are no fire-and-forget callouts.
 
-Host-side mutations travel as `effects` on the terminal, not as separate callouts: `canonical` (store object bytes + path index leaves), `fs` (materialize files/dirs into the view cache), and `invalidations` (`object` / `listing`). See the Caching model section. `on-event` handlers return a normal `provider-step`; their `effects.invalidations` are applied at the response boundary. There is no `preload` field and no `event-outcome` record.
+Host-side mutations travel as `effects` on the terminal, not as separate callouts: `canonical` (store object bytes + path index leaves), `fs` (materialize files/dirs into the view cache), and `invalidations` (`object` / `listing`). See the Caching model section. `on-event` handlers return a normal `provider-step`; their `effects.invalidations` are applied at the response boundary. Today only `timer` events dispatch to a handler (declared via `events(timer(Duration, Self::method))`); other provider events return empty effects. There is no `preload` field and no `event-outcome` record.
 
-The WIT reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads.
-
-Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount::mounts::Spec`, resolves it to `omnifs_mount::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
+Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount::mounts::Spec`, resolves it to `omnifs_mount::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up (and sets `deny_unknown_fields`, so mount JSON typos fail initialization loudly; do not loosen this).
 
 ## Caching model
 
@@ -287,14 +297,18 @@ When introducing a feature, prove it does not regress these tools through the sm
 
 ### File attributes
 
-Projected files declare `Size`, `Bytes`, `ReadMode`, `Stability`, and optional version evidence through the SDK's `Projection` API. The host wires `st_size`, FUSE flags/direct I/O, cache layers, durable version-keyed content, learned-size promotion, and post-read invalidation from those attributes.
+Projected files declare `Size`, `Bytes`, `ReadMode`, `Stability`, and optional version evidence through the SDK's projection API. The host wires `st_size`, FUSE flags/direct I/O, cache layers, durable version-keyed content, learned-size promotion, and post-read invalidation from those attributes.
 
-The full design lives in `docs/design/file-attributes.md`, including enum definitions, the structural rule that `Volatile` requires `Ranged`, legal combinations, and byte-source to handler pairing. Read it before changing the projection API or adding a new `#[file]` handler shape.
+The full design lives in `docs/design/file-attributes.md`, including enum definitions, the structural rule that `Volatile` requires `Ranged`, legal combinations, and byte-source to handler pairing. Read it before changing the projection API or adding a new file handler shape.
+
+### Agent legibility
+
+The projected tree's consumers include agents reading it with `ls`/`cat`/`grep`. Prefer designs where the tree explains itself: predictable naming, honest sizes, correct content types and extensions. When a directory's keying scheme is non-obvious, that is a provider schema smell to fix, not a documentation problem to paper over.
 
 ## Codebase expectations
 
 - Keep changes small and local.
-- Preserve the current architecture unless the task explicitly changes it: inode table, router, providers, GitHub cache/scheduler/poller, and clone manager.
+- Preserve the current architecture unless the task explicitly changes it: inode table, router, providers, caches, and clone manager.
 - Do not silently change the auth model or transport model.
 - If switching clone transport from SSH to HTTPS/token, call that out explicitly because it changes the operational contract.
 - When a refactor touches clone, routing, or traversal behavior, compare against the pre-refactor behavior before accepting the new result.
@@ -341,6 +355,8 @@ Avoid adding tests whose main value is only to confirm local plumbing or library
 
 Small unit tests are fine when they guard a non-obvious rule, an edge case with real product meaning, or a boundary that is hard to exercise elsewhere. Before adding a narrow test, be able to say what regression it would catch and why that regression matters.
 
+Providers do not carry in-crate `#[cfg(test)]` modules; verify provider behavior through host-driven integration tests and the live runtime path.
+
 ## Design judgment
 
 - Prefer the simpler end-to-end flow, not the purer local abstraction.
@@ -356,19 +372,22 @@ Small unit tests are fine when they guard a non-obvious rule, an edge case with 
 - Do not reuse an existing abstraction if it changes the behavior model. Semantic fit matters more than code reuse.
 - For protocol changes, write the exact interaction trace first and reject extra hops on hot paths.
 - If something is conceptually one-way, stop before making it `await`-shaped. Fix the boundary instead of forcing it through request/response machinery.
+- WIT changes are flag-day breaking for every built provider until a versioning/negotiation story exists; batch them and call them out explicitly.
 
 ## Mutation protocol
 
-Mutations are not implemented yet.
+Mutations are not implemented yet. The read model stays read-only permanently; writes, when they land, are explicit and reviewable, never implicit side effects of writing to projected files.
 
 If adding them, prefer:
 
 - read model remains read-only
 - drafts live under a draft namespace
-- execution is triggered by moving a prepared transaction directory into a control namespace
+- execution is triggered by an explicit, atomic act (moving a prepared transaction directory into a control namespace, or a git-shaped commit/push flow), producing an auditable record that can be reverted
 
 Do not make projected issue/PR files directly writable as an implicit mutation mechanism.
 
 ## Known follow-ups
 
 - Incomplete fuse module split, `attrs.rs` and `trace.rs`, was reverted. Revisit only if `fuse.rs` growth becomes a maintenance problem.
+- Non-timer provider events (`webhook-received`, `file-changed`, `auth-refreshed`) are currently swallowed with empty effects in the provider macro; surface them before building on event-driven freshness.
+- `FileLeafBuilder::{lazy,immutable,mutable}` mutate the most recently pushed leaf while `.project()` is what pushes (crates/omnifs-sdk/src/router/object.rs), so chaining a modifier before `.project()` flags the previous leaf; the github provider's `.lazy()` call sites hit this. Fix the builder (pending flags applied by `.project()`), then audit provider call sites.

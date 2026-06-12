@@ -1,14 +1,18 @@
-//! Async executor and context for provider handlers.
+//! Handler execution context and callout batching.
 //!
-//! Provides `Cx<State>` for accessing state and yielding callouts from
-//! async handlers. Handlers push callouts onto the yield queue, then
-//! `.await` on them (every callout expects a typed result back). The
-//! runtime drains the yield queue on every Poll outcome and hands
-//! callouts to the host.
+//! [`Cx<State>`](Cx) is what an async handler holds: typed provider state
+//! plus the operation's callout machinery. Awaiting a callout future pushes
+//! the callout onto the yield queue and suspends; the runtime drains the
+//! queue after every poll and hands the batch to the host, which runs it
+//! concurrently and resumes the operation with results in batch order.
+//! Every callout is strictly request/response: each one yielded expects
+//! exactly one typed result back, matched positionally, not by id.
 //!
-//! `join_all` batches N callout futures into a single yield/resume round
-//! trip. Every child future must participate in the same `Cx`'s
-//! yield/deliver protocol and yield exactly one callout per suspension.
+//! [`join_all`] exploits that protocol to fan out N callout futures in one
+//! suspension round instead of N sequential round trips. The positional
+//! matching is also its sharp edge: every child must belong to the same
+//! `Cx` and yield exactly one callout per suspension, or sibling results
+//! silently misalign (see [`join_all`]).
 
 use crate::archives;
 use crate::blob::{BlobId, BlobReader};
@@ -26,10 +30,10 @@ use std::rc::Rc;
 ///
 /// `Cx` separates the op-level callout machinery ([`CxShared`]: the id, the
 /// yield/deliver queues, the host-pushed validator) from the typed provider
-/// `State`. The shared part is reference-counted so a
-/// state-erased view ([`Cx::erase_state`]) drives callouts on the *same*
-/// operation — this is how `Object::load`, which takes `&Cx<()>`, issues
-/// fetches through the operation's queue while the router holds `Cx<S>`.
+/// `State`. The shared part is reference-counted so a state-erased view
+/// ([`Cx::erase_state`]) drives callouts on the *same* operation; this is
+/// how `Object::load`, which takes `&Cx<()>`, issues fetches through the
+/// operation's queue while the router holds `Cx<S>`.
 pub struct Cx<S = ()> {
     shared: Rc<CxShared>,
     state: Rc<RefCell<S>>,
@@ -130,32 +134,47 @@ impl<S> Cx<S> {
         Self::new(id, state)
     }
 
+    /// The host-assigned operation id; the correlation key the host uses to
+    /// resume this operation after a callout batch.
     pub fn id(&self) -> u64 {
         self.shared.id
     }
 
+    /// Read the provider state. The closure scopes the `RefCell` borrow so
+    /// it can never be held across an `.await`; do not call [`Self::state`]
+    /// or [`Self::state_mut`] reentrantly from inside `f`.
     pub fn state<R>(&self, f: impl FnOnce(&S) -> R) -> R {
         let state = self.state.borrow();
         f(&state)
     }
 
+    /// Mutate the provider state. Same borrow discipline as [`Self::state`]:
+    /// the closure scopes the exclusive borrow, and reentrant access from
+    /// inside `f` panics.
     pub fn state_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut state = self.state.borrow_mut();
         f(&mut state)
     }
 
+    /// Raw HTTP callout builder against a fully formed URL. Prefer
+    /// [`Self::endpoint`] for declared upstream hosts.
     pub fn http(&self) -> http::Builder<'_, S> {
         http::Builder::new(self)
     }
 
+    /// Git callout builder; see [`crate::git`] for the open/clone contract.
     pub fn git(&self) -> git::Builder<'_, S> {
         git::Builder::new(self)
     }
 
+    /// Archive-mount callout builder; see [`crate::archives`].
     pub fn archives(&self) -> archives::Builder<'_, S> {
         archives::Builder::new(self)
     }
 
+    /// Reader for a blob already stored host-side. Each read copies bytes
+    /// into guest memory under a host policy cap; see
+    /// [`crate::blob::BlobReader`].
     pub fn blob(&self, id: BlobId) -> BlobReader<'_, S> {
         BlobReader::new(self, id)
     }
@@ -176,21 +195,41 @@ impl<S> Cx<S> {
         self.shared.delivered.borrow_mut().pop_front()
     }
 
+    /// Clone the underlying state handle. For storing state alongside data
+    /// that outlives this `Cx` borrow; the closure-based [`Self::state`] and
+    /// [`Self::state_mut`] are the normal access path because they cannot
+    /// leak a borrow across a suspension point.
     pub fn state_handle(&self) -> Rc<RefCell<S>> {
         Rc::clone(&self.state)
     }
 }
 
-/// Run a collection of futures concurrently and collect their outputs in
-/// order. All queued callouts are yielded in a single batch so the host
-/// runs them in parallel; on resume the futures consume their results
-/// from the delivery queue in FIFO order.
+/// Run a collection of callout futures concurrently and collect their
+/// outputs in input order. All queued callouts are yielded in a single
+/// batch, so the host runs them in parallel and the whole fan-out costs one
+/// suspension round instead of one per child; on resume each child consumes
+/// its result from the delivery queue in FIFO order.
 ///
-/// Every child future MUST participate in the same `Cx`'s yield/deliver
-/// protocol and yield exactly one callout per suspension. Mixing in a
-/// future that yields multiple callouts from one poll, or one bound to a
-/// different `Cx`, will silently misalign the delivered results across
-/// siblings.
+/// Correctness rests on positional alignment, and violations are NOT
+/// detected; they surface as siblings receiving each other's results (or a
+/// type-mismatch error at best). Every child future MUST:
+///
+/// - belong to the same `Cx` as its siblings (results are delivered to one
+///   operation queue; a child bound to another `Cx` never sees its result
+///   and steals nothing from the queue it should have used), and
+/// - yield exactly one callout per suspension, the [`crate::http::CalloutFuture`]
+///   shape. A child that yields two callouts from one poll, or polls
+///   `Pending` without yielding, shifts every later sibling's result.
+///
+/// Plain SDK callout futures (HTTP sends, blob fetches, git opens, archive
+/// opens) and async fns that await them sequentially all satisfy this.
+///
+/// ```ignore
+/// let pages = join_all(
+///     (1..=4).map(|p| fetch_page(&cx, p)),
+/// )
+/// .await; // Vec of per-page results, in page order
+/// ```
 pub fn join_all<F>(futures: impl IntoIterator<Item = F>) -> JoinAll<F>
 where
     F: Future,
@@ -204,6 +243,10 @@ where
     }
 }
 
+/// Future returned by [`join_all`]. Polls children in index order, which is
+/// what keeps yield order (and therefore delivery order) aligned with input
+/// order across suspension rounds; children finish independently and the
+/// output preserves input positions.
 pub struct JoinAll<F: Future> {
     futures: Vec<Option<Pin<Box<F>>>>,
     results: Vec<Option<F::Output>>,

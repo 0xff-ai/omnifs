@@ -1,8 +1,27 @@
-//! HTTP callout result extraction and typed async HTTP builders.
+//! Raw HTTP callout builders and the callout future protocol.
 //!
-//! `send()` returns `http::Response<Vec<u8>>`; use
-//! `ResponseExt::error_for_status` for default 4xx/5xx mapping or
-//! inspect the response directly for custom handling.
+//! `cx.http().get(url).send().await` is the untyped layer beneath
+//! [`crate::endpoint`]; prefer typed endpoints for upstream APIs and reach
+//! for this layer only when the URL is fully dynamic. `send()` resolves to
+//! `http::Response<Vec<u8>>` with no status mapping: use
+//! [`ResponseExt::error_for_status`] for the default 4xx/5xx mapping or
+//! inspect the response directly.
+//!
+//! Sending never performs I/O in the guest. [`CalloutFuture`] yields the
+//! request onto the operation's [`Cx`] queue on its first poll; the runtime
+//! suspends the operation and hands the queued batch to the host, which runs
+//! it and resumes the operation with results in batch order. The future then
+//! consumes exactly one delivered result. That one-callout-per-suspension
+//! shape is what keeps results aligned when [`crate::cx::join_all`] batches
+//! siblings.
+//!
+//! The per-authority rate-limit breaker is checked here, at the lowest
+//! layer, so raw `cx.http()` sends and blob fetches inherit it as well as
+//! typed endpoints: an open 429 window fast-fails in-guest without issuing
+//! a callout. Arming is not symmetric, though: only typed endpoint sends
+//! arm the breaker from a 429 response. A raw send surfaces the 429 as an
+//! error without opening a window; call [`crate::note_rate_limited`] if a
+//! raw path should arm it.
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -13,6 +32,8 @@ use core::time::Duration;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpRequest, HttpResponse};
 
+/// Entry point returned by `cx.http()`. Starts a request against a fully
+/// formed URL; there is no base-URL resolution at this layer.
 pub struct Builder<'cx, S> {
     cx: &'cx Cx<S>,
 }
@@ -31,6 +52,9 @@ impl<'cx, S> Builder<'cx, S> {
     }
 }
 
+/// One raw HTTP request under construction. Builder methods are infallible
+/// by design: validation failures are recorded as a sticky first error and
+/// surfaced by `send`, so chains never need intermediate `?`.
 pub struct Request<'cx, S> {
     cx: &'cx Cx<S>,
     method: Method,
@@ -117,6 +141,12 @@ impl<'cx, S> Request<'cx, S> {
         self
     }
 
+    /// Lower the request into a `fetch` callout. Awaiting the returned
+    /// future suspends the operation; the host executes the fetch and the
+    /// resumed future yields the full response (any status, body buffered in
+    /// guest memory). For large bodies use [`Self::into_blob`] so the bytes
+    /// stay host-side. Fails immediately, without a callout, on a sticky
+    /// builder error or an open rate-limit window for the URL's authority.
     pub fn send(self) -> CalloutFuture<'cx, S, Response<Vec<u8>>> {
         if let Some(error) = self.error {
             return CalloutFuture::ready_error(self.cx, error);
@@ -167,11 +197,12 @@ impl<'cx, S> Request<'cx, S> {
         self
     }
 
-    /// Convert this request into a blob-fetch. The response body lands
-    /// in the host's blob cache rather than crossing the WIT, and the
-    /// returned [`crate::blob::BlobRef`] can be handed to
-    /// `FileContent::blob`, `cx.archives().open(...)`, or
-    /// `cx.blob(id).read()`.
+    /// Convert this request into a blob fetch. The response body lands in
+    /// the host's blob cache rather than crossing the WIT, and the returned
+    /// [`crate::blob::BlobRef`] can be handed to
+    /// [`crate::projection::FileProjection::blob`], `cx.archives().open(..)`,
+    /// or `cx.blob(id).read()`. A cache key is mandatory; chain
+    /// [`BlobRequest::with_cache_key`] before `send`.
     pub fn into_blob(self) -> BlobRequest<'cx, S> {
         BlobRequest {
             inner: self,
@@ -180,6 +211,8 @@ impl<'cx, S> Request<'cx, S> {
     }
 }
 
+/// A `fetch-blob` callout under construction: an HTTP fetch whose response
+/// body stays in the host blob cache. Created via [`Request::into_blob`].
 #[must_use]
 pub struct BlobRequest<'cx, S> {
     inner: Request<'cx, S>,
@@ -197,13 +230,22 @@ impl<'cx, S> BlobRequest<'cx, S> {
         self
     }
 
-    /// Provider-supplied cache key. Two callers using the same key
-    /// share the same blob; the host fetches once.
+    /// Provider-scoped deduplication key, required before `send`. Two
+    /// requests from the same provider using the same key share one blob and
+    /// one upstream fetch; different providers never collide on a key. Embed
+    /// everything that distinguishes the content (id, version, variant) in
+    /// the key, or stale bytes will be served for the colliding request.
     pub fn with_cache_key(mut self, key: impl Into<String>) -> Self {
         self.cache_key = Some(key.into());
         self
     }
 
+    /// Lower into a `fetch-blob` callout. Resolves to a
+    /// [`crate::blob::BlobRef`] carrying metadata only; the body is on the
+    /// host's disk. Fails immediately when no cache key was set, on a sticky
+    /// builder error, or when the authority's rate-limit window is open.
+    /// Note the `BlobRef` carries the upstream status: chain
+    /// [`crate::blob::BlobRef::error_for_status`] for the default mapping.
     pub fn send(self) -> CalloutFuture<'cx, S, crate::blob::BlobRef> {
         if let Some(error) = self.inner.error {
             return CalloutFuture::ready_error(self.inner.cx, error);
@@ -346,6 +388,20 @@ pub(crate) fn expect_callout<T>(
     }
 }
 
+/// The future shape of every callout (fetch, fetch-blob, read-blob,
+/// git-open-repo, open-archive).
+///
+/// Protocol: the first poll pushes the callout onto the owning [`Cx`]'s
+/// yield queue and returns `Pending`; the runtime suspends the operation
+/// and hands the queued batch to the host. After the host resumes the
+/// operation with results in batch order, the next poll pops exactly one
+/// result from the delivery queue and maps it through `extract`.
+///
+/// Invariant: one callout yielded, one result consumed, per suspension.
+/// Results carry no correlation ids, so alignment is purely positional;
+/// this is the contract [`crate::cx::join_all`] relies on to fan out
+/// siblings in a single suspension round. `Ready` short-circuits builder
+/// and breaker errors without touching the queues.
 pub enum CalloutFuture<'cx, S, T> {
     Pending {
         cx: &'cx Cx<S>,

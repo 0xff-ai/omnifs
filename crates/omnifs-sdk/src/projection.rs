@@ -1,4 +1,4 @@
-//! typestate projections (ADR-0001 §7, §10).
+//! Typestate projections (ADR-0001 §7, §10): what handlers return.
 //!
 //! [`FileProjection`] is the author-facing file projection. Its byte-source
 //! constructor fixes a typestate marker (`Inline`/`Body`/`Full`/`Ranged`/
@@ -11,6 +11,11 @@
 //! [`crate::browse::Listing`]/[`crate::browse::Effects`]; the router applies
 //! the carried validator, cursor, and extra-file preloads when it forms the
 //! WIT terminal.
+//!
+//! Projections describe; the host stores. A handler never caches: it attaches
+//! preloads ([`FileProjection::preload_file`], [`DirProjection::preload_file`],
+//! [`DirProjection::preload_dir`], [`DirProjection::store_canonical`]) and the
+//! host decides what to keep, evict, and invalidate.
 
 use crate::browse::{Effects, Entry as BrowseEntry, FileContent, Listing};
 use crate::error::{ProviderError, Result};
@@ -377,17 +382,26 @@ pub enum DirOutcome {
 }
 
 impl DirProjection {
-    /// Every child enumerated.
+    /// Every child enumerated: "these are all the names I am aware of."
+    /// Even so, lookup remains the authoritative name oracle and may
+    /// resolve names this listing omitted; exhaustive is a claim about the
+    /// enumeration, not a promise of future misses.
     pub fn exhaustive(entries: impl IntoIterator<Item = Entry>) -> Self {
         Self::from_entries(entries.into_iter().collect(), true, None)
     }
 
-    /// Capped, non-exhaustive, no cursor.
+    /// Deliberately partial with no cursor: the directory is unbounded or
+    /// expensive to enumerate (reverse-DNS, an unbounded id space) and the
+    /// caller navigates by lookup rather than by listing. Use [`Self::paged`]
+    /// instead when the rest is reachable and worth fetching.
     pub fn open(entries: impl IntoIterator<Item = Entry>) -> Self {
         Self::from_entries(entries.into_iter().collect(), false, None)
     }
 
-    /// Resumable: a partial listing plus the cursor the host echoes back.
+    /// Resumable: a partial page plus an opaque cursor. The host echoes the
+    /// cursor back as the `cursor` argument of the next `list_children` on
+    /// this path ([`crate::handler::DirIntent::List`]); the handler decodes
+    /// it and continues until a page comes back without one.
     pub fn paged(entries: impl IntoIterator<Item = Entry>, cursor: Cursor) -> Self {
         Self::from_entries(entries.into_iter().collect(), false, Some(cursor))
     }
@@ -561,6 +575,8 @@ pub enum EntryKind {
 }
 
 impl Entry {
+    /// A directory child; its contents come from whatever route matches the
+    /// child path when it is later listed.
     pub fn dir(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -569,6 +585,10 @@ impl Entry {
         }
     }
 
+    /// A file child with the default deferred projection: `stat` works
+    /// immediately, bytes load on the first read through the child's own
+    /// route. To ship the bytes along with the listing, pair the entry with
+    /// [`DirProjection::preload_file`] for the same name.
     pub fn file(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

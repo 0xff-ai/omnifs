@@ -1,11 +1,26 @@
 //! Typed async archive-mount callout builders.
 //!
 //! `cx.archives().open(blob).format(ArchiveFormat::TarGz).strip_prefix("foo/").send()`
-//! asks the host to extract a stored blob to disk and returns a
-//! [`TreeRef`]. Provider handlers that want to expose an archive's
-//! contents return that `TreeRef` from a `#[treeref]` route. The host
-//! resolves it through the same path used by `git-open-repo` and serves
-//! the directory through FUSE bind-mounts.
+//! asks the host to extract a stored blob to disk and returns a [`TreeRef`].
+//! A handler registered via `r.treeref(t).handler(h)` returns that `TreeRef`
+//! and the host resolves it the same way as a `git-open-repo` tree, serving
+//! the extracted directory through FUSE bind mounts. Neither the archive
+//! bytes nor the extracted entries ever enter guest memory; the provider
+//! only brokers the handle.
+//!
+//! The blob must already be in the host blob cache (see [`crate::blob`]);
+//! fetch it first with `.into_blob().with_cache_key(..)`. Typical shape:
+//!
+//! ```ignore
+//! let blob = cx
+//!     .endpoint::<ArxivWeb>()
+//!     .get(source_path)
+//!     .into_blob()
+//!     .cache_key(format!("arxiv/papers/{id}/{version}/source.tar.gz"))
+//!     .fetch()
+//!     .await?;
+//! let tree = cx.archives().open(blob.id).send().await?;
+//! ```
 
 use crate::blob::BlobId;
 use crate::cx::Cx;
@@ -15,7 +30,9 @@ use omnifs_wit::provider::types::{
     ArchiveFormat as WitArchiveFormat, ArchiveOpenRequest, Callout, CalloutResult,
 };
 
-/// Archive formats accepted by `open-archive`.
+/// Archive formats accepted by `open-archive`. A closed set on purpose:
+/// the host owns extraction, so new formats are added to the WIT enum and
+/// here together rather than sniffed from bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
     /// Gzip-compressed tar archive.
@@ -85,7 +102,12 @@ impl<'cx, S> OpenRequest<'cx, S> {
         self
     }
 
-    /// Ask the host to extract the archive and return a tree reference.
+    /// Lower into an `open-archive` callout. Awaiting suspends the
+    /// operation; the host extracts the blob to disk and the resumed future
+    /// yields the [`TreeRef`] to return from a treeref route. Re-derive the
+    /// handle per operation rather than persisting it: the host caches
+    /// extraction by blob, format, and strip prefix, so repeated opens are
+    /// cheap.
     pub fn send(self) -> CalloutFuture<'cx, S, TreeRef> {
         let request = ArchiveOpenRequest {
             blob: self.blob.raw(),

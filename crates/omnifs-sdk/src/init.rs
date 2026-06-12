@@ -1,22 +1,22 @@
 //! Provider initialization builder.
 //!
-//! Provides a typed builder for constructing the initial provider state
-//! and metadata returned from `init`.
+//! [`Init`] pairs a provider's initial typed state with the `ProviderInfo`
+//! metadata (name, version, optional description) reported to the host at
+//! startup. It is a plain data builder: construct with [`Init::new`],
+//! optionally chain [`Init::description`], and split with
+//! [`Init::into_parts`].
 
 use omnifs_wit::provider::types::ProviderInfo;
 
-/// Initialization context for a provider.
-///
-/// This type wraps the provider state and metadata, allowing a builder-style
-/// API for setting the provider name, version, and description before
-/// returning from `init`.
+/// A provider's initial state bundled with its `ProviderInfo` metadata.
 pub struct Init<S> {
     state: S,
     info: ProviderInfo,
 }
 
 impl<S> Init<S> {
-    /// Create a new initialization context with the given state and metadata.
+    /// Bundle the initial state with a name and version; the description
+    /// starts empty.
     pub fn new(state: S, name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             state,
@@ -35,10 +35,7 @@ impl<S> Init<S> {
         self
     }
 
-    /// Consume the Init and return the state and provider info parts.
-    ///
-    /// This is used by the macro to extract the values to return from
-    /// the generated `init` function.
+    /// Split into the state and `ProviderInfo` halves.
     pub fn into_parts(self) -> (S, ProviderInfo) {
         (self.state, self.info)
     }

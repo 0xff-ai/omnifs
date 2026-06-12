@@ -1,11 +1,38 @@
+//! Projected file attributes: declared size, stability, and version
+//! evidence, plus the validation rules that keep projections honest.
+//!
+//! These attributes are the contract the host derives filesystem behavior
+//! from: the `st_size` reported before any read, kernel attribute/content
+//! caching policy, direct I/O and the ranged live path for volatile files,
+//! and version-keyed durable content caching. Declare only what you actually
+//! know; the host learns the rest (for example the real size after the
+//! first read). Lying here breaks standard tools: an inflated size breaks
+//! `tail -c`, a false `Immutable` serves stale bytes forever.
+
 use crate::error::{ProviderError, Result};
 use omnifs_core::ContentType;
 use omnifs_wit::provider::types as wit_types;
 
+/// Per-projection inline byte cap (64 KiB), enforced by
+/// [`FileProj::validate`]. Content larger than this must be a deferred
+/// projection or a blob; it cannot ride inline in a terminal.
 pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
+/// Aggregate eager byte cap (512 KiB) the host enforces across all inline
+/// payloads of one terminal response. Individual projections can each pass
+/// [`MAX_PROJECTED_BYTES`] yet still overflow this together; trim preloads
+/// rather than splitting one logical answer across refetches.
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
+/// Maximum [`VersionToken`] length in bytes, enforced by
+/// [`VersionToken::validate`].
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 
+/// Declared metadata for a projected file: size, stability, and optional
+/// version evidence.
+///
+/// A version token lets the host key durable content by version and lets
+/// conditional reloads answer cheaply ([`crate::object::Load::Unchanged`]).
+/// It carries the most weight on `Mutable` content, where it is the proof
+/// that cached bytes are still current.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileAttrs {
     pub size: Size,
@@ -28,6 +55,8 @@ impl FileAttrs {
         self
     }
 
+    /// The `st_size` value implied by the declared size; see
+    /// [`Size::st_size`] for the placeholder rule.
     pub fn st_size(&self) -> u64 {
         self.size.st_size()
     }
@@ -41,6 +70,12 @@ impl FileAttrs {
     }
 }
 
+/// Opaque version evidence for a file or object: an `ETag`, commit SHA,
+/// updated-at timestamp, or any string that changes when the content does.
+///
+/// Must be non-empty and at most [`MAX_VERSION_TOKEN_BYTES`] bytes
+/// ([`Self::validate`]); the same type doubles as the object-layer
+/// conditional-request validator ([`crate::object::Validator`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionToken(pub String);
 
@@ -76,6 +111,14 @@ impl From<&str> for VersionToken {
     }
 }
 
+/// Declared file size: the truthful byte length, "non-empty but length
+/// unknown", or nothing known at all.
+///
+/// Declare `Exact` only when you know the precise length without an extra
+/// upstream call; `NonZero` when you know content exists (a field is
+/// present) but not its size; `Unknown` otherwise. Do not fabricate exact
+/// sizes: stat-driven tools (`tail -c`, `rsync --size-only`, `wc -c` on
+/// stat-only paths) trust them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Size {
     Exact(u64),
@@ -84,6 +127,14 @@ pub enum Size {
 }
 
 impl Size {
+    /// The `st_size` to report before any read: the exact length, or the
+    /// placeholder `1` for `NonZero` and `Unknown`.
+    ///
+    /// The placeholder is deliberately tiny and non-zero: zero would make
+    /// size-checking tools skip the file as empty, and a large fake value
+    /// (the old 256 MiB placeholder) broke `tail -n` and friends. The host
+    /// replaces it with the learned size once content has been
+    /// materialized.
     pub fn st_size(&self) -> u64 {
         match self {
             Self::Exact(size) => *size,
@@ -92,6 +143,14 @@ impl Size {
     }
 }
 
+/// A projected file: attributes plus a byte source, as it appears in
+/// directory entries and `fs` effects.
+///
+/// Provider authors usually build the higher-level
+/// [`crate::projection::FileProjection`] instead; `FileProj` is what it
+/// lowers onto. Every construction path runs [`Self::validate`] before
+/// crossing the WIT, so an illegal combination fails the operation rather
+/// than reaching the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileProj {
     pub attrs: FileAttrs,
@@ -100,6 +159,8 @@ pub struct FileProj {
 }
 
 impl FileProj {
+    /// Carry the bytes now. Size is set to the exact byte length, which is
+    /// the only legal size for inline content.
     pub fn inline(
         bytes: impl Into<Vec<u8>>,
         stability: Stability,
@@ -117,6 +178,11 @@ impl FileProj {
         }
     }
 
+    /// Declare the file without carrying bytes; content is served later
+    /// through `read-file` (`ReadMode::Full`) or the
+    /// `open-file`/`read-chunk` session (`ReadMode::Ranged`). Declare
+    /// honest attrs: this is the correct shape when a listing payload does
+    /// not contain the leaf's full content.
     pub fn deferred(size: Size, read: ReadMode, stability: Stability) -> Self {
         Self {
             attrs: FileAttrs::new(size, stability),
@@ -143,6 +209,15 @@ impl FileProj {
         self
     }
 
+    /// Enforce the structural legality rules:
+    ///
+    /// - `Stability::Volatile` requires `ProjBytes::Deferred { read:
+    ///   ReadMode::Ranged }`: bytes that can change mid-read may only be
+    ///   served through the ranged live path, never inline or full-read.
+    /// - Inline bytes require `Size::Exact` equal to the actual byte
+    ///   length, and at most [`MAX_PROJECTED_BYTES`].
+    /// - A version token, when present, must be non-empty and within
+    ///   [`MAX_VERSION_TOKEN_BYTES`].
     pub fn validate(&self) -> Result<()> {
         self.attrs.validate()?;
 
@@ -193,24 +268,49 @@ impl FileProj {
     }
 }
 
+/// Byte source for a projected file: bytes carried now, or a promise to
+/// serve them on demand in the given [`ReadMode`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjBytes {
     Inline(Vec<u8>),
     Deferred { read: ReadMode },
 }
 
+/// Byte source for a completed read answer: inline bytes, or a handle to a
+/// host-resident blob (the bytes never cross the WIT). Deferred is
+/// deliberately not an option here: a read must answer with concrete bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadFileBytes {
     Inline(Vec<u8>),
     Blob(crate::blob::BlobId),
 }
 
+/// How deferred content is read: one whole-file `read-file`, or arbitrary
+/// `(offset, length)` chunks through an `open-file`/`read-chunk` session
+/// backed by a [`crate::handler::RangeReader`]. This declares provider
+/// capability, not cache policy; the host may still read a ranged file in
+/// full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadMode {
     Full,
     Ranged,
 }
 
+/// How the bytes behave over time for one logical identity; the host
+/// derives its caching policy from this.
+///
+/// - `Immutable`: the bytes never change for this path identity (a pinned
+///   version, a content-addressed artifact). The host may cache content and
+///   learned size indefinitely.
+/// - `Mutable`: bytes may change between reads but not during one. Durable
+///   caching is tied to version evidence and invalidations.
+/// - `Volatile`: bytes may change while being observed (`tail -f` shapes).
+///   The host serves it through direct I/O and the ranged live path and
+///   never caches content or learned size. Structurally requires a
+///   deferred ranged projection ([`FileProj::validate`]).
+///
+/// Declaring `Mutable` when unsure is safe; declaring `Immutable` when the
+/// content can change pins stale bytes in caches with no expiry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stability {
     Immutable,

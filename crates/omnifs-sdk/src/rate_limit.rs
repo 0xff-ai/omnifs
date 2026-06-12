@@ -1,3 +1,21 @@
+//! Per-authority rate-limit circuit breaker.
+//!
+//! One breaker per provider instance, shared by every HTTP send path in this
+//! crate (raw `cx.http()`, typed endpoints, and blob fetches). A 429 arms a
+//! cooldown window for the request URL's authority, sized by `Retry-After`
+//! when present, else by the endpoint's
+//! [`crate::endpoint::RateLimitPolicy`], else by a small default; while the
+//! window is open, sends to that authority fail in-guest with a
+//! rate-limited error carrying the remaining cooldown, without issuing a
+//! callout. The first response with status < 400 disarms the authority, and
+//! the whole breaker is cleared on provider shutdown so a window never
+//! leaks across instance teardown.
+//!
+//! Providers do not drive this module directly; the send paths do. The one
+//! provider-facing hook is [`note_rate_limited`] (re-exported at the crate
+//! root) for upstream-specific throttle signals the generic 429 path cannot
+//! see, such as GitHub's `403` with `x-ratelimit-remaining: 0`.
+
 use core::time::Duration;
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -18,6 +36,9 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(3600);
 
 type BreakerMap = HashMap<String, Instant, BuildHasherDefault<DefaultHasher>>;
 
+/// Map of authority to the instant its 429 window closes. Single-threaded
+/// (`RefCell`) because provider guests run one operation at a time; access
+/// goes through the thread-local in [`with_breaker`].
 pub struct RateLimitBreaker {
     open: RefCell<BreakerMap>,
 }
@@ -44,7 +65,10 @@ impl RateLimitBreaker {
         None
     }
 
-    /// Arm after a 429. `retry_after` is the parsed Retry-After if present.
+    /// Arm after a 429. `retry_after` is the parsed Retry-After (or the
+    /// endpoint's policy cooldown) if present; without it the default
+    /// cooldown applies. The window is clamped so an absurd upstream value
+    /// can neither overflow `Instant` arithmetic nor wedge the breaker open.
     pub fn record_429(&self, authority: &str, retry_after: Option<Duration>) {
         let cooldown = retry_after.unwrap_or(DEFAULT_COOLDOWN).min(MAX_COOLDOWN);
         self.open

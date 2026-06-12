@@ -1,16 +1,20 @@
 //! Typed async blob callout builders.
 //!
-//! `cx.http().get(url).into_blob().with_cache_key(key).send()` lands the
-//! response body in the host's blob cache and returns a `BlobRef` with
-//! metadata only. The bytes never cross the WIT boundary unless the
-//! provider explicitly asks for them via `cx.blob(id).read().await`;
-//! each read response is capped by host policy because those bytes
-//! cross into guest memory.
+//! Blobs keep large bodies host-side by design.
+//! `cx.http().get(url).into_blob().with_cache_key(key).send()` (or the typed
+//! [`crate::endpoint::RequestBuilder::into_blob`]) lands the response body in
+//! the host's blob cache and returns a [`BlobRef`] carrying metadata only.
+//! The cache key is provider-scoped: reusing a key from the same provider
+//! deduplicates the fetch, and two providers never collide on a key.
 //!
-//! A `BlobRef` is consumed by:
-//! - `FileContent::blob(blob)`: serve the bytes verbatim from a `#[file]` handler.
-//! - `cx.archives().open(blob).format(..).send()`: mount as a directory tree.
-//! - `cx.blob(blob).read().await`: bring a range of bytes across.
+//! A stored blob is consumed by:
+//! - [`crate::projection::FileProjection::blob`]: serve the bytes verbatim
+//!   from a file route; the host reads them without guest involvement.
+//! - `cx.archives().open(blob).format(..).send()`: mount as a directory tree
+//!   (see [`crate::archives`]).
+//! - `cx.blob(blob).read().await`: bring (a range of) the bytes across the
+//!   WIT into guest memory. Use sparingly; each response is capped by host
+//!   policy because those bytes cross into the guest.
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -19,7 +23,9 @@ use omnifs_wit::provider::types::{
     BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header, ReadBlobRequest,
 };
 
-/// Runtime-local handle for a blob stored in the host cache.
+/// Runtime-local handle for a blob stored in the host cache. Valid only for
+/// the current provider instance; do not persist it or derive paths from it.
+/// The cache key, not this id, is the stable name for re-resolving a blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlobId(pub(crate) u64);
 
@@ -38,9 +44,10 @@ impl From<u64> for BlobId {
 
 /// Metadata returned by a blob fetch.
 ///
-/// The response body stays in the host cache. Use [`Self::id`] when
-/// passing the blob to `FileContent::blob`, archive opening, or
-/// [`BlobReader`].
+/// The response body stays in the host cache. Use [`Self::id`] when passing
+/// the blob to [`crate::projection::FileProjection::blob`], archive opening,
+/// or [`BlobReader`]. The fetch resolves for any upstream status; check
+/// [`Self::error_for_status`] before treating the blob as valid content.
 #[derive(Clone, Debug)]
 pub struct BlobRef {
     /// Runtime-local id of the cached blob.
@@ -129,9 +136,11 @@ pub(crate) fn extract_blob(result: CalloutResult) -> Result<BlobRef> {
 /// Builder returned by `cx.blob(id)`.
 ///
 /// Reads copy cached bytes back into guest memory, so each response is
-/// capped by host policy. Serve large files with `FileContent::blob`
-/// or expose archives as `TreeRef`s when the provider does not need
-/// the bytes in memory.
+/// capped by host policy. Serve large files with
+/// [`crate::projection::FileProjection::blob`] or expose archives as
+/// [`crate::handler::TreeRef`]s when the provider does not need the bytes
+/// in memory; reach for a read only when the provider must parse the
+/// content itself.
 pub struct BlobReader<'cx, S> {
     cx: &'cx Cx<S>,
     blob: BlobId,

@@ -1,3 +1,13 @@
+//! Provider error model: a typed kind, a message, and retry metadata that
+//! lower onto the WIT `provider-error` record.
+//!
+//! Retryability is derived from the kind at construction time and cannot be
+//! set independently: `Network`, `Timeout`, and `RateLimited` are retryable;
+//! every other kind is terminal for the operation. Pick the kind that tells
+//! the host the truth about whether retrying can help, not the one that
+//! matches the upstream library's error name. [`ProviderError::from_http_status`]
+//! does this mapping for plain HTTP status codes.
+
 use core::time::Duration;
 use omnifs_wit::provider::types::{
     CalloutError, ErrorKind, OpResult, ProviderError as WitProviderError, ProviderReturn,
@@ -7,7 +17,13 @@ use std::fmt;
 /// Provider result type alias used throughout the SDK and generated code.
 pub type Result<T> = core::result::Result<T, ProviderError>;
 
-/// Provider-side error that can be converted into WIT `OpResult::Error`.
+/// Provider-side error that lowers to WIT `OpResult::Error`.
+///
+/// Construct through the per-kind constructors ([`Self::not_found`],
+/// [`Self::network`], ...) or [`Self::from_http_status`]; there is no public
+/// constructor that takes a kind directly. The `retryable` flag is fixed by
+/// the kind; [`Self::with_retry_after`] is the only post-construction knob
+/// and only carries meaning on a rate-limited error.
 #[derive(Clone, Debug)]
 pub struct ProviderError {
     pub(crate) kind: ProviderErrorKind,
@@ -19,6 +35,16 @@ pub struct ProviderError {
     pub(crate) retry_after: Option<Duration>,
 }
 
+/// Error taxonomy mirroring the WIT `error-kind` variants, plus
+/// `Unimplemented` which exists only SDK-side.
+///
+/// Retryable kinds: `Network`, `Timeout`, `RateLimited`. Everything else
+/// tells the host the operation cannot succeed by retrying.
+///
+/// `Unimplemented` and `Internal` both lower to the WIT `internal` kind;
+/// the distinction survives only in the message and SDK-side `kind()`
+/// checks. Their `Display` output also omits the `[kind; retryable=..]`
+/// prefix that every other kind carries.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProviderErrorKind {
     NotFound,
@@ -152,6 +178,13 @@ impl ProviderError {
         Self::new(ProviderErrorKind::Unimplemented, message)
     }
 
+    /// Map a bare HTTP status code to an error of the matching kind.
+    ///
+    /// The table: 401 permission-denied, 403 denied, 404 not-found,
+    /// 408 timeout, 429 rate-limited, any other 4xx invalid-input, 5xx
+    /// network (retryable: the upstream may recover), anything else
+    /// internal. This does not read `Retry-After`; for a 429 with a
+    /// backoff header, chain [`Self::with_retry_after`] yourself.
     pub fn from_http_status(status: u16) -> Self {
         match status {
             401 => Self::permission_denied(format!("HTTP {status}")),
