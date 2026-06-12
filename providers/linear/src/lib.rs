@@ -156,7 +156,9 @@ impl LinearProvider {
             o.file("state").project(Issue::state)?;
             o.file("priority").project(Issue::priority)?;
             o.file("assignee").project(Issue::assignee)?;
-            o.file("description.md").project(Issue::description)?;
+            o.file("description.md")
+                .lazy()
+                .project(Issue::description)?;
             Ok(())
         })?;
         Ok(())
