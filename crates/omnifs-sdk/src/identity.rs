@@ -1,16 +1,30 @@
+//! Logical object identity: what makes two paths "the same object".
+//!
+//! A [`LogicalId`] (object kind plus identity captures) is the key the
+//! host caches canonical bytes under. Paths that should share one cached
+//! object must derive the same id; captures that vary across route aliases
+//! without changing the underlying object (a version selector, a category
+//! filter) are wrapped in [`Facet`] so they stay out of identity.
+
 use std::fmt;
 use std::ops::Deref;
 
 use crate::object::ObjectKind;
 use omnifs_wit::provider::types as wit;
 
-/// Identity captures excluded from the logical id. Macro-emitted on keys.
+/// The identity-contributing captures of a key, in declaration order.
+/// Emitted by `#[path_captures]`, which skips [`Facet`] fields.
 pub trait IdentityCaptures {
     fn identity_captures(&self) -> Vec<(&'static str, String)>;
 }
 
 /// A provider-local logical identity: an object kind plus its identity captures
 /// in declaration order.
+///
+/// Equality is order-sensitive: the capture sequence is part of the
+/// identity, so reordering fields in a `#[path_captures]` struct changes
+/// every id it produces (and orphans previously cached objects). The
+/// `Display` form is `kind|name=value|...`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogicalId {
     pub kind: ObjectKind,
@@ -74,7 +88,15 @@ impl From<&LogicalId> for wit::LogicalId {
     }
 }
 
-/// Route-context capture excluded from identity. `Deref` so handlers read `*facet`.
+/// A route-context capture excluded from identity. `Deref` so handlers
+/// read `*facet`.
+///
+/// Wrap a key field in `Facet` when the segment selects a view of the
+/// object rather than a different object: every value of the facet then
+/// resolves to the same [`LogicalId`] and shares one cached canonical
+/// (e.g. `/{paper}/@latest` and `/{paper}/v3` both load the paper once).
+/// When the facet's type exposes a finite [`crate::captures::PathSegment::choices`]
+/// set, the SDK also expands view leaves across every choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Facet<T>(pub T);
 

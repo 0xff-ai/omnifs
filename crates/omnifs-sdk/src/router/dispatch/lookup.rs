@@ -10,6 +10,33 @@ use super::super::pattern::{parse_child_segment, parse_provider_path};
 use super::super::register::Router;
 
 impl<S> Router<S> {
+    /// Resolve one child name under an absolute parent path.
+    ///
+    /// Lookup is the authoritative name oracle: a found result here is
+    /// binding even when the name never appeared in a listing, which is what
+    /// lets capture routes resolve arbitrary names (`cd /github/torvalds`)
+    /// without enumeration. Resolution order:
+    ///
+    /// 1. A treeref route at the child path: run the handler and hand the
+    ///    subtree to the host.
+    /// 2. A dir route at the child path: answer statically, without running
+    ///    the child's handler, unless a file route also matches with
+    ///    strictly higher precedence (then the file claims the name).
+    /// 3. An object anchored at the child path: a dir-shaped anchor answers
+    ///    as a static directory; a file-shaped one as its file entry.
+    /// 4. A representation or field leaf of an object anchored at the
+    ///    parent.
+    /// 5. A file route at the child path: answer statically.
+    /// 6. An auto-navigable literal prefix: a directory synthesized from the
+    ///    route table alone.
+    /// 7. Fallback: run the parent's dir handler with
+    ///    [`DirIntent::Lookup`] and resolve the name against its enumeration
+    ///    merged with static siblings; this is how dynamically enumerated
+    ///    children (which match no route of their own) resolve.
+    ///
+    /// Static answers carry their sibling entries and an `exhaustive` flag
+    /// that is false whenever a capture sibling exists at this depth, so the
+    /// host knows the names it cached are not the whole story.
     pub async fn lookup_child(&self, cx: &Cx<S>, parent: &str, name: &str) -> Result<Lookup> {
         debug_assert!(
             parent.starts_with('/'),

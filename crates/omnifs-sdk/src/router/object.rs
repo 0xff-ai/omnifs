@@ -1,4 +1,27 @@
 //! Object route registration, read path, and view-leaf expansion.
+//!
+//! An object route binds a typed [`Object`] to a template: the key parsed
+//! from the captures both identifies the resource ([`Key::anchor`]) and
+//! loads it ([`Key::load`]); there is no separate fetcher. The block passed
+//! to `r.object::<O>(..)` declares what the anchor directory contains:
+//!
+//! - [`DirObjectBlock::representations`]: the canonical source leaf plus one
+//!   rendered leaf per render set entry (`item.json`, `item.md`); mandatory.
+//! - [`DirObjectBlock::file`] with [`FileLeafBuilder::project`]: a field leaf
+//!   computed from the loaded value (`title`, `state`).
+//! - [`DirObjectBlock::file`] / [`DirObjectBlock::dir`] with `.handler(..)`:
+//!   ordinary handler leaves nested under the anchor; these become real
+//!   file/dir routes and bypass the object read path.
+//!
+//! The cache contract (the host owns all caching; the SDK only emits
+//! effects): every fresh [`Key::load`] produces a `canonical-store` effect
+//! carrying the verbatim upstream bytes, the validator, and the expanded
+//! view-leaf paths that map back to the object's logical id. On a later
+//! read the host pushes those bytes back as a [`CachedCanonical`] and the
+//! SDK re-renders without an upstream call. Facets (identity-neutral
+//! captures with finite choices) multiply the view leaves, so loading
+//! `/issues/open/7/title` also teaches the host `/issues/closed/7/title`
+//! and `/issues/all/7/title`.
 
 use super::pattern::{CaptureLocation, Pattern};
 use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
@@ -22,13 +45,19 @@ use super::pattern::parse_pattern;
 type ObjectState<O> = <<O as Object>::Key as Key>::State;
 
 /// A detached object subtree, replayable at multiple attach prefixes.
+///
+/// Built by [`object()`]; mounted with
+/// [`Router::attach`](super::Router::attach). The spec is shared by `Rc`, so
+/// attaching the same handle twice replays one definition at two prefixes,
+/// each with its own leaf claims.
 pub struct ObjectHandle<O: Object> {
     pub(super) template: &'static str,
     pub(super) shape: ObjectShape,
     pub(super) spec: std::rc::Rc<ObjectSpec<O>>,
 }
 
-/// Internal registration state built by an object block.
+/// Internal registration state built by an object block, independent of any
+/// attach prefix; [`mount_object`] specializes it per mount.
 #[derive(Clone)]
 pub(super) struct ObjectSpec<O: Object> {
     pub when: Option<fn(&O::Key) -> bool>,
@@ -38,12 +67,23 @@ pub(super) struct ObjectSpec<O: Object> {
     pub leaves: Vec<ObjectLeaf<O>>,
 }
 
+/// One declared child of an object anchor.
+///
+/// `Representation` and `Projected` leaves are served through the object
+/// read path (rendered or projected from canonical bytes) and contribute
+/// view leaves to the canonical-store effect. `HandlerFile`/`HandlerDir`
+/// leaves are ordinary routes that merely live under the anchor template;
+/// they never touch the canonical bytes.
 pub(super) enum ObjectLeaf<O: Object> {
+    /// A `stem.ext` leaf: the canonical bytes themselves or a registered
+    /// render of them.
     Representation {
         leaf_name: String,
         ct: ContentType,
         stability: Stability,
     },
+    /// A field leaf computed from the parsed object value. `lazy` excludes it
+    /// from listing-time eager preloads; reads still serve it.
     Projected {
         leaf_name: String,
         project: ProjectFn<O>,
@@ -110,7 +150,9 @@ impl<O: Object> Clone for ObjectLeaf<O> {
     }
 }
 
-/// Dir-shaped object block builder.
+/// Dir-shaped object block builder: the anchor is a directory whose children
+/// are the declared representations, projected fields, and handler leaves.
+/// [`Self::representations`] must be called or the block fails to finish.
 pub struct DirObjectBlock<O: Object> {
     template: &'static str,
     when: Option<fn(&O::Key) -> bool>,
@@ -121,16 +163,23 @@ pub struct DirObjectBlock<O: Object> {
     _marker: core::marker::PhantomData<O>,
 }
 
-/// File-shaped object block builder.
+/// File-shaped object block builder: the anchor presents as a file. Only
+/// representations and a `when` predicate may be declared; there is no
+/// `file()`/`dir()` surface because a file anchor has no children.
 pub struct FileObjectBlock<O: Object> {
     inner: DirObjectBlock<O>,
 }
 
+/// A pending file leaf named in [`DirObjectBlock::file`]; finish with
+/// [`Self::project`] (a field computed from the object value) or
+/// [`Self::handler`] (an ordinary file route under the anchor).
 pub struct FileLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
 }
 
+/// A pending dir leaf named in [`DirObjectBlock::dir`]; finish with
+/// [`Self::handler`].
 pub struct DirLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
@@ -150,6 +199,15 @@ impl<O: Object> DirObjectBlock<O> {
         })
     }
 
+    /// Declare the anchor's representation leaves; mandatory, once per block.
+    ///
+    /// Registers `stem.<ext>` for the canonical content type (e.g.
+    /// `item.json` when [`Object::canonical_content_type`] is JSON) plus one
+    /// `stem.<ext>` per entry in the render set `R` (e.g. `(Markdown,)`
+    /// adds `item.md`; `()` adds none). Each leaf is claimed against
+    /// [`Router::seal`](super::Router::seal). All representation leaves
+    /// share [`Object::default_stability`]; renders are recomputed from
+    /// cached canonical bytes, never fetched separately.
     pub fn representations<R: RenderSet<O>>(
         &mut self,
         stem: &'static str,
@@ -190,14 +248,22 @@ impl<O: Object> DirObjectBlock<O> {
         Ok(self)
     }
 
+    /// Begin a file leaf under the anchor. `name` may be a multi-segment
+    /// suffix with captures (`"comments/{idx}"`) when finished with
+    /// `.handler(..)`; projected leaves use a single literal name.
     pub fn file(&mut self, name: &'static str) -> FileLeafBuilder<'_, O> {
         FileLeafBuilder { block: self, name }
     }
 
+    /// Begin a directory leaf under the anchor; finished with `.handler(..)`
+    /// (there is no projected-dir form).
     pub fn dir(&mut self, name: &'static str) -> DirLeafBuilder<'_, O> {
         DirLeafBuilder { block: self, name }
     }
 
+    /// Gate the whole object on a key predicate. A key that fails the
+    /// predicate behaves as not-found for both listing and reads; no load is
+    /// attempted.
     pub fn when(&mut self, pred: fn(&O::Key) -> bool) -> Result<&mut Self> {
         self.when = Some(pred);
         Ok(self)
@@ -248,6 +314,13 @@ impl<O: Object> FileObjectBlock<O> {
 }
 
 impl<'a, O: Object> FileLeafBuilder<'a, O> {
+    /// Register a projected field leaf: `method` maps the loaded object value
+    /// to the leaf's bytes (`fn(&O) -> Result<FileContent>`), so reads can be
+    /// served from cached canonical bytes with no upstream call. The default
+    /// content type is `text/plain`; default stability is
+    /// [`Object::default_stability`]; the leaf is eager (preloaded into the
+    /// view cache when the anchor is listed) unless flagged lazy. Eager
+    /// projections must produce inline bytes; listing fails otherwise.
     pub fn project(self, method: ProjectFn<O>) -> Result<&'a mut DirObjectBlock<O>> {
         let pattern = parse_pattern(&format!(
             "{}/{}",
@@ -265,6 +338,12 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         Ok(self.block)
     }
 
+    /// Register an ordinary file handler under the anchor (e.g. a comment
+    /// leaf `"comments/{idx}"`, a diff served from a separate fetch). The
+    /// leaf is mounted as a real file route at `<anchor>/<name>`, dispatched
+    /// through the plain file tables, and never touches the object's
+    /// canonical bytes. The handler's captures include the anchor's
+    /// captures plus any in `name`.
     pub fn handler<Marker, H>(self, h: H) -> Result<&'a mut DirObjectBlock<O>>
     where
         H: IntoFileHandler<ObjectState<O>, Marker>,
@@ -285,6 +364,16 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         Ok(self.block)
     }
 
+    /// Exclude a projected leaf from listing-time eager preloads; reads still
+    /// serve it from canonical bytes. Use for large fields (an issue body)
+    /// where preloading every list row would bloat the view cache.
+    ///
+    /// Gotcha: this mutates the most recently *pushed* `Projected` leaf, and
+    /// `.project()` is what pushes (it also consumes the builder, so it must
+    /// come last in a chain). In `o.file("body").lazy().project(f)` the flag
+    /// therefore lands on the projected leaf registered by the previous
+    /// call, not on `"body"`. It is a no-op when the last pushed leaf is not
+    /// a projection.
     pub fn lazy(self) -> Self {
         if let Some(ObjectLeaf::Projected { lazy, .. }) = self.block.leaves.last_mut() {
             *lazy = true;
@@ -292,6 +381,9 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         self
     }
 
+    /// Set the most recently pushed projected leaf's stability to immutable.
+    /// Same ordering gotcha as [`Self::lazy`]: it targets the last pushed
+    /// `Projected` leaf, not the name passed to the current `.file(..)`.
     pub fn immutable(self) -> Self {
         if let Some(ObjectLeaf::Projected { stability, .. }) = self.block.leaves.last_mut() {
             *stability = Stability::Immutable;
@@ -299,6 +391,8 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         self
     }
 
+    /// Set the most recently pushed projected leaf's stability to mutable.
+    /// Same ordering gotcha as [`Self::lazy`].
     pub fn mutable(self) -> Self {
         if let Some(ObjectLeaf::Projected { stability, .. }) = self.block.leaves.last_mut() {
             *stability = Stability::Mutable;
@@ -306,6 +400,10 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
         self
     }
 
+    /// Assert that the most recently registered leaf is a `.handler` file
+    /// leaf; registers nothing itself (volatility actually comes from the
+    /// handler returning a ranged projection with volatile attrs). Errors
+    /// otherwise, because volatile content requires a ranged source.
     pub fn volatile(self) -> Result<&'a mut DirObjectBlock<O>> {
         let is_handler = matches!(
             self.block.leaves.last(),
@@ -321,6 +419,9 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
 }
 
 impl<'a, O: Object> DirLeafBuilder<'a, O> {
+    /// Register an ordinary directory handler under the anchor (e.g. a
+    /// `comments` listing). Mounted as a real dir route at `<anchor>/<name>`;
+    /// see [`FileLeafBuilder::handler`] for the dispatch and capture rules.
     pub fn handler<Marker, H>(self, h: H) -> Result<&'a mut DirObjectBlock<O>>
     where
         H: IntoDirHandler<ObjectState<O>, Marker>,
@@ -342,7 +443,9 @@ impl<'a, O: Object> DirLeafBuilder<'a, O> {
     }
 }
 
-/// Define a detached dir-shaped object subtree.
+/// Define a detached dir-shaped object subtree, to be mounted later with
+/// [`Router::attach`](super::Router::attach). `template` must be absolute;
+/// the block must call [`DirObjectBlock::representations`].
 pub fn object<O: Object>(
     template: &'static str,
     block: impl FnOnce(&mut DirObjectBlock<O>) -> Result<()>,
@@ -357,6 +460,9 @@ pub fn object<O: Object>(
     })
 }
 
+/// Define a detached file-shaped object subtree; the
+/// [`Router::file_object`](super::Router::file_object) sugar is the only
+/// caller today.
 pub(super) fn file_object<O: Object>(
     template: &'static str,
     block: impl FnOnce(&mut FileObjectBlock<O>) -> Result<()>,
@@ -371,6 +477,9 @@ pub(super) fn file_object<O: Object>(
     })
 }
 
+/// The mounted, type-erased object route the dispatch tables hold: the
+/// anchor pattern, the leaf names to list, and boxed read/list closures that
+/// re-instantiate the typed `ObjectRoute` per call.
 pub(super) struct ObjectEntry<S> {
     pub pattern: Pattern,
     pub shape: ObjectShape,
@@ -383,12 +492,18 @@ pub(super) struct ObjectEntry<S> {
     pub validator: RouteValidator,
 }
 
+/// A child name an object anchor lists, precomputed at mount time.
 pub(super) struct ListingLeaf {
     pub name: String,
     pub is_dir: bool,
 }
 
 impl ListingLeaf {
+    /// A handler leaf contributes a listing name only when its suffix is a
+    /// single literal segment (`"diff"` qualifies; `"comments/{idx}"` does
+    /// not). Deeper suffixes are not lost: their literal intermediates
+    /// (`comments`) still surface through the static-entry merge at listing
+    /// time.
     fn handler(suffix: &str, is_dir: bool) -> Option<Self> {
         let pattern = parse_pattern(&format!("/{suffix}")).ok()?;
         let (name, has_child) = pattern.literal_child_after(&[])?;
@@ -399,6 +514,9 @@ impl ListingLeaf {
     }
 }
 
+/// The typed runtime side of a mounted object: everything `read`/`list`
+/// need, cloneable so each boxed call can move an owned copy into its
+/// future.
 struct ObjectRoute<O: Object> {
     leaves: Vec<ObjectLeaf<O>>,
     render_table: RenderTable,
@@ -460,6 +578,12 @@ impl<O: Object> ObjectRoute<O> {
         })
     }
 
+    /// The anchor-listing side effects. Listing entries come from the
+    /// precomputed [`ListingLeaf`] names in dispatch; this loads the object
+    /// (conditionally, using the host-pushed validator from `cx.version()`)
+    /// and emits the canonical-store effect plus eager field preloads. A
+    /// fresh load teaches the host every view leaf; `Unchanged` emits
+    /// nothing; `NotFound` makes the whole anchor not-found.
     async fn list<S>(&self, cx: &Cx<S>, caps: Captures, list_path: String) -> Result<Effects>
     where
         O::Key: Key<State = S> + FacetMetadata,
@@ -492,6 +616,21 @@ impl<O: Object> ObjectRoute<O> {
         }
     }
 
+    /// The object read path, in priority order:
+    ///
+    /// 1. Warm: the host pushed cached canonical bytes and the SDK verified
+    ///    the pushed id against the route-derived [`Key::anchor`]; render
+    ///    with no upstream call and no new effects. A mismatched push is not
+    ///    served warm; dispatch falls through to a load.
+    /// 2. Fresh: [`Key::load`] with the pushed validator as `since`; emits a
+    ///    canonical-store effect with facet-expanded view leaves for the
+    ///    read path, then serves the requested representation or field.
+    /// 3. `Load::Unchanged`: re-renders from the pushed bytes; it is an
+    ///    internal error for a load to claim unchanged when the host pushed
+    ///    nothing to be unchanged against.
+    /// 4. `Load::NotFound`: reports not-found tagged with the anchor id, so
+    ///    the host can key the negative entry to the object and clear it on
+    ///    the object's next invalidation.
     async fn read<S>(
         &self,
         cx: &Cx<S>,
@@ -547,6 +686,10 @@ impl<O: Object> ObjectRoute<O> {
         }
     }
 
+    /// Every full path that maps to this object's canonical bytes: each
+    /// representation and projected leaf under the anchor, multiplied across
+    /// facet choices. Handler leaves are excluded; they are not derived from
+    /// the canonical.
     fn view_leaves(&self, list_path: &str) -> Result<Vec<String>> {
         let mut view_leaves = Vec::new();
         for leaf in &self.leaves {
@@ -562,6 +705,12 @@ impl<O: Object> ObjectRoute<O> {
         Ok(view_leaves)
     }
 
+    /// Materialize every non-lazy projected leaf into `fs` effects at listing
+    /// time, tagged with the object id so leaf invalidation cascades. This is
+    /// the preload discipline applied to objects: the value is already in
+    /// hand, so its cheap fields ship now instead of forcing per-leaf reads.
+    /// Errors when a projection yields non-inline bytes; eager preloads must
+    /// be inline.
     fn project_eager_fields(
         &self,
         effects: &mut Effects,
@@ -599,6 +748,9 @@ impl<O: Object> ObjectRoute<O> {
     }
 }
 
+/// What mounting an object spec yields: the dispatchable entry, the leaf
+/// claims to feed [`Router::seal`](super::Router::seal), and the handler
+/// leaves promoted to ordinary file/dir routes.
 pub(super) struct MountedObject<S> {
     pub entry: ObjectEntry<S>,
     pub claims: Vec<Pattern>,
@@ -624,6 +776,9 @@ type BoxedObjectList<S> = Box<
     ) -> Pin<Box<dyn Future<Output = Result<Effects>> + 'a>>,
 >;
 
+/// Which child of the anchor a read addresses: a representation by content
+/// type (dispatch resolves the `stem.ext` leaf name through the render
+/// table), or a projected field by leaf name.
 pub(super) enum ObjectReadTarget {
     Representation(ContentType),
     Projected(String),
@@ -648,6 +803,10 @@ fn mounted_leaf_claims<O: Object>(
     Ok(claims)
 }
 
+/// Specialize an [`ObjectSpec`] at a concrete mount pattern: precompute the
+/// listing names, build the per-mount facet expansion, promote handler
+/// leaves to real routes, and collect every leaf claim (anchor,
+/// representation and projected leaves, handler leaves) for the seal check.
 pub(super) fn mount_object<O, S>(
     pattern: &Pattern,
     shape: ObjectShape,
@@ -736,6 +895,8 @@ where
     })
 }
 
+/// Serve from host-pushed canonical bytes with no effects: the host already
+/// owns these bytes, so re-storing them would be redundant.
 fn serve_warm<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
@@ -745,6 +906,9 @@ fn serve_warm<O: Object>(
     serve_from_canonical::<O>(target, bytes, render_table, leaves, Effects::new())
 }
 
+/// Serve right after a fresh load, attaching the canonical-store effects.
+/// A projected target uses the already-parsed value (no re-parse of the
+/// bytes); representations render from the canonical bytes.
 fn serve_fresh<O: Object>(
     value: &O,
     target: ObjectReadTarget,
@@ -785,6 +949,11 @@ fn serve_fresh<O: Object>(
     }
 }
 
+/// Serve any target from canonical bytes. The source content type answers
+/// with the `byte-source::canonical` identity terminal (the host already
+/// holds the bytes; they are not echoed back); other representations render
+/// through the table; a projected field re-parses the canonical and runs
+/// its projection.
 fn serve_from_canonical<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
@@ -829,6 +998,10 @@ fn serve_from_canonical<O: Object>(
     }
 }
 
+/// The per-mount facet axes: which template segments are identity-neutral
+/// captures with finite choice sets, resolved to segment positions at mount
+/// time. Mounting fails if a declared facet capture is missing from the
+/// route template.
 #[derive(Clone, Debug)]
 pub(super) struct FacetExpansion {
     axes: Vec<FacetExpansionAxis>,
@@ -843,6 +1016,11 @@ impl FacetExpansion {
         Ok(Self { axes })
     }
 
+    /// Expand one concrete path into the cross product of all facet choices,
+    /// substituting each choice into its capture's segment (prefix captures
+    /// keep their prefix: a `v{version}` axis renders `v1`, `v2`). All
+    /// expanded paths name the same logical object, so the host can answer
+    /// any facet alias from one cached canonical.
     pub(super) fn expand_view_leaves(&self, read_path: &str) -> Result<Vec<String>> {
         if self.axes.is_empty() {
             return Ok(vec![read_path.to_string()]);
@@ -905,6 +1083,8 @@ fn content_size(content: &FileContent) -> u64 {
         .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
 }
 
+/// Attrs for the identity (canonical byte-source) answer: size is unknown to
+/// the SDK because the host serves the stored bytes directly.
 pub(super) fn canonical_attrs() -> FileAttrs {
     FileAttrs::new(Size::Unknown, Stability::Immutable)
 }

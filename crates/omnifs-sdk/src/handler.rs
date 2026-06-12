@@ -11,12 +11,35 @@ pub use crate::file_attrs::MAX_PROJECTED_BYTES;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
 
+/// A pagination cursor for non-exhaustive listings: an upstream-issued
+/// opaque token, or a plain page number. Return the next cursor with a
+/// paged listing and the host echoes it back on the continuation call;
+/// the provider holds no pagination state between calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cursor {
     Opaque(String),
     Page(u32),
 }
 
+/// The operation a directory handler is being invoked for.
+///
+/// One dir handler serves lookup and list (the same route knows the same
+/// names), so check the intent when the answers should differ in cost: a
+/// `Lookup` asks about one named child and should not trigger a full
+/// upstream enumeration when a point query exists; a `List` enumerates.
+/// Returning the full listing for both is correct, just potentially
+/// wasteful.
+///
+/// ```ignore
+/// match cx.intent() {
+///     DirIntent::Lookup { child } => {
+///         // point query: does `child` exist?
+///     },
+///     _ => {
+///         // enumerate
+///     },
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirIntent {
     Lookup { child: String },
@@ -43,8 +66,8 @@ impl<S> DirCx<S> {
         &self.intent
     }
 
-    /// The host-supplied pagination cursor for a `list-children` call (v2
-    /// §8). `None` on the first page or for non-list intents; the handler
+    /// The host-supplied pagination cursor for a `list-children` call.
+    /// `None` on the first page or for non-list intents; the handler
     /// resumes from it.
     pub fn cursor(&self) -> Option<&Cursor> {
         match &self.intent {
@@ -70,6 +93,8 @@ impl<S> std::ops::Deref for DirCx<S> {
     }
 }
 
+/// One ranged-read answer: the bytes plus an `eof` flag meaning "this
+/// chunk reaches the end of the content as of this read".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChunk {
     pub content: Vec<u8>,
@@ -94,10 +119,28 @@ impl From<FileChunk> for omnifs_wit::provider::types::ReadChunkResult {
     }
 }
 
+/// Byte server for an open ranged-read session (`open-file` /
+/// `read-chunk` / `close-file`).
+///
+/// The contract: return up to `length` bytes starting at `offset`, with
+/// `eof = true` when the chunk reaches the current end of content. An
+/// `offset` at or past the end yields an empty chunk with `eof = true`,
+/// not an error. Short chunks are legal; the host keeps reading. This is
+/// the only handler shape allowed to serve `Stability::Volatile` content,
+/// and the reader may be polled repeatedly on one open handle (`tail -f`),
+/// so each call should observe current bytes rather than a snapshot when
+/// volatility is the point.
 pub trait RangeReader {
     fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk>;
 }
 
+/// A [`RangeReader`] over a fully buffered in-memory payload.
+///
+/// Fine when the content is small or was already materialized anyway
+/// (a rendered report, a decoded field). For large remote content it
+/// defeats the purpose of ranged reads, since the whole payload is held
+/// in guest memory up front; serve those through blob handles or a reader
+/// that fetches ranges on demand.
 #[derive(Clone, Debug)]
 pub struct MemoryRangeReader {
     bytes: Rc<Vec<u8>>,
@@ -127,6 +170,9 @@ impl RangeReader for MemoryRangeReader {
     }
 }
 
+/// An open ranged-read session: the file's attrs plus the reader that
+/// serves its chunks. Produced by router `open_file` dispatch from a
+/// ranged projection; held until `close-file`.
 #[derive(Clone)]
 pub struct OpenedFile {
     pub attrs: FileAttrs,
@@ -139,6 +185,20 @@ impl OpenedFile {
     }
 }
 
+/// The subtree handoff token a `treeref` handler returns: a host-issued
+/// tree handle (from a git-open or open-archive callout) that the host
+/// resolves to a bind-mounted directory. Provider dispatch stops at the
+/// handoff point; paths below it never reach the provider.
+///
+/// ```ignore
+/// async fn tree(cx: Cx, key: RepoKey) -> Result<TreeRef> {
+///     let opened = cx
+///         .git()
+///         .open_repo("github.com/o/r".to_string(), "git@github.com:o/r.git".to_string())
+///         .await?;
+///     Ok(TreeRef::new(opened.tree))
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeRef {
     pub tree_ref: u64,

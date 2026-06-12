@@ -1,13 +1,54 @@
-//! typed outbound endpoints (ADR-0001 §10).
+//! Typed outbound endpoints (ADR-0001 §10).
 //!
-//! A provider declares an outbound host with `#[derive(Endpoint)]` and reaches
-//! it through `cx.endpoint::<E>()`. The returned [`EndpointHandle`] builds
-//! requests whose `path` is relative to `E::base()`; the SDK forms the URL via
-//! [`crate::http::HttpEndpoint`] and lowers the request onto the existing
-//! [`crate::http`] callout machinery. The terminals split the object-path
-//! 3-state ([`load`](RequestBuilder::load), [`conditional_json`](RequestBuilder::conditional_json))
-//! from the structural 2-state ([`json`](RequestBuilder::json),
-//! [`send_checked`](RequestBuilder::send_checked)).
+//! A provider declares each upstream host once with `#[derive(Endpoint)]`,
+//! lists it in the provider's `resources(endpoints = [..])`, and reaches it
+//! through [`Cx::endpoint`]. The returned [`EndpointHandle`] builds requests
+//! whose `path` is relative to [`Endpoint::base`]; the SDK forms the URL via
+//! [`crate::http::HttpEndpoint`] and lowers the request onto the [`crate::http`]
+//! callout machinery, so awaiting a terminal suspends the handler while the
+//! host runs the fetch.
+//!
+//! Pick the terminal by what the response status means for the route:
+//!
+//! - Object layer, 3-state: [`load`](RequestBuilder::load) and
+//!   [`load_with`](RequestBuilder::load_with) map 200 to [`Load::Fresh`],
+//!   304 to [`Load::Unchanged`], and 404 to [`Load::NotFound`]. Pair them
+//!   with [`maybe_if_none_match`](RequestBuilder::maybe_if_none_match) so the
+//!   host-pushed validator ([`Cx::version`]) becomes `If-None-Match` and an
+//!   unchanged object costs no body transfer.
+//!   [`conditional_json`](RequestBuilder::conditional_json) is the
+//!   listing-revalidation analogue (no `NotFound` arm).
+//! - Structural layer, 2-state: [`json`](RequestBuilder::json) and
+//!   [`send_checked`](RequestBuilder::send_checked) return the value or error
+//!   on any 4xx/5xx, including 404. Use these when "missing" is not a
+//!   meaningful outcome for the route.
+//!
+//! Never set `Authorization` or any other credential header here. Auth is
+//! host-managed: the provider's `omnifs.provider.json` manifest declares the
+//! scheme and inject domains, and the host materializes the header into
+//! matching requests after the callout leaves the guest. Endpoint
+//! `default_header` attributes are for static metadata such as `User-Agent`
+//! and `Accept`.
+//!
+//! Every send participates in the per-authority rate-limit breaker: a 429
+//! arms a cooldown for the URL's authority (honoring `Retry-After`, else the
+//! endpoint's [`RateLimitPolicy`]), and later sends to that authority
+//! fast-fail in-guest until the window passes.
+//!
+//! ```ignore
+//! #[derive(omnifs_sdk::Endpoint)]
+//! #[endpoint(base = "https://export.arxiv.org")]
+//! #[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+//! struct ArxivApi;
+//!
+//! let load = cx
+//!     .endpoint::<ArxivApi>()
+//!     .get("/api/query")
+//!     .query("id_list", raw_id)
+//!     .maybe_if_none_match(since.as_ref())
+//!     .load_with(parse_paper_atom)
+//!     .await?;
+//! ```
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -17,10 +58,13 @@ use crate::object::{Canonical, Load};
 use core::fmt::Display;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 
-/// Per-endpoint rate-limit policy. `Default` uses the breaker's default
-/// cooldown when a 429 carries no `Retry-After`; `Cooldown` overrides that
-/// default; `Off` opts the endpoint out of arming the breaker entirely. The
-/// check still runs, but this endpoint never arms a window.
+/// Per-endpoint rate-limit policy, generated from
+/// `#[endpoint(rate_limit = ..)]` (`"off"` or a whole number of seconds).
+/// `Default` uses the breaker's default cooldown when a 429 carries no
+/// `Retry-After`; `Cooldown` overrides that default; `Off` opts the endpoint
+/// out of arming the breaker entirely. The pre-send check still runs under
+/// `Off`, so a window armed by another endpoint on the same authority still
+/// fast-fails this one.
 #[derive(Clone, Copy, Debug)]
 pub enum RateLimitPolicy {
     Default,
@@ -29,9 +73,15 @@ pub enum RateLimitPolicy {
 }
 
 /// An outbound host a provider talks to over HTTP. The `#[derive(Endpoint)]`
-/// macro generates the impl from the `#[endpoint(base = ..)]` and
-/// `#[endpoint(default_header = ..)]` attributes.
+/// macro generates the impl from the `#[endpoint(base = ..)]`,
+/// `#[endpoint(default_header = ..)]`, and `#[endpoint(rate_limit = ..)]`
+/// attributes. Credential headers are never declared here; the host injects
+/// them from the provider's auth manifest (see the module docs).
 pub trait Endpoint {
+    /// Base URL request paths resolve against, such as
+    /// `https://api.example.com`. A `unix:///absolute/socket/path` base
+    /// routes through the host's Unix-socket HTTP executor (see
+    /// [`crate::http::HttpEndpoint`]).
     fn base() -> &'static str;
 
     /// Headers applied to every request to this endpoint before any
@@ -41,6 +91,9 @@ pub trait Endpoint {
         &[]
     }
 
+    /// How a 429 from this endpoint arms the per-authority breaker.
+    /// Generated from `#[endpoint(rate_limit = ..)]`; defaults to honoring
+    /// `Retry-After` with the breaker's built-in fallback cooldown.
     fn rate_limit_policy() -> RateLimitPolicy {
         RateLimitPolicy::Default
     }
@@ -175,6 +228,8 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
 
     /// Map the host-pushed validator to `If-None-Match` when present, so a 304
     /// short-circuits to [`Load::Unchanged`] / [`Revalidate::Unchanged`].
+    /// Take the validator from [`Cx::version`] or the `since` argument of
+    /// `Object::load`; passing `None` is a plain unconditional fetch.
     #[must_use]
     pub fn maybe_if_none_match(mut self, version: Option<&VersionToken>) -> Self {
         if let Some(v) = version {
@@ -253,7 +308,10 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
     }
 
     /// Object/revalidation terminal: 200 -> `Fresh(serde(T))`, 404 ->
-    /// `NotFound`, 304 -> `Unchanged`, other 4xx/5xx -> `Err`.
+    /// `NotFound`, 304 -> `Unchanged`, other 4xx/5xx -> `Err`. On `Fresh` the
+    /// stored [`Canonical`] is the raw response body verbatim with the
+    /// response `ETag` as its validator; deserialization only produces the
+    /// in-memory value.
     pub async fn load<T: serde::de::DeserializeOwned>(self) -> Result<Load<T>> {
         let resp = self.send_raw().await?;
         load_from_response(resp, |bytes| {
@@ -301,7 +359,10 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
         Ok(HttpResponse { inner: resp })
     }
 
-    /// Fetch the URL into the blob store; the bytes never cross back.
+    /// Convert into a blob fetch: the response body lands in the host's
+    /// blob cache and only a [`BlobHandle`] crosses back. A cache key is
+    /// mandatory; chain [`BlobRequestBuilder::cache_key`] before
+    /// [`BlobRequestBuilder::fetch`].
     pub fn into_blob(self) -> BlobRequestBuilder<'a, E, S> {
         BlobRequestBuilder {
             inner: self,
@@ -375,13 +436,19 @@ pub struct BlobRequestBuilder<'a, E, S = ()> {
 }
 
 impl<'a, E: Endpoint, S> BlobRequestBuilder<'a, E, S> {
+    /// Set the provider-scoped deduplication key. Required: [`Self::fetch`]
+    /// errors without one. Repeating the key from the same provider returns
+    /// the cached blob instead of refetching, so embed everything that
+    /// distinguishes the content (id, version, variant) in the key.
     #[must_use]
     pub fn cache_key(mut self, key: impl Into<String>) -> Self {
         self.cache_key = Some(key.into());
         self
     }
 
-    /// Fetch the URL into the blob store and return its handle.
+    /// Fetch the URL into the blob store and return its handle. Applies the
+    /// same 4xx/5xx mapping as the structural terminals, so a `BlobHandle`
+    /// always refers to a successful response body.
     pub async fn fetch(self) -> Result<BlobHandle> {
         let cache_key = self.cache_key.clone();
         let mut blob: BlobRequest<'a, S> = self.inner.into_http_request()?.into_blob();
@@ -396,7 +463,10 @@ impl<'a, E: Endpoint, S> BlobRequestBuilder<'a, E, S> {
     }
 }
 
-/// A handle to a host-resident blob fetched through an [`Endpoint`].
+/// A handle to a host-resident blob fetched through an [`Endpoint`]. Hand
+/// `id` to `FileProjection::blob` (with `size` as the exact size), to
+/// `cx.archives().open(id)`, or to `cx.blob(id)`; the bytes themselves stay
+/// host-side.
 pub struct BlobHandle {
     pub id: crate::blob::BlobId,
     pub size: u64,

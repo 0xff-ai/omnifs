@@ -1,9 +1,40 @@
-//! Path pattern parsing and match helpers.
+//! Route template grammar, matching, precedence, and ambiguity.
 //!
-//! This module owns the route-pattern types (`Pattern`, `CaptureLocation`,
-//! `Match`, `Error`) that were originally in `omnifs-core`. They moved here
-//! because route matching is SDK-side knowledge; no host, fuse, or CLI code
-//! consumes these types.
+//! This module owns the route-pattern types ([`Pattern`], [`CaptureLocation`],
+//! [`Match`], [`Error`]). Route matching is SDK-side knowledge; no host, fuse,
+//! or CLI code consumes these types.
+//!
+//! # Template grammar
+//!
+//! A template is an absolute path (`/` alone is the empty pattern). No
+//! trailing slash, no empty segments, no `.` or `..`. Each segment is one of:
+//!
+//! - a literal: `issues`, `repo.json`
+//! - a bare capture: `{owner}` (matches any non-empty segment)
+//! - a prefix capture: `@{resolver}`, `v{version}` (a non-empty literal
+//!   prefix glued to a capture in one segment; matches segments that start
+//!   with the prefix and have a non-empty remainder, and the capture value
+//!   is the remainder with the prefix stripped)
+//! - a rest capture: `{*rest}` (multi-segment; only legal as the final
+//!   segment, and matches zero or more trailing segments joined by `/`)
+//!
+//! Capture names must be non-empty identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
+//!
+//! # Precedence
+//!
+//! [`Pattern::precedence_key`] orders candidate routes when several match the
+//! same concrete path: any non-rest pattern beats any rest pattern, then more
+//! literal segments win, then more prefix captures, then more segments.
+//! Dispatch sorts candidates by this key and takes the head (see
+//! [`best_match`]).
+//!
+//! # Ambiguity
+//!
+//! [`Pattern::is_ambiguous_with`] detects two leaf claims that can bind the
+//! same concrete path with equal precedence, where neither could reliably win.
+//! [`Router::seal`](super::Router::seal) runs this pairwise over all leaf
+//! claims and fails initialization on the first overlap, so shadowed routes
+//! are a startup error rather than silent runtime behavior.
 
 use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
 use crate::captures::Captures;
@@ -17,7 +48,11 @@ use omnifs_core::path::{Path, Segment};
 // Pattern types
 // ===========================================================================
 
-/// A compiled route pattern, e.g. `/{owner}/{repo}/issues/{number}`.
+/// A compiled route template, e.g. `/{owner}/{repo}/issues/{number}`.
+///
+/// Compilation precomputes the counts that feed [`Self::precedence_key`] and
+/// the per-segment [`Self::specificity`] vector, so matching and ordering are
+/// comparisons over prebuilt data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern {
     segments: Vec<PatternSegment>,
@@ -27,8 +62,12 @@ pub struct Pattern {
     specificity: Vec<(u8, usize)>,
 }
 
-/// Where a named capture lives within a `Pattern` and what prefix (if any)
+/// Where a named capture lives within a [`Pattern`] and what prefix (if any)
 /// it strips from the raw segment before yielding the capture value.
+///
+/// The inverse direction matters too: [`Self::render_segment`] re-applies the
+/// prefix when a capture value is substituted back into a concrete path
+/// (facet view-leaf expansion relies on this round trip).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureLocation {
     segment_index: usize,
@@ -55,7 +94,9 @@ pub struct Error {
 }
 
 /// The result of a successful pattern match: the matched path plus its
-/// decoded captures.
+/// decoded captures in template order. Prefix-capture values arrive with the
+/// prefix already stripped (`@google` yields `google`); a rest capture yields
+/// the trailing segments joined by `/` (empty string for zero segments).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match {
     path: Path,
@@ -123,6 +164,13 @@ impl Match {
 }
 
 impl Pattern {
+    /// Compile a template (see the module docs for the grammar).
+    ///
+    /// Rejects: relative templates, trailing `/`, empty segments (`//`),
+    /// `.`/`..` segments, non-identifier capture names, a `{*rest}` capture
+    /// anywhere but last, and malformed capture syntax (nested or unclosed
+    /// braces, empty prefix). `"/"` compiles to the empty pattern that matches
+    /// only the root path.
     pub fn parse(template: &str) -> core::result::Result<Self, Error> {
         if template == "/" {
             return Ok(Self {
@@ -211,6 +259,10 @@ impl Pattern {
         self.has_rest
     }
 
+    /// The route-ordering key, compared descending by dispatch: non-rest
+    /// beats rest, then literal-segment count, then prefix-capture count,
+    /// then segment count. Patterns with equal keys cannot be ordered, which
+    /// is exactly the case [`Self::is_ambiguous_with`] exists to reject.
     #[must_use]
     pub fn precedence_key(&self) -> (u8, usize, usize, usize) {
         let is_not_rest = u8::from(!self.has_rest);
@@ -222,6 +274,10 @@ impl Pattern {
         )
     }
 
+    /// Match a whole concrete path. Non-rest patterns require an exact
+    /// segment-count match; a rest pattern matches its fixed prefix plus zero
+    /// or more trailing segments (so `/ipfs/{cid}/{*path}` matches
+    /// `/ipfs/Qm123` itself).
     pub fn match_path(&self, path: &Path) -> core::result::Result<Match, Error> {
         let segments: Vec<&str> = path.segments().collect();
         if self.has_rest {
@@ -240,6 +296,10 @@ impl Pattern {
         })
     }
 
+    /// Match a path that may stop partway through the pattern (an ancestor
+    /// probe). Captures are decoded only for the segments actually present;
+    /// callers must tolerate missing captures (see
+    /// [`crate::captures::FromCaptures::validate_present_captures`]).
     pub fn match_prefix(&self, path: &Path) -> core::result::Result<Match, Error> {
         let segments: Vec<&str> = path.segments().collect();
         if !self.has_rest && segments.len() > self.segments.len() {
@@ -264,11 +324,18 @@ impl Pattern {
         self.match_path(path).is_ok()
     }
 
+    /// Whether `parent_segments` is a proper ancestor of paths this pattern
+    /// can match, i.e. the pattern extends at least one segment below it.
+    /// This is the candidacy test for auto-navigable intermediate
+    /// directories.
     #[must_use]
     pub fn accepts_as_strict_ancestor(&self, parent_segments: &[&str]) -> bool {
         parent_segments.len() < self.segments.len() && self.matches_prefix_segments(parent_segments)
     }
 
+    /// Whether `path` is the immediate parent of a path this pattern matches.
+    /// For a rest pattern any path at or below the fixed prefix qualifies,
+    /// because the rest tail makes every descendant a potential child.
     #[must_use]
     pub fn matches_parent_path(&self, path: &Path) -> bool {
         let segments: Vec<&str> = path.segments().collect();
@@ -280,6 +347,8 @@ impl Pattern {
         }
     }
 
+    /// The final segment's literal name, or `None` when the leaf is dynamic
+    /// (a capture or rest segment).
     #[must_use]
     pub fn static_child(&self) -> Option<&str> {
         match self.segments.last()? {
@@ -288,6 +357,12 @@ impl Pattern {
         }
     }
 
+    /// The literal child name this pattern contributes directly under
+    /// `parent_segments`, plus whether the pattern continues below that child
+    /// (`true` means the child is an intermediate directory, not this
+    /// pattern's leaf). `None` when the next segment is dynamic or the parent
+    /// is not a proper ancestor. This is how static directory discovery
+    /// synthesizes literal entries without running any handler.
     #[must_use]
     pub fn literal_child_after<'a>(&'a self, parent_segments: &[&str]) -> Option<(&'a str, bool)> {
         if !self.accepts_as_strict_ancestor(parent_segments) {
@@ -300,6 +375,10 @@ impl Pattern {
         Some((name.as_str(), self.segments.len() > parent_depth + 1))
     }
 
+    /// Whether the segment directly under `parent_segments` is a capture or
+    /// rest segment. A `true` from any route at a given depth makes that
+    /// directory's static listing non-exhaustive: names this pattern would
+    /// accept cannot be enumerated.
     #[must_use]
     pub fn has_dynamic_child_after(&self, parent_segments: &[&str]) -> bool {
         if !self.accepts_as_strict_ancestor(parent_segments) {
@@ -311,6 +390,10 @@ impl Pattern {
         )
     }
 
+    /// A shape signature of all segments but the last (`l:<lit>`, `p:<prefix>`,
+    /// `c`, `r` joined by `/`). Used only for human-readable overlap
+    /// diagnostics in [`Router::seal`](super::Router::seal) errors; capture
+    /// names are deliberately erased because they do not affect matching.
     #[must_use]
     pub fn parent_signature(&self) -> String {
         self.segments
@@ -321,6 +404,10 @@ impl Pattern {
             .join("/")
     }
 
+    /// The pattern-length prefix of `concrete_path` when this pattern matches
+    /// that prefix: the anchor path of the route instance a descendant path
+    /// belongs to. A rest pattern returns the whole path (the tail is part of
+    /// the match).
     #[must_use]
     pub fn concrete_path_for(&self, concrete_path: &Path) -> Option<Path> {
         let segments: Vec<&str> = concrete_path.segments().collect();
@@ -349,6 +436,8 @@ impl Pattern {
         self.segments.len()
     }
 
+    /// Locate a named single-segment capture. Rest captures have no location:
+    /// they span a variable number of segments and cannot be substituted.
     #[must_use]
     pub fn capture_location(&self, name: &str) -> Option<CaptureLocation> {
         self.segments
@@ -368,6 +457,8 @@ impl Pattern {
             })
     }
 
+    /// Segment count excluding a trailing rest capture: the part of the
+    /// pattern that must be present for any match.
     #[must_use]
     pub fn fixed_prefix_len(&self) -> usize {
         if self.has_rest {
@@ -377,11 +468,29 @@ impl Pattern {
         }
     }
 
+    /// Per-segment specificity: literal `(2, len)` beats prefix capture
+    /// `(1, prefix len)` beats bare capture and rest `(0, 0)`. Lexicographic
+    /// slice comparison gives a segmentwise ordering finer than
+    /// [`Self::precedence_key`].
     #[must_use]
     pub fn specificity(&self) -> &[(u8, usize)] {
         &self.specificity
     }
 
+    /// Whether two leaf claims can bind the same concrete path with equal
+    /// precedence, so neither would reliably win dispatch.
+    ///
+    /// Two non-rest patterns are ambiguous when they have equal
+    /// [`Self::precedence_key`]s and every segment pair overlaps (literal vs
+    /// equal literal, anything vs bare capture, literal vs prefix capture
+    /// whose prefix it extends, prefix captures where one prefix extends the
+    /// other). Two rest patterns are ambiguous when their fixed prefixes have
+    /// equal length and overlap pairwise. A rest pattern is never ambiguous
+    /// with a non-rest pattern: precedence always separates them.
+    ///
+    /// Note the asymmetry with dispatch: routes that merely overlap but have
+    /// different precedence keys (`/{owner}` vs `/resolvers`) are legal and
+    /// resolve by specificity; only equal-precedence overlap is rejected.
     #[must_use]
     pub fn is_ambiguous_with(&self, other: &Self) -> bool {
         match (self.has_rest, other.has_rest) {
@@ -407,6 +516,9 @@ impl Pattern {
         }
     }
 
+    /// The trailing segments a rest pattern captures from `path`, joined by
+    /// `/` (empty string when the path ends at the fixed prefix). `None` for
+    /// non-rest patterns or non-matching paths.
     #[must_use]
     pub fn rest_of(&self, path: &Path) -> Option<String> {
         if !self.has_rest {
@@ -633,8 +745,14 @@ impl<S> RoutedEntry for &super::object::ObjectEntry<S> {
     }
 }
 
-/// Longest-precedence route from an iterator whose pattern matches `abs` and
-/// whose validator accepts captures.
+/// Highest-precedence route whose pattern matches `abs` and whose validator
+/// accepts the decoded captures.
+///
+/// The validator runs during candidacy, before precedence sorting. This is
+/// where capture-parse fallthrough happens: a route whose typed key rejects
+/// the segment (e.g. `{number}` fed a non-numeric value) is filtered out
+/// here, so a less specific sibling route can still win instead of the path
+/// resolving to not-found.
 pub(super) fn best_match<'a, E, I>(routes: I, abs: &Path) -> Option<(&'a E, Captures)>
 where
     E: RoutedEntry + 'a,

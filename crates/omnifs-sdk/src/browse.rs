@@ -1,7 +1,16 @@
-//! Internal SDK conversion types between provider-facing browse values
-//! and the generated WIT protocol. Provider authors normally build
-//! these through `handler.rs`; the SDK maps them to `operation-result`
-//! plus terminal `effect`s.
+//! Wire-facing browse results and the [`Effects`] channel.
+//!
+//! These types sit between the provider-facing projection layer
+//! ([`crate::projection::DirProjection`], [`crate::projection::FileProjection`])
+//! and the generated WIT protocol; the router lowers handler returns onto
+//! them. Most provider code only meets [`Effects`], [`EntryKind`], and
+//! [`ReadOutcome`] (re-exported in the prelude); reach for [`Lookup`],
+//! [`Listing`], or [`FileContent`] directly only when building custom
+//! object leaves or lowering glue.
+//!
+//! [`Effects`] is the part worth internalizing: it is the only channel
+//! through which a provider mutates host state. Everything else here is a
+//! terminal answer to the one operation in flight.
 
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ReadFileBytes, Size, Stability, VersionToken};
@@ -40,7 +49,10 @@ pub enum EntryKind {
     File,
 }
 
-/// A filesystem entry representing a file or directory.
+/// A wire-level dirent: a named file or directory, where file entries carry
+/// a [`FileProj`] (lowering to `DirEntry` panics without one). Handlers
+/// normally build [`crate::projection::Entry`] instead, which fills in
+/// [`FileProj::listing_shape`] for plain file names.
 #[derive(Clone, Debug)]
 pub struct Entry {
     name: String,
@@ -111,11 +123,29 @@ impl From<Entry> for wit_types::DirEntry {
     }
 }
 
-/// Terminal host mutations staged with an accepted provider return.
+/// Terminal host mutations staged with an accepted provider return: the
+/// only way a provider writes host state.
+///
+/// Three channels, applied only if the operation succeeds:
+///
+/// - `canonical` ([`Self::canonical_store`]): store verbatim upstream bytes
+///   against a logical object id, durable across restarts.
+/// - `fs` ([`Self::project_file`], [`Self::project_dir`]): materialize
+///   rendered files and directories into the view cache so later reads are
+///   served without re-invoking the provider.
+/// - `invalidations` ([`Self::invalidate_object`],
+///   [`Self::invalidate_listing_path`], [`Self::invalidate_listing_prefix`]):
+///   evict stale state, typically from event handlers. This is the
+///   freshness mechanism; there are no TTLs.
+///
+/// Preload discipline: any resource you already hold beyond the one
+/// requested travels here as extra `canonical`/`fs` entries. If a payload
+/// in hand contains sibling leaves, project them now instead of forcing a
+/// refetch later.
 ///
 /// The three WIT effect blocks are kept as separate typed vecs so the
-/// `fs`/`canonical`/`invalidations` channels never alias.
-/// [`Self::into_wit`] assembles them into the WIT `effects` record.
+/// channels never alias; [`Self::into_wit`] assembles the WIT `effects`
+/// record.
 #[derive(Clone, Debug, Default)]
 pub struct Effects {
     canonical: Vec<wit_types::CanonicalStore>,
@@ -128,6 +158,10 @@ impl Effects {
         Self::default()
     }
 
+    /// Materialize a directory into the view cache without claiming its
+    /// listing is complete; later readdirs may still invoke the provider.
+    /// Paths here and on every other `project_*` method are
+    /// mount-absolute; a missing leading `/` is tolerated and prefixed.
     pub fn project_dir(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
         self.fs.push(wit_types::FsWrite {
             id: None,
@@ -150,6 +184,9 @@ impl Effects {
         Ok(self)
     }
 
+    /// Materialize a file into the view cache. Validates the projection
+    /// ([`FileProj::validate`]) before staging, so an illegal shape fails
+    /// here rather than at the host boundary.
     pub fn project_file(&mut self, path: impl AsRef<str>, file: FileProj) -> Result<&mut Self> {
         file.validate()?;
         self.fs.push(wit_types::FsWrite {
@@ -160,7 +197,18 @@ impl Effects {
         Ok(self)
     }
 
-    /// Store raw upstream bytes against a logical object id.
+    /// Store verbatim upstream bytes against a logical object id in the
+    /// durable object cache.
+    ///
+    /// `view_leaves` teaches the host the exact full paths that map to this
+    /// id: on a later view miss at one of those paths, the host pushes
+    /// these bytes back into `read-file` as the cached canonical, and the
+    /// SDK re-renders with no upstream call. The host resolves paths by
+    /// exact map lookup, never prefix probing, so every leaf path must be
+    /// listed explicitly. Overwriting an id evicts its previously derived
+    /// view leaves. Object-route registrations emit this effect
+    /// automatically from [`crate::object::Key::load`] results; call it
+    /// directly only in hand-rolled handlers.
     pub fn canonical_store(
         &mut self,
         id: &LogicalId,
@@ -177,6 +225,8 @@ impl Effects {
         self
     }
 
+    /// Like [`Self::project_file`], with the file tagged as a view leaf of
+    /// logical object `id`, so object-level invalidation cascades to it.
     pub fn project_file_with_id(
         &mut self,
         path: impl AsRef<str>,
@@ -192,12 +242,17 @@ impl Effects {
         Ok(self)
     }
 
+    /// Evict an object's canonical bytes and every view leaf derived from
+    /// it.
     pub fn invalidate_object(&mut self, id: &LogicalId) -> &mut Self {
         self.invalidations
             .push(wit_types::Invalidation::Object(id.into()));
         self
     }
 
+    /// Evict the cached listing at exactly `path`. Panics if `path` is not
+    /// a valid protocol path; invalidation targets are provider-authored
+    /// constants, not user input.
     pub fn invalidate_listing_path(&mut self, path: impl AsRef<str>) -> &mut Self {
         let path = wire_path(path.as_ref()).expect("invalidation path must be a protocol path");
         self.invalidations.push(wit_types::Invalidation::Listing(
@@ -206,6 +261,8 @@ impl Effects {
         self
     }
 
+    /// Evict every cached listing under `prefix` (inclusive). Panics on an
+    /// invalid protocol path, like [`Self::invalidate_listing_path`].
     pub fn invalidate_listing_prefix(&mut self, prefix: impl AsRef<str>) -> &mut Self {
         let prefix =
             wire_path(prefix.as_ref()).expect("invalidation prefix must be a protocol path");
@@ -238,6 +295,12 @@ impl Effects {
 
 /// A directory listing with entries, exhaustiveness, and accepted-return
 /// projection effects for adjacent or nested paths.
+///
+/// `exhaustive` means "these are all the names I know", not "no other name
+/// can resolve": `lookup` remains the authoritative name oracle and may
+/// resolve names absent from the latest listing. The host also merges
+/// literal sibling routes registered at the same depth into what the user
+/// sees, so a handler only enumerates its own dynamic children.
 #[derive(Clone, Debug)]
 pub struct Listing {
     entries: Vec<Entry>,
@@ -248,6 +311,8 @@ pub struct Listing {
 }
 
 impl Listing {
+    /// An exhaustive listing: the host may serve later readdirs from cache
+    /// without re-invoking the provider.
     pub fn complete(entries: impl IntoIterator<Item = Entry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),
@@ -258,6 +323,9 @@ impl Listing {
         }
     }
 
+    /// A non-exhaustive listing: more names may exist than were
+    /// enumerated (open namespaces, paged results). Pair with
+    /// [`Self::with_cursor`] when the next page is reachable.
     pub fn partial(entries: impl IntoIterator<Item = Entry>) -> Self {
         Self {
             entries: entries.into_iter().collect(),
@@ -329,8 +397,12 @@ impl From<Listing> for wit_types::DirListing {
     }
 }
 
-/// A lookup result: either a found entry with cache-adjacent data, a
+/// A lookup result: a found entry with cache-adjacent sibling data, a
 /// subtree handoff, or a miss.
+///
+/// Lookup is the authoritative name oracle: the host trusts a `NotFound`
+/// here as a cacheable negative, so return it only when the name truly
+/// does not exist, not on transient failure (return an error for those).
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Lookup {
@@ -377,6 +449,9 @@ impl Lookup {
         })
     }
 
+    /// A found file with inline bytes, defaulting to
+    /// `Stability::Immutable` and no version token; build the [`Entry`]
+    /// yourself when the content can change.
     pub fn file(name: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         let content = content.into();
         Self::Entry(LookupEntry {
@@ -391,6 +466,9 @@ impl Lookup {
         Self::entry(Entry::dir(name))
     }
 
+    /// Hand the child off as a host-resolved subtree (a git clone, an
+    /// extracted archive). `tree` is the handle a tree-opening callout
+    /// returned; dispatch below this point belongs to the host.
     pub fn subtree(tree: u64) -> Self {
         Self::Subtree { tree }
     }
@@ -399,6 +477,9 @@ impl Lookup {
         Self::NotFound { id: None }
     }
 
+    /// A miss tied to a logical object id, so the host keys the cached
+    /// negative to that object and a later invalidation of the object also
+    /// clears the miss.
     pub fn not_found_id(id: LogicalId) -> Self {
         Self::NotFound { id: Some(id) }
     }
@@ -418,6 +499,10 @@ impl Lookup {
         }
     }
 
+    /// Attach sibling entries the answering payload already contained, so
+    /// the host caches them alongside the target (preload discipline:
+    /// never discard names you already fetched). No-op on subtree and
+    /// not-found results.
     #[must_use]
     pub fn with_siblings<I: IntoIterator<Item = Entry>>(self, entries: I) -> Self {
         match self {
@@ -576,6 +661,10 @@ impl From<ContentBytes> for wit_types::ByteSource {
 }
 
 impl FileContent {
+    /// Inline bytes with default attrs `Size::Exact(len)` plus
+    /// `Stability::Immutable`. Override with [`Self::with_attrs`] when the
+    /// content can change; the immutable default licenses the host to
+    /// cache it indefinitely.
     pub fn new(content: impl Into<Vec<u8>>) -> Self {
         let content = content.into();
         let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
@@ -587,7 +676,10 @@ impl FileContent {
         }
     }
 
-    /// Serve from a host-resident blob. No bytes cross the WIT.
+    /// Serve from a host-resident blob; no bytes cross the WIT. Attrs
+    /// default to `Size::Unknown` plus `Stability::Immutable`: set the real
+    /// size via [`Self::with_attrs`] when the blob fetch reported one, so
+    /// `stat` is honest before the first read.
     pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
         Self {
             content_type: None,
@@ -656,7 +748,9 @@ impl FileContent {
     }
 }
 
-/// A completed read-file terminal: found bytes or an id-bearing not-found.
+/// A completed read-file terminal: found content, or a not-found
+/// optionally keyed to the logical object whose absence was established
+/// (so object invalidation clears the cached miss).
 #[derive(Clone, Debug)]
 pub enum ReadOutcome {
     Found(FileContent),
@@ -688,6 +782,9 @@ impl From<FileContent> for wit_types::ReadFileResult {
     }
 }
 
+/// Normalize an effect path to protocol form: tolerate a missing leading
+/// slash, then validate through `Path::parse` so malformed paths surface
+/// as invalid-input here instead of corrupting the view cache.
 fn wire_path(path: &str) -> Result<String> {
     let absolute = if path.starts_with('/') {
         path.to_string()

@@ -1,3 +1,14 @@
+//! Multi-format object representations: render one canonical payload into
+//! several leaf files (`item.md`, `item.json`, ...).
+//!
+//! The model: an object's canonical bytes are stored verbatim; each
+//! representation leaf either serves those bytes as-is (the source content
+//! type) or re-renders them through a [`RenderFn`]. Renders are pure
+//! functions of the canonical bytes, so the host can re-serve every
+//! representation from cache with no upstream call. Leaf names come from
+//! the representation stem plus each content type's extension, which is
+//! why [`RenderTable::build`] rejects extension collisions.
+
 use crate::error::{ProviderError, Result};
 use omnifs_core::ContentType;
 
@@ -43,6 +54,13 @@ impl Format for Diff {
 }
 
 /// Build erased render fns from format markers for object `O`.
+///
+/// Implemented only for the fixed tuples `()`, `(Markdown,)`,
+/// `(Markdown, Html)`, and `(Markdown, Html, Diff)`; each non-unit element
+/// requires `O: Representable<F>`. `()` means the object exposes only its
+/// canonical representation. A new combination needs a new
+/// `impl_render_set!` line in this module; it cannot be assembled at a
+/// provider call site.
 pub trait RenderSet<O: crate::object::Object> {
     fn register(table: &mut Vec<(ContentType, RenderFn)>);
 }
@@ -74,11 +92,25 @@ where
 }
 
 /// A value that can render itself into format `F`.
+///
+/// Rendering is infallible by design: parse failures belong to
+/// `Object::parse_canonical`, and by the time `represent` runs the value
+/// is already a well-formed `O`. Keep it a pure function of `self`; the
+/// output may be served from cache long after the render ran.
+///
+/// ```ignore
+/// impl Representable<Markdown> for Issue {
+///     fn represent(&self) -> Vec<u8> {
+///         format!("# {}\n\n{}\n", self.title, self.body).into_bytes()
+///     }
+/// }
+/// ```
 pub trait Representable<F: Format> {
     fn represent(&self) -> Vec<u8>;
 }
 
-/// Erased render function: canonical bytes in, rendered bytes out.
+/// Erased render function: canonical bytes in, rendered bytes out
+/// (parse the canonical, then [`Representable::represent`]).
 pub type RenderFn = fn(&[u8]) -> Result<Vec<u8>>;
 
 /// Per-route representation dispatch: one verbatim source (canonical) content
