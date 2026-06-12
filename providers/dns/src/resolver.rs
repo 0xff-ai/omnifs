@@ -11,7 +11,7 @@ use hickory_proto::rr::Name;
 use hickory_proto::rr::RecordType as HickoryRecordType;
 
 use omnifs_sdk::Cx;
-use omnifs_sdk::http::{Request, ResponseExt};
+use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::Deserialize;
 
@@ -166,15 +166,26 @@ impl AsRef<str> for ResolverName {
     }
 }
 
-pub(crate) trait DnsHttpExt {
-    fn dns_message_get(&self, url: impl Into<String>) -> Request<'_, State>;
+/// Provider-local `DoH` transport boundary: fetch a prepared `DoH` URL and
+/// return the raw DNS wire-format response body.
+///
+/// Production goes through the SDK's `Callout::Fetch` via the [`Cx<State>`]
+/// impl below; tests inject canned responses without touching the WIT
+/// contract.
+pub(crate) trait DohTransport {
+    async fn fetch_dns_message(&self, url: String) -> Result<Vec<u8>>;
 }
 
-impl DnsHttpExt for Cx<State> {
-    fn dns_message_get(&self, url: impl Into<String>) -> Request<'_, State> {
-        self.http()
+impl DohTransport for Cx<State> {
+    async fn fetch_dns_message(&self, url: String) -> Result<Vec<u8>> {
+        let response = self
+            .http()
             .get(url)
             .header("Accept", "application/dns-message")
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.into_body())
     }
 }
 
@@ -432,21 +443,40 @@ pub(crate) async fn read_reverse_bytes(
     resolver: Option<&ResolverName>,
     ip: &str,
 ) -> Result<Vec<u8>> {
+    let config = cx.state(|s| s.resolvers.clone());
+    read_reverse_bytes_with(cx, &config, resolver, ip).await
+}
+
+async fn read_reverse_bytes_with<T: DohTransport>(
+    transport: &T,
+    config: &ResolverConfig,
+    resolver: Option<&ResolverName>,
+    ip: &str,
+) -> Result<Vec<u8>> {
     let resolver_name = resolver.map(ResolverName::as_ref);
-    let url = cx.state(|s| {
-        let addr = ip
-            .parse::<IpAddr>()
-            .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
-        let name = Name::from(addr);
-        query_with_name(&s.resolvers, resolver_name, name, SupportedRecordType::PTR)
-    })?;
-    let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
-    let (records, _) = parse_response(resp.body())?;
+    let addr = ip
+        .parse::<IpAddr>()
+        .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
+    let name = Name::from(addr);
+    let url = query_with_name(config, resolver_name, name, SupportedRecordType::PTR)?;
+    let body = transport.fetch_dns_message(url).await?;
+    let (records, _) = parse_response(&body)?;
     Ok(format_record_lines(&records))
 }
 
 pub(crate) async fn read_record_bytes(
     cx: &Cx<State>,
+    resolver: Option<&ResolverName>,
+    domain: &DomainName,
+    record: &str,
+) -> Result<Vec<u8>> {
+    let config = cx.state(|s| s.resolvers.clone());
+    read_record_bytes_with(cx, &config, resolver, domain, record).await
+}
+
+async fn read_record_bytes_with<T: DohTransport>(
+    transport: &T,
+    config: &ResolverConfig,
     resolver: Option<&ResolverName>,
     domain: &DomainName,
     record: &str,
@@ -458,9 +488,8 @@ pub(crate) async fn read_record_bytes(
 
             let mut requests = Vec::with_capacity(SupportedRecordType::common().len());
             for record_type in SupportedRecordType::common() {
-                let url =
-                    cx.state(|s| query_url(&s.resolvers, resolver_ref, &domain_str, *record_type))?;
-                requests.push(cx.dns_message_get(url).send());
+                let url = query_url(config, resolver_ref, &domain_str, *record_type)?;
+                requests.push(transport.fetch_dns_message(url));
             }
 
             let responses = join_all(requests).await;
@@ -471,9 +500,7 @@ pub(crate) async fn read_record_bytes(
             let mut had_success = false;
 
             for response in responses {
-                let result = response
-                    .and_then(ResponseExt::error_for_status)
-                    .and_then(|resp| parse_response(resp.body()));
+                let result = response.and_then(|body| parse_response(&body));
                 match result {
                     Ok((records, _)) => {
                         had_success = true;
@@ -500,16 +527,9 @@ pub(crate) async fn read_record_bytes(
         "raw" => {
             let domain_str = domain.to_string();
             let resolver_ref = resolver.map(ResolverName::as_ref);
-            let url = cx.state(|s| {
-                query_url(
-                    &s.resolvers,
-                    resolver_ref,
-                    &domain_str,
-                    SupportedRecordType::A,
-                )
-            })?;
-            let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
-            let (records, _) = parse_response(resp.body())?;
+            let url = query_url(config, resolver_ref, &domain_str, SupportedRecordType::A)?;
+            let body = transport.fetch_dns_message(url).await?;
+            let (records, _) = parse_response(&body)?;
 
             let mut out = String::new();
             let _ = writeln!(out, ";; QUESTION SECTION:");
@@ -529,10 +549,9 @@ pub(crate) async fn read_record_bytes(
                 .map_err(|()| ProviderError::not_found("record not found"))?;
             let domain_str = domain.to_string();
             let resolver_name = resolver.map(ResolverName::as_ref);
-            let url =
-                cx.state(|s| query_url(&s.resolvers, resolver_name, &domain_str, record_type))?;
-            let resp = cx.dns_message_get(url).send().await?.error_for_status()?;
-            let (records, _) = parse_response(resp.body())?;
+            let url = query_url(config, resolver_name, &domain_str, record_type)?;
+            let body = transport.fetch_dns_message(url).await?;
+            let (records, _) = parse_response(&body)?;
             Ok(format_record_lines(&records))
         },
     }
@@ -544,4 +563,343 @@ fn format_record_lines(records: &[DnsRecord]) -> Vec<u8> {
         let _ = writeln!(output, "{}\t{}", r.rtype, r.value);
     }
     output.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_proto::rr::rdata::{A, PTR, TXT};
+    use hickory_proto::rr::{RData, Record};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    /// Drive a future whose only awaits are mock transport calls. Mock
+    /// futures are ready on first poll, so `Pending` means the future
+    /// reached a real callout and would stall forever in a test.
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let mut fut = pin!(fut);
+        let mut ctx = Context::from_waker(Waker::noop());
+        match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test future stalled: mock transport futures must be ready"),
+        }
+    }
+
+    fn config() -> ResolverConfig {
+        ResolverConfig::from_config(
+            crate::default_resolver_name(),
+            std::iter::empty::<(String, crate::ConfigResolver)>(),
+        )
+        .expect("builtin defaults parse")
+    }
+
+    fn domain(s: &str) -> DomainName {
+        s.parse().expect("valid test domain")
+    }
+
+    fn resolver(s: &str) -> ResolverName {
+        s.parse().expect("valid test resolver name")
+    }
+
+    /// Read `/example.com/{record}` through the mock, optionally via a named
+    /// resolver. Wraps the `block_on`/`config` plumbing shared by every test.
+    fn read(mock: &MockDoh, resolver_spec: Option<&str>, record: &str) -> Result<Vec<u8>> {
+        let resolver_name = resolver_spec.map(resolver);
+        block_on(read_record_bytes_with(
+            mock,
+            &config(),
+            resolver_name.as_ref(),
+            &domain("example.com"),
+            record,
+        ))
+    }
+
+    fn a_record(name: &Name, ip: [u8; 4]) -> Record {
+        Record::from_rdata(
+            name.clone(),
+            300,
+            RData::A(A(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]))),
+        )
+    }
+
+    /// Encode a DNS wire-format response the way a DoH resolver would.
+    fn doh_response(code: ResponseCode, answers: Vec<Record>) -> Vec<u8> {
+        let mut message = Message::new(0, MessageType::Response, OpCode::Query);
+        message.metadata.response_code = code;
+        message.answers = answers;
+        message.to_vec().expect("encode mock DNS response")
+    }
+
+    enum Reply {
+        Answers(Vec<Record>),
+        Rcode(ResponseCode),
+        Error(ProviderError),
+    }
+
+    /// One observed DoH request, decoded from the `dns=` query parameter.
+    struct SeenQuery {
+        endpoint: String,
+        qname: Name,
+        qtype: HickoryRecordType,
+    }
+
+    /// Mock transport keyed by query record type. Unmatched types resolve
+    /// to an empty `NoError` answer, mirroring a domain with no records.
+    struct MockDoh {
+        replies: BTreeMap<HickoryRecordType, Reply>,
+        seen: RefCell<Vec<SeenQuery>>,
+    }
+
+    impl MockDoh {
+        fn new(replies: impl IntoIterator<Item = (SupportedRecordType, Reply)>) -> Self {
+            Self {
+                replies: replies
+                    .into_iter()
+                    .map(|(rtype, reply)| (rtype.as_hickory(), reply))
+                    .collect(),
+                seen: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> std::cell::Ref<'_, Vec<SeenQuery>> {
+            self.seen.borrow()
+        }
+    }
+
+    impl DohTransport for MockDoh {
+        async fn fetch_dns_message(&self, url: String) -> Result<Vec<u8>> {
+            let (endpoint, dns_param) = url
+                .split_once("?dns=")
+                .expect("DoH URL must carry a dns query parameter");
+            let wire = URL_SAFE_NO_PAD
+                .decode(dns_param)
+                .expect("dns parameter is URL-safe base64");
+            let query_message =
+                Message::from_vec(&wire).expect("dns parameter decodes to a DNS message");
+            let query = query_message
+                .queries
+                .first()
+                .expect("DoH query carries one question");
+            let qtype = query.query_type();
+            self.seen.borrow_mut().push(SeenQuery {
+                endpoint: endpoint.to_string(),
+                qname: query.name().clone(),
+                qtype,
+            });
+            match self.replies.get(&qtype) {
+                Some(Reply::Answers(records)) => {
+                    Ok(doh_response(ResponseCode::NoError, records.clone()))
+                },
+                Some(Reply::Rcode(code)) => Ok(doh_response(*code, Vec::new())),
+                Some(Reply::Error(error)) => Err(error.clone()),
+                None => Ok(doh_response(ResponseCode::NoError, Vec::new())),
+            }
+        }
+    }
+
+    fn example_fqdn() -> Name {
+        Name::from_ascii("example.com.").expect("valid name")
+    }
+
+    #[test]
+    fn single_record_read_queries_default_resolver() {
+        let mock = MockDoh::new([(
+            SupportedRecordType::A,
+            Reply::Answers(vec![a_record(&example_fqdn(), [93, 184, 216, 34])]),
+        )]);
+        let output = read(&mock, None, "A").expect("read succeeds");
+        assert_eq!(output, b"A\t93.184.216.34\n");
+
+        let seen = mock.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].endpoint, "https://cloudflare-dns.com/dns-query");
+        assert_eq!(seen[0].qname, example_fqdn());
+        assert_eq!(seen[0].qtype, HickoryRecordType::A);
+    }
+
+    #[test]
+    fn named_resolver_and_alias_select_endpoint() {
+        for spec in ["google", "8.8.8.8"] {
+            let mock = MockDoh::new([]);
+            read(&mock, Some(spec), "A").expect("read succeeds");
+            assert_eq!(mock.seen()[0].endpoint, "https://dns.google/dns-query");
+        }
+    }
+
+    #[test]
+    fn url_spec_resolver_is_used_verbatim() {
+        let url = query_url(
+            &config(),
+            Some("https://doh.example/dns-query"),
+            "example.com",
+            SupportedRecordType::A,
+        )
+        .expect("url builds");
+        assert!(url.starts_with("https://doh.example/dns-query?dns="));
+    }
+
+    #[test]
+    fn unknown_resolver_spec_is_invalid_input() {
+        let mock = MockDoh::new([]);
+        let error = read(&mock, Some("quad9"), "A").expect_err("unknown resolver rejected");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
+        assert!(mock.seen().is_empty());
+    }
+
+    #[test]
+    fn unknown_record_type_is_not_found_without_query() {
+        let mock = MockDoh::new([]);
+        let error = read(&mock, None, "BOGUS").expect_err("unsupported record type rejected");
+        assert_eq!(error.kind(), ProviderErrorKind::NotFound);
+        assert!(mock.seen().is_empty());
+    }
+
+    #[test]
+    fn response_codes_map_to_error_kinds() {
+        for (rcode, kind) in [
+            (ResponseCode::NXDomain, ProviderErrorKind::NotFound),
+            (ResponseCode::ServFail, ProviderErrorKind::Network),
+        ] {
+            let mock = MockDoh::new([(SupportedRecordType::A, Reply::Rcode(rcode))]);
+            let error = read(&mock, None, "A").expect_err("rcode surfaces as an error");
+            assert_eq!(error.kind(), kind, "{rcode}");
+        }
+    }
+
+    #[test]
+    fn all_merges_results_and_tolerates_partial_failures() {
+        let mock = MockDoh::new([
+            (
+                SupportedRecordType::A,
+                Reply::Answers(vec![a_record(&example_fqdn(), [93, 184, 216, 34])]),
+            ),
+            (
+                SupportedRecordType::TXT,
+                Reply::Error(ProviderError::network("mock network failure")),
+            ),
+        ]);
+        let output = read(&mock, None, "all").expect("partial success still succeeds");
+        let text = String::from_utf8(output).expect("utf8 output");
+        assert!(
+            text.contains("A\t93.184.216.34"),
+            "missing A record: {text}"
+        );
+        assert_eq!(mock.seen().len(), SupportedRecordType::common().len());
+    }
+
+    #[test]
+    fn all_prefers_rate_limited_error_when_nothing_succeeds() {
+        let mock = MockDoh::new(SupportedRecordType::common().iter().map(|rtype| {
+            let error = if *rtype == SupportedRecordType::TXT {
+                ProviderError::rate_limited("mock 429")
+            } else {
+                ProviderError::network("mock network failure")
+            };
+            (*rtype, Reply::Error(error))
+        }));
+        let error = read(&mock, None, "all").expect_err("total failure surfaces an error");
+        assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn all_surfaces_first_error_when_no_rate_limit() {
+        let mock = MockDoh::new(SupportedRecordType::common().iter().map(|rtype| {
+            (
+                *rtype,
+                Reply::Error(ProviderError::network("mock network failure")),
+            )
+        }));
+        let error = read(&mock, None, "all").expect_err("total failure surfaces an error");
+        assert_eq!(error.kind(), ProviderErrorKind::Network);
+    }
+
+    #[test]
+    fn raw_renders_question_and_answer_sections() {
+        let mock = MockDoh::new([(
+            SupportedRecordType::A,
+            Reply::Answers(vec![a_record(&example_fqdn(), [93, 184, 216, 34])]),
+        )]);
+        let output = read(&mock, None, "raw").expect("raw read succeeds");
+        let text = String::from_utf8(output).expect("utf8 output");
+        assert!(text.contains(";; QUESTION SECTION:"), "{text}");
+        assert!(
+            text.contains("example.com.\t\tIN\tA\t93.184.216.34"),
+            "{text}"
+        );
+        assert!(text.contains(";; RECORDS: 1"), "{text}");
+    }
+
+    #[test]
+    fn reverse_lookup_queries_ptr_for_in_addr_arpa() {
+        let ptr_name = Name::from_ascii("one.one.one.one.").expect("valid name");
+        let arpa_name = Name::from_ascii("1.1.1.1.in-addr.arpa.").expect("valid name");
+        let mock = MockDoh::new([(
+            SupportedRecordType::PTR,
+            Reply::Answers(vec![Record::from_rdata(
+                arpa_name.clone(),
+                300,
+                RData::PTR(PTR(ptr_name)),
+            )]),
+        )]);
+        let output = block_on(read_reverse_bytes_with(&mock, &config(), None, "1.1.1.1"))
+            .expect("reverse read succeeds");
+        let text = String::from_utf8(output).expect("utf8 output");
+        assert!(text.starts_with("PTR\tone.one.one.one"), "{text}");
+
+        let seen = mock.seen();
+        assert_eq!(seen[0].qname, arpa_name);
+        assert_eq!(seen[0].qtype, HickoryRecordType::PTR);
+    }
+
+    #[test]
+    fn invalid_ip_is_rejected_without_query() {
+        let mock = MockDoh::new([]);
+        let error = block_on(read_reverse_bytes_with(&mock, &config(), None, "not-an-ip"))
+            .expect_err("invalid IP rejected");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
+        assert!(mock.seen().is_empty());
+    }
+
+    #[test]
+    fn empty_answer_reads_as_empty_output() {
+        // Documents current behavior (see issue #56): an empty answer is
+        // indistinguishable from missing records in the projected file.
+        let mock = MockDoh::new([]);
+        let output = read(&mock, None, "A").expect("empty answer still succeeds");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn parse_response_uses_default_ttl_for_empty_answers() {
+        let body = doh_response(ResponseCode::NoError, Vec::new());
+        let (records, ttl) = parse_response(&body).expect("parses");
+        assert!(records.is_empty());
+        assert_eq!(ttl, 300);
+    }
+
+    #[test]
+    fn txt_records_render_with_record_type_prefix() {
+        let mock = MockDoh::new([(
+            SupportedRecordType::TXT,
+            Reply::Answers(vec![Record::from_rdata(
+                example_fqdn(),
+                300,
+                RData::TXT(TXT::new(vec!["v=spf1 -all".to_string()])),
+            )]),
+        )]);
+        let output = read(&mock, None, "TXT").expect("TXT read succeeds");
+        let text = String::from_utf8(output).expect("utf8 output");
+        assert!(text.starts_with("TXT\t"), "{text}");
+        assert!(text.contains("v=spf1 -all"), "{text}");
+    }
+
+    #[test]
+    fn query_url_rejects_invalid_domain() {
+        let error = query_url(&config(), None, "exa mple.com", SupportedRecordType::A)
+            .expect_err("invalid domain rejected");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
+    }
 }
