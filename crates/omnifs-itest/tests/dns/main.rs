@@ -431,6 +431,26 @@ fn dns_default_resolver_targets_configured_default() {
 }
 
 #[test]
+fn dns_resolver_aliases_target_configured_endpoint() {
+    let harness = dns_harness();
+
+    for path in ["/@google/example.com/A", "/@8.8.8.8/example.com/A"] {
+        let op = harness.read(path).unwrap();
+        let fetch = dns_expect_fetch(&op);
+        assert!(
+            fetch.url.starts_with("https://dns.google/dns-query"),
+            "unexpected resolver URL for {path}: {}",
+            fetch.url
+        );
+        assert!(
+            fetch.url.contains("dns="),
+            "expected DoH dns= parameter in {}",
+            fetch.url
+        );
+    }
+}
+
+#[test]
 fn dns_record_read_is_mutable_not_immutable() {
     let harness = dns_harness();
     let mut op = harness.read("/example.com/A").unwrap();
@@ -491,6 +511,14 @@ fn dns_query_uses_doh_wireformat() {
     );
 }
 
+fn empty_http_response(status: u16) -> CalloutResult {
+    CalloutResult::HttpResponse(HttpResponse {
+        status,
+        headers: Vec::new(),
+        body: Vec::new(),
+    })
+}
+
 #[test]
 fn dns_all_keeps_partial_success_under_rate_limit() {
     let harness = dns_harness();
@@ -526,5 +554,45 @@ fn dns_all_keeps_partial_success_under_rate_limit() {
             );
         },
         other => panic!("expected ReadFile terminal after partial success, got {other:?}"),
+    }
+}
+
+#[test]
+fn dns_all_returns_rate_limited_when_every_query_is_rate_limited() {
+    let harness = dns_harness();
+    let mut op = harness.read("/example.com/all").unwrap();
+    let fetches = expect_fetches(&op);
+
+    op.resume(
+        (0..fetches.len())
+            .map(|_| empty_http_response(429))
+            .collect(),
+    )
+    .unwrap();
+    match op.into_result().unwrap() {
+        OpResult::Error(error) => {
+            assert_eq!(error.kind, ErrorKind::RateLimited);
+        },
+        other => panic!("expected RateLimited error after all queries failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn dns_all_returns_network_when_every_query_fails_without_rate_limit() {
+    let harness = dns_harness();
+    let mut op = harness.read("/example.com/all").unwrap();
+    let fetches = expect_fetches(&op);
+
+    op.resume(
+        (0..fetches.len())
+            .map(|_| empty_http_response(500))
+            .collect(),
+    )
+    .unwrap();
+    match op.into_result().unwrap() {
+        OpResult::Error(error) => {
+            assert_eq!(error.kind, ErrorKind::Network);
+        },
+        other => panic!("expected Network error after all queries failed, got {other:?}"),
     }
 }
