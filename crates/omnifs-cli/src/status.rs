@@ -1,9 +1,9 @@
 //! Status report: data types, collection, and rendering.
 
 use comfy_table::{Cell, ContentArrangement, Table, presets};
+use omnifs_creds::FileStore;
 use std::fmt::Write as _;
 
-use crate::session::CredsBackend;
 use crate::{catalog::ProviderCatalog, paths::Paths};
 use omnifs_api::DaemonStatus;
 
@@ -25,14 +25,15 @@ pub(crate) fn collect_status(
     catalog: &ProviderCatalog,
     paths: Paths,
     runtime: Option<DaemonStatus>,
-) -> anyhow::Result<StatusReport> {
-    let store = CredsBackend::auto(&paths.credentials_file, true);
-    Ok(StatusReport {
+    mounts: Vec<crate::session::MountConfig>,
+) -> StatusReport {
+    let store = FileStore::new(&paths.credentials_file);
+    StatusReport {
         runtime,
-        user_mounts: catalog.scan_user_mount_configs(store.as_ref())?,
-        providers: catalog.scan_provider_configs()?,
+        user_mounts: catalog.scan_user_mount_configs(mounts.clone(), &store),
+        providers: catalog.scan_provider_configs(mounts),
         paths,
-    })
+    }
 }
 
 impl StatusReport {
@@ -258,7 +259,6 @@ pub(crate) struct MountJson {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PathsJson {
     pub config_dir: std::path::PathBuf,
-    pub data_dir: std::path::PathBuf,
     pub cache_dir: std::path::PathBuf,
     pub mounts_dir: std::path::PathBuf,
     pub providers_dir: std::path::PathBuf,
@@ -347,7 +347,6 @@ impl StatusReport {
             }),
             paths: PathsJson {
                 config_dir: self.paths.config_dir.clone(),
-                data_dir: self.paths.data_dir.clone(),
                 cache_dir: self.paths.cache_dir.clone(),
                 mounts_dir: self.paths.mounts_dir.clone(),
                 providers_dir: self.paths.providers_dir.clone(),

@@ -10,7 +10,7 @@ The daemon/CLI split (`docs/design/daemon-cli-split.md`, merged) left the shared
 
 - **`omnifs-mount-schema` is two domains in one crate.** It carries mount configuration (`Spec`, `Resolved`, `Catalog`, the user `auth`/`capabilities` blocks) and the provider contract (`ProviderManifest`, the WASM custom-section codec, route resolution, capabilities, config schema). They share a wall but not an audience.
 - **Several type families are modelled more than once.** Auth appears as the user-config `Auth`, the provider-authored `ManifestAuthScheme`/`ManifestOAuthFlow`, the runtime `AuthScheme`/`OAuthFlow`/`AuthManifest`, and the store-side `CredentialKind`, bridged by a transform that exists only because two of those live in the same crate for the same consumers. `Spec` and `Resolved` are field-for-field twins differing only in `provider_id: Option<String>` vs `String`.
-- **The on-disk layout is resolved in two places that have already drifted.** `crates/omnifs-cli/src/paths.rs` and `crates/omnifs-daemon/src/paths.rs` both read `OMNIFS_*`, apply `OMNIFS_HOME`, and fall back to `~/.omnifs`. After the layout was flattened on the CLI side (`credentials.json` and `providers/` at the root, no `data/` tier), the daemon copy still resolves `providers_dir` under `data/providers`. That is exactly the drift a shared definition prevents.
+- **The on-disk layout is resolved in two places that have already drifted.** `crates/omnifs-cli/src/paths.rs` and `crates/omnifs-daemon/src/paths.rs` both derive an omnifs root from environment and fall back to `~/.omnifs`. After the layout was flattened on the CLI side (`credentials.json` and `providers/` at the root, no `data/` tier), the daemon copy still resolved the provider directory under the old nested layout. That is exactly the drift a shared definition prevents.
 
 This document records the target crate structure. The governing principle: **a crate earns its existence by being shared across consumers or compiled to a different target (`wasm32-wasip2` provider builds vs host binaries). One-consumer logic stays a module, not a crate.** That is why `omnifs-api` (2 consumers) is healthy at its size, why the duplicated layout logic deserves a crate (2 consumers, already drifting), and why the CLI's `config.toml` handling does not (1 consumer).
 
@@ -50,11 +50,11 @@ This document records the target crate structure. The governing principle: **a c
 
 | Crate | Change | Owns (responsibility) | Consumers |
 |---|---|---|---|
-| `omnifs-home` | NEW | The omnifs root and its on-disk shape: `Paths`, `PathOverrides`, `under_root`, the layout constants (`config.toml`/`credentials.json`/`mounts`/`providers`/`cache`), and `OMNIFS_*` + override precedence. Host-only, the single layout authority. | CLI, daemon |
+| `omnifs-home` | NEW | The omnifs root and its on-disk shape: `Paths`, `PathOverrides`, `under_root`, the layout constants (`config.toml`/`credentials.json`/`mounts`/`providers`/`cache`), and `OMNIFS_HOME` + explicit override precedence. Host-only, the single layout authority. | CLI, daemon |
 | `omnifs-provider` | SPLIT (from mount-schema) | The provider's self-description / contract: `ProviderManifest`, the WASM custom-section codec (`sections`/`records`), route resolution, `ProviderCapabilities`, `ConfigSchema`, and one auth-scheme model (`AuthScheme`/`AuthFlow`/`AuthManifest`) replacing the manifest-vs-wire duplication. | SDK, providers (wasm), host, daemon, CLI |
 | `omnifs-mount` | SPLIT (from mount-schema) | The mount itself: a single `Mount` type (`Spec`+`Resolved` collapsed to `{ spec, provider_id }`), `Catalog`, and `Spec -> Resolved` resolution against `omnifs-provider`. Plus the sparse user `Auth` config. | CLI, daemon, host |
 | `omnifs-core` | CHANGED | Validated newtypes and protocol types: `Id`, `Name`, `Path`/`Segment`, `ContentType`, `CredentialId`/`SchemeId`/`AccountId`. wasm-safe. Move `view.rs` (host cache records) out to `omnifs-host`. | nearly everything |
-| `omnifs-creds` | UNCHANGED role | Credential store: `CredentialEntry`, `CredentialStore` (file / keychain / memory). Its `CredentialKind` merges with the unified auth discriminant. | CLI, host, auth |
+| `omnifs-creds` | UNCHANGED role | Credential store: `CredentialEntry`, `CredentialStore` (file / memory). Its `CredentialKind` merges with the unified auth discriminant. | CLI, host, auth |
 | `omnifs-auth` | CHANGED dep | OAuth protocol client: `OAuthClient`, `OAuthRequest`, device/loopback/manual flows. Depends on `omnifs-provider` for the auth-scheme types instead of mount-schema. | CLI, host |
 | `omnifs-api` | UNCHANGED | Control-plane HTTP DTOs: `VersionInfo`, `ReadyInfo`, `DaemonStatus`, `FrontendInfo`, `MountInfo`. The CLI/daemon wire contract. | CLI, daemon |
 | `omnifs-daemon` (`omnifsd`) | CHANGED | Runtime daemon: control API, registry, FUSE frontend lifecycle. Deletes its `paths.rs` copy, uses `omnifs-home`. | binary |
@@ -96,12 +96,11 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const MOUNTS_SUBDIR: &str = "mounts";
 const PROVIDERS_SUBDIR: &str = "providers";
 const CACHE_SUBDIR: &str = "cache";
-// default root: $OMNIFS_HOME, else $HOME/.omnifs, else /root/.omnifs
+// default root: $OMNIFS_HOME, else $HOME/.omnifs
 
 pub struct PathOverrides {        // explicit (CLI flag) relocations
     pub config_dir: Option<PathBuf>,
     pub cache_dir: Option<PathBuf>,
-    pub providers_dir: Option<PathBuf>,
 }
 
 pub struct Paths {                // the fully resolved layout
@@ -114,8 +113,7 @@ pub struct Paths {                // the fully resolved layout
 }
 
 impl Paths {
-    // Resolve from overrides, then per-purpose env (OMNIFS_CONFIG_DIR,
-    // OMNIFS_CACHE_DIR, OMNIFS_PROVIDERS_DIR), then OMNIFS_HOME, then default.
+    // Resolve from overrides, then OMNIFS_HOME, then the user's default home.
     pub fn resolve(overrides: PathOverrides) -> Self;
 
     // The one place that maps the omnifs structure to concrete paths. Host
@@ -130,13 +128,13 @@ impl Paths {
 
 Dependencies: `omnifs-core` (for `MountName`) and `std`. Nothing host-runtime, nothing wasm.
 
-What stays in the CLI (does **not** move into `omnifs-home`): the two-pass `resolve_with_config` and `overlay_config_paths`, because they read `config.toml`'s `[paths]` block. `config.toml` is the host user's authoring surface, owned by the CLI `Workspace`; the daemon never reads it. `omnifs-home` provides `resolve(overrides)` and `under_root`; the `Workspace` layers the config overlay on top.
+What stays in the CLI (does **not** move into `omnifs-home`): the two-pass `resolve_with_config`, because it locates and reads `config.toml`. `config.toml` is the host user's authoring surface, owned by the CLI `Workspace`; the daemon never reads it. `omnifs-home` provides `resolve(overrides)` and `under_root`.
 
-The daemon side collapses cleanly: `omnifs-daemon/src/paths.rs` (its own `Paths`/`Overrides` with the drifted `data/providers` fallback) is deleted and replaced by `omnifs_home::Paths::resolve`, reading the `config_dir`/`cache_dir`/`providers_dir` fields it needs. `omnifs_host::Dirs` is then built from that `Paths` via one `From`, so the runtime's dir bundle never drifts from the resolved layout.
+The daemon side collapses cleanly: `omnifs-daemon/src/paths.rs` is deleted and replaced by `omnifs_home::Paths::resolve`, reading the `config_dir`, `cache_dir`, and canonical `providers_dir` fields it needs. `omnifs_host::Dirs` is then built from that `Paths` via one `From`, so the runtime's dir bundle never drifts from the resolved layout.
 
 ## Workspace (not a crate)
 
-`Workspace` stays a module in `omnifs-cli`. It owns `config.toml` (immutable read view plus doc-preserving surgical mutators that cannot drop `[system]`/`[paths]`/comments) and the single mount-enumeration funnel (`config.toml` `[[mounts]]` merged with any per-file specs, the one path every command uses to list mounts). It has one consumer, the host CLI, so it is a module; it depends on `omnifs-home` for directory resolution and on `omnifs-mount` for `Spec`. Provider resolution (`Spec -> Resolved`) stays in `omnifs-mount`'s `Catalog`; credential materialization stays in the CLI `Session`.
+`Workspace` stays a module in `omnifs-cli`. It owns `config.toml` (immutable read view plus doc-preserving surgical mutators that cannot drop existing comments or unrelated sections) and the single mount-enumeration funnel (`config.toml` `[[mounts]]` merged with any per-file specs, the one path every command uses to list mounts). It has one consumer, the host CLI, so it is a module; it depends on `omnifs-home` for directory resolution and on `omnifs-mount` for `Spec`. Provider resolution (`Spec -> Resolved`) stays in `omnifs-mount`'s `Catalog`; credential materialization stays in the CLI `Session`.
 
 ## Sequencing
 

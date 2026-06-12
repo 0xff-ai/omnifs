@@ -16,7 +16,7 @@ proc-macro = true
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-omnifs-mount-schema = { workspace = true }
+omnifs-provider = { workspace = true }
 serde_json = { workspace = true }
 
 [lints.rust]

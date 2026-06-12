@@ -11,7 +11,7 @@ keywords = ["omnifs", "wasm", "wit", "sdk", "fuse"]
 
 [dependencies]
 omnifs-core = { workspace = true }
-omnifs-mount-schema = { workspace = true }
+omnifs-provider = { workspace = true }
 omnifs-sdk-macros = { workspace = true }
 omnifs-wit = { workspace = true }
 thiserror = { workspace = true }

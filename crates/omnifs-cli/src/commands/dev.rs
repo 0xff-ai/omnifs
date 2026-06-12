@@ -8,6 +8,7 @@
 
 use anyhow::Context;
 use clap::Args;
+use omnifs_creds::FileStore;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -15,12 +16,11 @@ use std::process::Command;
 use crate::app_context::AppContext;
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot, capture_gh_token};
-use crate::launch::{LaunchSpec, launch_session};
+use crate::launch::{LaunchSpec, launch_runtime};
 use crate::paths::PathOverrides;
 use crate::runtime::ContainerExtras;
 use crate::session::{
-    CONTAINER_NAME, CredsBackend, ENV_CONTAINER_NAME, HOST_FUSE_MOUNT, env_string, set_private_dir,
-    write_secret,
+    CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, env_string, set_private_dir, write_secret,
 };
 
 const CHINOOK_URL: &str = "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite";
@@ -77,14 +77,13 @@ impl DevArgs {
         let paths = ctx.paths();
         let runtime = ctx.runtime();
 
-        // Use the same JSON credential store as the normal CLI path so
-        // contributor builds never trigger platform keychain prompts.
-        let store = CredsBackend::file(&paths.credentials_file, true);
+        let store = Box::new(FileStore::new(&paths.credentials_file));
+        crate::provider_bundle::install_workspace_bundle(workspace.path(), &paths.providers_dir)?;
 
-        launch_session(
+        launch_runtime(
             LaunchSpec {
                 runtime,
-                credentials_file: &paths.credentials_file,
+                runtime_home: &paths.config_dir,
                 store,
                 verb: "omnifs dev",
                 configs: dev_mounts::configs()?,
@@ -100,7 +99,7 @@ impl DevArgs {
         .await?;
 
         anstream::println!(
-            "✓ {HOST_FUSE_MOUNT} is mounted inside `{}`",
+            "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
             runtime.container_name()
         );
         anstream::println!();

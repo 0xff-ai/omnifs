@@ -14,7 +14,7 @@ use omnifs_api::{API_VERSION, DaemonStatus, FrontendInfo, MountInfo, ReadyInfo, 
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::{ProviderRegistry, RegistryError};
 use omnifs_inspector::serialize_record;
-use omnifs_mount_schema::mounts::Spec;
+use omnifs_mount::mounts::Spec;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
@@ -37,13 +37,13 @@ use crate::frontends::Frontends;
         FrontendInfo,
         MountInfo,
         Spec,
-        omnifs_mount_schema::Auth,
-        omnifs_mount_schema::StaticToken,
-        omnifs_mount_schema::OAuth,
-        omnifs_mount_schema::ProviderConfig,
-        omnifs_mount_schema::ProviderCapabilities,
-        omnifs_mount_schema::PreopenedPath,
-        omnifs_mount_schema::PreopenMode,
+        omnifs_mount::Auth,
+        omnifs_mount::StaticToken,
+        omnifs_mount::OAuth,
+        omnifs_mount::ProviderConfig,
+        omnifs_provider::ProviderCapabilities,
+        omnifs_provider::PreopenedPath,
+        omnifs_provider::PreopenMode,
     ))
 )]
 struct ApiDoc;

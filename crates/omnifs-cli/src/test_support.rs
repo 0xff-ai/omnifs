@@ -37,15 +37,7 @@ impl CredentialStore for NonListingStore {
 /// `mounts_dir` or `providers_dir` to exist should mkdir them explicitly.
 #[cfg(test)]
 pub(crate) fn fixture_paths(root: &std::path::Path) -> crate::paths::Paths {
-    crate::paths::Paths {
-        config_dir: root.join("cfg"),
-        data_dir: root.join("data"),
-        cache_dir: root.join("cache"),
-        mounts_dir: root.join("mounts"),
-        providers_dir: root.join("providers"),
-        credentials_file: root.join("credentials.json"),
-        config_file: root.join("config.toml"),
-    }
+    crate::paths::Paths::under_root(root)
 }
 
 #[cfg(test)]
@@ -82,10 +74,10 @@ pub(crate) fn wasm_with_provider_metadata(id: &str, provider: &str) -> Vec<u8> {
     let data = serde_json::to_vec(&metadata).unwrap();
     let mut section = Vec::new();
     push_uleb(
-        omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME.len(),
+        omnifs_provider::PROVIDER_METADATA_SECTION_NAME.len(),
         &mut section,
     );
-    section.extend_from_slice(omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME.as_bytes());
+    section.extend_from_slice(omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes());
     section.extend_from_slice(&data);
     wasm.push(0);
     push_uleb(section.len(), &mut wasm);

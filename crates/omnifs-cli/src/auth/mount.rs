@@ -3,12 +3,11 @@
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
 use omnifs_auth::oauth_request_from_config;
+use omnifs_core::AuthKind;
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_mount_schema::Auth;
-use omnifs_mount_schema::mounts::Resolved;
-use omnifs_mount_schema::{
-    AuthInject, AuthManifest, ManifestAuthScheme, ManifestStaticTokenScheme, ProviderManifest,
-};
+use omnifs_mount::Auth;
+use omnifs_mount::mounts::Resolved;
+use omnifs_provider::{AuthInject, AuthManifest, AuthScheme, ProviderManifest, StaticTokenScheme};
 
 use super::manifest_view::AuthManifestView;
 use crate::catalog::ProviderCatalog;
@@ -18,7 +17,7 @@ use omnifs_core::MountName;
 /// Auth mode chosen during `omnifs init` before a mount config exists on disk.
 #[derive(Clone, Debug)]
 pub(crate) struct AuthSelection {
-    pub(crate) auth_type: String,
+    pub(crate) auth_type: AuthKind,
     pub(crate) scheme: Option<String>,
     pub(crate) account: Option<String>,
 }
@@ -28,8 +27,8 @@ impl AuthSelection {
         let auth = manifest.auth.as_ref()?;
         let (key, scheme) = auth.default_scheme()?;
         let auth_type = match scheme {
-            ManifestAuthScheme::StaticToken(_) => "static-token".to_string(),
-            ManifestAuthScheme::Oauth(_) => "oauth".to_string(),
+            AuthScheme::StaticToken(_) => AuthKind::StaticToken,
+            _ => AuthKind::OAuth,
         };
         Some(Self {
             auth_type,
@@ -39,7 +38,7 @@ impl AuthSelection {
     }
 
     pub(crate) fn is_oauth(&self) -> bool {
-        self.auth_type == "oauth"
+        self.auth_type == AuthKind::OAuth
     }
 
     pub(crate) fn promote_imported_static(
@@ -53,7 +52,7 @@ impl AuthSelection {
         let account = self.account.take();
         match AuthManifestView::new(auth_manifest).first_static_token_scheme_key() {
             Some(scheme) => Ok(Self {
-                auth_type: "static-token".to_string(),
+                auth_type: AuthKind::StaticToken,
                 scheme: Some(scheme),
                 account,
             }),
@@ -66,7 +65,7 @@ impl AuthSelection {
     pub(crate) fn static_token_scheme<'a>(
         &self,
         manifest: &'a ProviderManifest,
-    ) -> anyhow::Result<(&'a ManifestStaticTokenScheme, &'a AuthInject)> {
+    ) -> anyhow::Result<(&'a StaticTokenScheme, &'a AuthInject)> {
         let auth_block = manifest.auth.as_ref().ok_or_else(|| {
             anyhow!(
                 "provider `{}` has no auth block; cannot run static-token init",
@@ -81,8 +80,8 @@ impl AuthSelection {
             .get(&scheme_key)
             .ok_or_else(|| anyhow!("provider `{}` has no scheme `{scheme_key}`", manifest.id))?;
         match scheme {
-            ManifestAuthScheme::StaticToken(static_token) => Ok((static_token, &auth_block.inject)),
-            ManifestAuthScheme::Oauth(_) => anyhow::bail!(
+            AuthScheme::StaticToken(static_token) => Ok((static_token, &auth_block.inject)),
+            _ => anyhow::bail!(
                 "provider `{}` scheme `{scheme_key}` is OAuth, not static-token",
                 manifest.id
             ),
@@ -97,38 +96,49 @@ pub(crate) struct MountAuth {
 }
 
 impl ProviderCatalog {
-    pub(crate) fn load_mount_auth(&self, mount: &str) -> anyhow::Result<MountAuth> {
-        let config = self.load_mount_auth_config(mount)?;
+    pub(crate) fn load_mount_auth(
+        &self,
+        mounts: &[crate::session::MountConfig],
+        mount: &str,
+    ) -> anyhow::Result<MountAuth> {
+        let config = self.load_mount_auth_config(mounts, mount)?;
         self.resolve_mount_auth(config)
     }
 
     pub(crate) fn load_mount_auth_tolerating_manifest_errors(
         &self,
+        mounts: &[crate::session::MountConfig],
         mount: &str,
     ) -> anyhow::Result<MountAuth> {
-        let config = self.load_mount_auth_config(mount)?;
+        let config = self.load_mount_auth_config(mounts, mount)?;
         Ok(self.resolve_mount_auth_tolerating_manifest_errors(config))
     }
 
     pub(crate) fn load_all_mount_auth_tolerating_manifest_errors(
         &self,
+        mounts: Vec<crate::session::MountConfig>,
     ) -> anyhow::Result<Vec<MountAuth>> {
-        let mut mounts = self
-            .mount_config_paths()?
+        let mut results = mounts
             .into_iter()
-            .map(|path| {
-                let mount = self.load_mount(&path)?;
-                Ok(self.resolve_mount_auth_tolerating_manifest_errors(mount))
+            .map(|m| {
+                let resolved = self
+                    .resolve_mount_spec(m.config, true)
+                    .with_context(|| format!("load mount config `{}`", m.name))?;
+                Ok(self.resolve_mount_auth_tolerating_manifest_errors(resolved))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        mounts.sort_by(|a, b| a.config.mount.cmp(&b.config.mount));
-        Ok(mounts)
+        results.sort_by(|a, b| a.config.spec.mount.cmp(&b.config.spec.mount));
+        Ok(results)
     }
 
-    fn load_mount_auth_config(&self, mount: &str) -> anyhow::Result<Resolved> {
+    fn load_mount_auth_config(
+        &self,
+        mounts: &[crate::session::MountConfig],
+        mount: &str,
+    ) -> anyhow::Result<Resolved> {
         let name = MountName::new(mount.to_owned())
             .with_context(|| format!("invalid mount name `{mount}`"))?;
-        self.load_mount_by_name(&name)
+        self.load_mount_by_name(mounts, &name)
             .with_context(|| format!("load mount config `{mount}`"))
     }
 
@@ -200,7 +210,7 @@ impl MountAuth {
         let scheme = auth.scheme().ok_or_else(|| {
             anyhow!(
                 "auth config for mount `{}` must set `scheme`",
-                self.config.mount
+                self.config.spec.mount
             )
         })?;
         self.target_for_scheme(Some(auth), scheme, account)
@@ -208,10 +218,11 @@ impl MountAuth {
 
     fn primary_auth(&self) -> Option<&Auth> {
         self.config
+            .spec
             .auth
             .iter()
             .find(|auth| auth.is_oauth())
-            .or_else(|| self.config.auth.first())
+            .or_else(|| self.config.spec.auth.first())
     }
 
     fn status_target(&self) -> anyhow::Result<CredentialTarget> {

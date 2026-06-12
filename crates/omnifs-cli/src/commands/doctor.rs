@@ -5,12 +5,13 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use omnifs_creds::FileStore;
+
 use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
 use crate::runtime::Runtime;
-use crate::session::CredsBackend;
 use crate::status::UserMountStatus;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
@@ -29,7 +30,8 @@ pub(crate) enum DoctorVerdict {
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let ctx = AppContext::resolve_default()?;
-        run(ctx.paths(), ctx.catalog()).await
+        let mounts = ctx.workspace().mounts()?;
+        run(ctx.paths(), ctx.catalog(), mounts).await
     }
 }
 
@@ -109,7 +111,11 @@ impl DoctorReport {
     }
 }
 
-pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<DoctorVerdict> {
+pub async fn run(
+    paths: &Paths,
+    catalog: &ProviderCatalog,
+    mounts: Vec<crate::session::MountConfig>,
+) -> anyhow::Result<DoctorVerdict> {
     let mut report = DoctorReport::default();
 
     // 1. docker_reachable
@@ -151,7 +157,7 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
     anstream::println!("{}", report.record("config file", cfg_result));
 
     // 8. mount configs valid + 9. auth ready (combined because the loader does both)
-    let mount_results = probe_mount_configs(paths, catalog);
+    let mount_results = probe_mount_configs(paths, catalog, mounts);
     anstream::println!("{}", report.record("mount configs valid", mount_results.0));
     for (mount, result) in mount_results.1 {
         anstream::println!("{}", report.record(format!("auth ready ({mount})"), result));
@@ -165,13 +171,13 @@ pub async fn run(paths: &Paths, catalog: &ProviderCatalog) -> anyhow::Result<Doc
 }
 
 async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
-    use crate::paths::{PathOverrides, Paths};
+    use crate::paths::PathOverrides;
     use crate::runtime::DockerProbeOutcome;
     use crate::runtime_target::RuntimeTarget;
 
     // Use the default runtime target so that probe_image_cached checks the
     // same image omnifs up would pull.
-    let target = match Paths::resolve_with_config(PathOverrides::default())
+    let target = match crate::paths::resolve_with_config(PathOverrides::default())
         .and_then(|(_, cfg)| RuntimeTarget::resolve(None, None, &cfg))
     {
         Ok(t) => t,
@@ -289,14 +295,10 @@ fn probe_result_from_summary(summary: AuthProbeSummary) -> ProbeResult {
 fn probe_mount_configs(
     paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: Vec<crate::session::MountConfig>,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {
-    let store = CredsBackend::auto(&paths.credentials_file, false);
-    let mounts = match catalog.scan_user_mount_configs(store.as_ref()) {
-        Ok(m) => m,
-        Err(error) => {
-            return (ProbeResult::Err(format!("scan: {error}")), Vec::new());
-        },
-    };
+    let store = FileStore::new(&paths.credentials_file);
+    let mounts = catalog.scan_user_mount_configs(mounts, &store);
     let invalid: Vec<_> = mounts
         .iter()
         .filter_map(|m| match m {

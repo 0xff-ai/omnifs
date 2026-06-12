@@ -16,16 +16,15 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_mount_schema::ProviderManifest;
+use omnifs_provider::ProviderManifest;
 
 use crate::app_context::AppContext;
 use crate::catalog;
 use crate::commands::{init, up};
 use crate::error::WithHint;
-use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::HOST_FUSE_MOUNT;
+use crate::session::GUEST_FUSE_MOUNT;
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
@@ -69,19 +68,20 @@ impl SetupArgs {
             .await?;
 
         let catalog = ctx.catalog();
+        let mounts = ctx.workspace().mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = catalog.configured_mounts_by_provider(&templates)?;
+        let configured = catalog.configured_mounts_by_provider(&mounts, &templates);
 
         let selected = resolve_selection(&self, &templates, &configured)?;
-        let results = run_init_loop(&selected, &self, paths, &templates).await;
+        let results = run_init_loop(&selected, &self, &templates).await;
 
         let report = summary::SetupSummary::new(
             paths,
             ctx.runtime().container_name().as_str(),
-            HOST_FUSE_MOUNT,
+            GUEST_FUSE_MOUNT,
             &configured,
             &results,
         );
@@ -270,7 +270,6 @@ fn validate_preselected(
 async fn run_init_loop(
     selected: &[String],
     args: &SetupArgs,
-    paths: &Paths,
     templates: &BTreeMap<String, catalog::ProviderTemplate>,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
@@ -324,8 +323,6 @@ async fn run_init_loop(
             token: None,
             token_env: None,
             scopes: Vec::new(),
-            providers_dir: Some(paths.providers_dir.clone()),
-            mounts_dir: Some(paths.mounts_dir.clone()),
             show_capabilities: false,
         };
         let outcome = init_args.run().await.map_err(|e| e.to_string());
@@ -342,10 +339,8 @@ async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
     anstream::println!();
     anstream::println!("Launching container ...");
     up::UpArgs {
-        mounts_dir: None,
         image: config.image.clone(),
         container_name: config.container_name.clone(),
-        providers_dir: None,
     }
     .run()
     .await

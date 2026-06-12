@@ -1,7 +1,7 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+pub use omnifs_core::AuthKind;
 
 /// Provider-specific configuration object from a mount JSON file's `"config"` field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -40,31 +40,18 @@ pub enum Auth {
     OAuth(OAuth),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthKind {
-    StaticToken,
-    OAuth,
-}
-
-impl fmt::Display for AuthKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StaticToken => f.write_str("static-token"),
-            Self::OAuth => f.write_str("oauth"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     /// Provider-declared auth scheme key for manifest-backed credentials.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
     /// User-chosen account handle for host-managed credentials.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_file: Option<String>,
 }
 
@@ -72,26 +59,41 @@ pub struct StaticToken {
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
     /// Provider-declared auth scheme key for manifest-backed credentials.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
     /// User-chosen account handle for host-managed credentials.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
     /// OAuth public client id override for BYO OAuth applications.
-    #[serde(default, alias = "clientId")]
+    #[serde(default, alias = "clientId", skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     /// Environment variable containing an OAuth client secret.
-    #[serde(default, alias = "clientSecretEnv")]
+    #[serde(
+        default,
+        alias = "clientSecretEnv",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_secret_env: Option<String>,
     /// File containing an OAuth client secret.
-    #[serde(default, alias = "clientSecretFile")]
+    #[serde(
+        default,
+        alias = "clientSecretFile",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_secret_file: Option<String>,
     /// OAuth redirect URI override for BYO apps that require an exact
     /// registered callback.
-    #[serde(default, alias = "redirectUri")]
+    #[serde(
+        default,
+        alias = "redirectUri",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub redirect_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
 }
 

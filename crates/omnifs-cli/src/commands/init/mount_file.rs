@@ -1,10 +1,10 @@
 use super::config_generation::GeneratedMountConfig;
 use crate::auth::AuthSelection;
 use anyhow::Context;
-use omnifs_core::MountName;
-use omnifs_mount_schema::ProviderConfig;
-use omnifs_mount_schema::mounts::Spec;
-use omnifs_mount_schema::{ProviderCapabilities, ProviderManifest};
+use omnifs_core::{AuthKind, MountName};
+use omnifs_mount::ProviderConfig;
+use omnifs_mount::mounts::Spec;
+use omnifs_provider::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
 #[cfg(test)]
 use std::fs;
@@ -55,7 +55,7 @@ impl<'a> MountFile<'a> {
             provider: &self.manifest.provider,
             mount: self.mount_name.as_str(),
             auth: self.auth.map(|auth| MountAuthEntry {
-                auth_type: &auth.auth_type,
+                auth_type: auth.auth_type,
                 scheme: auth.scheme.as_deref(),
                 account: auth.account.as_deref(),
                 scopes: self.scopes,
@@ -70,7 +70,7 @@ impl<'a> MountFile<'a> {
     }
 }
 
-/// Typed mount config persisted into `~/.omnifs/config.toml`.
+/// Typed mount config persisted into the resolved omnifs config file.
 ///
 /// Field declaration order is the serialization order; using a struct
 /// instead of an ad-hoc `serde_json::Map` removes the need for
@@ -90,7 +90,7 @@ struct SerializableMountFile<'a> {
 #[derive(Serialize)]
 struct MountAuthEntry<'a> {
     #[serde(rename = "type")]
-    auth_type: &'a str,
+    auth_type: AuthKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     scheme: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]

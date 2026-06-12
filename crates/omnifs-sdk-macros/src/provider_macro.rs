@@ -267,7 +267,7 @@ fn read_manifest_facts(
             ),
         )
     })?;
-    let manifest = omnifs_mount_schema::ProviderManifest::from_bytes(&bytes).map_err(|error| {
+    let manifest = omnifs_provider::ProviderManifest::from_bytes(&bytes).map_err(|error| {
         syn::Error::new(
             metadata_path.span(),
             format!("invalid provider manifest {}: {error}", path.display()),

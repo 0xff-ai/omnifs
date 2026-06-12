@@ -19,7 +19,9 @@ path = "src/lib.rs"
 
 [dependencies]
 omnifs-api = { workspace = true }
-omnifs-mount-schema = { workspace = true }
+omnifs-home = { workspace = true }
+omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 omnifs-creds = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-inspector = { workspace = true }

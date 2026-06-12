@@ -80,7 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - omnifs is now distributed on npm as `@0xff-ai/omnifs`. Install with `npm install -g @0xff-ai/omnifs`; the CLI binary ships in one of four platform-specific optional-dependency packages (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`). The Docker image is pulled on `omnifs up`, not at install time.
-- Full `omnifs init <provider>` / `omnifs up` / `omnifs down` mount lifecycle. `omnifs init` walks through provider auth (device-code or PKCE loopback OAuth), writes a per-mount config under `~/.omnifs/config/mounts/`, and stores credentials in the OS keychain (macOS Keychain, Linux libsecret, Windows DPAPI) with a mode-600 file fallback at `~/.omnifs/data/credentials.json`. `omnifs up` pulls the matching runtime image, materialises credentials into a private session directory bind-mounted read-only into the container, then removes the session on stop or failure.
+- Full `omnifs init <provider>` / `omnifs up` / `omnifs down` mount lifecycle. `omnifs init` walks through provider auth (device-code or PKCE loopback OAuth), writes mounts into `~/.omnifs/config.toml`, and stores credentials in the OS keychain (macOS Keychain, Linux libsecret, Windows DPAPI) with a mode-600 file fallback at `~/.omnifs/credentials.json`. `omnifs up` pulls the matching runtime image, materialises credentials into a private session directory bind-mounted read-only into the container, then removes the session on stop or failure.
 - `omnifs auth` subcommands: `login`, `logout`, `status`, `refresh`, `scopes`, `import`. OAuth refresh happens automatically with a one-shot 401 retry coordinated by a singleflight plus a cross-process file lock so concurrent CLI invocations do not race on the same refresh token.
 - `omnifs setup` guided first-run walkthrough: detects OS and Docker, helps pick providers, runs `init` for each, and brings the container up.
 - `omnifs doctor` runs ten ordered probes to diagnose why a mount is not working (Docker availability, FUSE timeout, missing credentials, etc.).
@@ -101,7 +101,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Sandboxed archive extraction via a host-owned `omnifs-tool-archive` Wasm component. `BlobExecutor` streams `fetch-blob` responses into a staged temp file and commits metadata before the body is visible; `ArchiveExecutor` keys extracted trees by `(cache-key, format, strip-prefix)` and coalesces concurrent extractions through `TreeMaterializer`. The extractor runs path sanitization, depth/length/entry-count/per-file/total-byte limits inside the sandbox and publishes completed trees via atomic directory rename so tree refs never observe partial output.
 - `EffectiveConfig` type representing a mount after provider metadata has been merged in. `ProviderCatalog::load_mount()` returns one; credential targeting, session materialisation, and runtime construction all consume it. The previous `InstanceConfig`-plus-late-`apply_metadata` pattern is removed.
 - Provider runtime capabilities now come back from `init` as `(State, ProviderInfo, RequestedCapabilities)` instead of a separate WIT export. Initialisation runs exactly once in `ProviderRuntime::new`. Capability entries can be marked `dynamic: true` when the concrete grant depends on mount config (Docker's socket path is the motivating case).
-- `omnifs-mount-schema` crate is split into typed modules with a checked-in JSON schema at `crates/omnifs-mount-schema/schema/omnifs.provider.schema.json` (regenerate with `just regen-schema`).
+- `omnifs-mount-schema` crate is split into `omnifs-mount` and `omnifs-provider`, with a checked-in provider JSON schema at `crates/omnifs-provider/schema/omnifs.provider.schema.json` (regenerate with `just schema`).
 - Per-crate README files for all published crates.
 
 ### Changed
@@ -115,7 +115,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - CLI flows are redesigned around mount configs, provider metadata, credential materialisation, and container lifecycle commands. Verbose output is off by default; `-v` enables INFO logs and `-vv` adds DEBUG. Common errors surface a `Try:` block with a concrete next step.
 - Provider manifests (`omnifs.provider.json`) describe auth schemes, token injection policy, capability grants, and config schema. All built-in providers (`arxiv`, `db`, `dns`, `docker`, `github`, `linear`, `test`) carry an `omnifs.provider.json` and drop vestigial `[package.metadata.component]` Cargo sections.
 - Docker Compose development entrypoints (`compose.yaml`, `just dev`) are replaced by the supported `omnifs dev`, `omnifs shell`, `omnifs logs`, and `omnifs down` workflow.
-- Wasm providers are baked into the runtime image at `/root/.omnifs/providers/` with `OMNIFS_PROVIDERS_DIR` set so the daemon finds them without an entrypoint flag.
+- Wasm providers are installed into the host `OMNIFS_HOME/providers` directory and the trusted runtime container bind-mounts that home at `/root/.omnifs`.
 
 ### Fixed
 

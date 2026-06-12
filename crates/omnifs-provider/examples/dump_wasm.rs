@@ -3,7 +3,7 @@
 //!
 //! Run with:
 //! ```text
-//!   cargo run -p omnifs-mount-schema --example dump_wasm -- \
+//!   cargo run -p omnifs-provider --example dump_wasm -- \
 //!     target/wasm32-wasip2/debug/omnifs_provider_github.wasm
 //! ```
 
@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use omnifs_mount_schema as mts;
+use omnifs_provider as mts;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();

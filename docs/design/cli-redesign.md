@@ -18,7 +18,7 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 |---|---|---|---|
 | 1 | Primary persona | Solo dev in a terminal | Optimize human polish first; machine output (`--json`) follows. |
 | 2 | Surface shape | Flat verbs, hide internals under `omnifs debug` | Daily-driver muscle memory beats taxonomic purity. |
-| 3 | Directory layout | Unified `~/.omnifs/{config,data,cache}` on every platform, with `OMNIFS_HOME` and per-purpose env overrides | One layout to learn, easy to back up or delete; platform-native conventions remain reachable through the env vars for users who want them. |
+| 3 | Directory layout | Unified `~/.omnifs/{config,data,cache}` on every platform, with `OMNIFS_HOME` as the single env override | One layout to learn, easy to back up or delete; users who need a different root can move the whole layout without splitting policy across aliases. |
 | 4 | macOS host-side file ops | Defer (`omnifs shell` is the access path) | Persona doesn't need it day one; macFUSE is a separate launch. |
 | 5 | Render stack | `anstream` + `owo-colors` + `indicatif` + `comfy-table` + `inquire` | Idiomatic, composes well, respects `NO_COLOR`. |
 | 6 | Tracing default | Silent; `-v` = INFO, `-vv` = DEBUG + span events; always stderr | The CLI is a terminal verb, not a service log. `RUST_LOG` overrides. |
@@ -42,17 +42,17 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 
 ### Paths
 
-A single `paths` module resolves every directory the CLI uses from one source. Resolution per directory: explicit CLI flag, then per-purpose env (`OMNIFS_CONFIG_DIR`, `OMNIFS_CACHE_DIR`, etc.), then `OMNIFS_HOME` (fans out into all subdirs), then the default `~/.omnifs/{config,data,cache}` layout. The default is uniform across macOS and Linux; users who want platform-native conventions (XDG on Linux, Apple's Library tree on macOS) opt in through the per-purpose env vars.
+A single `paths` module resolves every directory the CLI uses from one source. Resolution per directory: explicit CLI flag, then `OMNIFS_HOME` (fans out into all subdirs), then the default `~/.omnifs/{config.toml,credentials.json,mounts,providers,cache}` layout. The default is uniform across macOS and Linux; users who want a relocated layout set one root instead of coordinating multiple directory-specific aliases.
 
 The resolved `credentials_file` is threaded through every site that opens the credential store. The host store, the `auth login` write path, and the `omnifs up` read path must point at the same file or `auth login` and `omnifs up` will silently disagree.
 
-A `Paths::display` helper home-relativizes (`~/.omnifs/config/mounts`) for every user-visible path; it falls back to the full path when the home prefix cannot be cleanly stripped.
+A `Paths::display` helper home-relativizes (`~/.omnifs/mounts`) for every user-visible path; it falls back to the full path when the home prefix cannot be cleanly stripped.
 
 ### Config file
 
-A global `config.toml` under `config_dir` supplies defaults for the runtime image, container name, mount/provider paths, and `up` toggles. Precedence is flag > env > file > built-in default. Missing file is not an error; malformed file is.
+A global `config.toml` under `config_dir` supplies defaults for the runtime image, container name, and `up` toggles. Precedence is flag > file > built-in default. Missing file is not an error; malformed file is.
 
-`Paths` and `Config` would form a cycle (config can override paths; paths locates config). Two-pass resolution breaks it: pass 1 resolves with no config to find `config_file`; pass 2 reads the file and overlays its `[paths]` block, with flags and env still winning.
+`Paths` locates `config.toml`; the loaded config no longer changes the directory layout.
 
 ### Surface
 

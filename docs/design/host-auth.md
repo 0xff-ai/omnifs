@@ -5,7 +5,7 @@ Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.pro
 
 ## Context
 
-omnifs providers run sandboxed as `wasm32-wasip2` components. They cannot speak to the network, the OS keychain, or a system browser directly. Every external call rides a host-mediated callout (`fetch`, `fetch-blob`, `git-open-repo`, `ws-*`). The host is the only place credentials live and the only place token acquisition can happen.
+omnifs providers run sandboxed as `wasm32-wasip2` components. They cannot speak to the network, the host credential file, or a system browser directly. Every external call rides a host-mediated callout (`fetch`, `fetch-blob`, `git-open-repo`, `ws-*`). The host is the only place credentials live and the only place token acquisition can happen.
 
 Each provider design under `docs/design/providers/` punts on this question, declaring `auth_types: ["oauth2"]` or `["bearer-token"]` and assuming the host will "inject the right header". This document specifies what that means.
 
@@ -36,11 +36,11 @@ Keep credentials out of the provider sandbox. Providers never see tokens. They g
 
 Keep vendor knowledge inside providers. The host's OAuth engine reads metadata supplied by the provider's auth manifest and optionally overridden by the instance config. The engine does not branch on which provider it is serving.
 
-Store tokens by default in the resolved `credentials.json` file with private file and directory permissions. Keeping platform keychains out of the default path makes startup non-interactive across local builds, installed binaries, CI, and containers.
+Store tokens in the resolved `credentials.json` file with private file and directory permissions. A single file store makes startup non-interactive across local builds, installed binaries, CI, and containers, and lets the trusted daemon refresh credentials through the writable `OMNIFS_HOME` bind.
 
 Refresh transparently. A 401 inside a provider callout triggers a file-lock-protected refresh and one retry; the provider observes a successful response on the second attempt or a `permission-denied` callout error if refresh fails.
 
-Make the abstraction pluggable. OAuth and static bearer are host HTTP-auth strategies. Non-HTTP credentials, such as DSNs and file paths, stay in the provider's instance config, outside the host auth layer and OAuth credential store.
+Keep the auth strategy abstraction provider-agnostic. OAuth and static bearer are host HTTP-auth strategies. Non-HTTP credentials, such as DSNs and file paths, stay in the provider's instance config, outside the host auth layer and credential store.
 
 ## Non-goals
 
@@ -179,7 +179,7 @@ provider ─WIT─►  │           (fetch / fetch-blob)       │
                      │   AuthManager    │  trait object per mount
                      │   (generic)      │
                      │ ─────────────────│
-                     │ • StaticToken    │ instance config + env/file
+                     │ • StaticToken    │ store + env/file
                      │ • OAuth2Pkce     │ provider metadata + store
                      └──────────────────┘
                             ▲
@@ -189,7 +189,6 @@ provider ─WIT─►  │           (fetch / fetch-blob)       │
                      │ CredentialStore  │  trait
                      │ ─────────────────│
                      │ • FileStore      │ credentials.json
-                     │ • KeyringStore   │ explicit opt-in
                      │ • MemoryStore    │ tests
                      └──────────────────┘
 
@@ -324,13 +323,12 @@ pub struct CredentialEntry {
 }
 ```
 
-Three concrete implementations:
+Two concrete implementations:
 
 - `FileStore`: the resolved `credentials.json`, mode 600, atomic writes. Used by all production CLI and host runtime paths.
-- `KeyringStore`: macOS Keychain, Linux libsecret, Windows DPAPI. Available for explicit opt-in, but not selected by default and not probed during startup.
 - `MemoryStore`: in-process map for tests.
 
-Startup uses the file backend. There is no dual-write store and no platform keychain probe on the default path.
+Startup uses the file backend. There is no dual-write store and no second production credential backend.
 
 Encryption-at-rest for the credential file is out of scope: the file is mode 600 inside the user's omnifs config directory, and the threat model treats user-account compromise as a separate problem.
 
@@ -347,11 +345,9 @@ Mid-callout 401 retry in `HttpStack::send`:
 1. Dispatch the request. On 200-2xx or non-auth error, return.
 2. On 401 (or 403 with `WWW-Authenticate: Bearer error="invalid_token"`), call `auth.refresh_for_url(url)`. If refresh succeeds, rebuild headers and retry once. If the retry also 401s, surface the original response to the provider.
 
-In-process refresh coalescing: a singleflight group keyed by `CredentialKey` collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future.
+In-process refresh coalescing: a singleflight group keyed by `CredentialKey` collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future. `FileStore` still locks its own JSON read-modify-write operations, but OAuth refresh itself is not a separate cross-process file protocol.
 
-Cross-process correctness comes from a file lock on `~/.omnifs/data/credentials.lock`. The singleflight leader holds the exclusive lock while it (1) re-reads the durable store, (2) returns the freshly stored entry if another process already refreshed it, (3) calls the token endpoint with the latest refresh token, (4) writes the replacement entry, (5) updates the in-process slot.
-
-The in-process current-token slot is an atomic swap container, so readers see either the pre-rotation or post-rotation `(access, refresh)` pair atomically, never torn. The provider's declared `refreshTokenRotates: true/false` is only a scheduling hint; the store re-read under the file lock is mandatory for all refreshes because a peer process may have rotated the token.
+The in-process current-token slot is an atomic swap container, so readers see either the pre-rotation or post-rotation `(access, refresh)` pair atomically, never torn. The provider's declared `refreshTokenRotates: true/false` is only a scheduling hint.
 
 Refresh fires when `expires_at - now() < 60 s`.
 
@@ -417,7 +413,6 @@ All diagnostic surfaces (`omnifs auth status`, `omnifs auth scopes`, `omnifs deb
 | Vendor changes auth URL or token URL | Provider's declared endpoints become stale. | Provider author ships a new `.wasm` with corrected metadata. The host requires no release. |
 | Scope drift (provider needs new scope after a release) | Vendor returns `permission-denied` from a specific endpoint. | `omnifs auth scopes <mount>` shows the gap between declared and granted; user reruns `omnifs auth login` to consent again. |
 | Two mounts share an OAuth account | Both try to refresh simultaneously. | In-process singleflight avoids duplicate local work; the cross-process file lock serializes the durable refresh. Identical `(providerId, scheme, account)` shares a token. |
-| Keychain unavailable | Read returns `NotFound` or `Backend::Unavailable`. | Probe at startup; on failure, fall back to file store with a warning. |
 | Provider auth manifest declares an unsupported flow shape | Strategy construction fails. | CLI surfaces "this mount needs host version ≥ X to authenticate". |
 
 ## Open questions

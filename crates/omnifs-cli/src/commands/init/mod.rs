@@ -2,7 +2,7 @@
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
 //! the built-in catalog or provider wasm metadata, writes the resulting mount config to
-//! `~/.omnifs/config.toml`, and runs the provider's default auth flow
+//! the resolved omnifs config file, and runs the provider's default auth flow
 //! when one is declared.
 
 mod auth_import;
@@ -13,19 +13,17 @@ mod provider_selection;
 mod token_validation;
 
 use crate::error::WithHint;
-use crate::session::CredsBackend;
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_creds::CredentialEntry;
-use omnifs_mount_schema::ProviderManifest;
+use omnifs_creds::{CredentialEntry, CredentialStore, FileStore};
+use omnifs_provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::commands::auth;
-use crate::config::ConfigFile;
 use crate::credential_target::CredentialTarget;
 use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
@@ -61,14 +59,6 @@ pub struct InitArgs {
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
-    /// Override the directory holding provider WASM components.
-    ///
-    /// Defaults to `OMNIFS_PROVIDERS_DIR`, then the default config providers dir.
-    #[arg(long)]
-    pub providers_dir: Option<PathBuf>,
-    /// Override the legacy directory holding per-mount JSON configs.
-    #[arg(long, hide = true)]
-    pub mounts_dir: Option<PathBuf>,
     /// Print the provider capability table at the start of the flow.
     /// Setup-driven runs suppress this because the picker already showed it.
     #[arg(skip = true)]
@@ -78,25 +68,18 @@ pub struct InitArgs {
 impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                mounts_dir: self.mounts_dir.clone(),
-                providers_dir: self.providers_dir.clone(),
-                ..Default::default()
-            },
-            None,
-            None,
-        )?;
+        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
         let paths = ctx.paths();
         let interactive = !self.no_input;
-        let providers_dir = paths.providers_dir.clone();
         let catalog = ctx.catalog();
+        let workspace = ctx.workspace();
+        let mounts = workspace.mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
             anyhow::bail!("no built-in or disk providers are available");
         }
 
-        let provider_selection = ProviderSelection::new(catalog, &templates);
+        let provider_selection = ProviderSelection::new(&mounts, &templates);
         let (provider_name, mount_name) = provider_selection.resolve(
             self.provider.as_deref(),
             self.as_name.as_deref(),
@@ -115,17 +98,13 @@ impl InitArgs {
             .with_hint("Run `omnifs init` (no args) to see the picker of available providers")
             .with_hint(format!(
                 "Or place a provider wasm in {}",
-                providers_dir.display()
+                paths.providers_dir.display()
             ))?;
         let default_auth = AuthSelection::from_provider_default(&template.manifest);
         if interactive && self.show_capabilities {
             print_capability_justifications(&template.manifest);
         }
-        if self.no_input
-            && default_auth
-                .as_ref()
-                .is_some_and(|auth| auth.auth_type == "oauth")
-        {
+        if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
             anyhow::bail!(
                 "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively, or create the mount and run `omnifs auth login {mount_name}`."
             );
@@ -164,20 +143,17 @@ impl InitArgs {
             generated,
         )
         .into_spec()?;
-        let mut config_file = ConfigFile::load(&paths.config_file)?;
-        config_file.upsert_mount(&spec)?;
-        config_file.save()?;
+        workspace.upsert_mount(&spec)?;
         anstream::println!("✓ Updated {}", Paths::display(&paths.config_file));
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
                 run_static_token_init(&template.manifest, auth, token, &paths.credentials_file)
                     .await?;
-            } else if auth.auth_type == "oauth" {
+            } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
                 auth::login_with_paths(
-                    paths.mounts_dir.clone(),
-                    providers_dir.clone(),
+                    paths.config_dir.clone(),
                     paths.credentials_file.clone(),
                     mount_name.as_str(),
                     auth.account.as_deref(),
@@ -206,15 +182,8 @@ impl InitArgs {
         anstream::println!("Mount `{mount_name}` is ready.");
 
         let config = crate::session::MountConfig::from_parsed(spec, paths.config_file.clone())?;
-        let store = CredsBackend::auto(&paths.credentials_file, false);
-        match crate::live::add_mount(
-            ctx.runtime().container_name(),
-            catalog,
-            store.as_ref(),
-            config,
-        )
-        .await
-        {
+        let store = FileStore::new(&paths.credentials_file);
+        match crate::live::add_mount(catalog, &store, config).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },
@@ -285,7 +254,7 @@ async fn run_static_token_init(
         }
     }
 
-    let store = CredsBackend::auto(credentials_file, true);
+    let store = FileStore::new(credentials_file);
     anstream::println!("Storing credential in {} ...", store.backend_label());
     let now = OffsetDateTime::now_utc();
     let mut entry = CredentialEntry::static_token(token, now);
@@ -300,7 +269,7 @@ async fn run_static_token_init(
     let auth_manifest = manifest
         .auth
         .as_ref()
-        .map(omnifs_mount_schema::ProviderAuthManifest::wasm_auth_manifest);
+        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
     let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
         .static_token_scheme_key(auth.scheme.as_deref(), None)?;
     let target =
@@ -321,9 +290,8 @@ mod tests {
     use crate::auth::AuthSelection;
     use crate::catalog::{ProviderCatalog, ProviderSource};
     use omnifs_core::MountName;
-    use omnifs_mount_schema::{
-        AuthManifest, AuthScheme, InitHint, InitInput, ManifestAuthScheme,
-        ManifestStaticTokenScheme, PreopenMode, PreopenStrategy, PreopenedPath,
+    use omnifs_provider::{
+        AuthManifest, AuthScheme, InitHint, InitInput, PreopenMode, PreopenStrategy, PreopenedPath,
         ProviderCapabilities, ProviderManifest,
     };
     use serde_json::Value;
@@ -556,14 +524,16 @@ mod tests {
         }
         let auth_manifest = AuthManifest {
             schemes: vec![
-                AuthScheme::StaticToken(omnifs_mount_schema::StaticTokenScheme {
+                AuthScheme::StaticToken(omnifs_provider::StaticTokenScheme {
                     key: "pat".to_string(),
                     header_name: Some("Authorization".to_string()),
                     value_prefix: String::new(),
                     description: "Linear API key".to_string(),
                     inject_domains: vec![],
+                    creation_url: None,
+                    validation: None,
                 }),
-                AuthScheme::Oauth(omnifs_mount_schema::OauthScheme {
+                AuthScheme::Oauth(omnifs_provider::OauthScheme {
                     key: "oauth".to_string(),
                     display_name: "Linear OAuth".to_string(),
                     authorization_endpoint: "https://example.com/authorize".to_string(),
@@ -571,12 +541,12 @@ mod tests {
                     revocation_endpoint: None,
                     default_client_id: None,
                     default_scopes: vec![],
-                    flow: omnifs_mount_schema::OAuthFlow::PkceLoopback(
-                        omnifs_mount_schema::PkceLoopbackConfig {
+                    flow: omnifs_provider::OAuthFlow::PkceLoopback(
+                        omnifs_provider::PkceLoopbackConfig {
                             redirect_uri_template: "http://127.0.0.1:{port}/cb".to_string(),
                         },
                     ),
-                    token_endpoint_auth: omnifs_mount_schema::TokenEndpointAuthMethod::None,
+                    token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
                     refresh_token_rotates: false,
                     extra_authorize_params: vec![],
                     extra_token_params: vec![],
@@ -587,7 +557,7 @@ mod tests {
             ],
         };
         let oauth_default = AuthSelection {
-            auth_type: "oauth".to_string(),
+            auth_type: omnifs_core::AuthKind::OAuth,
             scheme: Some("oauth".to_string()),
             account: None,
         };
@@ -603,7 +573,7 @@ mod tests {
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
-        assert_eq!(promoted.auth_type, "static-token");
+        assert_eq!(promoted.auth_type, omnifs_core::AuthKind::StaticToken);
         assert_eq!(promoted.scheme.as_deref(), Some("pat"));
         assert!(outcome.token.is_some(), "imported token should be set");
 
@@ -623,19 +593,21 @@ mod tests {
     #[test]
     fn load_provider_templates_reads_metadata_from_wasm() {
         let dir = tempfile::tempdir().unwrap();
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
         std::fs::write(
-            dir.path().join("omnifs_provider_linear.wasm"),
+            paths.providers_dir.join("omnifs_provider_linear.wasm"),
             wasm_with_custom_section(
-                omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME,
+                omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
                 &serde_json::to_vec(&manifest).unwrap(),
             ),
         )
         .unwrap();
-        std::fs::write(dir.path().join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(paths.providers_dir.join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
 
-        let templates = ProviderCatalog::new(dir.path().join("mounts"), dir.path())
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
             .provider_templates()
             .unwrap();
 
@@ -643,14 +615,15 @@ mod tests {
         assert_eq!(templates["linear"].manifest.default_mount, "linear-dev");
         assert_eq!(
             templates["linear"].source,
-            ProviderSource::Disk(dir.path().join("omnifs_provider_linear.wasm"))
+            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_linear.wasm"))
         );
     }
 
     #[test]
     fn load_provider_templates_includes_builtins_without_provider_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let templates = ProviderCatalog::new(dir.path().join("mounts"), dir.path().join("missing"))
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
             .provider_templates()
             .unwrap();
 
@@ -668,82 +641,99 @@ mod tests {
     #[test]
     fn load_provider_templates_prefers_disk_metadata_over_builtin_by_id() {
         let dir = tempfile::tempdir().unwrap();
+        let paths = omnifs_home::Paths::under_root(dir.path());
+        std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.id = "github".to_string();
         manifest.display_name = "GitHub dev".to_string();
         manifest.provider = "omnifs_provider_github.wasm".to_string();
         manifest.default_mount = "github-dev".to_string();
         std::fs::write(
-            dir.path().join("omnifs_provider_github.wasm"),
+            paths.providers_dir.join("omnifs_provider_github.wasm"),
             wasm_with_custom_section(
-                omnifs_mount_schema::PROVIDER_METADATA_SECTION_NAME,
+                omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
                 &serde_json::to_vec(&manifest).unwrap(),
             ),
         )
         .unwrap();
 
-        let templates = ProviderCatalog::new(dir.path().join("mounts"), dir.path())
+        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
             .provider_templates()
             .unwrap();
 
         assert_eq!(templates["github"].manifest.default_mount, "github-dev");
         assert_eq!(
             templates["github"].source,
-            ProviderSource::Disk(dir.path().join("omnifs_provider_github.wasm"))
+            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_github.wasm"))
         );
     }
 
     fn provider_manifest() -> ProviderManifest {
-        use omnifs_mount_schema::{
-            AuthInject, ManifestOAuthFlow, ManifestOauthScheme, ProviderAuthManifest,
+        use omnifs_provider::{
+            AuthInject, AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig,
+            ProviderAuthManifest, StaticTokenScheme, TokenEndpointAuthMethod,
         };
         use std::collections::BTreeMap;
 
+        let inject = AuthInject {
+            domains: vec!["api.linear.app".to_string()],
+            header: "Authorization".to_string(),
+            prefix: String::new(),
+        };
         ProviderManifest {
             id: "linear".to_string(),
             display_name: "Linear".to_string(),
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
             capabilities: vec![
-                omnifs_mount_schema::CapabilityEntry::Domain {
+                omnifs_provider::CapabilityEntry::Domain {
                     value: "api.linear.app".to_string(),
                     why: "api calls".to_string(),
                     dynamic: false,
                 },
-                omnifs_mount_schema::CapabilityEntry::MemoryMb {
+                omnifs_provider::CapabilityEntry::MemoryMb {
                     value: 128,
                     why: "in-memory caching".to_string(),
                     dynamic: false,
                 },
             ],
             auth: Some(ProviderAuthManifest {
-                inject: AuthInject {
-                    domains: vec!["api.linear.app".to_string()],
-                    header: "Authorization".to_string(),
-                    prefix: String::new(),
-                },
+                inject: inject.clone(),
                 default: "oauth".to_string(),
                 schemes: {
                     let mut m = BTreeMap::new();
                     m.insert(
                         "oauth".to_string(),
-                        ManifestAuthScheme::Oauth(ManifestOauthScheme {
+                        AuthScheme::Oauth(OauthScheme {
+                            key: "oauth".to_string(),
                             display_name: "Linear OAuth".to_string(),
-                            client_id: "test-client-id".to_string(),
-                            scopes: vec!["read".to_string()],
-                            flow: ManifestOAuthFlow::PkceLoopback {
-                                authorization_endpoint: "https://linear.app/oauth/authorize"
-                                    .to_string(),
-                                token_endpoint: "https://api.linear.app/oauth/token".to_string(),
+                            authorization_endpoint: "https://linear.app/oauth/authorize"
+                                .to_string(),
+                            token_endpoint: "https://api.linear.app/oauth/token".to_string(),
+                            revocation_endpoint: None,
+                            default_client_id: Some("test-client-id".to_string()),
+                            default_scopes: vec!["read".to_string()],
+                            flow: OAuthFlow::PkceLoopback(PkceLoopbackConfig {
                                 redirect_uri_template: "http://127.0.0.1:{port}/callback"
                                     .to_string(),
-                            },
+                            }),
+                            token_endpoint_auth: TokenEndpointAuthMethod::None,
+                            refresh_token_rotates: true,
+                            extra_authorize_params: vec![],
+                            extra_token_params: vec![],
+                            inject_domains: inject.domains.clone(),
+                            inject_header_name: Some(inject.header.clone()),
+                            inject_value_prefix: inject.prefix.clone(),
                         }),
                     );
                     m.insert(
                         "pat".to_string(),
-                        ManifestAuthScheme::StaticToken(ManifestStaticTokenScheme {
+                        AuthScheme::StaticToken(StaticTokenScheme {
+                            key: "pat".to_string(),
+                            header_name: Some(inject.header.clone()),
+                            value_prefix: inject.prefix.clone(),
                             description: "Linear API key".to_string(),
+                            inject_domains: inject.domains.clone(),
                             creation_url: None,
                             validation: None,
                         }),

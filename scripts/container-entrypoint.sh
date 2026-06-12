@@ -6,17 +6,17 @@ if [ "$#" -gt 0 ]; then
 fi
 
 : "${OMNIFS_MOUNT_POINT:=/omnifs}"
-: "${OMNIFS_CONFIG_DIR:=/root/.omnifs/config}"
-: "${OMNIFS_CACHE_DIR:=/root/.omnifs/cache}"
+: "${OMNIFS_HOME:=/root/.omnifs}"
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
 : "${OMNIFS_LISTEN:=0.0.0.0:7878}"
 : "${RUST_LOG:=info}"
-export RUST_LOG
+export OMNIFS_HOME RUST_LOG
+omnifs_cache_dir="$OMNIFS_HOME/cache"
 
 mkdir -p \
   "$OMNIFS_MOUNT_POINT" \
-  "$OMNIFS_CONFIG_DIR" \
-  "$OMNIFS_CACHE_DIR" \
+  "$OMNIFS_HOME" \
+  "$omnifs_cache_dir" \
   "$(dirname "$OMNIFS_LOG_FILE")"
 
 log_pipe=/tmp/omnifs-entrypoint.log.pipe
@@ -28,7 +28,5 @@ rm -f "$log_pipe"
 
 exec omnifsd \
   --mount-point "$OMNIFS_MOUNT_POINT" \
-  --config-dir "$OMNIFS_CONFIG_DIR" \
-  --cache-dir "$OMNIFS_CACHE_DIR" \
   --listen "$OMNIFS_LISTEN" \
   --root-symlinks

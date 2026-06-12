@@ -6,6 +6,5 @@
 
 pub mod frontends;
 pub mod mounts;
-pub mod paths;
 mod proc_mounts;
 pub mod server;

@@ -24,6 +24,10 @@ pub struct StaticTokenScheme {
     pub value_prefix: String,
     pub description: String,
     pub inject_domains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<TokenValidation>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -86,4 +90,21 @@ pub enum TokenEndpointAuthMethod {
 pub struct KeyValue {
     pub key: String,
     pub value: String,
+}
+
+/// Token self-validation probe, carried by a provider's static-token scheme.
+///
+/// The host uses this to verify a newly-entered token before storing it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TokenValidation {
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub expect_status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_pointer: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extract: std::collections::BTreeMap<String, String>,
 }

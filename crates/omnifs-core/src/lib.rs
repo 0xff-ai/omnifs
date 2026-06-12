@@ -7,7 +7,9 @@ pub mod path;
 pub mod provider;
 pub mod view;
 
-pub use auth::{AccountId, CredentialId, CredentialIdError, IdError, SchemeId as AuthSchemeId};
+pub use auth::{
+    AccountId, AuthKind, CredentialId, CredentialIdError, IdError, SchemeId as AuthSchemeId,
+};
 pub use content_type::ContentType;
 pub use mount::{Name as MountName, NameError as MountNameError};
 pub use path::{ParseError, Path, Segment};

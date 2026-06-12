@@ -6,7 +6,7 @@ use crate::client::{DaemonClient, DaemonProbe};
 use crate::paths::{PathOverrides, Paths};
 use crate::presentation::OutputFormat;
 use crate::status::collect_status;
-use anyhow::Context;
+use anyhow::Context as _;
 use clap::Args;
 use std::path::PathBuf;
 
@@ -31,18 +31,16 @@ impl StatusArgs {
         // A malformed config.toml shouldn't crash `omnifs status`; fall back
         // to pure flag + env + platform-default resolution so the user can
         // still see what's broken.
-        let (paths, catalog) = match AppContext::resolve(overrides.clone(), None, None) {
-            Ok(ctx) => (ctx.paths().clone(), ctx.catalog().clone()),
+        let (paths, catalog, mounts) = match AppContext::resolve(overrides.clone(), None, None) {
+            Ok(ctx) => {
+                let mounts = ctx.workspace().mounts()?;
+                (ctx.paths().clone(), ctx.catalog().clone(), mounts)
+            },
             Err(error) => {
                 anstream::eprintln!("warning: {error:#}");
-                let paths = Paths::resolve(overrides);
-                let catalog = ProviderCatalog::with_config(
-                    &paths.mounts_dir,
-                    &paths.providers_dir,
-                    &paths.config_file,
-                    Vec::new(),
-                );
-                (paths, catalog)
+                let paths = Paths::resolve(overrides)?;
+                let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
+                (paths, catalog, Vec::new())
             },
         };
         let client = DaemonClient::new();
@@ -50,7 +48,7 @@ impl StatusArgs {
             DaemonProbe::Unreachable => None,
             DaemonProbe::Compatible(_) => Some(client.status().await?),
         };
-        let report = collect_status(&catalog, paths, runtime)?;
+        let report = collect_status(&catalog, paths, runtime, mounts);
         match OutputFormat::from(self.json) {
             OutputFormat::Json => {
                 let payload = report.to_json();

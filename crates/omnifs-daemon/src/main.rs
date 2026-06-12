@@ -6,7 +6,8 @@
 //! host-native (see `docs/design/daemon-cli-split.md`).
 
 use clap::Parser;
-use omnifs_daemon::{frontends, paths, server};
+use omnifs_daemon::{frontends, server};
+use omnifs_home::{PathOverrides, Paths};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
@@ -23,12 +24,10 @@ struct Args {
     /// Directory to serve the FUSE filesystem at.
     #[arg(long)]
     mount_point: PathBuf,
-    /// Config directory. Defaults to `$OMNIFS_CONFIG_DIR`, then
-    /// `$OMNIFS_HOME`, then `~/.omnifs`.
+    /// Config directory. Defaults through omnifs home resolution.
     #[arg(long)]
     config_dir: Option<PathBuf>,
-    /// Cache directory. Defaults to `$OMNIFS_CACHE_DIR`, then
-    /// `$OMNIFS_HOME/cache`, then `~/.omnifs/cache`.
+    /// Cache directory. Defaults through omnifs home resolution.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
     /// Control API listen address. The container entrypoint passes
@@ -53,16 +52,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn run(args: Args) -> anyhow::Result<()> {
-    let paths = paths::Paths::resolve(paths::Overrides {
+    let paths = Paths::resolve(PathOverrides {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
-    });
+    })?;
 
     std::fs::create_dir_all(&args.mount_point)?;
     std::fs::create_dir_all(&paths.cache_dir)?;
 
     let cloner = Arc::new(GitCloner::new(paths.cache_dir.clone()));
-    let dirs = Dirs::new(cloner.cache_dir(), &paths.config_dir, &paths.providers_dir);
+    let dirs = Dirs::new(
+        cloner.cache_dir(),
+        &paths.config_dir,
+        &paths.providers_dir,
+        &paths.credentials_file,
+    );
 
     info!(
         mount_point = %args.mount_point.display(),

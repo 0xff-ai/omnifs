@@ -9,15 +9,17 @@ use time::OffsetDateTime;
 use super::shared::format_rfc3339;
 use crate::catalog::ProviderCatalog;
 use crate::paths::Paths;
+use crate::session::MountConfig;
 
 pub(super) async fn refresh(
     _paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
     store: Box<dyn CredentialStore>,
     mount: &str,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mount)?;
+    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, &[])?;
     let entry = target
         .lookup(store.as_ref())?
@@ -41,11 +43,12 @@ pub(super) async fn refresh(
 pub(super) fn scopes(
     _paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
     store: &dyn CredentialStore,
     mount: &str,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mount)?;
+    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, &[])?;
     let entry = target.lookup(store)?;
     anstream::println!("declared: {}", request.scheme().default_scopes.join(", "));
@@ -56,8 +59,12 @@ pub(super) fn scopes(
     Ok(())
 }
 
-pub(super) fn schemes(catalog: &ProviderCatalog, mount: &str) -> anyhow::Result<()> {
-    let mount = catalog.load_mount_auth(mount)?;
+pub(super) fn schemes(
+    catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
+    mount: &str,
+) -> anyhow::Result<()> {
+    let mount = catalog.load_mount_auth(mounts, mount)?;
     match mount.auth_manifest() {
         Some(manifest) => {
             anstream::println!("{}", serde_json::to_string_pretty(&manifest)?);
@@ -67,19 +74,24 @@ pub(super) fn schemes(catalog: &ProviderCatalog, mount: &str) -> anyhow::Result<
     Ok(())
 }
 
-pub(crate) fn run_auth_manifest(catalog: &ProviderCatalog, mount: &str) -> anyhow::Result<()> {
-    schemes(catalog, mount)
+pub(crate) fn run_auth_manifest(
+    catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
+    mount: &str,
+) -> anyhow::Result<()> {
+    schemes(catalog, mounts, mount)
 }
 
 pub(super) fn import_static_token_value(
     catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
     store: &dyn CredentialStore,
     mount: &str,
     token: SecretString,
     scheme: Option<&str>,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_config = catalog.load_mount_auth_tolerating_manifest_errors(mount)?;
+    let mount_config = catalog.load_mount_auth_tolerating_manifest_errors(mounts, mount)?;
     let target = mount_config.static_token_target(scheme, account)?;
     let key = target
         .primary_key()

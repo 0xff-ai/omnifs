@@ -18,7 +18,7 @@ use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::CredsBackend;
+use omnifs_creds::FileStore;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {
@@ -46,8 +46,11 @@ impl ResetArgs {
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
         let config = ctx.config();
+        let workspace = ctx.workspace();
         let container_name = RuntimeTarget::resolve_container_name(container_name, config)?;
-        let targets = ctx.catalog().mount_removal_targets()?;
+        let targets = ctx
+            .catalog()
+            .reset_removal_targets(workspace.inline_mounts(), &paths.config_file)?;
 
         if targets.is_empty() {
             anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
@@ -70,16 +73,15 @@ impl ResetArgs {
         // Docker (or an absent container) isn't a reset failure.
         teardown_container(&container_name).await;
 
-        let store = CredsBackend::auto(&paths.credentials_file, false);
+        let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
-            delete_credentials(
-                store.as_ref(),
-                &target.credential,
-                keep_credentials,
-                &target.name,
-            )?;
-            fs::remove_file(&target.path)
-                .with_context(|| format!("remove {}", target.path.display()))?;
+            delete_credentials(&store, &target.credential, keep_credentials, &target.name)?;
+            if target.path == paths.config_file {
+                workspace.remove_inline_mount(&target.name)?;
+            } else {
+                fs::remove_file(&target.path)
+                    .with_context(|| format!("remove {}", target.path.display()))?;
+            }
             anstream::println!("Removed mount `{}`", target.name);
         }
         if !targets.is_empty() {

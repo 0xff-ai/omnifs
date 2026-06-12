@@ -20,9 +20,11 @@ path = "src/bin/openapi.rs"
 [dependencies]
 omnifs-api = { workspace = true }
 omnifs-fuse = { workspace = true }
+omnifs-home = { workspace = true }
 omnifs-host = { workspace = true }
 omnifs-inspector = { workspace = true }
-omnifs-mount-schema = { workspace = true }
+omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 anyhow = { workspace = true }
 axum = "0.8"
 clap = { workspace = true }

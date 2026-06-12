@@ -6,16 +6,16 @@ Repository-local guidance for working in `omnifs`.
 
 `omnifs` is a projected filesystem that mirrors external services into local paths via FUSE. The runtime daemon (binary `omnifsd`, crate `crates/omnifs-daemon`) loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface.
 
-The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the session secrets directory is the only omnifs-owned bind. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
+The architecture is a daemon/CLI split (see `docs/design/daemon-cli-split.md`): `omnifsd` runs as the container entrypoint, serves the FUSE mount, and exposes an HTTP control API (`/v1/{ready,version,status,mounts,events}`) on port 7878, published on the host loopback. The `omnifs` CLI owns the Docker lifecycle and host credentials, and talks to the daemon over that API — mounts are pushed as spec payloads (`POST /v1/mounts`), never bind-mounted as config files; the host `OMNIFS_HOME` tree is bind-mounted writable as the daemon's runtime home. `omnifs init` and `omnifs mounts rm` apply live to a running daemon. The CLI does not link wasmtime or fuser.
 
 The runtime FUSE mount is Linux-only. The host CLI runs on macOS and Linux, and talks to a Linux container in both cases. Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested. `omnifsd` must stay free of container assumptions: Docker is one launch mechanism, and the daemon will later run host-native when NFSv4/FSKit mounts land.
 
 ## Supported workflow
 
-The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, materializes credentials and fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, validates stored credentials, materializes fixtures, and launches the container directly through the Docker API.
 
 ```bash
-omnifs dev          # build dev image, materialize secrets/fixtures, launch container
+omnifs dev          # build dev image, materialize fixtures, launch container
 omnifs shell        # attach a zsh shell
 omnifs logs -f      # follow container output
 omnifs status       # inspect mounts, providers, auth state
@@ -71,7 +71,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 
 CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers-build` with WASI SDK pins from `tools/versions.toml`.
 
-`Dockerfile` remains the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages a prebuilt Linux CLI binary plus provider WASM components into a small Ubuntu runtime context. Keep `omnifs dev` working when changing Docker-related files.
+`Dockerfile` remains the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI and daemon into a small Ubuntu runtime context. Provider and tool WASM artifacts are published as GitHub Release assets and installed into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `omnifs dev` working when changing Docker-related files.
 
 ## Release and npm packaging
 
@@ -147,7 +147,7 @@ Provider auth manifests live in `omnifs.provider.json` and are embedded in WASM 
 
 For the contributor sandbox, `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container.
 
-For the normal user path, `omnifs init` plus `omnifs up`, OAuth credentials live in the host credential store: keychain or `~/.omnifs/data/credentials.json` fallback.
+For the normal user path, `omnifs init` plus `omnifs up`, OAuth and static-token credentials live in the file-backed host credential store at `~/.omnifs/credentials.json`.
 
 Git clone currently uses SSH:
 
@@ -155,24 +155,28 @@ Git clone currently uses SSH:
 - auth comes from forwarded `SSH_AUTH_SOCK`
 - do not mount host private keys into the container
 
+### Runtime trust boundary
+
+Treat the omnifs host runtime as trusted: the host CLI, `omnifsd`, and its Docker container are one trusted control plane for local execution. Do not design credential or layout boundaries around hiding `~/.omnifs` from the container when the runtime needs that state; the container already runs trusted host code and receives host authority such as the SSH agent, selected secrets, preopens, and sometimes Docker access.
+
+The untrusted boundary is provider code. Providers are `wasm32-wasip2` components and must remain constrained by WASI preopens, host-mediated callouts, capability checks, and mount-specific auth materialization. Sharing runtime-home state with the trusted daemon is acceptable; exposing additional filesystem authority directly to provider WASM is not.
+
 ### Mount loading and resolved mounts
 
-- Mount loading lives in `omnifs_mount_schema::mounts` (shared by the CLI and the daemon).
-- `omnifs_mount_schema::mounts::Spec` is raw user-authored mount JSON.
-- `omnifs_mount_schema::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
-- `ProviderCatalog::load_mount()` returns `omnifs_mount_schema::mounts::Resolved` directly.
+- Mount config types (`Spec`, `Resolved`, `Catalog`, builtins) live in `omnifs_mount::mounts` (shared by the CLI and the daemon).
+- `omnifs_mount::mounts::Spec` is raw user-authored mount JSON.
+- `omnifs_mount::mounts::Resolved` is the runtime-ready mount after provider metadata/defaults have been applied.
+- Provider-contract types (`ProviderManifest`, manifest parsing, `AuthScheme`) live in `omnifs_provider`.
 - Use `resolve_mount_spec(spec, require_metadata)` for strict load versus best-effort delete/reset paths.
-- `CredentialTarget` and session materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
+- `CredentialTarget` and runtime payload materialization operate on `Resolved`, not raw mount JSON plus a late `apply_metadata` pass.
 - Host-managed credentials require `provider_id`, always on `Resolved`, plus `auth.scheme` and optional `auth.account`.
-- Static mounts may still use `token_env` or `token_file` for external secrets. Do not add keychain indirection to mount JSON.
-- Session secret filenames use `CredentialKey::storage_key()`, for example `github:pat:default`.
+- Static mounts may still use `token_env` or `token_file` for external user-managed secrets. Do not move host-managed credential state into mount JSON.
 
 ### Credentials store
 
-- Pick one backend at startup: keychain or file at `~/.omnifs/data/credentials.json`.
-- Keep `omnifs-creds` on the latest `keyring` 3.x line for now. `keyring` 4 split the application API into `keyring-core` and made the `keyring` crate a sample/connector bundle; depending on it directly pulls in every connector, including SQLite/Turso, instead of replacing the small file fallback cleanly.
+- The production credential backend is the file store at `~/.omnifs/credentials.json`.
 - `oauth2` 5.0.0 still binds its `reqwest` integration to `reqwest` 0.12. Keep `omnifs-auth` on a direct `reqwest` 0.12 dependency and use the `reqwest-oauth2` alias in `omnifs-host` for OAuth refresh clients until `oauth2` supports `reqwest` 0.13. The workspace `reqwest` dependency is for normal host/CLI HTTP clients and may be newer.
-- The file store is intentionally a local fallback and session-transfer store. It gives omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
+- The file store is intentionally the local runtime credential contract. The trusted daemon reads and writes the same `credentials.json` file through the writable `OMNIFS_HOME` bind, giving omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
 - `CredentialKey::storage_key()` is the only public wire form: `provider:scheme:account`.
 - `CredentialEntry.value` is private; callers use `access_token()`.
 
@@ -254,7 +258,7 @@ Host-side mutations travel as `effects` on the terminal, not as separate callout
 
 The WIT reserves `open-file`, `read-chunk`, and `close-file` for streamed and ranged file reads.
 
-Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount_schema::mounts::Spec`, resolves it to `omnifs_mount_schema::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
+Mount specs are JSON, not TOML. The host parses each mount's JSON config into `omnifs_mount::mounts::Spec`, resolves it to `omnifs_mount::mounts::Resolved`, and preserves the provider-specific `config` object as a `serde_json::Value` before re-serializing it to JSON bytes for the `initialize()` call. Providers receive the raw config payload as JSON bytes and deserialize through `serde_json::from_slice`; the SDK's `#[omnifs_sdk::config]` macro wires this up automatically.
 
 ## Caching model
 
@@ -300,7 +304,7 @@ The full design lives in `docs/design/file-attributes.md`, including enum defini
 
 ### CLI presentation vs schema types
 
-- `omnifs-mount-schema` types are wire/config truth. Do not add human-facing CLI labels or terminal formatting there.
+- `omnifs-mount` types (`Spec`, `Resolved`, `Auth`, `AuthKind`) are wire/config truth. Do not add human-facing CLI labels or terminal formatting there.
 - Provider capability display uses the schema `CapabilityEntry` enum directly. Format at use site through `crates/omnifs-cli/src/capability.rs`, with `capability_label` and `capability_value`. Do not introduce parallel CLI view-model structs for the same schema type.
 - Status/JSON output helpers such as `*_to_json` are DTO serialization, not domain types. Keep them separate from schema conversions.
 

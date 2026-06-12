@@ -8,7 +8,7 @@ use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::{Artifact, BuildError, Dirs, Runtime, component_engine};
 use omnifs_cache::Caches;
-use omnifs_mount_schema::mounts::{Resolved, Spec};
+use omnifs_mount::mounts::{Resolved, Spec};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +28,7 @@ pub struct ProviderRegistry {
     cache_dir: PathBuf,
     config_dir: PathBuf,
     providers_dir: PathBuf,
+    credentials_file: PathBuf,
     instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
@@ -65,6 +66,7 @@ impl ProviderRegistry {
             cache_dir: dirs.cache_dir.to_path_buf(),
             config_dir: dirs.config_dir.to_path_buf(),
             providers_dir: dirs.providers_dir.to_path_buf(),
+            credentials_file: dirs.credentials_file.to_path_buf(),
             instances: parking_lot::RwLock::new(HashMap::new()),
             root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
@@ -86,7 +88,12 @@ impl ProviderRegistry {
             return Err(RegistryError::DuplicateMount(mount));
         }
 
-        let dirs = Dirs::new(&self.cache_dir, &self.config_dir, &self.providers_dir);
+        let dirs = Dirs::new(
+            &self.cache_dir,
+            &self.config_dir,
+            &self.providers_dir,
+            &self.credentials_file,
+        );
         let wasm_path = dirs.provider_path(&spec.provider);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
@@ -95,7 +102,7 @@ impl ProviderRegistry {
         }
         let resolved = resolve_mount_for_wasm(&wasm_path, spec)
             .map_err(|error| registry_error(&mount, error))?;
-        let is_root = resolved.root_mount;
+        let is_root = resolved.spec.root_mount;
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = Runtime::new(
@@ -166,7 +173,12 @@ impl ProviderRegistry {
 
     /// The directories this registry resolves mounts against.
     pub fn dirs(&self) -> Dirs<'_> {
-        Dirs::new(&self.cache_dir, &self.config_dir, &self.providers_dir)
+        Dirs::new(
+            &self.cache_dir,
+            &self.config_dir,
+            &self.providers_dir,
+            &self.credentials_file,
+        )
     }
 
     pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
@@ -282,7 +294,7 @@ mod tests {
     use crate::Dirs;
     use crate::cloner::GitCloner;
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
-    use omnifs_mount_schema::mounts::Spec;
+    use omnifs_mount::mounts::Spec;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -315,6 +327,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_home::Paths::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -338,7 +351,12 @@ mod tests {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
-            Dirs::new(cache_dir.path(), config_dir.path(), providers_dir.path()),
+            Dirs::new(
+                cache_dir.path(),
+                &paths.config_dir,
+                providers_dir.path(),
+                &paths.credentials_file,
+            ),
             cloner,
         )
         .expect("registry init");

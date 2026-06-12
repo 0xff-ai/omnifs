@@ -3,8 +3,8 @@ use std::fmt;
 use anyhow::Context;
 use omnifs_core::{AccountId, AuthSchemeId, CredentialId, IdError, ProviderId};
 use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_mount_schema::Auth;
-use omnifs_mount_schema::mounts::Resolved;
+use omnifs_mount::Auth;
+use omnifs_mount::mounts::Resolved;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl CredentialTarget {
     }
 
     pub(crate) fn from_resolved_mount(config: &Resolved) -> Result<Self, CredentialTargetError> {
-        let Some(auth) = config.auth.first() else {
+        let Some(auth) = config.spec.auth.first() else {
             return Ok(Self::None);
         };
 
@@ -79,11 +79,11 @@ impl CredentialTarget {
     }
 
     pub(crate) fn for_mount(config: &Resolved) -> Self {
-        if config.auth.is_empty() {
+        if config.spec.auth.is_empty() {
             return Self::None;
         }
 
-        let auth = &config.auth[0];
+        let auth = &config.spec.auth[0];
         if let Some(token_file) = auth.token_file() {
             return Self::External(ExternalCredentialSource::TokenFile(token_file.to_owned()));
         }
@@ -94,7 +94,7 @@ impl CredentialTarget {
         let Some(scheme) = auth.scheme() else {
             return Self::None;
         };
-        let Ok(provider_id) = ProviderId::new(config.provider_id()) else {
+        let Ok(provider_id) = ProviderId::new(&config.provider_id) else {
             return Self::None;
         };
         let account = auth
@@ -154,7 +154,7 @@ impl CredentialTarget {
         scheme: &str,
         account: Option<&str>,
     ) -> Result<Self, CredentialTargetError> {
-        let provider_id = ProviderId::new(config.provider_id())?;
+        let provider_id = ProviderId::new(&config.provider_id)?;
         let account = account
             .or_else(|| auth.and_then(Auth::account))
             .map(AccountId::new)

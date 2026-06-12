@@ -194,6 +194,22 @@ pub enum CredentialIdError {
     InvalidPart { field: &'static str, value: String },
 }
 
+/// Discriminant for the two host-managed credential families.
+///
+/// Shared by `omnifs-creds` (`CredentialEntry.kind`), `omnifs-mount`
+/// (`Auth` / `AuthKind` accessors), and the CLI (`AuthSelection`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, strum::Display,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthKind {
+    #[strum(serialize = "static-token")]
+    StaticToken,
+    #[serde(rename = "oauth")]
+    #[strum(serialize = "oauth")]
+    OAuth,
+}
+
 impl CredentialIdError {
     fn malformed_storage_key(value: &str) -> Self {
         Self::MalformedStorageKey {

@@ -114,7 +114,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     # those artifacts exist in the target dir.
     cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
     cargo clippy -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings; \
+        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider -- -D warnings; \
     cargo clippy -p 'omnifs-provider-*' -p test-provider \
         -p 'omnifs-tool-*' --target wasm32-wasip2 -- -D warnings
 
@@ -132,7 +132,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release --target wasm32-wasip2 \
         -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'; \
     cargo test --release -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount-schema; \
+        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider; \
     cargo test -p 'omnifs-provider-*' -p test-provider \
         --target wasm32-wasip2 --no-run
 
@@ -159,16 +159,12 @@ COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
 
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
+ENV SHELL=/bin/zsh \
+    OMNIFS_HOME=/root/.omnifs
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
-    && mkdir -p /root/.omnifs/config/mounts /root/.omnifs/data /root/.omnifs/cache /root/.omnifs/providers /tmp/omnifs-provider-manifests
+    && mkdir -p "$OMNIFS_HOME/cache" /tmp/omnifs-provider-manifests
 
 SHELL ["/bin/zsh", "-c"]
-# `omnifsd` resolves `providers_dir` from `OMNIFS_PROVIDERS_DIR`
-# before falling back to `data_dir/providers`. The image bakes WASMs under
-# `/root/.omnifs/providers/`, so declare that location for the daemon and for
-# `docker exec omnifs omnifs status`.
-ENV SHELL=/bin/zsh \
-    OMNIFS_PROVIDERS_DIR=/root/.omnifs/providers
 WORKDIR /
 ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
@@ -186,8 +182,4 @@ ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 
 COPY --from=builder /omnifs /omnifsd /usr/local/bin/
-COPY --from=providers /out/wasm/omnifs_provider_*.wasm \
-     /root/.omnifs/providers/
-COPY --from=providers /out/wasm/omnifs_tool_archive.wasm \
-     /root/.omnifs/providers/
 RUN chmod 0755 /usr/local/bin/omnifs /usr/local/bin/omnifsd

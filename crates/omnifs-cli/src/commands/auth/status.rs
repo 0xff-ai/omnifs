@@ -8,16 +8,18 @@ use super::shared::{format_rfc3339, format_scopes};
 use crate::auth::MountAuth;
 use crate::catalog::ProviderCatalog;
 use crate::paths::Paths;
+use crate::session::MountConfig;
 
 pub(super) fn status(
     paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
-    let rows = AuthStatus::new(catalog, store).load()?;
+    let rows = AuthStatus::new(catalog, store).load(mounts)?;
     anstream::println!("backend: {}", store.backend_label());
     if rows.is_empty() {
-        anstream::println!("no mount configs found in {}", paths.mounts_dir.display());
+        anstream::println!("no mount configs found in {}", paths.config_file.display());
         return Ok(());
     }
     for row in rows {
@@ -51,10 +53,11 @@ struct AuthEntryJson {
 pub(super) fn status_json(
     _paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
     let entries = AuthStatus::new(catalog, store)
-        .load()?
+        .load(mounts)?
         .into_iter()
         .filter_map(AuthStatusRow::into_json)
         .collect();
@@ -73,17 +76,20 @@ impl<'a> AuthStatus<'a> {
         Self { catalog, store }
     }
 
-    fn load(&self) -> anyhow::Result<Vec<AuthStatusRow>> {
-        let mounts = self
+    fn load(&self, mounts: Vec<MountConfig>) -> anyhow::Result<Vec<AuthStatusRow>> {
+        let auth_mounts = self
             .catalog
-            .load_all_mount_auth_tolerating_manifest_errors()?;
-        mounts.iter().map(|mount| self.row_for(mount)).collect()
+            .load_all_mount_auth_tolerating_manifest_errors(mounts)?;
+        auth_mounts
+            .iter()
+            .map(|mount| self.row_for(mount))
+            .collect()
     }
 
     fn row_for(&self, mount: &MountAuth) -> anyhow::Result<AuthStatusRow> {
         let entry = mount.status_entry(self.store)?;
         Ok(AuthStatusRow {
-            mount: mount.config().mount.clone(),
+            mount: mount.config().spec.mount.clone(),
             entry,
         })
     }

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use omnifs_mount_schema::TokenValidation;
+use omnifs_provider::TokenValidation;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::Duration;

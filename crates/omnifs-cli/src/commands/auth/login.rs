@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest, UrlOpener,
 };
-use omnifs_creds::CredentialStore;
+use omnifs_creds::{CredentialStore, FileStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -15,19 +15,18 @@ use std::sync::Arc;
 use super::shared::format_scopes;
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
-use crate::paths::{PathOverrides, Paths};
-use crate::session::CredsBackend;
+use crate::paths::PathOverrides;
 
 pub(super) async fn login(
-    _paths: &Paths,
     catalog: &ProviderCatalog,
+    mounts: &[crate::session::MountConfig],
     store: Box<dyn CredentialStore>,
     mount: &str,
     account: Option<&str>,
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mount)?;
+    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
     print_oauth_consent_summary(mount, &request);
     let client = OAuthClient::new()?;
@@ -99,8 +98,7 @@ pub(super) async fn login(
 }
 
 pub(crate) async fn login_with_paths(
-    mounts_dir: PathBuf,
-    providers_dir: PathBuf,
+    config_dir: PathBuf,
     credentials_file: PathBuf,
     mount: &str,
     account: Option<&str>,
@@ -109,8 +107,7 @@ pub(crate) async fn login_with_paths(
 ) -> anyhow::Result<()> {
     let ctx = AppContext::resolve(
         PathOverrides {
-            mounts_dir: Some(mounts_dir),
-            providers_dir: Some(providers_dir),
+            config_dir: Some(config_dir),
             ..Default::default()
         },
         None,
@@ -118,10 +115,11 @@ pub(crate) async fn login_with_paths(
     )?;
     let mut paths = ctx.paths().clone();
     paths.credentials_file = credentials_file;
-    let store = CredsBackend::auto(&paths.credentials_file, true);
+    let store = Box::new(FileStore::new(&paths.credentials_file));
+    let mounts = ctx.workspace().mounts()?;
     login(
-        &paths,
         ctx.catalog(),
+        &mounts,
         store,
         mount,
         account,

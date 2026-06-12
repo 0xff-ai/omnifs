@@ -2,6 +2,7 @@ use crate::catalog::ProviderCatalog;
 use crate::config::Config;
 use crate::paths::{PathOverrides, Paths};
 use crate::runtime_target::RuntimeTarget;
+use crate::workspace::Workspace;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppContext {
@@ -9,6 +10,7 @@ pub(crate) struct AppContext {
     config: Config,
     runtime: RuntimeTarget,
     catalog: ProviderCatalog,
+    workspace: Workspace,
 }
 
 impl AppContext {
@@ -21,19 +23,16 @@ impl AppContext {
         container_name: Option<String>,
         image: Option<String>,
     ) -> anyhow::Result<Self> {
-        let (paths, config) = Paths::resolve_with_config(path_overrides)?;
+        let (paths, config) = crate::paths::resolve_with_config(path_overrides)?;
         let runtime = RuntimeTarget::resolve(container_name, image, &config)?;
-        let catalog = ProviderCatalog::with_config(
-            &paths.mounts_dir,
-            &paths.providers_dir,
-            &paths.config_file,
-            config.mounts.clone(),
-        );
+        let workspace = Workspace::new(paths.clone(), config.mounts.clone());
+        let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
         Ok(Self {
             paths,
             config,
             runtime,
             catalog,
+            workspace,
         })
     }
 
@@ -51,5 +50,9 @@ impl AppContext {
 
     pub(crate) fn catalog(&self) -> &ProviderCatalog {
         &self.catalog
+    }
+
+    pub(crate) fn workspace(&self) -> &Workspace {
+        &self.workspace
     }
 }

@@ -1,8 +1,6 @@
 pub mod file_store;
-pub mod keyring_store;
 pub mod memory_store;
 pub use file_store::FileStore;
-pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryStore;
 
 use secrecy::SecretString;
@@ -12,21 +10,13 @@ use time::OffsetDateTime;
 
 use omnifs_core::{CredentialId, CredentialIdError};
 
-/// Host-managed HTTP credential kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
-#[serde(rename_all = "kebab-case")]
-pub enum CredentialKind {
-    #[strum(serialize = "static-token")]
-    StaticToken,
-    #[serde(rename = "oauth")]
-    #[strum(serialize = "oauth")]
-    OAuth,
-}
+/// Re-export so callers don't need a direct omnifs-core dep for this type.
+pub use omnifs_core::AuthKind;
 
 /// One durable host-managed HTTP credential entry.
 #[derive(Debug, Clone)]
 pub struct CredentialEntry {
-    kind: CredentialKind,
+    kind: AuthKind,
     value: SecretString,
     stored_at: OffsetDateTime,
     last_validated: Option<OffsetDateTime>,
@@ -42,7 +32,7 @@ pub struct CredentialEntry {
 impl CredentialEntry {
     pub fn static_token(access_token: SecretString, stored_at: OffsetDateTime) -> Self {
         Self {
-            kind: CredentialKind::StaticToken,
+            kind: AuthKind::StaticToken,
             value: access_token,
             stored_at,
             last_validated: None,
@@ -65,7 +55,7 @@ impl CredentialEntry {
     ) -> Self {
         let token_type = token_type.into();
         Self {
-            kind: CredentialKind::OAuth,
+            kind: AuthKind::OAuth,
             value: access_token,
             stored_at,
             last_validated: None,
@@ -82,7 +72,7 @@ impl CredentialEntry {
         }
     }
 
-    pub fn kind(&self) -> CredentialKind {
+    pub fn kind(&self) -> AuthKind {
         self.kind
     }
 
@@ -141,7 +131,7 @@ impl CredentialEntry {
 
 #[derive(Deserialize)]
 struct CredentialEntryWire {
-    kind: CredentialKind,
+    kind: AuthKind,
     #[serde(rename = "access_token", with = "secret_string_serde")]
     access_token: SecretString,
     #[serde(default, with = "secret_string_serde::option")]
@@ -256,8 +246,7 @@ pub trait CredentialStore: Send + Sync {
     /// Lists known credential ids. Backends that cannot enumerate return
     /// `Ok(None)`.
     fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError>;
-    /// Human-readable backend name shown in UX (e.g. "macOS Keychain",
-    /// "file: ~/.omnifs/data/credentials.json").
+    /// Human-readable backend name shown in UX.
     fn backend_label(&self) -> String;
 }
 

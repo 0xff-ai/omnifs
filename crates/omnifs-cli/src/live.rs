@@ -6,8 +6,7 @@
 
 use crate::catalog::ProviderCatalog;
 use crate::client::{DaemonClient, DaemonProbe};
-use crate::container_name::ContainerName;
-use crate::session::{MountConfig, Session};
+use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
 
 pub(crate) enum LiveApply {
@@ -20,10 +19,8 @@ pub(crate) enum LiveApply {
     RestartRequired(&'static str),
 }
 
-/// Materialize the new mount's credentials into the live session and load
-/// it on the running daemon.
+/// Materialize the new mount and load it on the running daemon.
 pub(crate) async fn add_mount(
-    container_name: &ContainerName,
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
     config: MountConfig,
@@ -32,33 +29,11 @@ pub(crate) async fn add_mount(
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
-    // The session secrets directory is bind-mounted into the running
-    // container; files written here propagate immediately.
-    let Some(session) = Session::attach(container_name) else {
-        return Ok(LiveApply::NotRunning);
-    };
-    let (binds, payloads) = session.populate(std::slice::from_ref(&config), catalog, store)?;
+    let (binds, payload) = config.materialize(catalog, store)?;
     if !binds.is_empty() {
         // New host binds (user preopens) cannot be added to a running
         // container; the mount config is saved and `omnifs up` picks it up.
         return Ok(LiveApply::RestartRequired("it needs new host binds"));
-    }
-    let payload = payloads
-        .first()
-        .expect("populate returns one payload per config");
-    if payload
-        .spec
-        .auth
-        .iter()
-        .any(omnifs_mount_schema::Auth::is_oauth)
-    {
-        // OAuth credentials live in the session `credentials.json`, which is
-        // a single-file bind: it only exists in the container if it was
-        // present at launch, and host-side atomic rewrites replace the inode
-        // the bind pins. Only a relaunch rebinds it.
-        return Ok(LiveApply::RestartRequired(
-            "its OAuth credential must be bound at container start",
-        ));
     }
     client.add_mount(&payload.spec).await?;
     Ok(LiveApply::Applied)

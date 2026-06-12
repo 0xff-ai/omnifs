@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use omnifs_mount_schema as mts;
+use omnifs_provider as mts;
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Views {

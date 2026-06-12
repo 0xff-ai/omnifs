@@ -15,7 +15,7 @@ use crate::Provider;
 use crate::wasi::HostState;
 use crate::wasm;
 use crate::{BuildError, Error, Op};
-use omnifs_mount_schema::{PreopenMode, PreopenedPath};
+use omnifs_provider::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
 
 /// Owns the WASM component instance and serialized provider config.

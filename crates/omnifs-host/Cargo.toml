@@ -36,7 +36,8 @@ moka = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 omnifs-core = { workspace = true }
-omnifs-mount-schema = { workspace = true }
+omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 omnifs-cache = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-creds = { workspace = true }
@@ -45,7 +46,6 @@ omnifs-wit = { workspace = true, features = ["host-bindings"] }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }
 crossbeam-queue = "0.3"
-fs2 = { workspace = true }
 secrecy = "0.10"
 time = { workspace = true, features = ["formatting"] }
 
@@ -60,6 +60,7 @@ zip = { workspace = true }
 rcgen = "0.13"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 omnifs-itest = { path = "../omnifs-itest" }
+omnifs-home = { workspace = true }
 
 [lints]
 workspace = true

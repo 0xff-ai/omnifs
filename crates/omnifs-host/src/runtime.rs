@@ -5,7 +5,7 @@
 //! Op execution is in `op_lifecycle`; WASI store plumbing is in `wasi`.
 
 use crate::archive::ArchiveExecutor;
-use crate::auth::{AuthManager, credential_store_for_config_dir};
+use crate::auth::{AuthManager, credential_store_for_file};
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
 use crate::capability::{CapabilityChecker, CapabilityGrants};
@@ -23,8 +23,8 @@ use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
 use omnifs_core::path::Path as ProtocolPath;
-use omnifs_mount_schema::ProviderConfig;
-use omnifs_mount_schema::mounts::Resolved;
+use omnifs_mount::ProviderConfig;
+use omnifs_mount::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -42,6 +42,9 @@ const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::fr
 // Upper bound so a hostile Retry-After cannot overflow `Instant` or wedge the
 // window open indefinitely.
 const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3600);
+const PROVIDER_CACHE_SUBDIR: &str = "providers";
+const BLOB_CACHE_SUBDIR: &str = "blobs";
+const ARCHIVE_CACHE_SUBDIR: &str = "archives";
 
 /// Host directories needed to build one provider runtime.
 #[derive(Clone, Copy)]
@@ -49,14 +52,21 @@ pub struct Dirs<'a> {
     pub cache_dir: &'a Path,
     pub config_dir: &'a Path,
     pub providers_dir: &'a Path,
+    pub credentials_file: &'a Path,
 }
 
 impl<'a> Dirs<'a> {
-    pub fn new(cache_dir: &'a Path, config_dir: &'a Path, providers_dir: &'a Path) -> Self {
+    pub fn new(
+        cache_dir: &'a Path,
+        config_dir: &'a Path,
+        providers_dir: &'a Path,
+        credentials_file: &'a Path,
+    ) -> Self {
         Self {
             cache_dir,
             config_dir,
             providers_dir,
+            credentials_file,
         }
     }
 
@@ -147,13 +157,22 @@ struct CacheDirs {
 
 impl CacheDirs {
     fn prepare(cache_dir: &Path, mount_name: &str) -> std::result::Result<Self, BuildError> {
-        let provider_root = cache_dir.join("providers").join(mount_name);
+        let provider_root = Self::provider_root(cache_dir, mount_name);
         let dirs = Self {
-            blob: provider_root.join("blobs"),
-            archive_root: provider_root.join("archives"),
+            blob: provider_root.join(BLOB_CACHE_SUBDIR),
+            archive_root: provider_root.join(ARCHIVE_CACHE_SUBDIR),
         };
         dirs.prepare_all()?;
         Ok(dirs)
+    }
+
+    fn provider_root(cache_dir: &Path, mount_name: &str) -> PathBuf {
+        cache_dir.join(PROVIDER_CACHE_SUBDIR).join(mount_name)
+    }
+
+    #[cfg(test)]
+    fn blob_path(cache_dir: &Path, mount_name: &str) -> PathBuf {
+        Self::provider_root(cache_dir, mount_name).join(BLOB_CACHE_SUBDIR)
     }
 
     fn prepare_all(&self) -> std::result::Result<(), BuildError> {
@@ -232,16 +251,17 @@ impl Runtime {
         extractor: Arc<ArchiveExtractorComponent>,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
-        let mount_name = config.mount.as_str();
+        let mount_name = config.spec.mount.as_str();
         let config_bytes = config.config_bytes();
         let preopens = config
+            .spec
             .capabilities
             .as_ref()
             .and_then(|c| c.preopened_paths.as_deref())
             .unwrap_or(&[]);
         let instance = Instance::new(engine, wasm_path, config_bytes, preopens)?;
 
-        validate_instance_config(config.provider_config_schema(), config, mount_name)?;
+        validate_instance_config(config.spec.provider_config_schema(), config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
@@ -251,18 +271,16 @@ impl Runtime {
         let auth_manifest = Artifact::load(wasm_path)
             .and_then(|artifact| artifact.auth_manifest())
             .map_err(BuildError::InvalidConfig)?;
-        let auth = if config.auth.is_empty() {
+        let auth = if config.spec.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
-            let store = credential_store_for_config_dir(dirs.config_dir);
-            let refresh_lock_path = dirs.config_dir.join("credentials.lock");
+            let store = credential_store_for_file(dirs.credentials_file);
             Arc::new(
                 AuthManager::from_configs_manifest_store_with_store(
-                    &config.auth,
+                    &config.spec.auth,
                     auth_manifest.as_ref(),
-                    config.provider_id(),
+                    &config.provider_id,
                     store,
-                    refresh_lock_path,
                 )
                 .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
             )
@@ -272,7 +290,6 @@ impl Runtime {
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
 
         let cache_dirs = CacheDirs::prepare(dirs.cache_dir, mount_name)?;
-        let _provider_cache_root = dirs.cache_dir.join("providers").join(mount_name);
         let blob_cache = Arc::new(BlobCache::new(cache_dirs.blob));
         let archive = Arc::new(ArchiveExecutor::new(
             blob_cache.clone(),
@@ -290,7 +307,7 @@ impl Runtime {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
-            provider_id: config.provider_id().to_string(),
+            provider_id: config.provider_id.clone(),
             operation_ids: OperationIds::new(),
             http,
             git,
@@ -680,15 +697,16 @@ fn validate_instance_config(
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
     let config_value = config
+        .spec
         .config_raw
         .as_ref()
         .map_or(&empty_config, ProviderConfig::as_value);
-    match omnifs_mount_schema::validate_config(schema, config_value) {
+    match omnifs_provider::validate_config(schema, config_value) {
         Ok(()) => Ok(()),
-        Err(omnifs_mount_schema::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
+        Err(omnifs_provider::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
             format!("config for mount {mount_name} failed validation: {error}"),
         )),
-        Err(omnifs_mount_schema::SchemaError::InvalidSchema(error)) => {
+        Err(omnifs_provider::SchemaError::InvalidSchema(error)) => {
             Err(BuildError::ProviderProtocol(format!(
                 "provider config schema for mount {mount_name} is invalid: {error}"
             )))
@@ -713,7 +731,7 @@ mod tests {
     #[test]
     fn provider_cache_dir_creation_failure_stops_runtime_build() {
         let dir = tempfile::tempdir().unwrap();
-        let blob_path = dir.path().join("providers").join("linear").join("blobs");
+        let blob_path = CacheDirs::blob_path(dir.path(), "linear");
         std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
         std::fs::write(&blob_path, "not a directory").unwrap();
 

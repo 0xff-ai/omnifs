@@ -1,33 +1,25 @@
 [package]
-name = "omnifs-mount-schema"
+name = "omnifs-mount"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Wire types for the omnifs.provider-manifest.v1 custom section"
+description = "The omnifs mount: Spec/Resolved, the mount catalog, and Spec->Resolved resolution"
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "wasm", "wit", "schema", "fuse"]
 
 [dependencies]
 omnifs-core = { workspace = true }
+omnifs-provider = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 utoipa = { workspace = true }
-schemars = { workspace = true, features = ["indexmap2"] }
-jsonschema = { workspace = true }
-indexmap = { workspace = true }
-wasmparser = "0.246"
 thiserror = { workspace = true }
-hex = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 tempfile = { workspace = true }
-
-[[bin]]
-name = "dump-provider"
-path = "src/bin/dump_provider.rs"
 
 [package.metadata.dist]
 dist = false

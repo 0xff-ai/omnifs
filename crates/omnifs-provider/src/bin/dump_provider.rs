@@ -1,7 +1,7 @@
 //! Regenerate `schema/omnifs.provider.schema.json` from the derived schemars model.
 
 fn main() {
-    let schema = omnifs_mount_schema::provider_manifest_json();
+    let schema = omnifs_provider::provider_manifest_json();
     let value = serde_json::to_value(schema).expect("schema serializes");
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/omnifs.provider.schema.json");

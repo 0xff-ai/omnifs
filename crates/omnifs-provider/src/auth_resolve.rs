@@ -94,6 +94,8 @@ mod tests {
             value_prefix: "Bearer ".to_string(),
             description: key.to_string(),
             inject_domains: vec!["api.example.com".to_string()],
+            creation_url: None,
+            validation: None,
         })
     }
 

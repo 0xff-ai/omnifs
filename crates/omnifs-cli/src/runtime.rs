@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -17,12 +17,8 @@ use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
 use crate::runtime_target::RuntimeTarget;
-use crate::session::{CONTAINER_NAME, HOST_CRED_DIR, HOST_FUSE_MOUNT, IMAGE, Session};
-
-const HOST_CREDENTIALS_FILE: &str = "/root/.omnifs/config/credentials.json";
-const GUEST_CONFIG_DIR: &str = "/root/.omnifs/config";
-const GUEST_CACHE_DIR: &str = "/root/.omnifs/cache";
-const GUEST_PROVIDERS_DIR: &str = "/root/.omnifs/providers";
+use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
+use omnifs_home::OMNIFS_HOME_ENV;
 
 /// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
 /// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
@@ -30,7 +26,7 @@ const GUEST_PROVIDERS_DIR: &str = "/root/.omnifs/providers";
 /// from a newer source tree than the launcher itself.
 const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
 
-/// Extras layered on top of the canonical session wiring.
+/// Extras layered on top of the canonical runtime wiring.
 /// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
 /// both `omnifs dev` and `omnifs up` expose the inspector TCP port.
 #[derive(Debug, Default)]
@@ -39,9 +35,9 @@ pub(crate) struct ContainerExtras {
 }
 
 /// Pure description of a container launch: all bind mounts, env vars, and TCP
-/// port forwards assembled from the session and extras without touching any
-/// bollard types. Constructed by [`ContainerLaunchSpec::from_session`];
-/// mapped to a [`ContainerCreateBody`] by [`Runtime::build_container_body`].
+/// port forwards assembled without touching any bollard types. Constructed by
+/// [`ContainerLaunchSpec::from_runtime_home`]; mapped to a
+/// [`ContainerCreateBody`] by [`Runtime::build_container_body`].
 #[derive(Debug, Default)]
 pub(crate) struct ContainerLaunchSpec {
     pub(crate) image: String,
@@ -52,23 +48,14 @@ pub(crate) struct ContainerLaunchSpec {
 }
 
 impl ContainerLaunchSpec {
-    /// Assemble the launch spec from the session state and caller-supplied
+    /// Assemble the launch spec from the host runtime home and caller-supplied
     /// extras, without making any bollard calls.
-    pub(crate) fn from_session(
+    pub(crate) fn from_runtime_home(
         image: &ImageRef,
-        session: &Session,
+        runtime_home: &Path,
         extras: ContainerExtras,
     ) -> Self {
-        let mut binds = vec![format!(
-            "{}:{HOST_CRED_DIR}:ro",
-            session.creds_dir().display()
-        )];
-        if session.credentials_file().exists() {
-            binds.push(format!(
-                "{}:{HOST_CREDENTIALS_FILE}",
-                session.credentials_file().display()
-            ));
-        }
+        let mut binds = vec![format!("{}:{OMNIFS_HOME}", runtime_home.display())];
 
         // SSH_AUTH_SOCK bind enables git callouts. Skip if unset; only providers
         // that perform git operations will notice (and they'll error clearly).
@@ -93,9 +80,7 @@ impl ContainerLaunchSpec {
         binds.extend(extras.binds);
 
         let env = vec![
-            format!("OMNIFS_CONFIG_DIR={GUEST_CONFIG_DIR}"),
-            format!("OMNIFS_CACHE_DIR={GUEST_CACHE_DIR}"),
-            format!("OMNIFS_PROVIDERS_DIR={GUEST_PROVIDERS_DIR}"),
+            format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
             "SSH_AUTH_SOCK=/ssh-agent".to_string(),
             "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
         ];
@@ -323,14 +308,14 @@ impl Runtime {
 
     pub(crate) async fn launch_container(
         &self,
-        session: &Session,
+        runtime_home: &Path,
         extras: ContainerExtras,
     ) -> Result<()> {
         self.ensure_image().await?;
         self.verify_launcher_compat().await?;
         self.remove().await?;
 
-        let spec = ContainerLaunchSpec::from_session(&self.image, session, extras);
+        let spec = ContainerLaunchSpec::from_runtime_home(&self.image, runtime_home, extras);
         anstream::println!(
             "Creating container `{}` from image `{}`",
             self.container_name,
@@ -408,7 +393,7 @@ impl Runtime {
     pub(crate) async fn wait_for_daemon_ready(&self) -> Result<()> {
         let client = crate::client::DaemonClient::new();
         anstream::println!(
-            "Waiting for {HOST_FUSE_MOUNT} inside `{}`",
+            "Waiting for {GUEST_FUSE_MOUNT} inside `{}`",
             self.container_name
         );
         for attempt in 0..60 {
@@ -431,7 +416,7 @@ impl Runtime {
                     .status
                     .map_or_else(|| "exited".to_string(), |status| status.to_string());
                 return Err(anyhow::anyhow!(
-                    "container `{}` {status} before {HOST_FUSE_MOUNT} became available (exit {exit_code})",
+                    "container `{}` {status} before {GUEST_FUSE_MOUNT} became available (exit {exit_code})",
                     self.container_name
                 ))
                 .with_hint(format!(
@@ -447,7 +432,7 @@ impl Runtime {
         }
         anstream::println!();
         Err(anyhow::anyhow!(
-            "{HOST_FUSE_MOUNT} did not become available inside `{}` within 60s",
+            "{GUEST_FUSE_MOUNT} did not become available inside `{}` within 60s",
             self.container_name
         ))
         .with_hint(format!(
@@ -648,40 +633,28 @@ mod tests {
             .expect("garbage label should not block launch");
     }
 
-    /// Verify that `ContainerLaunchSpec::from_session` assembles the spec
-    /// correctly: guest env vars are always present, creds/mounts binds come
-    /// first in that order, and extras are appended without clobbering the
-    /// base set.
+    /// Verify that `ContainerLaunchSpec::from_runtime_home` assembles the spec
+    /// correctly: guest env vars are always present and extras are appended
+    /// without clobbering the base set.
     #[test]
     fn launch_spec_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
-        let cred_file = tmp.path().join("credentials.json");
-        let name = ContainerName::new("omnifs-test-spec").unwrap();
-        // Session::prepare creates the session dir under temp_dir keyed by
-        // container name. That's fine for a unit test — no container is started.
-        let session = Session::prepare(&name, &cred_file).unwrap();
+        let paths = omnifs_home::Paths::under_root(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
         let extras = ContainerExtras {
             binds: vec!["/extra:/extra:ro".to_string()],
         };
 
-        let spec = ContainerLaunchSpec::from_session(&image, &session, extras);
+        let spec = ContainerLaunchSpec::from_runtime_home(&image, &paths.config_dir, extras);
 
-        // Creds bind is first (read-only).
-        assert!(
-            spec.binds[0].ends_with(":ro"),
-            "creds bind should be read-only: {}",
-            spec.binds[0]
-        );
-        assert!(
-            spec.binds[0].contains(HOST_CRED_DIR),
-            "first bind should target HOST_CRED_DIR: {}",
-            spec.binds[0]
+        assert_eq!(
+            spec.binds[0],
+            format!("{}:{OMNIFS_HOME}", paths.config_dir.display())
         );
 
-        // Extras bind is appended after the base set. No credentials_file bind
-        // because cred_file doesn't exist in the temp dir.
+        // Extras bind is appended after the runtime home bind.
         assert_eq!(
             spec.binds.last().map(String::as_str),
             Some("/extra:/extra:ro"),
@@ -690,9 +663,10 @@ mod tests {
         );
 
         // Required guest env vars are present.
+        let expected_home_env = format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}");
         assert!(
-            spec.env.iter().any(|e| e.starts_with("OMNIFS_CONFIG_DIR=")),
-            "OMNIFS_CONFIG_DIR must be set"
+            spec.env.iter().any(|e| e == &expected_home_env),
+            "{OMNIFS_HOME_ENV} must be set"
         );
         assert!(
             spec.env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),

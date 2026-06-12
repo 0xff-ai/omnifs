@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use omnifs_mount_schema::{
+use omnifs_provider::{
     ConfigProperty, ConfigSchema, InitHint, InitInput, PreopenStrategy, PreopenedPath,
     ProviderCapabilities, ProviderManifest,
 };
@@ -145,7 +145,7 @@ impl<'a> MountConfigGenerator<'a> {
             .config_schema
             .as_ref()
             .ok_or_else(|| anyhow!("provider `{}` has no configSchema", self.manifest.id))?;
-        omnifs_mount_schema::validate_config(schema.as_value(), config)
+        omnifs_provider::validate_config(schema.as_value(), config)
             .map_err(|error| anyhow!("generated provider config failed schema validation: {error}"))
     }
 }
