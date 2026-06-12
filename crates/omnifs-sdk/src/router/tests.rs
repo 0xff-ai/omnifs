@@ -47,14 +47,23 @@ impl Representable<Markdown> for DemoObj {
 
 impl DemoObj {
     fn title(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
         Ok(FileContent::new(self.title.clone()))
     }
 
     fn body(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
         Ok(FileContent::new(format!("body: {}", self.title)))
     }
 
     fn state(&self) -> Result<FileContent> {
+        if self.title.is_empty() {
+            return Err(ProviderError::invalid_input("missing title"));
+        }
         Ok(FileContent::new("open"))
     }
 }
@@ -343,7 +352,7 @@ fn projected_leaf_modifiers_apply_to_pending_leaf() {
     let projected: Vec<_> = fs
         .iter()
         .map(|write| match &write.kind {
-            wit_types::FsKind::File(file) => (write.path.as_str(), file.attrs.stability.clone()),
+            wit_types::FsKind::File(file) => (write.path.as_str(), file.attrs.stability),
             wit_types::FsKind::Directory(_) => panic!("object field preload should write files"),
         })
         .collect();
