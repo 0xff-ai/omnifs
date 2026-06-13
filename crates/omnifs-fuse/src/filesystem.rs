@@ -161,7 +161,12 @@ impl Filesystem for Frontend {
 
         let attr = match &entry.kind {
             wit_types::EntryKind::Directory => self.dir_attr(ino.0),
-            wit_types::EntryKind::File(_) => self.file_attr(ino.0, entry.size),
+            wit_types::EntryKind::File(_) => {
+                let size = entry
+                    .size
+                    .max(self.follow_sizes.get(&ino.0).map_or(0, |v| *v));
+                self.file_attr(ino.0, size)
+            },
         };
         let ttl = Self::ttl_for_entry(&entry);
         reply.attr(&ttl, &attr);
@@ -447,7 +452,7 @@ impl Filesystem for Frontend {
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FuseFileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
@@ -456,6 +461,10 @@ impl Filesystem for Frontend {
     ) {
         let _trace = FuseTrace::new("release", format!("fh={}", fh.0));
         self.file_cache.remove(&fh.0);
+        if let Some((_, pump)) = self.follow_pumps.remove(&fh.0) {
+            pump.abort();
+        }
+        self.follow_sizes.remove(&ino.0);
         if let Some((_, ranged)) = self.ranged_handles.remove(&fh.0)
             && let Some(runtime) = self.runtime_for_mount(&ranged.mount_name)
             && let Err(e) = runtime.call_close_file(ranged.provider_handle)

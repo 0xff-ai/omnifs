@@ -921,3 +921,64 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
         "the continuation's page-1 items did NOT overwrite the dirents record; got {names:?}"
     );
 }
+
+// Proves the omnifs side of `tail -f`: opening a volatile ranged file spawns a
+// follow pump whose upstream probes advance the size `getattr` reports, between
+// the follower's own reads. Composed with the standalone FUSE spike (which
+// proved a polling `tail -f` reads forward whenever that size grows under
+// TTL=0 + direct I/O), this closes the chain end to end.
+#[test]
+fn volatile_follow_pump_advances_reported_size() {
+    use std::time::Duration as StdDuration;
+
+    let h = build_harness();
+    let path = "/hello/volatile-tail";
+    let ino = h.lookup_path(path).expect("volatile-tail resolves");
+
+    // Drive the real lookup->open path: the inode carries only the cheap
+    // Deferred(Full) lookup placeholder, and `open_ranged_file` probes
+    // `open_file` to discover the file is actually ranged + volatile.
+    let (attrs, synthetic) =
+        h.fs.inodes
+            .get(&ino)
+            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+    let fh = h.fs.alloc_fh();
+    let target = FullReadTarget {
+        ino,
+        fh,
+        mount_name: FuseHarness::MOUNT.to_string(),
+        path: path.to_string(),
+        backing_path: None,
+        attrs,
+        synthetic,
+    };
+    let flags =
+        h.fs.open_ranged_file(&target)
+            .expect("open ranged volatile");
+    assert!(flags.is_some(), "ranged open serves direct I/O");
+
+    // The size getattr would report to the kernel: the read-promoted inode size
+    // maxed with the follow pump's latest observed upstream end.
+    let reported = |fs: &Frontend| -> u64 {
+        let base = fs.inodes.get(&ino).map_or(0, |e| e.size);
+        base.max(fs.follow_sizes.get(&ino).map_or(0, |v| *v))
+    };
+
+    std::thread::sleep(StdDuration::from_millis(1500));
+    let s1 = reported(&h.fs);
+    std::thread::sleep(StdDuration::from_millis(1500));
+    let s2 = reported(&h.fs);
+
+    if let Some((_, pump)) = h.fs.follow_pumps.remove(&fh) {
+        pump.abort();
+    }
+
+    assert!(
+        s1 > 0,
+        "follow pump advances the reported size within a tick (got {s1})"
+    );
+    assert!(
+        s2 > s1,
+        "follow pump keeps the size growing between a follower's reads ({s1} -> {s2})"
+    );
+}

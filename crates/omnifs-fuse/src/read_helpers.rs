@@ -1,6 +1,5 @@
 //! Read-path helpers: payload resolution, slicing, learned sizes.
 
-use fuser::Errno;
 use omnifs_cache::Record as CacheRecord;
 use omnifs_core::view as view_types;
 use omnifs_core::view::{FileAttrsCache, FilePayload};
@@ -96,34 +95,16 @@ pub(super) fn learned_ranged_eof_attrs(
     }
 }
 
-pub(super) fn opened_file_attrs(
-    path: &str,
-    projected: Option<&FileAttrsCache>,
-    opened: &omnifs_wit::provider::types::FileAttrs,
-) -> Result<FileAttrsCache, Errno> {
-    let Some(projected) = projected else {
-        warn!(
-            path,
-            "open-file returned without a prior ranged file projection"
-        );
-        return Err(Errno::EIO);
-    };
-    if !matches!(
-        projected.bytes,
-        view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-    ) {
-        warn!(
-            path,
-            "open-file requires byte-source::deferred(read-mode::ranged)"
-        );
-        return Err(Errno::EIO);
-    }
-    Ok(FileAttrsCache {
+pub(super) fn opened_file_attrs(opened: &omnifs_wit::provider::types::FileAttrs) -> FileAttrsCache {
+    // A successful open-file means the provider's source is ranged, regardless
+    // of the cheap Deferred(Full) placeholder a lookup left on the inode. The
+    // real size and stability come from the open-file result.
+    FileAttrsCache {
         size: omnifs_host::wit_protocol::file_size_from_wit(opened.size),
-        bytes: projected.bytes.clone(),
+        bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Ranged),
         stability: omnifs_host::wit_protocol::stability_from_wit(opened.stability),
         version_token: opened.version_token.clone(),
-    })
+    }
 }
 
 pub(super) fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
