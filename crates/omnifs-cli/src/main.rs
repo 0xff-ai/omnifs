@@ -17,6 +17,7 @@ mod dev_mounts;
 mod dev_support;
 mod error;
 mod host_launch;
+mod host_teardown;
 mod image_ref;
 mod inspector;
 mod launch;
