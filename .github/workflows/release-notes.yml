@@ -1,0 +1,42 @@
+name: Release notes
+
+# Stage 1 of the release-note flow: on each feature PR, draft an area-tagged
+# release note into an editable sticky bot comment, and gate that the PR carries
+# a note (or the no-changelog label). The standing release PR (release-pr.yml)
+# folds these notes on merge.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: release-notes-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  note:
+    # The standing release PR is maintained by release-pr.yml, not drafted here.
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/omnifs-just
+
+      - name: Draft release note
+        if: contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bun scripts/release-notes.ts draft --pr ${{ github.event.pull_request.number }}
+
+      - name: Check release note
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/release-notes.ts check --pr ${{ github.event.pull_request.number }}

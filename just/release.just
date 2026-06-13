@@ -3,6 +3,22 @@
 release-prompt:
     @bun scripts/release.ts prompt
 
+# Draft an editable release-note comment for a PR (LLM; needs ANTHROPIC_API_KEY).
+# Pass --force to overwrite an existing note comment.
+[group('release')]
+release-notes-draft pr *args:
+    bun scripts/release-notes.ts draft --pr '{{ pr }}' {{ args }}
+
+# Validate that a PR carries a release note (or the no-changelog label).
+[group('release')]
+release-notes-check pr:
+    bun scripts/release-notes.ts check --pr '{{ pr }}'
+
+# Fold merged PR notes into the standing release/vX.Y.Z PR.
+[group('release')]
+release-pr-maintain:
+    bun scripts/release-notes.ts maintain
+
 # Validate release metadata for a PR or branch.
 [group('release')]
 release-check base='origin/main' head='HEAD':

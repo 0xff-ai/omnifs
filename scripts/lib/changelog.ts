@@ -102,6 +102,28 @@ export function finalizeUnreleased(log: Changelog, version: string, today: () =>
   return { ...next, raw: renderChangelog(next) };
 }
 
+/**
+ * Build a changelog whose [Unreleased] is empty and whose top version section is
+ * `## [version] - date` with `body`, replacing any existing same-version section
+ * and preserving older ones. Used by the standing release PR maintainer, which
+ * accumulates folded notes directly in the version section (not [Unreleased]).
+ */
+export function withReleaseSection(
+  log: Changelog,
+  version: string,
+  body: string,
+  date: string,
+): Changelog {
+  const heading = `## [${version}] - ${date}`;
+  const others = log.sections.filter((section) => !section.heading.startsWith(`## [${version}]`));
+  const next = {
+    preamble: log.preamble,
+    unreleasedBody: "",
+    sections: [{ heading, body }, ...others],
+  };
+  return { ...next, raw: renderChangelog(next) };
+}
+
 function renderChangelog(log: Pick<Changelog, "preamble" | "unreleasedBody" | "sections">): string {
   const blocks: string[] = [];
   const preamble = log.preamble.trimEnd();

@@ -30,3 +30,16 @@ export function bumpPatch(version: Version): Version {
     patch: version.patch + 1,
   };
 }
+
+export type BumpLevel = "major" | "minor" | "patch";
+
+export function bump(version: Version, level: BumpLevel): Version {
+  switch (level) {
+    case "major":
+      return { major: version.major + 1, minor: 0, patch: 0 };
+    case "minor":
+      return { major: version.major, minor: version.minor + 1, patch: 0 };
+    case "patch":
+      return bumpPatch(version);
+  }
+}

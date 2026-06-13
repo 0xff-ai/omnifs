@@ -24,6 +24,24 @@ main + notes ──► release cut (local) ──► release/v* PR ──► rel
               CI success ──► Release workflow (plan → GH release → promote → npm)
 ```
 
+## Automated release notes
+
+Release notes are captured per PR and assembled into a standing release PR, so the changelog is always a reviewable, editable artifact.
+
+**Stage 1 — per-PR note (`release-notes.yml`).** On each feature PR, an LLM drafts area-tagged bullets from the diff and posts them as an **editable sticky comment** (marked `<!-- omnifs-release-notes -->`). Edit the bullets in that comment directly. CI gates that every PR has a note or the `no-changelog` label. Notes group under the curated areas in `scripts/lib/areas.ts` (the single source of truth).
+
+**Stage 2 — standing release PR (`release-pr.yml`).** On every push to `main`, the maintainer folds the notes from PRs merged since the last tag into a `release/vX.Y.Z` branch, **additively**: existing CHANGELOG lines are preserved (edit the `## [X.Y.Z]` section directly in the PR and it survives), only newly merged PRs are appended, and re-folding a PR is a no-op (tracked in `.release-notes-manifest.json`). The bump is patch by default; apply `release:minor` or `release:major` to any PR in the range to raise it. **Merging the release PR ships** through `release.yml`, unchanged.
+
+```text
+feature PR ──► release-notes.yml: LLM draft → editable comment + CI gate
+                    │
+              merge to main ──► release-pr.yml: fold notes → release/v* PR (additive)
+                    │
+              merge release PR ──► CI factory ──► Release workflow (ship)
+```
+
+Requirements: `ANTHROPIC_API_KEY` repo secret (drafting; override the model with `OMNIFS_RELEASE_NOTES_MODEL`), and the `no-changelog`, `release:minor`, `release:major` labels. Fork PRs cannot read the secret, so a maintainer drafts/edits the note for them. `just release-cut` remains a manual escape hatch.
+
 ## Maintainer commands
 
 Maintainer commands are exposed through the root **`justfile`**. Run `just` to list the grouped command surface. The release and npm recipes call policy-heavy Bun scripts at `scripts/{npm,release}.ts`, which dispatch to `scripts/lib/`.

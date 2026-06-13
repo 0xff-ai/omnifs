@@ -1,0 +1,43 @@
+name: Release PR
+
+# Stage 2 of the release-note flow: maintain a standing release/vX.Y.Z PR. On
+# each push to main, fold release notes from PRs merged since the last tag into
+# the release branch's CHANGELOG, additively (existing lines preserved), bump
+# versions, and open/update the release PR. Merging it ships via release.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
+      - name: Configure git identity
+        run: |
+          git config user.name "omnifs-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+
+      - name: Maintain release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/release-notes.ts maintain

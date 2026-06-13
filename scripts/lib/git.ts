@@ -32,8 +32,27 @@ export class GitRepo {
     return await this.output(["show", spec]);
   }
 
+  /** Contents of a path at a ref, or undefined when the path/ref is absent. */
+  async showOrUndefined(spec: string): Promise<string | undefined> {
+    const result = await this.repo.$`git show ${spec}`.nothrow().quiet();
+    return result.exitCode === 0 ? result.stdout.toString() : undefined;
+  }
+
+  async fetch(ref: string): Promise<void> {
+    await this.repo.$`git fetch origin ${ref}`.nothrow().quiet();
+  }
+
   async checkoutNewBranch(branch: string): Promise<void> {
     await this.repo.$`git checkout -b ${branch}`;
+  }
+
+  /** Create or reset `branch` to point at `start`, checking it out. */
+  async resetBranchTo(branch: string, start: string): Promise<void> {
+    await this.repo.$`git checkout -B ${branch} ${start}`;
+  }
+
+  async forcePushUpstream(branch: string): Promise<void> {
+    await this.repo.$`git push -u --force-with-lease origin ${branch}`;
   }
 
   async addAll(): Promise<void> {
