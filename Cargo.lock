@@ -3804,6 +3804,7 @@ dependencies = [
  "omnifs-home",
  "omnifs-host",
  "omnifs-mount",
+ "omnifs-tree",
  "omnifs-wit",
  "rusqlite",
  "serde",
