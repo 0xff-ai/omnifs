@@ -5,14 +5,14 @@
 //! but must stay free of container assumptions so it can later run
 //! host-native (see `docs/design/daemon-cli-split.md`).
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use omnifs_daemon::{frontends, server};
 use omnifs_home::{PathOverrides, Paths};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
 use omnifs_host::registry::ProviderRegistry;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -24,6 +24,18 @@ struct Args {
     /// Directory to serve the FUSE filesystem at.
     #[arg(long)]
     mount_point: PathBuf,
+    /// Filesystem frontend to serve.
+    #[arg(long, value_enum, default_value_t = FrontendKind::Fuse)]
+    frontend: FrontendKind,
+    /// NFS loopback listen port. 0 asks the OS for an ephemeral port.
+    #[arg(long, default_value_t = 0)]
+    nfs_port: u16,
+    /// Directory for NFS mount-state files. Defaults under the cache dir.
+    #[arg(long)]
+    nfs_state_dir: Option<PathBuf>,
+    /// Optional NFS trace log.
+    #[arg(long)]
+    nfs_trace: Option<PathBuf>,
     /// Config directory. Defaults through omnifs home resolution.
     #[arg(long)]
     config_dir: Option<PathBuf>,
@@ -39,6 +51,12 @@ struct Args {
     /// meaningless when running host-native.
     #[arg(long)]
     root_symlinks: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum FrontendKind {
+    Fuse,
+    Nfs,
 }
 
 fn default_listen() -> SocketAddr {
@@ -87,11 +105,29 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    let frontends = frontends::Frontends::fuse(
-        args.mount_point.clone(),
-        Arc::clone(&registry),
-        omnifs_fuse::new_notifier_handle(),
-    );
+    let frontends = match args.frontend {
+        #[cfg(target_os = "linux")]
+        FrontendKind::Fuse => frontends::Frontends::fuse(
+            args.mount_point.clone(),
+            Arc::clone(&registry),
+            omnifs_fuse::new_notifier_handle(),
+        ),
+        #[cfg(not(target_os = "linux"))]
+        FrontendKind::Fuse => anyhow::bail!(
+            "the fuse frontend is only available on Linux; use --frontend nfs for host-native mounts"
+        ),
+        FrontendKind::Nfs => {
+            let mut options = omnifs_nfs::NfsMountOptions::loopback(
+                args.nfs_state_dir
+                    .unwrap_or_else(|| paths.cache_dir.join("nfs")),
+            );
+            options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
+            options.trace_path = args.nfs_trace;
+            options.config_dir = Some(paths.config_dir.clone());
+            options.cache_dir = Some(paths.cache_dir.clone());
+            frontends::Frontends::nfs(args.mount_point.clone(), Arc::clone(&registry), options)
+        },
+    };
     let daemon = Arc::new(server::Daemon::new(
         Arc::clone(&registry),
         sink,
@@ -105,7 +141,11 @@ fn run(args: Args) -> anyhow::Result<()> {
         },
     }
 
-    info!(mount_point = %daemon.mount_point().display(), "starting FUSE mount");
+    info!(
+        frontend = ?args.frontend,
+        mount_point = %daemon.mount_point().display(),
+        "starting filesystem frontend"
+    );
     daemon.serve(&rt)?;
     Ok(())
 }
