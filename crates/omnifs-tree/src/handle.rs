@@ -1,18 +1,22 @@
 //! Ranged read handle and the `Tree::open` body.
 //!
-//! Slice 5 work; signed now so the surface is stable. `Tree::open` and
-//! `RangedHandle::read` are `todo!()`-bodied; `RangedHandle::close` is a
-//! one-liner over `Runtime::call_close_file` and is implemented.
+//! `Tree::open` dispatches `Namespace::open_file` for a `Deferred(Ranged)`
+//! file and returns a runtime-owned `RangedHandle`. `RangedHandle::read` drives
+//! `Namespace::read_chunk` and learns the exact size on an EOF-short read. Fully
+//! async (no `block_on`): the renderer binds the handle to its own kernel handle
+//! (FUSE fh / NFS stateid) and drives reads from its own executor.
 
 use std::sync::Arc;
 
 use omnifs_core::path::Path;
+use omnifs_core::view as view_types;
 use omnifs_core::view::FileAttrsCache;
-use omnifs_host::Runtime;
+use omnifs_host::wit_protocol::{file_size_from_wit, stability_from_wit};
+use omnifs_host::{Error, Runtime};
 
-use crate::error::Result;
+use crate::error::{Result, TreeError};
 use crate::node::Node;
-use crate::read::Chunk;
+use crate::read::{Chunk, learned_ranged_eof_attrs};
 use crate::{RequestCtx, Tree};
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
@@ -39,11 +43,59 @@ impl RangedHandle {
         self.provider_handle
     }
 
-    /// Drive provider `read_chunk`; learn exact size on EOF. SLICE 5.
-    // Async surface is intentional (slice 5 body awaits Namespace::read_chunk).
-    #[allow(clippy::unused_async)]
-    pub async fn read(&self, _offset: u64, _length: u32) -> Result<Chunk> {
-        todo!("slice 5: Namespace::read_chunk + learned-EOF size")
+    /// Drive provider `read_chunk` for one ranged read; learn the exact size on
+    /// an EOF-short read. Validates the chunk against the requested length and
+    /// the projected attrs, mirroring the FUSE ranged read path.
+    pub async fn read(&self, offset: u64, length: u32) -> Result<Chunk> {
+        let chunk = match self
+            .runtime
+            .namespace()
+            .read_chunk(self.provider_handle, offset, length)
+            .await
+        {
+            Ok(chunk) => chunk,
+            Err(Error::ProviderError(error)) => {
+                return Err(Error::ProviderError(error).into());
+            },
+            Err(error) => return Err(error.into()),
+        };
+
+        if chunk.content.len() > length as usize {
+            return Err(TreeError::internal(format!(
+                "provider returned oversized ranged chunk for {}: requested {length}, returned {}",
+                self.path.as_str(),
+                chunk.content.len()
+            )));
+        }
+
+        let mut learned_attrs = None;
+        if chunk.eof {
+            let content_len = u64::try_from(chunk.content.len()).map_err(|_| {
+                TreeError::internal(format!(
+                    "ranged chunk length does not fit u64 for {}",
+                    self.path.as_str()
+                ))
+            })?;
+            let eof_size = offset.checked_add(content_len).ok_or_else(|| {
+                TreeError::internal(format!(
+                    "ranged EOF offset overflow for {}",
+                    self.path.as_str()
+                ))
+            })?;
+            if let Err(error) = self.attrs.validate_observed_size(eof_size) {
+                return Err(TreeError::internal(format!(
+                    "provider returned ranged EOF that contradicts file attrs for {}: {error}",
+                    self.path.as_str()
+                )));
+            }
+            learned_attrs = learned_ranged_eof_attrs(self.attrs.clone(), eof_size);
+        }
+
+        Ok(Chunk {
+            bytes: chunk.content,
+            eof: chunk.eof,
+            learned_attrs,
+        })
     }
 
     /// Release the provider handle via `Runtime::call_close_file`. Sync: the
@@ -57,12 +109,51 @@ impl RangedHandle {
 }
 
 impl Tree {
-    /// Open a `Deferred(Ranged)` file. SLICE 1: `todo!()`. Final body: dispatch
-    /// `Namespace::open_file`, validate/derive `opened_file_attrs`, return a
-    /// runtime-owned `RangedHandle` the renderer binds to its kernel handle.
-    // Async surface is intentional (slice 5 body awaits Namespace::open_file).
-    #[allow(clippy::unused_async)]
-    pub async fn open(&self, _node: &Node, _ctx: &RequestCtx) -> Result<RangedHandle> {
-        todo!("slice 5: open_file dispatch + opened_file_attrs derivation")
+    /// Open a `Deferred(Ranged)` file: dispatch `Namespace::open_file`, derive
+    /// the opened attrs from the projected attrs + the provider's reported size,
+    /// and return a runtime-owned `RangedHandle` the renderer binds to its
+    /// kernel handle. Faithful port of the FUSE `open_ranged_file` path.
+    pub async fn open(&self, node: &Node, _ctx: &RequestCtx) -> Result<RangedHandle> {
+        let projected = node.attrs().ok_or_else(|| {
+            TreeError::invalid_input(format!(
+                "open requires a ranged file projection: {}",
+                node.path().as_str()
+            ))
+        })?;
+        if !matches!(
+            projected.bytes,
+            view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
+        ) {
+            return Err(TreeError::invalid_input(format!(
+                "open requires byte-source::deferred(read-mode::ranged): {}",
+                node.path().as_str()
+            )));
+        }
+
+        let runtime = self.runtime_for(node.mount())?;
+        let opened = runtime.namespace().open_file(node.path().as_str()).await?;
+
+        let attrs = opened_file_attrs(projected, &opened.attrs);
+        Ok(RangedHandle {
+            runtime,
+            path: node.path().clone(),
+            provider_handle: opened.handle,
+            attrs,
+        })
+    }
+}
+
+/// Derive the opened ranged handle's attrs: the provider's reported size and
+/// stability over the projection's `Deferred(Ranged)` byte source. The caller
+/// has already verified the projection is `Deferred(Ranged)`.
+fn opened_file_attrs(
+    projected: &FileAttrsCache,
+    opened: &omnifs_wit::provider::types::FileAttrs,
+) -> FileAttrsCache {
+    FileAttrsCache {
+        size: file_size_from_wit(opened.size),
+        bytes: projected.bytes.clone(),
+        stability: stability_from_wit(opened.stability),
+        version_token: opened.version_token.clone(),
     }
 }
