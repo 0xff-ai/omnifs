@@ -10,6 +10,7 @@ use omnifs_sdk::http::{HttpEndpoint, ResponseExt};
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::State;
 use crate::objects::KubeManifest;
@@ -266,6 +267,33 @@ impl<'a> KubeApi<'a> {
         Ok(render_event_list(list))
     }
 
+    /// The container names of one pod, init containers first, in spec order.
+    /// These are the leaf names under the pod's `logs/` directory.
+    pub(crate) async fn pod_containers(&self, namespace: &str, name: &str) -> Result<Vec<String>> {
+        let path = format!("/api/v1/namespaces/{namespace}/pods/{name}");
+        let Some(bytes) = self.get_bytes_opt(&path, &[], ACCEPT_JSON).await? else {
+            return Err(ProviderError::not_found(format!(
+                "pod {name} not found in namespace {namespace}"
+            )));
+        };
+        let pod: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| ProviderError::internal(format!("kubernetes: parse pod: {error}")))?;
+        Ok(container_names(&pod))
+    }
+
+    /// The current log buffer for one container, read whole. The apiserver's
+    /// content negotiation rejects `Accept: text/plain` on the `log`
+    /// subresource even though it streams text, so send `*/*` like kubectl.
+    pub(crate) async fn pod_log(
+        &self,
+        namespace: &str,
+        name: &str,
+        container: &str,
+    ) -> Result<Vec<u8>> {
+        let path = format!("/api/v1/namespaces/{namespace}/pods/{name}/log");
+        self.get_bytes(&path, &[("container", container)], "*/*").await
+    }
+
     async fn fetch_discovery(&self) -> Result<Discovery> {
         let mut discovery = Discovery::default();
 
@@ -364,6 +392,20 @@ struct ListItem {
 #[derive(Deserialize, Default)]
 struct ListItemMeta {
     name: Option<String>,
+}
+
+fn container_names(pod: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    for field in ["initContainers", "containers"] {
+        if let Some(list) = pod.pointer(&format!("/spec/{field}")).and_then(Value::as_array) {
+            names.extend(
+                list.iter()
+                    .filter_map(|container| container.get("name").and_then(Value::as_str))
+                    .map(str::to_string),
+            );
+        }
+    }
+    names
 }
 
 fn event_field_selector(namespace: &str, kind: &str, name: &str, uid: Option<&str>) -> String {

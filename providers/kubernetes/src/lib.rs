@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! /namespaces/<ns>/<type>/<name>/{manifest.yaml,manifest.json,status.yaml,events.txt}
+//! /namespaces/<ns>/pods/<name>/logs/<container>.log
 //! /cluster/<type>/<name>/{manifest.yaml,manifest.json,status.yaml}
 //! ```
 
@@ -53,7 +54,18 @@ pub(crate) struct State {
 }
 
 fn valid_segment(s: &str) -> bool {
-    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\0')
+    // Reject path traversal, separators, and URL metacharacters: a captured
+    // segment is interpolated into the apiserver URL path, so `%`/`?`/`#` or a
+    // control byte could otherwise smuggle a query or alter the request. `%` is
+    // already forbidden by Kubernetes' own ValidatePathSegmentName, and `:`
+    // (RBAC names) stays legal.
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s
+            .bytes()
+            .any(|b| b < 0x20 || matches!(b, b'%' | b'?' | b'#'))
 }
 
 macro_rules! string_segment {
@@ -96,6 +108,31 @@ string_segment!(
     /// A resource object name.
     ResourceName
 );
+string_segment!(
+    /// A `<container>.log` leaf name under a pod's `logs/` directory.
+    LogFile
+);
+
+/// The `pods` resource type, used to gate the `logs/` subtree to pods only.
+/// As a capture (not a literal route segment) it stays invisible in the
+/// namespace type listing, so it neither advertises `pods` unconditionally nor
+/// breaks the `hide_empty_types` contract; its parser rejects every other type.
+#[derive(Clone, Debug)]
+pub(crate) struct PodType;
+
+impl FromStr for PodType {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        (s == "pods").then_some(Self).ok_or(())
+    }
+}
+
+impl fmt::Display for PodType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("pods")
+    }
+}
 
 #[omnifs_sdk::path_captures]
 struct NamespaceKey {
@@ -126,6 +163,21 @@ struct ClusterTypeKey {
     rtype: ResourceType,
 }
 
+#[omnifs_sdk::path_captures]
+struct PodLogsKey {
+    ns: Namespace,
+    rtype: PodType,
+    name: ResourceName,
+}
+
+#[omnifs_sdk::path_captures]
+struct PodLogKey {
+    ns: Namespace,
+    rtype: PodType,
+    name: ResourceName,
+    logfile: LogFile,
+}
+
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl KubernetesProvider {
     type Config = Config;
@@ -154,6 +206,10 @@ fn register_routes(r: &mut Router<State>) -> Result<()> {
     })?;
     r.file("/namespaces/{ns}/{rtype}/{name}/events.txt")
         .handler(namespaced_events_txt)?;
+    r.dir("/namespaces/{ns}/{rtype}/{name}/logs")
+        .handler(pod_logs_dir)?;
+    r.file("/namespaces/{ns}/{rtype}/{name}/logs/{logfile}")
+        .handler(pod_log_read)?;
 
     r.dir("/cluster").handler(cluster_types_dir)?;
     r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
@@ -279,6 +335,27 @@ async fn namespaced_events_txt(
     key: NamespacedResourceKey,
 ) -> Result<FileProjection> {
     key.events(cx).await
+}
+
+async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirProjection> {
+    let containers = KubeApi::new(&cx)
+        .pod_containers(key.ns.as_str(), key.name.as_str())
+        .await?;
+    Ok(DirProjection::exhaustive(
+        containers.into_iter().map(|c| Entry::file(format!("{c}.log"))),
+    ))
+}
+
+async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
+    let Some(container) = key.logfile.as_str().strip_suffix(".log") else {
+        return Err(ProviderError::not_found(
+            "pod log files are named <container>.log",
+        ));
+    };
+    let bytes = KubeApi::new(&cx)
+        .pod_log(key.ns.as_str(), key.name.as_str(), container)
+        .await?;
+    Ok(text_file(bytes))
 }
 
 impl Key for NamespacedResourceKey {
