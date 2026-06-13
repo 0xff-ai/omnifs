@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
+#[cfg(target_os = "linux")]
 use crate::proc_mounts;
 
 pub struct Frontends {
@@ -106,12 +107,7 @@ impl Frontends {
                     source: mount.source,
                     fs_type: mount.fs_type,
                 }),
-            Frontend::Nfs(frontend) => proc_mounts::find_mount(&frontend.mount_point)
-                .filter(|mount| mount.fs_type.starts_with("nfs"))
-                .map(|mount| FrontendInfo {
-                    source: mount.source,
-                    fs_type: mount.fs_type,
-                }),
+            Frontend::Nfs(frontend) => nfs_serving(&frontend.mount_point),
         }
     }
 
@@ -126,4 +122,24 @@ impl Frontends {
             },
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
+    proc_mounts::find_mount(mount_point)
+        .filter(|mount| mount.fs_type.starts_with("nfs"))
+        .map(|mount| FrontendInfo {
+            source: mount.source,
+            fs_type: mount.fs_type,
+        })
+}
+
+// macOS (and any host without `/proc/mounts`) reads the live OS mount table
+// through omnifs-nfs, so host-native NFS readiness works off Linux.
+#[cfg(not(target_os = "linux"))]
+fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
+    omnifs_nfs::mount_is_active(mount_point).then(|| FrontendInfo {
+        source: "omnifs".to_string(),
+        fs_type: "nfs".to_string(),
+    })
 }
