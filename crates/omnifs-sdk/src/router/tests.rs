@@ -104,15 +104,15 @@ impl Key for DemoKey {
         _cx: &Cx<Self::State>,
         _since: Option<crate::object::Validator>,
     ) -> Result<Load<Self::Object>> {
-        Ok(Load::Fresh {
-            value: DemoObj {
+        Ok(Load::fresh_from(
+            DemoObj {
                 title: self.id.clone(),
             },
-            canonical: Canonical {
+            Canonical {
                 bytes: format!(r#"{{"title":"{}"}}"#, self.id).into_bytes(),
                 validator: None,
             },
-        })
+        ))
     }
 }
 

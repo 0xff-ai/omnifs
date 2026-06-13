@@ -25,6 +25,8 @@ use omnifs_home::OMNIFS_HOME_ENV;
 /// reads it before `docker create` to refuse running an image baked
 /// from a newer source tree than the launcher itself.
 const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
+const LAUNCH_PROTOCOL_LABEL: &str = "ai.0xff.omnifs.launch-protocol";
+const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v1";
 
 /// Extras layered on top of the canonical runtime wiring.
 /// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
@@ -71,7 +73,7 @@ impl ContainerLaunchSpec {
             }
         }
 
-        // Docker socket bind powers the in-container docker provider. Optional.
+        // Docker socket bind powers the in-container Docker provider. Optional.
         let docker_sock = PathBuf::from("/var/run/docker.sock");
         if docker_sock.exists() {
             binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
@@ -473,12 +475,15 @@ impl Runtime {
             .inspect_image(self.image.as_str())
             .await
             .with_context(|| format!("inspect image `{}` for compatibility label", self.image))?;
-        let label = image
-            .config
-            .as_ref()
-            .and_then(|c| c.labels.as_ref())
-            .and_then(|l| l.get(LAUNCHER_VERSION_LABEL));
-        check_launcher_compat(env!("CARGO_PKG_VERSION"), label.map(String::as_str))
+        let labels = image.config.as_ref().and_then(|c| c.labels.as_ref());
+        let min_launcher = labels.and_then(|l| l.get(LAUNCHER_VERSION_LABEL));
+        let launch_protocol = labels.and_then(|l| l.get(LAUNCH_PROTOCOL_LABEL));
+        check_image_compat(
+            env!("CARGO_PKG_VERSION"),
+            min_launcher.map(String::as_str),
+            launch_protocol.map(String::as_str),
+            self.image.as_str(),
+        )
     }
 
     fn build_container_body(spec: &ContainerLaunchSpec) -> ContainerCreateBody {
@@ -531,6 +536,34 @@ fn connect_docker_client() -> Result<Docker> {
     Docker::connect_with_local_defaults().context("connect to Docker daemon (is it running?)")
 }
 
+fn check_image_compat(
+    launcher_version: &str,
+    min_launcher_label: Option<&str>,
+    launch_protocol_label: Option<&str>,
+    image: &str,
+) -> Result<()> {
+    check_launch_protocol(image, launch_protocol_label)?;
+    check_launcher_compat(launcher_version, min_launcher_label)
+}
+
+fn check_launch_protocol(image: &str, label: Option<&str>) -> Result<()> {
+    match label {
+        Some(EXPECTED_LAUNCH_PROTOCOL) => Ok(()),
+        Some(other) => anyhow::bail!(
+            "runtime image `{image}` uses launch protocol `{other}`, but this CLI expects \
+             `{EXPECTED_LAUNCH_PROTOCOL}`. Use a matching image for this worktree, for example \
+             `omnifs up --image omnifs:$(git rev-parse --short=12 HEAD)-dev`, or run `omnifs dev` \
+             to build and launch the local sandbox."
+        ),
+        None => anyhow::bail!(
+            "runtime image `{image}` does not declare `{LAUNCH_PROTOCOL_LABEL}`. It was likely \
+             built before the daemon control-API launcher. Use a matching image for this worktree, \
+             for example `omnifs up --image omnifs:$(git rev-parse --short=12 HEAD)-dev`, or run \
+             `omnifs dev` to build and launch the local sandbox."
+        ),
+    }
+}
+
 /// Compare the running launcher's version to the image's
 /// min-launcher-version label. Pure function so the policy is
 /// covered by unit tests without spinning up Docker.
@@ -540,8 +573,8 @@ fn connect_docker_client() -> Result<Docker> {
 ///   compatibility with images built before this handshake landed.
 /// - Sentinel `"unknown"` (image built without the build arg): warn,
 ///   allow. Same reason.
-/// - Unparseable label or launcher version: warn, allow. Don't break
-///   launch on a parse failure — leave a breadcrumb instead.
+/// - Unparseable label or launcher version: warn, allow. Do not break
+///   launch on a parse failure; leave a breadcrumb instead.
 /// - Launcher version `< label`: refuse.
 fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<()> {
     use semver::Version;
@@ -587,6 +620,46 @@ fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_compat_requires_launch_protocol_label() {
+        let err = check_image_compat("0.2.1", Some("0.2.1"), None, "ghcr.io/0xff-ai/omnifs:0.2.1")
+            .expect_err("missing protocol must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(LAUNCH_PROTOCOL_LABEL),
+            "msg should name missing label: {msg}"
+        );
+        assert!(
+            msg.contains("--image"),
+            "msg should tell users how to recover: {msg}"
+        );
+    }
+
+    #[test]
+    fn image_compat_rejects_wrong_launch_protocol() {
+        let err = check_image_compat(
+            "0.2.1",
+            Some("0.2.1"),
+            Some("legacy-config-dir"),
+            "ghcr.io/0xff-ai/omnifs:0.2.1",
+        )
+        .expect_err("wrong protocol must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("legacy-config-dir"));
+        assert!(msg.contains(EXPECTED_LAUNCH_PROTOCOL));
+    }
+
+    #[test]
+    fn image_compat_accepts_matching_protocol_and_version() {
+        check_image_compat(
+            "0.2.1",
+            Some("0.2.1"),
+            Some(EXPECTED_LAUNCH_PROTOCOL),
+            "omnifs:local-dev",
+        )
+        .expect("matching protocol and version should pass");
+    }
 
     #[test]
     fn missing_label_is_allowed_with_warning() {

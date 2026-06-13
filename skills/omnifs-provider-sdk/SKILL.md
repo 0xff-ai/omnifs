@@ -20,9 +20,11 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 7. **Attribute honesty.** Inline bytes require `Size::Exact(len)` and are capped at 64 KiB (`MAX_PROJECTED_BYTES`); bigger or unknown content is deferred. `Stability::Volatile` requires `Deferred { read: Ranged }` (the validator rejects anything else). Mutable upstream = mutable projection; versioned upstream = immutable projection.
 8. **Identity vs facets.** A key's non-`Facet` fields, in declaration order, ARE the object's identity (its logical id and cache key). Route-context captures that must not split the cache (list filter, version selector, team alias) are `Facet<T>`. Changing an object's `kind` string or identity captures orphans every cached object.
 9. **Auth never appears in provider code.** Credentials are declared in `omnifs.provider.json` and materialized into requests by the host. `#[endpoint(auth = ..)]` is rejected at compile time by design.
-10. **Use `hashbrown::HashMap`** (re-exported by the SDK) for provider-internal maps.
-11. **Error semantics:** `NotFound` for absent upstream resources or rows; `InvalidInput` for impossible path syntax; `rate_limited(..).with_retry_after(..)` on 429 (drives the SDK breaker and host window); `from_http_status` for the rest. Put operation context in the message.
-12. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `omnifs dev` container (repo policy).
+10. **Reuse the SDK, stdlib, and imported crates before writing plumbing.** Check `omnifs-sdk` projections, endpoint helpers, object/load APIs, typed captures, `time`, `url`, `serde_json`, `strum`, and other already-present workspace dependencies before adding local parsers, date math, enum tables, HTTP glue, cache shims, or projection helpers.
+11. **Use `strum` for finite enum path segments.** Derive `EnumString`, `AsRefStr`, `Display`, and usually `VariantArray` with `serialize_all = "snake_case"` instead of hand-writing parse/display ladders or parallel `&[&str]` tables. Put the single universe on the enum (`VariantArray::VARIANTS` or an enum-owned `ALL`), and derive filenames, entries, and `PathSegment::choices` from that one list.
+12. **Use `hashbrown::HashMap`** (re-exported by the SDK) for provider-internal maps.
+13. **Error semantics:** `NotFound` for absent upstream resources or rows; `InvalidInput` for impossible path syntax; `rate_limited(..).with_retry_after(..)` on 429 (drives the SDK breaker and host window); `from_http_status` for the rest. Put operation context in the message.
+14. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `omnifs dev` container (repo policy).
 
 ## Which SDK flavour: the decision table
 

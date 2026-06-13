@@ -6,13 +6,15 @@ use oauth2::{
 };
 use omnifs_mount::OAuth;
 use omnifs_provider::{
-    DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
-    TokenEndpointAuthMethod,
+    ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig,
+    PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use secrecy::{ExposeSecret, SecretString};
 
 pub(crate) type ConfiguredClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointSet>;
+pub(crate) type ConfiguredAuthorizationClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointNotSet>;
 pub(crate) type ConfiguredDeviceClient =
     BasicClient<EndpointSet, EndpointSet, EndpointNotSet, EndpointMaybeSet, EndpointSet>;
 
@@ -92,6 +94,16 @@ impl OAuthRequest {
         Ok(self.token_client()?.set_redirect_uri(redirect_uri))
     }
 
+    pub(crate) fn authorization_client(
+        &self,
+        redirect_uri: RedirectUrl,
+    ) -> Result<ConfiguredAuthorizationClient, AuthError> {
+        let auth_uri = AuthUrl::new(self.scheme.authorization_endpoint.clone())?;
+        Ok(BasicClient::new(ClientId::new(self.effective_client_id()?))
+            .set_auth_uri(auth_uri)
+            .set_redirect_uri(redirect_uri))
+    }
+
     pub(crate) fn token_client(&self) -> Result<ConfiguredClient, AuthError> {
         let auth_uri = AuthUrl::new(self.scheme.authorization_endpoint.clone())?;
         let token_uri = TokenUrl::new(self.scheme.token_endpoint.clone())?;
@@ -158,6 +170,12 @@ impl OAuthRequest {
                 flow: flow.clone(),
                 oauth: self,
             }),
+            OAuthFlow::ClientSideToken(flow) => {
+                LoginRequest::ClientSideToken(ClientSideTokenLoginRequest {
+                    flow: flow.clone(),
+                    oauth: self,
+                })
+            },
             OAuthFlow::DeviceCode(flow) => LoginRequest::DeviceCode(DeviceCodeLoginRequest {
                 flow: flow.clone(),
                 oauth: self,
@@ -165,7 +183,7 @@ impl OAuthRequest {
         }
     }
 
-    fn effective_client_id(&self) -> Result<String, AuthError> {
+    pub(crate) fn effective_client_id(&self) -> Result<String, AuthError> {
         self.client_id
             .clone()
             .or_else(|| self.scheme.default_client_id.clone())
@@ -229,6 +247,9 @@ fn override_redirect_uri(scheme: &mut OauthScheme, redirect_uri: String) {
         OAuthFlow::PkceManualCode(flow) => {
             flow.redirect_uri = redirect_uri;
         },
+        OAuthFlow::ClientSideToken(flow) => {
+            flow.redirect_uri_template = redirect_uri;
+        },
         OAuthFlow::DeviceCode(_) => {},
     }
 }
@@ -237,6 +258,7 @@ fn override_redirect_uri(scheme: &mut OauthScheme, redirect_uri: String) {
 pub enum LoginRequest {
     Loopback(LoopbackLoginRequest),
     ManualCode(ManualCodeLoginRequest),
+    ClientSideToken(ClientSideTokenLoginRequest),
     DeviceCode(DeviceCodeLoginRequest),
 }
 
@@ -250,6 +272,12 @@ pub struct LoopbackLoginRequest {
 pub struct ManualCodeLoginRequest {
     pub(crate) oauth: OAuthRequest,
     pub(crate) flow: PkceManualCodeConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClientSideTokenLoginRequest {
+    pub(crate) oauth: OAuthRequest,
+    pub(crate) flow: ClientSideTokenConfig,
 }
 
 #[derive(Clone, Debug)]

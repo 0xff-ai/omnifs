@@ -1,13 +1,14 @@
 use crate::request::{
-    ConfiguredClient, DeviceCodeLoginRequest, LoopbackLoginRequest, ManualCodeLoginRequest,
-    OAuthRequest,
+    ClientSideTokenLoginRequest, ConfiguredAuthorizationClient, ConfiguredClient,
+    DeviceCodeLoginRequest, LoopbackLoginRequest, ManualCodeLoginRequest, OAuthRequest,
 };
+use oauth2::basic::BasicTokenResponse;
 use oauth2::{
     AccessToken, AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
     RefreshToken, Scope, StandardRevocableToken, TokenResponse,
 };
 use omnifs_creds::CredentialEntry;
-use omnifs_provider::{OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig};
+use omnifs_provider::{OauthScheme, PkceManualCodeConfig};
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
 use std::pin::Pin;
@@ -66,16 +67,15 @@ impl OAuthClient {
         request: LoopbackLoginRequest,
     ) -> Result<CredentialEntry, AuthError> {
         let opener = self.opener.as_ref().ok_or(AuthError::MissingOpener)?;
-        let listener = TcpListener::bind(loopback_bind_addr(&request.flow)?).await?;
-        let redirect_uri = loopback_redirect_uri(&request.flow, &listener)?;
+        let endpoint = LoopbackEndpoint::bind(&request.flow.redirect_uri_template).await?;
 
-        let client = request.oauth.client(redirect_uri)?;
+        let client = request.oauth.client(endpoint.redirect_uri().clone())?;
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let (auth_url, csrf_token) =
             authorization_url(&client, &request.oauth.scheme, pkce_challenge);
 
         opener.open(&auth_url).await?;
-        let callback = read_loopback_callback(listener).await?;
+        let callback = read_loopback_callback(endpoint.into_listener()).await?;
         if callback.state.secret() != csrf_token.secret() {
             return Err(AuthError::StateMismatch);
         }
@@ -119,6 +119,25 @@ impl OAuthClient {
         )
         .await?;
         Ok(entry)
+    }
+
+    pub async fn login_client_side_token(
+        &self,
+        request: ClientSideTokenLoginRequest,
+    ) -> Result<CredentialEntry, AuthError> {
+        let opener = self.opener.as_ref().ok_or(AuthError::MissingOpener)?;
+        let endpoint = LoopbackEndpoint::bind(&request.flow.redirect_uri_template).await?;
+        let client = request
+            .oauth
+            .authorization_client(endpoint.redirect_uri().clone())?;
+        let (auth_url, csrf_token) = implicit_authorization_url(&client, &request.oauth.scheme);
+
+        opener.open(&auth_url).await?;
+        let callback = read_client_side_callback(endpoint.into_listener()).await?;
+        if callback.state.secret() != csrf_token.secret() {
+            return Err(AuthError::StateMismatch);
+        }
+        Ok(credential_entry_from_token(&callback.token))
     }
 
     pub async fn login_device_code<F, Fut>(
@@ -247,6 +266,8 @@ pub enum AuthError {
     StateMismatch,
     #[error("oauth callback did not include authorization code")]
     MissingCode,
+    #[error("oauth callback did not include access token")]
+    MissingAccessToken,
     #[error("oauth callback did not include state")]
     MissingState,
     #[error("oauth callback request is invalid")]
@@ -289,34 +310,58 @@ impl UrlOpener for SystemBrowser {
     }
 }
 
-fn loopback_redirect_uri(
-    config: &PkceLoopbackConfig,
-    listener: &TcpListener,
-) -> Result<RedirectUrl, AuthError> {
-    if !config.redirect_uri_template.contains("{port}") {
-        return Ok(RedirectUrl::new(config.redirect_uri_template.clone())?);
-    }
-    let port = listener.local_addr()?.port().to_string();
-    Ok(RedirectUrl::new(
-        config.redirect_uri_template.replace("{port}", &port),
-    )?)
-}
-
-fn loopback_bind_addr(config: &PkceLoopbackConfig) -> Result<String, AuthError> {
-    if config.redirect_uri_template.contains("{port}") {
-        return Ok("127.0.0.1:0".to_owned());
-    }
-    let redirect = Url::parse(&config.redirect_uri_template)?;
-    let host = redirect.host_str().ok_or(AuthError::InvalidRedirectUri)?;
-    let port = redirect.port().ok_or(AuthError::InvalidRedirectUri)?;
-    if host != "127.0.0.1" && host != "localhost" {
-        return Err(AuthError::InvalidRedirectUri);
-    }
-    Ok(format!("{host}:{port}"))
-}
-
 fn manual_redirect_uri(config: &PkceManualCodeConfig) -> Result<RedirectUrl, AuthError> {
     Ok(RedirectUrl::new(config.redirect_uri.clone())?)
+}
+
+struct LoopbackEndpoint {
+    listener: TcpListener,
+    redirect_uri: RedirectUrl,
+}
+
+impl LoopbackEndpoint {
+    async fn bind(template: &str) -> Result<Self, AuthError> {
+        let bind_url = Self::url_with_port(template, 0)?;
+        let host = bind_url.host_str().ok_or(AuthError::InvalidRedirectUri)?;
+        let port = bind_url.port().ok_or(AuthError::InvalidRedirectUri)?;
+        let listener = TcpListener::bind(format!("{host}:{port}")).await?;
+        let redirect_uri = RedirectUrl::from_url(Self::url_with_port(
+            template,
+            listener.local_addr()?.port(),
+        )?);
+        Ok(Self {
+            listener,
+            redirect_uri,
+        })
+    }
+
+    fn redirect_uri(&self) -> &RedirectUrl {
+        &self.redirect_uri
+    }
+
+    fn into_listener(self) -> TcpListener {
+        self.listener
+    }
+
+    fn url_with_port(template: &str, port: u16) -> Result<Url, AuthError> {
+        let raw = if template.contains("{port}") {
+            template.replace("{port}", &port.to_string())
+        } else {
+            template.to_owned()
+        };
+        let url = Url::parse(&raw)?;
+        if url.scheme() != "http" {
+            return Err(AuthError::InvalidRedirectUri);
+        }
+        let host = url.host_str().ok_or(AuthError::InvalidRedirectUri)?;
+        if host != "127.0.0.1" && host != "localhost" {
+            return Err(AuthError::InvalidRedirectUri);
+        }
+        if url.port().is_none() {
+            return Err(AuthError::InvalidRedirectUri);
+        }
+        Ok(url)
+    }
 }
 
 fn oauth_http_client() -> Result<reqwest::Client, AuthError> {
@@ -399,6 +444,20 @@ fn authorization_url(
     request.url()
 }
 
+fn implicit_authorization_url(
+    client: &ConfiguredAuthorizationClient,
+    scheme: &OauthScheme,
+) -> (Url, CsrfToken) {
+    let mut request = client
+        .authorize_url(CsrfToken::new_random)
+        .use_implicit_flow()
+        .add_scopes(scopes(scheme));
+    for param in &scheme.extra_authorize_params {
+        request = request.add_extra_param(&param.key, &param.value);
+    }
+    request.url()
+}
+
 fn scopes(scheme: &OauthScheme) -> impl Iterator<Item = Scope> + '_ {
     scheme.default_scopes.iter().cloned().map(Scope::new)
 }
@@ -454,7 +513,19 @@ struct LoopbackCallback {
     state: CsrfToken,
 }
 
-async fn read_loopback_callback(listener: TcpListener) -> Result<LoopbackCallback, AuthError> {
+#[derive(Debug)]
+struct ClientSideTokenCallback {
+    token: BasicTokenResponse,
+    state: CsrfToken,
+}
+
+/// Accept one request on the loopback listener and parse its request line into
+/// the requested URL. Non-GET methods are rejected with a 405 (a browser
+/// redirect only ever issues a GET); the returned stream stays open so the
+/// caller can write its own completion response.
+async fn accept_callback_request(
+    listener: &TcpListener,
+) -> Result<(tokio::net::TcpStream, Url), AuthError> {
     let (mut stream, _) = listener.accept().await?;
     let mut buf = vec![0; 4096];
     let read = stream.read(&mut buf).await?;
@@ -468,18 +539,27 @@ async fn read_loopback_callback(listener: TcpListener) -> Result<LoopbackCallbac
             .await?;
         return Err(AuthError::InvalidCallback);
     }
-
     let url =
         Url::parse(&format!("http://127.0.0.1{target}")).map_err(|_| AuthError::InvalidCallback)?;
-    let callback = parse_callback_url(&url);
-    match &callback {
-        Ok(_) => {
-            write_callback_response(&mut stream, "200 OK", "authorization complete").await?;
-        },
-        Err(_) => {
-            write_callback_response(&mut stream, "400 Bad Request", "authorization failed").await?;
-        },
+    Ok((stream, url))
+}
+
+/// Acknowledge a parsed callback to the browser: 200 on success, 400 on a
+/// parse/authorization failure.
+async fn respond_to_callback<T>(
+    stream: &mut tokio::net::TcpStream,
+    result: &Result<T, AuthError>,
+) -> Result<(), AuthError> {
+    match result {
+        Ok(_) => write_callback_response(stream, "200 OK", "authorization complete").await,
+        Err(_) => write_callback_response(stream, "400 Bad Request", "authorization failed").await,
     }
+}
+
+async fn read_loopback_callback(listener: TcpListener) -> Result<LoopbackCallback, AuthError> {
+    let (mut stream, url) = accept_callback_request(&listener).await?;
+    let callback = parse_callback_url(&url);
+    respond_to_callback(&mut stream, &callback).await?;
     callback
 }
 
@@ -507,6 +587,77 @@ fn parse_callback_url(url: &Url) -> Result<LoopbackCallback, AuthError> {
         code: code.ok_or(AuthError::MissingCode)?,
         state: CsrfToken::new(state.ok_or(AuthError::MissingState)?),
     })
+}
+
+async fn read_client_side_callback(
+    listener: TcpListener,
+) -> Result<ClientSideTokenCallback, AuthError> {
+    for _ in 0..3 {
+        let (mut stream, url) = accept_callback_request(&listener).await?;
+        if url.query().is_some() {
+            let callback = parse_client_side_token_url(&url);
+            respond_to_callback(&mut stream, &callback).await?;
+            return callback;
+        }
+
+        write_fragment_capture_response(&mut stream).await?;
+    }
+    Err(AuthError::MissingAccessToken)
+}
+
+fn parse_client_side_token_url(url: &Url) -> Result<ClientSideTokenCallback, AuthError> {
+    let mut state = None;
+    let mut error = None;
+    let mut error_description = None;
+    let mut has_access_token = false;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "access_token" => has_access_token = true,
+            "state" => state = Some(value.into_owned()),
+            "error" => error = Some(value.into_owned()),
+            "error_description" => error_description = Some(value.into_owned()),
+            _ => {},
+        }
+    }
+    if let Some(error) = error {
+        return Err(AuthError::AuthorizationError {
+            error,
+            description: error_description,
+        });
+    }
+    if !has_access_token {
+        return Err(AuthError::MissingAccessToken);
+    }
+    let query = url.query().ok_or(AuthError::MissingAccessToken)?;
+    let token = serde_urlencoded::from_str(query).map_err(|_| AuthError::InvalidCallback)?;
+    Ok(ClientSideTokenCallback {
+        token,
+        state: CsrfToken::new(state.ok_or(AuthError::MissingState)?),
+    })
+}
+
+async fn write_fragment_capture_response(
+    stream: &mut tokio::net::TcpStream,
+) -> Result<(), AuthError> {
+    const BODY: &str = r##"<!doctype html>
+<meta charset="utf-8">
+<title>omnifs authorization</title>
+<p>Completing authorization...</p>
+<script>
+const fragment = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+if (fragment) {
+  window.location.replace(window.location.pathname + "?" + fragment);
+} else {
+  document.body.textContent = "Authorization response did not include a token.";
+}
+</script>
+"##;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{BODY}",
+        BODY.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
 }
 
 async fn write_callback_response(
@@ -615,7 +766,8 @@ impl From<oauth2::HttpClientError<reqwest::Error>> for AuthError {
 mod tests {
     use super::*;
     use crate::LoginRequest;
-    use omnifs_provider::{OauthScheme, PkceLoopbackConfig};
+    use omnifs_creds::Refreshability;
+    use omnifs_provider::OauthScheme;
     use test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
 
     #[tokio::test]
@@ -651,6 +803,26 @@ mod tests {
 
         assert_eq!(entry.access_token().expose_secret(), "access-1");
         assert_eq!(entry.refresh_token().unwrap().expose_secret(), "refresh-1");
+    }
+
+    #[tokio::test]
+    async fn client_side_token_login_captures_fragment_token() {
+        let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+        let scheme = fake.client_side_scheme(None);
+        let opener: Arc<dyn UrlOpener> = Arc::new(FakeOpener(fake.clone()));
+        let client = OAuthClient::new().unwrap().with_opener(opener);
+
+        let entry = client
+            .login_client_side_token(client_side_token_login_request(scheme))
+            .await
+            .unwrap();
+
+        assert_eq!(entry.access_token().expose_secret(), "implicit-access-1");
+        assert!(entry.refresh_token().is_none());
+        assert_eq!(entry.refreshability(), Refreshability::NotRefreshable);
+        assert_eq!(entry.token_type(), "bearer");
+        assert_eq!(entry.scopes(), ["read", "write"]);
+        assert!(entry.expires_at().is_some());
     }
 
     #[tokio::test]
@@ -739,23 +911,25 @@ mod tests {
         assert_eq!(rewritten.status(), http::StatusCode::OK);
     }
 
-    #[test]
-    fn loopback_bind_addr_accepts_fixed_local_redirect_uri() {
-        let config = PkceLoopbackConfig {
-            redirect_uri_template: "http://127.0.0.1:17890/callback".to_owned(),
-        };
-        assert_eq!(loopback_bind_addr(&config).unwrap(), "127.0.0.1:17890");
+    #[tokio::test]
+    async fn loopback_endpoint_exposes_concrete_redirect_uri() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixed_port = probe.local_addr().unwrap().port();
+        drop(probe);
 
-        let dynamic = PkceLoopbackConfig {
-            redirect_uri_template: "http://127.0.0.1:{port}/callback".to_owned(),
-        };
-        assert_eq!(loopback_bind_addr(&dynamic).unwrap(), "127.0.0.1:0");
+        let fixed_template = format!("http://127.0.0.1:{fixed_port}/callback");
+        let fixed = LoopbackEndpoint::bind(&fixed_template).await.unwrap();
+        assert_eq!(fixed.redirect_uri().as_str(), fixed_template);
 
-        let remote = PkceLoopbackConfig {
-            redirect_uri_template: "https://example.com/callback".to_owned(),
-        };
+        let dynamic = LoopbackEndpoint::bind("http://127.0.0.1:{port}/callback")
+            .await
+            .unwrap();
+        let dynamic_url = Url::parse(dynamic.redirect_uri().as_str()).unwrap();
+        assert_eq!(dynamic_url.host_str(), Some("127.0.0.1"));
+        assert!(dynamic_url.port().is_some_and(|port| port > 0));
+
         assert!(matches!(
-            loopback_bind_addr(&remote),
+            LoopbackEndpoint::bind("https://example.com/callback").await,
             Err(AuthError::InvalidRedirectUri)
         ));
     }
@@ -919,6 +1093,14 @@ mod tests {
         let LoginRequest::ManualCode(request) = OAuthRequest::new(scheme).into_login_request()
         else {
             panic!("expected manual-code login request");
+        };
+        request
+    }
+
+    fn client_side_token_login_request(scheme: OauthScheme) -> ClientSideTokenLoginRequest {
+        let LoginRequest::ClientSideToken(request) = OAuthRequest::new(scheme).into_login_request()
+        else {
+            panic!("expected client-side token login request");
         };
         request
     }

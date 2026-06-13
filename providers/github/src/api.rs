@@ -81,13 +81,13 @@ impl<S> GithubRest<S> for Cx<S> {
                     .get("etag")
                     .and_then(|v| v.to_str().ok())
                     .map(Validator::from);
-                Ok(Load::Fresh {
+                Ok(Load::fresh_from(
                     value,
-                    canonical: Canonical {
+                    Canonical {
                         bytes: resp.body().clone(),
                         validator,
                     },
-                })
+                ))
             },
         }
     }

@@ -41,6 +41,16 @@ pub(super) async fn login(
             .login_loopback(request)
             .await
             .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
+        LoginRequest::ClientSideToken(request) if no_browser => client
+            .with_opener(Arc::new(PrintOpener))
+            .login_client_side_token(request)
+            .await
+            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
+        LoginRequest::ClientSideToken(request) => client
+            .with_system_browser()
+            .login_client_side_token(request)
+            .await
+            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
         LoginRequest::ManualCode(request) => client
             .login_manual_code(request, |url| async move {
                 anstream::println!("Open {url}");

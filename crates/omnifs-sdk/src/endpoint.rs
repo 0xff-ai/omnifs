@@ -404,7 +404,7 @@ fn load_from_response<T>(
                 bytes: resp.body().clone(),
                 validator: version,
             };
-            Ok(Load::Fresh { value, canonical })
+            Ok(Load::fresh_from(value, canonical))
         },
     }
 }

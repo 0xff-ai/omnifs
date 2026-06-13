@@ -285,10 +285,11 @@ impl Key for IssueKey {
             .await?
         {
             Load::Fresh { value, .. } if value.is_pull_request() => Ok(Load::NotFound),
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
-                value: Issue(value),
+            Load::Fresh {
+                value,
                 canonical,
-            }),
+                effects,
+            } => Ok(Load::fresh_with_effects(Issue(value), canonical, effects)),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
         }
@@ -305,10 +306,15 @@ impl Key for PullKey {
             .github_load::<ItemData>(format!("/repos/{repo}/pulls/{}", self.number), since)
             .await?
         {
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
-                value: PullRequest(value),
+            Load::Fresh {
+                value,
                 canonical,
-            }),
+                effects,
+            } => Ok(Load::fresh_with_effects(
+                PullRequest(value),
+                canonical,
+                effects,
+            )),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
         }
