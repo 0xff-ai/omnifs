@@ -45,8 +45,17 @@ impl DownArgs {
                     "Cleaned up {} stale mount record(s); no live mount was running.",
                     summary.swept_orphans
                 );
-            } else {
+            } else if summary.failed.is_empty() {
                 anstream::println!("No host-native omnifs mount is running.");
+            }
+            if !summary.failed.is_empty() {
+                for mount_point in &summary.failed {
+                    anstream::eprintln!(
+                        "⚠ could not unmount {0}; unmount it manually: diskutil unmount force {0}",
+                        mount_point.display()
+                    );
+                }
+                anyhow::bail!("{} mount(s) could not be unmounted", summary.failed.len());
             }
             return Ok(());
         }

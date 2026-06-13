@@ -6,7 +6,7 @@
 //! omnifs-host), so the on-disk state shape is mirrored locally here.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -23,16 +23,17 @@ struct NfsMountState {
 
 const STATE_VERSION: u8 = 1;
 
-/// Outcome of a host-native teardown sweep.
-///
-/// `unmounted` counts records whose daemon was still alive (a real running
-/// mount we tore down); `swept_orphans` counts records left by a daemon that
-/// had already died (only a stale state file to remove). The distinction keeps
-/// `omnifs down` from claiming it unmounted something when it only cleaned up.
+/// Outcome of a host-native teardown sweep, classified so `omnifs down` reports
+/// only what actually happened.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TeardownSummary {
+    /// Records whose daemon was alive: a real running mount we tore down.
     pub unmounted: usize,
+    /// Records left by a dead daemon: only a stale state file to sweep.
     pub swept_orphans: usize,
+    /// Mount points still mounted after the unmount attempt. Their state files
+    /// are kept so a later `omnifs down` can retry.
+    pub failed: Vec<PathBuf>,
 }
 
 /// Tear down every host-native NFS mount recorded under `state_dir`.
@@ -84,80 +85,113 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
 
     let mut summary = TeardownSummary::default();
     for (state_file, mount_point, pid) in &records {
-        // Liveness before we act: a live daemon means a real mount we are
-        // tearing down; a dead one means we are only sweeping a stale file.
+        // A live daemon means a real running mount; a dead one means we are only
+        // sweeping the stale file it left behind.
         let was_running = pid_alive(*pid);
-        unmount(mount_point);
+        // A live daemon self-exits once it sees the mount disappear, so a clean
+        // unmount suffices. A dead daemon leaves a stale mount whose NFS server
+        // is gone, where a clean unmount can hang: force it.
+        unmount(mount_point, !was_running);
         if was_running {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status();
-            summary.unmounted += 1;
-        } else {
-            summary.swept_orphans += 1;
+            signal_term(*pid);
         }
-        settle_state_file(state_file, *pid);
+
+        if mount_settled(mount_point) {
+            // Mount is gone. The daemon removes its own state file on clean
+            // exit; remove it ourselves if it lingered or was orphaned.
+            remove_state_file(state_file);
+            if was_running {
+                summary.unmounted += 1;
+            } else {
+                summary.swept_orphans += 1;
+            }
+        } else {
+            // Still mounted: keep the state file so a later `down` retries.
+            summary.failed.push(mount_point.clone());
+        }
     }
 
     Ok(summary)
 }
 
-/// `diskutil unmount` is best-effort: an already-unmounted view returns
-/// non-zero, which is fine. The output is captured for context only.
-fn unmount(mount_point: &Path) {
-    match Command::new("diskutil")
-        .arg("unmount")
-        .arg(mount_point)
-        .output()
-    {
-        Ok(output) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "omnifs: diskutil unmount {} reported: {}",
-                mount_point.display(),
-                stderr.trim()
-            );
-        },
-        Ok(_) => {},
-        Err(error) => {
-            eprintln!(
-                "omnifs: failed to run diskutil unmount {}: {error}",
-                mount_point.display()
-            );
-        },
+/// Unmount the loopback view. `force` is used when the recording daemon is
+/// already dead, so a stale mount whose NFS server has vanished does not hang a
+/// clean unmount. Output is swallowed: `diskutil` prints a scary "Unmount
+/// failed" even for stale mounts it ultimately clears, so the authoritative
+/// signal is whether the mount survives (see `mount_settled`), not its exit text.
+fn unmount(mount_point: &Path, force: bool) {
+    let mut command = Command::new("diskutil");
+    command.arg("unmount");
+    if force {
+        command.arg("force");
     }
+    let _ = command
+        .arg(mount_point)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Best-effort SIGTERM so a live daemon exits promptly and releases the control
+/// port; a dead pid (the signal lands after the daemon self-exits) is harmless.
+fn signal_term(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
 }
 
-/// Wait for the daemon to remove its own state file on clean exit. If the file
-/// outlives a daemon that is now gone, it is orphaned: remove it ourselves.
-fn settle_state_file(state_file: &Path, pid: u32) {
-    for _ in 0..10 {
-        if !state_file.exists() {
-            return;
+/// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
+/// needs a beat to unmount after SIGTERM). Returns true once it is gone.
+fn mount_settled(mount_point: &Path) -> bool {
+    for _ in 0..12 {
+        if !mount_present(mount_point) {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    !mount_present(mount_point)
+}
 
-    if state_file.exists() && !pid_alive(pid) {
-        match std::fs::remove_file(state_file) {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => {
-                eprintln!(
-                    "omnifs: failed to remove orphaned mount state {}: {error}",
-                    state_file.display()
-                );
-            },
-        }
+/// Whether `mount_point` is currently in the OS mount table. Matches the
+/// `mount(8)` "<src> on <path> (" form against the canonical path so a sibling
+/// mount sharing a path prefix cannot be mistaken for this one.
+fn mount_present(mount_point: &Path) -> bool {
+    let Ok(output) = Command::new("/sbin/mount").output() else {
+        return false;
+    };
+    let canonical = std::fs::canonicalize(mount_point).map_or_else(
+        |_| mount_point.to_string_lossy().into_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    );
+    let needle = format!(" on {canonical} (");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.contains(&needle))
+}
+
+fn remove_state_file(state_file: &Path) {
+    match std::fs::remove_file(state_file) {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => {
+            eprintln!(
+                "omnifs: failed to remove mount state {}: {error}",
+                state_file.display()
+            );
+        },
     }
 }
