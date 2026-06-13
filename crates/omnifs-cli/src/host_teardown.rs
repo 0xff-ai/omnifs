@@ -5,6 +5,7 @@
 //! depend on the omnifs-nfs server crate (which links wasmtime through
 //! omnifs-host), so the on-disk state shape is mirrored locally here.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -46,22 +47,14 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
         return Ok(TeardownSummary::default());
     }
 
-    let mut records: Vec<(PathBuf, PathBuf, u32)> = Vec::new();
-    let mut seen_mount_points: Vec<PathBuf> = Vec::new();
+    let mut summary = TeardownSummary::default();
+    let mut seen_mount_points = HashSet::new();
     for entry in std::fs::read_dir(state_dir)? {
-        let entry = entry?;
-        let path = entry.path();
+        let path = entry?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(error) => {
-                eprintln!("omnifs: skipping mount state {}: {error}", path.display());
-                continue;
-            },
-        };
-        let state: NfsMountState = match serde_json::from_reader(file) {
+        let state = match read_state(&path) {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("omnifs: skipping mount state {}: {error}", path.display());
@@ -76,42 +69,45 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
             );
             continue;
         }
-        if seen_mount_points.contains(&state.mount_point) {
-            continue;
-        }
-        seen_mount_points.push(state.mount_point.clone());
-        records.push((path, state.mount_point, state.pid));
-    }
-
-    let mut summary = TeardownSummary::default();
-    for (state_file, mount_point, pid) in &records {
-        // A live daemon means a real running mount; a dead one means we are only
-        // sweeping the stale file it left behind.
-        let was_running = pid_alive(*pid);
-        // A live daemon self-exits once it sees the mount disappear, so a clean
-        // unmount suffices. A dead daemon leaves a stale mount whose NFS server
-        // is gone, where a clean unmount can hang: force it.
-        unmount(mount_point, !was_running);
-        if was_running {
-            signal_term(*pid);
-        }
-
-        if mount_settled(mount_point) {
-            // Mount is gone. The daemon removes its own state file on clean
-            // exit; remove it ourselves if it lingered or was orphaned.
-            remove_state_file(state_file);
-            if was_running {
-                summary.unmounted += 1;
-            } else {
-                summary.swept_orphans += 1;
-            }
-        } else {
-            // Still mounted: keep the state file so a later `down` retries.
-            summary.failed.push(mount_point.clone());
+        if seen_mount_points.insert(state.mount_point.clone()) {
+            tear_down_one(&path, &state.mount_point, state.pid, &mut summary);
         }
     }
 
     Ok(summary)
+}
+
+fn read_state(path: &Path) -> anyhow::Result<NfsMountState> {
+    let file = std::fs::File::open(path)?;
+    Ok(serde_json::from_reader(file)?)
+}
+
+/// Tear down one recorded mount and record the outcome in `summary`.
+fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
+    // A live daemon means a real running mount; a dead one means we are only
+    // sweeping the stale file it left behind.
+    let was_running = pid_alive(pid);
+    // A live daemon self-exits once it sees the mount disappear, so a clean
+    // unmount suffices. A dead daemon leaves a stale mount whose NFS server is
+    // gone, where a clean unmount can hang: force it.
+    unmount(mount_point, !was_running);
+    if was_running {
+        signal_term(pid);
+    }
+
+    if !mount_settled(mount_point) {
+        // Still mounted: keep the state file so a later `down` retries.
+        summary.failed.push(mount_point.to_path_buf());
+        return;
+    }
+    // Mount is gone. The daemon removes its own state file on clean exit;
+    // remove it ourselves if it lingered or was orphaned.
+    remove_state_file(state_file);
+    if was_running {
+        summary.unmounted += 1;
+    } else {
+        summary.swept_orphans += 1;
+    }
 }
 
 /// Unmount the loopback view. `force` is used when the recording daemon is
@@ -157,30 +153,36 @@ fn pid_alive(pid: u32) -> bool {
 /// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
 /// needs a beat to unmount after SIGTERM). Returns true once it is gone.
 fn mount_settled(mount_point: &Path) -> bool {
-    for _ in 0..12 {
-        if !mount_present(mount_point) {
+    let needle = mount_table_needle(mount_point);
+    for attempt in 0..12 {
+        if !mount_present(&needle) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        if attempt + 1 < 12 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
-    !mount_present(mount_point)
+    false
 }
 
-/// Whether `mount_point` is currently in the OS mount table. Matches the
-/// `mount(8)` "<src> on <path> (" form against the canonical path so a sibling
-/// mount sharing a path prefix cannot be mistaken for this one.
-fn mount_present(mount_point: &Path) -> bool {
-    let Ok(output) = Command::new("/sbin/mount").output() else {
-        return false;
-    };
+/// The `mount(8)` "<src> on <path> (" fragment for `mount_point`, matched
+/// against the canonical path so a sibling mount sharing a path prefix cannot be
+/// mistaken for this one. Computed once per teardown, reused across poll ticks.
+fn mount_table_needle(mount_point: &Path) -> String {
     let canonical = std::fs::canonicalize(mount_point).map_or_else(
         |_| mount_point.to_string_lossy().into_owned(),
         |path| path.to_string_lossy().into_owned(),
     );
-    let needle = format!(" on {canonical} (");
+    format!(" on {canonical} (")
+}
+
+fn mount_present(needle: &str) -> bool {
+    let Ok(output) = Command::new("/sbin/mount").output() else {
+        return false;
+    };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .any(|line| line.contains(&needle))
+        .any(|line| line.contains(needle))
 }
 
 fn remove_state_file(state_file: &Path) {

@@ -36,18 +36,7 @@ impl DownArgs {
         // forces the Docker container path. Linux always uses Docker.
         let host_native = cfg!(target_os = "macos") && !isolated;
         if host_native {
-            let state_dir = paths.cache_dir.join("nfs");
-            let summary = crate::host_teardown::teardown_host_native(&state_dir)?;
-            if summary.unmounted > 0 {
-                anstream::println!("✓ omnifs unmounted");
-            } else if summary.swept_orphans > 0 {
-                anstream::println!(
-                    "Cleaned up {} stale mount record(s); no live mount was running.",
-                    summary.swept_orphans
-                );
-            } else if summary.failed.is_empty() {
-                anstream::println!("No host-native omnifs mount is running.");
-            }
+            let summary = crate::host_teardown::teardown_host_native(&paths.nfs_state_dir())?;
             if !summary.failed.is_empty() {
                 for mount_point in &summary.failed {
                     anstream::eprintln!(
@@ -56,6 +45,16 @@ impl DownArgs {
                     );
                 }
                 anyhow::bail!("{} mount(s) could not be unmounted", summary.failed.len());
+            }
+            if summary.unmounted > 0 {
+                anstream::println!("✓ omnifs unmounted");
+            } else if summary.swept_orphans > 0 {
+                anstream::println!(
+                    "Cleaned up {} stale mount record(s); no live mount was running.",
+                    summary.swept_orphans
+                );
+            } else {
+                anstream::println!("No host-native omnifs mount is running.");
             }
             return Ok(());
         }

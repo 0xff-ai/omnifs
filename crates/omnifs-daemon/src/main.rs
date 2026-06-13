@@ -118,8 +118,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         ),
         FrontendKind::Nfs => {
             let mut options = omnifs_nfs::NfsMountOptions::loopback(
-                args.nfs_state_dir
-                    .unwrap_or_else(|| paths.cache_dir.join("nfs")),
+                args.nfs_state_dir.unwrap_or_else(|| paths.nfs_state_dir()),
             );
             options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
             options.trace_path = args.nfs_trace;

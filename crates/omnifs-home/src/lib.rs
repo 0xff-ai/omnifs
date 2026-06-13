@@ -23,6 +23,8 @@ pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const MOUNTS_SUBDIR: &str = "mounts";
 pub const PROVIDERS_SUBDIR: &str = "providers";
 pub const CACHE_SUBDIR: &str = "cache";
+/// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
+pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 
 /// Explicit (CLI flag) relocations for individual directories.
@@ -105,6 +107,15 @@ impl Paths {
             cache_dir: config_dir.join(CACHE_SUBDIR),
             config_dir,
         }
+    }
+
+    /// Directory holding NFS loopback mount-state files (`<cache_dir>/nfs`).
+    ///
+    /// Single source of this path: the daemon writes state files here (its
+    /// `--nfs-state-dir` default) and the CLI reads them for host-native
+    /// `omnifs down`, so the producer and consumer cannot drift.
+    pub fn nfs_state_dir(&self) -> PathBuf {
+        self.cache_dir.join(NFS_STATE_SUBDIR)
     }
 
     /// Home-relativize a path for display (e.g. `~/.omnifs/config.toml`).
