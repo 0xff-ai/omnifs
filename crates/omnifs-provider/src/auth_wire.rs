@@ -56,6 +56,7 @@ pub struct OauthScheme {
 pub enum OAuthFlow {
     PkceLoopback(PkceLoopbackConfig),
     PkceManualCode(PkceManualCodeConfig),
+    ClientSideToken(ClientSideTokenConfig),
     DeviceCode(DeviceCodeConfig),
 }
 
@@ -69,6 +70,12 @@ pub struct PkceLoopbackConfig {
 #[serde(rename_all = "camelCase")]
 pub struct PkceManualCodeConfig {
     pub redirect_uri: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientSideTokenConfig {
+    pub redirect_uri_template: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

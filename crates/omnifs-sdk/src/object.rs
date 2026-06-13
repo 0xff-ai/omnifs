@@ -9,7 +9,7 @@
 //! the `since` validator. The provider's only upstream-facing code is
 //! [`Key::load`].
 
-use crate::browse::FileContent;
+use crate::browse::{Effects, FileContent};
 use crate::captures::FromCaptures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
@@ -48,13 +48,22 @@ pub struct Canonical {
 ///
 /// - `Fresh`: a new payload was fetched; carry the parsed value plus the
 ///   verbatim upstream bytes and their validator (e.g. the response `ETag`).
+///   `effects` carries any additional host effects derived from the same
+///   response and is empty for the common single-object case; use
+///   [`Load::fresh_with_effects`] when one list or range payload contains
+///   complete sibling objects to store in the canonical cache alongside the
+///   requested object.
 /// - `Unchanged`: a conditional request matched the `since` validator
 ///   (HTTP 304 shape); the host's cached canonical is still current and
 ///   the SDK serves from it. Return this only when `since` was given.
 /// - `NotFound`: the upstream says the object does not exist. Lowered to
 ///   a not-found terminal, not an error.
 pub enum Load<T> {
-    Fresh { value: T, canonical: Canonical },
+    Fresh {
+        value: T,
+        canonical: Canonical,
+        effects: Effects,
+    },
     Unchanged,
     NotFound,
 }
@@ -78,6 +87,26 @@ impl<T> Load<T> {
                 bytes: Vec::new(),
                 validator: None,
             },
+            effects: Effects::new(),
+        }
+    }
+
+    /// A fresh value with its verbatim canonical payload and no extra effects.
+    pub fn fresh_from(value: T, canonical: Canonical) -> Self {
+        Self::Fresh {
+            value,
+            canonical,
+            effects: Effects::new(),
+        }
+    }
+
+    /// A fresh value plus host effects derived from the same upstream response
+    /// (e.g. sibling objects from one list or range payload).
+    pub fn fresh_with_effects(value: T, canonical: Canonical, effects: Effects) -> Self {
+        Self::Fresh {
+            value,
+            canonical,
+            effects,
         }
     }
 }

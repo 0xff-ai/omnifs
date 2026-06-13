@@ -2,7 +2,8 @@
 
 use std::fmt::Write as _;
 
-use omnifs_creds::{CredentialEntry, CredentialStore};
+use omnifs_core::AuthKind;
+use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
 use omnifs_mount::mounts::Resolved;
 
 use crate::credential_target::CredentialTarget;
@@ -14,6 +15,8 @@ pub(crate) enum AuthReadiness {
         kind: String,
         scopes: Vec<String>,
         expires_at: Option<String>,
+        refreshability: Refreshability,
+        notices: Vec<String>,
     },
     Missing {
         command: String,
@@ -69,22 +72,25 @@ impl AuthReadiness {
             CredentialTarget::Internal(_) => {},
         }
 
+        let command = format!("omnifs auth login {}", config.spec.mount);
         match target.lookup(store) {
-            Ok(Some(entry)) => Self::from_entry(entry),
-            Ok(None) => Self::Missing {
-                command: format!("omnifs auth login {}", config.spec.mount),
-            },
+            Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
+            Ok(None) => Self::Missing { command },
             Err(error) => Self::Error(error.to_string()),
         }
     }
 
-    pub(crate) fn from_entry(entry: CredentialEntry) -> Self {
+    pub(crate) fn from_entry(entry: CredentialEntry, reauth_command: Option<&str>) -> Self {
         let expires_at = entry.expires_at().map(format_rfc3339);
         let kind = entry.kind().to_string();
+        let refreshability = entry.refreshability();
+        let notices = credential_notices(&entry, reauth_command);
         Self::Ready {
             kind,
             scopes: entry.into_scopes(),
             expires_at,
+            refreshability,
+            notices,
         }
     }
 
@@ -94,15 +100,29 @@ impl AuthReadiness {
                 severity: AuthProbeSeverity::Ok,
                 message: "no auth required".into(),
             },
-            Self::Ready { kind, scopes, .. } => {
+            Self::Ready {
+                kind,
+                scopes,
+                notices,
+                ..
+            } => {
                 let scopes_str = if scopes.is_empty() {
                     String::new()
                 } else {
                     format!(" scopes={}", scopes.join(","))
                 };
+                let notice_str = if notices.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", notices.join("; "))
+                };
                 AuthProbeSummary {
-                    severity: AuthProbeSeverity::Ok,
-                    message: format!("{kind}{scopes_str}"),
+                    severity: if notices.is_empty() {
+                        AuthProbeSeverity::Ok
+                    } else {
+                        AuthProbeSeverity::Warn
+                    },
+                    message: format!("{kind}{scopes_str}{notice_str}"),
                 }
             },
             Self::ConfiguredExternally { source } => AuthProbeSummary {
@@ -130,6 +150,8 @@ impl AuthReadiness {
                 kind,
                 scopes,
                 expires_at,
+                refreshability,
+                notices,
             } => {
                 let mut summary = kind.clone();
                 if !scopes.is_empty() {
@@ -137,6 +159,12 @@ impl AuthReadiness {
                 }
                 if let Some(expires_at) = expires_at {
                     let _ = write!(&mut summary, "  expires {expires_at}");
+                }
+                if *refreshability != Refreshability::NotApplicable {
+                    let _ = write!(&mut summary, "  {refreshability}");
+                }
+                if !notices.is_empty() {
+                    let _ = write!(&mut summary, "  {}", notices.join("; "));
                 }
                 AuthTerminalRow {
                     kind: AuthTerminalKind::Ready,
@@ -157,6 +185,23 @@ impl AuthReadiness {
             },
         }
     }
+}
+
+pub(crate) fn credential_notices(
+    entry: &CredentialEntry,
+    reauth_command: Option<&str>,
+) -> Vec<String> {
+    if entry.kind() != AuthKind::OAuth || entry.refreshability() != Refreshability::NotRefreshable {
+        return Vec::new();
+    }
+    if entry.expires_at().is_none() {
+        return Vec::new();
+    }
+    if entry.is_expired_at(time::OffsetDateTime::now_utc()) {
+        let command = reauth_command.unwrap_or("omnifs auth login <mount>");
+        return vec![format!("expired; run `{command}`")];
+    }
+    vec!["not refreshable; re-authentication will be required after expiry".to_owned()]
 }
 
 fn format_rfc3339(value: time::OffsetDateTime) -> String {

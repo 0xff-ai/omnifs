@@ -8,6 +8,7 @@ members = [
     "providers/github",
     "providers/dns",
     "providers/linear",
+    "providers/oura",
     "providers/test",
 ]
 default-members = ["crates/omnifs-cli", "crates/omnifs-host", "crates/omnifs-daemon"]

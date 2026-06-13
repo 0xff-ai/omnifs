@@ -179,7 +179,9 @@ FROM runtime-base AS runtime
 # doesn't know about. `omnifs dev` and CI both pass the workspace
 # `CARGO_PKG_VERSION` as the build arg.
 ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
+ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v1
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
+LABEL ai.0xff.omnifs.launch-protocol=${OMNIFS_LAUNCH_PROTOCOL}
 
 COPY --from=builder /omnifs /omnifsd /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/omnifs /usr/local/bin/omnifsd

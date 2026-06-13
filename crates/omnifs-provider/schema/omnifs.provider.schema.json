@@ -326,7 +326,10 @@
           "type": "object",
           "properties": {
             "clientId": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "displayName": {
               "type": "string"
@@ -349,7 +352,6 @@
           "required": [
             "type",
             "displayName",
-            "clientId",
             "flow"
           ]
         }
@@ -431,6 +433,33 @@
             "authorizationEndpoint",
             "tokenEndpoint",
             "redirectUri"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "authorizationEndpoint": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "clientSideToken"
+            },
+            "redirectUriTemplate": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokenEndpoint": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "authorizationEndpoint",
+            "tokenEndpoint"
           ]
         }
       ]
