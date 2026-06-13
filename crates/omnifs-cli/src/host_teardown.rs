@@ -35,6 +35,10 @@ pub(crate) struct TeardownSummary {
     /// Mount points still mounted after the unmount attempt. Their state files
     /// are kept so a later `omnifs down` can retry.
     pub failed: Vec<PathBuf>,
+    /// State files that were present but unreadable: a parse error, or a version
+    /// this CLI does not understand. A daemon-side format bump lands here, so
+    /// `down` must not conclude "nothing is running" while this is > 0.
+    pub skipped: usize,
 }
 
 /// Tear down every host-native NFS mount recorded under `state_dir`.
@@ -58,6 +62,7 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
             Ok(state) => state,
             Err(error) => {
                 eprintln!("omnifs: skipping mount state {}: {error}", path.display());
+                summary.skipped += 1;
                 continue;
             },
         };
@@ -67,6 +72,7 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
                 path.display(),
                 state.version
             );
+            summary.skipped += 1;
             continue;
         }
         if seen_mount_points.insert(state.mount_point.clone()) {

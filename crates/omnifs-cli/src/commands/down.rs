@@ -53,8 +53,24 @@ impl DownArgs {
                     "Cleaned up {} stale mount record(s); no live mount was running.",
                     summary.swept_orphans
                 );
-            } else {
+            } else if summary.skipped == 0 {
                 anstream::println!("No host-native omnifs mount is running.");
+            }
+            // Present-but-unreadable state files (e.g. a daemon-side format bump)
+            // must not be reported as "nothing running": a daemon may still hold
+            // a mount we could not parse.
+            if summary.skipped > 0 {
+                if summary.unmounted > 0 || summary.swept_orphans > 0 {
+                    anstream::eprintln!(
+                        "⚠ also found {} mount-state file(s) I could not read; a daemon may still be running — try upgrading omnifs",
+                        summary.skipped
+                    );
+                } else {
+                    anyhow::bail!(
+                        "{} mount-state file(s) could not be read; a daemon may still be running — try upgrading omnifs or unmount manually",
+                        summary.skipped
+                    );
+                }
             }
             return Ok(());
         }
