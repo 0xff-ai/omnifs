@@ -6,9 +6,9 @@ The target end state is clean:
 
 - providers compile as `wasm32-wasip2` components
 - providers import `wasi:http` directly
-- provider code uses straight-line async I/O instead of the current effect/resume protocol
+- provider code uses straight-line async I/O instead of the current callout/resume protocol
 - the host keeps auth, domain policy, and transport control at the `wasi:http` boundary
-- the custom continuation map and `resume(id, result)` machinery disappear
+- the custom continuation map and `resume(id, results)` machinery disappear
 
 That is still the right direction. The important caveat is what has to be true before we take it on: the runtime has to support concurrent requests on a single provider instance without forcing us back into a custom suspension protocol.
 
@@ -16,10 +16,10 @@ That is still the right direction. The important caveat is what has to be true b
 
 The current provider boundary works, but it is carrying too much custom machinery:
 
-- providers return `ProviderResponse::{Effect, Batch, Done}`
-- the host executes I/O out of band
-- the host re-enters the component with `resume(id, result)`
-- the SDK keeps pending continuations keyed by request id
+- providers return a `provider-step` that is either `suspended(list<callout>)` or `returned(provider-return)`
+- the host executes the callout batch out of band
+- the host re-enters the component with `resume(id, results)`
+- the SDK keeps pending continuations keyed by correlation id
 
 That shape solved a real problem. It lets omnifs drop the store between slow operations and keep multiple requests in flight on one provider instance. But it also spreads transport mechanics across the WIT world, the host runtime, and the generated SDK glue.
 
@@ -49,7 +49,7 @@ One subtlety from the investigation is worth keeping explicit: a Cargo feature b
 
 | Concern | Current design | Future redesign |
 | --- | --- | --- |
-| Target | `wasm32-wasip1` plus preview1 adaptation | `wasm32-wasip2` |
+| Target | `wasm32-wasip2` | `wasm32-wasip2` (unchanged) |
 | HTTP boundary | custom `fetch`-style effect | direct `wasi:http` import |
 | Slow I/O suspension | custom continuation map + `resume` | runtime-level async components |
 | Provider style | synchronous handlers that yield effects | straight-line async provider code |
@@ -69,10 +69,10 @@ That gives us:
 - a better match for the rest of the WASIp2/component ecosystem
 - fewer omnifs-specific transport concepts inside provider code
 
-It also forces the right target change:
+It also aligns with the target we already build for:
 
-- providers move to `wasm32-wasip2`
-- the preview1 adapter path goes away
+- providers already compile as `wasm32-wasip2` components
+- there is no preview1 adapter to remove
 - provider bindings are regenerated around the WASIp2 world
 
 This redesign does **not** depend on `wasm32-wasip3`. The target remains `wasm32-wasip2`.
@@ -89,7 +89,7 @@ At the WIT level, `wasi:http` is not just `fetch(url) -> response`. It works thr
 - bodies and streams
 - pollables
 
-That is the right interface shape for the platform, but it is too noisy to expose directly in day-to-day provider code. Even in the future design, omnifs should add a small provider-facing HTTP layer that turns the raw binding surface into something closer to:
+That is the right interface shape for the platform, but it is too noisy to expose directly in day-to-day provider code. The SDK already hides today's callout transport behind an ergonomic async layer: `cx.http()` returns a request builder and `join_all` fans concurrent requests out in one suspension round, so provider code is already straight-line async. The future design keeps that surface and only swaps the transport beneath it, turning the raw `wasi:http` binding into something close to:
 
 ```rust
 let response = http::send(request).await?;
@@ -110,13 +110,11 @@ Provider exports should return final results directly instead of transport envel
 That means removing continuation-facing concepts such as:
 
 - `correlation-id`
-- `single-effect`
-- `single-effect-result`
-- `effect-result`
-- `provider-response`
+- `callout` and `callout-results`
+- the `suspended` arm of `provider-step`
 - exported `resume`
 
-Browse, lifecycle, and related exports should return terminal `action-result` values directly.
+Browse, lifecycle, and related exports should return terminal `provider-return` values directly.
 
 ### Provider imports
 
@@ -135,7 +133,7 @@ Provider code should become ordinary async Rust:
 - call HTTP directly
 - await the response
 - shape filesystem results
-- return the final `ActionResult`
+- return the final `provider-return`
 
 That is the main readability win of the redesign.
 
@@ -208,7 +206,7 @@ If this redesign happens, the host will naturally move closer to the transport s
 
 Once the runtime condition is met, the implementation sequence should look like this:
 
-1. Switch providers and tests from `wasm32-wasip1` to `wasm32-wasip2`.
+1. Confirm providers and tests already build for `wasm32-wasip2` (they do today; no target switch is needed).
 2. Redefine the WIT world around direct imports and terminal returns.
 3. Regenerate host and SDK bindings.
 4. Add a provider-facing async HTTP helper over the raw `wasi:http` bindings.

@@ -127,47 +127,36 @@ The final shape should separate common Wasm host mechanics from the
 runtimes that use them.
 
 ```text
-crates/omnifs-host/src/runtime/
-  wasm/
-    mod.rs
-    engine.rs       # Wasmtime Config, Engine, Component helpers
-    limits.rs       # fuel, memory, and store-limit policy
-    wasi.rs         # WasiCtx and preopen construction helpers
-    error.rs        # shared sandbox/load/link/trap errors
+crates/omnifs-host/src/
+  runtime.rs        # long-lived provider runtime
 
-  provider/
-    mod.rs          # long-lived provider runtime
+  wasm/
+    mod.rs          # component_engine(), add_wasi_to_linker(), store_limits()
 
   sandbox/
     mod.rs
-    preopen.rs      # blob staging and narrow preopen helpers
+    preopen.rs      # StagedBlob staging and narrow preopen helpers
     publish.rs      # temp-dir/temp-file publication helpers
     tree_cache.rs   # keyed materialization into TreeRefs
 
   tools/
-    archive.rs      # archive WIT adapter, view key, limits, errors
+    archive.rs      # archive WIT adapter, ExtractError, limits
 ```
 
 The exact file names can move with the implementation, but the direction
-should hold: `runtime::wasm` contains reusable component host primitives;
-the provider runtime owns provider lifecycle; `runtime::tools` owns semantic
-tool adapters; `runtime::sandbox` owns one-shot materialization support.
+should hold: `wasm` contains reusable component host primitives;
+`runtime.rs` owns provider lifecycle; `tools` owns semantic
+tool adapters; `sandbox` owns one-shot materialization support.
 
 ## Archive adapter target shape
 
 Archive extraction reads like a semantic adapter using the substrate.
 
 ```rust
-let key = self.view_key_for(request);
-let tree = self.tree_materializer.materialize(key, |tmp_dir| {
-    let blob_path = self.blob_cache.blob_path(&record.cache_key);
-    self.archive_component.extract(ArchiveExtractRequest {
-        blob_path: blob_path.as_path(),
-        output_dir: tmp_dir,
-        format,
-        strip_prefix,
-    })
-})?;
+let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
+let tree = self
+    .materializer
+    .materialize(&key, |tmp| self.extract_to(tmp, &key, &record))?;
 ```
 
 The archive adapter owns:
@@ -202,7 +191,7 @@ tool-neutral: WASI preopen setup, blob staging, Wasmtime limits,
 component-engine construction, temp publication, and tree materialization.
 `ArchiveExecutor` remains the provider-facing semantic operation handler
 for `open-archive`, while
-`runtime::tools::archive::ArchiveExtractorComponent` owns the archive
+`tools::archive::ArchiveExtractorComponent` owns the archive
 extractor WIT adapter. `ArchiveExecutor` owns archive cache identity
 policy because the key is part of the provider-facing operation.
 

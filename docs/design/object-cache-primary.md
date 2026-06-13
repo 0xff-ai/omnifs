@@ -1,11 +1,11 @@
 # Object cache as the durable primary
 
 Status: implemented
-Supersedes: `docs/design/cache-architecture.md`. Revises ADR-0001 §4 (caches), §5–6 (read/write path), §9 (WIT effects).
+Related: `architecture.md` §3-§5 (the cache invariants this doc details), `file-attributes.md`.
 
 ## Decision
 
-The **object cache** (canonical upstream bytes) is the durable, primary host cache. The **view cache** (rendered bytes shell tools read) is derived and recomputable from it without an upstream refetch. This inverts today's code, where the view tier is durable (`browse.redb`) and the canonical store is a volatile in-memory LRU.
+The **object cache** (canonical upstream bytes) is the durable, primary host cache. The **view cache** (rendered bytes shell tools read) is derived and recomputable from it without an upstream refetch. This inverts today's code, where the view tier is durable (`view.redb`) and the canonical store is a volatile in-memory LRU.
 
 Three host caches, all byte-level, named by role:
 
@@ -22,7 +22,7 @@ A structural provider never emits `canonical-store`, so its object cache stays e
 The canonical object is the expensive thing (an upstream fetch); every rendered representation is cheap and local (parse the canonical, render). So the canonical must outlive the renders, not the other way around. Once the object cache is durable:
 
 - A view miss on `item.json` after `item.md` re-renders from the cached object with **no upstream call** — across process restarts.
-- Identity representations are not double-stored. `read.rs` already refuses to copy a `byte-source::canonical` result into the view cache; making the object cache durable is what closes the loop.
+- Identity representations are not double-stored. The host read path already refuses to copy a `byte-source::canonical` result into the view cache; making the object cache durable is what closes the loop.
 
 ## The read path (design from the call site backward)
 
@@ -32,13 +32,12 @@ async fn read_file(&self, path: &Path, ct: ContentType) -> Result<ReadFileResult
     if let Some(hit) = self.store.view_get(path, RecordKind::File) {
         return Ok(hit.into());                          // view hit: serve rendered bytes
     }
-    let op_gen = self.store.current_gen();              // capture BEFORE the push, so push + write share one fence point
-    let pushed = self.store.canonical_for(path);        // exact map -> { id, bytes, validator }, or None
+    let op_gen = self.store.current_generation();       // capture BEFORE the push, so push + write share one fence point
+    let pushed = self.store.cached_canonical_for(path);  // exact map -> { id, bytes, validator }, or None
     let ret = self.runtime.read_file(path, ct, pushed).await?;
     // Fenced: a canonical-store overwrite AND a view write derived from a pushed canonical are
-    // dropped if path's anchor was invalidated after op_gen (Codex #1). apply() needs `path` to
-    // fence the rendered-result view write, not just the effect writes.
-    Materializer::new(&self.store).apply(&ret, op_gen, path);
+    // dropped if path's id was invalidated after op_gen (Codex #1).
+    Materializer::new(&self.store).apply(&ret.effects, op_gen, now_millis);
     Ok(ret.result)
 }
 ```
@@ -46,7 +45,7 @@ async fn read_file(&self, path: &Path, ct: ContentType) -> Result<ReadFileResult
 - `pushed = Some` means the SDK renders from the pushed canonical, no fetch.
 - `pushed = None` means the SDK fetches (object-shaped) or returns structural bytes; the resulting `canonical-store` effect both stores the object and teaches the path-to-id map.
 
-There is one read path and no dispatch fork. The host never derives object identity: `canonical_for` is an **exact map lookup**, learned from effects, not a prefix probe.
+There is one read path and no dispatch fork. The host never derives object identity: `cached_canonical_for` is an **exact map lookup**, learned from effects, not a prefix probe.
 
 ## Types and ownership
 
@@ -57,52 +56,55 @@ and effect materialization live in `omnifs-host`.
 
 ```
 omnifs-cache/
-  object.rs   object::Cache   durable; anchor → Canonical; paths index; fence
+  object.rs   object::Cache   durable; id → Canonical; paths index
   view.rs     view::Cache     moka `mem` tier + redb `disk` tier
-  store.rs    Store           per-mount facade: storage primitives only
-  record.rs   RecordKind, Record, BatchRecord, Dirents/FilePayload
-  attrs.rs    FileAttrs, FileSize, ByteSource, Stability  (attribute DTOs stored on records)
-  key.rs      Key, Anchor, VersionToken, Generation, MountName
+  lib.rs      Caches, Store    per-mount facade; RecordKind + batch/record types; storage primitives
 ```
 
-**Materialization is the host's job, not the cache's.** `Effects` is the provider's wire terminal and projection is a provider-authoring concept; neither belongs in a byte store. The host already owns the wire bridge (`host/src/cache`, `host/src/view.rs`), so it also owns the materializer that decomposes a provider return into cache primitive calls, and `content_type_for` (read-path content-type derivation). The cache exposes only `object_store` / `view_put_batch` / `canonical_for` / `invalidate[_prefix]`.
+`FileAttrs`, `FileSize`, `ByteSource`, and `Stability` are the attribute DTOs
+stored on records; they live in `omnifs-core/src/view.rs`, not in
+`omnifs-cache`.
+
+**Materialization is the host's job, not the cache's.** `Effects` is the provider's wire terminal and projection is a provider-authoring concept; neither belongs in a byte store. The host already owns the wire bridge (`crates/omnifs-host/src/wit_protocol.rs`, `namespace.rs`), so it also owns the materializer (`crates/omnifs-host/src/materialize.rs`) that decomposes a provider return into cache primitive calls, and the read-path content-type derivation. The cache exposes only `put_canonical` / `put_canonical_batch` / `cached_canonical_for` / `delete_listing_path[_prefix]` / `delete_object`.
 
 ```rust
-// omnifs-host: the materializer bundles the store handle; methods take the per-return wire effects.
+// omnifs-host: the materializer bundles the store handle; apply takes the per-return wire effects.
 struct Materializer<'a> { store: &'a Store }
 
 impl Materializer<'_> {
-    fn apply(&self, ret: &wit::ProviderReturn, gen: Generation, read_path: &Path) -> Invalidations {
-        for c in &ret.effects.canonical {
-            // object_store evicts the anchor's prior derived view leaves before storing new ones,
-            // so an evict-then-refetch can't leave a mixed-version view (Codex #6). Fenced by gen.
-            self.store.object_store(&c.anchor, &Canonical::from(c), &c.leaves, gen);
-        }
-        for fs in &ret.effects.fs {
-            // dirent RMW is transactional inside the cache, not a host read-merge-write (Codex #8).
-            self.store.project(fs, gen);
-        }
-        // A rendered-from-pushed-canonical result (no canonical-store) is still a view write:
-        // fence it against read_path's anchor so a mid-op invalidation isn't re-cached (Codex #1).
-        self.store.cache_read_result(read_path, &ret.result, gen);
-        ret.effects.invalidations.iter().map(|inv| self.store.invalidate_one(inv)).collect()
+    // Returns (invalidated_prefixes, invalidated_paths); FUSE adapters turn those into
+    // kernel cache-invalidation notifications.
+    fn apply(&self, effects: &wit::Effects, op_gen: u64, now_millis: u64) -> (Vec<String>, Vec<String>) {
+        // Canonical-store entries that pass conflict detection are collected and committed in one
+        // redb write transaction. put_canonical evicts the id's prior derived view leaves before
+        // storing new ones, so an evict-then-refetch can't leave a mixed-version view (Codex #6).
+        // Fenced by op_gen.
+        let batch = collect_canonical(&effects.canonical);
+        self.store.put_canonical_batch(batch, op_gen);
+        // fs writes land as view records via cache_put_batch (dirents) and cache_view_leaf
+        // (file content, carrying a Stability-derived freshness deadline); the dirent
+        // read-modify-write stays transactional inside the cache, not a host merge (Codex #8).
+        write_fs_effects(self.store, &effects.fs, op_gen, now_millis);
+        // invalidations cascade through delete_object / delete_listing_path / delete_listing_prefix.
+        apply_invalidations(self.store, &effects.invalidations)
     }
 }
 ```
 
-### Domain newtypes (invariants at construction)
+### Domain values
+
+The shipped cache keys on primitive types rather than dedicated newtypes: the
+logical object id is opaque bytes (`Vec<u8>` / `ObjectId`), the mount is a
+`String` (`Caches::mount` takes `impl Into<String>`), the fence generation is a
+`u64` backed by an `AtomicU64`, and the validator is `Option<String>`
+(non-empty, opaque, byte-compared; `op_validate` rejects empty or oversized
+tokens in release). View-leaf paths are absolute strings indexed in the path
+map.
+
+`Canonical` is the stored object; `content_type` is gone (it was write-only state — the push carries only bytes + validator, and the served content type comes from the path suffix or the per-entry view record):
 
 ```rust
-pub struct Anchor(Path);                 // an object's key: a validated object-anchor path
-pub struct VersionToken(String);         // non-empty, <= 256 bytes; opaque; byte-compared
-pub struct Generation(u64);              // fence clock
-pub struct MountName(String);            // key-scope prefix; validated, no separator chars
-```
-
-`Canonical` is the stored object; `content_type` is gone (it was write-only state — the push carries only bytes + version, and the served content type comes from the path suffix or the per-entry view record):
-
-```rust
-pub struct Canonical { pub bytes: Vec<u8>, pub version: Option<VersionToken> }
+pub struct Canonical { pub bytes: Vec<u8>, pub validator: Option<String> }
 ```
 
 ### Global caches, per-mount facade
@@ -113,61 +115,64 @@ The caches are process-global handles opened once; `Store` is the cheap per-moun
 pub struct Caches { object: object::Cache, view: view::Cache }   // object.redb (durable); view.redb (deleted on startup)
 
 impl Caches {
-    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;        // open durable object DB; delete + recreate view.redb (always cold)
-    pub fn mount(self: &Arc<Self>, mount: MountName) -> Store;   // per-mount handle
+    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;            // open durable object DB; delete + recreate view.redb (always cold)
+    pub fn mount(self: &Arc<Self>, mount: impl Into<String>) -> Store; // per-mount handle
 }
 
-pub struct Store { caches: Arc<Caches>, mount: MountName }
-
-// The push carries the anchor (Codex #2: SDK self-checks) and hit_gen (Codex #1: fence the render).
-pub struct Pushed { pub anchor: Anchor, pub bytes: Vec<u8>, pub version: Option<VersionToken>, pub hit_gen: Generation }
+pub struct Store { caches: Arc<Caches>, mount: String }
 
 impl Store {
     // reads
-    pub fn view_get(&self, path: &Path, kind: RecordKind) -> Option<Record>;
-    pub fn canonical_for(&self, path: &Path) -> Option<Pushed>;          // exact anchor map → push
+    pub fn view_get(&self, path: &ProtocolPath, kind: RecordKind) -> Option<Record>;
+    // exact id map → (logical id, bytes, validator); the SDK self-checks the id (Codex #2).
+    pub fn cached_canonical_for(&self, path: &ProtocolPath) -> Option<(Vec<u8>, Vec<u8>, Option<String>)>;
 
     // storage primitives (the host materializer calls these; the cache does not parse effects)
-    pub fn object_store(&self, anchor: &Anchor, c: &Canonical, leaves: &[Leaf], op_gen: Generation) -> bool;
-    pub fn project(&self, write: &FsWriteView, op_gen: Generation);      // transactional dirent merge (Codex #8)
-    pub fn cache_read_result(&self, path: &Path, result: &ReadResultView, op_gen: Generation); // fenced (Codex #1)
-    pub fn invalidate(&self, path: &Path);          // cascades a leaf to its anchor (Codex #3)
-    pub fn invalidate_prefix(&self, prefix: &Path);
-    pub fn current_gen(&self) -> Generation;        // per-mount clock (Codex #7)
+    pub fn put_canonical(&self, id: &[u8], bytes: Vec<u8>, validator: Option<String>, view_leaves: &[String], op_gen: u64) -> bool;
+    pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64);
+    pub fn cache_put_batch(&self, records: &[BatchRecord]);          // transactional dirent merge (Codex #8)
+    pub fn cache_view_leaf(&self, path: &ProtocolPath, ..., expires_at: Option<u64>, op_gen: u64); // fenced (Codex #1)
+    pub fn delete_object(&self, id: &[u8]);         // drops the object + its indexed leaves; a leaf invalidation resolves to its id first (Codex #3)
+    pub fn delete_listing_path(&self, path: &ProtocolPath);
+    pub fn delete_listing_prefix(&self, prefix: &ProtocolPath);
+    pub fn current_generation(&self) -> u64;        // per-mount clock (Codex #7)
 
     fn scoped(&self, key: &str) -> String;          // "{mount}\x1f{key}" — the only place mount enters a key
 }
 ```
 
-The caches operate on already-scoped keys; they are mount-agnostic byte stores. Mount isolation lives in `Store::scoped` alone. The fence clock and tombstones are **per-mount** (Codex #7): a noisy mount can no longer GC another mount's live tombstone.
+The push carries the logical id (Codex #2: the SDK self-checks it) and the
+`op_gen` captured before the push (Codex #1: fence the render). The caches
+operate on already-scoped keys; they are mount-agnostic byte stores. Mount
+isolation lives in `Store::scoped` alone. The fence clock and tombstones are
+**per-mount** (Codex #7): a noisy mount can no longer GC another mount's live
+tombstone.
 
 ### object::Cache
 
 ```rust
 pub struct Cache {
-    disk: redb::Database,   // objects: scoped-anchor → { canonical, leaves };  paths: scoped-leaf → scoped-anchor
-    fence: Fence,         // runtime-only, per-mount: gen + tombstones; reset on restart
+    disk: Arc<redb::Database>,   // objects: scoped-id → { canonical, leaves };  paths: scoped-leaf → scoped-id
 }
 
 impl Cache {
-    pub fn store(&self, anchor: &str, c: &Canonical, leaves: &[Leaf], op_gen: Generation) -> bool;
-    pub fn get(&self, anchor: &str) -> Option<Canonical>;
-    pub fn anchor_of(&self, path: &str) -> Option<String>;   // exact lookup; replaces the prefix probe
-    pub fn leaves_of(&self, anchor: &str) -> Vec<String>;    // reverse set, for exact eviction (Codex #4)
-    pub fn evict_anchor(&self, anchor: &str);                // drop object + every indexed leaf, exactly
-    pub fn current_gen(&self) -> Generation;
+    pub fn store(&self, scoped_id: &[u8], c: Canonical, new_leaves: &[String], view_evict: impl FnMut(&str)) -> bool;
+    pub fn get(&self, scoped_id: &[u8]) -> Option<StoredObject>;
+    pub fn id_of(&self, scoped_path: &[u8]) -> Option<Vec<u8>>; // exact lookup; replaces the prefix probe
+    pub fn leaves_of(&self, scoped_id: &[u8]) -> Vec<String>;   // reverse set, for exact eviction (Codex #4)
+    pub fn evict_object(&self, scoped_id: &[u8], view_evict: impl FnMut(&str)); // drop object + every indexed leaf, exactly
 }
 ```
 
-`store` is admitted only if no tombstone for `anchor` is newer than `op_gen` (the fence). It then **evicts the anchor's prior derived view leaves** (so an evict-then-refetch can't strand a mixed version, Codex #6), persists `objects[anchor] = { c, leaves }`, and inserts `paths[anchor + leaf] = anchor` for each leaf. Eviction reads `leaves_of(anchor)` and deletes those **exact** full paths — never a textual or segment prefix, which is unsafe for File-shape leaves (Codex #4).
+The per-mount fence (generation counter plus tombstone map) lives on `Store`, not on `Cache`; the cache is a mount-agnostic byte store. `Store::put_canonical` admits a `store` only if no tombstone for the id is newer than `op_gen`. The store then **evicts the id's prior derived view leaves** (so an evict-then-refetch can't strand a mixed version, Codex #6), persists `objects[id] = { canonical, leaves }`, and inserts `paths[leaf] = id` for each leaf. Eviction reads `leaves_of(id)` and deletes those **exact** full paths, never a textual or segment prefix, which is unsafe for File-shape leaves (Codex #4).
 
 ## Invariants
 
 1. **Exact leaf eviction.** The path index is keyed by full leaf path; eviction of an object deletes its **exact** leaves via the object record's reverse set, never a prefix scan. Textual/segment prefix deletion is unsafe: a File-shape path `/issues/45` is a textual prefix of both `/issues/45.md` (wanted) and `/issues/45a.md` (not), and `/issues/45.md` is not a segment child of `/issues/45` (Codex #4).
 2. **Id coherence on the push.** `canonical-input` carries the pushed logical id; the SDK renders only if it matches the route-derived id, else treats the canonical as absent and fetches (Codex #2). A wrong or stale map entry degrades to a refetch, never silently-wrong bytes.
 3. **One canonical per logical id**, overwritten when the validator advances; the overwrite evicts the object's prior derived views first (Codex #6). No version history, no content-addressing (a 304 emits no write; aliases collapse to one id). Keyed by logical id plus mount, not hashed content.
-4. **The fence covers every write derived from a pushed canonical**, not just `canonical-store`. A rendered view result with no `canonical-store` is fenced against its read path's object id at `hit_gen` (Codex #1). The fence clock + tombstones are **per-mount** and runtime-only (Codex #7); nothing survives a restart, so they are not persisted.
-5. **Leaf invalidation cascades to the object.** Invalidating a representation path (which ADR-0001 §6 does on version advance) consults the path index and, if the path is a known leaf, evicts the whole object + its leaves, never just the one view entry (Codex #3).
+4. **The fence covers every write derived from a pushed canonical**, not just `canonical-store`. A rendered view result with no `canonical-store` is fenced against the `op_gen` captured before the push (Codex #1). The fence clock + tombstones are **per-mount** and runtime-only (Codex #7); nothing survives a restart, so they are not persisted.
+5. **Leaf invalidation cascades to the object.** Invalidating a representation path (which `architecture.md` §5 does on version advance) consults the path index and, if the path is a known leaf, evicts the whole object + its leaves, never just the one view entry (Codex #3).
 6. **Object cache is opt-in.** Structural providers emit no `canonical-store`; the cache self-selects. No host shape declaration.
 7. **No double storage.** Identity representations (`byte-source::canonical`) live only in the object cache; the view never copies them.
 8. **View is disposable.** A separate `view.redb`, deleted and recreated on every startup — no crash-detection, no sentinel. It never survives a restart to disagree with the durable object (Codex #5); object and view need no cross-store atomicity.
@@ -175,7 +180,7 @@ impl Cache {
 10. **Release-validated leaves.** `op_validate` (not a `debug_assert`) rejects empty logical ids, empty or invalid view leaves, invalidation ids, and oversized validator tokens (Codex #10).
 11. **Mount isolation by key prefix.** Cross-mount reads are unrepresentable.
 
-## Wire delta (ADR-0001 §9 ↔ shipped WIT)
+## Wire delta (`architecture.md` §4 ↔ shipped WIT)
 
 The shipped WIT stores object identity explicitly. `canonical-store` carries a
 provider logical id, validator, bytes, and full absolute view leaves. The dead
@@ -235,38 +240,29 @@ The object cache (precious, low write rate) is **durable and global**; the view 
 - **Object DB: one global file, mount-prefixed keys.** Object writes happen only on a cold fetch, so the single writer lock barely contends (Codex #9). Mount prefix reuses the existing range-scan machinery and keeps `TableDefinition` names static.
 - **View DB: a separate redb, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view.redb` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. If the single view writer lock contends under load (Codex #9), split the view into per-mount files with the same delete-on-startup rule — no other change.
 
-Budgets: object DB global LRU, no TTL; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
+Budgets: object DB global LRU; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
+
+"No TTL" is precise only for the object cache: canonical bytes carry no time deadline and leave by capacity eviction or explicit invalidation. View leaves do carry a `Stability`-derived freshness deadline: `freshness_expiry` sets a `Mutable` leaf to `now + 3000ms` and a `Volatile` leaf to `now` (immediate), and `view_get` drops a leaf past its deadline (`crates/omnifs-host/src/clock.rs`, `materialize.rs`; `crates/omnifs-cache/src/lib.rs`). The negative cache likewise carries TTLs. Providers still add no TTLs or LRUs of their own.
 
 ## Tradeoffs accepted
 
 - **Object DB single writer lock (global).** Only cold-fetch writes contend, and large deletes (mount teardown) are chunked so they don't hold the lock across an unrelated mount's fetch.
 - **View recompute after any restart.** Startup deletes `view.redb`, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
-- **Large ranged `.raw`.** A `Deferred { Ranged }` object `.raw` still has no `read-file` byte source; remains deferred per ADR-0001.
+- **Large ranged `.raw`.** A `Deferred { Ranged }` object `.raw` still has no `read-file` byte source; remains deferred per `architecture.md` §8.
 
 ## Adversarial review (Codex gpt-5.5, accepted findings)
 
 The design was hardened against an adversarial review. Folded in above:
 
-- **#1 (Critical)** push captured before `op_gen` and the rendered result re-cached after a mid-op invalidation → push carries `hit_gen`; the view write is fenced.
+- **#1 (Critical)** push captured before `op_gen` and the rendered result re-cached after a mid-op invalidation → the `op_gen` captured before the push fences the view write.
 - **#2 (Critical)** wrong/stale map silently renders -> `canonical-input` carries the logical id; SDK self-checks before rendering.
 - **#3 (Critical)** invalidating a representation path left the object alive -> leaf invalidation cascades to the logical id via the path index.
 - **#4 (High)** File-shape breaks prefix deletion -> exact-leaf eviction from the object's reverse leaf set; the "textual-containment means free range-delete" claim is withdrawn.
 - **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate `view.redb` deleted on every startup, so no view survives a restart to disagree with the object.
 - **#6 (High)** object eviction + refetch -> mixed versions -> a `canonical-store` overwrite evicts the object's prior derived views first.
 - **#7 (High)** global generation + tombstone GC unsafe across mounts -> the fence is per-mount.
-- **#8 (Medium)** concurrent dirent merge lost-update -> `Store::project` keeps the read-modify-write transactional inside the cache.
+- **#8 (Medium)** concurrent dirent merge lost-update -> `Store::cache_put_batch` keeps the read-modify-write transactional inside the cache.
 - **#9 (Medium)** global write-lock contention -> object DB is global but cold-write-only, so it barely contends. The view is a **single global `view.redb`** (per the chosen storage layout), so its writer lock is shared across mounts; this is accepted for now. If it contends under load, split the view into per-mount files (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
 - **#10 (Medium)** `leaves` only `debug_assert`ed → release validation in `op_validate`.
 
 Confirmed fine: structural files under an object dir; dropping `content-type`.
-
-## Historical migration slices
-
-These slices record how the branch reached the current model. They are retained as implementation history, not as remaining work.
-
-0. **Delete `tree-handoffs`** (warm-up; no behavior change).
-1. **Consolidate the view cache + rename crate.** The two former view tiers (in-memory `mem` + durable `disk`) merge into one `view::Cache`; the `mem` tier moves out of `FuseFs` into the cache; `omnifs-view` became `omnifs-cache`; module reorg. 3 host import sites + workspace member list.
-1a. **Split materialization out to the host.** Move `apply_effects` and `content_type_for` into a host `Materializer`; drop the cache's `protocol` Effects-family DTOs. **Keep the dirent read-modify-write as a transactional cache primitive** (`Store::project`), not a host read-merge-write (#8). Cache surface shrinks to storage primitives.
-2. **Wire change.** `canonical-store` now carries `id`, `validator`, `bytes`, and `view-leaves`; `canonical-input` carries `id`, `validator`, and `bytes` (#2); `op_validate` validates view leaves in release (#10). Atomic wire.
-3. **Object cache durable + exact map + fences.** Durable global `object.redb` (objects-with-leaves + paths); exact path-to-id lookup replaces the prefix probe; per-mount fence (#7) with `hit_gen` on the push (#1); object overwrite evicts prior derived views (#6); leaf invalidation cascades to the object (#3); SDK id self-check honored (#2). Non-durable `view.redb` deleted + recreated on startup (#5; no sentinel). Behavior-changing live-container validation covered cold `ls` issues -> read two representations (second renders, no refetch); structural sibling read pushes nothing; version advance then re-read a sibling representation serves the new version; kill -9 then restart serves correct recomputed bytes; restart keeps the object.
-4. **Docs.** Fold into ADR-0001 §4; retire `cache-architecture.md`; fix CLAUDE.md "Caching model" + "Provider architecture".

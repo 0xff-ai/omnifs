@@ -2,7 +2,7 @@
 
 Status: implemented
 Scope: `crates/omnifs-wit/wit/provider.wit`, host FUSE layer, SDK projection API, providers
-Supersedes the relevant parts of: `docs/design/projected-file-sizes.md` (the size-only model)
+Supersedes the relevant parts of: the earlier size-only model.
 
 ## Problem
 
@@ -59,7 +59,6 @@ Stat-only or seek-from-end modes require `Size::Exact` to be reliable:
 ```rust
 pub struct FileAttrs {
     pub size: Size,
-    pub bytes: Bytes,
     pub stability: Stability,
     pub version: Option<VersionToken>,
 }
@@ -316,9 +315,11 @@ enum read-mode {
     ranged,
 }
 
-// Byte availability is kept on a separate proj-bytes variant.
-variant proj-bytes {
+// Byte availability is kept on a separate byte-source variant.
+variant byte-source {
     inline(list<u8>),
+    canonical,
+    blob(blob-id),
     deferred(read-mode),
 }
 
@@ -328,37 +329,40 @@ enum stability {
     volatile,
 }
 
-// file-attrs carries metadata only; byte availability lives in file-proj.bytes.
+// file-attrs carries metadata only; byte availability lives in file-out.bytes.
 record file-attrs {
     size: file-size,
     stability: stability,
     version-token: option<version-token>,
 }
 
-record file-proj {
+record file-out {
+    content-type: option<string>,
     attrs: file-attrs,
-    bytes: proj-bytes,
+    bytes: byte-source,
 }
 
 variant entry-kind {
     directory,
-    file(file-proj),
+    file(file-out),
 }
 
 record dir-entry {
     name: string,
     kind: entry-kind,
+    id: option<logical-id>,
 }
 
-record file-chunk {
+record read-chunk-result {
     content: list<u8>,
     eof: bool,
 }
 
 // Completed full-read result.
 record read-file-result {
+    content-type: option<string>,
     attrs: file-attrs,
-    bytes: read-file-bytes,
+    bytes: byte-source,
 }
 
 // Opened ranged-read handle.
@@ -368,15 +372,15 @@ record open-file-result {
 }
 ```
 
-File attributes are carried by the `file(file-proj)` entry-kind payload. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, and `lookup-entry.siblings`, carries the same shape.
+File attributes are carried by the `file(file-out)` entry-kind payload. Directories do not have file attributes, and a regular file without attrs is a protocol error rather than an optional case. Every response surface that carries entries, including `dir-listing.entries`, `lookup-entry.target`, and `lookup-entry.siblings`, carries the same shape.
 
 Subtree handoffs remain a separate terminal shape, such as `list-result.subtree(tree-ref)`. They do not appear inside `dir-entry.kind`; `entry-kind` only describes entries materialized in a directory listing or lookup response.
 
-Inline bytes live inside `proj-bytes.inline`. The SDK and host validate after WIT decode that inline bytes imply an exact size equal to `content.len()`, then the host caches the bytes at the response boundary.
+Inline bytes live inside `byte-source.inline`. The SDK and host validate after WIT decode that inline bytes imply an exact size equal to `content.len()`, then the host caches the bytes at the response boundary.
 
-Deferred full files map to the `read-file` operation. Deferred ranged files map to the `open-file` / `read-chunk` / `close-file` operation family. The ranged request shape is explicit-offset: `open-file(path) -> file-handle`, `read-chunk(handle, offset, len) -> file-chunk`, and `close-file(handle)`.
+Deferred full files map to the `read-file` operation. Deferred ranged files map to the `open-file` / `read-chunk` / `close-file` operation family. The ranged request shape is explicit-offset: `open-file(path) -> file-handle`, `read-chunk(handle, offset, len) -> read-chunk-result`, and `close-file(handle)`.
 
-`read-chunk` returns `file-chunk { content, eof }`. For `Mutable + Ranged`, `eof = true` means the end of the snapshot for that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size.
+`read-chunk` returns `read-chunk-result { content, eof }`. For `Mutable + Ranged`, `eof = true` means the end of the snapshot for that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size.
 
 Additional paths learned while serving a request travel through the effects record (`effects { canonical, fs, invalidations }`). The `fs` field carries `fs-write` entries for paths the host should install into the view cache; the `canonical` field carries `canonical-store` entries for object anchors. There are no separate sibling-file or preload fields on the terminal result.
 
@@ -404,5 +408,3 @@ Earlier versions of omnifs reported a 256 MiB placeholder for unsized files. Tha
 The replacement is conservative but not magic. `Size::NonZero` and `Size::Unknown` make `du` and size-only tools under-report until the file is materialized. That is still preferable to a large fabricated length because it makes the absence of size knowledge explicit while preserving normal read behavior for `cat`-style tools.
 
 The new model decouples provider knowledge from host FUSE policy. `Size::Exact` is an exact length. `Size::NonZero` is a truthful lower-bound hint. `Size::Unknown` is explicit absence of length information. The host then chooses how to expose stat size and direct I/O without pretending a compatibility sentinel is an exact file length.
-
-See `docs/design/projected-file-sizes.md` for the original size-only design doc.

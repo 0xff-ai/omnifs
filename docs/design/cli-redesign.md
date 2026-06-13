@@ -18,7 +18,7 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 |---|---|---|---|
 | 1 | Primary persona | Solo dev in a terminal | Optimize human polish first; machine output (`--json`) follows. |
 | 2 | Surface shape | Flat verbs, hide internals under `omnifs debug` | Daily-driver muscle memory beats taxonomic purity. |
-| 3 | Directory layout | Unified `~/.omnifs/{config,data,cache}` on every platform, with `OMNIFS_HOME` as the single env override | One layout to learn, easy to back up or delete; users who need a different root can move the whole layout without splitting policy across aliases. |
+| 3 | Directory layout | Flat `~/.omnifs/{config.toml,credentials.json,mounts,providers,cache}` on every platform, with `OMNIFS_HOME` as the single env override | One layout to learn, easy to back up or delete; users who need a different root can move the whole layout without splitting policy across aliases. |
 | 4 | macOS host-side file ops | Defer (`omnifs shell` is the access path) | Persona doesn't need it day one; macFUSE is a separate launch. |
 | 5 | Render stack | `anstream` + `owo-colors` + `indicatif` + `comfy-table` + `inquire` | Idiomatic, composes well, respects `NO_COLOR`. |
 | 6 | Tracing default | Silent; `-v` = INFO, `-vv` = DEBUG + span events; always stderr | The CLI is a terminal verb, not a service log. `RUST_LOG` overrides. |
@@ -35,7 +35,7 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 | 17 | Context detection | Env vars (`GITHUB_TOKEN` etc.); GitHub-specific `gh auth status` probe with scope warning, default No | Cheap delight; safety rails on the gh path. |
 | 18 | Device flow | `arboard` auto-copy + countdown spinner + auto-open `verification_uri_complete` | Highest-attention moment; polish pays for itself. |
 | 19 | Debug verbs | Hide `mount-tree`, `auth-manifest` under `omnifs debug`; no "not yet implemented" surfaces | Debug is useful but not for `--help`. |
-| 20 | `version` | One line by default; rich on `--verbose` | Matches `gh`, `docker`. |
+| 20 | `version` | One line by default; rich on `--detail` | Matches `gh`, `docker`. |
 | 21 | Telemetry | None | Solo-dev persona skews privacy-conscious; reversible. |
 
 ## Architecture
@@ -50,13 +50,13 @@ A `Paths::display` helper home-relativizes (`~/.omnifs/mounts`) for every user-v
 
 ### Config file
 
-A global `config.toml` under `config_dir` supplies defaults for the runtime image, container name, and `up` toggles. Precedence is flag > file > built-in default. Missing file is not an error; malformed file is.
+A global `config.toml` under `config_dir` supplies defaults for the runtime image and container name (under a `[system]` section, with legacy top-level `image`/`container_name` still accepted), inline mount specs, and `up` toggles. Precedence is flag > file > built-in default. Missing file is not an error; malformed file is.
 
 `Paths` locates `config.toml`; the loaded config no longer changes the directory layout.
 
 ### Surface
 
-Top-level verbs: `init`, `up`, `down`, `status`, `doctor`, `mounts`, `dev`, `auth`, `shell`, `logs`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
+Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
 
 ### Tracing
 
@@ -78,7 +78,7 @@ Ten probes in dependency order. `image_cached` depends on `docker_reachable`. `a
 
 ### `mounts rm`
 
-Validates the mount name through `mount_name::validate` before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
+Validates the mount name through `MountName::new` (from `omnifs_core`) before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
 
 ### Token input
 
