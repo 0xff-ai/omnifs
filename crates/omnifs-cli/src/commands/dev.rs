@@ -93,6 +93,11 @@ impl DevArgs {
                         format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
                     ],
                 },
+                // `omnifs dev` is always the Docker path; the host-native
+                // mount point and cache dir are unused here.
+                host_native: false,
+                mount_point: paths.cache_dir.join("mnt"),
+                cache_dir: paths.cache_dir.clone(),
             },
             ctx.catalog(),
         )
