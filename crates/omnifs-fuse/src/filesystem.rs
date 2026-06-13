@@ -9,12 +9,11 @@ use fuser::{
     Errno, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
-use omnifs_core::view::FileAttrsCache;
 use omnifs_host::inspector::{self, InspectorFuseScope};
 use omnifs_inspector::CacheKind;
 use omnifs_wit::provider::types as wit_types;
 use std::ffi::OsStr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, debug_span, warn};
 
 impl Filesystem for Frontend {
@@ -56,7 +55,6 @@ impl Filesystem for Frontend {
         let live_scope = inspector::global()
             .map(|sink| InspectorFuseScope::begin(sink, "lookup", &mount_name, &child_path));
         let live = live_scope.as_ref();
-        let cache_started = Instant::now();
 
         // If the parent has a backing path, resolve the child from the filesystem.
         if let Some(ref parent_rp) = parent_backing_path {
@@ -85,39 +83,10 @@ impl Filesystem for Frontend {
             return;
         }
 
-        // view cache path.
-        match self.lookup_check_caches(&mount_name, &parent_path, name_str, live, cache_started) {
-            Ok(Some((attr, ttl))) => {
-                reply.entry(&ttl, &attr, Generation(0));
-                return;
-            },
-            Err(e) => {
-                // A cache-implied negative is authoritative for the provider's
-                // listing; a root ignore file the provider does not project is
-                // host-synthesized here, after the negative.
-                self.reply_lookup_negative(reply, live, &mount_name, &parent_path, name_str, e);
-                return;
-            },
-            Ok(None) => {},
-        }
-
-        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-            // No runtime, but a root ignore file is still host-synthesized.
-            self.reply_lookup_negative(
-                reply,
-                live,
-                &mount_name,
-                &parent_path,
-                name_str,
-                Errno::ENOENT,
-            );
-            return;
-        };
-
-        debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
-
-        match self.lookup_via_provider(
-            &runtime,
+        // Enter the async runtime once: `Tree::resolve_child` owns the cache
+        // consult, the provider lookup, the `@next`/`@all` control resolution,
+        // and the mount-root ignore synthesis.
+        match self.lookup_op(
             &mount_name,
             &parent_path,
             name_str,
@@ -125,9 +94,10 @@ impl Filesystem for Frontend {
         ) {
             Ok((attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
             Err(errno) => {
-                // The provider has no such child; a root ignore file is
-                // host-synthesized only now, never shadowing a real one.
-                self.reply_lookup_negative(reply, live, &mount_name, &parent_path, name_str, errno);
+                if let Some(scope) = live {
+                    scope.set_outcome(inspector_outcome(errno));
+                }
+                reply.error(errno);
             },
         }
     }
@@ -199,13 +169,12 @@ impl Filesystem for Frontend {
         let live_scope = inspector::global()
             .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, &path));
         let live = live_scope.as_ref();
-        let cache_started = Instant::now();
 
         // Passthrough for inodes with backing_path.
         if let Some(ref rp) = backing_path {
             match self.snapshot_from_fs(&mount_name, &path, rp) {
                 Ok(snapshot) => {
-                    self.insert_dir_snapshot(fh, &mount_name, &path, snapshot);
+                    self.dir_snapshots.insert(fh, snapshot);
                     reply.opened(FuseFileHandle(fh), FopenFlags::empty());
                 },
                 Err(e) => {
@@ -218,44 +187,17 @@ impl Filesystem for Frontend {
             return;
         }
 
-        // view cache path.
-        match self.opendir_check_caches(&mount_name, ino.0, &path, live, cache_started) {
-            Ok(Some(snapshot)) => {
-                self.insert_dir_snapshot(fh, &mount_name, &path, snapshot);
-                reply.opened(FuseFileHandle(fh), FopenFlags::empty());
-                return;
-            },
-            Err(e) => {
-                if let Some(scope) = &live_scope {
-                    scope.set_outcome(inspector_outcome(e));
-                }
-                reply.error(e);
-                return;
-            },
-            Ok(None) => {},
-        }
-
-        self.drain_and_evict_pending(&mount_name);
-
-        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
-            if let Some(scope) = &live_scope {
-                scope.set_outcome(inspector_outcome(Errno::ENOENT));
-            }
-            reply.error(Errno::ENOENT);
-            return;
-        };
-
-        debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount_name.as_str(), "cache miss");
-
-        match self.opendir_via_provider(
-            &runtime,
+        // Enter the async runtime once: `Tree::list` owns the cache consult,
+        // the cold provider listing + cache-populate, the serve-stale path, and
+        // the host-synthesized control / ignore entries in the returned snapshot.
+        match self.opendir_op(
             &mount_name,
             ino.0,
             &path,
             live.map(InspectorFuseScope::trace_id),
         ) {
             Ok(snapshot) => {
-                self.insert_dir_snapshot(fh, &mount_name, &path, snapshot);
+                self.dir_snapshots.insert(fh, snapshot);
                 reply.opened(FuseFileHandle(fh), FopenFlags::empty());
             },
             Err(e) => {
@@ -344,8 +286,8 @@ impl Filesystem for Frontend {
         // pagination action, so a partial or repeated read cannot advance the
         // feed more than once, and never serves `@*` content by path.
 
-        if let Some(ranged) = self.ranged_handles.get(&fh.0).map(|entry| entry.clone()) {
-            self.read_ranged_handle(ino.0, &ranged, offset, size, reply);
+        if self.ranged_handles.contains_key(&fh.0) {
+            self.read_ranged_handle(ino.0, fh.0, offset, size, reply);
             return;
         }
 
@@ -390,58 +332,18 @@ impl Filesystem for Frontend {
         let live = live_scope.as_ref();
         let fuse_trace = live.map(InspectorFuseScope::trace_id);
 
-        // Host-synthetic control/ignore files are served from a per-`fh` buffer,
-        // never through the provider read/prefetch path.
-        match self.open_synthetic_file(&target, fuse_trace) {
-            Ok(Some(flags)) => {
-                reply.opened(FuseFileHandle(fh), flags);
-                return;
-            },
-            Ok(None) => {},
+        // Enter the async runtime once: `open_op` dispatches the synthetic /
+        // ranged / full-prefetch / lazy cases on the inode's projection, binding
+        // a `Tree` `RangedHandle` or filling the per-`fh` buffer as needed.
+        match self.open_op(&target, fuse_trace) {
+            Ok(flags) => reply.opened(FuseFileHandle(fh), flags),
             Err(errno) => {
                 if let Some(scope) = live {
                     scope.set_outcome(inspector_outcome(errno));
                 }
                 reply.error(errno);
-                return;
             },
         }
-
-        match self.open_ranged_file(&target) {
-            Ok(Some(flags)) => {
-                reply.opened(FuseFileHandle(fh), flags);
-                return;
-            },
-            Ok(None) => {},
-            Err(errno) => {
-                if let Some(scope) = live {
-                    scope.set_outcome(inspector_outcome(errno));
-                }
-                reply.error(errno);
-                return;
-            },
-        }
-
-        match self.prefetch_full_file_on_open(&target, fuse_trace) {
-            Ok(Some(flags)) => {
-                reply.opened(FuseFileHandle(fh), flags);
-                return;
-            },
-            Ok(None) => {},
-            Err(errno) => {
-                if let Some(scope) = live {
-                    scope.set_outcome(inspector_outcome(errno));
-                }
-                reply.error(errno);
-                return;
-            },
-        }
-
-        let flags = target
-            .attrs
-            .filter(FileAttrsCache::should_direct_io)
-            .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO);
-        reply.opened(FuseFileHandle(fh), flags);
     }
 
     fn release(
@@ -456,15 +358,11 @@ impl Filesystem for Frontend {
     ) {
         let _trace = FuseTrace::new("release", format!("fh={}", fh.0));
         self.file_cache.remove(&fh.0);
-        if let Some((_, ranged)) = self.ranged_handles.remove(&fh.0)
-            && let Some(runtime) = self.runtime_for_mount(&ranged.mount_name)
-            && let Err(e) = runtime.call_close_file(ranged.provider_handle)
-        {
-            debug!(
-                path = ranged.path,
-                error = %e,
-                "close_file runtime error"
-            );
+        if let Some((_, ranged)) = self.ranged_handles.remove(&fh.0) {
+            let path = ranged.path().as_str().to_string();
+            if let Err(e) = ranged.close() {
+                debug!(path, error = %e, "close_file error");
+            }
         }
         reply.ok();
     }

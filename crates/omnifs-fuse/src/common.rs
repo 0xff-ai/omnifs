@@ -1,9 +1,7 @@
 //! Shared FUSE constants, path helpers, and inode read targets.
 
 use omnifs_core::path::Path;
-use omnifs_core::view as view_types;
-use omnifs_core::view::{EntryMeta, FileAttrsCache};
-use omnifs_host::pagination;
+use omnifs_core::view::FileAttrsCache;
 use omnifs_wit::provider::types as wit_types;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,20 +34,20 @@ pub(crate) fn file_kind_placeholder() -> wit_types::EntryKind {
     })
 }
 
-/// Volatile-file `EntryMeta` for a synthetic mount-root ignore file. Its size
-/// is exact (the ignore content is fixed) so `ls -l`/`cat` report the right
-/// length without a learned-size round trip.
-pub(crate) fn root_ignore_meta() -> EntryMeta {
-    EntryMeta::file(FileAttrsCache {
-        size: view_types::FileSize::Exact(pagination::IGNORE_CONTENT.len() as u64),
-        bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-        stability: view_types::Stability::Volatile,
+/// Volatile-file `EntryMeta` for a synthetic mount-root ignore file, mirroring
+/// the `Tree` synthetic projection. The live adapter materializes ignore files
+/// from `Tree`'s `Listing::synthetic`; the in-crate harness uses this to seed a
+/// host-synthesized inode directly.
+#[cfg(test)]
+pub(crate) fn root_ignore_meta() -> omnifs_core::view::EntryMeta {
+    omnifs_core::view::EntryMeta::file(FileAttrsCache {
+        size: omnifs_core::view::FileSize::Exact(
+            omnifs_host::pagination::IGNORE_CONTENT.len() as u64
+        ),
+        bytes: omnifs_core::view::ByteSource::Deferred(omnifs_core::view::ReadMode::Full),
+        stability: omnifs_core::view::Stability::Volatile,
         version_token: None,
     })
-}
-
-pub(crate) fn is_mount_root(path: &str) -> bool {
-    path == Path::ROOT
 }
 
 pub(crate) fn join_child_path(parent_path: &str, name: &str) -> String {
@@ -66,14 +64,6 @@ pub(crate) fn split_parent_leaf(path: &str) -> Option<(String, String)> {
     let path = Path::parse(path).ok()?;
     let (parent, leaf) = path.parent_and_name()?;
     Some((parent.as_str().to_string(), leaf.to_string()))
-}
-
-#[derive(Clone)]
-pub(crate) struct RangedFileHandle {
-    pub(crate) mount_name: String,
-    pub(crate) path: String,
-    pub(crate) provider_handle: u64,
-    pub(crate) attrs: FileAttrsCache,
 }
 
 pub(crate) struct FullReadTarget {

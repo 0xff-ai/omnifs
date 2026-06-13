@@ -14,6 +14,7 @@ dashmap = { workspace = true }
 fuser = { version = "0.17", features = ["macos-no-mount"] }
 libc = { workspace = true }
 omnifs-host = { workspace = true }
+omnifs-tree = { workspace = true }
 omnifs-cache = { workspace = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
 omnifs-core = { workspace = true }

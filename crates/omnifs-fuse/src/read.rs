@@ -1,96 +1,60 @@
-//! File open/read paths for FUSE (full, ranged, synthetic).
+//! FUSE file open/read op boundary: enter the async runtime once per callback,
+//! delegate the read/open DECISION to `Tree::read` / `Tree::open`, and keep the
+//! kernel-side handle tables (the per-`fh` whole-file buffer, the ranged handle,
+//! inode size promotion) plus the kernel offset/size slicing.
 
 use super::Frontend;
-use super::common::{FullReadTarget, RangedFileHandle, split_parent_leaf};
-use super::read_helpers::{
-    data_slice, file_payload_for_attrs, full_read_matches_attrs, learned_full_read_attrs,
-    learned_ranged_eof_attrs, opened_file_attrs, resolve_read_payload,
-    should_prefetch_full_on_open,
-};
+use super::common::{FullReadTarget, split_parent_leaf};
+use super::inode::NodeEntry;
+use super::lookup::provider_dir_node;
+use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
-use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
 use omnifs_core::view as view_types;
-use omnifs_core::view::{FileAttrsCache, FilePayload};
+use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::inspector::InspectorFuseScope;
 use omnifs_host::pagination;
-use omnifs_host::{Error, Runtime};
-use omnifs_inspector::{CacheKind, InspectorOutcome, TraceId};
-use omnifs_wit::provider::types::{ByteSource, ReadFileResult};
-use std::time::Instant;
-use tracing::{debug, warn};
+use omnifs_inspector::TraceId;
+use omnifs_tree::{Backing, Node, ReadResult, RequestCtx};
+use tracing::warn;
 
 impl Frontend {
+    /// Serve a ranged read from a `Tree`-owned `RangedHandle` bound to this
+    /// `fh`. `Tree` drives `read_chunk`, validates the chunk, and learns the
+    /// exact size on an EOF-short read; the adapter promotes the learned size to
+    /// the inode and replies with the chunk bytes.
     pub(super) fn read_ranged_handle(
         &self,
         ino: u64,
-        ranged: &RangedFileHandle,
+        fh: u64,
         offset: u64,
         size: u32,
         reply: ReplyData,
     ) {
-        let Some(runtime) = self.runtime_for_mount(&ranged.mount_name) else {
-            reply.error(Errno::ENOENT);
+        let Some(handle) = self.ranged_handles.get(&fh) else {
+            reply.error(Errno::EBADF);
             return;
         };
-
-        match self.rt.block_on(
-            runtime
-                .namespace()
-                .read_chunk(ranged.provider_handle, offset, size),
-        ) {
+        match self.rt.block_on(handle.read(offset, size)) {
             Ok(chunk) => {
-                if chunk.content.len() > size as usize {
-                    warn!(
-                        path = ranged.path.as_str(),
-                        requested = size,
-                        returned = chunk.content.len(),
-                        "provider returned oversized ranged chunk"
-                    );
-                    reply.error(Errno::EIO);
-                    return;
+                if let Some(attrs) = chunk.learned_attrs {
+                    self.promote_inode_attrs(ino, attrs);
                 }
-                if chunk.eof {
-                    let Some(content_len) = u64::try_from(chunk.content.len()).ok() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    let Some(eof_size) = offset.checked_add(content_len) else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
-                        warn!(
-                            path = ranged.path.as_str(),
-                            error, "provider returned ranged EOF that contradicts file attrs"
-                        );
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                    if let Some(attrs) = learned_ranged_eof_attrs(ranged.attrs.clone(), eof_size) {
-                        self.promote_inode_attrs(ino, attrs);
-                    }
-                }
-                reply.data(&chunk.content);
-            },
-            Err(Error::ProviderError(error)) => {
-                warn!(
-                    path = ranged.path.as_str(),
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = error.message,
-                    "provider returned typed error for read_chunk"
-                );
-                reply.error(super::errno::provider_error_errno(&error));
+                reply.data(&chunk.bytes);
             },
             Err(error) => {
-                warn!(path = ranged.path.as_str(), error = %error, "read_chunk runtime error");
-                reply.error(Errno::EIO);
+                warn!(error = %error, "ranged read_chunk error");
+                reply.error(super::errno::tree_error_errno(&error));
             },
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Whole-file read for a provider or backing-fs file. A backing-fs file is
+    /// read directly from the real filesystem (no provider round trip); a
+    /// provider file is rendered through `Tree::read` (which owns the cache
+    /// cascade, the write fence, and learned-size promotion). The rendered bytes
+    /// populate the per-`fh` buffer so later reads of the same handle serve
+    /// every offset from one buffer.
     pub(super) fn read_full_handle(
         &self,
         ino: INodeNo,
@@ -107,72 +71,23 @@ impl Frontend {
             reply.error(Errno::ENOENT);
             return;
         };
-        let target = FullReadTarget {
-            ino: ino.0,
-            fh: fh.0,
-            mount_name: inode_entry.mount_name.clone(),
-            path: inode_entry.path.clone(),
-            backing_path: inode_entry.backing_path.clone(),
-            attrs: inode_entry.attrs.clone(),
-            synthetic: inode_entry.synthetic,
-        };
+        let mount_name = inode_entry.mount_name.clone();
+        let path_str = inode_entry.path.clone();
+        let backing_path = inode_entry.backing_path.clone();
+        let meta = node_meta_from_entry(&inode_entry);
         drop(inode_entry);
 
-        self.drain_and_evict_pending(&target.mount_name);
-        let cache_started = Instant::now();
-        let elapsed = || cache_started.elapsed();
+        // Drive the kernel-side invalidation fan-out before the read; `Tree::read`
+        // owns the mem/durable cache cascade and the write fence.
+        self.drain_and_evict_pending(&mount_name);
 
-        if let Some(attrs) = target.attrs.as_ref()
-            && matches!(attrs.size, view_types::FileSize::Exact(0))
-        {
-            reply.data(&[]);
-            return;
-        }
-
-        let durable_aux = target
-            .attrs
-            .as_ref()
-            .and_then(FileAttrsCache::durable_cache_aux);
-
-        if let Some(aux) = durable_aux.clone()
-            && let Some(record) = self.mem_get_with_aux(
-                &target.mount_name,
-                &target.path,
-                RecordKind::File,
-                aux.as_deref(),
-            )
-            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
-        {
-            debug!(target: "omnifs_cache", kind = "mem_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
-            if let Some(scope) = live {
-                scope.emit_cache(CacheKind::FileHit, elapsed());
-            }
-            reply.data(data_slice(&payload.content, offset, size));
-            self.file_cache.insert(target.fh, payload.content);
-            return;
-        }
-
-        if target.backing_path.is_none()
-            && let Some(aux) = durable_aux.clone()
-            && let Some(runtime) = self.runtime_for_mount(&target.mount_name)
-            && let Some(record) = runtime.cache_get(&target.path, RecordKind::File, aux.as_deref())
-            && let Some(payload) = file_payload_for_attrs(&record, target.attrs.as_ref())
-        {
-            debug!(target: "omnifs_cache", kind = "disk_hit", op = "read", mount = target.mount_name.as_str(), "cache hit");
-            if let Some(scope) = live {
-                scope.emit_cache(CacheKind::FileHit, elapsed());
-            }
-            let data = payload.content;
-            reply.data(data_slice(&data, offset, size));
-            self.file_cache.insert(target.fh, data);
-            return;
-        }
-
-        if let Some(ref rp) = target.backing_path {
+        // A backing-fs file is served from the real filesystem, never the
+        // provider; `getattr` re-stats it, so no inode size promotion is needed.
+        if let Some(ref rp) = backing_path {
             match std::fs::read(rp) {
                 Ok(data) => {
                     reply.data(data_slice(&data, offset, size));
-                    self.file_cache.insert(target.fh, data);
+                    self.file_cache.insert(fh.0, data);
                 },
                 Err(e) => {
                     warn!(path = ?rp, err = %e, "backing fs error");
@@ -185,347 +100,154 @@ impl Frontend {
             return;
         }
 
-        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
-            if let Some(scope) = live {
-                scope.set_outcome(super::errno::inspector_outcome(Errno::ENOENT));
-            }
-            reply.error(Errno::ENOENT);
-            return;
+        let path = Path::parse(&path_str).expect("inode path must be a protocol path");
+        let node = Node::new(mount_name, path, meta, Backing::Provider);
+        let ctx = RequestCtx {
+            trace: live.map(InspectorFuseScope::trace_id),
         };
-
-        self.drain_and_evict_pending(&target.mount_name);
-
-        debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = target.mount_name.as_str(), "cache miss");
-
-        // Derive the content type the host echoes into `read-file`: the
-        // fixed suffix map for the four standard representation extensions,
-        // else the SDK-supplied content type (none retrievable on a cold
-        // miss; see TODO below).
-        // TODO: a bare-name field/custom-suffix leaf has its
-        // SDK-supplied content type only on the cached FilePayload, which is
-        // absent on a cold read. Until the canonical/render path is wired to
-        // providers, such leaves cold-read as application/octet-stream. The
-        // standard `.md/.json/.xml/.raw` representations are unaffected.
-        let path = Path::parse(&target.path).expect("inode path must be a protocol path");
-        let content_type = path.content_type_mime(None).to_string();
-        // Capture the generation before the read so the rendered result can be
-        // fenced against an invalidation that lands mid-read (Codex #1).
-        let op_gen = runtime.current_generation();
-        match self.rt.block_on(runtime.namespace().read_file(
-            &target.path,
-            content_type,
-            live.map(InspectorFuseScope::trace_id),
-        )) {
-            Ok(result) => {
-                self.finish_full_read(&target, &runtime, offset, size, result, op_gen, reply);
+        match self.rt.block_on(self.tree.read(&node, &ctx)) {
+            Ok(ReadResult::Bytes { data, attrs, .. }) => {
+                if let Some(attrs) = attrs {
+                    self.promote_inode_attrs(ino.0, attrs);
+                }
+                reply.data(data_slice(&data, offset, size));
+                self.file_cache.insert(fh.0, data);
             },
-            Err(Error::ProviderError(error)) => {
-                warn!(
-                    path = target.path.as_str(),
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = error.message,
-                    "provider returned typed error for read_file"
-                );
+            Ok(ReadResult::Backing(dir)) => match std::fs::read(&dir) {
+                Ok(data) => {
+                    reply.data(data_slice(&data, offset, size));
+                    self.file_cache.insert(fh.0, data);
+                },
+                Err(e) => {
+                    warn!(path = ?dir, err = %e, "backing fs error");
+                    if let Some(scope) = live {
+                        scope.set_outcome(super::errno::inspector_outcome(Errno::EIO));
+                    }
+                    reply.error(Errno::EIO);
+                },
+            },
+            Err(error) => {
                 if let Some(scope) = live {
                     scope.set_outcome(super::errno::inspector_outcome(
-                        super::errno::provider_error_errno(&error),
+                        super::errno::tree_error_errno(&error),
                     ));
                 }
-                reply.error(super::errno::provider_error_errno(&error));
-            },
-            Err(error) => {
-                warn!(path = target.path.as_str(), error = %error, "read_file runtime error");
-                if let Some(scope) = live {
-                    scope.set_outcome(InspectorOutcome::Internal);
-                }
-                reply.error(Errno::EIO);
+                reply.error(super::errno::tree_error_errno(&error));
             },
         }
     }
 
-    // All arguments are load-bearing on this private read-completion helper; the
-    // `op_gen` fence parameter (Codex #1) pushed it one over the lint threshold.
-    #[allow(clippy::too_many_arguments)]
-    fn finish_full_read(
+    /// The `open`-time dispatch. A host-synthesized control / ignore file is
+    /// served once into the per-`fh` buffer (its bytes come from `Tree::read`,
+    /// which runs the mutating pagination action exactly once); a ranged file
+    /// opens a `Tree` `RangedHandle` bound to `fh`; an unknown-size full file is
+    /// prefetched whole into the buffer. A backing-fs file and an exact-size full
+    /// file open lazily (read on demand). Returns the kernel open flags, or an
+    /// `Errno` for a resolution/render failure (e.g. an exhausted control).
+    pub(super) fn open_op(
         &self,
         target: &FullReadTarget,
-        runtime: &Runtime,
-        offset: u64,
-        size: u32,
-        result: ReadFileResult,
-        op_gen: u64,
-        reply: ReplyData,
-    ) {
-        // An identity representation answered by reference to the canonical
-        // store (`byte-source::canonical`) is not copied into the View cache:
-        // the canonical store is its sole home, so caching it here would
-        // duplicate the bytes across both stores (ADR-0001 §4, hybrid policy).
-        let from_canonical = matches!(result.bytes, ByteSource::Canonical);
-        let Some((data, result_attrs, content_type)) =
-            resolve_read_payload(runtime, &target.path, result)
-        else {
-            reply.error(Errno::EIO);
-            return;
-        };
-        debug!(
-            target: "omnifs_read",
-            path = target.path.as_str(),
-            content_len = data.len(),
-            "received Read result"
-        );
-        let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
-        if !full_read_matches_attrs(&attrs_cache, data.len()) {
-            warn!(
-                path = target.path.as_str(),
-                expected = ?attrs_cache.size,
-                actual = data.len(),
-                "provider returned bytes that contradict file attrs"
-            );
-            reply.error(Errno::EIO);
-            return;
-        }
-        self.promote_inode_attrs(target.ino, attrs_cache.clone());
-        if !from_canonical
-            && self
-                .cache_durable_file_payload(
-                    &target.mount_name,
-                    &target.path,
-                    &attrs_cache,
-                    &data,
-                    content_type,
-                    op_gen,
-                )
-                .is_err()
-        {
-            reply.error(Errno::EIO);
-            return;
-        }
-        reply.data(data_slice(&data, offset, size));
-        self.file_cache.insert(target.fh, data);
-    }
-
-    fn cache_durable_file_payload(
-        &self,
-        mount_name: &str,
-        path: &str,
-        attrs_cache: &FileAttrsCache,
-        data: &[u8],
-        content_type: Option<String>,
-        op_gen: u64,
-    ) -> Result<(), Errno> {
-        let Some(aux) = attrs_cache.durable_cache_aux() else {
-            return Ok(());
-        };
-        let payload = FilePayload::new(attrs_cache.version_token.clone(), data.to_vec())
-            .with_content_type(content_type);
-        let Some(payload) = payload.serialize() else {
-            return Err(Errno::EIO);
-        };
-        let file_record = CacheRecord::new(RecordKind::File, payload);
-        if let Some(rt) = self.runtime_for_mount(mount_name) {
-            // Drop the write if an invalidation for this path landed after the
-            // read began: caching it would reinstate stale bytes (Codex #1).
-            if rt.write_fenced(path, op_gen) {
-                return Ok(());
-            }
-            rt.cache_put(path, RecordKind::File, aux.as_deref(), &file_record);
-        }
-        Ok(())
-    }
-
-    pub(super) fn open_ranged_file(
-        &self,
-        target: &FullReadTarget,
-    ) -> Result<Option<FopenFlags>, Errno> {
-        if target.backing_path.is_some()
-            || !target.attrs.as_ref().is_some_and(|attrs| {
-                matches!(
-                    &attrs.bytes,
-                    view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-                )
-            })
-        {
-            return Ok(None);
-        }
-
-        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
-            return Err(Errno::ENOENT);
-        };
-        match self
-            .rt
-            .block_on(runtime.namespace().open_file(&target.path))
-        {
-            Ok(opened) => {
-                let opened_attrs =
-                    opened_file_attrs(&target.path, target.attrs.as_ref(), &opened.attrs)?;
-                self.promote_inode_attrs(target.ino, opened_attrs.clone());
-                self.ranged_handles.insert(
-                    target.fh,
-                    RangedFileHandle {
-                        mount_name: target.mount_name.clone(),
-                        path: target.path.clone(),
-                        provider_handle: opened.handle,
-                        attrs: opened_attrs,
-                    },
-                );
-                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
-            },
-            Err(Error::ProviderError(error)) => Err(super::errno::provider_error_errno(&error)),
-            Err(error) => {
-                warn!(
-                    path = target.path.as_str(),
-                    error = %error,
-                    "open_file runtime error"
-                );
-                Err(Errno::EIO)
-            },
-        }
-    }
-
-    pub(super) fn prefetch_full_file_on_open(
-        &self,
-        target: &FullReadTarget,
-        fuse_trace: Option<TraceId>,
-    ) -> Result<Option<FopenFlags>, Errno> {
-        if target.backing_path.is_some()
-            || !target
-                .attrs
-                .as_ref()
-                .is_some_and(should_prefetch_full_on_open)
-        {
-            return Ok(None);
-        }
-
-        let Some(runtime) = self.runtime_for_mount(&target.mount_name) else {
-            return Err(Errno::ENOENT);
-        };
+        trace: Option<TraceId>,
+    ) -> Result<FopenFlags, Errno> {
         self.drain_and_evict_pending(&target.mount_name);
-        // Same content-type derivation as the read path; see the TODO
-        // there about bare-name leaves on a cold read.
-        let path = Path::parse(&target.path).expect("inode path must be a protocol path");
-        let content_type = path.content_type_mime(None).to_string();
-        let op_gen = runtime.current_generation();
-        match self.rt.block_on(runtime.namespace().read_file(
-            &target.path,
-            content_type,
-            fuse_trace,
-        )) {
-            Ok(result) => {
-                // See the hybrid policy in `finish_full_read`: a canonical
-                // reference is served from the canonical store, not duplicated
-                // into the View cache.
-                let from_canonical = matches!(result.bytes, ByteSource::Canonical);
-                let Some((data, result_attrs, content_type)) =
-                    resolve_read_payload(&runtime, &target.path, result)
-                else {
-                    return Err(Errno::EIO);
-                };
-                let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
-                if !full_read_matches_attrs(&attrs_cache, data.len()) {
-                    warn!(
-                        path = target.path.as_str(),
-                        expected = ?attrs_cache.size,
-                        actual = data.len(),
-                        "provider returned bytes that contradict file attrs"
-                    );
-                    return Err(Errno::EIO);
-                }
-                self.promote_inode_attrs(target.ino, attrs_cache.clone());
-                if !from_canonical {
-                    self.cache_durable_file_payload(
-                        &target.mount_name,
-                        &target.path,
-                        &attrs_cache,
-                        &data,
-                        content_type,
-                        op_gen,
-                    )?;
-                }
-                self.file_cache.insert(target.fh, data);
-                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
-            },
-            Err(Error::ProviderError(error)) => Err(super::errno::provider_error_errno(&error)),
-            Err(error) => {
-                warn!(
-                    path = target.path.as_str(),
-                    error = %error,
-                    "read_file runtime error during open"
-                );
-                Err(Errno::EIO)
-            },
+
+        // Host-synthesized control / ignore files: re-resolve through `Tree`
+        // (cache-only) to recover the synthetic byte source, then render once
+        // into the per-`fh` buffer. A control whose feed has exhausted no longer
+        // resolves (ENOENT); a real provider file of the same name is not
+        // synthetic and falls through to the normal open path below.
+        if is_synthetic_candidate(target)
+            && let Some(flags) = self.open_synthetic(target, trace)?
+        {
+            return Ok(flags);
         }
+
+        // Backing-fs files open lazily: `read` serves them from the real
+        // filesystem.
+        if target.backing_path.is_some() {
+            return Ok(lazy_open_flags(target));
+        }
+
+        let node = provider_file_node(target);
+
+        // Ranged files open a `RangedHandle` bound to `fh`.
+        if is_ranged(target.attrs.as_ref()) {
+            let ctx = RequestCtx { trace };
+            let handle = self
+                .rt
+                .block_on(self.tree.open(&node, &ctx))
+                .map_err(|e| super::errno::tree_error_errno(&e))?;
+            self.promote_inode_attrs(target.ino, handle.attrs().clone());
+            self.ranged_handles.insert(target.fh, handle);
+            return Ok(FopenFlags::FOPEN_DIRECT_IO);
+        }
+
+        // Unknown-size full-deferred files prefetch whole on open so `cat`/`ls`
+        // see a learned size; an exact-size full file opens lazily.
+        if should_prefetch_full(target.attrs.as_ref()) {
+            let ctx = RequestCtx { trace };
+            match self.rt.block_on(self.tree.read(&node, &ctx)) {
+                Ok(ReadResult::Bytes { data, attrs, .. }) => {
+                    if let Some(attrs) = attrs {
+                        self.promote_inode_attrs(target.ino, attrs);
+                    }
+                    self.file_cache.insert(target.fh, data);
+                    return Ok(FopenFlags::FOPEN_DIRECT_IO);
+                },
+                Ok(ReadResult::Backing(_)) => {
+                    // A full-deferred provider file never resolves to a backing
+                    // dir; fall through to a lazy open.
+                    return Ok(lazy_open_flags(target));
+                },
+                Err(error) => return Err(super::errno::tree_error_errno(&error)),
+            }
+        }
+
+        Ok(lazy_open_flags(target))
     }
 
-    /// Serve a host-synthetic control (`@next`/`@all`) or mount-root ignore
-    /// file at `open` time, materializing its content into the per-`fh` file
-    /// cache so `read` serves every offset from the same buffer.
-    ///
-    /// These files are never a provider `read_file`; running the (mutating)
-    /// control action exactly once per open avoids the prefetch path
-    /// [`prefetch_full_file_on_open`](Self::prefetch_full_file_on_open) issuing
-    /// a `read_file("@next")` the provider cannot answer, and avoids a partial
-    /// or repeated `read` advancing pagination multiple times.
-    ///
-    /// Returns `Ok(Some(flags))` when the inode is synthetic and now served
-    /// from `fh`, `Ok(None)` when it is an ordinary file (caller continues to
-    /// the normal open path). Ignore files are served here only when their
-    /// inode was marked `synthetic` at lookup, so a real provider `.gitignore`
-    /// is never shadowed.
-    pub(super) fn open_synthetic_file(
+    /// Re-resolve a synthetic leaf through `Tree` and serve its bytes into the
+    /// per-`fh` buffer. Returns `Ok(Some(flags))` when the leaf is synthetic,
+    /// `Ok(None)` when `Tree` resolves a real provider file of the same name
+    /// (caller continues the normal open path), `Err(ENOENT)` when an exhausted
+    /// control no longer resolves.
+    pub(super) fn open_synthetic(
         &self,
         target: &FullReadTarget,
-        fuse_trace: Option<TraceId>,
+        trace: Option<TraceId>,
     ) -> Result<Option<FopenFlags>, Errno> {
         let Some((parent_path, leaf)) = split_parent_leaf(&target.path) else {
             return Ok(None);
         };
-
-        // `@next`/`@all`: only synthetic while the parent's cached dirents still
-        // carry the control (i.e. a resume cursor remains). A control whose
-        // entry is gone is no longer a file.
-        if pagination::is_control_name(&leaf) {
-            if self
-                .cached_control_dirent(&target.mount_name, &parent_path, &leaf)
-                .is_none()
-            {
-                return Err(Errno::ENOENT);
+        let parent = provider_dir_node(&target.mount_name, &parent_path)?;
+        let ctx = RequestCtx { trace };
+        // Resolve and render in one runtime entry: a `None` short-circuits when
+        // the leaf is a real provider file (the caller falls through), so the
+        // read only runs for a genuine synthetic node.
+        let outcome = self.rt.block_on(async {
+            let node = self.tree.resolve_child(&parent, &leaf, &ctx).await?;
+            if !node.is_synthetic() {
+                return Ok(None);
             }
-            let Some(status) =
-                self.serve_control_read(&target.mount_name, &parent_path, &leaf, fuse_trace)
-            else {
-                return Err(Errno::ENOENT);
-            };
-            let bytes = status.into_bytes();
-            // Promote the inode size to the freshly generated status length so
-            // `cat` reads the whole message instead of the `Unknown`
-            // placeholder's single byte. Mirrors `prefetch_full_file_on_open`.
-            self.promote_inode_attrs(
-                target.ino,
-                pagination::control_read_attrs(bytes.len() as u64),
-            );
-            self.file_cache.insert(target.fh, bytes);
-            return Ok(Some(FopenFlags::FOPEN_DIRECT_IO));
+            self.tree.read(&node, &ctx).await.map(Some)
+        });
+        match outcome {
+            // A real provider file (e.g. a provider-projected `.gitignore`) wins;
+            // the caller serves it through the normal read path.
+            Ok(None) => Ok(None),
+            Ok(Some(ReadResult::Bytes { data, attrs, .. })) => {
+                if let Some(attrs) = attrs {
+                    self.promote_inode_attrs(target.ino, attrs);
+                }
+                self.file_cache.insert(target.fh, data);
+                Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Ok(Some(ReadResult::Backing(_))) => Err(Errno::EIO),
+            Err(error) => Err(super::errno::tree_error_errno(&error)),
         }
-
-        // Mount-root ignore files: serve from `fh` ONLY when the inode was
-        // marked synthetic at lookup time (i.e. the provider returned no such
-        // file and the host synthesized it). A real provider `.gitignore` keeps
-        // `synthetic == false` and is served normally through the read path,
-        // never shadowed by content keyed on the path/name.
-        if target.synthetic
-            && super::common::is_mount_root(&parent_path)
-            && pagination::is_ignore_name(&leaf)
-        {
-            self.file_cache
-                .insert(target.fh, pagination::IGNORE_CONTENT.as_bytes().to_vec());
-            return Ok(Some(FopenFlags::FOPEN_DIRECT_IO));
-        }
-
-        Ok(None)
     }
 
-    fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
+    pub(super) fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
         if matches!(attrs.stability, view_types::Stability::Volatile) {
             return;
         }
@@ -535,4 +257,69 @@ impl Frontend {
         entry.size = attrs.st_size();
         entry.attrs = Some(attrs);
     }
+}
+
+/// The `EntryMeta` projected by an inode entry (kind + optional attrs).
+fn node_meta_from_entry(entry: &NodeEntry) -> EntryMeta {
+    let kind = match &entry.kind {
+        omnifs_wit::provider::types::EntryKind::Directory => {
+            omnifs_core::view::EntryKind::Directory
+        },
+        omnifs_wit::provider::types::EntryKind::File(_) => omnifs_core::view::EntryKind::File,
+    };
+    EntryMeta {
+        kind,
+        attrs: entry.attrs.clone(),
+    }
+}
+
+fn is_ranged(attrs: Option<&FileAttrsCache>) -> bool {
+    attrs.is_some_and(|attrs| {
+        matches!(
+            attrs.bytes,
+            view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
+        )
+    })
+}
+
+fn should_prefetch_full(attrs: Option<&FileAttrsCache>) -> bool {
+    attrs.is_some_and(|attrs| {
+        matches!(
+            attrs.bytes,
+            view_types::ByteSource::Deferred(view_types::ReadMode::Full)
+        ) && !matches!(attrs.size, view_types::FileSize::Exact(_))
+    })
+}
+
+/// True when this inode could be a host-synthesized leaf: a `@next`/`@all`
+/// control (gated by name) or a mount-root ignore file (gated by the
+/// `synthetic` inode marker set at lookup/listing).
+fn is_synthetic_candidate(target: &FullReadTarget) -> bool {
+    if target.synthetic {
+        return true;
+    }
+    split_parent_leaf(&target.path).is_some_and(|(_, leaf)| pagination::is_control_name(&leaf))
+}
+
+/// Build the provider-backed file `Node` for `target` from its inode-cached
+/// projection. The open path only reaches this for files, so the meta kind is
+/// `File`; the projected attrs drive `Tree::read`/`Tree::open` (the read mode,
+/// the durable aux key, the learned-size policy).
+fn provider_file_node(target: &FullReadTarget) -> Node {
+    let path = Path::parse(&target.path).expect("inode path must be a protocol path");
+    let meta = EntryMeta {
+        kind: omnifs_core::view::EntryKind::File,
+        attrs: target.attrs.clone(),
+    };
+    Node::new(target.mount_name.clone(), path, meta, Backing::Provider)
+}
+
+/// The open flags for a file served lazily (read on demand): direct I/O only
+/// when the projection requests it.
+fn lazy_open_flags(target: &FullReadTarget) -> FopenFlags {
+    target
+        .attrs
+        .as_ref()
+        .filter(|attrs| attrs.should_direct_io())
+        .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO)
 }
