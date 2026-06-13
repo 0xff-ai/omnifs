@@ -1,36 +1,59 @@
+//! NFSv4.0 export adapter over the renderer-neutral [`Tree`] projection core.
+//!
+//! `Export` is the NFS renderer: it owns the NFS-side identity and reply
+//! concerns (the inode table that backs `(generation, id)` filehandles, the
+//! stateid open tables, the `/omnifs` export-root alias, the expected-negative
+//! probe table, the materialize cap, and `fattr4` size construction) and drives
+//! all path resolution / listing / reads through `Tree::resolve_child`,
+//! `Tree::list`, and `Tree::read`. The cache consult+populate, the cold provider
+//! round trips, the `@next`/`@all` controls, the mount-root ignore synthesis,
+//! the write fence, and learned-size promotion all live in `Tree`; the renderer
+//! keeps only a learned-attrs slot on its inode table (so a learned size
+//! survives across ops, exactly like the FUSE inode), the flatten-renderer
+//! eager size probing for ranged children, and the inline-projection read path.
+//!
+//! There is no private object-metadata TTL table: an inode entry lives as long
+//! as a path is referenced and is pruned only by explicit invalidation, mirroring
+//! the FUSE adapter.
+
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, StateIdOther, Status, StatusResult,
 };
 use crate::frontend;
-use crate::frontend::{LookupCacheHit, ProviderFsError};
+use crate::frontend::LookupCacheHit;
 use crate::protocol::consts::{
     EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, OPEN_MATERIALIZE_MAX_BYTES, ROOT_ID,
 };
 use dashmap::DashMap;
-use omnifs_cache::{Record as CacheRecord, RecordKind};
+use omnifs_cache::RecordKind;
 use omnifs_core::path::{Path as ProtocolPath, Segment};
 use omnifs_core::view as view_types;
-use omnifs_core::view::{self as cache, EntryMeta, FileAttrsCache, FilePayload};
+use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::path_key::PathKey;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_host::wit_protocol;
-use omnifs_host::{Error as RuntimeError, LookupEntry, LookupOutcome, Runtime};
-use omnifs_wit::provider::types::{self as wit_types, ListChildrenResult, ProviderError};
-use std::collections::HashSet;
+use omnifs_host::{Error as RuntimeError, Runtime};
+use omnifs_tree::{
+    Backing, Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult,
+    RequestCtx, Synthetic, Tree, TreeError, TreeErrorKind,
+};
+use omnifs_wit::provider::types as wit_types;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::runtime::{Handle, RuntimeFlavor};
 
-const ENTRY_IDLE_TTL: Duration = Duration::from_secs(300);
-const ENTRY_SWEEP_INTERVAL: u64 = 1024;
-
+/// Per-inode renderer state. This is the NFS analogue of the FUSE `NodeEntry`:
+/// it carries the stable identity a `(generation, id)` filehandle rehydrates
+/// from, plus a learned-attrs slot so a size promoted by a `read`/`open` survives
+/// across ops. It is NOT a cache of provider data; `Tree` owns all caching.
 #[derive(Debug, Clone)]
-struct ObjectRecord {
+struct NodeEntry {
+    /// Which export root this inode hangs under (`ROOT_ID` or `EXPORT_ROOT_ID`).
+    /// The same protocol path under the two roots gets two distinct inodes.
     scope: u64,
     mount_name: String,
     path: ProtocolPath,
@@ -40,7 +63,11 @@ struct ObjectRecord {
     size_exact: bool,
     attrs: Option<FileAttrsCache>,
     backing_path: Option<PathBuf>,
-    last_seen: Instant,
+    /// `Some` when this inode is a host-synthesized entry (`@next`/`@all` control
+    /// or a mount-root ignore file). `read`/`open` serve its bytes through
+    /// `Tree::read` (which runs the synthetic byte source) instead of a normal
+    /// provider read.
+    synthetic: Option<Synthetic>,
 }
 
 struct EntrySeed<'a> {
@@ -53,14 +80,16 @@ struct EntrySeed<'a> {
     size_exact: bool,
     attrs: Option<FileAttrsCache>,
     backing_path: Option<PathBuf>,
+    synthetic: Option<Synthetic>,
 }
 
-#[derive(Debug, Clone)]
+/// A live ranged open bound to a stateid. Holds the `Tree`-owned `RangedHandle`
+/// (which owns its `Arc<Runtime>` + provider handle), so chunk reads and the
+/// provider-handle release stay inside `Tree`. Not `Clone`: it owns the handle.
 struct RangedOpen {
     mount_name: String,
     path: ProtocolPath,
-    provider_handle: u64,
-    attrs: FileAttrsCache,
+    handle: RangedHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -90,98 +119,63 @@ impl ObjectKey {
 
 pub struct Export {
     rt: Handle,
-    registry: Arc<dyn RegistryView>,
-    entries: DashMap<u64, ObjectRecord>,
+    /// The provider registry both the adapter and `Tree` hold. The adapter reads
+    /// it only for mount enumeration and the synthetic NFS export root; all
+    /// provider round trips go through `tree`.
+    registry: Arc<ProviderRegistry>,
+    /// The renderer-neutral projection core. Owns resolve/list/read decision
+    /// logic; the NFS adapter enters the async runtime to call it and turns the
+    /// neutral `Node`/`Listing`/`ReadResult` into NFS identity + `fattr4`.
+    tree: Tree,
+    inodes: DashMap<u64, NodeEntry>,
     path_to_inode: DashMap<ObjectKey, u64>,
     negative_lookups: DashMap<PathKey, ()>,
     next_ino: AtomicU64,
-    sweep_counter: AtomicU64,
     root_mount: Option<String>,
     opens: OpenTable,
     ranged_opens: DashMap<StateIdOther, RangedOpen>,
     backing_opens: DashMap<StateIdOther, BackingOpen>,
 }
 
-trait RegistryView: Send + Sync {
-    fn get(&self, mount: &str) -> Option<Arc<Runtime>>;
-    fn mounts(&self) -> Vec<String>;
-    fn root_mount_name(&self) -> Option<String>;
-}
-
-impl RegistryView for ProviderRegistry {
-    fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
-        ProviderRegistry::get(self, mount)
-    }
-
-    fn mounts(&self) -> Vec<String> {
-        ProviderRegistry::mounts(self)
-    }
-
-    fn root_mount_name(&self) -> Option<String> {
-        ProviderRegistry::root_mount_name(self)
-    }
-}
-
 impl Export {
     pub fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
-        Self::with_registry(rt, registry)
-    }
-
-    fn with_registry(rt: Handle, registry: Arc<dyn RegistryView>) -> Self {
+        let tree = Tree::new(Arc::clone(&registry));
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"
         );
         let root_mount = registry.root_mount_name();
-        let entries = DashMap::new();
+        let inodes = DashMap::new();
         let path_to_inode = DashMap::new();
-        let now = Instant::now();
-        let root_entry = ObjectRecord {
-            scope: ROOT_ID,
-            mount_name: root_mount.clone().unwrap_or_default(),
-            path: ProtocolPath::root(),
-            parent: ROOT_ID,
-            kind: NodeKind::Directory,
-            size: 0,
-            size_exact: true,
-            attrs: None,
-            backing_path: None,
-            last_seen: now,
-        };
-        if let Some(mount) = &root_mount {
-            path_to_inode.insert(
-                ObjectKey::new(ROOT_ID, mount, &ProtocolPath::root()),
-                ROOT_ID,
+        let mount = root_mount.clone().unwrap_or_default();
+        for scope in [ROOT_ID, EXPORT_ROOT_ID] {
+            inodes.insert(
+                scope,
+                NodeEntry {
+                    scope,
+                    mount_name: mount.clone(),
+                    path: ProtocolPath::root(),
+                    parent: ROOT_ID,
+                    kind: NodeKind::Directory,
+                    size: 0,
+                    size_exact: true,
+                    attrs: None,
+                    backing_path: None,
+                    synthetic: None,
+                },
             );
+            if root_mount.is_some() {
+                path_to_inode.insert(ObjectKey::new(scope, &mount, &ProtocolPath::root()), scope);
+            }
         }
-        let export_root_entry = ObjectRecord {
-            scope: EXPORT_ROOT_ID,
-            mount_name: root_mount.clone().unwrap_or_default(),
-            path: ProtocolPath::root(),
-            parent: ROOT_ID,
-            kind: NodeKind::Directory,
-            size: 0,
-            size_exact: true,
-            attrs: None,
-            backing_path: None,
-            last_seen: now,
-        };
-        if let Some(mount) = &root_mount {
-            path_to_inode.insert(
-                ObjectKey::new(EXPORT_ROOT_ID, mount, &ProtocolPath::root()),
-                EXPORT_ROOT_ID,
-            );
-        }
-        entries.insert(ROOT_ID, root_entry);
-        entries.insert(EXPORT_ROOT_ID, export_root_entry);
         Self {
             rt,
             registry,
-            entries,
+            tree,
+            inodes,
             path_to_inode,
             negative_lookups: DashMap::new(),
             next_ino: AtomicU64::new(EXPORT_ROOT_ID + 1),
-            sweep_counter: AtomicU64::new(0),
             root_mount,
             opens: OpenTable::new(),
             ranged_opens: DashMap::new(),
@@ -193,65 +187,33 @@ impl Export {
         self.registry.get(mount)
     }
 
-    fn touch_entry(&self, id: u64) {
-        if let Some(mut entry) = self.entries.get_mut(&id) {
-            entry.last_seen = Instant::now();
-        }
-    }
-
-    fn remove_object(&self, id: u64) -> Option<ObjectRecord> {
-        let (_, entry) = self.entries.remove(&id)?;
+    fn remove_object(&self, id: u64) -> Option<NodeEntry> {
+        let (_, entry) = self.inodes.remove(&id)?;
         self.path_to_inode
             .remove(&ObjectKey::new(entry.scope, &entry.mount_name, &entry.path));
         Some(entry)
     }
 
-    fn maybe_sweep_entries(&self) {
-        let count = self.sweep_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if count.is_multiple_of(ENTRY_SWEEP_INTERVAL) {
-            self.sweep_idle_entries();
-        }
-    }
-
-    fn sweep_idle_entries(&self) {
-        let now = Instant::now();
-        let open_inodes = self.opens.active_inodes();
-        let parent_inodes = self
-            .entries
-            .iter()
-            .map(|entry| entry.value().parent)
-            .collect::<HashSet<_>>();
-        let stale = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let id = *entry.key();
-                let entry = entry.value();
-                (id != ROOT_ID
-                    && id != EXPORT_ROOT_ID
-                    && !entry.path.is_root()
-                    && !open_inodes.contains(&id)
-                    && !parent_inodes.contains(&id)
-                    && now.duration_since(entry.last_seen) >= ENTRY_IDLE_TTL)
-                    .then_some(id)
-            })
-            .collect::<Vec<_>>();
-
-        for id in stale {
-            self.remove_object(id);
-        }
-    }
-
+    /// Drain pending runtime invalidations through `Tree` and drive the NFS-side
+    /// fan-out: prune the inode table, the negative-lookup table, and the open
+    /// stateid tables (closing ranged provider handles).
+    ///
+    /// `Tree::drain_invalidations` owns the renderer-neutral half (queue drain +
+    /// mem eviction); the NFS adapter consumes the returned report to prune its
+    /// own identity tables, which are protocol concerns the projection core must
+    /// not own. Mirrors the FUSE `drain_and_evict_pending`.
     fn drain_invalidations_for_mount(&self, mount_name: &str) {
-        let Some(runtime) = self.runtime_for_mount(mount_name) else {
-            return;
-        };
-        let prefixes = runtime.drain_invalidated_prefixes();
-        let paths = runtime.drain_invalidated_paths();
-        if prefixes.is_empty() && paths.is_empty() {
+        if mount_name.is_empty() {
             return;
         }
-        let invalidations = frontend::InvalidationSet::from_raw(paths, prefixes);
+        let report = self.tree.drain_invalidations(mount_name);
+        if report.is_empty() {
+            return;
+        }
+        let matches = |path: &ProtocolPath| {
+            report.paths.iter().any(|invalidated| invalidated == path)
+                || report.prefixes.iter().any(|prefix| path.has_prefix(prefix))
+        };
 
         let stale_negative_lookups = self
             .negative_lookups
@@ -259,7 +221,7 @@ impl Export {
             .filter_map(|entry| {
                 let key = entry.key();
                 let path = ProtocolPath::parse(&key.path).ok()?;
-                (key.mount == mount_name && invalidations.matches(&path)).then(|| key.clone())
+                (key.mount == mount_name && matches(&path)).then(|| key.clone())
             })
             .collect::<Vec<_>>();
         for key in stale_negative_lookups {
@@ -271,7 +233,7 @@ impl Export {
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
-                (key.mount == mount_name && !key.path.is_root() && invalidations.matches(&key.path))
+                (key.mount == mount_name && !key.path.is_root() && matches(&key.path))
                     .then(|| key.clone())
             })
             .collect::<Vec<_>>();
@@ -291,13 +253,12 @@ impl Export {
             .iter()
             .filter_map(|entry| {
                 let ranged = entry.value();
-                (ranged.mount_name == mount_name && invalidations.matches(&ranged.path))
-                    .then(|| *entry.key())
+                (ranged.mount_name == mount_name && matches(&ranged.path)).then(|| *entry.key())
             })
             .collect::<Vec<_>>();
         for stateid in stale_opens {
             if let Some((_, ranged)) = self.ranged_opens.remove(&stateid) {
-                self.close_ranged_provider_handle(&ranged);
+                Self::close_ranged_provider_handle(ranged);
             }
         }
 
@@ -306,8 +267,7 @@ impl Export {
             .iter()
             .filter_map(|entry| {
                 let backing = entry.value();
-                (backing.mount_name == mount_name && invalidations.matches(&backing.path))
-                    .then(|| *entry.key())
+                (backing.mount_name == mount_name && matches(&backing.path)).then(|| *entry.key())
             })
             .collect::<Vec<_>>();
         for stateid in stale_backing_opens {
@@ -330,16 +290,16 @@ impl Export {
             size_exact,
             attrs,
             backing_path,
+            synthetic,
         } = seed;
         let key = ObjectKey::new(scope, mount_name, path);
         let attrs_for_update = attrs.clone();
-        let now = Instant::now();
-        let id = *self
+        let synthetic_for_update = synthetic.clone();
+        *self
             .path_to_inode
             .entry(key)
             .and_modify(|existing| {
-                if let Some(mut entry) = self.entries.get_mut(existing) {
-                    entry.last_seen = now;
+                if let Some(mut entry) = self.inodes.get_mut(existing) {
                     entry.parent = parent;
                     entry.kind = kind;
                     if size_exact || !entry.size_exact {
@@ -355,6 +315,12 @@ impl Export {
                             matches!(merged_attrs.size, view_types::FileSize::Exact(_));
                         entry.attrs = Some(merged_attrs);
                     }
+                    // A genuine resolution carries an explicit synthetic state:
+                    // a real provider/backing entry clears any prior synthetic
+                    // marker (a real `.gitignore` wins), a synthetic entry sets
+                    // it. Every caller passes the resolved state, so there is no
+                    // origin-agnostic refresh to preserve.
+                    entry.synthetic.clone_from(&synthetic_for_update);
                     if backing_path.is_some() {
                         entry.backing_path.clone_from(&backing_path);
                         entry.size_exact = true;
@@ -364,43 +330,40 @@ impl Export {
             })
             .or_insert_with(|| {
                 let id = self.alloc_ino();
-                self.entries.insert(
+                self.inodes.insert(
                     id,
-                    ObjectRecord {
+                    NodeEntry {
+                        scope,
                         mount_name: mount_name.to_string(),
                         path: path.clone(),
-                        scope,
                         parent,
                         kind,
                         size,
                         size_exact,
                         attrs,
                         backing_path,
-                        last_seen: now,
+                        synthetic,
                     },
                 );
                 id
-            });
-        self.maybe_sweep_entries();
-        id
+            })
     }
 
     fn promote_file_attrs(&self, id: u64, attrs: FileAttrsCache) {
         if matches!(attrs.stability, view_types::Stability::Volatile) {
             return;
         }
-        if let Some(mut entry) = self.entries.get_mut(&id)
+        if let Some(mut entry) = self.inodes.get_mut(&id)
             && entry.kind == NodeKind::File
             && entry.backing_path.is_none()
         {
             entry.size = attrs.st_size();
             entry.size_exact = matches!(attrs.size, view_types::FileSize::Exact(_));
             entry.attrs = Some(attrs);
-            entry.last_seen = Instant::now();
         }
     }
 
-    fn attr_from_entry(id: u64, entry: &ObjectRecord) -> Attr {
+    fn attr_from_entry(id: u64, entry: &NodeEntry) -> Attr {
         Attr {
             id,
             parent: entry.parent,
@@ -448,7 +411,7 @@ impl Export {
         }
     }
 
-    fn entry_change(id: u64, entry: &ObjectRecord) -> u64 {
+    fn entry_change(id: u64, entry: &NodeEntry) -> u64 {
         let mut hasher = DefaultHasher::new();
         id.hash(&mut hasher);
         entry.mount_name.hash(&mut hasher);
@@ -493,10 +456,13 @@ impl Export {
         (meta.st_size(), exact)
     }
 
-    fn entry_meta(kind: &wit_types::EntryKind) -> EntryMeta {
-        wit_protocol::entry_meta_from_kind(kind)
-    }
-
+    /// Probe a ranged file's exact size by opening it through the provider. NFS
+    /// flattens a directory into a finite snapshot whose `fattr4` carries each
+    /// child's size, so a ranged child that lists as a static `Unknown`/`Full`
+    /// placeholder must be promoted to its real size before `ls -l` stats it.
+    /// FUSE has no analogue because it promotes size lazily on the inode at read
+    /// time. The probe writes the learned attrs back through the cache so a later
+    /// lookup serves them without re-probing.
     fn probe_ranged_attrs(
         &self,
         runtime: &Arc<Runtime>,
@@ -532,9 +498,9 @@ impl Export {
         };
 
         let attrs = FileAttrsCache {
-            size: wit_protocol::file_size_from_wit(opened.attrs.size),
+            size: omnifs_host::wit_protocol::file_size_from_wit(opened.attrs.size),
             bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Ranged),
-            stability: wit_protocol::stability_from_wit(opened.attrs.stability),
+            stability: omnifs_host::wit_protocol::stability_from_wit(opened.attrs.stability),
             version_token: opened.attrs.version_token,
         };
         if let Err(error) = attrs.validate() {
@@ -548,15 +514,9 @@ impl Export {
         Some(attrs)
     }
 
-    fn meta_with_ranged_probe(
-        &self,
-        runtime: &Arc<Runtime>,
-        child_path: &ProtocolPath,
-        kind: &wit_types::EntryKind,
-    ) -> EntryMeta {
-        self.promote_static_placeholder_meta(runtime, child_path, Self::entry_meta(kind))
-    }
-
+    /// Promote a static-placeholder file meta to its real ranged attrs via a
+    /// provider open-probe, caching the learned attrs. A non-placeholder meta is
+    /// returned unchanged.
     fn promote_static_placeholder_meta(
         &self,
         runtime: &Arc<Runtime>,
@@ -583,14 +543,18 @@ impl Export {
             )
     }
 
-    fn provider_status(error: &ProviderError) -> Status {
-        match ProviderFsError::from_provider(error) {
-            ProviderFsError::NotFound => Status::NoEnt,
-            ProviderFsError::NotDirectory => Status::NotDir,
-            ProviderFsError::IsDirectory => Status::IsDir,
-            ProviderFsError::Access => Status::Access,
-            ProviderFsError::InvalidInput => Status::Invalid,
-            ProviderFsError::TooLarge | ProviderFsError::Retry | ProviderFsError::Io => Status::Io,
+    fn tree_status(error: &TreeError) -> Status {
+        match error.kind {
+            TreeErrorKind::NotFound => Status::NoEnt,
+            TreeErrorKind::NotDirectory => Status::NotDir,
+            TreeErrorKind::IsDirectory => Status::IsDir,
+            TreeErrorKind::PermissionDenied => Status::Access,
+            TreeErrorKind::InvalidInput => Status::Invalid,
+            TreeErrorKind::TooLarge
+            | TreeErrorKind::RateLimited
+            | TreeErrorKind::Timeout
+            | TreeErrorKind::Network
+            | TreeErrorKind::Internal => Status::Io,
         }
     }
 
@@ -598,6 +562,11 @@ impl Export {
         name == ".DS_Store" || name.starts_with("._")
     }
 
+    /// Resolve a child from the parent's cached dirents record, if present. NFS
+    /// consults a non-exhaustive cached listing for a positive entry so a probe
+    /// name (e.g. `.DS_Store`) seen in a partial listing beats the
+    /// expected-negative shortcut. Returns `None` when the record is absent or
+    /// the name is not a positive entry; the caller then falls through to `Tree`.
     fn lookup_from_cached_dirents(
         &self,
         scope: u64,
@@ -606,205 +575,35 @@ impl Export {
         parent: u64,
         name: &Segment,
         runtime: &Arc<Runtime>,
-    ) -> Option<StatusResult<u64>> {
+    ) -> Option<u64> {
         let record = frontend::cache_get(runtime, parent_path, RecordKind::Dirents, None)?;
-        let lookup = frontend::cached_dirent_lookup(&record, name.as_str())?;
-        if matches!(lookup, LookupCacheHit::Negative) {
+        let LookupCacheHit::Positive(meta) =
+            frontend::cached_dirent_lookup(&record, name.as_str())?
+        else {
             return None;
-        }
-        let path = parent_path.join_segment(name);
-        Some(self.resolve_cached_lookup(scope, mount_name, &path, parent, lookup, Some(runtime)))
-    }
-
-    fn lookup_from_cached_lookup(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        child_path: &ProtocolPath,
-        parent: u64,
-        runtime: &Arc<Runtime>,
-    ) -> Option<StatusResult<u64>> {
-        let record = frontend::cache_get(runtime, child_path, RecordKind::Lookup, None)?;
-        let lookup = frontend::cached_lookup_record(&record)?;
-        Some(self.resolve_cached_lookup(
-            scope,
-            mount_name,
-            child_path,
-            parent,
-            lookup,
-            Some(runtime),
-        ))
-    }
-
-    fn resolve_cached_lookup(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        child_path: &ProtocolPath,
-        parent: u64,
-        lookup: LookupCacheHit,
-        runtime: Option<&Arc<Runtime>>,
-    ) -> StatusResult<u64> {
-        match lookup {
-            LookupCacheHit::Negative => Err(Status::NoEnt),
-            LookupCacheHit::Positive(mut meta) => {
-                self.negative_lookups
-                    .remove(&PathKey::new(mount_name, child_path.as_str()));
-                if let Some(runtime) = runtime
-                    && meta
-                        .attrs
-                        .as_ref()
-                        .is_some_and(Self::is_static_file_placeholder)
-                {
-                    meta = self.promote_static_placeholder_meta(runtime, child_path, meta);
-                }
-                let kind = Self::meta_kind(&meta);
-                let (size, size_exact) = Self::meta_size(&meta);
-                Ok(self.get_or_alloc(EntrySeed {
-                    scope,
-                    mount_name,
-                    path: child_path,
-                    parent,
-                    kind,
-                    size,
-                    size_exact,
-                    attrs: meta.attrs,
-                    backing_path: None,
-                }))
-            },
-        }
-    }
-
-    fn lookup_via_provider(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        parent_path: &ProtocolPath,
-        parent: u64,
-        name: &Segment,
-        runtime: &Arc<Runtime>,
-    ) -> StatusResult<u64> {
-        let child_path = parent_path.join_segment(name);
-        match self.rt.block_on(runtime.namespace().lookup_child(
-            parent_path.as_str(),
-            name.as_str(),
-            None,
-        )) {
-            Ok(LookupOutcome::Subtree(tree_ref)) => self.allocate_provider_subtree(
-                scope,
-                mount_name,
-                &child_path,
-                parent,
-                runtime,
-                tree_ref,
-            ),
-            Ok(LookupOutcome::Entry(entry)) => Ok(self.allocate_provider_entry(
-                scope,
-                mount_name,
-                &child_path,
-                parent,
-                runtime,
-                &entry,
-            )),
-            Ok(LookupOutcome::NotFound) => {
-                if Self::expected_negative_probe(name.as_str()) {
-                    self.negative_lookups
-                        .insert(PathKey::new(mount_name, child_path.as_str()), ());
-                }
-                let payload = cache::LookupPayload::Negative;
-                if let Some(encoded) = payload.serialize() {
-                    frontend::cache_put(
-                        runtime,
-                        &child_path,
-                        RecordKind::Lookup,
-                        None,
-                        &CacheRecord::new(RecordKind::Lookup, encoded),
-                    );
-                }
-                Err(Status::NoEnt)
-            },
-            Err(RuntimeError::ProviderError(error)) => {
-                if ProviderFsError::from_provider(&error) == ProviderFsError::NotFound
-                    && Self::expected_negative_probe(name.as_str())
-                {
-                    self.negative_lookups
-                        .insert(PathKey::new(mount_name, child_path.as_str()), ());
-                    tracing::debug!(
-                        op = "lookup",
-                        mount = %mount_name,
-                        parent = %parent_path,
-                        name = %name,
-                        "NFS expected negative lookup probe"
-                    );
-                } else {
-                    tracing::warn!(
-                        op = "lookup",
-                        mount = %mount_name,
-                        parent = %parent_path,
-                        name = %name,
-                        kind = ?error.kind,
-                        retryable = error.retryable,
-                        message = %error.message,
-                        "NFS provider lookup failed"
-                    );
-                }
-                Err(Self::provider_status(&error))
-            },
-            Err(error) => {
-                tracing::warn!(
-                    op = "lookup",
-                    mount = %mount_name,
-                    parent = %parent_path,
-                    name = %name,
-                    error = %error,
-                    "NFS runtime lookup failed"
-                );
-                Err(Status::Io)
-            },
-        }
-    }
-
-    fn allocate_provider_subtree(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        child_path: &ProtocolPath,
-        parent: u64,
-        runtime: &Arc<Runtime>,
-        tree_ref: u64,
-    ) -> StatusResult<u64> {
-        let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
-            return Err(Status::Io);
         };
+        let child_path = parent_path.join_segment(name);
+        Some(self.allocate_meta_entry(scope, mount_name, &child_path, parent, meta, Some(runtime)))
+    }
+
+    /// Allocate an inode for a resolved positive `meta`, promoting a static
+    /// ranged placeholder to its probed size and clearing any stale negative.
+    fn allocate_meta_entry(
+        &self,
+        scope: u64,
+        mount_name: &str,
+        child_path: &ProtocolPath,
+        parent: u64,
+        mut meta: EntryMeta,
+        runtime: Option<&Arc<Runtime>>,
+    ) -> u64 {
         self.negative_lookups
             .remove(&PathKey::new(mount_name, child_path.as_str()));
-        Ok(self.get_or_alloc(EntrySeed {
-            scope,
-            mount_name,
-            path: child_path,
-            parent,
-            kind: NodeKind::Directory,
-            size: 0,
-            size_exact: true,
-            attrs: None,
-            backing_path: Some(real_root),
-        }))
-    }
-
-    fn allocate_provider_entry(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        child_path: &ProtocolPath,
-        parent: u64,
-        runtime: &Arc<Runtime>,
-        entry: &LookupEntry,
-    ) -> u64 {
-        let meta = self.promote_static_placeholder_meta(runtime, child_path, entry.meta().clone());
+        if let Some(runtime) = runtime {
+            meta = self.promote_static_placeholder_meta(runtime, child_path, meta);
+        }
         let kind = Self::meta_kind(&meta);
         let (size, size_exact) = Self::meta_size(&meta);
-        self.negative_lookups
-            .remove(&PathKey::new(mount_name, child_path.as_str()));
         self.get_or_alloc(EntrySeed {
             scope,
             mount_name,
@@ -815,6 +614,99 @@ impl Export {
             size_exact,
             attrs: meta.attrs,
             backing_path: None,
+            synthetic: None,
+        })
+    }
+
+    /// Resolve `name` under the provider directory `parent_path` through
+    /// `Tree::resolve_child` and bind the resulting `Node` to an inode. `Tree`
+    /// owns the provider lookup, the `@next`/`@all` control resolution, the
+    /// mount-root ignore synthesis, and the subtree handoff; the adapter only
+    /// mints inode identity, eagerly probing ranged children for their size.
+    fn lookup_via_tree(
+        &self,
+        scope: u64,
+        mount_name: &str,
+        parent_path: &ProtocolPath,
+        parent: u64,
+        name: &Segment,
+        runtime: &Arc<Runtime>,
+    ) -> StatusResult<u64> {
+        let parent_node = provider_dir_node(mount_name, parent_path);
+        let ctx = RequestCtx::default();
+        let child_path = parent_path.join_segment(name);
+        match self
+            .rt
+            .block_on(self.tree.resolve_child(&parent_node, name.as_str(), &ctx))
+        {
+            Ok(node) => Ok(self.bind_node(scope, mount_name, parent, &node, Some(runtime))),
+            Err(error) if error.kind == TreeErrorKind::NotFound => {
+                if Self::expected_negative_probe(name.as_str()) {
+                    self.negative_lookups
+                        .insert(PathKey::new(mount_name, child_path.as_str()), ());
+                }
+                Err(Status::NoEnt)
+            },
+            Err(error) => {
+                tracing::warn!(
+                    op = "lookup",
+                    mount = %mount_name,
+                    parent = %parent_path,
+                    name = %name,
+                    error = %error,
+                    "NFS Tree lookup failed"
+                );
+                Err(Self::tree_status(&error))
+            },
+        }
+    }
+
+    /// Bind a resolved `Tree` `Node` to an inode. A subtree node records its
+    /// backing dir; a synthetic node carries its synthetic descriptor; a provider
+    /// node is promoted if it is a static ranged placeholder.
+    fn bind_node(
+        &self,
+        scope: u64,
+        mount_name: &str,
+        parent: u64,
+        node: &Node,
+        runtime: Option<&Arc<Runtime>>,
+    ) -> u64 {
+        let child_path = node.path().clone();
+        self.negative_lookups
+            .remove(&PathKey::new(mount_name, child_path.as_str()));
+        if let Backing::Subtree(dir) = node.backing() {
+            return self.get_or_alloc(EntrySeed {
+                scope,
+                mount_name,
+                path: &child_path,
+                parent,
+                kind: NodeKind::Directory,
+                size: 0,
+                size_exact: true,
+                attrs: None,
+                backing_path: Some(dir.clone()),
+                synthetic: None,
+            });
+        }
+
+        let mut meta = node_meta(node);
+        if let (None, Some(runtime)) = (node.synthetic_kind(), runtime) {
+            meta = self.promote_static_placeholder_meta(runtime, &child_path, meta);
+        }
+        let kind = Self::meta_kind(&meta);
+        let (size, size_exact) = Self::meta_size(&meta);
+        self.get_or_alloc(EntrySeed {
+            scope,
+            mount_name,
+            path: &child_path,
+            parent,
+            kind,
+            size,
+            size_exact,
+            attrs: meta.attrs,
+            backing_path: None,
+            synthetic: node.synthetic_kind().cloned(),
         })
     }
 
@@ -843,118 +735,93 @@ impl Export {
             size_exact: true,
             attrs: None,
             backing_path: Some(child),
+            synthetic: None,
         }))
     }
 
-    fn lookup_from_parent_subtree(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        parent_path: &ProtocolPath,
-        parent: u64,
-        name: &Segment,
-        runtime: &Arc<Runtime>,
-    ) -> Option<StatusResult<u64>> {
-        if parent_path.is_root() || Self::expected_negative_probe(name.as_str()) {
-            return None;
-        }
-
-        let cached_dirents = frontend::cache_get(runtime, parent_path, RecordKind::Dirents, None)
-            .and_then(|record| cache::DirentsPayload::deserialize(&record.payload));
-        let cached_validator = cached_dirents
-            .as_ref()
-            .and_then(|dirents| dirents.validator.clone());
-
-        match self.rt.block_on(runtime.namespace().list_children(
-            parent_path.as_str(),
-            cached_validator,
-            None,
-            None,
-        )) {
-            Ok(ListChildrenResult::Subtree(tree_ref)) => {
-                let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
-                    return Some(Err(Status::Io));
-                };
-                if let Some(mut entry) = self.entries.get_mut(&parent) {
-                    entry.backing_path = Some(real_root.clone());
-                    entry.attrs = None;
-                    entry.size_exact = true;
-                }
-                Some(self.lookup_backing_child(
-                    scope,
-                    mount_name,
-                    parent_path,
-                    parent,
-                    name,
-                    &real_root,
-                ))
-            },
-            Ok(_) => None,
-            Err(error) => {
-                tracing::debug!(
-                    op = "lookup",
-                    mount = %mount_name,
-                    parent = %parent_path,
-                    name = %name,
-                    error = %error,
-                    "NFS parent subtree materialization probe failed"
-                );
-                None
-            },
-        }
-    }
-
-    fn readdir_from_dirents(
+    /// Build a finite directory snapshot from a `Tree` `Listing`: provider
+    /// children (each ranged-probed and inode-allocated), then the host-synthesized
+    /// `@next`/`@all` controls and mount-root ignore files materialized as files.
+    fn snapshot_from_listing(
         &self,
         scope: u64,
         mount_name: &str,
         path: &ProtocolPath,
         parent: u64,
-        dirents: &cache::DirentsPayload,
+        listing: &Listing,
+        runtime: &Arc<Runtime>,
     ) -> DirListing {
-        let entries = dirents
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let Ok(name) = Segment::try_from(entry.name.as_str()) else {
-                    return None;
-                };
-                let child_path = path.join_segment(&name);
-                self.negative_lookups
-                    .remove(&PathKey::new(mount_name, child_path.as_str()));
-                let kind = Self::meta_kind(&entry.meta);
-                let (size, size_exact) = Self::meta_size(&entry.meta);
-                let id = self.get_or_alloc(EntrySeed {
-                    scope,
-                    mount_name,
-                    path: &child_path,
-                    parent,
-                    kind,
-                    size,
-                    size_exact,
-                    attrs: entry.meta.attrs.clone(),
-                    backing_path: None,
-                });
-                let attr = self.attr(id).unwrap_or(Attr {
-                    id,
-                    parent,
-                    kind,
-                    size,
-                    mode: kind.mode(),
-                    change: id,
-                    mtime_sec: 0,
-                });
-                Some(DirEntry {
-                    id,
-                    name: entry.name.clone(),
-                    attr,
-                })
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(listing.entries.len() + listing.synthetic.len());
+        for entry in &listing.entries {
+            if let Some(dir_entry) =
+                self.dir_entry_from_tree(scope, mount_name, path, parent, entry, Some(runtime))
+            {
+                entries.push(dir_entry);
+            }
+        }
+        for entry in &listing.synthetic {
+            if let Some(dir_entry) =
+                self.dir_entry_from_tree(scope, mount_name, path, parent, entry, None)
+            {
+                entries.push(dir_entry);
+            }
+        }
+        // Sorting happens centrally in `handle_readdir`; a local pre-sort here
+        // would diverge silently if that policy changes.
         DirListing {
             entries,
-            exhaustive: dirents.exhaustive,
+            // NFS presents the finite known snapshot; the dynamic-directory
+            // exhaustiveness is irrelevant to the NFS wire (there is no way to
+            // advertise lookup-only children), so the snapshot reports EOF.
+            exhaustive: true,
         }
+    }
+
+    fn dir_entry_from_tree(
+        &self,
+        scope: u64,
+        mount_name: &str,
+        path: &ProtocolPath,
+        parent: u64,
+        entry: &TreeEntry,
+        runtime: Option<&Arc<Runtime>>,
+    ) -> Option<DirEntry> {
+        let name = Segment::try_from(entry.name.as_str()).ok()?;
+        let child_path = path.join_segment(&name);
+        self.negative_lookups
+            .remove(&PathKey::new(mount_name, child_path.as_str()));
+        let mut meta = entry.meta.clone();
+        if let (None, Some(runtime)) = (entry.synthetic.as_ref(), runtime) {
+            meta = self.promote_static_placeholder_meta(runtime, &child_path, meta);
+        }
+        let kind = Self::meta_kind(&meta);
+        let (size, size_exact) = Self::meta_size(&meta);
+        let id = self.get_or_alloc(EntrySeed {
+            scope,
+            mount_name,
+            path: &child_path,
+            parent,
+            kind,
+            size,
+            size_exact,
+            attrs: meta.attrs,
+            backing_path: None,
+            synthetic: entry.synthetic.clone(),
+        });
+        let attr = self.attr(id).unwrap_or(Attr {
+            id,
+            parent,
+            kind,
+            size,
+            mode: kind.mode(),
+            change: id,
+            mtime_sec: 0,
+        });
+        Some(DirEntry {
+            id,
+            name: entry.name.clone(),
+            attr,
+        })
     }
 
     fn readdir_backing(
@@ -991,6 +858,7 @@ impl Export {
                 size_exact: true,
                 attrs: None,
                 backing_path: Some(backing_path),
+                synthetic: None,
             });
             entries.push(DirEntry {
                 id,
@@ -998,115 +866,32 @@ impl Export {
                 attr: Self::attr_from_metadata(id, parent, &metadata)?,
             });
         }
-        // Sorting happens centrally in `handle_readdir`; a local pre-sort here
-        // would diverge silently if that policy changes.
         Ok(DirListing {
             entries,
             exhaustive: true,
         })
     }
 
-    fn readdir_via_provider(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        path: &ProtocolPath,
-        parent: u64,
-        runtime: &Arc<Runtime>,
-    ) -> StatusResult<DirListing> {
-        let cached_dirents = frontend::cache_get(runtime, path, RecordKind::Dirents, None)
-            .and_then(|record| cache::DirentsPayload::deserialize(&record.payload));
-        let cached_validator = cached_dirents
-            .as_ref()
-            .and_then(|dirents| dirents.validator.clone());
-
-        match self.rt.block_on(runtime.namespace().list_children(
-            path.as_str(),
-            cached_validator,
-            None,
-            None,
-        )) {
-            Ok(ListChildrenResult::Unchanged) => {
-                let Some(dirents) = cached_dirents else {
-                    tracing::warn!(
-                        op = "readdir",
-                        mount = %mount_name,
-                        path = %path,
-                        "NFS provider returned unchanged with no cached listing"
-                    );
-                    return Err(Status::Io);
-                };
-                Ok(self.readdir_from_dirents(scope, mount_name, path, parent, &dirents))
-            },
-            Ok(ListChildrenResult::Subtree(tree_ref)) => {
-                let Some(real_root) = runtime.resolve_tree_ref(tree_ref) else {
-                    return Err(Status::Io);
-                };
-                if let Some(mut entry) = self.entries.get_mut(&parent) {
-                    entry.backing_path = Some(real_root.clone());
-                }
-                self.readdir_backing(scope, mount_name, path, parent, &real_root)
-            },
-            Ok(ListChildrenResult::Entries(listing)) => {
-                let mut records = Vec::with_capacity(listing.entries.len());
-                for entry in &listing.entries {
-                    let Ok(name) = Segment::try_from(entry.name.as_str()) else {
-                        continue;
-                    };
-                    let child_path = path.join_segment(&name);
-                    records.push(cache::DirentRecord {
-                        name: entry.name.clone(),
-                        meta: self.meta_with_ranged_probe(runtime, &child_path, &entry.kind),
-                    });
-                }
-                records.sort_by(|left, right| left.name.cmp(&right.name));
-                let dirents = cache::DirentsPayload {
-                    entries: records,
-                    exhaustive: listing.exhaustive && listing.next_cursor.is_none(),
-                    validator: listing.validator.clone(),
-                    next_cursor: listing
-                        .next_cursor
-                        .clone()
-                        .map(wit_protocol::cached_cursor_from_wit),
-                    paginated: listing.next_cursor.is_some(),
-                };
-                Ok(self.readdir_from_dirents(scope, mount_name, path, parent, &dirents))
-            },
-            Err(RuntimeError::ProviderError(error)) => {
-                tracing::warn!(
-                    op = "readdir",
-                    mount = %mount_name,
-                    path = %path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = %error.message,
-                    "NFS provider readdir failed"
-                );
-                Err(Self::provider_status(&error))
-            },
-            Err(error) => {
-                tracing::warn!(
-                    op = "readdir",
-                    mount = %mount_name,
-                    path = %path,
-                    error = %error,
-                    "NFS runtime readdir failed"
-                );
-                Err(Status::Io)
-            },
-        }
-    }
-
+    /// Read a provider-backed file. A host-synthesized node and a treeref backing
+    /// node are served by `Tree::read`; an inline-projection node (whose bytes
+    /// travel in its cached attrs, with no provider file route) is served from
+    /// those bytes directly. Everything else renders through `Tree::read`, which
+    /// owns the cache cascade, the write fence, and learned-size promotion.
     fn read_provider_file(
         &self,
         id: u64,
         mount_name: &str,
         path: &ProtocolPath,
-        attrs: Option<FileAttrsCache>,
-        runtime: &Runtime,
+        attrs: Option<&FileAttrsCache>,
+        synthetic: Option<Synthetic>,
+        runtime: &Arc<Runtime>,
     ) -> StatusResult<Vec<u8>> {
-        let read_attrs = frontend::cached_file_attrs(runtime, path).or(attrs);
-        if let Some(attrs) = read_attrs.as_ref()
+        // Inline cached projection: the bytes live in the attrs (a manually
+        // cached dirents/lookup entry with no provider file route), so serve them
+        // directly and learn the exact size, without a provider round trip.
+        if synthetic.is_none()
+            && let Some(attrs) =
+                frontend::cached_file_attrs(runtime, path).or_else(|| attrs.cloned())
             && let Some(bytes) = attrs.inline_bytes()
         {
             let data = bytes.to_vec();
@@ -1125,73 +910,22 @@ impl Export {
             return Ok(data);
         }
 
-        let cached_record = read_attrs.as_ref().and_then(|attrs| {
-            attrs.durable_cache_aux().and_then(|aux| {
-                frontend::cache_get(runtime, path, RecordKind::File, aux.as_deref())
-            })
-        });
-        if let Some(record) = cached_record
-            && let Some(payload) = FilePayload::deserialize(&record.payload)
-            && read_attrs
-                .as_ref()
-                .is_none_or(|attrs| frontend::file_payload_matches_attrs(attrs, &payload))
-        {
-            let data = payload.content;
-            let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
-            let attrs = read_attrs.map_or_else(
-                || frontend::exact_file_attrs(size),
-                |attrs| frontend::learned_full_read_attrs(attrs, data.len()),
-            );
-            self.promote_file_attrs(id, attrs.clone());
-            frontend::cache_file_metadata(runtime, path, attrs);
-            return Ok(data);
-        }
-
-        let content_type = String::new();
-        match self.rt.block_on(
-            runtime
-                .namespace()
-                .read_file(path.as_str(), content_type, None),
-        ) {
-            Ok(result) => {
-                let Some(resolved) =
-                    frontend::ResolvedRead::from_provider_result(runtime, path, result)
-                else {
-                    tracing::warn!(path = %path, "NFS read payload could not be resolved");
-                    return Err(Status::Io);
-                };
-                let data = resolved.data;
-                let attrs = frontend::learned_full_read_attrs(resolved.attrs, data.len());
-                if !frontend::full_read_matches_attrs(&attrs, data.len()) {
-                    tracing::warn!(
-                        path = %path,
-                        expected = ?attrs.size,
-                        actual = data.len(),
-                        "provider returned bytes that contradict file attrs"
-                    );
-                    return Err(Status::Io);
+        let node = file_node(mount_name, path, attrs, synthetic);
+        let ctx = RequestCtx::default();
+        match self.rt.block_on(self.tree.read(&node, &ctx)) {
+            Ok(ReadResult::Bytes {
+                data,
+                attrs: read_attrs,
+                ..
+            }) => {
+                if let Some(read_attrs) = read_attrs {
+                    self.promote_file_attrs(id, read_attrs.clone());
+                    frontend::cache_file_metadata(runtime, path, read_attrs);
                 }
-                if resolved.cache_rendered_file
-                    && let Some((aux, record)) =
-                        frontend::durable_file_record(&attrs, &data, resolved.content_type)
-                {
-                    frontend::cache_put(runtime, path, RecordKind::File, aux.as_deref(), &record);
-                }
-                self.promote_file_attrs(id, attrs.clone());
-                frontend::cache_file_metadata(runtime, path, attrs);
                 Ok(data)
             },
-            Err(RuntimeError::ProviderError(error)) => {
-                tracing::warn!(
-                    op = "read",
-                    mount = %mount_name,
-                    path = %path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = %error.message,
-                    "NFS provider read failed"
-                );
-                Err(Self::provider_status(&error))
+            Ok(ReadResult::Backing(backing_path)) => {
+                std::fs::read(backing_path).map_err(|_| Status::Io)
             },
             Err(error) => {
                 tracing::warn!(
@@ -1199,13 +933,19 @@ impl Export {
                     mount = %mount_name,
                     path = %path,
                     error = %error,
-                    "NFS runtime read failed"
+                    "NFS Tree read failed"
                 );
-                Err(Status::Io)
+                Err(Self::tree_status(&error))
             },
         }
     }
 
+    /// Serve a ranged read from the `Tree`-owned `RangedHandle` bound to this
+    /// stateid. `Tree` drives `read_chunk`, validates the chunk against the
+    /// requested length and the projected attrs, and learns the exact size on an
+    /// EOF-short read; the adapter promotes the learned size onto its inode (and
+    /// the cache) so a later `attr` reflects it. NFS clamps the request to the
+    /// max read size; `Tree` enforces the no-oversize-chunk invariant.
     fn read_ranged_state(
         &self,
         id: u64,
@@ -1213,84 +953,35 @@ impl Export {
         offset: u64,
         count: u32,
     ) -> StatusResult<OpenRead> {
-        let runtime = self
-            .runtime_for_mount(&ranged.mount_name)
-            .ok_or(Status::NoEnt)?;
         let count = count.min(MAX_NFS_READ_BYTES);
-        match self.rt.block_on(runtime.namespace().read_chunk(
-            ranged.provider_handle,
-            offset,
-            count,
-        )) {
-            Ok(chunk) => {
-                if chunk.content.len() > count as usize {
-                    tracing::warn!(
-                        path = ranged.path.as_str(),
-                        requested = count,
-                        returned = chunk.content.len(),
-                        "provider returned oversized ranged chunk"
-                    );
-                    return Err(Status::Io);
-                }
-                let content_len = u64::try_from(chunk.content.len()).map_err(|_| Status::Io)?;
-                let observed_end = offset.checked_add(content_len).ok_or(Status::Io)?;
-                if let view_types::FileSize::Exact(size) = ranged.attrs.size
-                    && observed_end > size
-                {
-                    tracing::warn!(
-                        path = ranged.path.as_str(),
-                        offset,
-                        returned = chunk.content.len(),
-                        size,
-                        "provider returned ranged bytes beyond exact file size"
-                    );
-                    return Err(Status::Io);
-                }
-                if chunk.eof {
-                    if let Err(error) = ranged.attrs.validate_observed_size(observed_end) {
-                        tracing::warn!(
-                            path = ranged.path.as_str(),
-                            error,
-                            "provider returned ranged EOF that contradicts file attrs"
-                        );
-                        return Err(Status::Io);
-                    }
-                    if let Some(attrs) =
-                        frontend::learned_ranged_eof_attrs(ranged.attrs.clone(), observed_end)
-                    {
-                        self.promote_file_attrs(id, attrs.clone());
-                        frontend::cache_file_metadata(&runtime, &ranged.path, attrs);
-                    }
-                }
-                Ok(OpenRead {
-                    id,
-                    data: chunk.content,
-                    eof: chunk.eof,
-                })
-            },
-            Err(RuntimeError::ProviderError(error)) => {
-                tracing::warn!(
-                    op = "read",
-                    mount = %ranged.mount_name,
-                    path = %ranged.path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = %error.message,
-                    "NFS provider ranged read failed"
-                );
-                Err(Self::provider_status(&error))
-            },
+        let Chunk {
+            bytes,
+            eof,
+            learned_attrs,
+        } = match self.rt.block_on(ranged.handle.read(offset, count)) {
+            Ok(chunk) => chunk,
             Err(error) => {
                 tracing::warn!(
                     op = "read",
                     mount = %ranged.mount_name,
                     path = %ranged.path,
                     error = %error,
-                    "NFS runtime ranged read failed"
+                    "NFS Tree ranged read failed"
                 );
-                Err(Status::Io)
+                return Err(Self::tree_status(&error));
             },
+        };
+        if let Some(attrs) = learned_attrs {
+            self.promote_file_attrs(id, attrs.clone());
+            if let Some(runtime) = self.runtime_for_mount(&ranged.mount_name) {
+                frontend::cache_file_metadata(&runtime, &ranged.path, attrs);
+            }
         }
+        Ok(OpenRead {
+            id,
+            data: bytes,
+            eof,
+        })
     }
 
     fn read_backing_state(
@@ -1340,10 +1031,6 @@ impl Export {
         if backing_path.is_some() {
             return Ok(());
         }
-        // Exact full-mode projections can be rejected before reading. Non-exact
-        // full-mode projections are still materialized below and checked
-        // against the same cap after bytes are available, matching FUSE open
-        // behavior for static-shape placeholder attrs.
         if let Some(projected_attrs) = attrs
             && matches!(
                 projected_attrs.bytes,
@@ -1370,13 +1057,16 @@ impl Export {
         Ok(())
     }
 
-    fn close_ranged_provider_handle(&self, ranged: &RangedOpen) {
-        if let Some(runtime) = self.runtime_for_mount(&ranged.mount_name)
-            && let Err(error) = runtime.call_close_file(ranged.provider_handle)
-        {
+    /// Release the provider handle behind a removed ranged open through
+    /// `RangedHandle::close`. Consumes the owned `RangedOpen` taken out of the
+    /// stateid table.
+    fn close_ranged_provider_handle(ranged: RangedOpen) {
+        let mount = ranged.mount_name.clone();
+        let path = ranged.path.clone();
+        if let Err(error) = ranged.handle.close() {
             tracing::warn!(
-                mount = %ranged.mount_name,
-                path = %ranged.path,
+                mount = %mount,
+                path = %path,
                 error = %error,
                 "NFS runtime ranged close failed"
             );
@@ -1409,6 +1099,9 @@ impl Export {
         *attrs = Some(probed_attrs);
     }
 
+    /// Open a `Deferred(Ranged)` file through `Tree::open` and register the
+    /// resulting handle under a fresh stateid. `Tree` owns the provider open and
+    /// chunk reads; the adapter keeps the renderer-side stateid binding.
     fn open_ranged_state(
         &self,
         seed: OpenSeed,
@@ -1417,65 +1110,92 @@ impl Export {
         projected_attrs: &FileAttrsCache,
         runtime: &Arc<Runtime>,
     ) -> StatusResult<OpenResult> {
-        match self
-            .rt
-            .block_on(runtime.namespace().open_file(path.as_str()))
-        {
-            Ok(opened) => {
-                let opened_attrs =
-                    match frontend::opened_file_attrs(Some(projected_attrs), &opened.attrs) {
-                        Ok(attrs) => attrs,
-                        Err(error) => {
-                            tracing::warn!(path = %path, error, "open-file returned invalid attrs");
-                            let _ = runtime.call_close_file(opened.handle);
-                            return Err(Status::Io);
-                        },
-                    };
-                self.promote_file_attrs(seed.inode, opened_attrs.clone());
-                frontend::cache_file_metadata(runtime, &path, opened_attrs.clone());
-                let attr = match self.attr(seed.inode) {
-                    Ok(attr) => attr,
-                    Err(status) => {
-                        let _ = runtime.call_close_file(opened.handle);
-                        return Err(status);
-                    },
-                };
-                let stateid = self.opens.open(seed);
-                self.ranged_opens.insert(
-                    stateid.other(),
-                    RangedOpen {
-                        mount_name,
-                        path,
-                        provider_handle: opened.handle,
-                        attrs: opened_attrs,
-                    },
-                );
-                Ok(OpenResult { stateid, attr })
-            },
-            Err(RuntimeError::ProviderError(error)) => {
-                tracing::warn!(
-                    op = "open",
-                    mount = %mount_name,
-                    path = %path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = %error.message,
-                    "NFS provider ranged open failed"
-                );
-                Err(Self::provider_status(&error))
-            },
+        let node = file_node(&mount_name, &path, Some(projected_attrs), None);
+        let ctx = RequestCtx::default();
+        let handle = match self.rt.block_on(self.tree.open(&node, &ctx)) {
+            Ok(handle) => handle,
             Err(error) => {
                 tracing::warn!(
                     op = "open",
                     mount = %mount_name,
                     path = %path,
                     error = %error,
-                    "NFS runtime ranged open failed"
+                    "NFS Tree ranged open failed"
                 );
-                Err(Status::Io)
+                return Err(Self::tree_status(&error));
             },
+        };
+        let opened_attrs = handle.attrs().clone();
+        if let Err(error) = opened_attrs.validate() {
+            tracing::warn!(path = %path, error, "open-file returned invalid attrs");
+            let _ = handle.close();
+            return Err(Status::Io);
         }
+        self.promote_file_attrs(seed.inode, opened_attrs.clone());
+        frontend::cache_file_metadata(runtime, &path, opened_attrs);
+        let attr = match self.attr(seed.inode) {
+            Ok(attr) => attr,
+            Err(status) => {
+                let _ = handle.close();
+                return Err(status);
+            },
+        };
+        let stateid = self.opens.open(seed);
+        self.ranged_opens.insert(
+            stateid.other(),
+            RangedOpen {
+                mount_name,
+                path,
+                handle,
+            },
+        );
+        Ok(OpenResult { stateid, attr })
     }
+}
+
+/// The `EntryMeta` a resolved `Node` projects (kind + optional attrs).
+fn node_meta(node: &Node) -> EntryMeta {
+    EntryMeta {
+        kind: node.kind(),
+        attrs: node.attrs().cloned(),
+    }
+}
+
+/// Build the provider-backed (or synthetic) file `Node` `Tree::read`/`Tree::open`
+/// consume, from inode-cached projection state.
+fn file_node(
+    mount_name: &str,
+    path: &ProtocolPath,
+    attrs: Option<&FileAttrsCache>,
+    synthetic: Option<Synthetic>,
+) -> Node {
+    let meta = match attrs {
+        Some(attrs) => EntryMeta::file(attrs.clone()),
+        None => EntryMeta {
+            kind: view_types::EntryKind::File,
+            attrs: None,
+        },
+    };
+    match synthetic {
+        Some(synthetic) => Node::synthetic(mount_name.to_string(), path.clone(), meta, synthetic),
+        None => Node::new(
+            mount_name.to_string(),
+            path.clone(),
+            meta,
+            Backing::Provider,
+        ),
+    }
+}
+
+/// Build the minimal provider-backed directory `Node` `Tree` needs to resolve a
+/// child or list a directory. The inode table has already proved this is a dir.
+fn provider_dir_node(mount_name: &str, path: &ProtocolPath) -> Node {
+    Node::new(
+        mount_name.to_string(),
+        path.clone(),
+        EntryMeta::directory(),
+        Backing::Provider,
+    )
 }
 
 impl ReadOnlyExport for Export {
@@ -1484,17 +1204,14 @@ impl ReadOnlyExport for Export {
     }
 
     fn attr(&self, id: u64) -> StatusResult<Attr> {
-        let entry = self.entries.get(&id).ok_or(Status::Stale)?;
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         let mount_name = entry.mount_name.clone();
         let backing_path = entry.backing_path.clone();
         drop(entry);
 
-        if !mount_name.is_empty() {
-            self.drain_invalidations_for_mount(&mount_name);
-        }
+        self.drain_invalidations_for_mount(&mount_name);
 
-        let mut entry = self.entries.get_mut(&id).ok_or(Status::Stale)?;
-        entry.last_seen = Instant::now();
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         if let Some(path) = &backing_path {
             let metadata = std::fs::symlink_metadata(path).map_err(|_| Status::Stale)?;
             Self::attr_from_metadata(id, entry.parent, &metadata)
@@ -1520,6 +1237,7 @@ impl ReadOnlyExport for Export {
                 size_exact: true,
                 attrs: None,
                 backing_path: None,
+                synthetic: None,
             }));
         }
 
@@ -1527,11 +1245,10 @@ impl ReadOnlyExport for Export {
             return Ok(EXPORT_ROOT_ID);
         }
 
-        let mut parent_entry = self.entries.get_mut(&parent).ok_or(Status::Stale)?;
+        let parent_entry = self.inodes.get(&parent).ok_or(Status::Stale)?;
         if parent_entry.kind != NodeKind::Directory {
             return Err(Status::NotDir);
         }
-        parent_entry.last_seen = Instant::now();
         let mount_name = parent_entry.mount_name.clone();
         let parent_path = parent_entry.path.clone();
         let scope = parent_entry.scope;
@@ -1539,11 +1256,11 @@ impl ReadOnlyExport for Export {
         drop(parent_entry);
 
         self.drain_invalidations_for_mount(&mount_name);
-        // Invalidations may have just removed `parent` from the object table.
-        // Re-confirm before binding a new child to it, otherwise the child
-        // would inherit an orphan parent inode that fails Status::Stale on
-        // every subsequent attr/lookupp.
-        if !self.entries.contains_key(&parent) {
+        // Invalidations may have just removed `parent` from the inode table.
+        // Re-confirm before binding a child to it, otherwise the child would
+        // inherit an orphan parent inode that fails Status::Stale on every later
+        // attr/lookupp.
+        if !self.inodes.contains_key(&parent) {
             return Err(Status::Stale);
         }
 
@@ -1560,7 +1277,10 @@ impl ReadOnlyExport for Export {
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
         let child_path = parent_path.join_segment(&name);
-        if let Some(result) = self.lookup_from_cached_dirents(
+
+        // NFS-specific: a positive entry in a (possibly non-exhaustive) cached
+        // listing beats the expected-negative shortcut.
+        if let Some(id) = self.lookup_from_cached_dirents(
             scope,
             &mount_name,
             &parent_path,
@@ -1568,13 +1288,9 @@ impl ReadOnlyExport for Export {
             &name,
             &runtime,
         ) {
-            return result;
+            return Ok(id);
         }
-        if let Some(result) =
-            self.lookup_from_cached_lookup(scope, &mount_name, &child_path, parent, &runtime)
-        {
-            return result;
-        }
+
         if Self::expected_negative_probe(name.as_str())
             && self
                 .negative_lookups
@@ -1582,21 +1298,8 @@ impl ReadOnlyExport for Export {
         {
             return Err(Status::NoEnt);
         }
-        let result =
-            self.lookup_via_provider(scope, &mount_name, &parent_path, parent, &name, &runtime);
-        if matches!(result, Err(Status::NoEnt))
-            && let Some(subtree_result) = self.lookup_from_parent_subtree(
-                scope,
-                &mount_name,
-                &parent_path,
-                parent,
-                &name,
-                &runtime,
-            )
-        {
-            return subtree_result;
-        }
-        result
+
+        self.lookup_via_tree(scope, &mount_name, &parent_path, parent, &name, &runtime)
     }
 
     fn readdir(&self, id: u64) -> StatusResult<DirListing> {
@@ -1616,6 +1319,7 @@ impl ReadOnlyExport for Export {
                         size_exact: true,
                         attrs: None,
                         backing_path: None,
+                        synthetic: None,
                     });
                     DirEntry {
                         id: child,
@@ -1630,11 +1334,10 @@ impl ReadOnlyExport for Export {
             });
         }
 
-        let mut entry = self.entries.get_mut(&id).ok_or(Status::Stale)?;
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         if entry.kind != NodeKind::Directory {
             return Err(Status::NotDir);
         }
-        entry.last_seen = Instant::now();
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let scope = entry.scope;
@@ -1642,7 +1345,7 @@ impl ReadOnlyExport for Export {
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.entries.contains_key(&id) {
+        if !self.inodes.contains_key(&id) {
             return Err(Status::Stale);
         }
 
@@ -1651,32 +1354,50 @@ impl ReadOnlyExport for Export {
         }
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        if let Some(record) = frontend::cache_get(&runtime, &path, RecordKind::Dirents, None)
-            && let Some(dirents) = frontend::cached_exhaustive_dirents(&record)
-        {
-            return Ok(self.readdir_from_dirents(scope, &mount_name, &path, id, &dirents));
+        let node = provider_dir_node(&mount_name, &path);
+        let ctx = RequestCtx::default();
+        match self.rt.block_on(self.tree.list(&node, None, &ctx)) {
+            Ok(ListOutcome::Listing(listing)) => {
+                Ok(self.snapshot_from_listing(scope, &mount_name, &path, id, &listing, &runtime))
+            },
+            Ok(ListOutcome::Subtree(dir)) => {
+                if let Some(mut entry) = self.inodes.get_mut(&id)
+                    && entry.backing_path.is_none()
+                {
+                    entry.backing_path = Some(dir.clone());
+                }
+                self.readdir_backing(scope, &mount_name, &path, id, &dir)
+            },
+            Err(error) => {
+                tracing::warn!(
+                    op = "readdir",
+                    mount = %mount_name,
+                    path = %path,
+                    error = %error,
+                    "NFS Tree readdir failed"
+                );
+                Err(Self::tree_status(&error))
+            },
         }
-
-        self.readdir_via_provider(scope, &mount_name, &path, id, &runtime)
     }
 
     fn read(&self, id: u64) -> StatusResult<Vec<u8>> {
-        let mut entry = self.entries.get_mut(&id).ok_or(Status::Stale)?;
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         if entry.kind == NodeKind::Directory {
             return Err(Status::IsDir);
         }
         if entry.kind == NodeKind::Symlink {
             return Err(Status::Invalid);
         }
-        entry.last_seen = Instant::now();
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let attrs = entry.attrs.clone();
         let backing_path = entry.backing_path.clone();
+        let synthetic = entry.synthetic.clone();
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.entries.contains_key(&id) {
+        if !self.inodes.contains_key(&id) {
             return Err(Status::Stale);
         }
 
@@ -1695,22 +1416,21 @@ impl ReadOnlyExport for Export {
         }
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        self.read_provider_file(id, &mount_name, &path, attrs, &runtime)
+        self.read_provider_file(id, &mount_name, &path, attrs.as_ref(), synthetic, &runtime)
     }
 
     fn readlink(&self, id: u64) -> StatusResult<Vec<u8>> {
-        let mut entry = self.entries.get_mut(&id).ok_or(Status::Stale)?;
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         if entry.kind != NodeKind::Symlink {
             return Err(Status::Invalid);
         }
-        entry.last_seen = Instant::now();
         let mount_name = entry.mount_name.clone();
         let Some(path) = entry.backing_path.clone() else {
             return Err(Status::Invalid);
         };
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.entries.contains_key(&id) {
+        if !self.inodes.contains_key(&id) {
             return Err(Status::Stale);
         }
         std::fs::read_link(path)
@@ -1725,29 +1445,34 @@ impl ReadOnlyExport for Export {
         clientid: u64,
         access: u32,
     ) -> StatusResult<OpenResult> {
-        let mut entry = self.entries.get_mut(&id).ok_or(Status::Stale)?;
-        entry.last_seen = Instant::now();
+        let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let mut attrs = entry.attrs.clone();
         let backing_path = entry.backing_path.clone();
+        let synthetic = entry.synthetic.clone();
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
-        if !self.entries.contains_key(&id) {
+        if !self.inodes.contains_key(&id) {
             return Err(Status::Stale);
         }
 
-        self.promote_ranged_attrs_for_open(
-            id,
-            &mount_name,
-            &path,
-            &mut attrs,
-            backing_path.as_deref(),
-        );
+        // A host-synthesized control / ignore file is materialized whole through
+        // `Tree::read` like any other full-mode file (no ranged streaming).
+        if synthetic.is_none() {
+            self.promote_ranged_attrs_for_open(
+                id,
+                &mount_name,
+                &path,
+                &mut attrs,
+                backing_path.as_deref(),
+            );
+        }
 
         Self::enforce_materialize_cap(&mount_name, &path, attrs.as_ref(), backing_path.as_deref())?;
 
-        if backing_path.is_none()
+        if synthetic.is_none()
+            && backing_path.is_none()
             && let Some(projected_attrs) = attrs.as_ref()
             && matches!(
                 projected_attrs.bytes,
@@ -1822,7 +1547,7 @@ impl ReadOnlyExport for Export {
             Ok(_) => Ok(()),
             Err(Status::Expired) => {
                 if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_provider_handle(&ranged);
+                    Self::close_ranged_provider_handle(ranged);
                 }
                 self.backing_opens.remove(&stateid.other());
                 Err(Status::Expired)
@@ -1841,43 +1566,48 @@ impl ReadOnlyExport for Export {
             if !self.backing_opens.contains_key(&stateid.other()) {
                 return Err(Status::BadStateId);
             }
-            let info = match self.opens.read_info(stateid) {
-                Ok(info) => info,
+            match self.opens.read_info(stateid) {
+                Ok(_) => {},
                 Err(Status::Expired) => {
                     self.backing_opens.remove(&stateid.other());
                     return Err(Status::Expired);
                 },
                 Err(status) => return Err(status),
-            };
-            self.touch_entry(info.id);
+            }
             return Self::read_backing_state(&backing, offset, count);
         }
 
-        if let Some(ranged) = self
+        if let Some(mount_name) = self
             .ranged_opens
             .get(&stateid.other())
-            .map(|entry| entry.clone())
+            .map(|entry| entry.mount_name.clone())
         {
-            self.drain_invalidations_for_mount(&ranged.mount_name);
-            if !self.ranged_opens.contains_key(&stateid.other()) {
-                return Err(Status::BadStateId);
-            }
+            // Drain before re-binding the open: an invalidation may evict this
+            // stateid (closing its provider handle). The drain must not run while
+            // a `ranged_opens` guard is held, so the mount name is copied out
+            // first and the entry is re-acquired afterward.
+            self.drain_invalidations_for_mount(&mount_name);
             let info = match self.opens.read_info(stateid) {
                 Ok(info) => info,
                 Err(Status::Expired) => {
-                    self.close_ranged_provider_handle(&ranged);
-                    self.ranged_opens.remove(&stateid.other());
+                    if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
+                        Self::close_ranged_provider_handle(ranged);
+                    }
                     return Err(Status::Expired);
                 },
                 Err(status) => return Err(status),
             };
-            self.touch_entry(info.id);
+            // `read_ranged_state` drives the `RangedHandle` (which only touches
+            // the runtime, never `ranged_opens`), so holding the guard across the
+            // chunk read is safe.
+            let Some(ranged) = self.ranged_opens.get(&stateid.other()) else {
+                return Err(Status::BadStateId);
+            };
             return self.read_ranged_state(info.id, &ranged, offset, count);
         }
 
         let info = self.opens.touch(stateid)?;
-        let mut entry = self.entries.get_mut(&info.id).ok_or(Status::Stale)?;
-        entry.last_seen = Instant::now();
+        let entry = self.inodes.get(&info.id).ok_or(Status::Stale)?;
         let mount_name = entry.mount_name.clone();
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
@@ -1888,14 +1618,14 @@ impl ReadOnlyExport for Export {
         match self.opens.close(stateid) {
             Ok(next_stateid) => {
                 if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_provider_handle(&ranged);
+                    Self::close_ranged_provider_handle(ranged);
                 }
                 self.backing_opens.remove(&stateid.other());
                 Ok(next_stateid)
             },
             Err(Status::Expired) => {
                 if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_provider_handle(&ranged);
+                    Self::close_ranged_provider_handle(ranged);
                 }
                 self.backing_opens.remove(&stateid.other());
                 Err(Status::Expired)
@@ -1917,35 +1647,70 @@ impl ReadOnlyExport for Export {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_host::Dirs;
+    use omnifs_host::cloner::GitCloner;
+    use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
+    use std::path::Path;
+    use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
-
-    struct EmptyRegistry;
-
-    impl RegistryView for EmptyRegistry {
-        fn get(&self, _mount: &str) -> Option<Arc<Runtime>> {
-            None
-        }
-
-        fn mounts(&self) -> Vec<String> {
-            Vec::new()
-        }
-
-        fn root_mount_name(&self) -> Option<String> {
-            None
-        }
-    }
 
     struct TestExport {
         export: Export,
         _runtime: TokioRuntime,
+        _cache_dir: TempDir,
+        _config_dir: TempDir,
+        _providers_dir: TempDir,
     }
 
+    fn wasm_artifact_path(file_name: &str) -> PathBuf {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate must have a workspace parent")
+            .parent()
+            .expect("workspace root must exist");
+        workspace_root
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("release")
+            .join(file_name)
+    }
+
+    /// Build an `Export` over a `ProviderRegistry` with no mounts. Provider round
+    /// trips therefore short-circuit on a missing mount (`runtime_for_mount`
+    /// returns `None`), so these tests drive only the renderer-side budget /
+    /// backing / learned-size logic. Mirrors the FUSE in-crate harness.
     fn empty_export() -> TestExport {
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let providers_dir = tempfile::tempdir().expect("providers dir");
+        let src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
+        assert!(
+            src.exists(),
+            "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers-build` first.",
+            src.display()
+        );
+        std::fs::copy(&src, providers_dir.path().join(ARCHIVE_TOOL_WASM)).expect("copy wasm");
+        let credentials_file = config_dir.path().join("credentials.json");
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let registry = ProviderRegistry::new(
+            Dirs::new(
+                cache_dir.path(),
+                config_dir.path(),
+                providers_dir.path(),
+                &credentials_file,
+            ),
+            cloner,
+        )
+        .expect("registry init");
+
         let runtime = TokioRuntime::new().expect("tokio runtime");
-        let export = Export::with_registry(runtime.handle().clone(), Arc::new(EmptyRegistry));
+        let export = Export::new(runtime.handle().clone(), Arc::new(registry));
         TestExport {
             export,
             _runtime: runtime,
+            _cache_dir: cache_dir,
+            _config_dir: config_dir,
+            _providers_dir: providers_dir,
         }
     }
 
@@ -1975,30 +1740,6 @@ mod tests {
             .expect("test path segment is valid")
     }
 
-    fn insert_stale_leaf(export: &Export, id: u64) {
-        let path = test_path(&format!("stale-{id}"));
-        export
-            .path_to_inode
-            .insert(ObjectKey::new(ROOT_ID, "test", &path), id);
-        export.entries.insert(
-            id,
-            ObjectRecord {
-                scope: ROOT_ID,
-                mount_name: "test".to_string(),
-                path,
-                parent: ROOT_ID,
-                kind: NodeKind::File,
-                size: 1,
-                size_exact: true,
-                attrs: None,
-                backing_path: None,
-                last_seen: Instant::now()
-                    .checked_sub(ENTRY_IDLE_TTL + Duration::from_secs(1))
-                    .expect("test duration is before now"),
-            },
-        );
-    }
-
     fn insert_full_mode_leaf(
         export: &Export,
         id: u64,
@@ -2019,9 +1760,9 @@ mod tests {
         export
             .path_to_inode
             .insert(ObjectKey::new(ROOT_ID, "test", &path), id);
-        export.entries.insert(
+        export.inodes.insert(
             id,
-            ObjectRecord {
+            NodeEntry {
                 scope: ROOT_ID,
                 mount_name: "test".to_string(),
                 path,
@@ -2031,7 +1772,7 @@ mod tests {
                 size_exact: matches!(declared_size, view_types::FileSize::Exact(_)),
                 attrs: Some(attrs),
                 backing_path: None,
-                last_seen: Instant::now(),
+                synthetic: None,
             },
         );
     }
@@ -2041,9 +1782,9 @@ mod tests {
         export
             .path_to_inode
             .insert(ObjectKey::new(ROOT_ID, "test", &path), id);
-        export.entries.insert(
+        export.inodes.insert(
             id,
-            ObjectRecord {
+            NodeEntry {
                 scope: ROOT_ID,
                 mount_name: "test".to_string(),
                 path,
@@ -2053,19 +1794,18 @@ mod tests {
                 size_exact: true,
                 attrs: None,
                 backing_path: Some(backing),
-                last_seen: Instant::now(),
+                synthetic: None,
             },
         );
     }
 
     #[test]
     fn open_state_allows_non_exact_full_mode_to_reach_provider() {
-        // Static-shape file routes can enter NFS with Unknown/Full
-        // placeholder attrs before the file handler projects exact metadata.
-        // They must reach provider materialization instead of being rejected
-        // by the pre-read budget check. This empty test registry has no
-        // runtime, so success for this guard is the later NoEnt path rather
-        // than Resource.
+        // Static-shape file routes can enter NFS with Unknown/Full placeholder
+        // attrs before the file handler projects exact metadata. They must reach
+        // provider materialization instead of being rejected by the pre-read
+        // budget check. This empty registry has no runtime, so success for this
+        // guard is the later NoEnt path rather than Resource.
         for size in [view_types::FileSize::Unknown, view_types::FileSize::NonZero] {
             let harness = empty_export();
             insert_full_mode_leaf(&harness.export, 700, "unknown-full", size);
@@ -2098,8 +1838,6 @@ mod tests {
             matches!(result, Err(Status::Resource)),
             "expected Resource for oversized full-mode OPEN, got {result:?}"
         );
-        // The entry must not have been read from the (absent) provider runtime;
-        // open-state table must remain empty.
         assert!(
             harness.export.opens.active_inodes().is_empty(),
             "OPEN must not register an open instance when it rejects the materialize"
@@ -2111,8 +1849,6 @@ mod tests {
         let harness = empty_export();
         let temp = tempfile::tempdir().expect("backing tempdir");
         let backing = temp.path().join("huge.bin");
-        // Use std::fs::File and set_len to create a sparse file larger than
-        // the cap without consuming actual disk bytes.
         let file = std::fs::File::create(&backing).expect("create backing file");
         file.set_len(OPEN_MATERIALIZE_MAX_BYTES + 1)
             .expect("set backing len");
@@ -2136,43 +1872,6 @@ mod tests {
             .expect("backing read");
         assert_eq!(chunk.data, vec![0]);
         assert!(chunk.eof);
-    }
-
-    #[test]
-    fn idle_leaf_sweep_removes_entry_and_path_index() {
-        let harness = empty_export();
-        insert_stale_leaf(&harness.export, 100);
-
-        harness.export.sweep_idle_entries();
-
-        assert!(!harness.export.entries.contains_key(&100));
-        assert!(!harness.export.path_to_inode.contains_key(&ObjectKey::new(
-            ROOT_ID,
-            "test",
-            &test_path("stale-100")
-        )));
-    }
-
-    #[test]
-    fn idle_leaf_sweep_preserves_open_entries() {
-        let harness = empty_export();
-        insert_stale_leaf(&harness.export, 100);
-        let _stateid = harness.export.opens.open(OpenSeed {
-            generation: 1,
-            inode: 100,
-            clientid: 1,
-            access: 1,
-            materialized_bytes: Vec::new(),
-        });
-
-        harness.export.sweep_idle_entries();
-
-        assert!(harness.export.entries.contains_key(&100));
-        assert!(harness.export.path_to_inode.contains_key(&ObjectKey::new(
-            ROOT_ID,
-            "test",
-            &test_path("stale-100")
-        )));
     }
 
     #[test]
