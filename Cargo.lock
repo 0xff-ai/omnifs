@@ -3985,6 +3985,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-tree"
+version = "0.2.1"
+dependencies = [
+ "omnifs-cache",
+ "omnifs-core",
+ "omnifs-host",
+ "omnifs-inspector",
+ "omnifs-itest",
+ "omnifs-wit",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "omnifs-wit"
 version = "0.2.1"
 dependencies = [

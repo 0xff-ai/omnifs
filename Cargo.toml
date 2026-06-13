@@ -34,6 +34,7 @@ omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-provider = { version = "0.2.1", path = "crates/omnifs-provider" }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
+omnifs-tree = { version = "0.2.1", path = "crates/omnifs-tree" }
 omnifs-cache = { version = "0.2.1", path = "crates/omnifs-cache" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "runtime"] }
