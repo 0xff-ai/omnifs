@@ -23,14 +23,26 @@ struct NfsMountState {
 
 const STATE_VERSION: u8 = 1;
 
+/// Outcome of a host-native teardown sweep.
+///
+/// `unmounted` counts records whose daemon was still alive (a real running
+/// mount we tore down); `swept_orphans` counts records left by a daemon that
+/// had already died (only a stale state file to remove). The distinction keeps
+/// `omnifs down` from claiming it unmounted something when it only cleaned up.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TeardownSummary {
+    pub unmounted: usize,
+    pub swept_orphans: usize,
+}
+
 /// Tear down every host-native NFS mount recorded under `state_dir`.
 ///
-/// Returns the number of mount records processed. Best-effort and idempotent:
-/// an already-unmounted view, a dead daemon, or a failed signal are all
-/// non-fatal. A missing `state_dir` means nothing is running (`Ok(0)`).
-pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<usize> {
+/// Best-effort and idempotent: an already-unmounted view, a dead daemon, or a
+/// failed signal are all non-fatal. A missing `state_dir` means nothing is
+/// running (an empty summary).
+pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownSummary> {
     if !state_dir.exists() {
-        return Ok(0);
+        return Ok(TeardownSummary::default());
     }
 
     let mut records: Vec<(PathBuf, PathBuf, u32)> = Vec::new();
@@ -70,13 +82,25 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<usize> {
         records.push((path, state.mount_point, state.pid));
     }
 
+    let mut summary = TeardownSummary::default();
     for (state_file, mount_point, pid) in &records {
+        // Liveness before we act: a live daemon means a real mount we are
+        // tearing down; a dead one means we are only sweeping a stale file.
+        let was_running = pid_alive(*pid);
         unmount(mount_point);
-        signal_daemon(*pid);
+        if was_running {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            summary.unmounted += 1;
+        } else {
+            summary.swept_orphans += 1;
+        }
         settle_state_file(state_file, *pid);
     }
 
-    Ok(records.len())
+    Ok(summary)
 }
 
 /// `diskutil unmount` is best-effort: an already-unmounted view returns
@@ -103,18 +127,6 @@ fn unmount(mount_point: &Path) {
             );
         },
     }
-}
-
-/// Send `SIGTERM` to the recording daemon if it is still alive. A dead pid
-/// (failed `kill -0`) needs no signal.
-fn signal_daemon(pid: u32) {
-    if !pid_alive(pid) {
-        return;
-    }
-    let _ = Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status();
 }
 
 fn pid_alive(pid: u32) -> bool {

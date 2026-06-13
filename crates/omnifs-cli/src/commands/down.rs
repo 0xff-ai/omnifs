@@ -37,11 +37,16 @@ impl DownArgs {
         let host_native = cfg!(target_os = "macos") && !isolated;
         if host_native {
             let state_dir = paths.cache_dir.join("nfs");
-            let torn = crate::host_teardown::teardown_host_native(&state_dir)?;
-            if torn == 0 {
-                anstream::println!("No host-native omnifs mount is running.");
-            } else {
+            let summary = crate::host_teardown::teardown_host_native(&state_dir)?;
+            if summary.unmounted > 0 {
                 anstream::println!("✓ omnifs unmounted");
+            } else if summary.swept_orphans > 0 {
+                anstream::println!(
+                    "Cleaned up {} stale mount record(s); no live mount was running.",
+                    summary.swept_orphans
+                );
+            } else {
+                anstream::println!("No host-native omnifs mount is running.");
             }
             return Ok(());
         }
