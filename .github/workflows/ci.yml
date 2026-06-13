@@ -394,6 +394,43 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: Build Darwin omnifsd binaries
+        id: build_daemon
+        env:
+          DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
+        run: just ci-build-darwin-daemon
+
+      - name: Package Darwin omnifsd archives
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            case "$arch" in
+              x64) artifact="${{ steps.build_daemon.outputs.x64_artifact }}" ;;
+              arm64) artifact="${{ steps.build_daemon.outputs.arm64_artifact }}" ;;
+            esac
+            mkdir -p "dist/daemon/darwin-$arch"
+            staging="$(mktemp -d)"
+            cp "$artifact" "$staging/omnifsd"
+            chmod 0755 "$staging/omnifsd"
+            tar -C "$staging" -cJf "dist/daemon/darwin-$arch/omnifsd-darwin-$arch.tar.xz" omnifsd
+          done
+
+      - name: Upload Darwin x64 omnifsd archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifsd-darwin-x64
+          path: dist/daemon/darwin-x64/omnifsd-darwin-x64.tar.xz
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload Darwin arm64 omnifsd archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifsd-darwin-arm64
+          path: dist/daemon/darwin-arm64/omnifsd-darwin-arm64.tar.xz
+          retention-days: 90
+          if-no-files-found: error
+
   docker-amd64:
     name: docker amd64
     if: >-

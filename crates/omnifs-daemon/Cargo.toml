@@ -42,7 +42,8 @@ omnifs-fuse = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 
-# Image-only artifact; cargo-dist packages the CLI for macOS only.
+# Not a cargo-dist target: omnifsd ships in the npm CLI platform packages
+# (staged beside omnifs by release.yml), and in the runtime image.
 [package.metadata.dist]
 dist = false
 
