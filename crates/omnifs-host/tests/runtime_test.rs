@@ -44,7 +44,7 @@ async fn test_list_root() {
         .unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 4);
+            assert_eq!(listing.entries.len(), 5);
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -53,6 +53,7 @@ async fn test_list_root() {
             assert!(names.contains(&"items"));
             assert!(names.contains(&"hello"));
             assert!(names.contains(&"scoped"));
+            assert!(names.contains(&"dynamic"));
             assert!(names.contains(&"checkout"));
             assert!(
                 listing
@@ -77,7 +78,7 @@ async fn test_list_hello_dir() {
         .unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 13);
+            assert_eq!(listing.entries.len(), 14);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"message"));
             assert!(names.contains(&"greeting"));
@@ -86,6 +87,7 @@ async fn test_list_hello_dir() {
             assert!(names.contains(&"fresh-full"));
             assert!(names.contains(&"ranged"));
             assert!(names.contains(&"unknown-ranged"));
+            assert!(names.contains(&"large-ranged"));
             assert!(names.contains(&"volatile-tail"));
             assert!(names.contains(&"bundle"));
             assert!(names.contains(&"feed"));
@@ -353,6 +355,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "feed",
             "fresh-full",
             "greeting",
+            "large-ranged",
             "lazy",
             "message",
             "projected",
@@ -690,6 +693,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
             "feed",
             "fresh-full",
             "greeting",
+            "large-ranged",
             "lazy",
             "message",
             "projected",
