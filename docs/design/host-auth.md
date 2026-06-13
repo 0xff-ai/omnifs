@@ -1,11 +1,11 @@
 # Host authentication, OAuth, and credential storage
 
 Status: accepted; current implementation covers static-token auth, generic OAuth plumbing, GitHub device-code OAuth, and Linear PKCE OAuth.
-Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.provider.json`), `crates/omnifs-mount-schema`, `crates/omnifs-sdk`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/http.rs`, `crates/omnifs-cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
+Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.provider.json`), `crates/omnifs-mount`, `crates/omnifs-provider`, `crates/omnifs-sdk`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/http.rs`, `crates/omnifs-cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
 
 ## Context
 
-omnifs providers run sandboxed as `wasm32-wasip2` components. They cannot speak to the network, the host credential file, or a system browser directly. Every external call rides a host-mediated callout (`fetch`, `fetch-blob`, `git-open-repo`, `ws-*`). The host is the only place credentials live and the only place token acquisition can happen.
+omnifs providers run sandboxed as `wasm32-wasip2` components. They cannot speak to the network, the host credential file, or a system browser directly. Every external call rides a host-mediated callout (`fetch`, `git-open-repo`, `fetch-blob`, `open-archive`, `read-blob`). The host is the only place credentials live and the only place token acquisition can happen.
 
 Each provider design under `docs/design/providers/` punts on this question, declaring `auth_types: ["oauth2"]` or `["bearer-token"]` and assuming the host will "inject the right header". This document specifies what that means.
 
@@ -38,7 +38,7 @@ Keep vendor knowledge inside providers. The host's OAuth engine reads metadata s
 
 Store tokens in the resolved `credentials.json` file with private file and directory permissions. A single file store makes startup non-interactive across local builds, installed binaries, CI, and containers, and lets the trusted daemon refresh credentials through the writable `OMNIFS_HOME` bind.
 
-Refresh transparently. A 401 inside a provider callout triggers a file-lock-protected refresh and one retry; the provider observes a successful response on the second attempt or a `permission-denied` callout error if refresh fails.
+Refresh transparently. A 401 inside a provider callout triggers a singleflight-coalesced refresh and one retry; the provider observes a successful response on the second attempt or a `permission-denied` callout error if refresh fails.
 
 Keep the auth strategy abstraction provider-agnostic. OAuth and static bearer are host HTTP-auth strategies. Non-HTTP credentials, such as DSNs and file paths, stay in the provider's instance config, outside the host auth layer and credential store.
 
@@ -61,13 +61,17 @@ Defended:
 - **Accidental credential exposure.** The credential file is written under the user's omnifs config directory with private file and directory permissions. Encryption-at-rest belongs to the OS or disk layer.
 - **Token leakage through provider sandbox.** The provider cannot read host memory or the host credential file. The only token exposure surface is the `Authorization` header on the outgoing HTTP request, which the provider does not see (the host attaches it after the callout crosses the WIT boundary).
 - **Mis-targeted token injection.** Tokens are scoped to a domain set declared in capabilities; the host refuses to inject on URLs outside that set. A provider asking the host to fetch `https://attacker.example/` does not receive the GitHub token.
-- **Refresh races.** A cross-process file lock ensures that N concurrent 401s do not produce N parallel refresh requests (some vendors throttle aggressively and rotate refresh tokens on use, which invalidates parallel callers).
+- **Refresh races.** In-process singleflight coalescing (an `async_singleflight::Group` keyed by the credential storage key) ensures that N concurrent 401s inside one host process do not produce N parallel refresh requests (some vendors throttle aggressively and rotate refresh tokens on use, which invalidates parallel callers).
 
 Not defended:
 
 - **Compromise of the host process or the Unix user.** Anyone with code execution as the owning user can read the credential file. That is the standard desktop trust boundary.
 - **Compromise of the vendor's OAuth surface.** Outside our control.
 - **Stolen refresh tokens.** Once stolen, they can be used until revoked. `omnifs auth logout --revoke` revokes server-side when the provider declares a revocation endpoint.
+
+## Runtime trust boundary
+
+Treat the omnifs host runtime as trusted: the host CLI, `omnifsd`, and its Docker container are one trusted control plane for local execution. Do not design credential or layout boundaries around hiding `~/.omnifs` from the container when the runtime needs that state; the container already runs trusted host code and receives host authority such as the SSH agent, selected secrets, preopens, and sometimes Docker access. Sharing runtime-home state with the trusted daemon is acceptable; exposing additional filesystem authority directly to provider WASM is not. The untrusted boundary is provider code, constrained by WASI preopens, host-mediated callouts, capability checks, and mount-specific auth materialization (see `architecture.md` section 10).
 
 ## Where vendor knowledge lives: the auth manifest
 
@@ -112,10 +116,12 @@ OAuthFlow:
   deviceCode(DeviceCodeConfig)
 ```
 
-Manifest validation is schema-backed at provider load. The schema is stricter than `"format": "uri"` for OAuth endpoints:
+The per-scheme `injectDomains`, `injectHeaderName`, and `injectValuePrefix` fields above are the resolved runtime shape. Provider manifests author them once in an `auth.inject` block (`auth.inject.domains`, with optional header name and value prefix), which is eagerly applied to every scheme at deserialization.
 
-- `authorizationEndpoint`, `tokenEndpoint`, `revocationEndpoint`, and `deviceAuthorizationEndpoint` must match `^https://`.
-- `pkceLoopback.redirectUriTemplate` must match `.*\{port\}.*`.
+Manifest validation runs as imperative checks at provider load, stricter than a bare URI parse for OAuth endpoints:
+
+- `authorizationEndpoint`, `tokenEndpoint`, `revocationEndpoint`, and `deviceAuthorizationEndpoint` must start with `https://`.
+- `pkceLoopback.redirectUriTemplate` must contain `{port}`.
 - `pkceManualCode.redirectUri` must not contain `{port}`.
 - `injectDomains` entries are hostnames, not URLs; the host rejects schemes, paths, and wildcards.
 
@@ -205,6 +211,8 @@ provider ─WIT─►  │           (fetch / fetch-blob)       │
 
 The generic OAuth engine lives in `crates/omnifs-auth`. It takes OAuth scheme metadata from the auth manifest plus a `CredentialStore` handle and runs the flow. It does not import any provider's name and does not pattern-match on URLs.
 
+`omnifs-auth` is the OAuth protocol client and nothing more: `OAuthClient` plus the device, loopback, and manual flows. It is not mount auth config, credential storage, or manifest parsing. Its `lib.rs` is mostly re-exports; the implementation lives in `client.rs` and `request.rs`.
+
 ## Configuration
 
 Each mount's instance JSON gets an optional `auth` block. The provider's auth manifest is the source of defaults; the config is the override layer.
@@ -270,6 +278,19 @@ The provider's auth manifest contains a `staticToken` scheme with the appropriat
 
 These are provider instance-config values, not HTTP auth schemes. A DSN has no `injectDomains` meaning; a file path is opaque provider configuration, usually paired with a WASI preopen or host-expanded config value. The host stores or redacts the config value but does not inject it into HTTP callouts, refresh it, or model it as an OAuth credential.
 
+## Mount loading and resolved mounts
+
+The auth layer reads from resolved mounts, not from raw mount JSON. The mount config types are shared between the CLI and the daemon.
+
+- Mount config types (`Spec`, `Resolved`, `Catalog`, builtins) live in `omnifs_mount::mounts`.
+- `omnifs_mount::mounts::Spec` is the raw user-authored mount JSON.
+- `omnifs_mount::mounts::Resolved` is the runtime-ready mount after provider metadata and defaults have been applied.
+- Provider-contract types (`ProviderManifest`, manifest parsing, `AuthScheme`) live in `omnifs_provider`.
+- `resolve_mount_spec(spec, require_metadata)` covers strict load versus the best-effort delete and reset paths.
+- `CredentialTarget` and runtime payload materialization operate on `Resolved`, not on raw mount JSON plus a late `apply_metadata` pass.
+- Host-managed credentials require `provider_id`, always present on `Resolved`, plus `auth.scheme` and an optional `auth.account`.
+- Static mounts may still use `token_env` or `token_file` for external, user-managed secrets. Host-managed credential state does not move into mount JSON.
+
 ## PKCE auth-code flow (loopback redirect)
 
 The flow runs out-of-band, driven by `omnifs auth login <mount>`. The daemon does not drive it on first FUSE access.
@@ -283,7 +304,7 @@ The flow runs out-of-band, driven by `omnifs auth login <mount>`. The daemon doe
 7. Wait on the listener with a 5-minute deadline. On accept, parse the request line, verify `state` (constant-time compare), render a "you can close this tab" success page, cancel the token. State mismatch returns HTTP 400 and continues listening (browser prefetches sometimes hit the URL early).
 8. Exchange the code with the PKCE verifier and any `extraTokenParams` from the manifest.
 9. Compute `expires_at = now + expires_in - 60s` and assemble a `CredentialEntry`.
-10. Write the entry to the store under key `(providerId, scheme, account)`.
+10. Write the entry to the store under a `CredentialId` built from `(provider_id, scheme, account)` (wire form `provider:scheme:account`).
 
 The `pkceManualCode` shape replaces steps 4-7: no listener, no browser open, the redirect URI is the one the vendor enforces, the user pastes the code into a CLI prompt. Everything else is identical.
 
@@ -295,31 +316,36 @@ The `CredentialStore` trait and storage layout are independent of which provider
 
 ```rust
 pub trait CredentialStore: Send + Sync {
-    fn put(&self, key: &CredentialKey, entry: &CredentialEntry) -> Result<(), StoreError>;
-    fn get(&self, key: &CredentialKey) -> Result<Option<CredentialEntry>, StoreError>;
-    fn delete(&self, key: &CredentialKey) -> Result<(), StoreError>;
-    fn list(&self) -> Result<Vec<CredentialKey>, StoreError>;
-    fn supports_list(&self) -> bool { true }
+    fn put(&self, key: &CredentialId, entry: &CredentialEntry) -> Result<(), StoreError>;
+    fn get(&self, key: &CredentialId) -> Result<Option<CredentialEntry>, StoreError>;
+    fn delete(&self, key: &CredentialId) -> Result<(), StoreError>;
+    // Backends that cannot enumerate return `Ok(None)`.
+    fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError>;
     fn backend_label(&self) -> String;
 }
 
-pub struct CredentialKey {
-    pub provider_id: String,  // stable provider identity, see open question 1
-    pub scheme: String,       // OauthScheme.key or StaticTokenScheme.key
-    pub account: String,      // user-chosen handle, opaque to the host
-}
+// The store key is `omnifs_core::CredentialId`, built from
+// `CredentialId::new(provider_id, scheme, account)`. Its only public wire
+// form is `storage_key()` = `provider:scheme:account`. The parts:
+//   provider_id: stable provider identity, see open question 1
+//   scheme:      OauthScheme.key or StaticTokenScheme.key
+//   account:     user-chosen handle, opaque to the host
 
+// CredentialEntry keeps its fields private. The secret is `value:
+// SecretString`, read only via `access_token() -> &SecretString`, and the
+// entry serializes through a private wire type. Accessor methods expose the
+// rest:
 pub struct CredentialEntry {
-    pub kind: CredentialKind,            // StaticToken | Oauth
-    pub access_token: SecretString,
-    pub refresh_token: Option<SecretString>,
-    pub expires_at: Option<OffsetDateTime>,
-    pub token_type: String,
-    pub scopes: Vec<String>,
-    pub stored_at: OffsetDateTime,
-    pub last_validated: Option<OffsetDateTime>,
-    pub upstream_identity: Option<String>,
-    pub extras: BTreeMap<String, String>,
+    kind: AuthKind,                  // StaticToken | OAuth
+    value: SecretString,             // access token; read via access_token()
+    refresh_token: Option<SecretString>,
+    expires_at: Option<OffsetDateTime>,
+    token_type: String,
+    scopes: Vec<String>,
+    stored_at: OffsetDateTime,
+    last_validated: Option<OffsetDateTime>,
+    upstream_identity: Option<String>,
+    extras: BTreeMap<String, String>,
 }
 ```
 
@@ -329,6 +355,10 @@ Two concrete implementations:
 - `MemoryStore`: in-process map for tests.
 
 Startup uses the file backend. There is no dual-write store and no second production credential backend.
+
+The file store is intentionally the local runtime credential contract. The trusted daemon reads and writes the same `credentials.json` file through the writable `OMNIFS_HOME` bind, giving omnifs a known path, enumerable keys, atomic writes, and private Unix permissions without depending on a desktop secret service in containers or headless environments.
+
+`oauth2` 5.0.0 still binds its `reqwest` integration to `reqwest` 0.12. Keep `omnifs-auth` on a direct `reqwest` 0.12 dependency and use the `reqwest-oauth2` alias in `omnifs-host` for OAuth refresh clients until `oauth2` supports `reqwest` 0.13. The workspace `reqwest` dependency is for normal host and CLI HTTP clients and may be newer.
 
 Encryption-at-rest for the credential file is out of scope: the file is mode 600 inside the user's omnifs config directory, and the threat model treats user-account compromise as a separate problem.
 
@@ -345,7 +375,7 @@ Mid-callout 401 retry in `HttpStack::send`:
 1. Dispatch the request. On 200-2xx or non-auth error, return.
 2. On 401 (or 403 with `WWW-Authenticate: Bearer error="invalid_token"`), call `auth.refresh_for_url(url)`. If refresh succeeds, rebuild headers and retry once. If the retry also 401s, surface the original response to the provider.
 
-In-process refresh coalescing: a singleflight group keyed by `CredentialKey` collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future. `FileStore` still locks its own JSON read-modify-write operations, but OAuth refresh itself is not a separate cross-process file protocol.
+In-process refresh coalescing: a singleflight group keyed by the credential `storage_key()` (`provider:scheme:account`) collapses concurrent refreshes inside one host process. The Nth concurrent caller awaits the leader's future. `FileStore` still locks its own JSON read-modify-write operations, but OAuth refresh itself is not a separate cross-process file protocol.
 
 The in-process current-token slot is an atomic swap container, so readers see either the pre-rotation or post-rotation `(access, refresh)` pair atomically, never torn. The provider's declared `refreshTokenRotates: true/false` is only a scheduling hint.
 
@@ -412,8 +442,38 @@ All diagnostic surfaces (`omnifs auth status`, `omnifs auth scopes`, `omnifs deb
 | Loopback port blocked by firewall | Listener bind succeeds but callback never arrives. | Manual-code fallback if the scheme allows; otherwise document the firewall as a known limitation. |
 | Vendor changes auth URL or token URL | Provider's declared endpoints become stale. | Provider author ships a new `.wasm` with corrected metadata. The host requires no release. |
 | Scope drift (provider needs new scope after a release) | Vendor returns `permission-denied` from a specific endpoint. | `omnifs auth scopes <mount>` shows the gap between declared and granted; user reruns `omnifs auth login` to consent again. |
-| Two mounts share an OAuth account | Both try to refresh simultaneously. | In-process singleflight avoids duplicate local work; the cross-process file lock serializes the durable refresh. Identical `(providerId, scheme, account)` shares a token. |
+| Two mounts share an OAuth account | Both try to refresh simultaneously. | In-process singleflight avoids duplicate local work within one host process; `FileStore`'s `.lock` sidecar serializes the credentials.json read-modify-write. Identical `(provider_id, scheme, account)` shares a token. |
 | Provider auth manifest declares an unsupported flow shape | Strategy construction fails. | CLI surfaces "this mount needs host version ≥ X to authenticate". |
+
+## Git clone and the contributor dev path
+
+Git clone is a separate credential path from the HTTP auth engine above; it rides the SSH agent, not the credential store.
+
+- Remote format is `git@github.com:<owner>/<repo>.git`.
+- Auth comes from the forwarded `SSH_AUTH_SOCK`. Do not mount host private keys into the container.
+
+The contributor sandbox uses a third path again. `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container. The normal user path (`omnifs init` plus `omnifs up`) keeps OAuth and static-token credentials in the file-backed credential store at `~/.omnifs/credentials.json`.
+
+Container startup requires:
+
+- host `gh auth token` works so `omnifs dev` can capture and write `.secrets/github_token`
+- host `SSH_AUTH_SOCK` is set
+- host SSH agent has a usable GitHub key loaded
+
+Useful host checks:
+
+```bash
+test -s .secrets/github_token || gh auth token > .secrets/github_token
+ssh-add -L
+ssh -T git@github.com
+```
+
+Useful container checks:
+
+```bash
+cat /tmp/omnifs.log
+ssh -F /dev/null -T git@github.com
+```
 
 ## Open questions
 
