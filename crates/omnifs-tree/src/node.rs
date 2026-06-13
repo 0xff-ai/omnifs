@@ -15,6 +15,49 @@ pub enum Backing {
     Subtree(PathBuf),
 }
 
+/// A host-synthesized entry that no provider projects, represented identically
+/// for every renderer so FUSE and NFS materialize it the same way. The two
+/// concrete cases differ in HOW their bytes are produced, captured by the
+/// `content`:
+///
+/// - the mount-root ignore files (`.gitignore`/`.ignore`/`.rgignore`) are
+///   `Fixed` static bytes (`@*\n`), so a recursive ignore-respecting tool skips
+///   the `@`-prefixed control files during a tree walk;
+/// - the pagination controls (`@next`/`@all`) are a `PaginationControl` ACTION:
+///   reading one runs the host's accumulating pagination (advancing the parent
+///   directory's cached dirents) and returns a one-line status, so the content
+///   is computed at read time, not stored.
+///
+/// `Tree::resolve` returns a `Node` carrying this when the name is synthetic;
+/// `Tree::list` appends `Entry`s carrying it; `Tree::read` dispatches on it.
+/// A renderer never inspects the variant: it reads the node's bytes through
+/// `Tree::read` and gets the right behavior for free. The renderer DOES learn
+/// the leaf is synthetic (via `Node::synthetic`) so it can, e.g., serve the
+/// bytes from a per-handle buffer and never re-run a mutating control action on
+/// a partial read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Synthetic {
+    pub content: SyntheticContent,
+}
+
+/// How a synthetic entry's bytes are produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntheticContent {
+    /// Static bytes served verbatim (the mount-root ignore files).
+    Fixed(Vec<u8>),
+    /// A pagination control action over the parent directory. `Next` advances
+    /// one page; `All` advances to exhaustion (host-capped). The action mutates
+    /// the parent's cached dirents and is resolved at read time.
+    PaginationControl(PaginationControl),
+}
+
+/// Which pagination action a `@next`/`@all` control runs when read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginationControl {
+    Next,
+    All,
+}
+
 /// Stable, content-addressable identity = (mount, mount-relative protocol path).
 /// This IS the cache key everywhere in omnifs, so it survives Tree-internal
 /// eviction: a renderer encodes it (or a hash) into a FUSE inode-table key or a
@@ -39,6 +82,10 @@ pub struct Node {
     path: Path,
     meta: EntryMeta,
     backing: Backing,
+    /// `Some` when this node is a host-synthesized entry (a pagination control
+    /// or a mount-root ignore file) the renderer must read through `Tree::read`
+    /// rather than dispatch to the provider.
+    synthetic: Option<Synthetic>,
 }
 
 impl Node {
@@ -48,6 +95,20 @@ impl Node {
             path,
             meta,
             backing,
+            synthetic: None,
+        }
+    }
+
+    /// Construct a host-synthesized node (a pagination control or a mount-root
+    /// ignore file). The `meta` carries the entry's projected attrs (so a
+    /// renderer can stat it without a read); `synthetic` carries the byte source.
+    pub fn synthetic(mount: String, path: Path, meta: EntryMeta, synthetic: Synthetic) -> Self {
+        Self {
+            mount,
+            path,
+            meta,
+            backing: Backing::Provider,
+            synthetic: Some(synthetic),
         }
     }
 
@@ -91,6 +152,18 @@ impl Node {
         !matches!(self.backing, Backing::Provider)
     }
 
+    /// The synthetic descriptor when this node is a host-synthesized entry; a
+    /// renderer reads it through `Tree::read` and (for a control) must serve the
+    /// result from a per-handle buffer so a partial read never re-runs the
+    /// mutating action.
+    pub fn synthetic_kind(&self) -> Option<&Synthetic> {
+        self.synthetic.as_ref()
+    }
+
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic.is_some()
+    }
+
     /// Stable identity the renderer persists in its kernel handle.
     pub fn id(&self) -> NodeId {
         NodeId {
@@ -102,9 +175,25 @@ impl Node {
 
 /// One child within a `Listing`. Renderer-neutral: name + meta. The renderer
 /// mints its own inode/filehandle over (parent.mount, parent.path.join(name))
-/// and reads attrs from meta without a second resolve.
+/// and reads attrs from meta without a second resolve. `synthetic` is `Some`
+/// for the host-synthesized control / ignore entries `Tree` appends to a
+/// listing; the renderer marks its inode/handle so a later `read` of that child
+/// goes back through `Tree::read` (where the synthetic byte source is served)
+/// rather than the provider.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub meta: EntryMeta,
+    pub synthetic: Option<Synthetic>,
+}
+
+impl Entry {
+    /// A normal provider-projected child.
+    pub fn provider(name: String, meta: EntryMeta) -> Self {
+        Self {
+            name,
+            meta,
+            synthetic: None,
+        }
+    }
 }

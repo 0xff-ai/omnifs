@@ -12,13 +12,14 @@ use std::path::PathBuf;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::view as view_types;
 use omnifs_core::view::{FileAttrsCache, FilePayload};
+use omnifs_host::pagination::{self, NextPageOutcome};
 use omnifs_host::wit_protocol::file_attrs_from_attrs;
 use omnifs_host::{Error, Runtime};
 use omnifs_wit::provider::types::{ByteSource, ReadFileResult};
 use tracing::warn;
 
 use crate::error::{Result, TreeError};
-use crate::node::{Backing, Node};
+use crate::node::{Backing, Node, PaginationControl, SyntheticContent};
 use crate::{RequestCtx, Tree};
 
 /// Result of `Tree::read`. A two-arm shape so a treeref-backed node (read via
@@ -59,6 +60,14 @@ impl Tree {
     /// buffer FUSE keeps, the inode size promotion) and kernel offset/size
     /// slicing; `Tree::read` returns the whole rendered file.
     pub async fn read(&self, node: &Node, ctx: &RequestCtx) -> Result<ReadResult> {
+        // A host-synthesized node (a mount-root ignore file or a `@next`/`@all`
+        // pagination control) is served by `Tree`, never the provider. The
+        // renderer materializes the result into a per-handle buffer so a partial
+        // or repeated read never re-runs the (mutating) control action.
+        if let Some(synthetic) = node.synthetic_kind() {
+            return self.read_synthetic(node, &synthetic.content, ctx).await;
+        }
+
         // A treeref-backed node is served by the renderer from the real backing
         // dir; `Tree` hands the path back without a provider round trip.
         if let Backing::Subtree(dir) = node.backing() {
@@ -131,6 +140,63 @@ impl Tree {
         };
 
         finish_read(&runtime, path, result, op_gen)
+    }
+
+    /// Serve a host-synthesized node. A `Fixed` synthetic (a mount-root ignore
+    /// file) returns its static bytes with the node's projected attrs; a
+    /// `PaginationControl` runs the accumulating pagination action over the
+    /// parent directory, invalidates the parent's cached dirents so a later
+    /// listing reflects the grown feed, and returns a one-line status with a
+    /// learned exact size so `cat` reads the whole message.
+    async fn read_synthetic(
+        &self,
+        node: &Node,
+        content: &SyntheticContent,
+        ctx: &RequestCtx,
+    ) -> Result<ReadResult> {
+        match content {
+            SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
+                data: bytes.clone(),
+                attrs: node.attrs().cloned(),
+                content_type: None,
+            }),
+            SyntheticContent::PaginationControl(action) => {
+                let runtime = self.runtime_for(node.mount())?;
+                let Some((parent, _)) = node.path().parent_and_name() else {
+                    return Err(TreeError::invalid_input(format!(
+                        "pagination control has no parent: {}",
+                        node.path().as_str()
+                    )));
+                };
+                let status = match action {
+                    PaginationControl::All => {
+                        runtime.paginate_all(parent.as_str(), ctx.trace).await
+                    },
+                    PaginationControl::Next => {
+                        match runtime.paginate_next(parent.as_str(), ctx.trace).await {
+                            NextPageOutcome::Loaded { added, more } => format!(
+                                "loaded +{added} entries; {}\n",
+                                if more { "more available" } else { "complete" }
+                            ),
+                            NextPageOutcome::NoMore => "no more pages\n".to_string(),
+                            NextPageOutcome::Error(message) => message,
+                        }
+                    },
+                };
+                // The action grew (or exhausted) the parent's accumulated
+                // dirents; drop the parent's mem listing so a later browse
+                // re-reads the stored record. The kernel re-list notify stays
+                // renderer-side (driven from the InvalidationReport).
+                runtime.mem_invalidate(parent.as_str(), RecordKind::Dirents, None);
+                let bytes = status.into_bytes();
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                Ok(ReadResult::Bytes {
+                    data: bytes,
+                    attrs: Some(pagination::control_read_attrs(len)),
+                    content_type: None,
+                })
+            },
+        }
     }
 }
 

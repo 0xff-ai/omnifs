@@ -36,6 +36,7 @@ mod list;
 mod node;
 mod read;
 mod resolve;
+mod synthetic;
 
 use std::sync::Arc;
 
@@ -48,7 +49,9 @@ pub use crate::error::{Result, TreeError, TreeErrorKind};
 pub use crate::handle::RangedHandle;
 pub use crate::invalidate::{InvalidationReport, WatchStream};
 pub use crate::list::{Cursor, ListOutcome, Listing};
-pub use crate::node::{Backing, Entry, Node, NodeId};
+pub use crate::node::{
+    Backing, Entry, Node, NodeId, PaginationControl, Synthetic, SyntheticContent,
+};
 pub use crate::read::{Chunk, ReadResult};
 
 /// Internal mount-resolution backing. `Tree::new` wraps a full
