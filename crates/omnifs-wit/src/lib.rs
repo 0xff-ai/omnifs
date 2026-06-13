@@ -145,6 +145,20 @@ pub mod provider {
             }
         }
     }
+
+    impl types::ProviderEvent {
+        /// The kebab-case label of this variant, matching the `provider-event`
+        /// cases in the `omnifs:provider` WIT.
+        #[must_use]
+        pub fn name(&self) -> &'static str {
+            match self {
+                types::ProviderEvent::FileChanged(_) => "file-changed",
+                types::ProviderEvent::WebhookReceived(_) => "webhook-received",
+                types::ProviderEvent::TimerTick => "timer-tick",
+                types::ProviderEvent::AuthRefreshed => "auth-refreshed",
+            }
+        }
+    }
 }
 
 /// Generated bindings for the `omnifs:tool-archive` package.

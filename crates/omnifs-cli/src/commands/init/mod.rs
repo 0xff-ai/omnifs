@@ -685,6 +685,7 @@ mod tests {
             display_name: "Linear".to_string(),
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
+            contract: None,
             capabilities: vec![
                 omnifs_provider::CapabilityEntry::Domain {
                     value: "api.linear.app".to_string(),

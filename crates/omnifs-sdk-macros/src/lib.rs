@@ -32,10 +32,11 @@ mod provider_macro;
 /// Arguments (all optional unless noted):
 ///
 /// - `metadata = "omnifs.provider.json"`: path relative to the crate root.
-///   The manifest is validated at compile time, embedded verbatim in the
-///   `omnifs.provider-metadata.v1` custom section, and supplies the
-///   provider name/description (overridable with `name = ".."` /
-///   `description = ".."`; `version = ".."` overrides the crate version).
+///   The manifest is validated at compile time, stamped with SDK/WIT contract
+///   evidence, embedded in the `omnifs.provider-metadata.v1` custom section,
+///   and supplies the provider name/description (overridable with
+///   `name = ".."` / `description = ".."`; `version = ".."` overrides the
+///   crate version).
 /// - `resources(git = <bool>, memory_mb = <int>, endpoints = [TypeA, ..])`:
 ///   requested capabilities. `endpoints` is a declared-intent list of
 ///   [`Endpoint`](../omnifs_sdk/endpoint/trait.Endpoint.html) types,
@@ -43,7 +44,8 @@ mod provider_macro;
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
 ///   handler `async fn method(cx: Cx<State>) -> Result<Effects>`; the
 ///   interval is exported as the manifest's `refresh-interval-secs`.
-///   Non-timer provider events currently return empty effects.
+///   Provider events without a registered handler warn and return empty
+///   effects.
 ///
 /// What the expansion does, so debugging is not archaeology: it defines the
 /// provider type, thread-local `STATE`/`ROUTER`/async-runtime/range-handle
