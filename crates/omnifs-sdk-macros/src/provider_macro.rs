@@ -267,12 +267,15 @@ fn read_manifest_facts(
             ),
         )
     })?;
-    let manifest = omnifs_provider::ProviderManifest::from_bytes(&bytes).map_err(|error| {
+    let mut manifest = omnifs_provider::ProviderManifest::from_bytes(&bytes).map_err(|error| {
         syn::Error::new(
             metadata_path.span(),
             format!("invalid provider manifest {}: {error}", path.display()),
         )
     })?;
+    manifest.contract = Some(omnifs_provider::ContractEvidence::current(env!(
+        "CARGO_PKG_VERSION"
+    )));
     let name = manifest.id.clone();
     let description = manifest.display_name.clone();
     let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {
@@ -672,6 +675,15 @@ fn generate_notify(
     state_type: &Type,
     timer: Option<&TimerSpec>,
 ) -> TokenStream2 {
+    let warn_ignored_event = quote! {
+        omnifs_sdk::omnifs::provider::log::log(&omnifs_sdk::omnifs::provider::types::LogEntry {
+            level: omnifs_sdk::omnifs::provider::types::LogLevel::Warn,
+            message: format!(
+                "ignored provider event `{}`: no handler registered",
+                event.name()
+            ),
+        });
+    };
     let dispatch = if let Some(timer) = timer {
         let method = timer
             .handler
@@ -680,7 +692,7 @@ fn generate_notify(
             .map(|segment| segment.ident.clone());
         let method = method.unwrap_or_else(|| format_ident!("on_tick"));
         quote! {
-            match event {
+            match &event {
                 omnifs_sdk::omnifs::provider::types::ProviderEvent::TimerTick => {
                     match #type_name::#method(future_cx).await {
                         Ok(effects) => omnifs_sdk::prelude::ProviderReturn::with_effects(
@@ -690,15 +702,19 @@ fn generate_notify(
                         Err(error) => omnifs_sdk::prelude::err(error),
                     }
                 },
-                _ => omnifs_sdk::prelude::ProviderReturn::with_effects(
-                    omnifs_sdk::prelude::OpResult::OnEvent,
-                    omnifs_sdk::prelude::Effects::new().into_wit(),
-                ),
+                _ => {
+                    #warn_ignored_event
+                    omnifs_sdk::prelude::ProviderReturn::with_effects(
+                        omnifs_sdk::prelude::OpResult::OnEvent,
+                        omnifs_sdk::prelude::Effects::new().into_wit(),
+                    )
+                },
             }
         }
     } else {
         quote! {
-            let _ = (future_cx, event);
+            let _ = future_cx;
+            #warn_ignored_event
             omnifs_sdk::prelude::ProviderReturn::with_effects(
                 omnifs_sdk::prelude::OpResult::OnEvent,
                 omnifs_sdk::prelude::Effects::new().into_wit(),

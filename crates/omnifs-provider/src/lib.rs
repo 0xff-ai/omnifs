@@ -30,7 +30,10 @@ pub use auth_wire::{
 pub use config::{
     ConfigProperty, ConfigSchema, ConfigSchemaType, InitHint, InitInput, PreopenStrategy,
 };
-pub use manifest::{AuthInject, CapabilityEntry, ProviderAuthManifest, ProviderManifest};
+pub use manifest::{
+    AuthInject, CapabilityEntry, ContractEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest,
+    ProviderManifest,
+};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
