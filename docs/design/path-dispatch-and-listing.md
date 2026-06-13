@@ -1,6 +1,6 @@
 # Path dispatch and listing semantics
 
-Status: superseded by docs/design/object-cache-primary.md and ADR-0001 §8 for current dispatch semantics; retained as the rules-of-dispatch reference for provider authors.
+Status: superseded by docs/design/object-cache-primary.md and docs/design/architecture.md §6 for current dispatch semantics; retained as the rules-of-dispatch reference for provider authors.
 Scope: `crates/omnifs-sdk` (route registration, lookup/list dispatch), `crates/omnifs-host` (FUSE cache, lookup short-circuit), provider authoring conventions
 
 ## Context
@@ -26,7 +26,7 @@ Patterns are ordered by `Pattern::precedence_key()`, a 4-tuple compared lexicogr
 3. More prefix captures (e.g. `_v{ver}`) wins over bare captures.
 4. Longer patterns win as a tiebreaker.
 
-Counts are summed over the pattern, not compared segment-by-segment from the left. Pairs that could match the same concrete path with the same precedence key are rejected at registration by `validate_ambiguous_routes`; this is the safety valve that makes count-based precedence sound.
+Counts are summed over the pattern, not compared segment-by-segment from the left. Pairs that could match the same concrete path with the same precedence key are rejected at registration by `Router::seal`, which uses the `Pattern::is_ambiguous_with` predicate; this is the safety valve that makes count-based precedence sound.
 
 ### D2. Per-segment validators participate in match candidacy
 
@@ -47,12 +47,12 @@ Otherwise the dispatcher invokes the matching capture handler and returns its ve
 
 ### D5. Intermediate directories are auto-navigable along literal-segment prefixes
 
-omnifs is interactive. A user types `cd /categories`, then `ls`, then `cd cs.AI`. Intermediate paths must be addressable as directories without forcing the provider to write a stub `#[dir]` for every literal navigation node.
+omnifs is interactive. A user types `cd /categories`, then `ls`, then `cd cs.AI`. Intermediate paths must be addressable as directories without forcing the provider to register a stub `r.dir(...).handler(...)` for every literal navigation node.
 
 The rule has two halves:
 
 - **Literal-segment prefix → auto-navigable.** A path resolves as a directory if it has no explicit handler but its last segment appears as a literal child of its parent in the route table (i.e. some registered route has a literal at the corresponding depth, with a matching prefix above). Listing such a directory merges sibling-route literal children. The `exhaustive` flag is true iff no `Capture` or `Rest` segment appears at the corresponding depth in any registered route.
-- **Capture-segment prefix → not auto-navigable.** A capture segment ranges over an unbounded keyspace; the SDK has no way to validate which concrete values inhabit it without the per-route parse function (D2), and the parse function takes a complete concrete path, not a prefix. Paths whose ancestry goes through a capture must resolve through `match_dir` directly. Their parent directory must have an explicit `#[dir]` handler whose projection is the source of truth for which children exist.
+- **Capture-segment prefix → not auto-navigable.** A capture segment ranges over an unbounded keyspace; the SDK has no way to validate which concrete values inhabit it without the per-route parse function (D2), and the parse function takes a complete concrete path, not a prefix. Paths whose ancestry goes through a capture must resolve through `match_dir` directly. Their parent directory must have an explicit `r.dir(...).handler(...)` registration whose projection is the source of truth for which children exist.
 
 This is the load-bearing distinction from URL routers, which do not auto-derive intermediates because there is no `cd` in HTTP. It is also the load-bearing distinction from "every directory is a static enumeration": capture children are discovered by the provider, not by the route table.
 
@@ -68,7 +68,7 @@ A provider can still claim `exhaustive: true` on a directory whose siblings incl
 
 ### D8. Compute precedence and route-table predicates at registration
 
-Spring `PathPatternParser`, ASP.NET endpoint graph, and httprouter's radix tree all bake ordering into a structure built once. omnifs's `Router::validate` (at provider `start`) is the natural place to sort and freeze. Per-request route walks are acceptable while route counts remain small; precomputed structures are the path forward as the registry grows.
+Spring `PathPatternParser`, ASP.NET endpoint graph, and httprouter's radix tree all bake ordering into a structure built once. omnifs's `Router::seal` (called by the provider macro after `start`) is the natural place to sort and freeze. Per-request route walks are acceptable while route counts remain small; precomputed structures are the path forward as the registry grows.
 
 ## Pattern grammar
 
@@ -90,7 +90,7 @@ Constraints (enforced by `Pattern::parse`):
 
 ## Match algorithm
 
-The single matching primitive is `best_match_entries(routes, path)` in `crates/omnifs-sdk/src/router/pattern.rs`, used by `Router` dispatch for dirs, files, treerefs, and objects:
+The single matching primitive is `best_match(routes, path)` in `crates/omnifs-sdk/src/router/pattern.rs`, used by `Router` dispatch for dirs, files, treerefs, and objects:
 
 1. Filter routes to those whose pattern shape accepts `path` (`Pattern::matches_path`).
 2. Sort the remaining candidates by `precedence_key` descending.
@@ -121,7 +121,7 @@ This resolution order honors D2, D4, and D5: capture validation runs in steps 1,
 
 ## Cross-kind coexistence
 
-A single template may be registered as both a dir and a file handler (`r.dir(t).handler(h)` and `r.file(t).handler(h)`) — the dispatcher routes by request kind (`list_children` → dir, `read_file` → file). Subtree handlers are mutually exclusive with dir/file on the same template, since a subtree takes the path entirely. `Router::validate` enforces this at registration.
+A single template may be registered as both a dir and a file handler (`r.dir(t).handler(h)` and `r.file(t).handler(h)`) — the dispatcher routes by request kind (`list_children` → dir, `read_file` → file). Subtree handlers are mutually exclusive with dir/file on the same template, since a subtree takes the path entirely. `Router::seal` enforces this at registration.
 
 When dir and file co-exist on a template (always rest-captured, by current validator rules), `lookup_child` defers to the parent dir's projection verdict to disambiguate the child's kind.
 

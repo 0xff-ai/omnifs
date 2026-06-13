@@ -55,7 +55,7 @@ The cost is that the mount must support real Git worktree behavior and must defi
 - Mutable scope: a provider-controlled subtree that participates in outer-repo reconciliation. Example: `/github/rust-lang/rust`.
 - Outer repo: the Git repository presented at the mutable scope root.
 - Provider-owned path: a path inside the mutable scope that belongs to the provider reconcile model.
-- Disowned island: a subtree inside the mutable scope that is locally visible and writable but excluded from outer reconcile. Example: `/github/rust-lang/rust/repo`.
+- Disowned island: a subtree inside the mutable scope that is locally visible and writable but excluded from outer reconcile. Example: `/github/rust-lang/rust/repo`. Note that this reuses the word "disowned" for a writable git-overlay island that does not exist yet. The shipped GitHub provider registers `/{owner}/{repo}/repo` as a read-only `treeref` handoff (`r.treeref("/{owner}/{repo}/repo")`) that the host resolves to a bind-mounted clone (the host-side concept is a subtree, sometimes called `disown-tree`). That shipped subtree is not writable, so this design extends it rather than reusing existing behavior.
 - Inner repo: a nested Git repository inside a disowned island.
 - Baseline: the last known upstream state for a provider-owned resource, including version tokens.
 - Hydration: fetching provider-owned resource files and baseline metadata into local state.
@@ -233,7 +233,7 @@ The key design choice is that a first read may hydrate. This is intentional. It 
 
 ### Hydration operation
 
-Hydration calls `fetch-resource(path)` on the provider reconcile interface, where `path` may be any provider-owned path inside the resource. The provider normalizes that path to the owning resource and returns all files for that resource, including version tokens.
+Hydration calls `fetch-resource(path)` on the proposed provider reconcile interface (see Provider contract; this interface is not in the shipped WIT yet), where `path` may be any provider-owned path inside the resource. The provider normalizes that path to the owning resource and returns all files for that resource, including version tokens.
 
 Hydration stores:
 
@@ -328,7 +328,7 @@ This is the meaning of "not visible to omnifs anyway" in this design: not part o
 
 ### `.git`
 
-The mounted scope exposes a real `.git` directory backed by hidden local state. Git commands operate against the mount path itself.
+Under this design the mounted scope exposes a real `.git` directory backed by hidden local state, and Git commands operate against the mount path itself. The mount is read-only today: the fuser `Filesystem` impl provides only read-side methods (`lookup`, `getattr`, `opendir`, `readdir`, `releasedir`, `read`, `open`, `release`, `readlink`) and no write/create/mkdir/unlink/rename/setattr, so this is a target shape rather than current behavior.
 
 The host must support the file operations Git requires for both `.git` and the outer working tree, including:
 
@@ -468,7 +468,7 @@ Disowned islands are excluded from this refresh.
 
 ## Provider contract
 
-This design uses the existing reconcile interface:
+This design requires a new provider reconcile interface that does not exist in the shipped WIT contract yet. The shipped `omnifs:provider` package declares only `lifecycle`, `namespace`, `continuation`, `notify`, and `log`. The reconcile interface this design depends on must add:
 
 - `plan-mutations`
 - `execute`

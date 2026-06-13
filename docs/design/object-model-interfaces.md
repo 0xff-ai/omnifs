@@ -1,9 +1,9 @@
 # Object-model interface contract
 
 Status: implemented contract
-Derives from: `docs/design/object-shaped-providers.md` (authoritative spec), the
-Phase A gate review, and its three deferred-decision proposals (WIT / redb / SDK)
-reconciled here.
+Derives from: the object model in `docs/design/architecture.md` §2 (authoritative
+spec), the Phase A gate review, and its three deferred-decision proposals
+(WIT / redb / SDK) reconciled here.
 
 This document is the **single contract** Tier 1 and Tier 2 build against. Every
 record, type, and method below is inlined so an implementer needs nothing else.
@@ -69,8 +69,8 @@ is unambiguous.
 ## 2. WIT record changes (literal)
 
 All changes are in `crates/omnifs-wit/wit/provider.wit`, `types` interface. The WIT
-package version bumps `0.3.0 → 0.4.0` (breaking). Host and guest bindgen regenerate
-together (atomic wire change).
+package version is `omnifs:provider@0.4.0` (the `0.3.0 → 0.4.0` breaking bump landed).
+Host and guest bindgen regenerate together (atomic wire change).
 
 ### 2.1 Effects
 
@@ -117,8 +117,8 @@ exclude it.
 ### 2.2 The NotFound (negative) channel
 
 NotFound becomes a **non-error, id-bearing terminal** so it can carry the
-`logical-id` and be fenced (today it is an `op-result::error`, and error terminals
-carry no effects; `op_validate.rs:42`).
+`logical-id` and be fenced (an `op-result::error` terminal carries no effects; the
+error-no-effects rule is `error_returns_do_not_mutate` in `op_validate.rs`).
 
 ```wit
 // lookup: enrich the existing arm
@@ -154,8 +154,9 @@ record canonical-input {
 The host emits the **stored** `logical-id` (learned from the prior
 `canonical-store`), not a path. The SDK self-checks `key.anchor() == input.id`
 before rendering; on mismatch it treats the push as absent and does `load(None)`
-(this self-check does not exist today; `handlers.rs:257`'s `anchor` param is unused;
-it is new Tier-1 SDK work).
+(this self-check landed at `router/object.rs`: the warm-read path verifies the
+host-pushed id against the route-derived `Key::anchor` and falls through to `load`
+on mismatch).
 
 ## 3. SDK core types (Rust)
 
@@ -362,7 +363,8 @@ impl Store {
     fn current_generation(&self) -> u64;
 
     // writes (all fenced against op_gen by the id's tombstone)
-    fn put_canonical(&self, id: &LogicalId, canonical: Canonical, view_leaves: &[String], op_gen: u64) -> bool;
+    fn put_canonical(&self, id: &[u8], bytes: Vec<u8>, validator: Option<String>, view_leaves: &[String], op_gen: u64) -> bool;  // id is host-opaque bytes
+    fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64);  // one-write batch path; fenced per-entry
     fn put_index_only(&self, id: &LogicalId, view_leaves: &[String], op_gen: u64) -> bool;  // id-bearing fs-write (preload)
     fn put_negative(&self, path: &str, id: Option<&LogicalId>, op_gen: u64) -> bool;
     fn cache_view_leaf(&self, path, id: Option<&LogicalId>, record, stability, op_gen) -> bool; // sets freshness
@@ -370,7 +372,8 @@ impl Store {
 
     // invalidation
     fn delete_object(&self, id: &LogicalId);     // the ONLY index remover: canonical+validator+rendered+alias set+negatives
-    fn delete_listing(&self, target: PathOrPrefix);  // VIEW-ONLY: dirent/listing entries; never touches object canonicals or paths index
+    fn delete_listing_path(&self, path: &ProtocolPath);     // VIEW-ONLY: exact dirent/listing entry; never touches object canonicals or paths index
+    fn delete_listing_prefix(&self, prefix: &ProtocolPath); // VIEW-ONLY: dirent/listing entries under a prefix
 
     // eviction
     fn capacity_evict(&self, id: &LogicalId);    // drop canonical bytes+validator+rendered; MAY keep paths index (-> canonical:None)
@@ -389,10 +392,9 @@ impl Store {
   re-renders from the in-hand canonical.
 - **`delete_object(id)` is the only index remover.** Full eviction: canonical,
   validator, rendered bytes, alias set, **all** `paths` rows for the id, and negatives.
-- **`delete_listing(PathOrPrefix)` is VIEW-ONLY.** It evicts dirent/listing records
-  under the path/prefix in the view cache and must **not** call object eviction and
-  must **not** remove `paths`↔id entries. (The current `delete_prefix` wrongly evicts
-  object canonicals via `evict_prefix`; that is replaced by this view-only path.)
+- **`delete_listing_path` / `delete_listing_prefix` are VIEW-ONLY.** They evict
+  dirent/listing records at the path or under the prefix in the view cache and must
+  **not** call object eviction and must **not** remove `paths`↔id entries.
 - **`capacity_evict(id)`** drops canonical bytes + validator + rendered atomically
   (so the object-miss branch always means "no canonical and no validator," never a
   stranded validator); it may keep `paths` rows (→ `canonical: None`), so a re-read
@@ -450,24 +452,8 @@ resets a deadline).
 | 11 | revalidation dedup | id-keyed coalescing window (§7) | Tier 1 (host) |
 | 12 | cold dispatch only | no path parsing; learned index (§6.1) | Tier 1 (host) |
 | 13 | structural gating | enforced-disjoint `load` (Issue/PR) | Tier 2 (github) |
-| 14 | invalidation intent | `delete_object` vs view-only `delete_listing` (§6.5) | Tier 1 (cache) |
+| 14 | invalidation intent | `delete_object` vs view-only `delete_listing_path`/`delete_listing_prefix` (§6.5) | Tier 1 (cache) |
 | 15 | representation dispatch | `RenderTable` (§3); dup-CT build error | Tier 1 (sdk) |
 | 16 | negative records | id-bearing NotFound terminal + in-memory negatives (§2.2, §6.3) | Tier 1 (host) |
 | 17 | attach symmetry | path-independent `LogicalId` (§1) | Tier 2 (arxiv) |
 | 18 | route-map visibility | `seal` / registered routes | Tier 1 (sdk) |
-
-## 9. Current anchor points (validated by direct read)
-
-- WIT: `provider.wit:102-150` (effects/canonical-store/fs-write/invalidation/
-  canonical-input), `:249-253` (lookup-child-result), `:289-293` (read-file-result).
-- Cache: `object.rs` `Canonical{bytes,version,leaves}` + `OBJECTS_TABLE`/`PATHS_TABLE`
-  + `store`(REPLACE leaf rows, to become UNION) + `evict_prefix`(to become view-only);
-  `lib.rs` `Store` (generation/tombstones at `:645-653`, `put_canonical:838`,
-  `delete_path:868`, `delete_prefix:891`, `cached_canonical_for:816`).
-- SDK: `object.rs` `Object`/`ObjectMeta`/`ObjectFields`/`render_representation`/
-  `canonical_leaves`; `router/register.rs` `Router<S,R>`/`bind`/`section`/`attach`/
-  `build_path`; `router/handlers.rs:252-308` `object_read` (cold/warm, the unused
-  `anchor` self-check, `Load::NotFound => Err`); `captures.rs`/`captures_macro.rs`.
-- Host: `op_validate.rs:42` (error-no-effects rule — NotFound channel depends on
-  this), `materialize.rs` (effects apply), `view.rs`/`cache/mod.rs` (wit conversions).
-```

@@ -1,8 +1,8 @@
 # db provider
 
 Status: v1 shipped (sqlite, read-only, browse-only); future surface designed below
-Scope: `providers/db/`, `crates/omnifs-host/src/config` (preopened paths capability), `crates/omnifs-host/src/runtime/instance.rs` (sync wasmtime isolation)
-Supersedes the postgres-specific draft: parts of `docs/design/providers/postgres.md` (the `pg-query` callout idea) are deferred behind the file-backed sqlite path, which works through standard WASI filesystem syscalls and needs no WIT extension.
+Scope: `providers/db/`, `crates/omnifs-host/src/config` (preopened paths capability), `crates/omnifs-host/src/instance.rs` (sync wasmtime isolation)
+Supersedes the postgres-specific draft: the `pg-query` callout idea is deferred behind the file-backed sqlite path, which works through standard WASI filesystem syscalls and needs no WIT extension.
 
 ## Summary
 
@@ -16,6 +16,7 @@ What v1 ships:
 
 - `/meta/version.txt`, `/meta/path.txt`, `/meta/info.json`
 - `/tables/` (lists tables from `sqlite_master`)
+- `/tables/{name}/table.json`
 - `/tables/{name}/schema.sql`
 - `/tables/{name}/schema.json`
 - `/tables/{name}/indexes.json`
@@ -42,6 +43,8 @@ What v1 does not ship and the document below covers as future work:
 /db/tables/                           (lists every table from sqlite_master)
 /db/tables/{name}/                    (direct handlers, name admitted from the
                                        startup table snapshot)
+  ├ /db/tables/{name}/table.json      (canonical table record; field leaves
+                                       are direct reads from it)
   ├ /db/tables/{name}/schema.sql      (CREATE TABLE statement)
   ├ /db/tables/{name}/schema.json     (PRAGMA table_info: columns, types, PK)
   ├ /db/tables/{name}/indexes.json    (PRAGMA index_list + index_info)
@@ -88,13 +91,13 @@ Table names collide with magic segments only inside `tables/`. A table named `me
 
 The host's `CapabilitiesConfig` grows a `preopened_paths: Option<Vec<PreopenedPath>>` field. The runtime wires each entry into Wasmtime's `WasiCtxBuilder::preopened_dir(host, guest, DirPerms, FilePerms)` with read or read-write permission per the `mode` field.
 
-A second host change ships with v1: `crates/omnifs-host/src/runtime/instance.rs` wraps each sync wasmtime call in `std::thread::scope` so the call runs on a fresh OS thread with no tokio handle. This is the "load-bearing escape hatch" the agent's report flagged. Background:
+A second host change ships with v1: `crates/omnifs-host/src/instance.rs` wraps each sync wasmtime call in `std::thread::scope` so the call runs on a fresh OS thread with no tokio handle. This is the "load-bearing escape hatch" the agent's report flagged. Background:
 
-- The host uses `wasmtime::add_to_linker_sync` and drives wasmtime from inside `tokio::Runtime::block_on(...)` on a tokio worker thread.
+- The host uses `wasmtime_wasi::p2::add_to_linker_sync` and drives wasmtime from inside `tokio::Runtime::block_on(...)` on a tokio worker thread.
 - The first time a guest calls a WASI filesystem syscall (i.e. the first read from SQLite), `wasmtime_wasi`'s internal `in_tokio` shim tries to use the tokio runtime handle in a way that conflicts with the already-running runtime and panics with "Cannot start a runtime from within a runtime."
 - Running the wasmtime call on a thread without a tokio handle lets the WASI shim fall back to its private runtime singleton.
 
-The right long-term fix is `wasmtime_wasi::add_to_linker_async` (switches the host to fiber-stacked async wasmtime calls; aligns with the rest of the host's async runtime). That is tracked as a follow-up; the per-op thread spawn is fine for current latency budgets but should not stay forever.
+The right long-term fix is `wasmtime_wasi::p2::add_to_linker_async` (switches the host to fiber-stacked async wasmtime calls; aligns with the rest of the host's async runtime). That is tracked as a follow-up; the per-op thread spawn is fine for current latency budgets but should not stay forever.
 
 ## File attributes
 
@@ -143,7 +146,7 @@ This is the documented design space the next iterations of the provider can fill
 The biggest gap: today there is no way to address an individual row. The shape:
 
 ```
-/db/tables/{table}/rows/{pk}/             (r.subtree → RowSubtree)
+/db/tables/{table}/rows/{pk}/             (r.treeref → RowSubtree)
 /db/tables/{table}/rows/{pk}/row.json     (full row as JSON)
 /db/tables/{table}/rows/{pk}/{column}     (one file per column)
 ```
@@ -220,7 +223,7 @@ Adding `database_type: "postgres"` is the next backend after sqlite. Key differe
 - The path tree above maps 1:1: `meta/`, `tables/{schema.table}/...`, `rows/{pk}/...`, `queries/{label}.json`. Postgres-specific extras (`pg_stat_user_tables`, `EXPLAIN`, `pg_indexes`) slot under `meta/` and per-table.
 - Connection pooling, prepared statement caching, transaction boundaries: host-side concerns.
 
-The detailed Postgres design lives in `docs/design/providers/postgres.md`; this provider's backend abstraction is shaped to drop that work in cleanly when the WIT extension is on the table.
+This provider's backend abstraction is shaped to drop that work in cleanly when the WIT extension is on the table.
 
 ## Bash-tool walkthrough
 
@@ -253,7 +256,7 @@ What does not work and why:
 
 ## Mutation hooks (future)
 
-Mutations follow the git-via-mutation model (`design/mutations-via-git.md`). Natural granularity for the db provider:
+Mutations follow the git-via-mutation model (`docs/future/mutations-via-git.md`). Natural granularity for the db provider:
 
 - Edit a row by writing to `rows/{pk}/{column}` or `rows/{pk}/row.json`. Commit. `git push` translates the diff into `UPDATE table SET column = ? WHERE pk = ?`.
 - Create a new row by creating a new `rows/{new-pk}/` directory and committing. `INSERT INTO table ...`.
@@ -274,8 +277,7 @@ This is documented for design coherence only; the read-only mount and mutation m
 
 ## References
 
-- `docs/design/providers/_context.md` — shared provider authoring briefing.
-- `docs/design/providers/postgres.md` — the original generic-database design, parts of which (the `pg-query` callout) are deferred until Postgres lands.
+- `providers/DESIGN.md` — shared provider flavour doctrine and authoring guidance.
 - `docs/design/path-dispatch-and-listing.md` — routing precedence, listing exhaustiveness, lookup-vs-readdir authority split. D4 is the load-bearing rule for the future `rows/` lookup-fallthrough.
 - `docs/design/file-attributes.md` — `Size` / `Bytes` / `Stability` / `VersionToken` contract.
 - `docs/design/wasm-sandbox-substrate.md` — wasm32-wasip2 sandbox model.
