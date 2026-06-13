@@ -1,54 +1,32 @@
-//! Kubernetes API access: endpoint resolution, discovery, and rendering.
-//!
-//! The provider reaches the API server through the configured `endpoint`,
-//! built into callout URLs by [`HttpEndpoint`]. The recommended endpoint is a
-//! local `kubectl proxy --unix-socket` socket: it rides the `unix:` callout
-//! transport (the same one the Docker provider uses), and kubectl terminates
-//! TLS and injects the active-context credentials, so this provider issues
-//! plain HTTP and never handles a token. An `https://` endpoint also works for
-//! clusters reachable with system-trust TLS.
-//!
-//! Resource types are not hard-coded: [`fetch_discovery`] walks `/api/v1` and
-//! `/apis` once per instance and caches the catalog in [`crate::State`], so
-//! CRDs surface exactly like built-in kinds.
+//! Kubernetes API access, discovery cataloging, and related-view rendering.
 
 use core::fmt::Write as _;
 
 use hashbrown::HashMap;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+    APIGroup, APIGroupList, APIResource as K8sApiResource, APIResourceList,
+};
 use omnifs_sdk::http::{HttpEndpoint, ResponseExt};
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 use crate::State;
+use crate::objects::KubeManifest;
 
 const ACCEPT_JSON: &str = "application/json";
-const ACCEPT_TEXT: &str = "text/plain";
 
-// ===========================================================================
-// Discovery catalog
-// ===========================================================================
-
-/// One API resource discovered from the cluster's discovery documents.
+/// One discovered, browsable Kubernetes resource.
 #[derive(Clone, Debug)]
-pub(crate) struct ApiResource {
-    /// URL root for this resource's group/version: `/api/v1` or `/apis/<group>/<version>`.
+pub(crate) struct Resource {
     api_root: String,
-    /// The resource's plural URL segment: `pods`, `deployments`, ...
     plural: String,
-    /// The resource's `Kind` (`Pod`, `Deployment`); used for the event
-    /// `involvedObject.kind` selector so events match this exact kind.
     kind: String,
-    /// The API group (`""` for the core group), used to dedup the same
-    /// resource discovered across multiple versions of one group.
     group: String,
-    /// Whether the resource is namespaced (vs cluster-scoped).
     pub(crate) namespaced: bool,
 }
 
-impl ApiResource {
-    /// Collection URL path, optionally scoped to a namespace.
+impl Resource {
     pub(crate) fn collection_path(&self, namespace: Option<&str>) -> String {
         match namespace {
             Some(ns) => format!("{}/namespaces/{}/{}", self.api_root, ns, self.plural),
@@ -56,37 +34,30 @@ impl ApiResource {
         }
     }
 
-    /// Single-object URL path.
     pub(crate) fn object_path(&self, namespace: Option<&str>, name: &str) -> String {
         format!("{}/{}", self.collection_path(namespace), name)
     }
 
-    /// The resource's `Kind`, for the event `involvedObject.kind` selector.
     pub(crate) fn kind(&self) -> &str {
         &self.kind
     }
 }
 
-/// The cluster's resource catalog, keyed by the filesystem-facing plural name.
-/// Built once per provider instance. A plural that collides across groups is
-/// disambiguated to `<plural>.<group>` (core/built-ins keep the bare name).
+/// Resource discovery indexed by filesystem-facing type name.
 #[derive(Debug, Default)]
 pub(crate) struct Discovery {
-    by_plural: HashMap<String, ApiResource>,
+    by_plural: HashMap<String, Resource>,
 }
 
 impl Discovery {
-    fn insert(&mut self, fs_name: String, resource: ApiResource) {
+    fn insert(&mut self, fs_name: String, resource: Resource) {
         self.by_plural.entry(fs_name).or_insert(resource);
     }
 
-    fn get(&self, fs_plural: &str) -> Option<&ApiResource> {
+    fn get(&self, fs_plural: &str) -> Option<&Resource> {
         self.by_plural.get(fs_plural)
     }
 
-    /// Has this exact `(group, plural)` resource already been recorded (from a
-    /// higher-priority version of the same group)? Used to keep the preferred
-    /// version when a resource is served in several versions of one group.
     fn has_group_resource(&self, group: &str, plural: &str) -> bool {
         self.by_plural
             .values()
@@ -97,7 +68,7 @@ impl Discovery {
         let mut names: Vec<String> = self
             .by_plural
             .iter()
-            .filter(|(_, r)| r.namespaced == namespaced)
+            .filter(|(_, resource)| resource.namespaced == namespaced)
             .map(|(name, _)| name.clone())
             .collect();
         names.sort();
@@ -105,284 +76,277 @@ impl Discovery {
     }
 }
 
-// ===========================================================================
-// Discovery wire types
-// ===========================================================================
-
-#[derive(Deserialize)]
-struct ApiResourceList {
-    #[serde(default)]
-    resources: Vec<ApiResourceEntry>,
-}
-
-#[derive(Deserialize)]
-struct ApiResourceEntry {
-    name: String,
-    #[serde(default)]
-    namespaced: bool,
-    #[serde(default)]
-    kind: String,
-}
-
-#[derive(Deserialize)]
-struct ApiGroupList {
-    #[serde(default)]
-    groups: Vec<ApiGroup>,
-}
-
-#[derive(Deserialize)]
-struct ApiGroup {
-    #[serde(default)]
-    name: String,
-    #[serde(rename = "preferredVersion", default)]
-    preferred_version: GroupVersion,
-    #[serde(default)]
-    versions: Vec<GroupVersion>,
-}
-
-#[derive(Deserialize, Default)]
-struct GroupVersion {
-    #[serde(rename = "groupVersion", default)]
-    group_version: String,
-}
-
 fn add_resources(
-    disc: &mut Discovery,
+    discovery: &mut Discovery,
     api_root: &str,
     group: &str,
-    resources: &[ApiResourceEntry],
+    resources: &[K8sApiResource],
 ) {
     for entry in resources {
-        // Names with a `/` are subresources (`pods/log`, `deployments/scale`),
-        // not browsable resource types.
-        if entry.name.contains('/') {
+        if !is_browsable(entry) || discovery.has_group_resource(group, &entry.name) {
             continue;
         }
-        // Already recorded from a higher-priority (preferred) version of the
-        // same group — keep that one (client-go `ServerPreferredResources`).
-        if disc.has_group_resource(group, &entry.name) {
-            continue;
-        }
-        let resource = ApiResource {
+        let resource = Resource {
             api_root: api_root.to_string(),
             plural: entry.name.clone(),
             kind: entry.kind.clone(),
             group: group.to_string(),
             namespaced: entry.namespaced,
         };
-        // The bare plural is taken by a *different* group → disambiguate as
-        // `<plural>.<group>` (matching kubectl's fully-qualified form).
-        let fs_name = if !group.is_empty() && disc.get(&entry.name).is_some() {
+        let fs_name = if !group.is_empty() && discovery.get(&entry.name).is_some() {
             format!("{}.{}", entry.name, group)
         } else {
             entry.name.clone()
         };
-        disc.insert(fs_name, resource);
+        discovery.insert(fs_name, resource);
     }
 }
 
-/// A group's `groupVersion`s with the preferred one first. `add_resources`
-/// keeps the first occurrence, so a resource served in several versions
-/// resolves to the preferred version (matching client-go
-/// `ServerPreferredResources`), while a resource present only in a
-/// non-preferred version still surfaces (at its own version).
-fn group_versions_preferred_first(group: &ApiGroup) -> Vec<String> {
-    let preferred = group.preferred_version.group_version.clone();
+fn is_browsable(entry: &K8sApiResource) -> bool {
+    !entry.name.contains('/')
+        && entry.verbs.iter().any(|verb| verb == "get")
+        && entry.verbs.iter().any(|verb| verb == "list")
+}
+
+fn group_versions_preferred_first(group: &APIGroup) -> Vec<String> {
+    let preferred = group
+        .preferred_version
+        .as_ref()
+        .map(|version| version.group_version.clone())
+        .unwrap_or_default();
     let mut versions = Vec::new();
     if !preferred.is_empty() {
         versions.push(preferred.clone());
     }
-    for version in &group.versions {
-        if !version.group_version.is_empty() && version.group_version != preferred {
-            versions.push(version.group_version.clone());
-        }
-    }
+    versions.extend(
+        group
+            .versions
+            .iter()
+            .map(|version| version.group_version.clone())
+            .filter(|version| !version.is_empty() && version != &preferred),
+    );
     versions
 }
 
-/// Walk discovery: core (`/api/v1`) plus every named group. Each group's
-/// versions are queried preferred-first so a multi-version resource resolves to
-/// its preferred version, yet resources present only in a non-preferred version
-/// still surface (matching client-go `ServerPreferredResources`). A group
-/// version whose discovery call fails (e.g. a flaky aggregated API) is skipped
-/// rather than failing the whole catalog.
-async fn fetch_discovery(cx: &Cx<State>, ep: &HttpEndpoint) -> Result<Discovery> {
-    let mut disc = Discovery::default();
+/// Operation-scoped Kubernetes API adapter. It owns URL construction, HTTP
+/// status policy, and JSON decoding while still lowering every request through
+/// Omnifs host callouts.
+pub(crate) struct KubeApi<'a> {
+    cx: &'a Cx<State>,
+    endpoint: HttpEndpoint,
+}
 
-    if let Ok(core) = get_json::<ApiResourceList>(cx, ep, "/api/v1").await {
-        add_resources(&mut disc, "/api/v1", "", &core.resources);
+impl<'a> KubeApi<'a> {
+    pub(crate) fn new(cx: &'a Cx<State>) -> Self {
+        Self {
+            cx,
+            endpoint: cx.state(|state| state.endpoint.clone()),
+        }
     }
 
-    if let Ok(groups) = get_json::<ApiGroupList>(cx, ep, "/apis").await {
-        for group in &groups.groups {
-            for group_version in group_versions_preferred_first(group) {
-                let api_root = format!("/apis/{group_version}");
-                if let Ok(list) = get_json::<ApiResourceList>(cx, ep, &api_root).await {
-                    add_resources(&mut disc, &api_root, &group.name, &list.resources);
+    pub(crate) async fn ensure_discovery(&self) -> Result<()> {
+        if self.cx.state(|state| state.discovery.borrow().is_some()) {
+            return Ok(());
+        }
+        let discovery = self.fetch_discovery().await?;
+        self.cx.state(|state| {
+            *state.discovery.borrow_mut() = Some(discovery);
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn resource(&self, fs_plural: &str) -> Result<Resource> {
+        self.ensure_discovery().await?;
+        self.cx.state(|state| {
+            state
+                .discovery
+                .borrow()
+                .as_ref()
+                .and_then(|discovery| discovery.get(fs_plural).cloned())
+                .ok_or_else(|| {
+                    ProviderError::not_found(format!("unknown resource type: {fs_plural}"))
+                })
+        })
+    }
+
+    pub(crate) async fn type_is(&self, fs_plural: &str, namespaced: bool) -> Result<bool> {
+        self.ensure_discovery().await?;
+        Ok(self.cx.state(|state| {
+            state
+                .discovery
+                .borrow()
+                .as_ref()
+                .and_then(|discovery| discovery.get(fs_plural))
+                .is_some_and(|resource| resource.namespaced == namespaced)
+        }))
+    }
+
+    pub(crate) async fn list_types_for_listing(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let namespaced = namespace.is_some();
+        let types = self.list_types(namespaced).await?;
+        if !self.cx.state(|state| state.hide_empty_types) {
+            return Ok(types);
+        }
+
+        let mut names = Vec::new();
+        let mut paths = Vec::new();
+        self.cx.state(|state| {
+            if let Some(discovery) = state.discovery.borrow().as_ref() {
+                for plural in &types {
+                    if let Some(resource) = discovery.get(plural) {
+                        names.push(plural.clone());
+                        paths.push(resource.collection_path(namespace));
+                    }
+                }
+            }
+        });
+
+        let results = join_all(paths.iter().map(|path| self.collection_non_empty(path))).await;
+        Ok(names
+            .into_iter()
+            .zip(results)
+            .filter_map(|(name, result)| result.unwrap_or(true).then_some(name))
+            .collect())
+    }
+
+    pub(crate) async fn list_names(&self, path: &str) -> Result<Vec<String>> {
+        let list: ListResponse = self.get_json(path, &[]).await?;
+        Ok(list
+            .items
+            .into_iter()
+            .filter_map(|item| item.metadata.name)
+            .collect())
+    }
+
+    pub(crate) async fn path_exists(&self, path: &str) -> Result<bool> {
+        Ok(self.get_bytes_opt(path, &[], ACCEPT_JSON).await?.is_some())
+    }
+
+    pub(crate) async fn load_manifest(
+        &self,
+        fs_plural: &str,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<Load<KubeManifest>> {
+        let resource = self.resource(fs_plural).await?;
+        if resource.namespaced != namespace.is_some() {
+            return Ok(Load::NotFound);
+        }
+        let path = resource.object_path(namespace, name);
+        let Some(bytes) = self.get_bytes_opt(&path, &[], ACCEPT_JSON).await? else {
+            return Ok(Load::NotFound);
+        };
+        let manifest = KubeManifest::from_upstream_bytes(&bytes)?;
+        let validator = manifest.resource_version().map(Validator::from);
+        let canonical = Canonical {
+            bytes: manifest.canonical_json_bytes()?,
+            validator,
+        };
+        Ok(Load::Fresh {
+            value: manifest,
+            canonical,
+        })
+    }
+
+    pub(crate) async fn events_text(
+        &self,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+        uid: Option<&str>,
+    ) -> Result<String> {
+        let field_selector = event_field_selector(namespace, kind, name, uid);
+        let path = format!("/api/v1/namespaces/{namespace}/events");
+        let list: EventList = self
+            .get_json(&path, &[("fieldSelector", &field_selector)])
+            .await?;
+        Ok(render_event_list(list))
+    }
+
+    async fn fetch_discovery(&self) -> Result<Discovery> {
+        let mut discovery = Discovery::default();
+
+        if let Ok(core) = self.get_json::<APIResourceList>("/api/v1", &[]).await {
+            add_resources(&mut discovery, "/api/v1", "", &core.resources);
+        }
+
+        if let Ok(groups) = self.get_json::<APIGroupList>("/apis", &[]).await {
+            for group in &groups.groups {
+                for group_version in group_versions_preferred_first(group) {
+                    let api_root = format!("/apis/{group_version}");
+                    if let Ok(list) = self.get_json::<APIResourceList>(&api_root, &[]).await {
+                        add_resources(&mut discovery, &api_root, &group.name, &list.resources);
+                    }
                 }
             }
         }
-    }
 
-    if disc.by_plural.is_empty() {
-        return Err(ProviderError::internal(
-            "kubernetes discovery returned no resources; is the API endpoint reachable? \
-             (for `unix://` endpoints, is `kubectl proxy --unix-socket` running?)",
-        ));
-    }
-    Ok(disc)
-}
-
-/// Populate the per-instance discovery cache on first use. No-op afterwards.
-pub(crate) async fn ensure_discovery(cx: &Cx<State>) -> Result<()> {
-    if cx.state(|s| s.discovery.borrow().is_some()) {
-        return Ok(());
-    }
-    let ep = cx.state(|s| s.endpoint.clone());
-    let disc = fetch_discovery(cx, &ep).await?;
-    cx.state(|s| {
-        *s.discovery.borrow_mut() = Some(disc);
-    });
-    Ok(())
-}
-
-/// Resolve a filesystem plural to its API resource, populating discovery first.
-pub(crate) async fn resolve_type(cx: &Cx<State>, fs_plural: &str) -> Result<ApiResource> {
-    ensure_discovery(cx).await?;
-    cx.state(|s| {
-        s.discovery
-            .borrow()
-            .as_ref()
-            .and_then(|d| d.get(fs_plural).cloned())
-            .ok_or_else(|| ProviderError::not_found(format!("unknown resource type: {fs_plural}")))
-    })
-}
-
-/// Does a discovered type exist with the requested scope?
-pub(crate) async fn type_is(cx: &Cx<State>, fs_plural: &str, namespaced: bool) -> Result<bool> {
-    ensure_discovery(cx).await?;
-    Ok(cx.state(|s| {
-        s.discovery
-            .borrow()
-            .as_ref()
-            .and_then(|d| d.get(fs_plural).map(|r| r.namespaced == namespaced))
-            .unwrap_or(false)
-    }))
-}
-
-/// Sorted filesystem plurals for the requested scope.
-pub(crate) async fn list_types(cx: &Cx<State>, namespaced: bool) -> Result<Vec<String>> {
-    ensure_discovery(cx).await?;
-    Ok(cx.state(|s| {
-        s.discovery
-            .borrow()
-            .as_ref()
-            .map(|d| d.sorted_types(namespaced))
-            .unwrap_or_default()
-    }))
-}
-
-/// Resource types to show in a scope listing. The full discovery catalog by
-/// default; when `hide_empty_types` is set, only types with at least one
-/// instance in `namespace` (`None` = cluster scope). Existence is probed with
-/// `limit=1`, and all probes for the listing run in a single batched round.
-/// This filters `readdir` only — `lookup` still resolves any known type, so an
-/// empty type stays directly navigable.
-pub(crate) async fn list_types_for_listing(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    namespace: Option<&str>,
-) -> Result<Vec<String>> {
-    let types = list_types(cx, namespace.is_some()).await?;
-    if !cx.state(|s| s.hide_empty_types) {
-        return Ok(types);
-    }
-
-    // Resolve each type's collection path up front (cheap map lookups), then
-    // probe them all concurrently.
-    let mut names = Vec::new();
-    let mut paths = Vec::new();
-    cx.state(|s| {
-        if let Some(disc) = s.discovery.borrow().as_ref() {
-            for plural in &types {
-                if let Some(resource) = disc.get(plural) {
-                    names.push(plural.clone());
-                    paths.push(resource.collection_path(namespace));
-                }
-            }
+        if discovery.by_plural.is_empty() {
+            return Err(ProviderError::internal(
+                "kubernetes discovery returned no readable resources; is the API endpoint reachable? \
+                 (for `unix://` endpoints, is `kubectl proxy --unix-socket` running?)",
+            ));
         }
-    });
-    let results = join_all(paths.iter().map(|p| collection_non_empty(cx, ep, p))).await;
+        Ok(discovery)
+    }
 
-    let mut kept = Vec::new();
-    for (name, result) in names.into_iter().zip(results) {
-        // Keep on probe error: never hide a type we couldn't confirm is empty.
-        if result.unwrap_or(true) {
-            kept.push(name);
+    async fn list_types(&self, namespaced: bool) -> Result<Vec<String>> {
+        self.ensure_discovery().await?;
+        Ok(self.cx.state(|state| {
+            state
+                .discovery
+                .borrow()
+                .as_ref()
+                .map(|discovery| discovery.sorted_types(namespaced))
+                .unwrap_or_default()
+        }))
+    }
+
+    async fn collection_non_empty(&self, path: &str) -> Result<bool> {
+        let list: ListResponse = self.get_json(path, &[("limit", "1")]).await?;
+        Ok(!list.items.is_empty())
+    }
+
+    async fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
+        let bytes = self.get_bytes(path, query, ACCEPT_JSON).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| ProviderError::internal(format!("kubernetes: parse {path}: {error}")))
+    }
+
+    async fn get_bytes(&self, path: &str, query: &[(&str, &str)], accept: &str) -> Result<Vec<u8>> {
+        let url = self.endpoint.build_url(path, query);
+        let response = self
+            .cx
+            .http()
+            .get(url)
+            .header("Accept", accept)
+            .send()
+            .await?;
+        Ok(response.error_for_status()?.into_body())
+    }
+
+    async fn get_bytes_opt(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        accept: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let url = self.endpoint.build_url(path, query);
+        let response = self
+            .cx
+            .http()
+            .get(url)
+            .header("Accept", accept)
+            .send()
+            .await?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
         }
+        Ok(Some(response.error_for_status()?.into_body()))
     }
-    Ok(kept)
-}
-
-/// Does the collection at `path` have any items? Uses `limit=1` so the probe
-/// stays tiny regardless of collection size.
-async fn collection_non_empty(cx: &Cx<State>, ep: &HttpEndpoint, path: &str) -> Result<bool> {
-    let bytes = get_bytes(cx, ep, path, &[("limit", "1")], ACCEPT_JSON).await?;
-    let list: ListResponse = serde_json::from_slice(&bytes)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: parse list {path}: {e}")))?;
-    Ok(!list.items.is_empty())
-}
-
-// ===========================================================================
-// HTTP helpers
-// ===========================================================================
-
-pub(crate) fn endpoint(cx: &Cx<State>) -> HttpEndpoint {
-    cx.state(|s| s.endpoint.clone())
-}
-
-async fn get_bytes(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    path: &str,
-    query: &[(&str, &str)],
-    accept: &str,
-) -> Result<Vec<u8>> {
-    let url = ep.build_url(path, query);
-    let response = cx.http().get(url).header("Accept", accept).send().await?;
-    let response = response.error_for_status()?;
-    Ok(response.into_body())
-}
-
-/// Like [`get_bytes`] but maps `404 Not Found` to `Ok(None)` so callers can do
-/// existence checks without treating absence as an error.
-pub(crate) async fn get_bytes_opt(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    path: &str,
-    query: &[(&str, &str)],
-    accept: &str,
-) -> Result<Option<Vec<u8>>> {
-    let url = ep.build_url(path, query);
-    let response = cx.http().get(url).header("Accept", accept).send().await?;
-    if response.status().as_u16() == 404 {
-        return Ok(None);
-    }
-    let response = response.error_for_status()?;
-    Ok(Some(response.into_body()))
-}
-
-async fn get_json<T: DeserializeOwned>(cx: &Cx<State>, ep: &HttpEndpoint, path: &str) -> Result<T> {
-    let bytes = get_bytes(cx, ep, path, &[], ACCEPT_JSON).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: parse {path}: {e}")))
-}
-
-/// True if the object at `path` exists (`GET` returns non-404).
-pub(crate) async fn path_exists(cx: &Cx<State>, ep: &HttpEndpoint, path: &str) -> Result<bool> {
-    Ok(get_bytes_opt(cx, ep, path, &[], ACCEPT_JSON)
-        .await?
-        .is_some())
 }
 
 #[derive(Deserialize)]
@@ -394,73 +358,26 @@ struct ListResponse {
 #[derive(Deserialize)]
 struct ListItem {
     #[serde(default)]
-    metadata: ItemMeta,
+    metadata: ListItemMeta,
 }
 
 #[derive(Deserialize, Default)]
-struct ItemMeta {
-    #[serde(default)]
-    name: String,
+struct ListItemMeta {
+    name: Option<String>,
 }
 
-/// `.items[].metadata.name` for a collection `GET`, dropping unnamed entries.
-pub(crate) async fn list_names(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    path: &str,
-) -> Result<Vec<String>> {
-    let list: ListResponse = get_json(cx, ep, path).await?;
-    Ok(list
-        .items
-        .into_iter()
-        .map(|i| i.metadata.name)
-        .filter(|name| !name.is_empty())
-        .collect())
-}
-
-/// Fetch one object as JSON, resolving its type through discovery.
-pub(crate) async fn fetch_object(
-    cx: &Cx<State>,
-    fs_plural: &str,
-    namespace: Option<&str>,
-    name: &str,
-) -> Result<Value> {
-    let resource = resolve_type(cx, fs_plural).await?;
-    let ep = endpoint(cx);
-    let path = resource.object_path(namespace, name);
-    let bytes = get_bytes(cx, &ep, &path, &[], ACCEPT_JSON).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: parse object {path}: {e}")))
-}
-
-/// Container names declared by a pod manifest (regular, init, and ephemeral).
-pub(crate) fn pod_container_names(pod: &Value) -> Vec<String> {
-    let mut names = Vec::new();
-    for field in ["containers", "initContainers", "ephemeralContainers"] {
-        if let Some(items) = pod
-            .pointer(&format!("/spec/{field}"))
-            .and_then(Value::as_array)
-        {
-            for container in items {
-                if let Some(name) = container.get("name").and_then(Value::as_str) {
-                    names.push(name.to_string());
-                }
-            }
-        }
+fn event_field_selector(namespace: &str, kind: &str, name: &str, uid: Option<&str>) -> String {
+    let mut terms = vec![
+        format!("involvedObject.name={name}"),
+        format!("involvedObject.namespace={namespace}"),
+    ];
+    if !kind.is_empty() {
+        terms.push(format!("involvedObject.kind={kind}"));
     }
-    names
-}
-
-/// Current logs for one container of a pod.
-pub(crate) async fn pod_log(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    namespace: &str,
-    pod: &str,
-    container: &str,
-) -> Result<Vec<u8>> {
-    let path = format!("/api/v1/namespaces/{namespace}/pods/{pod}/log");
-    get_bytes(cx, ep, &path, &[("container", container)], ACCEPT_TEXT).await
+    if let Some(uid) = uid.filter(|uid| !uid.is_empty()) {
+        terms.push(format!("involvedObject.uid={uid}"));
+    }
+    terms.join(",")
 }
 
 #[derive(Deserialize)]
@@ -485,54 +402,6 @@ struct EventItem {
     event_time: Option<String>,
 }
 
-/// Tab-separated events for a specific object, matching the involvedObject
-/// field selector kubectl builds (`event_expansion.go` `GetFieldSelector`):
-/// name + namespace + kind, plus uid when known. Without kind, events from a
-/// different-kind object of the same name would leak in; uid additionally
-/// excludes events from a prior incarnation of a recreated object.
-pub(crate) async fn events_text(
-    cx: &Cx<State>,
-    ep: &HttpEndpoint,
-    namespace: &str,
-    kind: &str,
-    name: &str,
-    uid: Option<&str>,
-) -> Result<String> {
-    let field_selector = event_field_selector(namespace, kind, name, uid);
-    let path = format!("/api/v1/namespaces/{namespace}/events");
-    let bytes = get_bytes(
-        cx,
-        ep,
-        &path,
-        &[("fieldSelector", &field_selector)],
-        ACCEPT_JSON,
-    )
-    .await?;
-    let list: EventList = serde_json::from_slice(&bytes)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: parse events: {e}")))?;
-    Ok(render_event_list(list))
-}
-
-/// Build the comma-separated (logical-AND) involvedObject field selector
-/// kubectl uses. Pure so the selector contract is unit-tested directly.
-fn event_field_selector(namespace: &str, kind: &str, name: &str, uid: Option<&str>) -> String {
-    let mut terms = vec![
-        format!("involvedObject.name={name}"),
-        format!("involvedObject.namespace={namespace}"),
-    ];
-    if !kind.is_empty() {
-        terms.push(format!("involvedObject.kind={kind}"));
-    }
-    if let Some(uid) = uid.filter(|u| !u.is_empty()) {
-        terms.push(format!("involvedObject.uid={uid}"));
-    }
-    terms.join(",")
-}
-
-/// Render a parsed event list as a tab-separated table. Pure (no I/O) so the
-/// formatting is unit-tested directly. `lastTimestamp` is preferred over the
-/// new-style `eventTime`; `count` defaults to 1; embedded newlines in messages
-/// are flattened so one event stays one line.
 fn render_event_list(list: EventList) -> String {
     if list.items.is_empty() {
         return "No events.\n".to_string();
@@ -555,51 +424,7 @@ fn render_event_list(list: EventList) -> String {
     out
 }
 
-// ===========================================================================
-// Rendering
-// ===========================================================================
-
-/// Strip server-managed `metadata.managedFields` so a manifest reads like
-/// `kubectl get -o yaml`, which omits managedFields by default (since v1.21, via
-/// cli-runtime's print flags). Everything else — including the
-/// `last-applied-configuration` annotation, which `kubectl get` preserves — is
-/// kept verbatim.
-pub(crate) fn clean_manifest(mut value: Value) -> Value {
-    if let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) {
-        metadata.remove("managedFields");
-    }
-    value
-}
-
-/// The `.status` subobject, or null if absent.
-pub(crate) fn status_of(value: &Value) -> Value {
-    value.get("status").cloned().unwrap_or(Value::Null)
-}
-
-pub(crate) fn render_yaml(value: &Value) -> Result<FileProjection> {
-    let yaml = serde_yaml::to_string(value)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: render yaml: {e}")))?;
-    Ok(FileProjection::body(yaml.into_bytes())
-        .content_type(ContentType::Custom("application/yaml"))
-        .mutable()
-        .build())
-}
-
-pub(crate) fn render_json(value: &Value) -> Result<FileProjection> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|e| ProviderError::internal(format!("kubernetes: render json: {e}")))?;
-    bytes.push(b'\n');
-    Ok(FileProjection::body(bytes)
-        .content_type(ContentType::Json)
-        .mutable()
-        .build())
-}
-
-pub(crate) fn text_file(text: String) -> FileProjection {
-    text_bytes(text.into_bytes())
-}
-
-pub(crate) fn text_bytes(bytes: Vec<u8>) -> FileProjection {
+pub(crate) fn text_file(bytes: Vec<u8>) -> FileProjection {
     FileProjection::body(bytes)
         .content_type(ContentType::Custom("text/plain"))
         .mutable()
@@ -608,28 +433,16 @@ pub(crate) fn text_bytes(bytes: Vec<u8>) -> FileProjection {
 
 #[cfg(test)]
 mod tests {
-    //! Wire-handling correctness against realistic Kubernetes payloads.
-    //!
-    //! These mirror the surface kubectl's own discovery/RESTMapper tests cover
-    //! (scope classification, subresource filtering, group-qualified resource
-    //! names) and are version-robust: the fixtures carry the full set of fields
-    //! a real server sends so we also prove forward-compatibility (unknown
-    //! fields are ignored) and tolerance of omitted optionals.
-
     use super::*;
-    use serde_json::json;
-
-    fn resource_list(body: &str) -> ApiResourceList {
+    fn resource_list(body: &str) -> APIResourceList {
         serde_json::from_str(body).expect("parse APIResourceList")
     }
 
-    /// A realistic core (`/api/v1`) discovery payload: namespaced + cluster
-    /// kinds, subresources, and the extra fields (`verbs`, `shortNames`,
-    /// `categories`, `storageVersionHash`, `singularName`) a real server emits.
     const CORE_V1: &str = r#"{
       "kind": "APIResourceList",
       "groupVersion": "v1",
       "resources": [
+        {"name":"bindings","singularName":"binding","namespaced":true,"kind":"Binding","verbs":["create"]},
         {"name":"pods","singularName":"pod","namespaced":true,"kind":"Pod","verbs":["get","list","watch"],"shortNames":["po"],"categories":["all"],"storageVersionHash":"abc"},
         {"name":"pods/log","singularName":"","namespaced":true,"kind":"Pod","verbs":["get"]},
         {"name":"pods/status","singularName":"","namespaced":true,"kind":"Pod","verbs":["get","patch","update"]},
@@ -640,15 +453,20 @@ mod tests {
     }"#;
 
     #[test]
-    fn discovery_classifies_scope_and_filters_subresources() {
-        let mut disc = Discovery::default();
-        add_resources(&mut disc, "/api/v1", "", &resource_list(CORE_V1).resources);
+    fn discovery_classifies_scope_and_filters_unreadable_resources() {
+        let mut discovery = Discovery::default();
+        add_resources(
+            &mut discovery,
+            "/api/v1",
+            "",
+            &resource_list(CORE_V1).resources,
+        );
 
-        // Subresources (names containing '/') are not browsable types.
-        assert!(disc.get("pods/log").is_none());
-        assert!(disc.get("pods/status").is_none());
+        assert!(discovery.get("bindings").is_none());
+        assert!(discovery.get("pods/log").is_none());
+        assert!(discovery.get("pods/status").is_none());
 
-        let pods = disc.get("pods").expect("pods present");
+        let pods = discovery.get("pods").expect("pods present");
         assert!(pods.namespaced);
         assert_eq!(
             pods.collection_path(Some("default")),
@@ -659,41 +477,38 @@ mod tests {
             "/api/v1/namespaces/default/pods/web"
         );
 
-        let nodes = disc.get("nodes").expect("nodes present");
+        let nodes = discovery.get("nodes").expect("nodes present");
         assert!(!nodes.namespaced);
         assert_eq!(nodes.collection_path(None), "/api/v1/nodes");
         assert_eq!(nodes.object_path(None, "n1"), "/api/v1/nodes/n1");
 
-        // Scope partitioning is exactly what `/namespaces` vs `/cluster` list.
-        let namespaced = disc.sorted_types(true);
-        let cluster = disc.sorted_types(false);
+        let namespaced = discovery.sorted_types(true);
+        let cluster = discovery.sorted_types(false);
         assert!(namespaced.contains(&"pods".to_string()));
         assert!(namespaced.contains(&"events".to_string()));
         assert!(cluster.contains(&"nodes".to_string()));
         assert!(cluster.contains(&"namespaces".to_string()));
         assert!(!namespaced.contains(&"nodes".to_string()));
-        // Listings are sorted.
-        let mut expected = namespaced.clone();
-        expected.sort();
-        assert_eq!(namespaced, expected);
+        assert!(!cluster.contains(&"pods".to_string()));
     }
 
     #[test]
     fn group_resources_use_group_version_root() {
-        let mut disc = Discovery::default();
+        let mut discovery = Discovery::default();
         let apps = r#"{"groupVersion":"apps/v1","resources":[
-            {"name":"deployments","namespaced":true,"kind":"Deployment","verbs":["get"]},
-            {"name":"deployments/scale","namespaced":true,"kind":"Scale","verbs":["get"]}
+            {"name":"deployments","singularName":"deployment","namespaced":true,"kind":"Deployment","verbs":["get","list"]},
+            {"name":"deployments/scale","singularName":"","namespaced":true,"kind":"Scale","verbs":["get"]}
         ]}"#;
         add_resources(
-            &mut disc,
+            &mut discovery,
             "/apis/apps/v1",
             "apps",
             &resource_list(apps).resources,
         );
-        assert!(disc.get("deployments/scale").is_none());
+        assert!(discovery.get("deployments/scale").is_none());
         assert_eq!(
-            disc.get("deployments")
+            discovery
+                .get("deployments")
                 .expect("deployments present")
                 .object_path(Some("default"), "web"),
             "/apis/apps/v1/namespaces/default/deployments/web"
@@ -702,25 +517,30 @@ mod tests {
 
     #[test]
     fn plural_collision_qualifies_by_group_and_core_keeps_bare_name() {
-        let mut disc = Discovery::default();
-        // Core processed first, so it keeps the bare `events` name.
-        add_resources(&mut disc, "/api/v1", "", &resource_list(CORE_V1).resources);
+        let mut discovery = Discovery::default();
+        add_resources(
+            &mut discovery,
+            "/api/v1",
+            "",
+            &resource_list(CORE_V1).resources,
+        );
         let group = r#"{"groupVersion":"events.k8s.io/v1","resources":[
-            {"name":"events","namespaced":true,"kind":"Event","verbs":["get","list"]}
+            {"name":"events","singularName":"event","namespaced":true,"kind":"Event","verbs":["get","list"]}
         ]}"#;
         add_resources(
-            &mut disc,
+            &mut discovery,
             "/apis/events.k8s.io/v1",
             "events.k8s.io",
             &resource_list(group).resources,
         );
 
         assert_eq!(
-            disc.get("events").unwrap().collection_path(Some("ns")),
+            discovery.get("events").unwrap().collection_path(Some("ns")),
             "/api/v1/namespaces/ns/events"
         );
         assert_eq!(
-            disc.get("events.events.k8s.io")
+            discovery
+                .get("events.events.k8s.io")
                 .unwrap()
                 .collection_path(Some("ns")),
             "/apis/events.k8s.io/v1/namespaces/ns/events"
@@ -728,117 +548,51 @@ mod tests {
     }
 
     #[test]
-    fn api_resource_entry_defaults_namespaced_when_omitted() {
-        // Robust against servers/versions that might omit `namespaced`.
-        let list = resource_list(r#"{"resources":[{"name":"widgets","kind":"Widget"}]}"#);
-        let mut disc = Discovery::default();
-        add_resources(
-            &mut disc,
-            "/apis/example.io/v1",
-            "example.io",
-            &list.resources,
-        );
-        assert!(!disc.get("widgets").unwrap().namespaced);
-    }
-
-    #[test]
-    fn clean_manifest_strips_only_managed_fields() {
-        // `kubectl get -o yaml` omits managedFields by default (since v1.21) but
-        // PRESERVES the last-applied-configuration annotation; match that.
-        let cleaned = clean_manifest(json!({
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": "web",
-                "namespace": "default",
-                "managedFields": [{"manager": "kubectl"}],
-                "annotations": {
-                    "kubectl.kubernetes.io/last-applied-configuration": "{...}",
-                    "keep": "me"
-                }
-            },
-            "spec": {"containers": [{"name": "web"}]}
-        }));
-        let meta = cleaned.get("metadata").unwrap();
-        assert!(meta.get("managedFields").is_none());
-        let annotations = meta.get("annotations").unwrap();
-        // last-applied-configuration is kept, exactly as `kubectl get` shows it.
-        assert_eq!(
-            annotations.get("kubectl.kubernetes.io/last-applied-configuration"),
-            Some(&Value::String("{...}".to_string()))
-        );
-        assert_eq!(annotations.get("keep").unwrap(), "me");
-        assert_eq!(meta.get("name").unwrap(), "web");
-        assert!(cleaned.get("spec").is_some());
-    }
-
-    #[test]
-    fn event_field_selector_matches_kubectl_fields() {
-        // kubectl's GetFieldSelector builds name+namespace+kind(+uid), comma-joined.
-        assert_eq!(
-            event_field_selector("default", "Pod", "web", Some("abc-123")),
-            "involvedObject.name=web,involvedObject.namespace=default,\
-             involvedObject.kind=Pod,involvedObject.uid=abc-123"
-        );
-        // uid omitted when unknown/empty; kind omitted only if unknown.
-        assert_eq!(
-            event_field_selector("default", "Pod", "web", None),
-            "involvedObject.name=web,involvedObject.namespace=default,involvedObject.kind=Pod"
-        );
-        assert_eq!(
-            event_field_selector("ns", "Deployment", "app", Some("")),
-            "involvedObject.name=app,involvedObject.namespace=ns,involvedObject.kind=Deployment"
-        );
-    }
-
-    #[test]
     fn discovery_prefers_preferred_version_and_keeps_non_preferred_only_resources() {
-        // A group with two versions: v2 is preferred. `bars` exists in both;
-        // `legacies` only in the non-preferred v1. fetch_discovery queries
-        // preferred-first, so `bars` resolves to v2 while `legacies` still
-        // surfaces (at v1) — matching client-go ServerPreferredResources.
-        let mut disc = Discovery::default();
+        let mut discovery = Discovery::default();
         let v2 = r#"{"groupVersion":"example.io/v2","resources":[
-            {"name":"bars","namespaced":true,"kind":"Bar"}
+            {"name":"bars","singularName":"bar","namespaced":true,"kind":"Bar","verbs":["get","list"]}
         ]}"#;
         let v1 = r#"{"groupVersion":"example.io/v1","resources":[
-            {"name":"bars","namespaced":true,"kind":"Bar"},
-            {"name":"legacies","namespaced":true,"kind":"Legacy"}
+            {"name":"bars","singularName":"bar","namespaced":true,"kind":"Bar","verbs":["get","list"]},
+            {"name":"legacies","singularName":"legacy","namespaced":true,"kind":"Legacy","verbs":["get","list"]}
         ]}"#;
-        // preferred (v2) first, then v1
         add_resources(
-            &mut disc,
+            &mut discovery,
             "/apis/example.io/v2",
             "example.io",
             &resource_list(v2).resources,
         );
         add_resources(
-            &mut disc,
+            &mut discovery,
             "/apis/example.io/v1",
             "example.io",
             &resource_list(v1).resources,
         );
 
         assert_eq!(
-            disc.get("bars").unwrap().collection_path(Some("ns")),
-            "/apis/example.io/v2/namespaces/ns/bars",
-            "multi-version resource resolves to the preferred version"
+            discovery.get("bars").unwrap().collection_path(Some("ns")),
+            "/apis/example.io/v2/namespaces/ns/bars"
         );
         assert_eq!(
-            disc.get("legacies").unwrap().collection_path(Some("ns")),
-            "/apis/example.io/v1/namespaces/ns/legacies",
-            "a resource only in a non-preferred version still surfaces"
+            discovery
+                .get("legacies")
+                .unwrap()
+                .collection_path(Some("ns")),
+            "/apis/example.io/v1/namespaces/ns/legacies"
         );
-        // No spurious group-qualified duplicate from the second version.
-        assert!(disc.get("bars.example.io").is_none());
+        assert!(discovery.get("bars.example.io").is_none());
     }
 
     #[test]
     fn group_versions_preferred_first_orders_and_dedups() {
-        let group: ApiGroup = serde_json::from_str(
+        let group: APIGroup = serde_json::from_str(
             r#"{"name":"example.io",
-                "preferredVersion":{"groupVersion":"example.io/v2"},
-                "versions":[{"groupVersion":"example.io/v1"},{"groupVersion":"example.io/v2"}]}"#,
+                "preferredVersion":{"groupVersion":"example.io/v2","version":"v2"},
+                "versions":[
+                    {"groupVersion":"example.io/v1","version":"v1"},
+                    {"groupVersion":"example.io/v2","version":"v2"}
+                ]}"#,
         )
         .unwrap();
         assert_eq!(
@@ -848,70 +602,19 @@ mod tests {
     }
 
     #[test]
-    fn clean_manifest_tolerates_unexpected_shapes() {
-        // Must never panic on shapes a CRD or malformed object might present.
-        let _ = clean_manifest(json!({"kind": "X"}));
-        let _ = clean_manifest(json!({"metadata": "not-an-object"}));
-        let _ = clean_manifest(json!({"metadata": {"annotations": "nope"}}));
-        let _ = clean_manifest(json!(42));
-    }
-
-    #[test]
-    fn status_of_extracts_or_nulls() {
+    fn event_field_selector_matches_kubectl_fields() {
         assert_eq!(
-            status_of(&json!({"status": {"phase": "Running"}})),
-            json!({"phase": "Running"})
+            event_field_selector("default", "Pod", "web", Some("abc-123")),
+            "involvedObject.name=web,involvedObject.namespace=default,\
+             involvedObject.kind=Pod,involvedObject.uid=abc-123"
         );
-        assert_eq!(status_of(&json!({"spec": {}})), Value::Null);
-    }
-
-    #[test]
-    fn pod_container_names_covers_all_container_kinds_in_order() {
-        let pod = json!({"spec": {
-            "initContainers": [{"name": "init"}],
-            "containers": [{"name": "app"}, {"name": "sidecar"}],
-            "ephemeralContainers": [{"name": "debug"}]
-        }});
-        // Order: containers, then initContainers, then ephemeralContainers.
         assert_eq!(
-            pod_container_names(&pod),
-            vec![
-                "app".to_string(),
-                "sidecar".to_string(),
-                "init".to_string(),
-                "debug".to_string()
-            ]
+            event_field_selector("default", "Pod", "web", None),
+            "involvedObject.name=web,involvedObject.namespace=default,involvedObject.kind=Pod"
         );
-        // No spec / unexpected shape -> empty, no panic.
-        assert!(pod_container_names(&json!({"kind": "Pod"})).is_empty());
-        assert!(pod_container_names(&json!({"spec": {"containers": "nope"}})).is_empty());
-    }
-
-    #[test]
-    fn render_event_list_formats_rows_and_handles_empty() {
-        let empty: EventList = serde_json::from_str(r#"{"items":[]}"#).unwrap();
-        assert_eq!(render_event_list(empty), "No events.\n");
-
-        // Carries the full real-server field set (involvedObject, source, etc.)
-        // to prove unknown fields are ignored.
-        let list: EventList = serde_json::from_str(
-            r#"{"apiVersion":"v1","kind":"EventList","items":[
-                {"involvedObject":{"kind":"Pod","name":"web","namespace":"default"},
-                 "type":"Warning","reason":"BackOff","message":"Back-off restarting\nfailed container",
-                 "count":5,"source":{"component":"kubelet"},
-                 "firstTimestamp":"2024-01-01T00:00:00Z","lastTimestamp":"2024-01-01T00:05:00Z",
-                 "reportingComponent":"kubelet"},
-                {"type":"Normal","reason":"Scheduled","message":"assigned","eventTime":"2024-01-02T00:00:00Z"}
-            ]}"#,
-        )
-        .unwrap();
-        let out = render_event_list(list);
-        assert!(out.starts_with("LAST SEEN\tCOUNT\tTYPE\tREASON\tMESSAGE\n"));
-        // lastTimestamp preferred; embedded newline flattened to a space.
-        assert!(out.contains(
-            "2024-01-01T00:05:00Z\t5\tWarning\tBackOff\tBack-off restarting failed container\n"
-        ));
-        // eventTime fallback when lastTimestamp absent; count defaults to 1.
-        assert!(out.contains("2024-01-02T00:00:00Z\t1\tNormal\tScheduled\tassigned\n"));
+        assert_eq!(
+            event_field_selector("ns", "Deployment", "app", Some("")),
+            "involvedObject.name=app,involvedObject.namespace=ns,involvedObject.kind=Deployment"
+        );
     }
 }

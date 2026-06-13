@@ -7,22 +7,21 @@ whatever the cluster actually serves.
 ## How it reaches the cluster
 
 The provider talks to the API server through the configured `endpoint`, which
-is turned into callout URLs by the SDK's `HttpEndpoint`. Two transports work:
+is turned into callout URLs by the SDK's `HttpEndpoint`.
 
-- **`unix://` socket (recommended).** Point `endpoint` at a local
-  `kubectl proxy --unix-socket` socket. kubectl terminates TLS and injects the
-  active kubeconfig context's credentials, so the provider issues plain,
-  unauthenticated HTTP over the socket and never handles a token. This works
-  against **any** cluster `kubectl` can reach — client-cert (kind/minikube/
-  kubeadm), EKS/GKE/AKS exec plugins, OIDC, and custom CAs are all handled
-  upstream by kubectl. The host's `unix:` callout transport bypasses the
-  HTTPS-only / private-IP egress restrictions that otherwise block local and
-  in-cluster API servers.
-- **`https://` API server.** Works only for clusters reachable with
-  system-trust TLS (a public hostname + publicly-trusted cert) and a bearer
-  token configured in mount auth. The host callout currently has no custom-CA
-  or client-cert (mTLS) support, so self-signed clusters and private IPs are
-  not reachable over this transport. Prefer the `unix://` path.
+Use a **`unix://` socket** pointed at a local `kubectl proxy --unix-socket`
+socket. kubectl terminates TLS and injects the active kubeconfig context's
+credentials, so the provider issues plain, unauthenticated HTTP over the socket
+and never handles a token. This works against **any** cluster `kubectl` can
+reach: client-cert clusters such as kind/minikube/kubeadm, EKS/GKE/AKS exec
+plugins, OIDC, and custom CAs are all handled upstream by kubectl. The host's
+`unix:` callout transport bypasses the HTTPS-only / private-IP egress
+restrictions that otherwise block local and in-cluster API servers.
+
+Direct `https://` API-server transport is intentionally not advertised yet.
+Host auth injection needs provider auth metadata before bearer-token mounts can
+work reliably, and the host callout currently has no custom-CA or client-cert
+support.
 
 ### Running with kubectl proxy
 
@@ -96,9 +95,9 @@ grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
 ## Scope and limitations (v1)
 
 - **Read-only.** No writes/mutations, consistent with the omnifs read model.
-- **No live watch.** Each read is an on-demand fetch; listings and objects are
-  re-fetched on access (the host caches bytes; `manifest`/`status` leaves are
-  marked mutable so reads stay fresh). A polling-based change feed
+- **No live watch.** Object reads populate the host object cache and derive
+  `manifest`/`status` leaves from the canonical Kubernetes object. External
+  cluster changes are not invalidated live yet; a polling-based change feed
   (periodic `LIST` keyed by `resourceVersion`, emitting cache invalidations) is
   a natural follow-up using the runtime's `refresh-interval`/`timer-tick`
   mechanism.
