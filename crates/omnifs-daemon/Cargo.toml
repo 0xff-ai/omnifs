@@ -19,7 +19,6 @@ path = "src/bin/openapi.rs"
 
 [dependencies]
 omnifs-api = { workspace = true }
-omnifs-fuse = { workspace = true }
 omnifs-home = { workspace = true }
 omnifs-host = { workspace = true }
 omnifs-inspector = { workspace = true }
@@ -35,6 +34,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { workspace = true }
+
+# FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
+[target.'cfg(target_os = "linux")'.dependencies]
+omnifs-fuse = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
