@@ -478,7 +478,12 @@ async fn checkout(_cx: Cx<State>) -> Result<TreeRef> {
 struct LiveTailReader;
 
 impl RangeReader for LiveTailReader {
-    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk> {
+    fn read_chunk<'a>(
+        &'a self,
+        _cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk> {
         Box::pin(async move {
             let body = format!("tail:{offset}\n");
             let mut bytes = body.into_bytes();
