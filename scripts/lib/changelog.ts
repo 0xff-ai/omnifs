@@ -102,6 +102,12 @@ export function finalizeUnreleased(log: Changelog, version: string, today: () =>
   return { ...next, raw: renderChangelog(next) };
 }
 
+/** Return the changelog with its [Unreleased] body replaced and re-rendered. */
+export function withUnreleased(log: Changelog, unreleasedBody: string): Changelog {
+  const next = { preamble: log.preamble, unreleasedBody, sections: log.sections };
+  return { ...next, raw: renderChangelog(next) };
+}
+
 function renderChangelog(log: Pick<Changelog, "preamble" | "unreleasedBody" | "sections">): string {
   const blocks: string[] = [];
   const preamble = log.preamble.trimEnd();

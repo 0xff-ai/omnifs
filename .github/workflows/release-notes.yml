@@ -1,0 +1,39 @@
+name: Changelog draft
+
+# PR stage of the changelog flow: on each feature PR, draft one changelog entry
+# in three lengths and post it as a sticky comment with the selector reactions
+# seeded. There is no gate; a PR is never required to carry an entry. The merge
+# stage (release-changelog.yml) records the chosen entry.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: changelog-draft-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  draft:
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/omnifs-just
+
+      - name: Install script deps
+        working-directory: scripts
+        run: bun install --frozen-lockfile
+
+      - name: Draft changelog options
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_ZEN_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+        run: bun scripts/release-notes.ts draft --pr ${{ github.event.pull_request.number }}

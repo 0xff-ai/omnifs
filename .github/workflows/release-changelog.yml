@@ -1,0 +1,48 @@
+name: Changelog record
+
+# Merge stage of the changelog flow: on each push to main, append the chosen
+# changelog entry for the merged PR to CHANGELOG.md's [Unreleased], grouped under
+# its area, and commit it authored as the PR author. Selection is by reaction on
+# the PR's sticky comment (maintainer wins, else author, else the medium default).
+# Direct pushes to main are drafted from the commit diff at the medium length.
+#
+# The bot's own changelog commit carries a `docs(changelog):` subject; the job
+# skips it (and GITHUB_TOKEN pushes do not trigger workflows, so there is no loop).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: changelog-record
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: ${{ !startsWith(github.event.head_commit.message, 'docs(changelog):') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/omnifs-just
+
+      - name: Install script deps
+        working-directory: scripts
+        run: bun install --frozen-lockfile
+
+      - name: Configure git identity
+        run: |
+          git config user.name "omnifs-changelog-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Record changelog entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_ZEN_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+        run: bun scripts/release-notes.ts record

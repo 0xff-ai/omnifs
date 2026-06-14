@@ -3,6 +3,16 @@
 release-prompt:
     @bun scripts/release.ts prompt
 
+# Draft a PR's changelog entry (3 lengths) into a sticky comment (LLM; needs OPENCODE_ZEN_API_KEY).
+[group('release')]
+release-notes-draft pr:
+    bun scripts/release-notes.ts draft --pr '{{ pr }}'
+
+# Record the chosen changelog entry for HEAD into CHANGELOG.md [Unreleased].
+[group('release')]
+release-notes-record:
+    bun scripts/release-notes.ts record
+
 # Validate release metadata for a PR or branch.
 [group('release')]
 release-check base='origin/main' head='HEAD':
