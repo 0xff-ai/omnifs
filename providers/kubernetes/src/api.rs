@@ -12,6 +12,10 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use core::cell::RefCell;
+
+use omnifs_sdk::handler::BoxFuture;
+
 use crate::State;
 use crate::objects::KubeManifest;
 
@@ -170,18 +174,6 @@ impl<'a> KubeApi<'a> {
         })
     }
 
-    pub(crate) async fn type_is(&self, fs_plural: &str, namespaced: bool) -> Result<bool> {
-        self.ensure_discovery().await?;
-        Ok(self.cx.state(|state| {
-            state
-                .discovery
-                .borrow()
-                .as_ref()
-                .and_then(|discovery| discovery.get(fs_plural))
-                .is_some_and(|resource| resource.namespaced == namespaced)
-        }))
-    }
-
     pub(crate) async fn list_types_for_listing(
         &self,
         namespace: Option<&str>,
@@ -220,10 +212,6 @@ impl<'a> KubeApi<'a> {
             .into_iter()
             .filter_map(|item| item.metadata.name)
             .collect())
-    }
-
-    pub(crate) async fn path_exists(&self, path: &str) -> Result<bool> {
-        Ok(self.get_bytes_opt(path, &[], ACCEPT_JSON).await?.is_some())
     }
 
     pub(crate) async fn load_manifest(
@@ -279,19 +267,6 @@ impl<'a> KubeApi<'a> {
         let pod: Value = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::internal(format!("kubernetes: parse pod: {error}")))?;
         Ok(container_names(&pod))
-    }
-
-    /// The current log buffer for one container, read whole. The apiserver's
-    /// content negotiation rejects `Accept: text/plain` on the `log`
-    /// subresource even though it streams text, so send `*/*` like kubectl.
-    pub(crate) async fn pod_log(
-        &self,
-        namespace: &str,
-        name: &str,
-        container: &str,
-    ) -> Result<Vec<u8>> {
-        let path = format!("/api/v1/namespaces/{namespace}/pods/{name}/log");
-        self.get_bytes(&path, &[("container", container)], "*/*").await
     }
 
     async fn fetch_discovery(&self) -> Result<Discovery> {
@@ -392,6 +367,127 @@ struct ListItem {
 #[derive(Deserialize, Default)]
 struct ListItemMeta {
     name: Option<String>,
+}
+
+/// Initial window: how many trailing lines to seed before following, so a
+/// first read of a long-lived pod does not pull its entire history.
+const INITIAL_TAIL_LINES: u32 = 2000;
+
+/// Offset-addressable, append-only reader for one pod container's log. Backs
+/// the `Volatile`/`Ranged` `<container>.log` leaf so the host follow pump and a
+/// `tail -f` see the log grow: each read at or past the buffered end
+/// delta-fetches new lines (kubectl-style `Accept: */*`, `timestamps=true` for
+/// a resume marker, `sinceTime` to bound the fetch) and appends them with the
+/// embedded timestamp stripped.
+pub(crate) struct PodLogReader {
+    endpoint: HttpEndpoint,
+    namespace: String,
+    pod: String,
+    container: String,
+    buf: RefCell<LogBuf>,
+}
+
+#[derive(Default)]
+struct LogBuf {
+    /// Accumulated log bytes, timestamps stripped: what the file serves.
+    content: Vec<u8>,
+    /// The last raw `<ts> <line>` appended; the resume marker for the next
+    /// fetch, matched verbatim so variable `RFC3339Nano` precision cannot desync.
+    last_raw: Option<String>,
+    started: bool,
+}
+
+impl PodLogReader {
+    pub(crate) fn new(endpoint: HttpEndpoint, namespace: &str, pod: &str, container: &str) -> Self {
+        Self {
+            endpoint,
+            namespace: namespace.to_string(),
+            pod: pod.to_string(),
+            container: container.to_string(),
+            buf: RefCell::new(LogBuf::default()),
+        }
+    }
+
+    async fn fetch_delta(&self, cx: &Cx<()>) -> Result<()> {
+        let (since, first) = {
+            let buf = self.buf.borrow();
+            (buf.last_raw.as_deref().and_then(log_line_second), !buf.started)
+        };
+        let path = format!("/api/v1/namespaces/{}/pods/{}/log", self.namespace, self.pod);
+        let tail = INITIAL_TAIL_LINES.to_string();
+        let mut query: Vec<(&str, &str)> =
+            vec![("container", &self.container), ("timestamps", "true")];
+        if first {
+            query.push(("tailLines", &tail));
+        }
+        if let Some(since) = &since {
+            query.push(("sinceTime", since));
+        }
+        let url = self.endpoint.build_url(&path, &query);
+        let body = cx
+            .http()
+            .get(url)
+            .header("Accept", "*/*")
+            .send()
+            .await?
+            .error_for_status()?
+            .into_body();
+        self.append(&body);
+        Ok(())
+    }
+
+    fn append(&self, body: &[u8]) {
+        let text = String::from_utf8_lossy(body);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut buf = self.buf.borrow_mut();
+        buf.started = true;
+        // Resume after the marker if the over-fetched window still contains it;
+        // otherwise (rotation, or first fetch) take the whole window.
+        let start = match &buf.last_raw {
+            Some(marker) => lines
+                .iter()
+                .position(|line| line == marker)
+                .map_or(0, |i| i + 1),
+            None => 0,
+        };
+        for &line in &lines[start..] {
+            let content = line.split_once(' ').map_or(line, |(_, rest)| rest);
+            buf.content.extend_from_slice(content.as_bytes());
+            buf.content.push(b'\n');
+            buf.last_raw = Some(line.to_string());
+        }
+    }
+}
+
+impl RangeReader for PodLogReader {
+    fn read_chunk<'a>(
+        &'a self,
+        cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk> {
+        Box::pin(async move {
+            if offset >= self.buf.borrow().content.len() as u64 {
+                self.fetch_delta(cx).await?;
+            }
+            let buf = self.buf.borrow();
+            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(buf.content.len());
+            let end = start.saturating_add(length as usize).min(buf.content.len());
+            Ok(FileChunk::new(
+                buf.content[start..end].to_vec(),
+                end >= buf.content.len(),
+            ))
+        })
+    }
+}
+
+/// Truncate a raw log line's `RFC3339Nano` timestamp to whole seconds for
+/// `sinceTime` (which the apiserver honors only at second precision), e.g.
+/// `2026-06-14T00:15:45Z`.
+fn log_line_second(line: &str) -> Option<String> {
+    let ts = line.split_once(' ').map_or(line, |(ts, _)| ts);
+    let date_time = ts.get(..19)?;
+    Some(format!("{date_time}Z"))
 }
 
 fn container_names(pod: &Value) -> Vec<String> {

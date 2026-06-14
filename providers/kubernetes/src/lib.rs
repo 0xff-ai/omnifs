@@ -27,7 +27,7 @@ use omnifs_sdk::prelude::*;
 mod api;
 mod objects;
 
-use crate::api::{Discovery, KubeApi, text_file};
+use crate::api::{Discovery, KubeApi, PodLogReader, text_file};
 use crate::objects::{ClusterResource, NamespacedResource};
 
 #[derive(Clone)]
@@ -231,32 +231,14 @@ fn dir_listing(names: Vec<String>) -> DirProjection {
     DirProjection::exhaustive(names.into_iter().map(Entry::dir))
 }
 
-fn lookup_dir(exists: bool, name: &str) -> DirProjection {
-    if exists {
-        DirProjection::exhaustive([Entry::dir(name)])
-    } else {
-        empty_dir()
-    }
-}
-
 async fn namespaces_dir(cx: DirCx<State>) -> Result<DirProjection> {
     let api = KubeApi::new(&cx);
-    if let DirIntent::Lookup { child } = cx.intent() {
-        return Ok(lookup_dir(
-            api.path_exists(&format!("/api/v1/namespaces/{child}"))
-                .await?,
-            child,
-        ));
-    }
     Ok(dir_listing(api.list_names("/api/v1/namespaces").await?))
 }
 
 impl NamespaceKey {
     async fn types(self, cx: DirCx<State>) -> Result<DirProjection> {
         let api = KubeApi::new(&cx);
-        if let DirIntent::Lookup { child } = cx.intent() {
-            return Ok(lookup_dir(api.type_is(child, true).await?, child));
-        }
         Ok(dir_listing(
             api.list_types_for_listing(Some(self.ns.as_str())).await?,
         ))
@@ -273,13 +255,6 @@ impl NsTypeKey {
         let resource = api.resource(self.rtype.as_str()).await?;
         if !resource.namespaced {
             return Ok(empty_dir());
-        }
-        if let DirIntent::Lookup { child } = cx.intent() {
-            return Ok(lookup_dir(
-                api.path_exists(&resource.object_path(Some(self.ns.as_str()), child))
-                    .await?,
-                child,
-            ));
         }
         Ok(dir_listing(
             api.list_names(&resource.collection_path(Some(self.ns.as_str())))
@@ -352,10 +327,12 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
             "pod log files are named <container>.log",
         ));
     };
-    let bytes = KubeApi::new(&cx)
-        .pod_log(key.ns.as_str(), key.name.as_str(), container)
-        .await?;
-    Ok(text_file(bytes))
+    let endpoint = cx.state(|state| state.endpoint.clone());
+    let reader = PodLogReader::new(endpoint, key.ns.as_str(), key.name.as_str(), container);
+    Ok(FileProjection::ranged(reader)
+        .size(Size::Unknown)
+        .volatile()
+        .build())
 }
 
 impl Key for NamespacedResourceKey {
@@ -383,9 +360,6 @@ impl Key for NamespacedResourceKey {
 
 async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirProjection> {
     let api = KubeApi::new(&cx);
-    if let DirIntent::Lookup { child } = cx.intent() {
-        return Ok(lookup_dir(api.type_is(child, false).await?, child));
-    }
     Ok(dir_listing(api.list_types_for_listing(None).await?))
 }
 
@@ -395,12 +369,6 @@ impl ClusterTypeKey {
         let resource = api.resource(self.rtype.as_str()).await?;
         if resource.namespaced {
             return Ok(empty_dir());
-        }
-        if let DirIntent::Lookup { child } = cx.intent() {
-            return Ok(lookup_dir(
-                api.path_exists(&resource.object_path(None, child)).await?,
-                child,
-            ));
         }
         Ok(dir_listing(
             api.list_names(&resource.collection_path(None)).await?,
