@@ -395,10 +395,17 @@ impl Frontend {
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
             Err(Error::ProviderError(error))
-                if error.kind == omnifs_wit::provider::types::ErrorKind::InvalidInput =>
+                if matches!(
+                    error.kind,
+                    omnifs_wit::provider::types::ErrorKind::InvalidInput
+                        | omnifs_wit::provider::types::ErrorKind::NotFound
+                ) =>
             {
-                // The file's source is not ranged; fall through to the full
-                // read path.
+                // Not a ranged file route here: a non-ranged source reports
+                // InvalidInput; a path with no file route at all (an object
+                // representation or projected leaf) reports NotFound. Either
+                // way, fall through to the normal read path, which serves
+                // object representations and full files.
                 Ok(None)
             },
             Err(Error::ProviderError(error)) => Err(super::errno::provider_error_errno(&error)),
