@@ -1,8 +1,3 @@
-# Draft changelog notes from commits since the last release tag.
-[group('release')]
-release-prompt:
-    @bun scripts/release.ts prompt
-
 # Draft a PR's changelog entry (3 lengths) into a sticky comment (LLM; needs OPENCODE_ZEN_API_KEY).
 [group('release')]
 release-notes-draft pr:
@@ -13,10 +8,10 @@ release-notes-draft pr:
 release-notes-record:
     bun scripts/release-notes.ts record
 
-# Validate release metadata for a PR or branch.
+# Validate release metadata for a release PR.
 [group('release')]
-release-check base='origin/main' head='HEAD':
-    bun scripts/release.ts check --base '{{ base }}' --head '{{ head }}'
+release-check:
+    bun scripts/release.ts check
 
 # Emit the text release plan used by the Release workflow.
 [group('release')]

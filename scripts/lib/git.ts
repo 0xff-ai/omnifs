@@ -22,16 +22,6 @@ export class GitRepo {
     return (await this.output(["tag", "-l", "v*.*.*", "--sort=-v:refname"])).split(/\r?\n/).find(Boolean);
   }
 
-  async changedFiles(base: string, head: string): Promise<string[]> {
-    return (await this.output(["diff", "--name-only", `${base}...${head}`]))
-      .split(/\r?\n/)
-      .filter(Boolean);
-  }
-
-  async show(spec: string): Promise<string> {
-    return await this.output(["show", spec]);
-  }
-
   async checkoutNewBranch(branch: string): Promise<void> {
     await this.repo.$`git checkout -b ${branch}`;
   }

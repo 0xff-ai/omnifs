@@ -65,12 +65,6 @@ Maintainer commands are exposed through the root **`justfile`**. Run `just` to l
 | **`just npm-sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from workspace (or `version`) through `npm pkg set` |
 | **`just npm-validate`** | `just check`, release PR, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` |
 
-Optional (not part of the ship path):
-
-```bash
-just release-prompt   # LLM helper: commit range since last tag
-```
-
 Examples:
 
 ```bash
@@ -182,8 +176,6 @@ just release-cut
 ```
 
 `just release-cut` creates `release/vX.Y.Z`, bumps workspace + npm, finalizes CHANGELOG, commits, pushes, opens PR.
-
-Optional before cut: `just release-prompt` → draft notes → commit on `main` → then `just release-cut`.
 
 ### 4. Merge the release PR
 

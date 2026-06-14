@@ -7,14 +7,12 @@
 // grouped under its area heading. Appends are additive: existing lines are never
 // rewritten, so hand-edits to CHANGELOG.md always survive.
 
-import { areaById, areaIndex, resolveArea, type AreaId } from "./areas";
+import { areaById } from "./areas";
 import type { ChangelogDraft } from "./llm";
 
 export const MARKER = "<!-- omnifs-changelog -->";
 const DATA_PREFIX = "<!-- omnifs-changelog-data:";
 const DATA_SUFFIX = "-->";
-
-export type AreaBullet = { area: AreaId; text: string };
 
 /** Reaction content (GitHub's fixed set) that selects each length option. */
 export const OPTION_REACTIONS = { short: "+1", medium: "rocket", long: "eyes" } as const;
@@ -70,91 +68,3 @@ export function parseOptionsComment(body: string): ChangelogDraft | undefined {
   }
 }
 
-// --- additive [Unreleased] fold, grouped by area --------------------------
-
-/**
- * Additively fold new bullets into an existing [Unreleased] body. Existing lines
- * are preserved verbatim; new bullets are appended under their area's subsection
- * (created at its canonical position if absent). Exact-text duplicates within an
- * area are skipped, so recording the same entry twice is a no-op.
- */
-export function appendBulletsToUnreleased(currentBody: string, newBullets: AreaBullet[]): string {
-  const subs = parseSubsections(currentBody);
-  for (const bullet of newBullets) {
-    const text = `- ${bullet.text}`;
-    const existing = subs.find((s) => s.areaId === bullet.area);
-    if (existing) {
-      if (!existing.bullets.some((b) => normalizeBullet(b) === normalizeBullet(text))) {
-        existing.bullets.push(text);
-      }
-      continue;
-    }
-    insertSubsection(subs, {
-      heading: `### ${areaById(bullet.area).heading}`,
-      areaId: bullet.area,
-      bullets: [text],
-    });
-  }
-  return renderSubsections(subs);
-}
-
-type Subsection = { heading: string; areaId?: AreaId; bullets: string[] };
-
-function parseSubsections(body: string): Subsection[] {
-  const subs: Subsection[] = [];
-  let current: Subsection | undefined;
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.trimEnd();
-    const heading = headingText(line);
-    if (heading !== undefined) {
-      current = { heading: line, areaId: resolveArea(heading)?.id, bullets: [] };
-      subs.push(current);
-      continue;
-    }
-    if (line.trim().length === 0) continue;
-    if (!current) {
-      // Loose content before any subsection: keep it as a headless section so
-      // human-authored preamble in [Unreleased] is never dropped.
-      current = { heading: "", bullets: [] };
-      subs.push(current);
-    }
-    if (bulletBody(line) !== undefined) {
-      current.bullets.push(line.trimStart());
-    } else if (current.bullets.length > 0) {
-      // Continuation of the previous bullet; keep attached verbatim.
-      current.bullets[current.bullets.length - 1] += `\n${line}`;
-    } else {
-      current.bullets.push(line.trimStart());
-    }
-  }
-  return subs.filter((s) => s.heading.length > 0 || s.bullets.length > 0);
-}
-
-function insertSubsection(subs: Subsection[], next: Subsection): void {
-  const nextIdx = next.areaId ? areaIndex(next.areaId) : Number.MAX_SAFE_INTEGER;
-  const at = subs.findIndex(
-    (s) => s.areaId !== undefined && next.areaId !== undefined && areaIndex(s.areaId) > nextIdx,
-  );
-  if (at === -1) subs.push(next);
-  else subs.splice(at, 0, next);
-}
-
-function renderSubsections(subs: Subsection[]): string {
-  const blocks = subs
-    .filter((s) => s.bullets.length > 0 || s.heading.length > 0)
-    .map((s) => (s.heading.length > 0 ? [s.heading, ...s.bullets].join("\n") : s.bullets.join("\n")));
-  return blocks.length === 0 ? "" : `${blocks.join("\n\n")}\n`;
-}
-
-function headingText(line: string): string | undefined {
-  return line.startsWith("### ") ? line.slice(4).trim() : undefined;
-}
-
-function bulletBody(line: string): string | undefined {
-  const m = line.match(/^\s*-\s+(.*)$/);
-  return m ? m[1]!.trim() : undefined;
-}
-
-function normalizeBullet(line: string): string {
-  return (bulletBody(line) ?? line).trim().toLowerCase().replace(/\s+/g, " ");
-}

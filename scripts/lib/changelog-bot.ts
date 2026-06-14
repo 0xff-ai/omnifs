@@ -12,13 +12,12 @@
 // Direct pushes to main (no PR) are drafted from the commit diff and recorded at
 // the medium length, authored as the pusher.
 
-import { parseChangelog, withUnreleased } from "./changelog";
+import { appendBulletsToUnreleased, parseChangelog, withUnreleased } from "./changelog";
 import { GitHub, type UserIdentity } from "./github";
 import { draftChangelogOptions, type ChangelogDraft } from "./llm";
 import {
   MARKER,
   OPTION_REACTIONS,
-  appendBulletsToUnreleased,
   lengthForReaction,
   parseOptionsComment,
   renderOptionsComment,

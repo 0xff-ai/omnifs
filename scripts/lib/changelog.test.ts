@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appendBulletsToUnreleased,
   finalizeUnreleased,
   parseChangelog,
   sectionForVersion,
   unreleasedHasContent,
   validateReleaseChangelog,
+  type AreaBullet,
 } from "./changelog";
 
 const FIXED_DATE = () => "2026-05-26";
@@ -122,5 +124,46 @@ describe("validateReleaseChangelog", () => {
   test("returns no errors on a healthy release log", () => {
     const log = parseChangelog(changelog("## [Unreleased]\n\n## [1.0.0] - 2025-01-01\n\n### Added\n- real\n"));
     expect(validateReleaseChangelog(log, "1.0.0")).toEqual([]);
+  });
+});
+
+describe("appendBulletsToUnreleased", () => {
+  test("groups a fresh set in canonical area order", () => {
+    const body = appendBulletsToUnreleased("", [
+      { area: "packaging", text: "npm dev tag" },
+      { area: "providers", text: "new provider path" },
+    ]);
+    expect(body).toBe(
+      "### Providers & projected paths\n- new provider path\n\n### Packaging & release\n- npm dev tag\n",
+    );
+  });
+
+  test("appends to an existing area subsection without rewriting it", () => {
+    const start = "### Providers & projected paths\n- existing bullet\n";
+    const merged = appendBulletsToUnreleased(start, [{ area: "providers", text: "added bullet" }]);
+    expect(merged).toBe("### Providers & projected paths\n- existing bullet\n- added bullet\n");
+  });
+
+  test("inserts a new area subsection at its canonical position", () => {
+    const start = "### Packaging & release\n- pkg note\n";
+    const merged = appendBulletsToUnreleased(start, [{ area: "providers", text: "prov note" }]);
+    // Providers (index 0) must precede Packaging (index 5).
+    expect(merged).toBe(
+      "### Providers & projected paths\n- prov note\n\n### Packaging & release\n- pkg note\n",
+    );
+  });
+
+  test("is idempotent on exact-duplicate bullets (recording the same entry twice is a no-op)", () => {
+    const start = "### Auth & credentials\n- token refresh fixed\n";
+    const merged = appendBulletsToUnreleased(start, [{ area: "auth", text: "token refresh fixed" }]);
+    expect(merged).toBe(start);
+  });
+
+  test("preserves a human-edited bullet verbatim while adding a new one", () => {
+    const start = "### Runtime & mounts\n- Hand-reworded line a maintainer typed.\n";
+    const bullets: AreaBullet[] = [{ area: "runtime", text: "auto bullet" }];
+    const merged = appendBulletsToUnreleased(start, bullets);
+    expect(merged).toContain("- Hand-reworded line a maintainer typed.");
+    expect(merged).toContain("- auto bullet");
   });
 });
