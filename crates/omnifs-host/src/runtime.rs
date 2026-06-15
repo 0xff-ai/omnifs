@@ -265,7 +265,8 @@ impl Runtime {
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
-        let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities);
+        let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities)
+            .map_err(BuildError::InvalidConfig)?;
         let capability = Arc::new(CapabilityChecker::new(grants));
 
         let auth_manifest = Artifact::load(wasm_path)
@@ -301,7 +302,25 @@ impl Runtime {
         // Per-mount facade: scopes all cache keys with "{mount}\x1f".
         let cache = caches.mount(mount_name);
         let blob_limits = BlobLimits::from_config(config);
-        let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
+
+        // Resolve any extra TLS trust the mount declared (inline PEM or a
+        // file path). The CA is a public trust anchor, not a secret, so
+        // it travels in the mount capability config rather than the
+        // credential store.
+        let extra_ca_pem: Option<Vec<u8>> = config
+            .spec
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.tls.as_ref())
+            .map(omnifs_provider::TlsTrust::resolve_ca_pem)
+            .transpose()
+            .map_err(BuildError::InvalidConfig)?
+            .flatten();
+        let http = Arc::new(HttpStack::new(
+            auth.clone(),
+            capability.clone(),
+            extra_ca_pem.as_deref(),
+        )?);
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
         Ok(Self {
             instance,

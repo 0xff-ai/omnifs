@@ -41,7 +41,7 @@ pub use records::{
 };
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
 pub use runtime_grants::{
-    PreopenMode, PreopenedPath, ProviderCapabilities, UnixSocketEndpointError,
+    PreopenMode, PreopenedPath, ProviderCapabilities, TlsTrust, UnixSocketEndpointError,
 };
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,

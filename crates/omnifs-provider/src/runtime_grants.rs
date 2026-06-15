@@ -34,6 +34,20 @@ pub struct ProviderCapabilities {
     pub git_repos: Option<Vec<String>>,
     #[serde(default)]
     pub unix_sockets: Option<Vec<String>>,
+    /// HTTPS origins (`scheme://host[:port]`) the provider may reach
+    /// directly even when they resolve to a private or link-local IP.
+    /// Each entry is an explicit, operator-granted exception to the
+    /// default private-IP denial, named the same way `unix_sockets`
+    /// names allowed sockets. A granted origin also satisfies the
+    /// `domains` check, so an internal endpoint needs only this grant.
+    #[serde(default)]
+    pub endpoints: Option<Vec<String>>,
+    /// Extra TLS trust for reaching endpoints whose server certificate
+    /// is not signed by a system-trusted CA (e.g. a self-signed local
+    /// cluster). The CA is a public trust anchor, not a secret, so it
+    /// lives here rather than in the credential store.
+    #[serde(default)]
+    pub tls: Option<TlsTrust>,
     #[serde(default)]
     pub preopened_paths: Option<Vec<PreopenedPath>>,
     #[serde(default)]
@@ -42,6 +56,37 @@ pub struct ProviderCapabilities {
     pub max_fetch_blob_bytes: Option<u64>,
     #[serde(default)]
     pub max_read_blob_bytes: Option<u64>,
+}
+
+/// Additional CA roots to trust for this mount's HTTPS callouts, on top
+/// of the system trust store. Supply the CA by file path (`ca_file`,
+/// read by the host at mount load) or inline PEM (`ca_pem`); a bundle
+/// with multiple PEM certificates is accepted in either form.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TlsTrust {
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    #[serde(default)]
+    pub ca_pem: Option<String>,
+}
+
+impl TlsTrust {
+    /// Resolve the configured CA to PEM bytes. Inline `ca_pem` wins over
+    /// `ca_file`, which is read from disk; `None` means no extra trust.
+    /// The error is a display string so the host can surface it as a
+    /// mount config failure without this crate depending on host types.
+    pub fn resolve_ca_pem(&self) -> Result<Option<Vec<u8>>, String> {
+        if let Some(pem) = &self.ca_pem {
+            return Ok(Some(pem.as_bytes().to_vec()));
+        }
+        match &self.ca_file {
+            Some(path) => std::fs::read(path)
+                .map(Some)
+                .map_err(|e| format!("read tls.ca_file `{path}`: {e}")),
+            None => Ok(None),
+        }
+    }
 }
 
 impl ProviderCapabilities {

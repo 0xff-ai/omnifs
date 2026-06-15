@@ -20,13 +20,18 @@ pub struct CapabilityGrants {
     /// Absolute unix socket paths the provider may open via `unix:`
     /// URLs. An empty list means no socket is allowed.
     pub unix_sockets: Vec<PathBuf>,
+    /// HTTPS origins (`scheme://host[:port]`) explicitly granted for
+    /// direct access. A granted origin bypasses both the private-IP
+    /// denial and the domain allowlist, the same deny-by-default shape
+    /// as `unix_sockets`. An empty list grants no exceptions.
+    pub endpoints: Vec<String>,
 }
 
 impl CapabilityGrants {
     pub fn from_config(
         config: &Resolved,
         provider_caps: &wit_types::RequestedCapabilities,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let caps = config.spec.capabilities.as_ref();
         let mut unix_sockets: Vec<PathBuf> = caps
             .and_then(|c| c.unix_sockets.clone())
@@ -38,14 +43,52 @@ impl CapabilityGrants {
         unix_sockets.sort();
         unix_sockets.dedup();
 
-        Self {
+        let endpoints =
+            parse_endpoint_grants(&caps.and_then(|c| c.endpoints.clone()).unwrap_or_default())?;
+
+        Ok(Self {
             domains: caps.and_then(|c| c.domains.clone()).unwrap_or_default(),
             git_repos: caps.and_then(|c| c.git_repos.clone()).unwrap_or_default(),
             max_memory_mb: caps.and_then(|c| c.max_memory_mb).unwrap_or(64),
             needs_git: provider_caps.needs_git,
             unix_sockets,
-        }
+            endpoints,
+        })
     }
+}
+
+/// Normalize and validate the mount's `endpoints` grants. A malformed
+/// entry fails mount load loudly rather than being silently dropped: a
+/// grant that no-ops on a typo would deny the very callout it was meant
+/// to allow. Returns the origins sorted and deduped, matching the
+/// `unix_sockets` allowlist shape.
+fn parse_endpoint_grants(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut origins = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let origin = normalized_origin(entry).ok_or_else(|| {
+            format!("capability `endpoints` entry `{entry}` is not a valid `scheme://host[:port]` origin")
+        })?;
+        origins.push(origin);
+    }
+    origins.sort();
+    origins.dedup();
+    Ok(origins)
+}
+
+/// The origin (`scheme://host[:port]`, default ports elided) of `url`,
+/// or `None` for an opaque origin. Comparing on this normal form lets
+/// grant time and check time agree on what an endpoint grant matches.
+fn origin_string(url: &Url) -> Option<String> {
+    match url.origin() {
+        origin @ url::Origin::Tuple(..) => Some(origin.ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
+}
+
+/// Parse `url` and reduce it to its origin for allowlist comparison.
+/// Returns `None` for inputs that do not parse or carry an opaque origin.
+fn normalized_origin(url: &str) -> Option<String> {
+    origin_string(&Url::parse(url).ok()?)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +139,13 @@ impl CapabilityChecker {
                 let host = parsed
                     .host_str()
                     .ok_or_else(|| CapabilityError::InvalidUrl("no host".to_string()))?;
+
+                // An explicitly granted origin is an operator-authored
+                // exception that satisfies both the private-IP and the
+                // domain rules below, so check it first.
+                if self.endpoint_allowed(&parsed) {
+                    return Ok(());
+                }
 
                 // Check for private/link-local IPs (covers both bare and bracketed IPv6).
                 let bare_host = host.trim_start_matches('[').trim_end_matches(']');
@@ -157,6 +207,10 @@ impl CapabilityChecker {
             .domains
             .iter()
             .any(|allowed| allowed == "*" || host == allowed)
+    }
+
+    fn endpoint_allowed(&self, url: &Url) -> bool {
+        origin_string(url).is_some_and(|origin| self.grants.endpoints.contains(&origin))
     }
 
     fn unix_socket_allowed(&self, socket_path: &std::path::Path) -> bool {
@@ -232,6 +286,7 @@ mod tests {
             max_memory_mb: 64,
             needs_git: false,
             unix_sockets: sockets.into_iter().map(PathBuf::from).collect(),
+            endpoints: Vec::new(),
         }
     }
 
@@ -265,6 +320,70 @@ mod tests {
     fn private_ip_is_denied() {
         let checker = CapabilityChecker::new(grants(vec!["10.0.0.1"], Vec::new()));
         let err = checker.check_url("https://10.0.0.1/v1/things").unwrap_err();
+        assert!(matches!(err, CapabilityError::PrivateIpDenied { .. }));
+    }
+
+    #[test]
+    fn granted_endpoint_bypasses_private_ip_and_domain_rules() {
+        let checker = CapabilityChecker::new(CapabilityGrants {
+            endpoints: vec!["https://10.43.0.1:6443".to_string()],
+            ..Default::default()
+        });
+        // A private-IP origin that is explicitly granted is allowed,
+        // including default-port normalization on the callout side.
+        checker
+            .check_url("https://10.43.0.1:6443/api/v1/namespaces")
+            .expect("granted private-IP endpoint must be allowed");
+    }
+
+    #[test]
+    fn granted_endpoint_matches_default_port_and_hostname() {
+        let checker = CapabilityChecker::new(CapabilityGrants {
+            // Granted without an explicit port; a callout using the https
+            // default port (443) must still match after origin normalization.
+            endpoints: vec!["https://cluster.internal".to_string()],
+            ..Default::default()
+        });
+        checker
+            .check_url("https://cluster.internal:443/api/v1")
+            .expect("default-port callout must match a port-less grant");
+        // A granted hostname also satisfies the (here empty) domain allowlist.
+        checker
+            .check_url("https://cluster.internal/healthz")
+            .expect("granted hostname bypasses the empty domain allowlist");
+    }
+
+    #[test]
+    fn endpoint_grants_reject_malformed_entries() {
+        // No scheme: ambiguous origin, must fail loudly rather than vanish.
+        let err = parse_endpoint_grants(&["10.43.0.1:6443".to_string()]).unwrap_err();
+        assert!(
+            err.contains("endpoints"),
+            "error names the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn endpoint_grants_normalize_and_dedup() {
+        // Explicit default port and no port are the same origin; collapse to one.
+        let parsed = parse_endpoint_grants(&[
+            "https://cluster.internal:443".to_string(),
+            "https://cluster.internal".to_string(),
+        ])
+        .expect("well-formed grants parse");
+        assert_eq!(parsed, vec!["https://cluster.internal".to_string()]);
+    }
+
+    #[test]
+    fn ungranted_private_ip_is_still_denied_with_other_endpoints_present() {
+        let checker = CapabilityChecker::new(CapabilityGrants {
+            endpoints: vec!["https://10.43.0.1:6443".to_string()],
+            ..Default::default()
+        });
+        // A different private IP, not in the grant, stays denied.
+        let err = checker
+            .check_url("https://10.43.0.9:6443/api/v1")
+            .unwrap_err();
         assert!(matches!(err, CapabilityError::PrivateIpDenied { .. }));
     }
 
