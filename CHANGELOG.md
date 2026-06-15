@@ -5,23 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
-
 ### Added
-
 - `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
 - `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
 
 ### Changed
-
 - The runtime now runs as a standalone `omnifsd` daemon that owns the FUSE mount and exposes an HTTP control API; the `omnifs` CLI drives it over that API and no longer links the WASM runtime or FUSE.
 - Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
 
 ### Fixed
-
 - The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
 - The arXiv provider no longer crashes when it fails to encode a JSON response.
 - A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
 - The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
+
+### CLI & workflow
+- Custom entry committed by the apply path test.
 
 ## [0.2.1] - 2026-06-08
 
