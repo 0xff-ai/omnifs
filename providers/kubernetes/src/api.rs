@@ -411,9 +411,15 @@ impl PodLogReader {
     async fn fetch_delta(&self, cx: &Cx<()>) -> Result<()> {
         let (since, first) = {
             let buf = self.buf.borrow();
-            (buf.last_raw.as_deref().and_then(log_line_second), !buf.started)
+            (
+                buf.last_raw.as_deref().and_then(log_line_second),
+                !buf.started,
+            )
         };
-        let path = format!("/api/v1/namespaces/{}/pods/{}/log", self.namespace, self.pod);
+        let path = format!(
+            "/api/v1/namespaces/{}/pods/{}/log",
+            self.namespace, self.pod
+        );
         let tail = INITIAL_TAIL_LINES.to_string();
         let mut query: Vec<(&str, &str)> =
             vec![("container", &self.container), ("timestamps", "true")];
@@ -471,7 +477,9 @@ impl RangeReader for PodLogReader {
                 self.fetch_delta(cx).await?;
             }
             let buf = self.buf.borrow();
-            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(buf.content.len());
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(buf.content.len());
             let end = start.saturating_add(length as usize).min(buf.content.len());
             Ok(FileChunk::new(
                 buf.content[start..end].to_vec(),
@@ -493,7 +501,10 @@ fn log_line_second(line: &str) -> Option<String> {
 fn container_names(pod: &Value) -> Vec<String> {
     let mut names = Vec::new();
     for field in ["initContainers", "containers"] {
-        if let Some(list) = pod.pointer(&format!("/spec/{field}")).and_then(Value::as_array) {
+        if let Some(list) = pod
+            .pointer(&format!("/spec/{field}"))
+            .and_then(Value::as_array)
+        {
             names.extend(
                 list.iter()
                     .filter_map(|container| container.get("name").and_then(Value::as_str))

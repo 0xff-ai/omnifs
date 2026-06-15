@@ -317,7 +317,9 @@ async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirProjection
         .pod_containers(key.ns.as_str(), key.name.as_str())
         .await?;
     Ok(DirProjection::exhaustive(
-        containers.into_iter().map(|c| Entry::file(format!("{c}.log"))),
+        containers
+            .into_iter()
+            .map(|c| Entry::file(format!("{c}.log"))),
     ))
 }
 
