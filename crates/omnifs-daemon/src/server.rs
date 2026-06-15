@@ -2,7 +2,7 @@
 //!
 //! Serves daemon runtime facts and the inspector event stream over HTTP on
 //! the control listener; mount mutation side effects live in
-//! [`crate::mounts`]. See `docs/design/daemon-cli-split.md`.
+//! [`crate::mounts`]. See `docs/_dev/design/daemon-cli-split.md`.
 
 use axum::Router;
 use axum::body::Body;

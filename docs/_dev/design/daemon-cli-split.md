@@ -2,7 +2,7 @@
 
 Status: implemented (all four phases)
 Scope: new `crates/omnifs-daemon`, `crates/omnifs-cli`, `crates/omnifs-host` crate boundary, container entrypoint, control API, mount lifecycle
-Related: `docs/design/cli-redesign.md`, `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/architecture.md` §9 (inspector emission)
+Related: `docs/_dev/design/cli-redesign.md`, `docs/_dev/design/mount-lifecycle.md`, `docs/_dev/design/host-auth.md`, `docs/_dev/design/architecture.md` §9 (inspector emission)
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 Status: accepted
 Scope: `crates/omnifs-cli`
-Related: `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/npm-distribution.md`
+Related: `docs/_dev/design/mount-lifecycle.md`, `docs/_dev/design/host-auth.md`, `docs/_dev/design/npm-distribution.md`
 
 ## Context
 
@@ -56,7 +56,7 @@ A global `config.toml` under `config_dir` supplies defaults for the runtime imag
 
 ### Surface
 
-Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
+Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/_dev/design/daemon-cli-split.md`).
 
 ### Tracing
 

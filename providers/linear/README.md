@@ -101,7 +101,7 @@ The polling interval (`refresh_interval_secs`) is 120 s. With Linear's
 3M-point-per-hour API key budget, a few-team workspace stays well
 under budget even with periodic refresh.
 
-For OAuth setup, see `docs/oauth.md`.
+For OAuth setup, see `docs/_dev/oauth.md`.
 
 ## TODOs (deferred from v1)
 

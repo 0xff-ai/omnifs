@@ -2,7 +2,7 @@
 
 Repository-local guidance for working in `omnifs`.
 
-`omnifs` projects external services (GitHub, DNS, arXiv, Docker, Linear, a SQL database) as a Linux filesystem. The runtime daemon `omnifsd` loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface; the `omnifs` CLI owns the Docker lifecycle and host credentials and talks to the daemon over an HTTP control API. The host owns trust, caching, auth, and I/O; providers own meaning (what paths exist, what bytes they hold). Every consumer of the projected tree (shells, scripts, editors, agents, applications) is served by the same mount; nothing may assume a privileged consumer. Why the system is shaped this way: `docs/design/architecture.md`.
+`omnifs` projects external services (GitHub, DNS, arXiv, Docker, Linear, a SQL database) as a Linux filesystem. The runtime daemon `omnifsd` loads providers as `wasm32-wasip2` WASM components and drives them through the `omnifs:provider` WIT interface; the `omnifs` CLI owns the Docker lifecycle and host credentials and talks to the daemon over an HTTP control API. The host owns trust, caching, auth, and I/O; providers own meaning (what paths exist, what bytes they hold). Every consumer of the projected tree (shells, scripts, editors, agents, applications) is served by the same mount; nothing may assume a privileged consumer. Why the system is shaped this way: `docs/_dev/design/architecture.md`.
 
 ## Non-negotiables
 
@@ -17,9 +17,9 @@ These are invariants, not preferences. A change that breaks one is wrong; if a t
   - copy/archive: `cp`, `mv`, `tar c/x/t`, `rsync`; compare/hash: `diff`, `cmp`, `*sum`; inspect: `jq`, `yq`, `xmllint`; editors: `vim`, `nano` (mmap editors best-effort)
 
   Prove no regression through `tests/smoke/` or a unit test when introducing a feature.
-- **Read-only model.** The read model stays read-only. Writes, when they land, are explicit, atomic, and auditable (drafts under a draft namespace, executed by moving a prepared transaction into a control namespace), never a side effect of writing to a projected file. See `docs/future/mutations-via-git.md`.
+- **Read-only model.** The read model stays read-only. Writes, when they land, are explicit, atomic, and auditable (drafts under a draft namespace, executed by moving a prepared transaction into a control namespace), never a side effect of writing to a projected file. See `docs/_dev/future/mutations-via-git.md`.
 - **Linux-only mount, no container assumptions in the daemon.** The runtime FUSE mount is Linux-only; the host CLI runs on macOS and Linux and talks to a Linux container in both cases. Do not reintroduce macFUSE, `diskutil`, or macOS-specific mount behavior unless explicitly requested. Docker is one launch mechanism; `omnifsd` will later run host-native when NFSv4/FSKit mounts land, so keep it free of container assumptions.
-- **Renderer neutrality.** FUSE is one frontend of the projected tree, not its definition. Keep new traversal, caching-policy, coalescing, or invalidation logic out of fuser vocabulary and out of `omnifs-fuse` unless it is genuinely kernel-FUSE-specific (inode tables, kernel notifier, reply types), and keep the seam clean so a second frontend can reuse the decision.
+- **Frontend agnosticity.** FUSE is one frontend of the projected tree, not its definition. Keep new traversal, caching-policy, coalescing, or invalidation logic out of fuser vocabulary and out of `omnifs-fuse` unless it is genuinely kernel-FUSE-specific (inode tables, kernel notifier, reply types), and keep the seam clean so a second frontend can reuse the decision.
 - **Host owns caching; providers do not.** The host owns all caching as opaque byte storage and evicts only by capacity or explicit invalidation. Providers must not add their own LRUs or time-based expiration.
 
 ## Working in this repo
@@ -41,16 +41,16 @@ Read the owning doc before changing a subsystem; these are the source of truth, 
 
 | Area | Source of truth |
 |---|---|
-| Architecture invariants, decisions, rejected directions | `docs/design/architecture.md` |
+| Architecture invariants, decisions, rejected directions | `docs/_dev/design/architecture.md` |
 | Provider authoring (read before writing or changing a provider) | `skills/omnifs-provider-sdk/SKILL.md`, `providers/DESIGN.md`, `crates/omnifs-sdk/src/lib.rs` rustdocs |
-| Caching model | `architecture.md` §3, `docs/design/object-cache-primary.md` |
-| File attributes (size, stability, read-mode, byte source) | `docs/design/file-attributes.md` |
-| Path dispatch and listing honesty | `architecture.md` §6, `docs/design/path-dispatch-and-listing.md` |
-| Auth, credentials, mount loading | `docs/design/host-auth.md` |
-| Daemon/CLI split and control API | `docs/design/daemon-cli-split.md` |
+| Caching model | `architecture.md` §3, `docs/_dev/design/object-cache-primary.md` |
+| File attributes (size, stability, read-mode, byte source) | `docs/_dev/design/file-attributes.md` |
+| Path dispatch and listing honesty | `architecture.md` §6, `docs/_dev/design/path-dispatch-and-listing.md` |
+| Auth, credentials, mount loading | `docs/_dev/design/host-auth.md` |
+| Daemon/CLI split and control API | `docs/_dev/design/daemon-cli-split.md` |
 | Build, runtime, debugging | `CONTRIBUTING.md` |
 | Release and npm packaging | `RELEASING.md` |
-| Roadmap and open opportunities | `docs/future/` |
+| Roadmap and open opportunities | `docs/_dev/future/` |
 
 A provider in one breath: one `#[omnifs_sdk::provider]` impl with a synchronous `fn start` that registers routes imperatively on a `Router`; it returns a terminal `op-result` with `effects`, or suspends on `callout`s the host runs and resumes. The registration verbs, macros, and effect shapes are in the SKILL and `architecture.md` §2-§6. Mount specs are JSON, not TOML, and config deserialization sets `deny_unknown_fields` (do not loosen it; typos must fail initialization loudly).
 
@@ -76,8 +76,8 @@ Prefer tests that protect behavior the project depends on: user-visible workflow
 
 Docs are organized by what changes at what rate, and they point at code rather than copy it.
 
-- `docs/design/architecture.md` is the invariants-and-decisions home: the load-bearing rules, their rationale, and the rejected directions (the "never" list). Change it when an invariant or a deliberate constraint changes, not when an implementation detail moves.
-- `docs/design/*` are subsystem detail; `docs/future/*` is roadmap (incl. `engine-roadmap.md`); `docs/internal/*` is gitignored strategy. The WIT and the code are the source of truth for the contract.
+- `docs/_dev/design/architecture.md` is the invariants-and-decisions home: the load-bearing rules, their rationale, and the rejected directions (the "never" list). Change it when an invariant or a deliberate constraint changes, not when an implementation detail moves.
+- `docs/_dev/design/*` are subsystem detail; `docs/_dev/future/*` is roadmap (incl. `engine-roadmap.md`); `docs/internal/*` is gitignored strategy. The WIT and the code are the source of truth for the contract.
 - Docs cite symbols and files; they do not transcribe WIT blocks, struct definitions, or crate layouts. A transcribed code shape is a known drift liability: if you must include one, treat it as something to re-verify on the next contract change. Most of the docs that went stale did so by mirroring code.
 
 Two triggers, because these drift the docs fastest:

@@ -2,7 +2,7 @@
 //!
 //! The daemon serves these under `/v1/` on its control listener (TCP
 //! loopback through the container port forward today; a Unix socket in the
-//! future host-native mode). See `docs/design/daemon-cli-split.md`.
+//! future host-native mode). See `docs/_dev/design/daemon-cli-split.md`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
