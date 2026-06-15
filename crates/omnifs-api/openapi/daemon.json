@@ -453,6 +453,16 @@
               "type": "string"
             }
           },
+          "endpoints": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "HTTPS origins (`scheme://host[:port]`) the provider may reach\ndirectly even when they resolve to a private or link-local IP.\nEach entry is an explicit, operator-granted exception to the\ndefault private-IP denial, named the same way `unix_sockets`\nnames allowed sockets. A granted origin also satisfies the\n`domains` check, so an internal endpoint needs only this grant."
+          },
           "git_repos": {
             "type": [
               "array",
@@ -494,6 +504,17 @@
             "items": {
               "$ref": "#/components/schemas/PreopenedPath"
             }
+          },
+          "tls": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TlsTrust",
+                "description": "Extra TLS trust for reaching endpoints whose server certificate\nis not signed by a system-trusted CA (e.g. a self-signed local\ncluster). The CA is a public trust anchor, not a secret, so it\nlives here rather than in the credential store."
+              }
+            ]
           },
           "unix_sockets": {
             "type": [
@@ -592,6 +613,25 @@
             ]
           },
           "token_file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "TlsTrust": {
+        "type": "object",
+        "description": "Additional CA roots to trust for this mount's HTTPS callouts, on top\nof the system trust store. Supply the CA by file path (`ca_file`,\nread by the host at mount load) or inline PEM (`ca_pem`); a bundle\nwith multiple PEM certificates is accepted in either form.",
+        "properties": {
+          "ca_file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ca_pem": {
             "type": [
               "string",
               "null"

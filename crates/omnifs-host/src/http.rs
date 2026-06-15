@@ -35,11 +35,23 @@ pub struct HttpStack {
 }
 
 impl HttpStack {
+    /// Build the stack. `extra_ca_pem`, when present, is a PEM CA bundle
+    /// added to the system trust roots for this mount's HTTPS callouts
+    /// (e.g. a self-signed local cluster's CA). It is additive: system
+    /// trust still applies, and reachability is gated separately by the
+    /// capability checker's endpoint allowlist.
     pub fn new(
         auth: Arc<AuthManager>,
         capability: Arc<CapabilityChecker>,
+        extra_ca_pem: Option<&[u8]>,
     ) -> Result<Self, reqwest::Error> {
-        let https_client = base_client_builder().build()?;
+        let mut builder = base_client_builder();
+        if let Some(pem) = extra_ca_pem {
+            for cert in reqwest::Certificate::from_pem_bundle(pem)? {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        let https_client = builder.build()?;
         Ok(Self::with_https_client(auth, capability, https_client))
     }
 

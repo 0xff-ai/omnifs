@@ -476,9 +476,11 @@ mod tests {
             max_memory_mb: 16,
             needs_git: false,
             unix_sockets: Vec::new(),
+            endpoints: Vec::new(),
         });
-        let http =
-            Arc::new(HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability)).unwrap());
+        let http = Arc::new(
+            HttpStack::new(Arc::new(AuthManager::none()), Arc::new(capability), None).unwrap(),
+        );
         let executor = BlobExecutor::new(
             http,
             cache,

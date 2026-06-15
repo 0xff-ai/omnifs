@@ -312,8 +312,9 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
         max_memory_mb: 64,
         needs_git: false,
         unix_sockets: Vec::new(),
+        endpoints: Vec::new(),
     }));
-    let stack = HttpStack::new(auth, capability).unwrap();
+    let stack = HttpStack::new(auth, capability, None).unwrap();
 
     let req = wit_types::HttpRequest {
         method: "GET".to_string(),
@@ -347,6 +348,7 @@ async fn oauth_401_refreshes_and_retries_once() {
             max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
+            endpoints: Vec::new(),
         })),
         test_https_client(),
     );
@@ -418,6 +420,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
             max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
+            endpoints: Vec::new(),
         })),
         test_https_client(),
     ));
@@ -465,6 +468,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
             max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
+            endpoints: Vec::new(),
         })),
         test_https_client(),
     );

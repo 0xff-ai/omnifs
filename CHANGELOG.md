@@ -5,24 +5,20 @@ All notable changes to this project will be documented in this file.
 Entries are grouped by product area; each is tagged with a type (Feature, Fix, Improvement, Performance, Breaking, Deprecation, Removal, Security).
 
 ## [Unreleased]
-
 ### Providers & projected paths
-
 - **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
 - **Fix:** A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
+- **Feature:** Add per-mount egress trust for private and self-signed HTTPS (#122)
 
 ### Runtime & mounts
-
 - **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
 - **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
 - **Feature:** The runtime now runs as a standalone `omnifsd` daemon that owns the FUSE mount and exposes an HTTP control API; the `omnifs` CLI drives it over that API and no longer links the WASM runtime or FUSE.
 
 ### CLI & workflow
-
 - **Fix:** The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
 
 ### Caching & performance
-
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
 - **Fix:** The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
 
