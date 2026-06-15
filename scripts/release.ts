@@ -4,12 +4,10 @@ import { parseArgs, runCli, takeCommandWithVersion } from "./lib/cli";
 import { ReleaseWorkflow, type ShipPlan } from "./lib/release-workflow";
 import { Repo } from "./lib/repo";
 
-const USAGE = "usage: scripts/release.ts prompt | check [--base BASE] [--head HEAD] | plan [--format text|json] | cut [VERSION] [--version VERSION] [--no-push]";
+const USAGE = "usage: scripts/release.ts check | plan [--format text|json] | cut [VERSION] [--version VERSION] [--no-push]";
 
 await runCli(async () => {
   const { values, positionals } = parseArgs(Bun.argv.slice(2), {
-    base: { type: "string" },
-    head: { type: "string" },
     format: { type: "string" },
     version: { type: "string" },
     "no-push": { type: "boolean" },
@@ -21,15 +19,8 @@ await runCli(async () => {
   }
   const release = new ReleaseWorkflow(await Repo.discover());
 
-  if (command === "prompt") {
-    if (version) throw new Error("prompt does not accept a version argument");
-    process.stdout.write(await release.releaseNotesPrompt());
-    return;
-  }
   if (command === "check") {
-    const base = typeof values.base === "string" ? values.base : "origin/main";
-    const head = typeof values.head === "string" ? values.head : "HEAD";
-    await release.releaseCheck(base, head);
+    await release.releaseCheck();
     return;
   }
   if (command === "plan") {

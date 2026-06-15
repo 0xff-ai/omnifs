@@ -1,12 +1,7 @@
-# Draft changelog notes from commits since the last release tag.
+# Validate release metadata for a release PR.
 [group('release')]
-release-prompt:
-    @bun scripts/release.ts prompt
-
-# Validate release metadata for a PR or branch.
-[group('release')]
-release-check base='origin/main' head='HEAD':
-    bun scripts/release.ts check --base '{{ base }}' --head '{{ head }}'
+release-check:
+    bun scripts/release.ts check
 
 # Emit the text release plan used by the Release workflow.
 [group('release')]

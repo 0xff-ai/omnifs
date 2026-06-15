@@ -6,7 +6,7 @@ How omnifs ships: one maintainer command surface (`just`), two workflows (`ci.ym
 
 | Phase | Who / what | What runs | Outcome |
 |-------|------------|-----------|---------|
-| 1. Development | You + feature PRs | CI `verify` + `release-check` → `just release-check` | `[Unreleased]` updated (or `no-changelog` label) |
+| 1. Development | You + feature PRs | CI `verify`; `changelog.yml` (0xff-ai/bot) drafts an entry | Sticky proposal; `/changelog` commits it to the PR branch; merge gated on an entry |
 | 2. Cut release | You on `origin/main` | `just release-cut` | Branch `release/vX.Y.Z`, version bump, changelog finalized, release PR opened |
 | 3. Review | You + release PR CI | CI verify; `just release-check` | Release PR shape validated |
 | 4. Merge | Merge to `main` | **CI** factory | `omnifs-wasm`, four `omnifs-cli-*` tarballs, runtime image `sha-<commit>` |
@@ -15,7 +15,7 @@ How omnifs ships: one maintainer command surface (`just`), two workflows (`ci.ym
 Nothing in phase 5 recompiles. Release downloads artifacts from the CI run that triggered it (`workflow_run`).
 
 ```text
-feature PR ──► ci release-check
+feature PR ──► changelog.yml (0xff-ai/bot): LLM drafts entry → /changelog commits it to the PR branch
                     │
 main + notes ──► release cut (local) ──► release/v* PR ──► release check
                     │
@@ -23,6 +23,39 @@ main + notes ──► release cut (local) ──► release/v* PR ──► rel
                     │
               CI success ──► Release workflow (plan → GH release → promote → npm)
 ```
+
+## Automated changelog
+
+The changelog is written by the [0xff-ai/bot](https://github.com/0xff-ai/bot) reusable workflow, wired in via `.github/workflows/changelog.yml` and configured in `.github/bot.yml` (the product line, maintainers, and the area headings). An LLM proposes each entry, a human accepts or rewrites it with a `/changelog` comment, and the entry is committed to the PR's own branch under its area heading, so it merges with the change that introduced it. `CHANGELOG.md` is versioned in git as before; nothing else (no manifest, no standing branch) is added.
+
+**Propose.** On each feature PR, unless the PR already edits `CHANGELOG.md`, the LLM drafts one entry in three lengths (short / medium / long) and posts a sticky proposal comment. A PR with no user-facing change is labeled `no-changelog` automatically.
+
+**Apply.** The author or a maintainer replies with a command and the bot commits the entry to the PR branch under its area:
+
+- `/changelog apply` — add the medium entry
+- `/changelog apply short` or `long` — pick another length
+- `/changelog <area>: your wording` — custom text
+- `/changelog skip` — label `no-changelog`, no entry needed
+
+Appends are additive: existing lines are never rewritten, so hand-edits to `CHANGELOG.md` survive and re-applying the same entry is a no-op. Fork PRs can't be pushed to, so the bot posts the exact commands to add the entry locally instead. Maintainers default to `raulk` (set `maintainers` in `.github/bot.yml`).
+
+**Gate.** A required `changelog` check blocks merge until `CHANGELOG.md` changes or the `no-changelog` label is present. It reports an `action_required` conclusion, so a missing entry shows as an orange "action required" state rather than a red failure, and still blocks. Add `changelog` to the branch's required status checks for it to take effect.
+
+```text
+feature PR ──► changelog.yml: LLM drafts → sticky proposal
+                    │
+              /changelog apply ──► entry committed to the PR branch (additive, by area)
+                    │
+              merge to main ──► [Unreleased] already carries the entry
+                    │
+              just release-cut ──► finalize [Unreleased] → release/v* PR ──► Release workflow (ship)
+```
+
+Requirements:
+
+- `OPENAI_API_KEY` secret for drafting (an org-level secret is cleanest; it reaches the bot via `secrets: inherit`). Override `OPENAI_BASE_URL` / `OPENAI_MODEL` to retarget the gateway or model.
+- The apply job pushes a commit to the PR branch (`contents: write`), not to `main`; nothing is pushed to `main` by the bot.
+- Fork PRs can't read the secret or be pushed to, so the bot posts manual instructions for a maintainer to add the entry.
 
 ## Maintainer commands
 
@@ -32,16 +65,10 @@ Maintainer commands are exposed through the root **`justfile`**. Run `just` to l
 |------------|------|----------------|
 | **`just release-cut`** | Local, on clean `main` | Bump versions, finalize CHANGELOG, commit on `release/vX.Y.Z`, push, open PR |
 | **`just release-cut-local`** | Local, on clean `main` | Prepare the release branch without pushing |
-| **`just release-check`** | Every PR (CI) | On `release/*` branches: validate release PR. Else: validate `[Unreleased]` vs base |
+| **`just release-check`** | Release PR (CI) | On `release/*` branches, validate the release PR (finalized changelog, version, npm sync) |
 | **`just release-plan-json`** | CI only, after green `main` | If workspace version > latest tag: emit ship metadata; else no-op |
 | **`just npm-sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from workspace (or `version`) through `npm pkg set` |
 | **`just npm-validate`** | `just check`, release PR, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` |
-
-Optional (not part of the ship path):
-
-```bash
-just release-prompt   # LLM helper: commit range since last tag
-```
 
 Examples:
 
@@ -53,9 +80,6 @@ just release-cut
 # Pin version or prepare without pushing
 just release-cut 0.2.0
 just release-cut-local 0.2.0
-
-# Match CI changelog check on a feature branch
-just release-check origin/main HEAD
 ```
 
 Day-to-day dev uses `just check`, `just providers-build`, and `omnifs dev`.
@@ -90,9 +114,8 @@ When reviewing a release branch: `git diff origin/main --stat`, not `git diff ma
 
 ## Changelog policy
 
-[Keep a Changelog](https://keepachangelog.com/). Humans or LLMs write prose; automation never invents entries.
+[Keep a Changelog](https://keepachangelog.com/). Entries are drafted per PR by the changelog bot and committed to the PR branch under `## [Unreleased]` via `/changelog` (see [Automated changelog](#automated-changelog)); the merge gate requires an entry (or the `no-changelog` label). Edit `CHANGELOG.md` directly any time to fix wording or move an entry between areas.
 
-- Feature PRs: update `## [Unreleased]` (or label **`no-changelog`** for exempt chores).
 - Release PR: `just release-cut` moves `[Unreleased]` into `## [X.Y.Z] - date` and leaves an empty `[Unreleased]`.
 
 ## What gets released
@@ -151,15 +174,13 @@ If either invocation fails (MODULE_NOT_FOUND, missing platform binary, postinsta
 
 ### 3. Cut the release PR
 
-Prerequisites: clean `main` = `origin/main`, `gh` auth, `[Unreleased]` filled, `just`, and `cargo install cargo-edit` for `cargo set-version`.
+Prerequisites: clean `main` = `origin/main`, `gh` auth, `[Unreleased]` populated (merged PRs carry their entries; hand-edit to add any missing ones), `just`, and `cargo install cargo-edit` for `cargo set-version`.
 
 ```bash
 just release-cut
 ```
 
 `just release-cut` creates `release/vX.Y.Z`, bumps workspace + npm, finalizes CHANGELOG, commits, pushes, opens PR.
-
-Optional before cut: `just release-prompt` → draft notes → commit on `main` → then `just release-cut`.
 
 ### 4. Merge the release PR
 
@@ -209,7 +230,7 @@ Local **`just release-cut`**: requires `cargo-edit` (`cargo set-version`) so Car
 
 | Problem | Fix |
 |---------|-----|
-| Feature PR changelog check failed | Update `[Unreleased]` or add `no-changelog` |
+| Changelog proposal missing on a PR | Fork PR (no secret access) or LLM error; comment `/changelog <area>: text` or edit `CHANGELOG.md` directly, then the gate passes |
 | Release PR check failed | Ensure `## [version]` exists, `[Unreleased]` empty, versions synced |
 | Release workflow did not run | CI must succeed on `main` push first |
 | Missing GH assets | CI must upload `omnifs-wasm` + four `omnifs-cli-*`; re-run CI then Release |

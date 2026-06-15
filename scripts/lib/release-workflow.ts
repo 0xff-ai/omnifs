@@ -12,7 +12,6 @@ import {
 import { GitRepo } from "./git";
 import { NpmWorkspace } from "./npm-workspace";
 import { Repo, printErrorsAndExit } from "./repo";
-import { bumpPatch, formatVersion, parseVersion } from "./semver";
 
 export type ShipPlan = {
   should_ship: boolean;
@@ -30,32 +29,18 @@ export class ReleaseWorkflow {
     this.npm = new NpmWorkspace(repo);
   }
 
-  async releaseNotesPrompt(): Promise<string> {
-    const tag = await this.git.latestSemverTag();
-    const range = tag ? `${tag}..HEAD` : "HEAD";
-    return `# Release notes prompt
-
-Write a Keep a Changelog \`## [Unreleased]\` section for omnifs from the commit range below.
-Inspect the repo with git (log, diff, show) as needed. Use end-user language, merge related
-changes, and omit internal-only refactors unless they affect users. Use \`### Added\`,
-\`### Changed\`, and \`### Fixed\` where appropriate.
-
-Return only the markdown body for \`[Unreleased]\` (subsection headings and bullets). Do not
-include the \`## [Unreleased]\` heading itself.
-
-## Commit range
-
-${range}
-`;
-  }
-
-  async releaseCheck(base: string, head: string): Promise<void> {
-    const branch = process.env.GITHUB_HEAD_REF || await this.git.currentBranch();
-    if (branch.startsWith("release/")) {
-      await this.checkReleasePr();
-    } else {
-      await this.checkChangelogPr(base, head);
+  /** Validate a release PR: finalized changelog section, version, npm sync. */
+  async releaseCheck(): Promise<void> {
+    const version = await this.repo.workspaceVersion();
+    const errors = [
+      ...validateReleaseChangelog(await this.readChangelog(), version),
+      ...await this.npm.validateSynced(version),
+    ];
+    if (errors.length > 0) {
+      printErrorsAndExit("release PR check", errors);
     }
+    await this.npm.validate();
+    console.log(`release PR check passed for version ${version}`);
   }
 
   async shipPlan(): Promise<ShipPlan> {
@@ -132,36 +117,6 @@ ${range}
     return parseChangelog(await Bun.file(this.repo.path("CHANGELOG.md")).text());
   }
 
-  private async checkChangelogPr(base: string, head: string): Promise<void> {
-    const changed = await this.git.changedFiles(base, head);
-    if (!changed.includes("CHANGELOG.md")) {
-      throw new Error("PR must update CHANGELOG.md under ## [Unreleased]; add the no-changelog label to exempt chore-only PRs");
-    }
-
-    const baseLog = parseChangelog(await this.git.show(`${base}:CHANGELOG.md`));
-    const headLog = await this.readChangelog();
-    if (headLog.unreleasedBody.trim() === baseLog.unreleasedBody.trim()) {
-      throw new Error("CHANGELOG.md [Unreleased] was not updated");
-    }
-    if (!unreleasedHasContent(headLog)) {
-      throw new Error("CHANGELOG.md [Unreleased] must contain release notes");
-    }
-    console.log("changelog PR check passed");
-  }
-
-  private async checkReleasePr(): Promise<void> {
-    const version = await this.repo.workspaceVersion();
-    const errors = [
-      ...validateReleaseChangelog(await this.readChangelog(), version),
-      ...await this.npm.validateSynced(version),
-    ];
-    if (errors.length > 0) {
-      printErrorsAndExit("release PR check", errors);
-    }
-    await this.npm.validate();
-    console.log(`release PR check passed for version ${version}`);
-  }
-
   private async bumpWorkspaceVersion(version: string): Promise<void> {
     const result = await this.repo.$`cargo set-version ${version}`.nothrow().quiet();
     if (result.exitCode === 0) return;
@@ -186,9 +141,16 @@ Merging this PR triggers CI, then the Release workflow after green CI.`;
 }
 
 async function promptTargetVersion(current: string): Promise<string> {
-  const suggested = formatVersion(bumpPatch(parseVersion(current)));
+  const suggested = suggestNextPatch(current);
   const rl = createInterface({ input: stdin, output: stderr });
   const input = (await rl.question(`Current workspace version: ${current}\nSuggested patch release: ${suggested}\nTarget version [${suggested}]: `)).trim();
   rl.close();
   return input || suggested;
+}
+
+/** Suggest the next patch version, dropping any prerelease suffix. */
+function suggestNextPatch(current: string): string {
+  const core = current.split("-")[0] ?? current;
+  const [major = "0", minor = "0", patch = "0"] = core.split(".");
+  return `${major}.${minor}.${Number(patch) + 1}`;
 }
