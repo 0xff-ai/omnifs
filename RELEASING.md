@@ -114,7 +114,7 @@ When reviewing a release branch: `git diff origin/main --stat`, not `git diff ma
 
 ## Changelog policy
 
-[Keep a Changelog](https://keepachangelog.com/). Entries are drafted per PR by the changelog bot and committed to the PR branch under `## [Unreleased]` via `/changelog` (see [Automated changelog](#automated-changelog)); the merge gate requires an entry (or the `no-changelog` label). Edit `CHANGELOG.md` directly any time to fix wording or move an entry between areas.
+Entries in `## [Unreleased]` are grouped by product area, and each is tagged with a type (`**Feature:**`, `**Fix:**`, `**Improvement:**`, `**Performance:**`, `**Breaking:**`, `**Deprecation:**`, `**Removal:**`, `**Security:**`). They are drafted per PR by the changelog bot and committed to the PR branch via `/changelog` (see [Automated changelog](#automated-changelog)); the merge gate requires an entry (or the `no-changelog` label). Edit `CHANGELOG.md` directly any time to fix wording or move an entry between areas.
 
 - Release PR: `just release-cut` moves `[Unreleased]` into `## [X.Y.Z] - date` and leaves an empty `[Unreleased]`.
 
