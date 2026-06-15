@@ -39,7 +39,7 @@ The changelog is written by the [0xff-ai/bot](https://github.com/0xff-ai/bot) re
 
 Appends are additive: existing lines are never rewritten, so hand-edits to `CHANGELOG.md` survive and re-applying the same entry is a no-op. Fork PRs can't be pushed to, so the bot posts the exact commands to add the entry locally instead. Maintainers default to `raulk` (set `maintainers` in `.github/bot.yml`).
 
-**Gate.** A required `changelog` check (from `dangoslen/changelog-enforcer`) blocks merge until `CHANGELOG.md` changes or the `no-changelog` label is present. Add it to the branch's required status checks for it to actually block.
+**Gate.** A required `changelog` check blocks merge until `CHANGELOG.md` changes or the `no-changelog` label is present. It reports an `action_required` conclusion, so a missing entry shows as an orange "action required" state rather than a red failure, and still blocks. Add `changelog` to the branch's required status checks for it to take effect.
 
 ```text
 feature PR ──► changelog.yml: LLM drafts → sticky proposal

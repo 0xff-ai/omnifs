@@ -16,10 +16,12 @@ on:
 jobs:
   changelog:
     # Granted to the reusable workflow: apply pushes the entry to the PR branch
-    # (contents) and the bot posts comments and toggles the no-changelog label.
+    # (contents), the bot posts comments and toggles the no-changelog label
+    # (pull-requests/issues), and the gate reports the `changelog` check (checks).
     permissions:
       contents: write
       pull-requests: write
       issues: write
+      checks: write
     uses: 0xff-ai/bot/.github/workflows/changelog.yml@v1
     secrets: inherit
