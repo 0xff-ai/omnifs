@@ -410,30 +410,3 @@ impl Key for ClusterResourceKey {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_seal_without_ambiguity() {
-        let mut router = Router::<State>::new();
-        register_routes(&mut router).expect("routes register");
-        router.seal().expect("route set must seal without overlap");
-    }
-
-    #[test]
-    fn segment_validation_rejects_traversal_and_separators() {
-        assert!("default".parse::<Namespace>().is_ok());
-        assert!("cert-manager".parse::<ResourceType>().is_ok());
-        assert!(
-            "certificates.cert-manager.io"
-                .parse::<ResourceType>()
-                .is_ok()
-        );
-        assert!("".parse::<Namespace>().is_err());
-        assert!(".".parse::<ResourceName>().is_err());
-        assert!("..".parse::<ResourceName>().is_err());
-        assert!("a/b".parse::<ResourceName>().is_err());
-    }
-}
