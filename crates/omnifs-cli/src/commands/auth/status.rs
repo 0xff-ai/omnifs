@@ -2,10 +2,10 @@
 
 use std::fmt::Write as _;
 
-use omnifs_creds::{CredentialEntry, CredentialStore};
+use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
 
 use super::shared::{format_rfc3339, format_scopes};
-use crate::auth::MountAuth;
+use crate::auth::{MountAuth, credential_notices};
 use crate::catalog::ProviderCatalog;
 use crate::paths::Paths;
 use crate::session::MountConfig;
@@ -48,6 +48,8 @@ struct AuthEntryJson {
     kind: String,
     scopes: Vec<String>,
     expires_at: Option<String>,
+    refreshability: Refreshability,
+    notices: Vec<String>,
 }
 
 pub(super) fn status_json(
@@ -101,6 +103,10 @@ pub(super) struct AuthStatusRow {
 }
 
 impl AuthStatusRow {
+    fn reauth_command(&self) -> String {
+        format!("omnifs auth login {}", self.mount)
+    }
+
     fn text_detail(&self) -> Option<String> {
         let entry = self.entry.as_ref()?;
         let mut detail = format!("{} ready", entry.kind());
@@ -110,17 +116,29 @@ impl AuthStatusRow {
         if let Some(expires_at) = entry.expires_at() {
             let _ = write!(detail, "; expires: {}", format_rfc3339(expires_at));
         }
+        let refreshability = entry.refreshability();
+        if refreshability != Refreshability::NotApplicable {
+            let _ = write!(detail, "; refresh: {refreshability}");
+        }
+        for notice in credential_notices(entry, Some(&self.reauth_command())) {
+            let _ = write!(detail, "; notice: {notice}");
+        }
         Some(detail)
     }
 
     fn into_json(self) -> Option<AuthEntryJson> {
+        let command = self.reauth_command();
         let entry = self.entry?;
         let expires_at = entry.expires_at().map(format_rfc3339);
+        let refreshability = entry.refreshability();
+        let notices = credential_notices(&entry, Some(&command));
         Some(AuthEntryJson {
             key: self.mount,
             kind: entry.kind().to_string(),
             scopes: entry.into_scopes(),
             expires_at,
+            refreshability,
+            notices,
         })
     }
 }

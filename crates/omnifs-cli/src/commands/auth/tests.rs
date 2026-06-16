@@ -477,6 +477,12 @@ fn oauth_scheme_json(oauth: &OauthScheme) -> serde_json::Value {
             "tokenEndpoint": oauth.token_endpoint,
             "redirectUriTemplate": config.redirect_uri_template,
         }),
+        OAuthFlow::ClientSideToken(config) => serde_json::json!({
+            "kind": "clientSideToken",
+            "authorizationEndpoint": oauth.authorization_endpoint,
+            "tokenEndpoint": oauth.token_endpoint,
+            "redirectUriTemplate": config.redirect_uri_template,
+        }),
     };
     serde_json::json!({
         "type": "oauth",

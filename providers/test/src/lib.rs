@@ -144,7 +144,7 @@ impl Key for ItemKey {
         if since.is_some() && since == canonical.validator {
             return Ok(Load::Unchanged);
         }
-        Ok(Load::Fresh { value, canonical })
+        Ok(Load::fresh_from(value, canonical))
     }
 }
 

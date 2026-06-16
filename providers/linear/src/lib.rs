@@ -246,10 +246,7 @@ impl Key for IssueKey {
         let value: Issue = serde_json::from_str(node.get())
             .map_err(|e| ProviderError::invalid_input(format!("linear issue node parse: {e}")))?;
         let validator = value.version().map(Validator::from);
-        Ok(Load::Fresh {
-            value,
-            canonical: Canonical { bytes, validator },
-        })
+        Ok(Load::fresh_from(value, Canonical { bytes, validator }))
     }
 }
 

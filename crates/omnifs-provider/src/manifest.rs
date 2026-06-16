@@ -1,8 +1,9 @@
 //! Typed `omnifs.provider.json` manifest.
 
 use crate::auth_wire::{
-    AuthManifest, AuthScheme, DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig,
-    PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod, TokenValidation,
+    AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme,
+    PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod,
+    TokenValidation,
 };
 use crate::config::ConfigSchema;
 use crate::runtime_grants::{PreopenedPath, ProviderCapabilities};
@@ -11,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+const DEFAULT_CLIENT_SIDE_TOKEN_REDIRECT_URI_TEMPLATE: &str = "http://127.0.0.1:{port}/callback";
 pub const PROVIDER_WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -190,7 +192,8 @@ impl ProviderAuthManifest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawOauthScheme {
     display_name: String,
-    client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<String>,
     flow: RawOAuthFlow,
@@ -216,6 +219,16 @@ enum RawOAuthFlow {
         authorization_endpoint: String,
         token_endpoint: String,
         redirect_uri: String,
+    },
+    ClientSideToken {
+        authorization_endpoint: String,
+        token_endpoint: String,
+        #[serde(
+            default,
+            alias = "redirectUri",
+            skip_serializing_if = "Option::is_none"
+        )]
+        redirect_uri_template: Option<String>,
     },
 }
 
@@ -301,10 +314,17 @@ impl Serialize for ProviderAuthManifest {
                                 token_endpoint: o.token_endpoint.clone(),
                                 redirect_uri: p.redirect_uri.clone(),
                             },
+                            OAuthFlow::ClientSideToken(p) => RawOAuthFlow::ClientSideToken {
+                                authorization_endpoint: o.authorization_endpoint.clone(),
+                                token_endpoint: o.token_endpoint.clone(),
+                                redirect_uri_template: (p.redirect_uri_template
+                                    != DEFAULT_CLIENT_SIDE_TOKEN_REDIRECT_URI_TEMPLATE)
+                                    .then(|| p.redirect_uri_template.clone()),
+                            },
                         };
                         RawAuthScheme::Oauth(RawOauthScheme {
                             display_name: o.display_name.clone(),
-                            client_id: o.default_client_id.clone().unwrap_or_default(),
+                            client_id: o.default_client_id.clone(),
                             scopes: o.default_scopes.clone(),
                             flow,
                         })
@@ -386,6 +406,19 @@ fn expand_raw_scheme(key: &str, raw: RawAuthScheme, inject: &AuthInject) -> Auth
                     token_endpoint,
                     OAuthFlow::PkceManualCode(PkceManualCodeConfig { redirect_uri }),
                 ),
+                RawOAuthFlow::ClientSideToken {
+                    authorization_endpoint,
+                    token_endpoint,
+                    redirect_uri_template,
+                } => (
+                    authorization_endpoint,
+                    token_endpoint,
+                    OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+                        redirect_uri_template: redirect_uri_template.unwrap_or_else(|| {
+                            DEFAULT_CLIENT_SIDE_TOKEN_REDIRECT_URI_TEMPLATE.to_string()
+                        }),
+                    }),
+                ),
             };
             AuthScheme::Oauth(OauthScheme {
                 key: key.to_string(),
@@ -393,7 +426,7 @@ fn expand_raw_scheme(key: &str, raw: RawAuthScheme, inject: &AuthInject) -> Auth
                 authorization_endpoint,
                 token_endpoint,
                 revocation_endpoint: None,
-                default_client_id: Some(o.client_id),
+                default_client_id: o.client_id,
                 default_scopes: o.scopes,
                 flow,
                 token_endpoint_auth: TokenEndpointAuthMethod::None,
@@ -563,6 +596,15 @@ fn validate_oauth_flow(key: &str, oauth: &OauthScheme) -> Result<(), ProviderMet
                 )));
             }
         },
+        OAuthFlow::ClientSideToken(p) => {
+            if !p.redirect_uri_template.contains("{port}")
+                && !is_fixed_loopback_redirect(&p.redirect_uri_template)
+            {
+                return Err(ProviderMetadataError::Validation(format!(
+                    "auth.schemes.{key}.flow.redirectUriTemplate must contain {{port}} or use http://localhost:<port>"
+                )));
+            }
+        },
     }
     Ok(())
 }
@@ -584,6 +626,19 @@ fn validate_https_endpoint(field: &str, endpoint: &str) -> Result<(), ProviderMe
             "{field} must start with https://"
         )))
     }
+}
+
+fn is_fixed_loopback_redirect(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("http://localhost:")
+        .or_else(|| value.strip_prefix("http://127.0.0.1:"))
+    else {
+        return false;
+    };
+    let Some(port) = rest.split('/').next() else {
+        return false;
+    };
+    port.parse::<u16>().is_ok()
 }
 
 fn validate_inject_domains(domains: &[String]) -> Result<(), ProviderMetadataError> {
@@ -687,7 +742,8 @@ mod tests {
                 "docker",
                 "github",
                 "kubernetes",
-                "linear"
+                "linear",
+                "oura"
             ]
         );
     }
@@ -823,6 +879,37 @@ mod tests {
         let error = encode_provider_manifest(&manifest).unwrap_err();
         assert!(
             matches!(error, ProviderMetadataError::Validation(message) if message.contains("{port}"))
+        );
+    }
+
+    #[test]
+    fn provider_metadata_accepts_client_side_fixed_loopback_redirect() {
+        let mut manifest = oauth_provider_manifest();
+        let auth = manifest.auth.as_mut().expect("oauth auth");
+        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
+            panic!("expected oauth scheme");
+        };
+        oauth.flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+            redirect_uri_template: "http://localhost:58880".to_string(),
+        });
+
+        encode_provider_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn provider_metadata_rejects_client_side_non_loopback_fixed_redirect() {
+        let mut manifest = oauth_provider_manifest();
+        let auth = manifest.auth.as_mut().expect("oauth auth");
+        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
+            panic!("expected oauth scheme");
+        };
+        oauth.flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+            redirect_uri_template: "https://example.com/callback".to_string(),
+        });
+
+        let error = encode_provider_manifest(&manifest).unwrap_err();
+        assert!(
+            matches!(error, ProviderMetadataError::Validation(message) if message.contains("http://localhost:<port>"))
         );
     }
 

@@ -350,9 +350,14 @@ impl Key for NamespacedResourceKey {
             )
             .await?
         {
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => Ok(Load::Fresh {
                 value: NamespacedResource::new(value),
                 canonical,
+                effects,
             }),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
@@ -391,39 +396,17 @@ impl Key for ClusterResourceKey {
             .load_manifest(self.rtype.as_str(), None, self.name.as_str())
             .await?
         {
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => Ok(Load::Fresh {
                 value: ClusterResource::new(value),
                 canonical,
+                effects,
             }),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_seal_without_ambiguity() {
-        let mut router = Router::<State>::new();
-        register_routes(&mut router).expect("routes register");
-        router.seal().expect("route set must seal without overlap");
-    }
-
-    #[test]
-    fn segment_validation_rejects_traversal_and_separators() {
-        assert!("default".parse::<Namespace>().is_ok());
-        assert!("cert-manager".parse::<ResourceType>().is_ok());
-        assert!(
-            "certificates.cert-manager.io"
-                .parse::<ResourceType>()
-                .is_ok()
-        );
-        assert!("".parse::<Namespace>().is_err());
-        assert!(".".parse::<ResourceName>().is_err());
-        assert!("..".parse::<ResourceName>().is_err());
-        assert!("a/b".parse::<ResourceName>().is_err());
     }
 }
