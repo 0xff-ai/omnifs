@@ -66,6 +66,11 @@ openapi-check:
 smoke-init:
     bash tests/smoke/init_no_source.sh
 
+# Smoke a mounted test-provider tree's bash-tool and read semantics, FUSE or NFS (pass the mount root).
+[group('dev')]
+smoke-frontend-test-provider root:
+    bash tests/smoke/frontend-test-provider.sh {{root}}
+
 # Launch the supported contributor runtime.
 [group('dev')]
 dev:
