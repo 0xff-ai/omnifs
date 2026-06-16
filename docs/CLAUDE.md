@@ -1,6 +1,6 @@
 # Docs voice and tone
 
-Guidance for anyone (human or agent) writing or editing pages in the omnifs docs. The structure these pages slot into is described in [`README.md`](README.md), with the section order and labels in [`_nav.ts`](_nav.ts). This file governs how they read.
+Guidance for anyone (human or agent) writing or editing pages in the omnifs docs. The structure these pages slot into is described in [`README.md`](README.md), with the full ordering (sections and pages) in [`_nav.ts`](_nav.ts). This file governs how they read.
 
 ## The house voice
 

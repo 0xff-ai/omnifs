@@ -1,9 +1,9 @@
 # omnifs documentation
 
-Content for the omnifs docs site. The section order and labels are the source of
-truth in [`_nav.ts`](_nav.ts); page order within a section comes from each page's
-frontmatter. Voice, reserved terms, and the honesty gates are governed by
-[`CLAUDE.md`](CLAUDE.md).
+Content for the omnifs docs site. [`_nav.ts`](_nav.ts) is the source of truth for
+the full information architecture: both the section order/labels and the page
+order within each section, as explicit ordered lists. Voice, reserved terms, and
+the honesty gates are governed by [`CLAUDE.md`](CLAUDE.md).
 
 Four sections name the system by its architecture (projections, engine, providers,
 surfaces); the rest are topical (get oriented, recipes, tutorials, security and
@@ -41,10 +41,6 @@ through the SDK, render it. "Render" is reserved for canonical object to format
 page name repeated across sections; the resolved naming knots (callouts-and-effects
 vs reaching-upstream, the single homes for file attributes and capabilities) are
 recorded in [`CLAUDE.md`](CLAUDE.md).
-
-This tree holds the ported pages (step 1 of the build order: spartan bodies and
-branch concept prose, with frontmatter). Pages still to write (cross-section
-merges and net-new) are listed under "Pending" at the end.
 
 ## Get oriented
 - [What omnifs is](get-oriented/what-omnifs-is.md)
@@ -101,7 +97,7 @@ merges and net-new) are listed under "Pending" at the end.
 ## Security and trust
 - [The trust model](security/the-trust-model.md)
 
-## Reference (generated; hand-written interim)
+## Reference
 - [Reference index](reference/index.md)
 - CLI, config schema, path schemes, provider manifest, runtime grants, WIT,
   file attributes, SDK, cache, capability types, errors, environment, glossary,
@@ -113,21 +109,3 @@ merges and net-new) are listed under "Pending" at the end.
 - [Contributing](project/contributing.md)
 - [Design decisions](project/design-decisions.md)
 - [FAQ](project/faq.md)
-
-## Pending (steps 2 and 3)
-
-Cross-section merges and net-new pages, not yet written. Each is sourced from a
-shipped spartan page, an existing branch draft, or a design doc under
-`docs/_dev/design/`; prior branch drafts are in git history under the old
-`plane-*` paths.
-
-- Get oriented: the architecture map (redrawn to the four areas).
-- Projections: objects, fields, and rendered views; agent legibility.
-- Engine: the daemon and control API; routing and identity; the capability
-  broker; the inspector.
-- Providers: what a provider is and is not; catalogue and per-provider pages
-  (github, docker, arxiv, linear, dns, db).
-- Surfaces: section intro; FUSE; NFSv4 and FSKit; mounting; platform support.
-- Security and trust: audit and observability; worldviews; team and enterprise
-  operation.
-- Project: distribution; release; contributing; design decisions; FAQ.
