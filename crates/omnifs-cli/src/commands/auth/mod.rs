@@ -28,6 +28,8 @@ pub struct AuthArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
+    /// List the authentication mechanisms omnifs supports, in general.
+    Modes,
     Login {
         mount: String,
         #[arg(long)]
@@ -72,6 +74,11 @@ impl AuthArgs {
         let mounts = ctx.workspace().mounts()?;
         let store = Box::new(FileStore::new(&paths.credentials_file));
         match self.command {
+            // A static reference card; ignores the mount/credential context above.
+            AuthCommand::Modes => {
+                crate::auth::explain::render_modes_catalog();
+                Ok(())
+            },
             AuthCommand::Login {
                 mount,
                 no_browser,

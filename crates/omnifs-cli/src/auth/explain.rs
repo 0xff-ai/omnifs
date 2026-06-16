@@ -1,0 +1,94 @@
+//! Host-canned explanations of the authentication mechanisms omnifs supports.
+//!
+//! The mechanics of each flow are identical across providers, so the prose
+//! lives here (host-owned) rather than being re-authored in every provider
+//! manifest. A provider manifest supplies only what is specific to it (which
+//! token to create, which app to register); that guidance is paired with this
+//! canned copy at the point of display.
+
+use crate::style;
+
+/// An authentication mechanism omnifs knows how to drive, independent of any
+/// particular provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthMode {
+    StaticToken,
+    OauthDeviceCode,
+    OauthPkceLoopback,
+    OauthPkceManualCode,
+    OauthClientSideToken,
+}
+
+impl AuthMode {
+    /// Every mode, in rough order of how commonly a user meets it.
+    pub(crate) const ALL: [AuthMode; 5] = [
+        AuthMode::StaticToken,
+        AuthMode::OauthPkceLoopback,
+        AuthMode::OauthDeviceCode,
+        AuthMode::OauthPkceManualCode,
+        AuthMode::OauthClientSideToken,
+    ];
+
+    /// Short human label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            AuthMode::StaticToken => "Static token",
+            AuthMode::OauthDeviceCode => "OAuth device code",
+            AuthMode::OauthPkceLoopback => "OAuth browser redirect (PKCE)",
+            AuthMode::OauthPkceManualCode => "OAuth paste-the-redirect (PKCE)",
+            AuthMode::OauthClientSideToken => "OAuth token redirect",
+        }
+    }
+
+    /// One-line summary for pickers and listings.
+    pub(crate) fn summary(self) -> &'static str {
+        match self {
+            AuthMode::StaticToken => "Paste a long-lived token you create in the provider's settings.",
+            AuthMode::OauthDeviceCode => "Approve a short code in your browser; works on headless hosts.",
+            AuthMode::OauthPkceLoopback => "Your browser opens, you approve, and you're redirected back automatically.",
+            AuthMode::OauthPkceManualCode => "Your browser opens; you paste the final redirect URL back here.",
+            AuthMode::OauthClientSideToken => "Your browser opens; the access token comes back in the redirect.",
+        }
+    }
+
+    /// What the user actually does, a sentence or two.
+    pub(crate) fn experience(self) -> &'static str {
+        match self {
+            AuthMode::StaticToken => {
+                "You create a token (API key or personal access token) in the provider's web UI and paste it in. omnifs stores it and sends it on every request."
+            },
+            AuthMode::OauthDeviceCode => {
+                "omnifs shows a short code and a URL. Open the URL, enter the code, and approve. Nothing listens on a local port, so this works over SSH and on headless machines."
+            },
+            AuthMode::OauthPkceLoopback => {
+                "omnifs opens your browser to the provider's consent page and listens on a localhost port. After you approve, the provider redirects back and the token is captured. Refresh tokens are supported."
+            },
+            AuthMode::OauthPkceManualCode => {
+                "Like the browser-redirect flow, but for providers that don't allow a localhost redirect: after approving, copy the final redirect URL (or the `code state` pair) and paste it back here."
+            },
+            AuthMode::OauthClientSideToken => {
+                "omnifs opens your browser; the provider returns the access token directly in the redirect, with no code exchange. Used by providers that only offer this flow; usually no refresh token."
+            },
+        }
+    }
+}
+
+/// Render the general catalog of supported auth mechanisms for `omnifs auth modes`.
+pub(crate) fn render_modes_catalog() {
+    anstream::println!("{}", style::bold("Authentication modes omnifs supports"));
+    anstream::println!(
+        "{}",
+        style::dim("How a provider authenticates is declared in its manifest; run `omnifs auth explain <provider>` for a specific one.")
+    );
+    for mode in AuthMode::ALL {
+        anstream::println!();
+        anstream::println!("{}", style::accent(mode.label()));
+        anstream::println!("  {}", mode.summary());
+        anstream::println!("  {}", style::dim(mode.experience()));
+    }
+    anstream::println!();
+    anstream::println!(
+        "{}",
+        style::dim("Some providers need no auth at all (public APIs). OAuth flows may use omnifs's registered app or your own: when a provider ships no client id, you create an app and supply its client id and secret.")
+    );
+}

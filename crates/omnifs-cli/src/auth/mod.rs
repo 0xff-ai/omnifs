@@ -1,5 +1,6 @@
 //! Shared auth helpers: manifest views, mount auth loading, readiness probes.
 
+pub(crate) mod explain;
 pub(crate) mod manifest_view;
 pub(crate) mod mount;
 pub(crate) mod readiness;
