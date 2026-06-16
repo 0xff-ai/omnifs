@@ -40,7 +40,7 @@ impl Format for Atom {
 
 pub struct Yaml;
 impl Format for Yaml {
-    const CT: ContentType = ContentType::Custom("application/yaml");
+    const CT: ContentType = ContentType::Yaml;
 }
 
 pub struct Html;
@@ -80,6 +80,7 @@ macro_rules! impl_render_set {
 }
 
 impl_render_set!(Markdown);
+impl_render_set!(Yaml);
 impl_render_set!(Markdown, Html);
 impl_render_set!(Markdown, Html, Diff);
 

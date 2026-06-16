@@ -17,6 +17,8 @@ use omnifs_host::pagination;
 use omnifs_host::{Error, Runtime};
 use omnifs_inspector::{CacheKind, InspectorOutcome, TraceId};
 use omnifs_wit::provider::types::{ByteSource, ReadFileResult};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{debug, warn};
 
@@ -65,6 +67,7 @@ impl Frontend {
                         // contradicts the open-time size. Grow the inode size
                         // monotonically so getattr reports the new length and a
                         // polling reader re-stats and reads the appended bytes.
+                        ranged.observed_end.fetch_max(eof_size, Ordering::Relaxed);
                         self.grow_volatile_size(ino, eof_size);
                     } else {
                         if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
@@ -375,13 +378,16 @@ impl Frontend {
                 let opened_attrs = opened_file_attrs(&opened.attrs);
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
                 let is_volatile = matches!(opened_attrs.stability, view_types::Stability::Volatile);
+                let observed_end = Arc::new(AtomicU64::new(0));
                 self.ranged_handles.insert(
                     target.fh,
                     RangedFileHandle {
+                        ino: target.ino,
                         mount_name: target.mount_name.clone(),
                         path: target.path.clone(),
                         provider_handle: opened.handle,
                         attrs: opened_attrs,
+                        observed_end: Arc::clone(&observed_end),
                     },
                 );
                 if is_volatile {
@@ -390,6 +396,7 @@ impl Frontend {
                         target.fh,
                         target.mount_name.clone(),
                         opened.handle,
+                        observed_end,
                     );
                 }
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
@@ -600,18 +607,25 @@ impl Frontend {
     /// just to size; reads and probes serialize on the provider's store lock,
     /// and an offset-addressable reader serves both consistently. Aborted on
     /// `release`.
-    fn spawn_follow_pump(&self, ino: u64, fh: u64, mount_name: String, provider_handle: u64) {
+    fn spawn_follow_pump(
+        &self,
+        ino: u64,
+        fh: u64,
+        mount_name: String,
+        provider_handle: u64,
+        observed_end: Arc<AtomicU64>,
+    ) {
         const PROBE_LEN: u32 = 64 * 1024;
         const INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         let registry = self.registry.clone();
         let follow_sizes = self.follow_sizes.clone();
         let task = self.rt.spawn(async move {
-            let mut known_end: u64 = 0;
             loop {
                 tokio::time::sleep(INTERVAL).await;
                 let Some(runtime) = registry.get(&mount_name) else {
                     break;
                 };
+                let known_end = observed_end.load(Ordering::Relaxed);
                 match runtime
                     .namespace()
                     .read_chunk(provider_handle, known_end, PROBE_LEN)
@@ -620,8 +634,12 @@ impl Frontend {
                     Ok(chunk) => {
                         let advanced = u64::try_from(chunk.content.len()).unwrap_or(0);
                         if advanced > 0 {
-                            known_end = known_end.saturating_add(advanced);
-                            follow_sizes.insert(ino, known_end);
+                            let new_end = known_end.saturating_add(advanced);
+                            observed_end.fetch_max(new_end, Ordering::Relaxed);
+                            follow_sizes
+                                .entry(ino)
+                                .and_modify(|current| *current = (*current).max(new_end))
+                                .or_insert(new_end);
                         }
                     },
                     Err(_) => break,

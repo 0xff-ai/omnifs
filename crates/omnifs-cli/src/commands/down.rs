@@ -28,6 +28,14 @@ impl DownArgs {
         };
         remove_result?;
         anstream::println!("✓ Container `{container_name}` removed");
+
+        // Best-effort teardown of the kubernetes dev cluster stack, if this is
+        // a workspace checkout. Idempotent when no cluster is running.
+        if let Ok(workspace) = crate::dev_support::WorkspaceRoot::discover()
+            && let Err(error) = crate::kubernetes_testenv::down(workspace.path())
+        {
+            anstream::eprintln!("note: dev cluster teardown: {error:#}");
+        }
         Ok(())
     }
 }

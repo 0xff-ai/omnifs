@@ -67,6 +67,18 @@ impl DevArgs {
         write_secret(&token_path, &gh_token)?;
         ensure_db_fixture(&db_dir, &db_path).await?;
 
+        // Kick off the dev Kubernetes cluster on a blocking thread so k3s
+        // pulling and booting overlaps the image build below. It is
+        // best-effort (joined further down): a cluster that fails to come up
+        // must not abort the whole dev session.
+        let cluster_task = {
+            let workspace = workspace.path().to_path_buf();
+            let sock_dir = secrets_dir.join("k8s");
+            tokio::task::spawn_blocking(move || {
+                crate::kubernetes_testenv::up(&workspace, &sock_dir)
+            })
+        };
+
         build_image(workspace.path(), image.as_str())?;
 
         let ctx = AppContext::resolve(
@@ -80,19 +92,38 @@ impl DevArgs {
         let store = Box::new(FileStore::new(&paths.credentials_file));
         crate::provider_bundle::install_workspace_bundle(workspace.path(), &paths.providers_dir)?;
 
+        let mut configs = dev_mounts::configs()?;
+        let mut binds = vec![
+            format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
+            format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
+        ];
+
+        // Join the kubernetes cluster bring-up started before the image build.
+        // Best-effort: if it failed, mount everything else without kubernetes
+        // and surface the reason rather than failing the command.
+        match cluster_task.await {
+            Ok(Ok((socket_bind, mount))) => {
+                binds.push(socket_bind);
+                configs.push(mount);
+            },
+            Ok(Err(error)) => {
+                anstream::eprintln!(
+                    "warning: dev Kubernetes cluster did not start; mounting without it: {error:#}"
+                );
+            },
+            Err(join) => {
+                anstream::eprintln!("warning: dev Kubernetes cluster task panicked: {join}");
+            },
+        }
+
         launch_runtime(
             LaunchSpec {
                 runtime,
                 runtime_home: &paths.config_dir,
                 store,
                 verb: "omnifs dev",
-                configs: dev_mounts::configs()?,
-                extras: ContainerExtras {
-                    binds: vec![
-                        format!("{}:{GUEST_TOKEN_PATH}:ro", token_path.display()),
-                        format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()),
-                    ],
-                },
+                configs,
+                extras: ContainerExtras { binds },
             },
             ctx.catalog(),
         )

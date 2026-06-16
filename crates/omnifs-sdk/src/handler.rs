@@ -131,7 +131,16 @@ impl From<FileChunk> for omnifs_wit::provider::types::ReadChunkResult {
 /// so each call should observe current bytes rather than a snapshot when
 /// volatility is the point.
 pub trait RangeReader {
-    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk>;
+    /// Serve a chunk. `cx` is the state-erased context of the running
+    /// read-chunk operation, so a reader that fetches ranges on demand can
+    /// `cx.http()…send().await` and the callout suspends and resumes on this
+    /// operation. In-memory readers ignore it.
+    fn read_chunk<'a>(
+        &'a self,
+        cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk>;
 }
 
 /// A [`RangeReader`] over a fully buffered in-memory payload.
@@ -155,7 +164,12 @@ impl MemoryRangeReader {
 }
 
 impl RangeReader for MemoryRangeReader {
-    fn read_chunk(&self, offset: u64, length: u32) -> BoxFuture<'_, FileChunk> {
+    fn read_chunk<'a>(
+        &'a self,
+        _cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk> {
         Box::pin(async move {
             let start = usize::try_from(offset).unwrap_or(usize::MAX);
             if start >= self.bytes.len() {

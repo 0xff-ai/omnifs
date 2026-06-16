@@ -1,4 +1,5 @@
 /target
+.tmp/
 .cache/
 /dist-wasm
 /dist-cli

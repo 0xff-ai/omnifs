@@ -1,0 +1,35 @@
+# Seed workloads for the dev cluster, applied by k3s on boot. Gives the
+# projected tree something real to browse: a namespace, a ConfigMap, and a
+# Deployment whose pod produces log lines for the `logs/` subtree.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: greeting
+  namespace: demo
+data:
+  message: "hello from omnifs dev"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticker
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ticker
+  template:
+    metadata:
+      labels:
+        app: ticker
+    spec:
+      containers:
+        - name: ticker
+          image: busybox:1.36
+          command: ["sh", "-c", "i=0; while true; do echo \"tick $i\"; i=$((i+1)); sleep 5; done"]

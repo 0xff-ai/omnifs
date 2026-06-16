@@ -6,6 +6,8 @@ use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::pagination;
 use omnifs_wit::provider::types as wit_types;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 /// Kernel-side entry/attr TTL. The host never expires entries on time,
@@ -70,10 +72,12 @@ pub(crate) fn split_parent_leaf(path: &str) -> Option<(String, String)> {
 
 #[derive(Clone)]
 pub(crate) struct RangedFileHandle {
+    pub(crate) ino: u64,
     pub(crate) mount_name: String,
     pub(crate) path: String,
     pub(crate) provider_handle: u64,
     pub(crate) attrs: FileAttrsCache,
+    pub(crate) observed_end: Arc<AtomicU64>,
 }
 
 pub(crate) struct FullReadTarget {

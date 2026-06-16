@@ -678,7 +678,18 @@ mod tests {
         }
         parsed.sort();
 
-        assert_eq!(parsed, ["arxiv", "db", "dns", "docker", "github", "linear"]);
+        assert_eq!(
+            parsed,
+            [
+                "arxiv",
+                "db",
+                "dns",
+                "docker",
+                "github",
+                "kubernetes",
+                "linear"
+            ]
+        );
     }
 
     #[test]

@@ -46,4 +46,18 @@ mod tests {
         let configs = configs().expect("embedded dev mounts must parse");
         assert!(!configs.is_empty());
     }
+
+    #[test]
+    fn kubernetes_is_not_auto_mounted() {
+        // kubernetes needs a live cluster, so its dev mount lives under
+        // `testenv/` and is injected by `omnifs dev`'s testenv flow, never
+        // embedded into the always-on set.
+        assert!(
+            EMBEDDED_DEV_MOUNTS
+                .iter()
+                .all(|(filename, json)| *filename != "k8s.json"
+                    && !json.contains("omnifs_provider_kubernetes.wasm")),
+            "kubernetes must not be auto-mounted by plain omnifs dev"
+        );
+    }
 }
