@@ -61,11 +61,6 @@ openapi:
 openapi-check:
     bun scripts/openapi.ts check
 
-# Smoke a mounted test-provider tree's bash-tool and read semantics, FUSE or NFS (pass the mount root).
-[group('dev')]
-smoke-frontend-test-provider root:
-    bash tests/smoke/frontend-test-provider.sh {{root}}
-
 # Launch the supported contributor runtime.
 [group('dev')]
 dev:
