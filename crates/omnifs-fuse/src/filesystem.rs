@@ -464,7 +464,6 @@ impl Filesystem for Frontend {
         if let Some((_, pump)) = self.follow_pumps.remove(&fh.0) {
             pump.abort();
         }
-        self.follow_sizes.remove(&ino.0);
         if let Some((_, ranged)) = self.ranged_handles.remove(&fh.0)
             && let Some(runtime) = self.runtime_for_mount(&ranged.mount_name)
             && let Err(e) = runtime.call_close_file(ranged.provider_handle)
@@ -474,6 +473,9 @@ impl Filesystem for Frontend {
                 error = %e,
                 "close_file runtime error"
             );
+        }
+        if !self.ranged_handles.iter().any(|entry| entry.ino == ino.0) {
+            self.follow_sizes.remove(&ino.0);
         }
         reply.ok();
     }
