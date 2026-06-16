@@ -68,6 +68,9 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-provider-target,target=/src/target,sharing=locked \
     set -eux; \
+    workspace_pkgs=$(awk -F'"' '/^name = "omnifs-/ || /^name = "test-provider"/ { printf " -p %s", $2 }' crates/*/Cargo.toml providers/*/Cargo.toml); \
+    cargo clean $workspace_pkgs --target wasm32-wasip2 --release --target-dir /src/target; \
+    rm -f /src/target/wasm32-wasip2/release/*.wasm; \
     pkgs=$(awk -F'"' '/^name = "omnifs-provider-/ { printf " -p %s", $2 }' providers/*/Cargo.toml); \
     cargo build $pkgs -p test-provider --target wasm32-wasip2 --release --target-dir /src/target; \
     cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 --target-dir /src/target; \

@@ -1,0 +1,53 @@
+# Throwaway Kubernetes for `omnifs dev`.
+#
+# k3s runs the cluster; a co-located `kubectl proxy` shares k3s's network
+# namespace, so it reaches the API server at the default 127.0.0.1:6443 with
+# k3s's own admin kubeconfig (no TLS-SAN or server rewrite needed). The proxy
+# terminates TLS and auth and re-exposes the API as plain HTTP on a unix
+# socket. The omnifs container bind-mounts that socket and the kubernetes
+# provider reads it through its default `unix:///run/omnifs/k8s.sock` endpoint.
+# omnifs itself holds no cluster credential and needs no egress capability.
+services:
+  k3s:
+    image: rancher/k3s:v1.31.5-k3s1
+    command: server --disable=traefik --disable=metrics-server
+    privileged: true
+    environment:
+      K3S_KUBECONFIG_OUTPUT: /output/kubeconfig.yaml
+      K3S_KUBECONFIG_MODE: "644"
+    volumes:
+      - kubeconfig:/output
+      # Seed workloads applied by k3s on boot. Mounted as a single file, not
+      # the whole directory, so k3s can still write its own bundled manifests
+      # (ccm.yaml and friends) into the auto-deploy dir alongside it.
+      - ./manifests/seed.yaml:/var/lib/rancher/k3s/server/manifests/seed.yaml:ro
+    healthcheck:
+      test: ["CMD", "kubectl", "get", "--raw=/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  proxy:
+    image: rancher/k3s:v1.31.5-k3s1
+    # Share k3s's network namespace: localhost:6443 is the API server, so the
+    # admin kubeconfig k3s writes (which points at 127.0.0.1) works unchanged.
+    network_mode: "service:k3s"
+    depends_on:
+      k3s:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        exec kubectl proxy
+        --kubeconfig=/output/kubeconfig.yaml
+        --unix-socket=/run/omnifs/k8s.sock
+        --accept-hosts='.*'
+    volumes:
+      - kubeconfig:/output:ro
+      # Shared host dir carrying the unix socket, also bind-mounted into the
+      # omnifs container at the same path. Set by `omnifs dev`.
+      - ${OMNIFS_K8S_SOCK_DIR:?set OMNIFS_K8S_SOCK_DIR}:/run/omnifs
+
+volumes:
+  kubeconfig:

@@ -1,0 +1,7 @@
+{
+  "provider": "omnifs_provider_kubernetes.wasm",
+  "mount": "k8s",
+  "config": {
+    "endpoint": "unix:///run/omnifs/k8s.sock"
+  }
+}

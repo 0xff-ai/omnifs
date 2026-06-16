@@ -79,6 +79,19 @@ impl DevArgs {
         set_private_dir(&dev_home)?;
         ensure_db_fixture(&db_dir, &db_path).await?;
 
+        // In build mode, kick off the dev Kubernetes cluster on a blocking
+        // thread so k3s pulling and booting overlaps the image build below. It
+        // is best-effort (joined further down): a cluster that fails to come up
+        // must not abort the dev session. Skipped with `--image` (the lean
+        // pre-built/CI path), which has no use for a local k3s cluster.
+        let cluster_task = self.image.is_none().then(|| {
+            let workspace = workspace.path().to_path_buf();
+            let sock_dir = dev_home.join("k8s");
+            tokio::task::spawn_blocking(move || {
+                crate::kubernetes_testenv::up(&workspace, &sock_dir)
+            })
+        });
+
         if self.image.is_none() {
             build_image(workspace.path(), &image)?;
         }
@@ -110,9 +123,31 @@ impl DevArgs {
         // store, then launch only the mounts we could provision (plus the ones
         // that need no auth). Same detect→validate→store path as `omnifs init`.
         let templates = ctx.catalog().provider_templates()?;
-        let configs =
+        let mut configs =
             provision_dev_mounts(dev_mounts::configs()?, &templates, &paths.credentials_file)
                 .await?;
+
+        let mut binds = vec![format!("{}:{GUEST_DB_DIR}:ro", db_dir.display())];
+
+        // Join the kubernetes cluster bring-up (build mode only). Best-effort:
+        // if it failed, mount everything else without kubernetes and surface
+        // the reason rather than failing the command.
+        if let Some(cluster_task) = cluster_task {
+            match cluster_task.await {
+                Ok(Ok((socket_bind, mount))) => {
+                    binds.push(socket_bind);
+                    configs.push(mount);
+                },
+                Ok(Err(error)) => {
+                    anstream::eprintln!(
+                        "warning: dev Kubernetes cluster did not start; mounting without it: {error:#}"
+                    );
+                },
+                Err(join) => {
+                    anstream::eprintln!("warning: dev Kubernetes cluster task panicked: {join}");
+                },
+            }
+        }
 
         let store = Box::new(FileStore::new(&paths.credentials_file));
         launch_runtime(
@@ -122,9 +157,7 @@ impl DevArgs {
                 store,
                 verb: "omnifs dev",
                 configs,
-                extras: ContainerExtras {
-                    binds: vec![format!("{}:{GUEST_DB_DIR}:ro", db_dir.display())],
-                },
+                extras: ContainerExtras { binds },
             },
             ctx.catalog(),
         )

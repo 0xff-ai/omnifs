@@ -982,3 +982,49 @@ fn volatile_follow_pump_advances_reported_size() {
         "follow pump keeps the size growing between a follower's reads ({s1} -> {s2})"
     );
 }
+
+#[test]
+fn volatile_follow_pump_probes_from_foreground_eof() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration as StdDuration;
+
+    let h = build_harness();
+    let path = "/hello/volatile-tail";
+    let ino = h.lookup_path(path).expect("volatile-tail resolves");
+    let (attrs, synthetic) =
+        h.fs.inodes
+            .get(&ino)
+            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+    let fh = h.fs.alloc_fh();
+    let target = FullReadTarget {
+        ino,
+        fh,
+        mount_name: FuseHarness::MOUNT.to_string(),
+        path: path.to_string(),
+        backing_path: None,
+        attrs,
+        synthetic,
+    };
+    h.fs.open_ranged_file(&target)
+        .expect("open ranged volatile")
+        .expect("ranged open serves direct I/O");
+
+    let foreground_eof = 4096;
+    let ranged = h.fs.ranged_handles.get(&fh).expect("ranged handle present");
+    ranged
+        .observed_end
+        .fetch_max(foreground_eof, Ordering::Relaxed);
+    drop(ranged);
+
+    std::thread::sleep(StdDuration::from_millis(1500));
+    let reported = h.fs.follow_sizes.get(&ino).map_or(0, |v| *v);
+
+    if let Some((_, pump)) = h.fs.follow_pumps.remove(&fh) {
+        pump.abort();
+    }
+
+    assert!(
+        reported > foreground_eof,
+        "follow pump must probe from the foreground EOF, not from zero ({reported} <= {foreground_eof})"
+    );
+}

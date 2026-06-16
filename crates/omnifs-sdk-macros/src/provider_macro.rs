@@ -627,9 +627,10 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                     );
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                let read_cx = cx.erase_state();
                 let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
                     Box::pin(async move {
-                        match reader.read_chunk(offset, len).await {
+                        match reader.read_chunk(&read_cx, offset, len).await {
                             Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
                                 omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
                             ),
