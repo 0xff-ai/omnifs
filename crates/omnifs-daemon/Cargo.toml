@@ -24,6 +24,7 @@ omnifs-home = { workspace = true }
 omnifs-host = { workspace = true }
 omnifs-inspector = { workspace = true }
 omnifs-mount = { workspace = true }
+omnifs-nfs = { workspace = true }
 omnifs-provider = { workspace = true }
 anyhow = { workspace = true }
 axum = "0.8"
@@ -37,6 +38,7 @@ utoipa = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 
 # Image-only artifact; cargo-dist packages the CLI for macOS only.
 [package.metadata.dist]

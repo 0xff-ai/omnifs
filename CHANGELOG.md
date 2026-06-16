@@ -13,6 +13,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** Kubernetes provider unit tests have been ported to host-driven integration tests, exercising the provider through the same code path as real consumers. (#127)
 
 ### Runtime & mounts
+- **Feature:** `omnifsd` can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
 - **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
 - **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
 - **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.

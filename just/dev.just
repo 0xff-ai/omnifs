@@ -61,11 +61,6 @@ openapi:
 openapi-check:
     bun scripts/openapi.ts check
 
-# Prepare smoke-test fixtures without launching the runtime.
-[group('dev')]
-smoke-init:
-    bash tests/smoke/init_no_source.sh
-
 # Launch the supported contributor runtime.
 [group('dev')]
 dev:

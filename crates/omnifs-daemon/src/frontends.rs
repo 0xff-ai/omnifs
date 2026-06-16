@@ -4,6 +4,7 @@ use omnifs_api::FrontendInfo;
 use omnifs_fuse::NotifierHandle;
 use omnifs_fuse::mount;
 use omnifs_host::registry::ProviderRegistry;
+use omnifs_nfs::NfsMountOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -16,12 +17,19 @@ pub struct Frontends {
 
 enum Frontend {
     Fuse(Fuse),
+    Nfs(Nfs),
 }
 
 struct Fuse {
     mount_point: PathBuf,
     registry: Arc<ProviderRegistry>,
     notifier: NotifierHandle,
+}
+
+struct Nfs {
+    mount_point: PathBuf,
+    registry: Arc<ProviderRegistry>,
+    options: NfsMountOptions,
 }
 
 impl Frontends {
@@ -39,9 +47,24 @@ impl Frontends {
         }
     }
 
+    pub fn nfs(
+        mount_point: PathBuf,
+        registry: Arc<ProviderRegistry>,
+        options: NfsMountOptions,
+    ) -> Self {
+        Self {
+            primary: Frontend::Nfs(Nfs {
+                mount_point,
+                registry,
+                options,
+            }),
+        }
+    }
+
     pub fn mount_point(&self) -> &Path {
         match &self.primary {
             Frontend::Fuse(frontend) => &frontend.mount_point,
+            Frontend::Nfs(frontend) => &frontend.mount_point,
         }
     }
 
@@ -53,6 +76,14 @@ impl Frontends {
                     &frontend.registry,
                     rt,
                     &frontend.notifier,
+                )?;
+            },
+            Frontend::Nfs(frontend) => {
+                omnifs_nfs::mount_blocking(
+                    &frontend.mount_point,
+                    &frontend.registry,
+                    rt.clone(),
+                    &frontend.options,
                 )?;
             },
         }
@@ -67,6 +98,12 @@ impl Frontends {
                     source: mount.source,
                     fs_type: mount.fs_type,
                 }),
+            Frontend::Nfs(frontend) => proc_mounts::find_mount(&frontend.mount_point)
+                .filter(|mount| mount.fs_type.starts_with("nfs"))
+                .map(|mount| FrontendInfo {
+                    source: mount.source,
+                    fs_type: mount.fs_type,
+                }),
         }
     }
 
@@ -74,6 +111,9 @@ impl Frontends {
         match &self.primary {
             Frontend::Fuse(frontend) => {
                 omnifs_fuse::invalidate_root_child(&frontend.notifier, name);
+            },
+            Frontend::Nfs(_) => {
+                let _ = name;
             },
         }
     }
