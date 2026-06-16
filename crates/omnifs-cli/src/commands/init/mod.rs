@@ -27,7 +27,7 @@ use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
-use auth_import::AuthImportDecision;
+pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
 use provider_selection::ProviderSelection;
@@ -224,7 +224,7 @@ pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {
     }
 }
 
-async fn run_static_token_init(
+pub(crate) async fn run_static_token_init(
     manifest: &ProviderManifest,
     auth: &AuthSelection,
     token: SecretString,

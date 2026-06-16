@@ -452,18 +452,18 @@ Git clone is a separate credential path from the HTTP auth engine above; it ride
 - Remote format is `git@github.com:<owner>/<repo>.git`.
 - Auth comes from the forwarded `SSH_AUTH_SOCK`. Do not mount host private keys into the container.
 
-The contributor sandbox uses a third path again. `omnifs dev` captures `gh auth token` and exposes it as a read-only mounted secret file at `/run/secrets/github_token` inside the container. The normal user path (`omnifs init` plus `omnifs up`) keeps OAuth and static-token credentials in the file-backed credential store at `~/.omnifs/credentials.json`.
+The contributor sandbox reuses the same credential-store path as the normal user, isolated in a dedicated dev home. `omnifs dev` resolves `~/.omnifs/dev` as the runtime home, then for each built-in dev mount runs the same detect→validate→store flow as `omnifs init` (`commands::init::run_static_token_init` via `AuthImportDecision`): it imports a host credential (`gh auth token`, or a provider env var such as `LINEAR_API_KEY`) into `~/.omnifs/dev/credentials.json` and the embedded `providers/*/dev-mount.json` references it by `(provider, scheme, account)` like any user mount. Nothing is written into the source checkout, and a mount whose credential cannot be sourced is skipped rather than aborting the sandbox. The dev home is bind-mounted at `/root/.omnifs`, so the daemon reads the same store the CLI wrote. The normal user path (`omnifs init` plus `omnifs up`) uses `~/.omnifs/credentials.json` the same way.
 
 Container startup requires:
 
-- host `gh auth token` works so `omnifs dev` can capture and write `.secrets/github_token`
+- host `gh auth token` works so `omnifs dev` can import the GitHub credential
 - host `SSH_AUTH_SOCK` is set
 - host SSH agent has a usable GitHub key loaded
 
 Useful host checks:
 
 ```bash
-test -s .secrets/github_token || gh auth token > .secrets/github_token
+gh auth token >/dev/null && echo "gh ok"
 ssh-add -L
 ssh -T git@github.com
 ```

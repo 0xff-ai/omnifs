@@ -68,27 +68,3 @@ impl DevImageTag {
         &self.0
     }
 }
-
-pub(crate) fn capture_gh_token() -> anyhow::Result<String> {
-    use std::process::Stdio;
-
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .stderr(Stdio::piped())
-        .output()
-        .context("invoke gh")
-        .with_hint("Install GitHub CLI (https://cli.github.com) and run `gh auth login`")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("gh auth token failed: {}", stderr.trim()))
-            .with_hint("Run `gh auth login` to authenticate the GitHub CLI");
-    }
-    let token = String::from_utf8(output.stdout)
-        .context("gh auth token output was not UTF-8")?
-        .trim()
-        .to_string();
-    if token.is_empty() {
-        anyhow::bail!("gh auth token returned an empty token");
-    }
-    Ok(token)
-}
