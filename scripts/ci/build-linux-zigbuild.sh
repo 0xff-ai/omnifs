@@ -6,6 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 target="${1:-x86_64-unknown-linux-gnu.2.17}"
 package="${OMNIFS_PACKAGE:-omnifs-cli}"
 bin="${OMNIFS_BIN:-omnifs}"
+build_daemon="${OMNIFS_BUILD_DAEMON:-0}"
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 case "$target_root" in
   /*) ;;
@@ -43,58 +44,101 @@ target_env="$(printf '%s\n' "$base_target" | tr '[:lower:].-' '[:upper:]__')"
 export "CARGO_TARGET_${target_env}_RUSTFLAGS=${CARGO_ZIGBUILD_RUSTFLAGS:-}"
 ulimit -n 4096 2>/dev/null || true
 
-cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
-
-artifact=""
-for candidate in \
-  "$target_root/$target/release/$bin" \
-  "$target_root/$base_target/release/$bin" \
-  "$root/target/$target/release/$bin" \
-  "$root/target/$base_target/release/$bin"
-do
-  if [[ -f "$candidate" ]]; then
-    artifact="$candidate"
-    break
-  fi
-done
-
-if [[ -z "$artifact" ]]; then
-  echo "built artifact not found for $target" >&2
-  exit 1
-fi
-
-echo "artifact=$artifact"
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  echo "artifact=$artifact" >>"$GITHUB_OUTPUT"
-fi
-file "$artifact"
-
-case "$base_target" in
-  *-unknown-linux-gnu)
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      case "$base_target" in
-        x86_64-unknown-linux-gnu) docker_platform="linux/amd64" ;;
-        aarch64-unknown-linux-gnu) docker_platform="linux/arm64" ;;
-        *)
-          echo "no docker platform mapping for $base_target; skipping Linux readelf/ldd inspection" >&2
-          exit 0
-          ;;
-      esac
-
-      docker run --rm \
-        --platform "$docker_platform" \
-        -v "$artifact:/work/omnifs:ro" \
-        ubuntu:22.04 \
-        /bin/bash -lc '
-          set -euo pipefail
-          apt-get update >/dev/null
-          apt-get install -y --no-install-recommends binutils file >/dev/null
-          file /work/omnifs
-          readelf -V /work/omnifs | grep "GLIBC_" || true
-          ldd /work/omnifs
-        '
-    else
-      echo "docker unavailable; skipping Linux readelf/ldd inspection" >&2
+find_artifact() {
+  local artifact_bin="$1"
+  local artifact=""
+  local candidate
+  for candidate in \
+    "$target_root/$target/release/$artifact_bin" \
+    "$target_root/$base_target/release/$artifact_bin" \
+    "$root/target/$target/release/$artifact_bin" \
+    "$root/target/$base_target/release/$artifact_bin"
+  do
+    if [[ -f "$candidate" ]]; then
+      artifact="$candidate"
+      break
     fi
-    ;;
-esac
+  done
+
+  if [[ -z "$artifact" ]]; then
+    echo "built artifact not found for $target: $artifact_bin" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$artifact"
+}
+
+emit_output() {
+  local name="$1"
+  local value="$2"
+  echo "$name=$value"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "$name=$value" >>"$GITHUB_OUTPUT"
+  fi
+}
+
+inspect_linux_artifacts() {
+  case "$base_target" in
+    *-unknown-linux-gnu) ;;
+    *) return 0 ;;
+  esac
+
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo "docker unavailable; skipping Linux readelf/ldd inspection" >&2
+    return 0
+  fi
+
+  local docker_platform=""
+  case "$base_target" in
+    x86_64-unknown-linux-gnu) docker_platform="linux/amd64" ;;
+    aarch64-unknown-linux-gnu) docker_platform="linux/arm64" ;;
+    *)
+      echo "no docker platform mapping for $base_target; skipping Linux readelf/ldd inspection" >&2
+      return 0
+      ;;
+  esac
+
+  local inspect_dir
+  inspect_dir="$(mktemp -d)"
+  local artifact
+  for artifact in "$@"; do
+    cp "$artifact" "$inspect_dir/$(basename "$artifact")"
+  done
+
+  docker run --rm \
+    --platform "$docker_platform" \
+    -v "$inspect_dir:/work:ro" \
+    ubuntu:22.04 \
+    /bin/bash -lc '
+      set -euo pipefail
+      apt-get update >/dev/null
+      apt-get install -y --no-install-recommends binutils file >/dev/null
+      for binary in /work/*; do
+        file "$binary"
+        readelf -V "$binary" | grep "GLIBC_" || true
+        ldd "$binary"
+      done
+    '
+  rm -rf "$inspect_dir"
+}
+
+if [[ "$build_daemon" == "1" ]]; then
+  cargo zigbuild --release --target "$target" \
+    -p omnifs-cli --bin omnifs \
+    -p omnifs-daemon --bin omnifsd
+
+  artifact="$(find_artifact omnifs)"
+  daemon_artifact="$(find_artifact omnifsd)"
+  emit_output artifact "$artifact"
+  emit_output daemon_artifact "$daemon_artifact"
+  file "$artifact"
+  file "$daemon_artifact"
+  inspect_linux_artifacts "$artifact" "$daemon_artifact"
+else
+  cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
+
+  artifact="$(find_artifact "$bin")"
+  emit_output artifact "$artifact"
+  file "$artifact"
+  inspect_linux_artifacts "$artifact"
+fi
