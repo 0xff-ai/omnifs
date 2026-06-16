@@ -135,6 +135,23 @@ jobs:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
 
+      - name: Isolate host test archive inputs
+        run: |
+          set -euo pipefail
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          rm -rf "$keep"
+          mkdir -p "$keep/dist/host-tests" "$keep/wasm" "$keep/target-preserve"
+          cp dist/host-tests/host-tests.tar.zst "$keep/dist/host-tests/"
+          cp target/wasm32-wasip2/release/*.wasm "$keep/wasm/"
+          if [[ -d target/host-build ]]; then
+            mv target/host-build "$keep/target-preserve/host-build"
+          fi
+          find target -mindepth 1 -maxdepth 1 ! -name wasm32-wasip2 -exec rm -rf {} +
+          rm -rf dist/host-tests target/wasm32-wasip2/release
+          mkdir -p dist/host-tests target/wasm32-wasip2/release
+          cp "$keep/dist/host-tests/host-tests.tar.zst" dist/host-tests/
+          cp "$keep/wasm/"*.wasm target/wasm32-wasip2/release/
+
       - name: Cache wasmtime component compilations
         # Wasmtime's on-disk cache is internally content-addressed (WASM hash +
         # wasmtime version), so stale entries are harmless and won't be served
@@ -151,6 +168,17 @@ jobs:
 
       - name: Run host tests
         run: just ci-host-test
+
+      - name: Restore host build cache inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          if [[ -d "$keep/target-preserve/host-build" ]]; then
+            rm -rf target/host-build
+            mkdir -p target
+            mv "$keep/target-preserve/host-build" target/host-build
+          fi
 
   cli-linux-x64:
     name: cli linux x64
