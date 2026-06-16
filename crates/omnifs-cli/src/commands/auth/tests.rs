@@ -101,12 +101,11 @@ fn schemes_reads_manifest_from_provider() {
 
     let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
     let mounts = mounts_for(&paths);
+    let mount_auth = catalog.load_mount_auth(&mounts, "github").unwrap();
     let loaded = catalog
-        .load_mount_auth(&mounts, "github")
+        .auth_manifest_for(mount_auth.config())
         .unwrap()
-        .auth_manifest()
-        .unwrap()
-        .clone();
+        .unwrap();
 
     assert_eq!(loaded, manifest);
 }

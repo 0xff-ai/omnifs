@@ -161,10 +161,6 @@ impl MountAuth {
         &self.config
     }
 
-    pub(crate) fn auth_manifest(&self) -> Option<&AuthManifest> {
-        self.manifest.as_ref()
-    }
-
     pub(crate) fn oauth_request(
         &self,
         account: Option<&str>,

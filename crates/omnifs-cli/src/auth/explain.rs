@@ -7,6 +7,7 @@
 //! canned copy at the point of display.
 
 use crate::style;
+use omnifs_provider::{AuthScheme, OAuthFlow, ProviderAuthManifest, SchemeGuidance};
 
 /// An authentication mechanism omnifs knows how to drive, independent of any
 /// particular provider.
@@ -51,6 +52,20 @@ impl AuthMode {
         }
     }
 
+    /// The mode a concrete scheme drives, or `None` for [`AuthScheme::None`].
+    pub(crate) fn from_scheme(scheme: &AuthScheme) -> Option<AuthMode> {
+        match scheme {
+            AuthScheme::None => None,
+            AuthScheme::StaticToken(_) => Some(AuthMode::StaticToken),
+            AuthScheme::Oauth(oauth) => Some(match oauth.flow {
+                OAuthFlow::DeviceCode(_) => AuthMode::OauthDeviceCode,
+                OAuthFlow::PkceLoopback(_) => AuthMode::OauthPkceLoopback,
+                OAuthFlow::PkceManualCode(_) => AuthMode::OauthPkceManualCode,
+                OAuthFlow::ClientSideToken(_) => AuthMode::OauthClientSideToken,
+            }),
+        }
+    }
+
     /// What the user actually does, a sentence or two.
     pub(crate) fn experience(self) -> &'static str {
         match self {
@@ -91,4 +106,81 @@ pub(crate) fn render_modes_catalog() {
         "{}",
         style::dim("Some providers need no auth at all (public APIs). OAuth flows may use omnifs's registered app or your own: when a provider ships no client id, you create an app and supply its client id and secret.")
     );
+}
+
+/// Render every auth scheme a provider declares, pairing the host's canned
+/// flow-kind copy with the provider's own setup guidance.
+pub(crate) fn render_provider_auth(provider_label: &str, auth: &ProviderAuthManifest) {
+    anstream::println!(
+        "{}",
+        style::bold(format!("Authentication for {provider_label}"))
+    );
+    anstream::println!(
+        "  {}",
+        style::dim(format!("Applies to: {}", auth.inject.domains.join(", ")))
+    );
+    for (key, scheme) in &auth.schemes {
+        anstream::println!();
+        render_scheme(key, scheme, &auth.guidance_for(key), *key == auth.default);
+    }
+}
+
+fn render_scheme(key: &str, scheme: &AuthScheme, guidance: &SchemeGuidance, is_default: bool) {
+    let mode = AuthMode::from_scheme(scheme);
+    let mode_label = mode.map_or("unknown", AuthMode::label);
+    let default_tag = if is_default {
+        format!(" {}", style::dim("(default)"))
+    } else {
+        String::new()
+    };
+    anstream::println!(
+        "{} {}{}",
+        style::accent(key),
+        style::dim(format!("— {mode_label}")),
+        default_tag
+    );
+
+    // Provider one-liner if it gave one, else the canned mode summary.
+    match (&guidance.summary, mode) {
+        (Some(summary), _) => anstream::println!("  {summary}"),
+        (None, Some(mode)) => anstream::println!("  {}", mode.summary()),
+        (None, None) => {},
+    }
+    if let Some(mode) = mode {
+        anstream::println!("  {}", style::dim(mode.experience()));
+    }
+
+    match scheme {
+        AuthScheme::StaticToken(s) => {
+            if let Some(url) = &s.creation_url {
+                anstream::println!(
+                    "  {} {}",
+                    style::dim("Create a token at:"),
+                    style::accent(url)
+                );
+            }
+        },
+        AuthScheme::Oauth(o) => {
+            if !o.default_scopes.is_empty() {
+                anstream::println!("  {} {}", style::dim("Scopes:"), o.default_scopes.join(", "));
+            }
+            if o.default_client_id.is_none() {
+                anstream::println!(
+                    "  {}",
+                    style::warn("Needs your own OAuth app: omnifs ships no client id for this scheme.")
+                );
+            }
+        },
+        AuthScheme::None => {},
+    }
+
+    if !guidance.setup_steps.is_empty() {
+        anstream::println!("  {}", style::dim("Setup:"));
+        for (i, step) in guidance.setup_steps.iter().enumerate() {
+            anstream::println!("    {}. {step}", i + 1);
+        }
+    }
+    if let Some(url) = &guidance.docs_url {
+        anstream::println!("  {} {}", style::dim("Docs:"), style::accent(url));
+    }
 }
