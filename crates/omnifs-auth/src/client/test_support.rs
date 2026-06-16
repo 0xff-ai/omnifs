@@ -1,7 +1,7 @@
 use super::{AuthError, BoxFuture, ManualCode, UrlOpener, parse_callback_url};
 use omnifs_provider::{
-    DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig,
-    TokenEndpointAuthMethod,
+    ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig,
+    PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -93,6 +93,15 @@ impl FakeAuthServer {
         )
     }
 
+    pub(super) fn client_side_scheme(&self, revocation_endpoint: Option<String>) -> OauthScheme {
+        self.scheme(
+            OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+                redirect_uri_template: "http://127.0.0.1:{port}/callback".to_owned(),
+            }),
+            revocation_endpoint,
+        )
+    }
+
     pub(super) fn device_scheme(&self, revocation_endpoint: Option<String>) -> OauthScheme {
         self.scheme(
             OAuthFlow::DeviceCode(DeviceCodeConfig {
@@ -133,9 +142,30 @@ impl FakeAuthServer {
     }
 
     async fn follow_authorize_redirect(&self, url: Url) {
-        let client = reqwest::Client::new();
+        let client = reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
         let response = client.get(url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let redirect = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let redirect = Url::parse(redirect).unwrap();
+        let fragment = redirect.fragment().map(str::to_owned);
+        let mut first_callback = redirect.clone();
+        first_callback.set_fragment(None);
+        let response = client.get(first_callback.clone()).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+        if let Some(fragment) = fragment {
+            let mut second_callback = first_callback;
+            second_callback.set_query(Some(&fragment));
+            let response = client.get(second_callback).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
     }
 
     pub(super) async fn manual_authorize(&self, url: Url) -> Result<ManualCode, AuthError> {
@@ -189,31 +219,45 @@ impl FakeAuthServer {
             Some("client-id")
         );
         assert_eq!(
-            params.get("response_type").map(String::as_str),
-            Some("code")
-        );
-        assert_eq!(
-            params.get("code_challenge_method").map(String::as_str),
-            Some("S256")
-        );
-        assert_eq!(
             params.get("audience").map(String::as_str),
             Some("omnifs-test")
         );
         let redirect_uri = params.get("redirect_uri").unwrap();
         let state = params.get("state").unwrap();
-        let code = format!("code-{}", self.state.next_token.load(Ordering::SeqCst));
-        self.state
-            .codes
-            .lock()
-            .await
-            .insert(code.clone(), params.get("code_challenge").unwrap().clone());
         let returned_state = self.state.behavior.state_override.as_ref().unwrap_or(state);
-        let redirect = Url::parse_with_params(
-            redirect_uri,
-            &[("code", code.as_str()), ("state", returned_state.as_str())],
-        )
-        .unwrap();
+        let redirect = match params.get("response_type").map(String::as_str) {
+            Some("code") => {
+                assert_eq!(
+                    params.get("code_challenge_method").map(String::as_str),
+                    Some("S256")
+                );
+                let code = format!("code-{}", self.state.next_token.load(Ordering::SeqCst));
+                self.state
+                    .codes
+                    .lock()
+                    .await
+                    .insert(code.clone(), params.get("code_challenge").unwrap().clone());
+                Url::parse_with_params(
+                    redirect_uri,
+                    &[("code", code.as_str()), ("state", returned_state.as_str())],
+                )
+                .unwrap()
+            },
+            Some("token") => {
+                let mut redirect = Url::parse(redirect_uri).unwrap();
+                let id = self.state.next_token.fetch_add(1, Ordering::SeqCst);
+                let fragment = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("access_token", &format!("implicit-access-{id}"))
+                    .append_pair("token_type", "bearer")
+                    .append_pair("expires_in", "2592000")
+                    .append_pair("scope", "read write")
+                    .append_pair("state", returned_state)
+                    .finish();
+                redirect.set_fragment(Some(&fragment));
+                redirect
+            },
+            other => panic!("unexpected response_type: {other:?}"),
+        };
         let response = format!(
             "HTTP/1.1 302 Found\r\nlocation: {redirect}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
         );

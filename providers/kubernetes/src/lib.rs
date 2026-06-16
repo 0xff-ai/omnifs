@@ -350,9 +350,14 @@ impl Key for NamespacedResourceKey {
             )
             .await?
         {
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => Ok(Load::Fresh {
                 value: NamespacedResource::new(value),
                 canonical,
+                effects,
             }),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
@@ -391,9 +396,14 @@ impl Key for ClusterResourceKey {
             .load_manifest(self.rtype.as_str(), None, self.name.as_str())
             .await?
         {
-            Load::Fresh { value, canonical } => Ok(Load::Fresh {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => Ok(Load::Fresh {
                 value: ClusterResource::new(value),
                 canonical,
+                effects,
             }),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),

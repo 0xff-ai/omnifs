@@ -13,6 +13,34 @@ use omnifs_core::{CredentialId, CredentialIdError};
 /// Re-export so callers don't need a direct omnifs-core dep for this type.
 pub use omnifs_core::AuthKind;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Refreshability {
+    NotApplicable,
+    Refreshable,
+    NotRefreshable,
+}
+
+impl Refreshability {
+    fn for_entry(kind: AuthKind, refresh_token_present: bool) -> Self {
+        match (kind, refresh_token_present) {
+            (AuthKind::OAuth, true) => Self::Refreshable,
+            (AuthKind::OAuth, false) => Self::NotRefreshable,
+            (AuthKind::StaticToken, _) => Self::NotApplicable,
+        }
+    }
+}
+
+impl std::fmt::Display for Refreshability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotApplicable => f.write_str("not-applicable"),
+            Self::Refreshable => f.write_str("refreshable"),
+            Self::NotRefreshable => f.write_str("not-refreshable"),
+        }
+    }
+}
+
 /// One durable host-managed HTTP credential entry.
 #[derive(Debug, Clone)]
 pub struct CredentialEntry {
@@ -24,6 +52,7 @@ pub struct CredentialEntry {
     /// Human-readable identity reported by the upstream API at validation time.
     upstream_identity: Option<String>,
     refresh_token: Option<SecretString>,
+    refreshability: Refreshability,
     expires_at: Option<OffsetDateTime>,
     token_type: String,
     extras: BTreeMap<String, String>,
@@ -39,6 +68,7 @@ impl CredentialEntry {
             scopes: vec![],
             upstream_identity: None,
             refresh_token: None,
+            refreshability: Refreshability::NotApplicable,
             expires_at: None,
             token_type: "Bearer".to_owned(),
             extras: BTreeMap::new(),
@@ -54,6 +84,8 @@ impl CredentialEntry {
         stored_at: OffsetDateTime,
     ) -> Self {
         let token_type = token_type.into();
+        let refreshability =
+            Refreshability::for_entry(AuthKind::OAuth, refresh_token.as_ref().is_some());
         Self {
             kind: AuthKind::OAuth,
             value: access_token,
@@ -62,6 +94,7 @@ impl CredentialEntry {
             scopes,
             upstream_identity: None,
             refresh_token,
+            refreshability,
             expires_at,
             token_type: if token_type.is_empty() {
                 "Bearer".to_owned()
@@ -84,8 +117,16 @@ impl CredentialEntry {
         self.refresh_token.clone()
     }
 
+    pub fn refreshability(&self) -> Refreshability {
+        self.refreshability
+    }
+
     pub fn expires_at(&self) -> Option<OffsetDateTime> {
         self.expires_at
+    }
+
+    pub fn is_expired_at(&self, now: OffsetDateTime) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
     }
 
     pub fn token_type(&self) -> &str {
@@ -136,6 +177,8 @@ struct CredentialEntryWire {
     access_token: SecretString,
     #[serde(default, with = "secret_string_serde::option")]
     refresh_token: Option<SecretString>,
+    #[serde(default)]
+    refreshability: Option<Refreshability>,
     #[serde(default, with = "time::serde::rfc3339::option")]
     expires_at: Option<OffsetDateTime>,
     #[serde(default)]
@@ -158,6 +201,7 @@ impl From<&CredentialEntry> for CredentialEntryWire {
             kind: entry.kind,
             access_token: entry.value.clone(),
             refresh_token: entry.refresh_token.clone(),
+            refreshability: Some(entry.refreshability),
             expires_at: entry.expires_at,
             token_type: entry.token_type.clone(),
             stored_at: entry.stored_at,
@@ -174,13 +218,14 @@ impl Serialize for CredentialEntryWire {
         use secrecy::ExposeSecret;
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("CredentialEntry", 10)?;
+        let mut state = serializer.serialize_struct("CredentialEntry", 11)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("access_token", self.access_token.expose_secret())?;
         state.serialize_field(
             "refresh_token",
             &self.refresh_token.as_ref().map(ExposeSecret::expose_secret),
         )?;
+        state.serialize_field("refreshability", &self.refreshability)?;
         let expires_at = self.expires_at.map(|value| {
             value
                 .format(&time::format_description::well_known::Rfc3339)
@@ -217,6 +262,9 @@ impl Serialize for CredentialEntry {
 impl<'de> Deserialize<'de> for CredentialEntry {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = CredentialEntryWire::deserialize(deserializer)?;
+        let refreshability = wire
+            .refreshability
+            .unwrap_or_else(|| Refreshability::for_entry(wire.kind, wire.refresh_token.is_some()));
         let entry = Self {
             kind: wire.kind,
             value: wire.access_token,
@@ -225,6 +273,7 @@ impl<'de> Deserialize<'de> for CredentialEntry {
             scopes: wire.scopes,
             upstream_identity: wire.upstream_identity,
             refresh_token: wire.refresh_token,
+            refreshability,
             expires_at: wire.expires_at,
             token_type: if wire.token_type.is_empty() {
                 "Bearer".to_owned()
@@ -281,5 +330,65 @@ mod secret_string_serde {
         ) -> Result<Option<SecretString>, D::Error> {
             Ok(Option::<String>::deserialize(de)?.map(SecretString::from))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::SecretString;
+
+    #[test]
+    fn oauth_refreshability_serializes_and_legacy_entries_infer_it() {
+        let entry = CredentialEntry::oauth(
+            SecretString::from("access".to_owned()),
+            Some(SecretString::from("refresh".to_owned())),
+            None,
+            "bearer",
+            vec![],
+            OffsetDateTime::UNIX_EPOCH,
+        );
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["refreshability"], "refreshable");
+
+        let legacy_refreshable: CredentialEntry = serde_json::from_str(
+            r#"{
+                "kind": "oauth",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": null,
+                "token_type": "bearer",
+                "stored_at": "1970-01-01T00:00:00Z",
+                "last_validated": null,
+                "scopes": [],
+                "upstream_identity": null,
+                "extras": {}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_refreshable.refreshability(),
+            Refreshability::Refreshable
+        );
+
+        let legacy_not_refreshable: CredentialEntry = serde_json::from_str(
+            r#"{
+                "kind": "oauth",
+                "access_token": "access",
+                "refresh_token": null,
+                "expires_at": null,
+                "token_type": "bearer",
+                "stored_at": "1970-01-01T00:00:00Z",
+                "last_validated": null,
+                "scopes": [],
+                "upstream_identity": null,
+                "extras": {}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_not_refreshable.refreshability(),
+            Refreshability::NotRefreshable
+        );
     }
 }

@@ -28,7 +28,7 @@ use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, FileProj, Size, Stability};
+use crate::file_attrs::{FileAttrs, FileProj, Size, Stability, VersionToken};
 use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object, ObjectShape, ProjectFn};
 use crate::repr::{RenderSet, RenderTable};
 use omnifs_core::ContentType;
@@ -599,24 +599,30 @@ impl<O: Object> ObjectRoute<O> {
         }
 
         let since = cx.version().cloned();
-        match key.load(cx, since).await? {
-            Load::Fresh { value, canonical } => {
-                let id = key.anchor();
-                let mut effects = Effects::new();
-                effects.canonical_store(
-                    &id,
-                    canonical.validator.clone(),
-                    canonical.bytes,
-                    self.view_leaves(&list_path)?,
-                );
-                self.project_eager_fields(&mut effects, &id, &value, &list_path)?;
-                Ok(effects)
+        let (value, canonical, extra_effects) = match key.load(cx, since).await? {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => (value, canonical, effects),
+            Load::Unchanged => return Ok(Effects::new()),
+            Load::NotFound => {
+                return Err(ProviderError::not_found(format!(
+                    "object not found: {list_path}"
+                )));
             },
-            Load::Unchanged => Ok(Effects::new()),
-            Load::NotFound => Err(ProviderError::not_found(format!(
-                "object not found: {list_path}"
-            ))),
-        }
+        };
+        let id = key.anchor();
+        let mut effects = Effects::new();
+        effects.canonical_store(
+            &id,
+            canonical.validator.clone(),
+            canonical.bytes,
+            self.view_leaves(&list_path)?,
+        );
+        effects.extend(extra_effects);
+        self.project_eager_fields(&mut effects, &id, &value, &list_path)?;
+        Ok(effects)
     }
 
     /// The object read path, in priority order:
@@ -653,40 +659,52 @@ impl<O: Object> ObjectRoute<O> {
         if let Some(ref push) = cached
             && push.matches_anchor(&key.anchor())
         {
-            return serve_warm::<O>(target, &push.bytes, &self.render_table, &self.leaves);
+            return serve_warm::<O>(
+                target,
+                &push.bytes,
+                push.validator.clone(),
+                &self.render_table,
+                &self.leaves,
+            );
         }
 
         let since = cached.as_ref().and_then(|p| p.validator.clone());
-        match key.load(cx, since).await? {
-            Load::Fresh { value, canonical } => {
-                let id = key.anchor();
-                let view_leaves = self.facet_expansion.expand_view_leaves(&read_path)?;
-                let mut effects = Effects::new();
-                effects.canonical_store(
-                    &id,
-                    canonical.validator.clone(),
-                    canonical.bytes.clone(),
-                    view_leaves,
-                );
-                serve_fresh::<O>(
-                    &value,
-                    target,
-                    &canonical.bytes,
-                    &self.render_table,
-                    &self.leaves,
-                    effects,
-                )
-            },
+        let (value, canonical, extra_effects) = match key.load(cx, since).await? {
+            Load::Fresh {
+                value,
+                canonical,
+                effects,
+            } => (value, canonical, effects),
             Load::Unchanged => {
                 let bytes = cached.as_ref().map(|p| p.bytes.as_slice()).ok_or_else(|| {
                     ProviderError::internal(
                         "Load::Unchanged returned without a host-pushed canonical",
                     )
                 })?;
-                serve_warm::<O>(target, bytes, &self.render_table, &self.leaves)
+                let validator = cached.as_ref().and_then(|p| p.validator.clone());
+                return serve_warm::<O>(target, bytes, validator, &self.render_table, &self.leaves);
             },
-            Load::NotFound => Ok(ReadOutcome::NotFound(Some(key.anchor()))),
-        }
+            Load::NotFound => return Ok(ReadOutcome::NotFound(Some(key.anchor()))),
+        };
+        let id = key.anchor();
+        let view_leaves = self.facet_expansion.expand_view_leaves(&read_path)?;
+        let mut effects = Effects::new();
+        effects.canonical_store(
+            &id,
+            canonical.validator.clone(),
+            canonical.bytes.clone(),
+            view_leaves,
+        );
+        effects.extend(extra_effects);
+        serve_fresh::<O>(
+            &value,
+            target,
+            &canonical.bytes,
+            canonical.validator.clone(),
+            &self.render_table,
+            &self.leaves,
+            effects,
+        )
     }
 
     /// Every full path that maps to this object's canonical bytes: each
@@ -903,10 +921,18 @@ where
 fn serve_warm<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
+    validator: Option<VersionToken>,
     render_table: &RenderTable,
     leaves: &[ObjectLeaf<O>],
 ) -> Result<ReadOutcome> {
-    serve_from_canonical::<O>(target, bytes, render_table, leaves, Effects::new())
+    serve_from_canonical::<O>(
+        target,
+        bytes,
+        validator,
+        render_table,
+        leaves,
+        Effects::new(),
+    )
 }
 
 /// Serve right after a fresh load, attaching the canonical-store effects.
@@ -916,6 +942,7 @@ fn serve_fresh<O: Object>(
     value: &O,
     target: ObjectReadTarget,
     bytes: &[u8],
+    validator: Option<VersionToken>,
     render_table: &RenderTable,
     leaves: &[ObjectLeaf<O>],
     effects: Effects,
@@ -945,6 +972,7 @@ fn serve_fresh<O: Object>(
         ObjectReadTarget::Representation(ct) => serve_from_canonical::<O>(
             ObjectReadTarget::Representation(ct),
             bytes,
+            validator,
             render_table,
             leaves,
             effects,
@@ -960,20 +988,27 @@ fn serve_fresh<O: Object>(
 fn serve_from_canonical<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
+    validator: Option<VersionToken>,
     render_table: &RenderTable,
     leaves: &[ObjectLeaf<O>],
     effects: Effects,
 ) -> Result<ReadOutcome> {
     match target {
         ObjectReadTarget::Representation(ct) => {
+            let stability = representation_stability::<O>(ct, leaves);
             if ct == render_table.source_ct {
                 return Ok(ReadOutcome::Found(
-                    FileContent::canonical(canonical_attrs()).with_effects(effects),
+                    FileContent::canonical(representation_attrs(
+                        Size::Unknown,
+                        stability,
+                        validator,
+                    ))
+                    .with_effects(effects),
                 ));
             }
             let rendered = render_table.serve(ct, bytes)?;
             Ok(ReadOutcome::Found(
-                body_file_content(rendered, ct).with_effects(effects),
+                body_file_content(rendered, ct, stability, validator).with_effects(effects),
             ))
         },
         ObjectReadTarget::Projected(name) => {
@@ -1086,12 +1121,41 @@ fn content_size(content: &FileContent) -> u64 {
         .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
 }
 
-/// Attrs for the identity (canonical byte-source) answer: size is unknown to
-/// the SDK because the host serves the stored bytes directly.
-pub(super) fn canonical_attrs() -> FileAttrs {
-    FileAttrs::new(Size::Unknown, Stability::Immutable)
+fn representation_stability<O: Object>(ct: ContentType, leaves: &[ObjectLeaf<O>]) -> Stability {
+    leaves
+        .iter()
+        .find_map(|leaf| match leaf {
+            ObjectLeaf::Representation {
+                ct: leaf_ct,
+                stability,
+                ..
+            } if *leaf_ct == ct => Some(*stability),
+            _ => None,
+        })
+        .unwrap_or_else(O::default_stability)
 }
 
-pub(super) fn body_file_content(bytes: Vec<u8>, ct: ContentType) -> FileContent {
-    FileContent::new(bytes).with_content_type(ct)
+fn representation_attrs(
+    size: Size,
+    stability: Stability,
+    validator: Option<VersionToken>,
+) -> FileAttrs {
+    let attrs = FileAttrs::new(size, stability);
+    if let Some(validator) = validator {
+        attrs.with_version(validator)
+    } else {
+        attrs
+    }
+}
+
+pub(super) fn body_file_content(
+    bytes: Vec<u8>,
+    ct: ContentType,
+    stability: Stability,
+    validator: Option<VersionToken>,
+) -> FileContent {
+    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    FileContent::new(bytes)
+        .with_attrs(representation_attrs(size, stability, validator))
+        .with_content_type(ct)
 }

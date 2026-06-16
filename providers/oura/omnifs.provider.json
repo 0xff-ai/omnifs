@@ -1,0 +1,49 @@
+{
+  "id": "oura",
+  "displayName": "Oura",
+  "provider": "omnifs_provider_oura.wasm",
+  "defaultMount": "oura",
+  "capabilities": [
+    {
+      "kind": "domain",
+      "value": "api.ouraring.com",
+      "why": "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
+    },
+    {
+      "kind": "memoryMb",
+      "value": 128,
+      "why": "Leave room for date-range and time-series JSON responses."
+    }
+  ],
+  "auth": {
+    "inject": {
+      "domains": ["api.ouraring.com"],
+      "header": "Authorization",
+      "prefix": "Bearer "
+    },
+    "default": "oauth",
+    "schemes": {
+      "oauth": {
+        "type": "oauth",
+        "displayName": "Oura OAuth",
+        "clientId": "9443bed5-98df-4a2d-b08e-d2a10c1851ae",
+        "scopes": [
+          "email",
+          "personal",
+          "daily",
+          "heartrate",
+          "workout",
+          "tag",
+          "session",
+          "spo2Daily"
+        ],
+        "flow": {
+          "kind": "clientSideToken",
+          "authorizationEndpoint": "https://cloud.ouraring.com/oauth/authorize",
+          "tokenEndpoint": "https://api.ouraring.com/oauth/token",
+          "redirectUriTemplate": "http://localhost:58880/"
+        }
+      }
+    }
+  }
+}

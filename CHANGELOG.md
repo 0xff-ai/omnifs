@@ -9,6 +9,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 ### Providers & projected paths
 
 - **Feature:** A read-only Kubernetes provider projects a cluster as a filesystem: namespaces, resource types, and objects are browsable under `namespaces/<ns>/<kind>/<name>/`, each object renders its `manifest.yaml`, and pods expose live `logs/<container>.log` that stream with `tail -f`. The provider holds no cluster credential and reaches the API server through a `kubectl proxy`, so all auth and TLS stay host-side.
+- **Feature:** A read-only Oura provider projects Oura Ring health data as a filesystem: each day is a directory (`<day>/`) holding per-collection JSON files such as `daily_sleep.json`, `daily_activity.json`, `daily_readiness.json`, `heart_rate.json`, and `workout.json`. It authenticates with Oura's client-side-token OAuth flow, and reading any day preloads the surrounding ±15-day window so neighboring days are already warm.
 - **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
 - **Fix:** A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
 

@@ -1,7 +1,7 @@
 //! Status report: data types, collection, and rendering.
 
 use comfy_table::{Cell, ContentArrangement, Table, presets};
-use omnifs_creds::FileStore;
+use omnifs_creds::{FileStore, Refreshability};
 use std::fmt::Write as _;
 
 use crate::{catalog::ProviderCatalog, paths::Paths};
@@ -291,6 +291,8 @@ pub(crate) enum AuthJson {
         kind: String,
         scopes: Vec<String>,
         expires_at: Option<String>,
+        refreshability: Refreshability,
+        notices: Vec<String>,
     },
     ConfiguredExternally {
         source: String,
@@ -384,10 +386,14 @@ impl From<&AuthReadiness> for AuthJson {
                 kind,
                 scopes,
                 expires_at,
+                refreshability,
+                notices,
             } => Self::Ready {
                 kind: kind.clone(),
                 scopes: scopes.clone(),
                 expires_at: expires_at.clone(),
+                refreshability: *refreshability,
+                notices: notices.clone(),
             },
             AuthReadiness::ConfiguredExternally { source } => Self::ConfiguredExternally {
                 source: source.clone(),

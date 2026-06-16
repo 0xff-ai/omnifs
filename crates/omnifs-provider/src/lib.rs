@@ -23,9 +23,9 @@ mod wasm;
 
 pub use auth_resolve::SchemeResolveError;
 pub use auth_wire::{
-    AuthManifest, AuthScheme, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme,
-    PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod,
-    TokenValidation,
+    AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow,
+    OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme,
+    TokenEndpointAuthMethod, TokenValidation,
 };
 pub use config::{
     ConfigProperty, ConfigSchema, ConfigSchemaType, InitHint, InitInput, PreopenStrategy,
