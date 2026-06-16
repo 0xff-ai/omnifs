@@ -1,12 +1,12 @@
 //! `omnifs dev` — contributor sandbox launcher.
 //!
-//! Brings up the full local integration sandbox: builds the canonical
-//! omnifs image (always), provisions credentials for the built-in dev mounts
-//! from the contributor's host (`gh` CLI, provider env vars) into a dedicated
-//! dev home under `~/.omnifs/dev`, exposes the Docker socket and a Chinook
-//! `SQLite` fixture, and starts the container. Nothing is written into the
-//! source checkout, so a stray `git add` can never leak a token.
-//! Contributors-only; requires a source checkout.
+//! Brings up the full local integration sandbox: builds the canonical omnifs
+//! image from the workspace (or runs a pre-built one with `--image`), provisions
+//! credentials for the built-in dev mounts from the contributor's host (`gh`
+//! CLI, provider env vars) into a dedicated dev home under `~/.omnifs/dev`,
+//! exposes the Docker socket and a Chinook `SQLite` fixture, and starts the
+//! container. Nothing is written into the source checkout, so a stray `git add`
+//! can never leak a token. Contributors-only; requires a source checkout.
 
 use anyhow::Context;
 use clap::Args;
@@ -19,7 +19,7 @@ use std::process::Command;
 use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::catalog::ProviderTemplate;
-use crate::commands::init::{AuthImportDecision, run_static_token_init};
+use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
@@ -37,6 +37,14 @@ pub struct DevArgs {
     /// Skip confirmation prompts.
     #[arg(short = 'y', long)]
     pub yes: bool,
+    /// Run a pre-built image instead of building one from the workspace.
+    ///
+    /// Skips `docker build` and installs providers by copying the pre-built
+    /// WASM from `target/wasm32-wasip2/release` rather than re-exporting them.
+    /// CI uses this to smoke the published image through the real `omnifs dev`
+    /// launch path (credential provisioning, mount push, fixtures, and all).
+    #[arg(long)]
+    pub image: Option<String>,
 }
 
 impl DevArgs {
@@ -53,19 +61,27 @@ impl DevArgs {
         let db_dir = dev_home.join("db");
         let db_path = db_dir.join("test.db");
 
-        let image = DevImageTag::synthesize(&workspace)?;
+        // Either build the canonical image from the workspace, or run a
+        // pre-built one as-is. The pre-built path is how CI smokes the exact
+        // published image through this same launch sequence.
+        let image = match &self.image {
+            Some(image) => image.clone(),
+            None => DevImageTag::synthesize(&workspace)?.as_str().to_owned(),
+        };
         let container_name =
             env_string(ENV_CONTAINER_NAME).unwrap_or_else(|| CONTAINER_NAME.to_string());
 
         if !self.yes {
-            confirm_session(&dev_home, &db_path, image.as_str(), container_name.as_str())?;
+            confirm_session(&dev_home, &db_path, &image, container_name.as_str())?;
         }
 
         fs::create_dir_all(&dev_home).with_context(|| format!("create {}", dev_home.display()))?;
         set_private_dir(&dev_home)?;
         ensure_db_fixture(&db_dir, &db_path).await?;
 
-        build_image(workspace.path(), image.as_str())?;
+        if self.image.is_none() {
+            build_image(workspace.path(), &image)?;
+        }
 
         let ctx = AppContext::resolve(
             PathOverrides {
@@ -73,12 +89,22 @@ impl DevArgs {
                 ..PathOverrides::default()
             },
             Some(container_name.clone()),
-            Some(image.as_str().to_owned()),
+            Some(image),
         )?;
         let paths = ctx.paths();
         let runtime = ctx.runtime();
 
-        crate::provider_bundle::install_workspace_bundle(workspace.path(), &paths.providers_dir)?;
+        // Providers: export freshly from the workspace, or copy the pre-built
+        // bundle when running a pre-built image (no workspace build).
+        if self.image.is_some() {
+            let wasm_dir = workspace.path().join("target/wasm32-wasip2/release");
+            crate::provider_bundle::install_local_bundle(&wasm_dir, &paths.providers_dir)?;
+        } else {
+            crate::provider_bundle::install_workspace_bundle(
+                workspace.path(),
+                &paths.providers_dir,
+            )?;
+        }
 
         // Provision each dev mount's credential from the host into the dev-home
         // store, then launch only the mounts we could provision (plus the ones
@@ -157,7 +183,17 @@ async fn provision_dev_mounts(
         .resolve()?;
 
         if let (Some(auth), Some(token)) = (outcome.auth, outcome.token) {
-            run_static_token_init(&template.manifest, &auth, token, credentials_file).await?;
+            // Skip validation: the sandbox is best-effort, and a token that a
+            // provider's validation endpoint rejects (e.g. a CI Actions token
+            // against GitHub's `/user`) may still work for data callouts.
+            run_static_token_init(
+                &template.manifest,
+                &auth,
+                token,
+                credentials_file,
+                TokenValidationMode::Skip,
+            )
+            .await?;
             ready.push(config);
         } else {
             anstream::eprintln!(

@@ -23,14 +23,10 @@ pub enum DebugCommand {
     },
     /// Print the provider auth manifest for a mount (formerly `auth schemes`).
     AuthManifest { mount: String },
-    /// Push the compile-time embedded dev mount specs to the running
-    /// daemon. Used by the CI smoke harness, which runs the bare runtime
-    /// image without a host-side `omnifs dev` to seed mounts.
-    PushDevMounts,
 }
 
 impl DebugArgs {
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub fn run(self) -> anyhow::Result<()> {
         match self.command {
             DebugCommand::MountTree {
                 path,
@@ -52,22 +48,6 @@ impl DebugArgs {
                 let mounts = ctx.workspace().mounts()?;
                 crate::commands::auth::run_auth_manifest(ctx.catalog(), &mounts, &mount)
             },
-            DebugCommand::PushDevMounts => push_dev_mounts().await,
         }
     }
-}
-
-async fn push_dev_mounts() -> anyhow::Result<()> {
-    use anyhow::Context as _;
-
-    let client = crate::client::DaemonClient::new();
-    client.require_compatible().await?;
-    for config in crate::dev_mounts::configs()? {
-        client
-            .add_mount(&config.config)
-            .await
-            .with_context(|| format!("load dev mount `{}`", config.name))?;
-        anstream::println!("✓ Loaded `{}`", config.name);
-    }
-    Ok(())
 }
