@@ -131,6 +131,11 @@ jobs:
     name: host test
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [components, host-build]
+    env:
+      # Providers are built by the `components` job and downloaded as the
+      # omnifs-wasm artifact below, so the itest harness must not rebuild them
+      # (this runner has no wasm32-wasip2 toolchain or WASI SDK).
+      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
     steps:
       - uses: actions/checkout@v6
 
