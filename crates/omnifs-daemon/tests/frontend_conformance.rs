@@ -75,6 +75,7 @@ const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test"
 
 /// Bring up `omnifsd --frontend <frontend>` with only the test-provider mounted.
 /// Returns `None` (skip) when the mount can't be established on this host.
+#[allow(clippy::too_many_lines)] // linear end-to-end frontend bring-up
 fn start(frontend: &str) -> Option<Daemon> {
     let wasm_dir = release_wasm_dir();
     let test_wasm = wasm_dir.join("test_provider.wasm");
@@ -91,7 +92,10 @@ fn start(frontend: &str) -> Option<Daemon> {
     std::fs::create_dir_all(&providers).expect("providers dir");
     // Copy every built provider/tool wasm so the registry finds the test
     // provider and the archive extractor it loads at init.
-    for entry in std::fs::read_dir(&wasm_dir).expect("read release wasm dir").flatten() {
+    for entry in std::fs::read_dir(&wasm_dir)
+        .expect("read release wasm dir")
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "wasm") {
             std::fs::copy(&path, providers.join(path.file_name().unwrap())).expect("copy wasm");
@@ -153,10 +157,16 @@ fn start(frontend: &str) -> Option<Daemon> {
 
     // Push the test-provider mount.
     if !curl(&[
-        "-fsS", "-o", "/dev/null", "-X", "POST",
+        "-fsS",
+        "-o",
+        "/dev/null",
+        "-X",
+        "POST",
         &format!("{base}/v1/mounts"),
-        "-H", "content-type: application/json",
-        "-d", TEST_MOUNT_SPEC,
+        "-H",
+        "content-type: application/json",
+        "-d",
+        TEST_MOUNT_SPEC,
     ]) {
         eprintln!("skip {frontend}: mount push failed");
         return None;
@@ -200,7 +210,11 @@ fn file_size(path: &Path) -> u64 {
 /// boundary, not just the host op layer.
 fn run_matrix(root: &Path) {
     let hello = root.join("hello");
-    assert!(root.is_dir(), "mount root {} not a directory", root.display());
+    assert!(
+        root.is_dir(),
+        "mount root {} not a directory",
+        root.display()
+    );
     assert!(hello.is_dir(), "hello/ not a directory");
 
     // cat + exact size of the canonical small file.
