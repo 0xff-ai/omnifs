@@ -21,6 +21,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 
 ### CLI & workflow
 
+- **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
 - **Fix:** The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
 
 ### Caching & performance
