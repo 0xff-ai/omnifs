@@ -7,6 +7,7 @@ members = [
     "providers/docker",
     "providers/github",
     "providers/dns",
+    "providers/kubernetes",
     "providers/linear",
     "providers/oura",
     "providers/test",

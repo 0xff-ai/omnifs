@@ -1,0 +1,23 @@
+name: omnifs-install-cli
+description: Download the prebuilt omnifs CLI for the given arch and put it on PATH
+inputs:
+  arch:
+    description: CLI artifact arch (x64 or arm64)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Download Linux ${{ inputs.arch }} CLI archive
+      uses: actions/download-artifact@v8
+      with:
+        name: omnifs-cli-linux-${{ inputs.arch }}
+        path: dist-cli
+
+    - name: Install the omnifs CLI on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist-cli/bin
+        tar -C dist-cli/bin -xJf "dist-cli/omnifs-cli-linux-${{ inputs.arch }}.tar.xz"
+        test -x dist-cli/bin/omnifs
+        echo "$GITHUB_WORKSPACE/dist-cli/bin" >> "$GITHUB_PATH"

@@ -27,7 +27,7 @@ use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
-use auth_import::AuthImportDecision;
+pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
 use provider_selection::ProviderSelection;
@@ -148,8 +148,14 @@ impl InitArgs {
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
-                run_static_token_init(&template.manifest, auth, token, &paths.credentials_file)
-                    .await?;
+                run_static_token_init(
+                    &template.manifest,
+                    auth,
+                    token,
+                    &paths.credentials_file,
+                    TokenValidationMode::Validate,
+                )
+                .await?;
             } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
                 auth::login_with_paths(
@@ -173,8 +179,14 @@ impl InitArgs {
                     interactive,
                 )?;
                 let token = source.read()?;
-                run_static_token_init(&template.manifest, auth, token, &paths.credentials_file)
-                    .await?;
+                run_static_token_init(
+                    &template.manifest,
+                    auth,
+                    token,
+                    &paths.credentials_file,
+                    TokenValidationMode::Validate,
+                )
+                .await?;
             }
         }
 
@@ -224,24 +236,40 @@ pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {
     }
 }
 
-async fn run_static_token_init(
+/// Whether [`run_static_token_init`] checks the token against the provider's
+/// validation endpoint before storing it.
+#[derive(Clone, Copy)]
+pub(crate) enum TokenValidationMode {
+    /// Hit the validation endpoint and fail if the token is rejected. Used by
+    /// interactive `omnifs init` to catch a bad token before saving.
+    Validate,
+    /// Store the token without validating. Used by best-effort `omnifs dev`
+    /// provisioning, where a picky or unreachable validation endpoint (e.g.
+    /// GitHub's `/user`, which rejects Actions installation tokens) must not
+    /// abort the whole sandbox bring-up.
+    Skip,
+}
+
+pub(crate) async fn run_static_token_init(
     manifest: &ProviderManifest,
     auth: &AuthSelection,
     token: SecretString,
     credentials_file: &Path,
+    validation_mode: TokenValidationMode,
 ) -> anyhow::Result<()> {
     let (static_token_scheme, inject) = auth.static_token_scheme(manifest)?;
 
     let header_name = &inject.header;
     let header_prefix = &inject.prefix;
 
-    let validation = match static_token_scheme.validation.as_ref() {
-        Some(v) => Some(
+    let validation = match (validation_mode, static_token_scheme.validation.as_ref()) {
+        (TokenValidationMode::Validate, Some(v)) => Some(
             StaticTokenValidator::new(v, header_name, header_prefix)
                 .validate(token.expose_secret())
                 .await?,
         ),
-        None => None,
+        // `Validate` with no declared endpoint has nothing to check, same as `Skip`.
+        (TokenValidationMode::Validate, None) | (TokenValidationMode::Skip, _) => None,
     };
     if let Some(outcome) = &validation {
         if let Some(identity) = &outcome.identity {
@@ -685,6 +713,7 @@ mod tests {
             display_name: "Linear".to_string(),
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
+            contract: None,
             capabilities: vec![
                 omnifs_provider::CapabilityEntry::Domain {
                     value: "api.linear.app".to_string(),

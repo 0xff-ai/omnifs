@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const DEFAULT_CLIENT_SIDE_TOKEN_REDIRECT_URI_TEMPLATE: &str = "http://127.0.0.1:{port}/callback";
+pub const PROVIDER_WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -22,12 +23,41 @@ pub struct ProviderManifest {
     /// Filename of the provider WASM component.
     pub provider: String,
     pub default_mount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ContractEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<CapabilityEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<schemars::Schema>,
+}
+
+/// The contract a built provider component was compiled against: the
+/// `omnifs:provider` WIT package version and the SDK version. The `#[provider]`
+/// macro stamps this into the embedded manifest so the host can later detect a
+/// provider built against an incompatible contract.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContractEvidence {
+    pub wit: String,
+    pub sdk: String,
+}
+
+impl ContractEvidence {
+    #[must_use]
+    pub fn current(sdk_version: impl Into<String>) -> Self {
+        Self {
+            wit: PROVIDER_WIT_CONTRACT.to_string(),
+            sdk: sdk_version.into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ProviderMetadataError> {
+        validate_non_empty("contract.wit", &self.wit)?;
+        validate_non_empty("contract.sdk", &self.sdk)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -452,6 +482,9 @@ impl ProviderManifest {
         validate_non_empty("displayName", &self.display_name)?;
         validate_non_empty("provider", &self.provider)?;
         validate_non_empty("defaultMount", &self.default_mount)?;
+        if let Some(contract) = &self.contract {
+            contract.validate()?;
+        }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
         }
@@ -702,8 +735,57 @@ mod tests {
 
         assert_eq!(
             parsed,
-            ["arxiv", "db", "dns", "docker", "github", "linear", "oura"]
+            [
+                "arxiv",
+                "db",
+                "dns",
+                "docker",
+                "github",
+                "kubernetes",
+                "linear",
+                "oura"
+            ]
         );
+    }
+
+    #[test]
+    fn provider_manifest_contract_evidence_round_trips() {
+        let manifest = ProviderManifest::from_bytes(
+            br#"{
+                "id": "demo",
+                "displayName": "Demo",
+                "provider": "demo.wasm",
+                "defaultMount": "demo",
+                "contract": {
+                    "wit": "omnifs:provider@0.4.0",
+                    "sdk": "0.2.1"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest.contract,
+            Some(ContractEvidence {
+                wit: "omnifs:provider@0.4.0".to_string(),
+                sdk: "0.2.1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn provider_wit_contract_constant_matches_wit_package() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../omnifs-wit/wit/provider.wit");
+        let wit = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("read {}: {error}", path.display());
+        });
+        let package = wit
+            .lines()
+            .find(|line| line.starts_with("package "))
+            .expect("provider.wit declares a package");
+
+        assert_eq!(package, format!("package {PROVIDER_WIT_CONTRACT};"));
     }
 
     #[test]

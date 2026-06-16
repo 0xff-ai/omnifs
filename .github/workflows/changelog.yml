@@ -1,0 +1,29 @@
+name: Changelog
+
+# Per-PR changelog entries via the 0xff-ai/bot reusable workflow. It drafts an
+# entry on each PR (sticky comment), commits the chosen entry to the PR branch
+# when the author or a maintainer comments `/changelog ...`, and gates merge until
+# CHANGELOG.md changes (escape hatch: the `no-changelog` label). Config and areas
+# live in .github/bot.yml. Drafting needs the OPENAI_API_KEY secret, passed via
+# `secrets: inherit`.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  changelog:
+    # Granted to the reusable workflow: apply pushes the entry to the PR branch
+    # (contents), the bot posts comments and toggles the no-changelog label
+    # (pull-requests/issues), and the gate reports the `changelog` check (checks).
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    # Track the bot's main branch: omnifs is the only consumer, so it always
+    # runs the latest bot without a version tag to bump.
+    uses: 0xff-ai/bot/.github/workflows/changelog.yml@main
+    secrets: inherit

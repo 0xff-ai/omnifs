@@ -1,18 +1,9 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
+use std::path::PathBuf;
 
 const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];
-
-#[derive(Deserialize)]
-struct ProviderManifestWire {
-    provider: String,
-    #[serde(rename = "defaultMount")]
-    default_mount: String,
-}
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -62,14 +53,17 @@ fn main() {
         )
         .unwrap();
 
+        // A provider is auto-mounted by `omnifs dev` only if it ships a
+        // `dev-mount.json`. Providers that need external setup before they can
+        // mount (e.g. kubernetes needs a live cluster) keep their mount spec
+        // under `testenv/` and are mounted by their own flow instead.
         let dev_mount_path = provider_dir.join("dev-mount.json");
-        let dev_json = if dev_mount_path.is_file() {
-            println!("cargo:rerun-if-changed={}", dev_mount_path.display());
-            fs::read_to_string(&dev_mount_path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", dev_mount_path.display()))
-        } else {
-            default_dev_mount_json(&manifest_path)
-        };
+        if !dev_mount_path.is_file() {
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", dev_mount_path.display());
+        let dev_json = fs::read_to_string(&dev_mount_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dev_mount_path.display()));
 
         let dev_value: serde_json::Value = serde_json::from_str(&dev_json)
             .unwrap_or_else(|error| panic!("parse dev mount for `{provider_name}`: {error}"));
@@ -98,18 +92,6 @@ fn main() {
         .expect("write built-in provider manifest list");
     fs::write(out_dir.join("embedded_dev_mounts.rs"), dev_mount_out)
         .expect("write embedded dev mount list");
-}
-
-fn default_dev_mount_json(manifest_path: &Path) -> String {
-    let manifest_json = fs::read_to_string(manifest_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));
-    let manifest: ProviderManifestWire = serde_json::from_str(&manifest_json)
-        .unwrap_or_else(|error| panic!("parse {}: {error}", manifest_path.display()));
-    serde_json::json!({
-        "provider": manifest.provider,
-        "mount": manifest.default_mount,
-    })
-    .to_string()
 }
 
 fn ensure_trailing_newline(json: &str) -> String {

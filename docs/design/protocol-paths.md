@@ -42,10 +42,10 @@ impl Path {
     pub fn from_validated(s: impl Into<String>) -> Self;
 
     /// Parse a candidate path, checking invariants.
-    pub fn parse(s: &str) -> Result<Self, PathParseError>;
+    pub fn parse(s: &str) -> Result<Self, ParseError>;
 
     /// Join a single child name. `name` must not contain `/`.
-    pub fn join(&self, name: &str) -> Result<Self, PathParseError>;
+    pub fn join(&self, name: &str) -> Result<Self, ParseError>;
 
     /// Parent. `/foo/bar` → `/foo`, `/foo` → `/`, `/` → `None`.
     pub fn parent(&self) -> Option<Path>;
@@ -70,18 +70,24 @@ impl Path {
 ```
 
 ```rust
-#[derive(Debug, thiserror::Error)]
-pub enum PathParseError {
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ParseError {
     #[error("empty path")]
     Empty,
+    #[error("path is not absolute: {0:?}")]
+    MissingLeadingSlash(String),
     #[error("double slash in path: {0:?}")]
     DoubleSlash(String),
     #[error("trailing slash on non-root path: {0:?}")]
     TrailingSlash(String),
+    #[error("empty path segment")]
+    EmptySegment,
     #[error("path contains `.` or `..` segment: {0:?}")]
     RelativeSegment(String),
     #[error("name segment contains `/`: {0:?}")]
     SlashInSegment(String),
+    #[error("path segment is not valid UTF-8")]
+    NonUtf8Segment,
 }
 ```
 
@@ -97,10 +103,11 @@ bare form.
 
 ## WIT boundary
 
-Every `string` typed as `path` in `crates/omnifs-wit/wit/provider.wit` satisfies the
-invariants. The host calls `Path::parse` on every path string crossing
-the WIT boundary in either direction; a `PathParseError` becomes a
-`provider-error` and fails the operation.
+Every path-shaped `string` field in `crates/omnifs-wit/wit/provider.wit`
+(there is no `path` type alias; `parent-path` and `path` args are bare
+`string`) satisfies the invariants. The host calls `Path::parse` on every
+path string crossing the WIT boundary in either direction; a `ParseError`
+becomes a provider error and fails the operation.
 
 The validation cost is one O(len) scan per path. A typical browse
 op carries 1–2 paths, so the cost is negligible. Paths the host already
@@ -116,7 +123,7 @@ behind the same API.
 
 ## Cache key encoding
 
-The view cache (durable `view.redb`) and object cache (`object.redb`) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
+The view cache (non-durable `view.redb`, deleted and recreated on every startup) and object cache (durable `object.redb`) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
 
 ## Provider ergonomics
 

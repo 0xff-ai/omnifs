@@ -1,0 +1,29 @@
+# Config for the 0xff-ai/bot changelog bot (see https://github.com/0xff-ai/bot).
+# Strict: unknown keys fail, so a typo surfaces loudly.
+
+product: omnifs, a projected filesystem that mirrors external services into local paths
+
+maintainers:
+  - raulk
+
+# Changelog areas, in the order their `### <heading>` subsections appear in
+# CHANGELOG.md. The last area is the catch-all for anything unclassifiable.
+areas:
+  - id: providers
+    heading: Providers & projected paths
+    aliases: [provider, providers, projected paths, paths, routing, tree]
+  - id: runtime
+    heading: Runtime & mounts
+    aliases: [runtime, daemon, omnifsd, mount, mounts, fuse, container]
+  - id: cli
+    heading: CLI & workflow
+    aliases: [cli, command, commands, workflow, omnifs dev, shell]
+  - id: caching
+    heading: Caching & performance
+    aliases: [cache, caching, performance, perf, speed, memory]
+  - id: auth
+    heading: Auth & credentials
+    aliases: [auth, authentication, credential, credentials, oauth, token, clone]
+  - id: packaging
+    heading: Packaging & release
+    aliases: [packaging, package, npm, release, docker, image, ghcr, install]

@@ -192,17 +192,6 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-pub(crate) fn write_secret(path: &Path, secret: &str) -> anyhow::Result<()> {
-    fs::write(path, secret).with_context(|| format!("write secret to {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
-    }
-    Ok(())
-}
-
 pub(crate) fn set_private_dir(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {

@@ -4,7 +4,7 @@ import { errorMessage, Repo, printErrorsAndExit } from "./repo";
 
 const ROOT_PACKAGE = "@0xff-ai/omnifs";
 
-export type PlatformSpec = {
+type PlatformSpec = {
   package: string;
   rustTarget: string;
   os: string;
@@ -12,7 +12,7 @@ export type PlatformSpec = {
   runner: string;
 };
 
-export type PlatformCatalog = Record<string, PlatformSpec>;
+type PlatformCatalog = Record<string, PlatformSpec>;
 
 type PackageJson = {
   path: string;

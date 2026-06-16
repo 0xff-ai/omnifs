@@ -1,7 +1,7 @@
 # Mount lifecycle
 
-Status: implementation aligned
-Scope: `crates/omnifs-cli`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/config`, provider metadata, Docker lifecycle wrappers
+Status: core model aligned; CLI surface table partially ahead of the shipped commands
+Scope: `crates/omnifs-cli`, `crates/omnifs-host/src/auth.rs`, `omnifs_mount::mounts` (mount config), `crates/omnifs-home/src/lib.rs` (home layout), provider metadata, Docker lifecycle wrappers
 Related: `docs/design/host-auth.md`, `docs/design/file-attributes.md`, `docs/design/wasm-sandbox-substrate.md`
 
 ## Context
@@ -85,24 +85,23 @@ Before starting the container, the host CLI resolves enabled mounts and verifies
 
 Mount configs presented to the daemon keep host-managed auth as `scheme` plus optional `account`. Explicit `token_file` and `token_env` remain available for user-managed external secrets.
 
-Credential files must not be written under the repo working tree, except for explicit contributor fixtures such as `.secrets/github_token` used by `omnifs dev`.
+Credential files must not be written under the repo working tree. `omnifs dev` provisions contributor credentials into a dedicated dev home (`~/.omnifs/dev`) via the same store path as `omnifs init`, never into the checkout.
 
 ## CLI surface
 
-The implemented surface should only claim commands that exist. The long-term lifecycle shape is:
+The implemented surface should only claim commands that exist. The current shipped lifecycle surface is:
 
 | Command | Phase | Purpose |
 |---|---|---|
-| `omnifs up` | current lifecycle work | Start the container from enabled user mounts by default. |
-| dev or repo up path | current lifecycle work | Start the container with explicit repo or dev mounts. |
-| `omnifs down` | current lifecycle work | Stop the container. |
-| `omnifs status` | existing or phased | Report runtime and config state. Do not claim live validation unless implemented. |
-| `omnifs init` | current lifecycle work | Create an enabled mount from provider metadata and run default auth. |
-| `omnifs list` | phased | List enabled mounts. |
-| `omnifs configure` | phased | Edit an existing enabled mount. |
-| `omnifs rotate` | phased | Replace a stored credential. |
-| `omnifs doctor` | phased | Run live provider validation. |
-| `omnifs remove` | phased | Remove an enabled mount and optional credential. |
+| `omnifs up` | shipped | Start the container from enabled user mounts by default. |
+| `omnifs dev` | shipped | Start the contributor sandbox container with explicit dev mounts. |
+| `omnifs down` | shipped | Stop the container. |
+| `omnifs status` | shipped | Report runtime and config state. |
+| `omnifs setup` | shipped | Guided onboarding walkthrough; runs `init` per chosen provider, then launches the container. |
+| `omnifs init` | shipped | Create an enabled mount from provider metadata and run default auth. |
+| `omnifs mounts rm <name>` | shipped | Remove an enabled mount and (by default) its stored credential. |
+| `omnifs doctor` | shipped | Diagnose environment and auth. |
+| `omnifs reset` | shipped | Remove every mount config and (by default) its stored credential, then stop the container. |
 
 Design prose and help text should not present phased commands as shipped behavior. When a command is not implemented, describe it as planned or leave it out of user-facing claims.
 

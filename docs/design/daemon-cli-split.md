@@ -2,7 +2,7 @@
 
 Status: implemented (all four phases)
 Scope: new `crates/omnifs-daemon`, `crates/omnifs-cli`, `crates/omnifs-host` crate boundary, container entrypoint, control API, mount lifecycle
-Related: `docs/design/cli-redesign.md`, `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/inspector-emission-architecture.md`
+Related: `docs/design/cli-redesign.md`, `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/architecture.md` §9 (inspector emission)
 
 ## Context
 
@@ -22,7 +22,7 @@ Two standing constraints shape everything below:
 | # | Branch | Decision | Why |
 |---|---|---|---|
 | 1 | Daemon model | `omnifsd` is the runtime as its own binary, with a control API. The CLI owns daemon lifecycle; today that means the Docker container lifecycle (`up`/`down` = create/destroy container). | Docker-like UX without a third host-side process. When native mounts land, the CLI grows a second launch backend that spawns `omnifsd` directly; the daemon and protocol are identical in both modes. |
-| 2 | Transport | HTTP + JSON, `/v1/` path prefix. Docker mode: TCP loopback on the published port (7878). Native mode: Unix socket (or loopback TCP). `--listen` accepts both. | Curl-able, versionable, axum is a cheap dependency. Unix sockets cannot cross the Docker Desktop VM boundary (established by the inspector work), so loopback TCP is the container transport; UDS is the natural native transport. |
+| 2 | Transport | HTTP + JSON, `/v1/` path prefix. Docker mode: TCP loopback on the published port (7878). `--listen` takes a `SocketAddr` (TCP loopback only today). Native mode (future) prefers a Unix socket; the flag would grow `unix:path` parsing then. | Curl-able, versionable, axum is a cheap dependency. Unix sockets cannot cross the Docker Desktop VM boundary (established by the inspector work), so loopback TCP is the container transport; UDS is the natural native transport. |
 | 3 | API auth | None; trust the local channel | Single-user dev machine posture, same as the existing inspector port. Made tenable by #4: no secret material ever rides the API. See Security posture. |
 | 4 | Mount delivery | Specs over the API, credentials through `OMNIFS_HOME`. `omnifs up` starts an empty daemon and POSTs each resolved mount spec; the host omnifs home is bind-mounted writable in docker mode and used directly in native mode. Host-managed auth stays as `scheme` plus optional `account`; explicit `token_file` / `token_env` remain external user-managed sources. | One control path for cold start and hot add; secret values stay off the unauthenticated wire; the trusted daemon reads and refreshes the same file-backed `credentials.json` as the host CLI. The mounts-dir bind, daemon-side config scanning, and credential-copy bridge are deleted. |
 | 5 | Hot mounts | In scope: `POST /v1/mounts` and `DELETE /v1/mounts/{name}` take effect on the running daemon | The headline user-visible win: `omnifs init` while running, no restart. |
@@ -34,13 +34,13 @@ Two standing constraints shape everything below:
 
 **`crates/omnifs-daemon`** (new, binary `omnifsd`): the daemon main. Absorbs the body of `commands/daemon.rs` — paths, `GitCloner`, `ProviderRegistry`, FUSE `run_blocking` — plus the HTTP server and the mount manager (hot add/remove). Depends on `omnifs-host`, `omnifs-fuse`, axum. Linux is the only supported target today (FUSE); the crate must keep building without container assumptions so the native NFSv4 mode is a frontend addition, not a port.
 
-Flags: `--mount-point`, `--cache-dir`, `--listen <addr|unix:path>`, `--root-symlinks` (container-image nicety: maintain `/github → /omnifs/github` links as mounts come and go; off by default, passed by the entrypoint, meaningless and absent in native mode).
+Flags: `--mount-point`, `--config-dir`, `--cache-dir`, `--listen <addr>` (a `SocketAddr`, TCP loopback only today), `--root-symlinks` (container-image nicety: maintain `/github → /omnifs/github` links as mounts come and go; off by default, passed by the entrypoint, meaningless and absent in native mode).
 
 **`crates/omnifs-api`** (new, library): serde DTOs shared by CLI and daemon — `DaemonStatus`/`VersionInfo`/`ReadyInfo` and (phase 3) the mount-create request body. No business logic. The CLI's `StatusJson` stays in the CLI: it is the *merged* host+daemon presentation for `omnifs status --json`, not a wire type the daemon ever sees.
 
 **`crates/omnifs-cli`**: drops `omnifs-host` and `omnifs-fuse` (and with them wasmtime and fuser). Keeps bollard. The daemon lifecycle sits behind a small backend seam — launch, terminate, control endpoint, runtime-home path — with Docker as the only implementation now and a native spawn backend later. Keep the seam exactly that small; it is not a plugin system.
 
-**Crate boundary move**: the CLI's only remaining `omnifs-host` imports are `mounts::{Spec, Resolved, Catalog}` + builtins, `config::validate_config`, and `auth::oauth_request_from_config`. The `mounts` module depends only on `omnifs-core` and `omnifs-mount-schema` (verified), so it moves into `omnifs-mount-schema`; the config validator and the oauth-request builder move to the layer of their consumers (mount-schema and `omnifs-auth`). Call sites are fixed in the same change; `omnifs-host` does not re-export the moved items.
+**Crate boundary move**: the CLI's only remaining `omnifs-host` imports are `mounts::{Spec, Resolved, Catalog}` + builtins, the config validator, and the oauth-request builder. The `mounts` module depends only on `omnifs-core` and the provider contract (verified), so it moves into `omnifs-mount`; the config validator (`validate_config`) lands in `omnifs-provider` and the oauth-request builder in `omnifs-auth`, each at the layer of its consumers. Call sites are fixed in the same change; `omnifs-host` does not re-export the moved items.
 
 ## Daemon topology and startup
 
@@ -51,7 +51,7 @@ Flags: `--mount-point`, `--cache-dir`, `--listen <addr|unix:path>`, `--root-syml
 - the host `OMNIFS_HOME` directory as the daemon's writable runtime home, including `credentials.json`, `mounts/`, `providers/`, `cache/`, and `config.toml`;
 - environmental passthroughs that are not omnifs surface: `SSH_AUTH_SOCK`, `/var/run/docker.sock` (optional), user preopened paths, dev-flow extras.
 
-**Native mode** (future, with NFSv4/FSKit): the CLI spawns `omnifsd` directly with the same resolved `OMNIFS_HOME` and `--listen` at a Unix socket. Nothing else changes: same API, same credential contract, same lifecycle verbs. The FUSE frontend is swapped for an NFSv4 server behind the same registry; that frontend is a separate design when it lands.
+**Native mode** (future, with NFSv4/FSKit): the CLI spawns `omnifsd` directly with the same resolved `OMNIFS_HOME` and, once the flag grows `unix:path` parsing, `--listen` at a Unix socket. Nothing else changes: same API, same credential contract, same lifecycle verbs. The FUSE frontend is swapped for an NFSv4 server behind the same registry; that frontend is a separate design when it lands.
 
 A bare `docker run` of the image yields an empty filesystem until a CLI pushes mounts. This is deliberate; `omnifs dev` pushes the built-in dev mount specs through the API, and the entrypoint's `install-dev-mounts` step is deleted.
 
@@ -63,8 +63,7 @@ All endpoints under `/v1`, JSON bodies. The API carries **no secret values in ei
 |---|---|
 | `GET /v1/ready` | Readiness gate for `omnifs up` (replaces exec-probing `/omnifs`). |
 | `GET /v1/version` | Daemon semver + API version; CLI compatibility check. |
-| `GET /v1/status` | Typed status payload (replaces `docker exec omnifs omnifs status` and `runtime_state.json`). |
-| `GET /v1/mounts` | List active mounts. |
+| `GET /v1/status` | Typed status payload (replaces `docker exec omnifs omnifs status` and `runtime_state.json`); active mounts are surfaced here via `DaemonStatus.mounts`. |
 | `POST /v1/mounts` | Create a mount from a resolved spec. Host-managed credential references are `scheme` plus optional `account`, resolved against `credentials.json`. |
 | `DELETE /v1/mounts/{name}` | Remove a mount live. |
 | `GET /v1/events` | Inspector stream: chunked newline-framed JSON records, the existing `omnifs-inspector` wire format. Replaces the raw TCP listener. |
@@ -127,7 +126,7 @@ The image label handshake (`ai.0xff.omnifs.min-launcher-version`) stays as the p
 
 Each phase lands independently and keeps `omnifs dev` plus the smoke harness green. Deletions happen in the phase that obsoletes them, not in a cleanup epilogue.
 
-1. **Binary split.** Create `crates/omnifs-daemon` from `commands/daemon.rs`; move the `mounts` module and friends down to `omnifs-mount-schema`; entrypoint execs `omnifsd`; Dockerfile ships both binaries; CLI drops `omnifs-host`/`omnifs-fuse`; the `omnifs daemon` subcommand is deleted. No behavior change.
+1. **Binary split.** Create `crates/omnifs-daemon` from `commands/daemon.rs`; move the `mounts` module down to `omnifs-mount`, the config validator to `omnifs-provider`, and the oauth-request builder to `omnifs-auth`; entrypoint execs `omnifsd`; Dockerfile ships both binaries; CLI drops `omnifs-host`/`omnifs-fuse`; the `omnifs daemon` subcommand is deleted. No behavior change.
 2. **Control plane.** Axum server in `omnifsd`; `ready`/`version`/`status`/`events`; inspector TCP listener replaced by `GET /v1/events`; CLI switches the `up` readiness gate, `status`, and `inspect` from exec/state-file/raw-TCP to the API; `runtime_state.json` deleted.
 3. **API mount delivery.** `up` pushes specs via `POST /v1/mounts`; the mounts-dir bind and daemon-side config scanning are deleted; the writable `OMNIFS_HOME` bind becomes the only omnifs-owned runtime-state bind; entrypoint dev-mount install replaced by `omnifs dev` pushing specs; `debug install-dev-mounts` deleted.
 4. **Hot mounts.** Registry add/remove dynamics, live `POST`/`DELETE`, `init`/`mounts rm` apply live when running, docker-backend restart-required detection, daemon-managed root symlinks behind `--root-symlinks`.

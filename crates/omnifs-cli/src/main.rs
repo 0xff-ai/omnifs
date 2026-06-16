@@ -18,6 +18,7 @@ mod dev_support;
 mod error;
 mod image_ref;
 mod inspector;
+mod kubernetes_testenv;
 mod launch;
 mod live;
 mod mount_report;

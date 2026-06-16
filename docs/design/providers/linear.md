@@ -14,7 +14,7 @@ The provider declares two host-managed HTTP auth schemes in `auth` inside `provi
 - Token endpoint: `https://api.linear.app/oauth/token`
 - Redirect shape: `http://127.0.0.1:{port}/callback`
 - Default scope: `read`
-- Injected API header: `Authorization: Bearer <access token>`
+- Injected API header: `Authorization: <access token>` (the shared inject block has an empty prefix, so the host does not prepend `Bearer `)
 
 Linear documents PKCE as supported for OAuth applications. Its token endpoint treats `client_secret` as optional for PKCE authorization-code exchange, and refresh for PKCE-generated tokens can use `client_id` without `client_secret`.
 
@@ -29,11 +29,11 @@ The provider bakes product OAuth client id `4dc7b7c05f651306a318de6f9f963b40` in
 }
 ```
 
-Static-token auth remains the default supported container workflow.
+OAuth is the default supported auth scheme; the manifest sets `auth.default` to `oauth`. Static-token auth is the dev compose and offline path, not the default.
 
 ## Validation
 
-The provider has a unit test that decodes the macro-emitted auth manifest bytes and asserts both schemes, including the product client id. The generic host OAuth path is tested with fake OAuth and HTTPS API servers, including the BYO `clientId` override. No live Linear OAuth flow is part of CI.
+A host test reads the checked-in `providers/linear/omnifs.provider.json` through `ProviderManifest::from_bytes`, asserts `auth.default` is `oauth`, and asserts the derived wasm auth manifest exposes a non-empty set of schemes; it does not assert the product client id. The generic host OAuth path is tested separately with fake OAuth and HTTPS API servers, including the BYO `clientId` override, but that test is provider-agnostic and does not reference Linear. No live Linear OAuth flow is part of CI.
 
 References:
 

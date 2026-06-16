@@ -84,6 +84,12 @@ pub(crate) struct Frontend {
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
     ranged_handles: DashMap<u64, RangedFileHandle>,
+    /// Latest upstream size observed by a per-handle follow pump, keyed by
+    /// inode. `getattr` reports `max(entry.size, follow_sizes[ino])` so a
+    /// polling `tail -f` sees a volatile file grow between its own reads.
+    follow_sizes: Arc<DashMap<u64, u64>>,
+    /// Abort handles for follow pumps, keyed by file handle; aborted on release.
+    follow_pumps: DashMap<u64, tokio::task::AbortHandle>,
 }
 
 impl Frontend {
@@ -136,6 +142,8 @@ impl Frontend {
             next_fh: AtomicU64::new(1),
             file_cache: DashMap::new(),
             ranged_handles: DashMap::new(),
+            follow_sizes: Arc::new(DashMap::new()),
+            follow_pumps: DashMap::new(),
         }
     }
 

@@ -4,7 +4,7 @@ ci-preflight-fast: just-check fmt-check
 
 # Run policy-backed CI metadata checks.
 [group('ci')]
-ci-preflight-policy: npm-validate scripts-test
+ci-preflight-policy: npm-validate scripts-test docs-check
 
 # Run the CI WASM lane.
 [group('ci')]

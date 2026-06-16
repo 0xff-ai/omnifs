@@ -37,9 +37,14 @@ test: providers-build ci-host
 scripts-test:
     bun test scripts
 
+# Check that docs do not reference nonexistent docs paths.
+[group('dev')]
+docs-check:
+    bash scripts/ci/check-doc-links.sh
+
 # Run the full local validation path for broad changes.
 [group('dev')]
-check: fmt-check openapi-check host-clippy test providers-check npm-validate scripts-test
+check: fmt-check openapi-check host-clippy test providers-check npm-validate scripts-test docs-check
 
 # Regenerate the provider JSON schema.
 [group('dev')]

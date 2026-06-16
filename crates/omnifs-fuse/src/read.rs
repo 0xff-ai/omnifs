@@ -17,6 +17,8 @@ use omnifs_host::pagination;
 use omnifs_host::{Error, Runtime};
 use omnifs_inspector::{CacheKind, InspectorOutcome, TraceId};
 use omnifs_wit::provider::types::{ByteSource, ReadFileResult};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{debug, warn};
 
@@ -59,16 +61,28 @@ impl Frontend {
                         reply.error(Errno::EIO);
                         return;
                     };
-                    if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
-                        warn!(
-                            path = ranged.path.as_str(),
-                            error, "provider returned ranged EOF that contradicts file attrs"
-                        );
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                    if let Some(attrs) = learned_ranged_eof_attrs(ranged.attrs.clone(), eof_size) {
-                        self.promote_inode_attrs(ino, attrs);
+                    if matches!(ranged.attrs.stability, view_types::Stability::Volatile) {
+                        // A volatile file (tail -f shapes) is meant to change
+                        // while observed, so a freshly observed end never
+                        // contradicts the open-time size. Grow the inode size
+                        // monotonically so getattr reports the new length and a
+                        // polling reader re-stats and reads the appended bytes.
+                        ranged.observed_end.fetch_max(eof_size, Ordering::Relaxed);
+                        self.grow_volatile_size(ino, eof_size);
+                    } else {
+                        if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
+                            warn!(
+                                path = ranged.path.as_str(),
+                                error, "provider returned ranged EOF that contradicts file attrs"
+                            );
+                            reply.error(Errno::EIO);
+                            return;
+                        }
+                        if let Some(attrs) =
+                            learned_ranged_eof_attrs(ranged.attrs.clone(), eof_size)
+                        {
+                            self.promote_inode_attrs(ino, attrs);
+                        }
                     }
                 }
                 reply.data(&chunk.content);
@@ -338,13 +352,17 @@ impl Frontend {
         &self,
         target: &FullReadTarget,
     ) -> Result<Option<FopenFlags>, Errno> {
+        // Synthetic/inline/blob files resolve before here and backing-tree
+        // files are served from disk. A deferred file may be ranged or full,
+        // and a cheap lookup leaves only a `Deferred(Full)` placeholder on the
+        // inode, so probe `open_file`: success means the source is ranged; a
+        // non-ranged source reports `InvalidInput` and falls through to the
+        // full read path below.
         if target.backing_path.is_some()
-            || !target.attrs.as_ref().is_some_and(|attrs| {
-                matches!(
-                    &attrs.bytes,
-                    view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-                )
-            })
+            || !target
+                .attrs
+                .as_ref()
+                .is_some_and(|attrs| matches!(attrs.bytes, view_types::ByteSource::Deferred(_)))
         {
             return Ok(None);
         }
@@ -357,19 +375,45 @@ impl Frontend {
             .block_on(runtime.namespace().open_file(&target.path))
         {
             Ok(opened) => {
-                let opened_attrs =
-                    opened_file_attrs(&target.path, target.attrs.as_ref(), &opened.attrs)?;
+                let opened_attrs = opened_file_attrs(&opened.attrs);
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
+                let is_volatile = matches!(opened_attrs.stability, view_types::Stability::Volatile);
+                let observed_end = Arc::new(AtomicU64::new(0));
                 self.ranged_handles.insert(
                     target.fh,
                     RangedFileHandle {
+                        ino: target.ino,
                         mount_name: target.mount_name.clone(),
                         path: target.path.clone(),
                         provider_handle: opened.handle,
                         attrs: opened_attrs,
+                        observed_end: Arc::clone(&observed_end),
                     },
                 );
+                if is_volatile {
+                    self.spawn_follow_pump(
+                        target.ino,
+                        target.fh,
+                        target.mount_name.clone(),
+                        opened.handle,
+                        observed_end,
+                    );
+                }
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
+            },
+            Err(Error::ProviderError(error))
+                if matches!(
+                    error.kind,
+                    omnifs_wit::provider::types::ErrorKind::InvalidInput
+                        | omnifs_wit::provider::types::ErrorKind::NotFound
+                ) =>
+            {
+                // Not a ranged file route here: a non-ranged source reports
+                // InvalidInput; a path with no file route at all (an object
+                // representation or projected leaf) reports NotFound. Either
+                // way, fall through to the normal read path, which serves
+                // object representations and full files.
+                Ok(None)
             },
             Err(Error::ProviderError(error)) => Err(super::errno::provider_error_errno(&error)),
             Err(error) => {
@@ -534,5 +578,74 @@ impl Frontend {
         };
         entry.size = attrs.st_size();
         entry.attrs = Some(attrs);
+    }
+
+    /// Grow a volatile file's cached size from an observed ranged EOF, never
+    /// shrinking. The file stays volatile, so it keeps direct I/O and a zero
+    /// attr TTL (`ttl_for_attrs` only grants the long TTL to immutable exact
+    /// files), which is what lets a polling `tail -f` see the new size on its
+    /// next `stat` and read forward. Rotation/truncation is handled by the
+    /// reader reopening, not by a size that moves backwards mid-follow.
+    fn grow_volatile_size(&self, ino: u64, observed_end: u64) {
+        let Some(mut entry) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        if observed_end <= entry.size {
+            return;
+        }
+        entry.size = observed_end;
+        if let Some(attrs) = entry.attrs.take() {
+            entry.attrs = Some(attrs.with_exact_size(observed_end));
+        }
+    }
+
+    /// Spawn a background pump for a volatile file: on a cadence it probes the
+    /// provider's `read_chunk` at the current end purely to learn the upstream
+    /// size, recording it in `follow_sizes`. `getattr` reports that size, so a
+    /// polling `tail -f` re-stats (TTL=0), sees growth, and reads the new bytes
+    /// through the normal ranged path. The pump is the only caller that reads
+    /// just to size; reads and probes serialize on the provider's store lock,
+    /// and an offset-addressable reader serves both consistently. Aborted on
+    /// `release`.
+    fn spawn_follow_pump(
+        &self,
+        ino: u64,
+        fh: u64,
+        mount_name: String,
+        provider_handle: u64,
+        observed_end: Arc<AtomicU64>,
+    ) {
+        const PROBE_LEN: u32 = 64 * 1024;
+        const INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        let registry = self.registry.clone();
+        let follow_sizes = self.follow_sizes.clone();
+        let task = self.rt.spawn(async move {
+            loop {
+                tokio::time::sleep(INTERVAL).await;
+                let Some(runtime) = registry.get(&mount_name) else {
+                    break;
+                };
+                let known_end = observed_end.load(Ordering::Relaxed);
+                match runtime
+                    .namespace()
+                    .read_chunk(provider_handle, known_end, PROBE_LEN)
+                    .await
+                {
+                    Ok(chunk) => {
+                        let advanced = u64::try_from(chunk.content.len()).unwrap_or(0);
+                        if advanced > 0 {
+                            let new_end = known_end.saturating_add(advanced);
+                            observed_end.fetch_max(new_end, Ordering::Relaxed);
+                            follow_sizes
+                                .entry(ino)
+                                .and_modify(|current| *current = (*current).max(new_end))
+                                .or_insert(new_end);
+                        }
+                    },
+                    Err(_) => break,
+                }
+            }
+        });
+        self.follow_pumps.insert(fh, task.abort_handle());
     }
 }

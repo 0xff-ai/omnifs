@@ -1,9 +1,11 @@
 /target
+.tmp/
 .cache/
 /dist-wasm
 /dist-cli
 /providers/target
 /dist
+node_modules/
 .worktrees/
 npm/platform/*/bin/omnifs
 npm/platform/*/bin/omnifs.exe

@@ -11,6 +11,8 @@ pub enum ContentType {
     Markdown,
     /// `application/json` (`.json`).
     Json,
+    /// `application/yaml` (`.yaml`).
+    Yaml,
     /// `application/xml` (`.xml`).
     Xml,
     /// `application/octet-stream` (`.raw`) - the identity representation.
@@ -37,6 +39,7 @@ impl ContentType {
         match self {
             Self::Markdown => Some("md"),
             Self::Json => Some("json"),
+            Self::Yaml => Some("yaml"),
             Self::Xml => Some("xml"),
             Self::Octet => Some("raw"),
             Self::Atom => Some("atom"),
@@ -49,6 +52,7 @@ impl ContentType {
         match ext {
             "md" => Some(Self::Markdown),
             "json" => Some(Self::Json),
+            "yaml" | "yml" => Some(Self::Yaml),
             "xml" => Some(Self::Xml),
             "raw" => Some(Self::Octet),
             "atom" => Some(Self::Atom),
@@ -61,6 +65,7 @@ impl ContentType {
         match self {
             Self::Markdown => "text/markdown",
             Self::Json => "application/json",
+            Self::Yaml => "application/yaml",
             Self::Xml => "application/xml",
             Self::Octet => "application/octet-stream",
             Self::Atom => "application/atom+xml",
@@ -78,6 +83,7 @@ impl ContentType {
         match mime {
             "text/markdown" => Some(Self::Markdown),
             "application/json" => Some(Self::Json),
+            "application/yaml" | "application/x-yaml" | "text/yaml" => Some(Self::Yaml),
             "application/xml" => Some(Self::Xml),
             "application/octet-stream" => Some(Self::Octet),
             "application/atom+xml" => Some(Self::Atom),
@@ -120,11 +126,17 @@ mod tests {
             Some(ContentType::Markdown)
         );
         assert_eq!(ContentType::from_extension("atom"), Some(ContentType::Atom));
+        assert_eq!(ContentType::from_extension("yaml"), Some(ContentType::Yaml));
+        assert_eq!(ContentType::from_extension("yml"), Some(ContentType::Yaml));
     }
 
     #[test]
     fn converts_to_mime_crate_type() {
         assert_eq!(ContentType::Json.to_mime().unwrap(), mime::APPLICATION_JSON);
+        assert_eq!(
+            ContentType::Yaml.to_mime().unwrap(),
+            "application/yaml".parse::<mime::Mime>().unwrap()
+        );
         assert_eq!(
             ContentType::Custom("text/x-diff").to_mime().unwrap(),
             "text/x-diff".parse::<mime::Mime>().unwrap()

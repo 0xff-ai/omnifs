@@ -23,7 +23,7 @@ when the inode, directory snapshot, attrs, or file bytes are not already known.
 | `opendir(ino)` | Open a directory handle and build a directory snapshot. | `ls dir`, `find dir`, `grep -r dir`. | On miss, call `list_children(path)`. This is where provider directory projection happens. |
 | `readdir(fh, offset)` | Stream directory entries from the opened snapshot. | `ls`, `find`, shell globbing. | No provider call today. Serves the snapshot built by `opendir`. |
 | `releasedir(fh)` | Close a directory handle. | End of `ls`, `find`, shell globbing. | No provider call. Drops host directory snapshot. |
-| `open(ino)` | Open a file handle. | `cat file`, `head file`, `tail file`, `wc file`, editors. | For `Bytes::Deferred(ReadMode::Ranged)`, call `open_file(path)`. For non-exact `Bytes::Deferred(ReadMode::Full)`, materialize through `read_file(path)` before the first read. |
+| `open(ino)` | Open a file handle. | `cat file`, `head file`, `tail file`, `wc file`, editors. | For `ByteSource::Deferred(ReadMode::Ranged)`, call `open_file(path)`. For non-exact `ByteSource::Deferred(ReadMode::Full)`, materialize through `read_file(path)` before the first read. |
 | `read(fh, offset, size)` | Read bytes from a file. | `cat`, `head`, `tail -c`, `wc -c`, `grep`, `cp`, `tar`. | Full mode miss calls `read_file(path)`. Ranged mode calls `read_chunk(handle, offset, length)`. |
 | `release(fh)` | Close a file handle. | End of `cat`, `head`, `cp`, editor close. | For ranged handles, call `close_file(handle)`. Otherwise drop per-handle host cache. |
 | `readlink(ino)` | Read symlink target. | `readlink`, `ls -l` on symlink. | Backing filesystem only today. There is no provider symlink contract. |

@@ -29,6 +29,16 @@
         }
       ]
     },
+    "contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContractEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "defaultMount": {
       "type": "string"
     },
@@ -282,6 +292,23 @@
             "why"
           ]
         }
+      ]
+    },
+    "ContractEvidence": {
+      "description": "The contract a built provider component was compiled against: the\n`omnifs:provider` WIT package version and the SDK version. The `#[provider]`\nmacro stamps this into the embedded manifest so the host can later detect a\nprovider built against an incompatible contract.",
+      "type": "object",
+      "properties": {
+        "sdk": {
+          "type": "string"
+        },
+        "wit": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "wit",
+        "sdk"
       ]
     },
     "ManifestAuthScheme": {
