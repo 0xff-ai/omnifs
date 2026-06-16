@@ -729,6 +729,7 @@ mod tests {
             auth: Some(ProviderAuthManifest {
                 inject: inject.clone(),
                 default: "oauth".to_string(),
+                guidance: BTreeMap::new(),
                 schemes: {
                     let mut m = BTreeMap::new();
                     m.insert(
