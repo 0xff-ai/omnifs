@@ -234,13 +234,57 @@ pub fn provider_artifact_dir() -> PathBuf {
 }
 
 pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
+    ensure_providers_built();
     let path = provider_artifact_dir().join(provider_name);
     assert!(
         path.exists(),
-        "{provider_name} not found at {path}. Run `just providers-build` first.",
+        "{provider_name} not found at {path} after building providers.",
         path = path.display()
     );
     path
+}
+
+/// Build (or refresh) the provider/tool WASM the harness loads.
+///
+/// The harness loads providers as prebuilt `wasm32-wasip2` components from the
+/// shared target dir. Running tests against a stale build silently exercises
+/// old provider logic (a pagination change that never took effect, say), which
+/// surfaces as a confusing test failure unrelated to the edit in hand. Rather
+/// than require a manual `just providers-build`, refresh the components on
+/// demand.
+///
+/// This runs at test *runtime*, after cargo's build phase has released the
+/// target-dir lock, so the build it triggers can write into the same
+/// `target/wasm32-wasip2/release` that the test binary loads from (cache reused,
+/// no second build tree) without deadlocking against the build that produced
+/// this test binary.
+///
+/// It delegates to `just providers-build` rather than invoking cargo directly:
+/// that recipe is the single source of truth for the build, including the WASI
+/// SDK toolchain env (the db provider compiles `sqlite3.c` for
+/// `wasm32-wasip2` through cc-rs and needs the wasi sysroot), the package
+/// globs, target, and profile. Cargo decides staleness, so an up-to-date tree
+/// makes this a sub-second no-op.
+///
+/// Set `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` to skip it (e.g. CI, which builds
+/// the provider wasm in a separate job and hands it to the test job as an
+/// artifact, with no wasm toolchain on the test runner).
+fn ensure_providers_built() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        if std::env::var_os("OMNIFS_ITEST_SKIP_PROVIDER_BUILD").is_some() {
+            return;
+        }
+        let status = Command::new("just")
+            .arg("providers-build")
+            .current_dir(workspace_root())
+            .status()
+            .expect("spawn `just providers-build`");
+        assert!(
+            status.success(),
+            "`just providers-build` failed; run it directly to see the error",
+        );
+    });
 }
 
 pub fn make_engine() -> wasmtime::Engine {
