@@ -101,7 +101,6 @@ jobs:
     needs: components
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/host-test
       # Providers are built by the `components` job and downloaded as the
       # omnifs-wasm artifact below, so the itest harness must not rebuild them
       # (this runner has no wasm32-wasip2 toolchain or WASI SDK).
@@ -123,6 +122,8 @@ jobs:
           tool: nextest@0.9.132
 
       - name: Lint and archive host tests
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/host-build
         run: just ci-host-build
 
       - name: Prepare WASM sidecar directory
