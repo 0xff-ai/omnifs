@@ -36,6 +36,32 @@ pub(crate) async fn ensure_release_bundle(providers_dir: &Path) -> anyhow::Resul
     Ok(())
 }
 
+/// Install the provider WASM bundle by copying the expected files out of a
+/// local directory (typically `target/wasm32-wasip2/release`) instead of
+/// building them. Used by `omnifs dev --image`, which runs a pre-built image
+/// and must not trigger a workspace build.
+pub(crate) fn install_local_bundle(src_dir: &Path, providers_dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(providers_dir)
+        .with_context(|| format!("create {}", providers_dir.display()))?;
+    anstream::println!(
+        "Installing provider WASM bundle from {} into {}",
+        src_dir.display(),
+        providers_dir.display()
+    );
+    for file in expected_files()? {
+        let src = src_dir.join(&file);
+        let dest = providers_dir.join(&file);
+        std::fs::copy(&src, &dest).with_context(|| {
+            format!(
+                "copy provider WASM {} → {} (is the WASM bundle built?)",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn install_workspace_bundle(
     workspace: &Path,
     providers_dir: &Path,

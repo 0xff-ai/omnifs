@@ -104,7 +104,7 @@ impl Commands {
                 Ok(())
             },
             Self::Version(args) => args.run().await,
-            Self::Debug(args) => args.run().await,
+            Self::Debug(args) => args.run(),
         }
     }
 }

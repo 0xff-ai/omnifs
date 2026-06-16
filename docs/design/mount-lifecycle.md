@@ -85,7 +85,7 @@ Before starting the container, the host CLI resolves enabled mounts and verifies
 
 Mount configs presented to the daemon keep host-managed auth as `scheme` plus optional `account`. Explicit `token_file` and `token_env` remain available for user-managed external secrets.
 
-Credential files must not be written under the repo working tree, except for explicit contributor fixtures such as `.secrets/github_token` used by `omnifs dev`.
+Credential files must not be written under the repo working tree. `omnifs dev` provisions contributor credentials into a dedicated dev home (`~/.omnifs/dev`) via the same store path as `omnifs init`, never into the checkout.
 
 ## CLI surface
 

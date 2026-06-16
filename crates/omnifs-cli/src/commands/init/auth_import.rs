@@ -3,12 +3,12 @@ use crate::auth::AuthSelection;
 use omnifs_provider::AuthManifest;
 use secrecy::SecretString;
 
-pub(super) struct ImportOutcome {
-    pub(super) auth: Option<AuthSelection>,
-    pub(super) token: Option<SecretString>,
+pub(crate) struct ImportOutcome {
+    pub(crate) auth: Option<AuthSelection>,
+    pub(crate) token: Option<SecretString>,
 }
 
-pub(super) struct AuthImportDecision<'a> {
+pub(crate) struct AuthImportDecision<'a> {
     default_auth: Option<AuthSelection>,
     auth_manifest: Option<&'a AuthManifest>,
     provider_id: &'a str,
@@ -17,7 +17,7 @@ pub(super) struct AuthImportDecision<'a> {
 }
 
 impl<'a> AuthImportDecision<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         default_auth: Option<AuthSelection>,
         auth_manifest: Option<&'a AuthManifest>,
         provider_id: &'a str,
@@ -33,7 +33,7 @@ impl<'a> AuthImportDecision<'a> {
         }
     }
 
-    pub(super) fn resolve(self) -> anyhow::Result<ImportOutcome> {
+    pub(crate) fn resolve(self) -> anyhow::Result<ImportOutcome> {
         if self.default_auth.is_none() {
             return Ok(ImportOutcome {
                 auth: None,

@@ -14,7 +14,7 @@ omnifs status       # inspect mounts, providers, auth state
 omnifs down         # stop and remove the container
 ```
 
-`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, captures `gh auth token`, writes `.secrets/github_token`, downloads the Chinook SQLite fixture into `.secrets/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with all built-in providers mounted under `/omnifs/<mount>`.
+`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, resolves a dedicated dev home at `~/.omnifs/dev`, provisions each built-in dev mount's credential from your host (`gh auth token`, or a provider env var such as `LINEAR_API_KEY`) into `~/.omnifs/dev/credentials.json`, downloads the Chinook SQLite fixture into `~/.omnifs/dev/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with the mounts it could provision under `/omnifs/<mount>`. Nothing is written into the checkout; a mount whose credential is missing is skipped with a warning.
 
 Do not add alternate local mount recipes unless explicitly requested.
 

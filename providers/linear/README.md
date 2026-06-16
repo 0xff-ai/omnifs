@@ -25,9 +25,10 @@ so the host can reuse cached content across opens until Linear's
 
 The provider is built into the omnifs container image. Run
 `omnifs init linear` to create a user mount config and complete the
-default OAuth flow. The development Compose path derives its baked mount
-config from `providers/linear/omnifs.provider.json`, which can read
-`LINEAR_TOKEN` when supplied.
+default OAuth flow. The `omnifs dev` contributor sandbox provisions the
+`pat` scheme automatically: when `LINEAR_API_KEY` is set, it imports that
+token into the dev-home credential store (`~/.omnifs/dev/credentials.json`),
+and the embedded `providers/linear/dev-mount.json` references it by scheme.
 
 ### Authentication
 
