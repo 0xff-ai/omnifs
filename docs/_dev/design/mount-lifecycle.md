@@ -2,7 +2,7 @@
 
 Status: core model aligned; CLI surface table partially ahead of the shipped commands
 Scope: `crates/omnifs-cli`, `crates/omnifs-host/src/auth.rs`, `omnifs_mount::mounts` (mount config), `crates/omnifs-home/src/lib.rs` (home layout), provider metadata, Docker lifecycle wrappers
-Related: `docs/design/host-auth.md`, `docs/design/file-attributes.md`, `docs/design/wasm-sandbox-substrate.md`
+Related: `docs/_dev/design/host-auth.md`, `docs/_dev/design/file-attributes.md`, `docs/_dev/design/wasm-sandbox-substrate.md`
 
 ## Context
 
@@ -157,6 +157,6 @@ Do not claim provider installation, live validation, credential revocation, or n
 
 ## References
 
-- `docs/design/host-auth.md`
-- `docs/design/file-attributes.md`
-- `docs/design/wasm-sandbox-substrate.md`
+- `docs/_dev/design/host-auth.md`
+- `docs/_dev/design/file-attributes.md`
+- `docs/_dev/design/wasm-sandbox-substrate.md`

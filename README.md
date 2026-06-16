@@ -1,6 +1,6 @@
 <div align="center">
 <p align="center">
-  <img src="docs/assets/omnifs-hero.png" width="960" alt="omnifs">
+  <img src="docs/_assets/omnifs-hero.png" width="960" alt="omnifs">
 </p>
 
 <h1 align="center"><b>omnifs</b></h1>

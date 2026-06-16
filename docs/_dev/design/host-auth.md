@@ -7,7 +7,7 @@ Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.pro
 
 omnifs providers run sandboxed as `wasm32-wasip2` components. They cannot speak to the network, the host credential file, or a system browser directly. Every external call rides a host-mediated callout (`fetch`, `git-open-repo`, `fetch-blob`, `open-archive`, `read-blob`). The host is the only place credentials live and the only place token acquisition can happen.
 
-Each provider design under `docs/design/providers/` punts on this question, declaring `auth_types: ["oauth2"]` or `["bearer-token"]` and assuming the host will "inject the right header". This document specifies what that means.
+Each provider design under `docs/_dev/design/providers/` punts on this question, declaring `auth_types: ["oauth2"]` or `["bearer-token"]` and assuming the host will "inject the right header". This document specifies what that means.
 
 The patterns the host must support, in order of how much work they imply:
 
@@ -398,7 +398,7 @@ A provider that needs no HTTP credentials omits the auth manifest or embeds an e
 
 A provider can declare multiple schemes. Linear, for example, declares both `staticToken` (for `lin_api_*` personal API keys) and `oauth` (for shared workspaces). The instance config picks which one to use via `auth.type`.
 
-Each provider design under `docs/design/providers/` carries an "Authentication schemes" subsection that pins down its auth manifest entry.
+Each provider design under `docs/_dev/design/providers/` carries an "Authentication schemes" subsection that pins down its auth manifest entry.
 
 ## CLI surface
 

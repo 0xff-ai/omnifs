@@ -3,7 +3,7 @@
 //! Loads the provider registry, serves the control API, and serves the FUSE
 //! mount until unmounted. Runs as the runtime container's entrypoint today,
 //! but must stay free of container assumptions so it can later run
-//! host-native (see `docs/design/daemon-cli-split.md`).
+//! host-native (see `docs/_dev/design/daemon-cli-split.md`).
 
 use clap::Parser;
 use omnifs_daemon::{frontends, server};

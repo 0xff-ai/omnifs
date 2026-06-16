@@ -1,6 +1,6 @@
 # Path dispatch and listing semantics
 
-Status: superseded by docs/design/object-cache-primary.md and docs/design/architecture.md §6 for current dispatch semantics; retained as the rules-of-dispatch reference for provider authors.
+Status: superseded by docs/_dev/design/object-cache-primary.md and docs/_dev/design/architecture.md §6 for current dispatch semantics; retained as the rules-of-dispatch reference for provider authors.
 Scope: `crates/omnifs-sdk` (route registration, lookup/list dispatch), `crates/omnifs-host` (FUSE cache, lookup short-circuit), provider authoring conventions
 
 ## Context

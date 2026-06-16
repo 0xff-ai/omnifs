@@ -1,0 +1,50 @@
+name: Notify web
+
+# When docs or provider metadata change on main, tell the omnifs-web site to
+# rebuild. omnifs is the source of truth for both; the site syncs them at build
+# time (see omnifs-web scripts/sync-docs.ts), so it only needs a nudge plus the
+# exact commit to pull. Cross-repo trigger via repository_dispatch.
+#
+# Requires the WEB_DISPATCH_TOKEN secret: a token with `contents: write` (or the
+# fine-grained "Contents: read and write") on 0xff-ai/omnifs-web, which is what
+# the dispatches endpoint needs. A classic PAT needs the `repo` scope.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "providers/**/omnifs.provider.json"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "omnifs commit SHA the site should sync (defaults to this run's SHA)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notify-web-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: dispatch docs-changed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger omnifs-web rebuild
+        env:
+          GH_TOKEN: ${{ secrets.WEB_DISPATCH_TOKEN }}
+          SHA: ${{ github.event.inputs.sha || github.sha }}
+          SRC_REF: ${{ github.ref_name }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::WEB_DISPATCH_TOKEN is not set; cannot dispatch to omnifs-web." \
+                 "Add a PAT with contents:write on 0xff-ai/omnifs-web as the WEB_DISPATCH_TOKEN secret."
+            exit 1
+          fi
+          jq -n --arg sha "$SHA" --arg ref "$SRC_REF" \
+            '{event_type: "docs-changed", client_payload: {sha: $sha, ref: $ref}}' \
+          | gh api -X POST repos/0xff-ai/omnifs-web/dispatches --input -
+          echo "Dispatched docs-changed to 0xff-ai/omnifs-web for omnifs@$SHA"

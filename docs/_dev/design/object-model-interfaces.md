@@ -1,7 +1,7 @@
 # Object-model interface contract
 
 Status: implemented contract
-Derives from: the object model in `docs/design/architecture.md` §2 (authoritative
+Derives from: the object model in `docs/_dev/design/architecture.md` §2 (authoritative
 spec), the Phase A gate review, and its three deferred-decision proposals
 (WIT / redb / SDK) reconciled here.
 

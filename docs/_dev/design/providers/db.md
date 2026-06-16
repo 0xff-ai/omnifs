@@ -256,7 +256,7 @@ What does not work and why:
 
 ## Mutation hooks (future)
 
-Mutations follow the git-via-mutation model (`docs/future/mutations-via-git.md`). Natural granularity for the db provider:
+Mutations follow the git-via-mutation model (`docs/_dev/future/mutations-via-git.md`). Natural granularity for the db provider:
 
 - Edit a row by writing to `rows/{pk}/{column}` or `rows/{pk}/row.json`. Commit. `git push` translates the diff into `UPDATE table SET column = ? WHERE pk = ?`.
 - Create a new row by creating a new `rows/{new-pk}/` directory and committing. `INSERT INTO table ...`.
@@ -278,9 +278,9 @@ This is documented for design coherence only; the read-only mount and mutation m
 ## References
 
 - `providers/DESIGN.md` — shared provider flavour doctrine and authoring guidance.
-- `docs/design/path-dispatch-and-listing.md` — routing precedence, listing exhaustiveness, lookup-vs-readdir authority split. D4 is the load-bearing rule for the future `rows/` lookup-fallthrough.
-- `docs/design/file-attributes.md` — `Size` / `Bytes` / `Stability` / `VersionToken` contract.
-- `docs/design/wasm-sandbox-substrate.md` — wasm32-wasip2 sandbox model.
+- `docs/_dev/design/path-dispatch-and-listing.md` — routing precedence, listing exhaustiveness, lookup-vs-readdir authority split. D4 is the load-bearing rule for the future `rows/` lookup-fallthrough.
+- `docs/_dev/design/file-attributes.md` — `Size` / `Bytes` / `Stability` / `VersionToken` contract.
+- `docs/_dev/design/wasm-sandbox-substrate.md` — wasm32-wasip2 sandbox model.
 - `providers/db/README.md` — operator-facing setup, configuration, fixture instructions.
 - Chinook database (test fixture): https://github.com/lerocha/chinook-database
 - `rusqlite` crate: https://docs.rs/rusqlite/

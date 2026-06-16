@@ -12,7 +12,7 @@ This crate is re-exported through `omnifs-sdk`. Provider authors should depend o
 - `#[config]` — provider config struct, deserialized from JSON by the host.
 - `#[provider(mounts(...))]` — provider entrypoint; declares mount points and wires the manifest custom section.
 
-See the [SDK design notes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) for the routing precedence and listing semantics behind these macros.
+See the [SDK design notes](https://github.com/0xff-ai/omnifs/blob/main/docs/_dev/design/path-dispatch-and-listing.md) for the routing precedence and listing semantics behind these macros.
 
 ## Install
 
