@@ -31,9 +31,6 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
 - **Fix:** The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
 
-### Internal & maintenance
-- **Chore:** The changelog GitHub Actions workflow now requests `statuses: write` permission to allow nested jobs to report commit statuses. (#131)
-
 ## [0.2.1] - 2026-06-08
 
 ### Fixed
