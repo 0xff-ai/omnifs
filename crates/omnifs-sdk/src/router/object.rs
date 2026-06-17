@@ -61,6 +61,7 @@ pub struct ObjectHandle<O: Object> {
 #[derive(Clone)]
 pub(super) struct ObjectSpec<O: Object> {
     pub when: Option<fn(&O::Key) -> bool>,
+    pub stability: fn(&O::Key) -> Stability,
     pub render_table: RenderTable,
     pub source_stem: &'static str,
     pub source_ext: &'static str,
@@ -144,6 +145,7 @@ impl<O: Object> Clone for ObjectLeaf<O> {
 pub struct DirObjectBlock<O: Object> {
     template: &'static str,
     when: Option<fn(&O::Key) -> bool>,
+    stability: Option<fn(&O::Key) -> Stability>,
     render_table: Option<RenderTable>,
     source_stem: Option<&'static str>,
     leaves: Vec<ObjectLeaf<O>>,
@@ -180,6 +182,7 @@ impl<O: Object> DirObjectBlock<O> {
         Ok(Self {
             template,
             when: None,
+            stability: None,
             render_table: None,
             source_stem: None,
             leaves: Vec::new(),
@@ -195,8 +198,8 @@ impl<O: Object> DirObjectBlock<O> {
     /// `stem.<ext>` per entry in the render set `R` (e.g. `(Markdown,)`
     /// adds `item.md`; `()` adds none). Each leaf is claimed against
     /// [`Router::seal`](super::Router::seal). All representation leaves
-    /// carry the object's [`Object::stability`] (a rendering inherits its
-    /// canonical's); renders are recomputed from cached canonical bytes,
+    /// carry the object's declared [`Self::stability`] (a rendering inherits
+    /// its canonical's); renders are recomputed from cached canonical bytes,
     /// never fetched separately.
     pub fn representations<R: RenderSet<O>>(
         &mut self,
@@ -261,6 +264,36 @@ impl<O: Object> DirObjectBlock<O> {
         Ok(self)
     }
 
+    /// Declare the object's [`Stability`] as a function of its key, shared by
+    /// the canonical and every leaf derived from it (a rendering inherits the
+    /// canonical's). A pinned identity is `Stable`, a "latest" alias is
+    /// `Dynamic`; e.g. `o.stability(|key| if key.numbered() { Stable } else {
+    /// Dynamic })`. For a stability that is the same for every key, prefer the
+    /// [`Self::stable`] / [`Self::dynamic`] / [`Self::live`] shorthands.
+    /// Mandatory, once per block; the block fails to finish otherwise.
+    pub fn stability(&mut self, f: fn(&O::Key) -> Stability) -> &mut Self {
+        self.stability = Some(f);
+        self
+    }
+
+    /// Shorthand for `stability(|_| Stability::Stable)`: the object's bytes
+    /// never change for any key (a content-addressed or versioned identity).
+    pub fn stable(&mut self) -> &mut Self {
+        self.stability(|_| Stability::Stable)
+    }
+
+    /// Shorthand for `stability(|_| Stability::Dynamic)`: each read is a
+    /// consistent snapshot, but later reads may differ.
+    pub fn dynamic(&mut self) -> &mut Self {
+        self.stability(|_| Stability::Dynamic)
+    }
+
+    /// Shorthand for `stability(|_| Stability::Live)`: a moving target that
+    /// may change while being observed.
+    pub fn live(&mut self) -> &mut Self {
+        self.stability(|_| Stability::Live)
+    }
+
     fn finish(self, _shape: ObjectShape) -> Result<ObjectSpec<O>> {
         let render_table = self.render_table.ok_or_else(|| {
             ProviderError::invalid_input("object block requires representations(stem, ..)")
@@ -269,8 +302,14 @@ impl<O: Object> DirObjectBlock<O> {
             ProviderError::invalid_input("object block requires representations(stem, ..)")
         })?;
         let source_ext = O::canonical_content_type().extension().unwrap_or("raw");
+        let stability = self.stability.ok_or_else(|| {
+            ProviderError::invalid_input(
+                "object block requires a stability declaration: stability(|key| ..) or stable()/dynamic()/live()",
+            )
+        })?;
         Ok(ObjectSpec {
             when: self.when,
+            stability,
             render_table,
             source_stem,
             source_ext,
@@ -300,6 +339,30 @@ impl<O: Object> FileObjectBlock<O> {
         Ok(self)
     }
 
+    /// See [`DirObjectBlock::stability`].
+    pub fn stability(&mut self, f: fn(&O::Key) -> Stability) -> &mut Self {
+        self.inner.stability(f);
+        self
+    }
+
+    /// See [`DirObjectBlock::stable`].
+    pub fn stable(&mut self) -> &mut Self {
+        self.inner.stable();
+        self
+    }
+
+    /// See [`DirObjectBlock::dynamic`].
+    pub fn dynamic(&mut self) -> &mut Self {
+        self.inner.dynamic();
+        self
+    }
+
+    /// See [`DirObjectBlock::live`].
+    pub fn live(&mut self) -> &mut Self {
+        self.inner.live();
+        self
+    }
+
     fn finish(self) -> Result<ObjectSpec<O>> {
         self.inner.finish(ObjectShape::File)
     }
@@ -309,9 +372,9 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     /// Register a projected field leaf: `method` maps the loaded object value
     /// to the leaf's bytes (`fn(&O) -> Result<FileContent>`), so reads can be
     /// served from cached canonical bytes with no upstream call. The default
-    /// content type is `text/plain`; its stability is the object's
-    /// [`Object::stability`] for the key (a projected field inherits the
-    /// canonical's); the leaf is eager (preloaded into the view cache when
+    /// content type is `text/plain`; its stability is the object's declared
+    /// stability for the key (a projected field inherits the canonical's);
+    /// the leaf is eager (preloaded into the view cache when
     /// the anchor is listed) unless flagged lazy. Eager
     /// projections must produce inline bytes; listing fails otherwise.
     pub fn project(self, method: ProjectFn<O>) -> Result<&'a mut DirObjectBlock<O>> {
@@ -470,6 +533,7 @@ impl ListingLeaf {
 /// future.
 struct ObjectRoute<O: Object> {
     leaves: Vec<ObjectLeaf<O>>,
+    stability: fn(&O::Key) -> Stability,
     render_table: RenderTable,
     facet_expansion: FacetExpansion,
     when: Option<fn(&O::Key) -> bool>,
@@ -479,6 +543,7 @@ impl<O: Object> Clone for ObjectRoute<O> {
     fn clone(&self) -> Self {
         Self {
             leaves: self.leaves.clone(),
+            stability: self.stability,
             render_table: self.render_table.clone(),
             facet_expansion: self.facet_expansion.clone(),
             when: self.when,
@@ -493,6 +558,7 @@ impl<O: Object> ObjectRoute<O> {
     {
         Ok(Self {
             leaves: spec.leaves.clone(),
+            stability: spec.stability,
             render_table: spec.render_table.clone(),
             facet_expansion: FacetExpansion::for_pattern::<O::Key>(pattern)?,
             when: spec.when,
@@ -545,7 +611,7 @@ impl<O: Object> ObjectRoute<O> {
                 "object not found: {list_path}"
             )));
         }
-        let stability = O::stability(&key);
+        let stability = (self.stability)(&key);
 
         let since = cx.version().cloned();
         let (value, canonical, extra_effects) = match key.load(cx, since).await? {
@@ -605,7 +671,7 @@ impl<O: Object> ObjectRoute<O> {
             return Ok(ReadOutcome::NotFound(None));
         }
 
-        let stability = O::stability(&key);
+        let stability = (self.stability)(&key);
 
         if let Some(ref push) = cached
             && push.matches_anchor(&key.anchor())

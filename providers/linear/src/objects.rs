@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::priority_label;
 
-#[omnifs_sdk::object(kind = "linear.issue", key = crate::IssueKey, stability = Dynamic)]
+#[omnifs_sdk::object(kind = "linear.issue", key = crate::IssueKey)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Issue {

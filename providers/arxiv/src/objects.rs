@@ -11,8 +11,7 @@ use crate::api::{paper_abs_url, paper_pdf_url, paper_source_url, parse_paper_ato
     kind = "arxiv.paper",
     key = PaperVersionKey,
     canonical = Atom,
-    parse = parse_paper_atom,
-    stability_fn = crate::paper_stability
+    parse = parse_paper_atom
 )]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Paper {

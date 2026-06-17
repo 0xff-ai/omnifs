@@ -66,6 +66,7 @@ impl GithubProvider {
         r.dir("/{owner}").handler(OwnerKey::repos)?;
 
         r.object::<Repo>("/{owner}/{repo}", |o| {
+            o.dynamic();
             o.representations("repo", ())?;
             Ok(())
         })?;
@@ -75,6 +76,7 @@ impl GithubProvider {
         r.dir("/{owner}/{repo}/issues/{filter}")
             .handler(IssueListKey::list)?;
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
+            o.dynamic();
             o.representations("item", (Markdown,))?;
             o.file("title").project(Issue::title)?;
             o.file("body").lazy().project(Issue::body)?;
@@ -90,6 +92,7 @@ impl GithubProvider {
         r.dir("/{owner}/{repo}/pulls/{filter}")
             .handler(PullListKey::list)?;
         r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
+            o.dynamic();
             o.representations("item", (Markdown,))?;
             o.file("title").project(PullRequest::title)?;
             o.file("body").lazy().project(PullRequest::body)?;
@@ -106,6 +109,7 @@ impl GithubProvider {
         r.dir("/{owner}/{repo}/actions/runs")
             .handler(RunListKey::list)?;
         r.object::<Run>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
+            o.dynamic();
             o.representations("run", ())?;
             o.file("status").project(Run::status)?;
             o.file("conclusion").project(Run::conclusion)?;

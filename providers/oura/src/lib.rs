@@ -38,6 +38,7 @@ impl OuraProvider {
         r.dir("/").handler(root)?;
         r.dir("/{day}").handler(DayKey::entries)?;
         r.file_object::<DailyCollection>("/{day}/{collection}", |o| {
+            o.dynamic();
             o.representations("collection", ())?;
             Ok(())
         })?;
@@ -231,11 +232,7 @@ impl DailyCollectionKey {
     }
 
     fn project_lazy_entry(self, effects: &mut Effects, validator: Option<Validator>) -> Result<()> {
-        let mut file = FileProj::deferred(
-            Size::Unknown,
-            ReadMode::Full,
-            DailyCollection::stability(&self),
-        );
+        let mut file = FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Dynamic);
         if let Some(validator) = validator {
             file = file.with_version(validator);
         }
@@ -245,7 +242,7 @@ impl DailyCollectionKey {
     }
 }
 
-#[omnifs_sdk::object(kind = "daily_collection", key = DailyCollectionKey, stability = Dynamic)]
+#[omnifs_sdk::object(kind = "daily_collection", key = DailyCollectionKey)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DailyCollection(Value);
 

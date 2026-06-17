@@ -10,8 +10,6 @@ pub(crate) struct ObjectArgs {
     pub key: Path,
     pub canonical: Option<Ident>,
     pub parse: Option<Path>,
-    pub stability: Option<Ident>,
-    pub stability_fn: Option<Path>,
 }
 
 impl Parse for ObjectArgs {
@@ -20,8 +18,6 @@ impl Parse for ObjectArgs {
         let mut object_key: Option<Path> = None;
         let mut canonical: Option<Ident> = None;
         let mut parse: Option<Path> = None;
-        let mut stability: Option<Ident> = None;
-        let mut stability_fn: Option<Path> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -57,30 +53,10 @@ impl Parse for ObjectArgs {
                     let _: Token![=] = input.parse()?;
                     parse = Some(input.parse()?);
                 },
-                "stability" => {
-                    if stability.is_some() {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            "duplicate `stability` argument",
-                        ));
-                    }
-                    let _: Token![=] = input.parse()?;
-                    stability = Some(input.parse()?);
-                },
-                "stability_fn" => {
-                    if stability_fn.is_some() {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            "duplicate `stability_fn` argument",
-                        ));
-                    }
-                    let _: Token![=] = input.parse()?;
-                    stability_fn = Some(input.parse()?);
-                },
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, `parse = path::to::function`, `stability = Variant`, and `stability_fn = path::to::function`",
+                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, and `parse = path::to::function`",
                     ));
                 },
             }
@@ -107,8 +83,6 @@ impl Parse for ObjectArgs {
             key: object_key,
             canonical,
             parse,
-            stability,
-            stability_fn,
         })
     }
 }
@@ -131,35 +105,6 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
         ));
     }
 
-    // Stability is required and has no default: a constant `stability = Variant`
-    // (the same for every key) or a key-conditional `stability_fn = path` that
-    // maps `&Self::Key` to a `Stability` (e.g. a pinned version is `Stable`
-    // while a "latest" alias is `Dynamic`). Exactly one must be given.
-    let stability_method = match (&args.stability, &args.stability_fn) {
-        (Some(_), Some(path)) => {
-            return Err(syn::Error::new_spanned(
-                path,
-                "object takes either `stability = Variant` or `stability_fn = path`, not both",
-            ));
-        },
-        (Some(variant), None) => quote! {
-            fn stability(_key: &Self::Key) -> omnifs_sdk::file_attrs::Stability {
-                omnifs_sdk::file_attrs::Stability::#variant
-            }
-        },
-        (None, Some(path)) => quote! {
-            fn stability(key: &Self::Key) -> omnifs_sdk::file_attrs::Stability {
-                #path(key)
-            }
-        },
-        (None, None) => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "object requires `stability = <Stable|Dynamic|Live>` for a constant stability, or `stability_fn = path` for one that depends on the key",
-            ));
-        },
-    };
-
     let parse_tokens = args.parse.as_ref().map(|parse| {
         quote! {
             fn parse_canonical(bytes: &[u8]) -> omnifs_sdk::error::Result<Self> {
@@ -181,8 +126,6 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
             fn canonical_content_type() -> omnifs_sdk::ContentType {
                 omnifs_sdk::ContentType::#canonical_ident
             }
-
-            #stability_method
 
             #parse_tokens
         }

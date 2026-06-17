@@ -13,7 +13,7 @@ use crate::browse::{Effects, FileContent};
 use crate::captures::FromCaptures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{Stability, VersionToken};
+use crate::file_attrs::VersionToken;
 use crate::identity::{IdentityCaptures, LogicalId};
 use omnifs_core::ContentType;
 
@@ -132,15 +132,6 @@ pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
     fn canonical_content_type() -> ContentType {
         ContentType::Json
     }
-
-    /// The [`Stability`] of this object's canonical bytes and every leaf
-    /// derived from them, evaluated for `key`. A rendering inherits the
-    /// canonical's stability, so an object declares it once here rather than
-    /// per leaf: `Stable` for a pinned identity (a versioned or
-    /// content-addressed key), `Dynamic` for a floating one (a "latest"
-    /// alias), `Live` for a moving target. There is no default; every object
-    /// must state it (via `#[object(stability = ..)]` / `stability_fn = ..`).
-    fn stability(key: &Self::Key) -> Stability;
 
     /// Parse the verbatim canonical bytes back into a value. Failures
     /// surface as invalid-input; never normalize bytes here to make
