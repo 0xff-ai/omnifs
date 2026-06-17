@@ -377,7 +377,7 @@ impl Serialize for ProviderAuthManifest {
                             client_id: o.default_client_id.clone(),
                             scopes: o.default_scopes.clone(),
                             flow,
-                            token_endpoint_auth: o.token_endpoint_auth.clone(),
+                            token_endpoint_auth: o.token_endpoint_auth,
                             summary: guidance.summary,
                             setup: guidance.setup_steps,
                             docs_url: guidance.docs_url,
@@ -1103,7 +1103,7 @@ mod tests {
 
         let method = |manifest: &ProviderManifest| match &manifest.auth.as_ref().unwrap().schemes["oauth"]
         {
-            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth.clone(),
+            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth,
             other => panic!("expected oauth scheme, got {other:?}"),
         };
         assert_eq!(method(&manifest), TokenEndpointAuthMethod::ClientSecretPost);

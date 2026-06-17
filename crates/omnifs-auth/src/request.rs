@@ -119,10 +119,9 @@ impl OAuthRequest {
             .set_token_uri(token_uri)
             .set_revocation_url_option(revocation_url);
 
-        if let Some((secret, auth_type)) = token_endpoint_secret(
-            &self.scheme.token_endpoint_auth,
-            self.client_secret.as_ref(),
-        )? {
+        if let Some((secret, auth_type)) =
+            token_endpoint_secret(self.scheme.token_endpoint_auth, self.client_secret.as_ref())?
+        {
             client = client.set_client_secret(secret);
             client = client.set_auth_type(auth_type);
         }
@@ -149,10 +148,9 @@ impl OAuthRequest {
             .set_device_authorization_url(device_uri)
             .set_revocation_url_option(revocation_url);
 
-        if let Some((secret, auth_type)) = token_endpoint_secret(
-            &self.scheme.token_endpoint_auth,
-            self.client_secret.as_ref(),
-        )? {
+        if let Some((secret, auth_type)) =
+            token_endpoint_secret(self.scheme.token_endpoint_auth, self.client_secret.as_ref())?
+        {
             client = client.set_client_secret(secret);
             client = client.set_auth_type(auth_type);
         }
@@ -287,7 +285,7 @@ pub struct DeviceCodeLoginRequest {
 }
 
 fn token_endpoint_secret(
-    method: &TokenEndpointAuthMethod,
+    method: TokenEndpointAuthMethod,
     secret: Option<&SecretString>,
 ) -> Result<Option<(ClientSecret, AuthType)>, AuthError> {
     let auth_type = match method {

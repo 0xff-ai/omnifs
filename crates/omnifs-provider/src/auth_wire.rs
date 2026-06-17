@@ -115,7 +115,7 @@ pub struct DeviceCodeConfig {
     pub device_authorization_endpoint: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TokenEndpointAuthMethod {
     /// Public client: no secret presented at the token endpoint (PKCE).

@@ -317,27 +317,7 @@ fn read_provider_metadata_file(path: &Path) -> anyhow::Result<Option<ProviderMan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{push_uleb, wasm_with_provider_metadata};
-
-    /// A wasm whose metadata section is present but holds a manifest that fails
-    /// validation: the shape a provider built against a newer (or older) omnifs
-    /// takes. Distinct from a wasm with no metadata section, which is skipped
-    /// silently.
-    fn wasm_with_unparseable_metadata() -> Vec<u8> {
-        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
-        let data = br#"{"id":"x","displayName":"X","unknownField":true}"#;
-        let mut section = Vec::new();
-        push_uleb(
-            omnifs_provider::PROVIDER_METADATA_SECTION_NAME.len(),
-            &mut section,
-        );
-        section.extend_from_slice(omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes());
-        section.extend_from_slice(data);
-        wasm.push(0);
-        push_uleb(section.len(), &mut wasm);
-        wasm.extend(section);
-        wasm
-    }
+    use crate::test_support::{wasm_with_metadata_section, wasm_with_provider_metadata};
 
     /// A single incompatible disk provider must not brick catalog enumeration:
     /// the valid providers alongside it still load.
@@ -351,9 +331,12 @@ mod tests {
             wasm_with_provider_metadata("demo", "omnifs_provider_demo.wasm"),
         )
         .unwrap();
+        // Metadata section present but holding a manifest that fails validation —
+        // the shape a provider built against a newer/older omnifs takes (distinct
+        // from a wasm with no metadata section, which is skipped silently).
         std::fs::write(
             providers_dir.join("omnifs_provider_broken.wasm"),
-            wasm_with_unparseable_metadata(),
+            wasm_with_metadata_section(br#"{"id":"x","displayName":"X","unknownField":true}"#),
         )
         .unwrap();
 
