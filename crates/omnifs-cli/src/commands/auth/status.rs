@@ -5,10 +5,12 @@ use std::fmt::Write as _;
 use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
 
 use super::shared::{format_rfc3339, format_scopes};
+use crate::auth::explain::AuthMode;
 use crate::auth::{MountAuth, credential_notices};
 use crate::catalog::ProviderCatalog;
 use crate::paths::Paths;
 use crate::session::MountConfig;
+use omnifs_provider::ProviderAuthManifest;
 
 pub(super) fn status(
     paths: &Paths,
@@ -27,11 +29,15 @@ pub(super) fn status(
             Some(detail) => anstream::println!("{}: {detail}", row.mount),
             None => {
                 anstream::println!(
-                    "{}: missing credential; run `omnifs auth login {}`",
+                    "{}: missing credential; run `omnifs auth login {}` (`omnifs auth explain {}` for options)",
+                    row.mount,
                     row.mount,
                     row.mount
                 );
             },
+        }
+        if let Some(line) = row.available_line() {
+            anstream::println!("  {line}");
         }
     }
     Ok(())
@@ -50,6 +56,7 @@ struct AuthEntryJson {
     expires_at: Option<String>,
     refreshability: Refreshability,
     notices: Vec<String>,
+    available_schemes: Vec<String>,
 }
 
 pub(super) fn status_json(
@@ -90,21 +97,68 @@ impl<'a> AuthStatus<'a> {
 
     fn row_for(&self, mount: &MountAuth) -> anyhow::Result<AuthStatusRow> {
         let entry = mount.status_entry(self.store)?;
+        let available = self
+            .catalog
+            .provider_auth_manifest_for(mount.config())
+            .ok()
+            .flatten()
+            .map(|auth| scheme_options(&auth))
+            .unwrap_or_default();
         Ok(AuthStatusRow {
             mount: mount.config().spec.mount.clone(),
             entry,
+            available,
         })
     }
+}
+
+struct SchemeOption {
+    key: String,
+    label: String,
+    is_default: bool,
+}
+
+fn scheme_options(auth: &ProviderAuthManifest) -> Vec<SchemeOption> {
+    auth.schemes
+        .iter()
+        .map(|(key, scheme)| SchemeOption {
+            key: key.clone(),
+            label: AuthMode::from_scheme(scheme)
+                .map_or("unknown", AuthMode::label)
+                .to_owned(),
+            is_default: *key == auth.default,
+        })
+        .collect()
 }
 
 pub(super) struct AuthStatusRow {
     mount: String,
     entry: Option<CredentialEntry>,
+    available: Vec<SchemeOption>,
 }
 
 impl AuthStatusRow {
     fn reauth_command(&self) -> String {
         format!("omnifs auth login {}", self.mount)
+    }
+
+    fn available_line(&self) -> Option<String> {
+        if self.available.is_empty() {
+            return None;
+        }
+        let list = self
+            .available
+            .iter()
+            .map(|opt| {
+                if opt.is_default {
+                    format!("{} ({}, default)", opt.key, opt.label)
+                } else {
+                    format!("{} ({})", opt.key, opt.label)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("schemes: {list}"))
     }
 
     fn text_detail(&self) -> Option<String> {
@@ -128,6 +182,7 @@ impl AuthStatusRow {
 
     fn into_json(self) -> Option<AuthEntryJson> {
         let command = self.reauth_command();
+        let available_schemes = self.available.iter().map(|opt| opt.key.clone()).collect();
         let entry = self.entry?;
         let expires_at = entry.expires_at().map(format_rfc3339);
         let refreshability = entry.refreshability();
@@ -139,6 +194,7 @@ impl AuthStatusRow {
             expires_at,
             refreshability,
             notices,
+            available_schemes,
         })
     }
 }
