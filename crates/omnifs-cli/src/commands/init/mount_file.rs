@@ -6,9 +6,7 @@ use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
 use omnifs_provider::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
-#[cfg(test)]
 use std::fs;
-#[cfg(test)]
 use std::path::Path;
 
 pub(super) struct MountFile<'a> {
@@ -36,8 +34,7 @@ impl<'a> MountFile<'a> {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn write_to(self, path: &Path) -> anyhow::Result<()> {
+    pub(super) fn write_to(&self, path: &Path) -> anyhow::Result<()> {
         let config = self.serializable();
         let pretty = serde_json::to_string_pretty(&config).context("serialize mount config")?;
         fs::write(path, format!("{pretty}\n"))

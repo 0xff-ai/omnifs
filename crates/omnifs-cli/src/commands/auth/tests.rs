@@ -12,7 +12,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 
 fn mounts_for(paths: &Paths) -> Vec<MountConfig> {
-    Workspace::new(paths.clone(), Vec::new()).mounts().unwrap()
+    Workspace::new(paths.clone()).mounts().unwrap()
 }
 
 #[test]

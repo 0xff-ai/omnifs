@@ -135,16 +135,19 @@ impl InitArgs {
         .resolve()?;
         let effective_auth = import_outcome.auth.clone();
 
-        let spec = MountFile::new(
+        let mount_file = MountFile::new(
             &mount_name,
             &template.manifest,
             effective_auth.as_ref(),
             &self.scopes,
             generated,
-        )
-        .into_spec()?;
-        workspace.upsert_mount(&spec)?;
-        anstream::println!("✓ Updated {}", Paths::display(&paths.config_file));
+        );
+        std::fs::create_dir_all(&paths.mounts_dir)
+            .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
+        let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
+        mount_file.write_to(&mount_path)?;
+        let spec = mount_file.into_spec()?;
+        anstream::println!("✓ Wrote {}", Paths::display(&mount_path));
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
@@ -209,7 +212,7 @@ impl InitArgs {
         anstream::println!();
         anstream::println!("Mount `{mount_name}` is ready.");
 
-        let config = crate::session::MountConfig::from_parsed(spec, paths.config_file.clone())?;
+        let config = crate::session::MountConfig::from_parsed(spec, mount_path.clone())?;
         let store = FileStore::new(&paths.credentials_file);
         let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
         match crate::live::add_mount(catalog, &store, config, host_native).await {

@@ -5,7 +5,6 @@
 //! once and threaded into commands that need it.
 
 use anyhow::{Context, Result};
-use omnifs_mount::mounts::Spec;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +16,6 @@ pub struct Config {
     pub container_name: Option<String>,
     /// Legacy top-level setting, still accepted for existing config files.
     pub image: Option<String>,
-    pub mounts: Vec<Spec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -108,41 +106,6 @@ impl ConfigFile {
         Ok(Self { path, doc })
     }
 
-    pub fn upsert_mount(&mut self, spec: &Spec) -> Result<()> {
-        let root = self
-            .doc
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", self.path.display()))?;
-        let mounts = root
-            .entry("mounts".to_string())
-            .or_insert_with(|| toml::Value::Array(Vec::new()));
-        let mounts = mounts.as_array_mut().ok_or_else(|| {
-            anyhow::anyhow!("{} has a non-array [[mounts]] value", self.path.display())
-        })?;
-        let value = toml::Value::try_from(spec).context("serialize mount as TOML")?;
-        if let Some(existing) = mounts
-            .iter_mut()
-            .find(|mount| mount.get("mount").and_then(toml::Value::as_str) == Some(&spec.mount))
-        {
-            *existing = value;
-        } else {
-            mounts.push(value);
-        }
-        Ok(())
-    }
-
-    pub fn remove_mount(&mut self, name: &str) -> Result<bool> {
-        let Some(root) = self.doc.as_table_mut() else {
-            anyhow::bail!("{} is not a TOML table", self.path.display());
-        };
-        let Some(mounts) = root.get_mut("mounts").and_then(toml::Value::as_array_mut) else {
-            return Ok(false);
-        };
-        let before = mounts.len();
-        mounts.retain(|mount| mount.get("mount").and_then(toml::Value::as_str) != Some(name));
-        Ok(mounts.len() != before)
-    }
-
     /// Set `[system].runtime`, preserving the rest of the config. `omnifs setup`
     /// records the launch backend here so `omnifs up` reads it.
     pub fn set_system_runtime(&mut self, runtime: Runtime) -> Result<()> {
@@ -176,28 +139,6 @@ impl ConfigFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_inline_mounts() {
-        let config: Config = toml::from_str(
-            r#"
-                [[mounts]]
-                provider = "omnifs_provider_dns.wasm"
-                mount = "dns"
-
-                [mounts.config]
-                resolver = "1.1.1.1"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.mounts.len(), 1);
-        assert_eq!(config.mounts[0].mount, "dns");
-        assert_eq!(
-            config.mounts[0].config_raw.as_ref().unwrap().as_value()["resolver"],
-            "1.1.1.1"
-        );
-    }
 
     #[test]
     fn system_section_feeds_legacy_runtime_fields() {

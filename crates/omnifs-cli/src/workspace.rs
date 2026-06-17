@@ -1,87 +1,39 @@
-//! CLI workspace: config.toml read view and the single mount-enumeration funnel.
+//! CLI mount enumeration: the single funnel every command uses to list
+//! configured mounts.
 //!
-//! `Workspace` owns the host user's `config.toml` (immutable read view and
-//! doc-preserving surgical mutators) and provides the one path every command
-//! uses to enumerate configured mounts. `Spec`-to-`Resolved` conversion stays
-//! in `omnifs_mount::mounts::Catalog`; runtime payload preparation stays in
-//! `MountConfig`.
-//!
-//! The mount funnel merges two sources in order:
-//! 1. `[[mounts]]` entries inline in `config.toml`, in declaration order.
-//! 2. Per-file specs in the `mounts/` directory, sorted by file stem.
+//! Mounts live as one JSON `Spec` file per mount under the `mounts/`
+//! directory. `Workspace::mounts()` is the one path that enumerates them.
+//! `Spec`-to-`Resolved` conversion stays in `omnifs_mount::mounts::Catalog`;
+//! runtime payload preparation stays in `MountConfig`.
 
 use anyhow::Context as _;
 use omnifs_home::Paths;
-use omnifs_mount::mounts::Spec;
 use std::path::PathBuf;
 
-use crate::config::ConfigFile;
 use crate::session::MountConfig;
 
-/// The CLI workspace: config.toml ownership and the mount-enumeration funnel.
+/// The CLI workspace: the mount-enumeration funnel over the `mounts/` dir.
 #[derive(Debug, Clone)]
 pub(crate) struct Workspace {
     paths: Paths,
-    /// Inline `[[mounts]]` from `config.toml`, in declaration order.
-    inline_mounts: Vec<Spec>,
 }
 
 impl Workspace {
-    pub(crate) fn new(paths: Paths, inline_mounts: Vec<Spec>) -> Self {
-        Self {
-            paths,
-            inline_mounts,
-        }
+    pub(crate) fn new(paths: Paths) -> Self {
+        Self { paths }
     }
 
     /// The single mount-enumeration funnel used by every command.
     ///
-    /// Merges inline `config.toml` `[[mounts]]` with per-file specs from the
-    /// `mounts/` directory and returns the combined list sorted by mount name.
+    /// Reads one `Spec` per JSON file in the `mounts/` directory and returns
+    /// the list sorted by mount name.
     pub(crate) fn mounts(&self) -> anyhow::Result<Vec<MountConfig>> {
-        let mut configs = Vec::new();
-
-        for spec in &self.inline_mounts {
-            configs.push(MountConfig::from_parsed(
-                spec.clone(),
-                self.paths.config_file.clone(),
-            )?);
-        }
-
-        let per_file_paths = per_file_mount_paths(&self.paths.mounts_dir)?;
-        for path in per_file_paths {
-            configs.push(MountConfig::from_path(&path)?);
-        }
-
+        let mut configs = per_file_mount_paths(&self.paths.mounts_dir)?
+            .into_iter()
+            .map(|path| MountConfig::from_path(&path))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         configs.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(configs)
-    }
-
-    /// Write `spec` into `config.toml`, inserting or replacing by mount name.
-    ///
-    /// Preserves all existing sections and comments.
-    pub(crate) fn upsert_mount(&self, spec: &Spec) -> anyhow::Result<()> {
-        let mut file = ConfigFile::load(&self.paths.config_file)?;
-        file.upsert_mount(spec)?;
-        file.save()
-    }
-
-    /// Remove the named mount from the inline `[[mounts]]` array in
-    /// `config.toml`. Returns `true` if an entry was removed.
-    ///
-    /// Preserves all existing sections and comments.
-    /// Returns the inline `[[mounts]]` specs from `config.toml`.
-    pub(crate) fn inline_mounts(&self) -> &[Spec] {
-        &self.inline_mounts
-    }
-
-    pub(crate) fn remove_inline_mount(&self, name: &str) -> anyhow::Result<bool> {
-        let mut file = ConfigFile::load(&self.paths.config_file)?;
-        let removed = file.remove_mount(name)?;
-        if removed {
-            file.save()?;
-        }
-        Ok(removed)
     }
 }
 
