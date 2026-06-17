@@ -21,6 +21,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.
 - **Feature:** The runtime now runs as a standalone `omnifsd` daemon that owns the FUSE mount and exposes an HTTP control API; the `omnifs` CLI drives it over that API and no longer links the WASM runtime or FUSE.
 - **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
+- **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.

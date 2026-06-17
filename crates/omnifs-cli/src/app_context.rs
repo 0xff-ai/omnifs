@@ -25,7 +25,7 @@ impl AppContext {
     ) -> anyhow::Result<Self> {
         let (paths, config) = crate::paths::resolve_with_config(path_overrides)?;
         let runtime = RuntimeTarget::resolve(container_name, image, &config)?;
-        let workspace = Workspace::new(paths.clone(), config.mounts.clone());
+        let workspace = Workspace::new(paths.clone());
         let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
         Ok(Self {
             paths,

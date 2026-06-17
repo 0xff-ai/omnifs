@@ -46,11 +46,8 @@ impl ResetArgs {
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
         let config = ctx.config();
-        let workspace = ctx.workspace();
         let container_name = RuntimeTarget::resolve_container_name(container_name, config)?;
-        let targets = ctx
-            .catalog()
-            .reset_removal_targets(workspace.inline_mounts(), &paths.config_file)?;
+        let targets = ctx.catalog().reset_removal_targets()?;
 
         if targets.is_empty() {
             anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
@@ -76,12 +73,8 @@ impl ResetArgs {
         let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
             delete_credentials(&store, &target.credential, keep_credentials, &target.name)?;
-            if target.path == paths.config_file {
-                workspace.remove_inline_mount(&target.name)?;
-            } else {
-                fs::remove_file(&target.path)
-                    .with_context(|| format!("remove {}", target.path.display()))?;
-            }
+            fs::remove_file(&target.path)
+                .with_context(|| format!("remove {}", target.path.display()))?;
             anstream::println!("Removed mount `{}`", target.name);
         }
         if !targets.is_empty() {
