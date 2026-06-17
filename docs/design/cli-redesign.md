@@ -58,6 +58,10 @@ A global `config.toml` under `config_dir` supplies defaults for the runtime imag
 
 Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. The `mount-tree` diagnostic lives under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
 
+### Runtime start verbs
+
+Three verbs start a runtime and their help cross-references the others so the relationship is legible from `--help`: `setup` is the first-run wizard (pick providers, authenticate, launch), `up` runs the already-configured mounts, and `dev` is the contributor sandbox built from a source checkout. They stay distinct flat verbs rather than one verb with modes, per the muscle-memory decision.
+
 ### Tracing
 
 Default is silent. `-v` sets INFO; `-vv` sets DEBUG and enables span open/close events. All tracing, warnings, and errors go to stderr. Command success output stays on stdout so pipes work. `RUST_LOG` overrides the level whenever set.

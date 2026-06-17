@@ -29,14 +29,17 @@ pub enum Commands {
     /// Manage provider credentials.
     Auth(commands::auth::AuthArgs),
 
-    /// Bring up the omnifs container: materialize credentials from the
-    /// host credential store, write them to a per-session directory,
-    /// bind-mount the rewritten configs into the container, then start it.
+    /// Start omnifs with your configured mounts: materialize host credentials
+    /// into a session dir, bind-mount them into the container, then run it.
+    ///
+    /// For first-run setup use `omnifs setup`; `omnifs dev` is the contributor
+    /// sandbox built from a source checkout.
     Up(commands::up::UpArgs),
-    /// Bring up the canonical local dev sandbox: build the image, wire host
+    /// Contributor sandbox: build the image from the source checkout, wire host
     /// credentials, expose the Docker socket + DB fixture, and start the
-    /// container with all built-in providers' dev mounts. Source checkout
-    /// required.
+    /// container with all built-in providers' dev mounts.
+    ///
+    /// For normal use run `omnifs setup` (first run) or `omnifs up`.
     Dev(commands::dev::DevArgs),
     /// Stop and remove the omnifs container and clean up the session dir.
     Down(commands::down::DownArgs),
