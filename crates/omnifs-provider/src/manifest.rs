@@ -219,6 +219,11 @@ struct RawOauthScheme {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<String>,
     flow: RawOAuthFlow,
+    /// How the host authenticates at the token endpoint. `none` (the default)
+    /// suits public PKCE clients; confidential clients that must present a
+    /// secret use `clientSecretPost` or `clientSecretBasic`.
+    #[serde(default, skip_serializing_if = "TokenEndpointAuthMethod::is_none")]
+    token_endpoint_auth: TokenEndpointAuthMethod,
     /// One-line summary shown in scheme pickers and `omnifs auth explain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
@@ -372,6 +377,7 @@ impl Serialize for ProviderAuthManifest {
                             client_id: o.default_client_id.clone(),
                             scopes: o.default_scopes.clone(),
                             flow,
+                            token_endpoint_auth: o.token_endpoint_auth.clone(),
                             summary: guidance.summary,
                             setup: guidance.setup_steps,
                             docs_url: guidance.docs_url,
@@ -496,7 +502,7 @@ fn expand_raw_scheme(
                 default_client_id: o.client_id,
                 default_scopes: o.scopes,
                 flow,
-                token_endpoint_auth: TokenEndpointAuthMethod::None,
+                token_endpoint_auth: o.token_endpoint_auth,
                 refresh_token_rotates,
                 extra_authorize_params: Vec::new(),
                 extra_token_params: Vec::new(),
@@ -1063,6 +1069,49 @@ mod tests {
         // Round-trip back to the compact on-disk form and re-parse.
         let reparsed = encode_provider_manifest(&manifest).unwrap();
         assert_eq!(reparsed.auth.unwrap().guidance, auth.guidance);
+    }
+
+    #[test]
+    fn oauth_token_endpoint_auth_round_trips() {
+        let manifest = ProviderManifest::from_bytes(
+            br#"{
+                "id": "conf",
+                "displayName": "Confidential",
+                "provider": "conf.wasm",
+                "defaultMount": "conf",
+                "auth": {
+                    "inject": { "domains": ["api.conf.test"], "header": "Authorization", "prefix": "Bearer " },
+                    "default": "oauth",
+                    "schemes": {
+                        "oauth": {
+                            "type": "oauth",
+                            "displayName": "Conf OAuth",
+                            "clientId": "abc",
+                            "tokenEndpointAuth": "clientSecretPost",
+                            "flow": {
+                                "kind": "pkceLoopback",
+                                "authorizationEndpoint": "https://conf.test/oauth/authorize",
+                                "tokenEndpoint": "https://conf.test/oauth/token",
+                                "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let method = |manifest: &ProviderManifest| match &manifest.auth.as_ref().unwrap().schemes["oauth"]
+        {
+            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth.clone(),
+            other => panic!("expected oauth scheme, got {other:?}"),
+        };
+        assert_eq!(method(&manifest), TokenEndpointAuthMethod::ClientSecretPost);
+
+        // The confidential-client method survives the compact on-disk round-trip;
+        // a default (`none`) scheme would omit the field entirely.
+        let reparsed = encode_provider_manifest(&manifest).unwrap();
+        assert_eq!(method(&reparsed), TokenEndpointAuthMethod::ClientSecretPost);
     }
 
     #[test]

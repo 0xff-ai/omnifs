@@ -115,12 +115,24 @@ pub struct DeviceCodeConfig {
     pub device_authorization_endpoint: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TokenEndpointAuthMethod {
+    /// Public client: no secret presented at the token endpoint (PKCE).
+    #[default]
     None,
+    /// Confidential client: secret sent in the token request body.
     ClientSecretPost,
+    /// Confidential client: secret sent via HTTP Basic auth.
     ClientSecretBasic,
+}
+
+impl TokenEndpointAuthMethod {
+    /// Whether this is the public-client default (no secret presented).
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
