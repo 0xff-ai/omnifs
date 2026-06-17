@@ -45,6 +45,7 @@ jobs:
 
   components:
     name: components
+    needs: preflight
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -94,12 +95,17 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  host-build:
-    name: host build
+  host-test:
+    name: host test
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    needs: components
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/host-build
+      # Providers are built by the `components` job and downloaded as the
+      # omnifs-wasm artifact below, so the itest harness must not rebuild them
+      # (this runner has no wasm32-wasip2 toolchain or WASI SDK).
+      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -119,40 +125,6 @@ jobs:
       - name: Lint and archive host tests
         run: just ci-host-build
 
-      - name: Upload host test archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: host-tests
-          path: dist/host-tests/*
-          retention-days: 1
-          if-no-files-found: error
-
-  host-test:
-    name: host test
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    needs: [components, host-build]
-    env:
-      # Providers are built by the `components` job and downloaded as the
-      # omnifs-wasm artifact below, so the itest harness must not rebuild them
-      # (this runner has no wasm32-wasip2 toolchain or WASI SDK).
-      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/omnifs-just
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: nextest@0.9.132
-
-      - name: Download host test archive
-        uses: actions/download-artifact@v8
-        with:
-          name: host-tests
-          path: dist/host-tests
-
       - name: Prepare WASM sidecar directory
         run: rm -rf target/wasm32-wasip2/release
 
@@ -161,6 +133,23 @@ jobs:
         with:
           name: omnifs-wasm
           path: target/wasm32-wasip2/release
+
+      - name: Isolate host test archive inputs
+        run: |
+          set -euo pipefail
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          rm -rf "$keep"
+          mkdir -p "$keep/dist/host-tests" "$keep/wasm" "$keep/target-preserve"
+          cp dist/host-tests/host-tests.tar.zst "$keep/dist/host-tests/"
+          cp target/wasm32-wasip2/release/*.wasm "$keep/wasm/"
+          if [[ -d target/host-build ]]; then
+            mv target/host-build "$keep/target-preserve/host-build"
+          fi
+          find target -mindepth 1 -maxdepth 1 ! -name wasm32-wasip2 -exec rm -rf {} +
+          rm -rf dist/host-tests target/wasm32-wasip2/release
+          mkdir -p dist/host-tests target/wasm32-wasip2/release
+          cp "$keep/dist/host-tests/host-tests.tar.zst" dist/host-tests/
+          cp "$keep/wasm/"*.wasm target/wasm32-wasip2/release/
 
       - name: Cache wasmtime component compilations
         # Wasmtime's on-disk cache is internally content-addressed (WASM hash +
@@ -177,10 +166,24 @@ jobs:
             wasmtime-cache-${{ runner.os }}-
 
       - name: Run host tests
-        run: just ci-host-test
+        run: |
+          unset CARGO_TARGET_DIR
+          just ci-host-test
+
+      - name: Restore host build cache inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          if [[ -d "$keep/target-preserve/host-build" ]]; then
+            rm -rf target/host-build
+            mkdir -p target
+            mv "$keep/target-preserve/host-build" target/host-build
+          fi
 
   cli-linux-x64:
     name: cli linux x64
+    needs: preflight
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -215,6 +218,8 @@ jobs:
 
       - name: Build Linux x64 CLI
         id: build
+        env:
+          OMNIFS_BUILD_DAEMON: "1"
         run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
 
       - name: Package Linux x64 CLI
@@ -234,19 +239,15 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Build Linux x64 omnifsd
-        id: build_daemon
-        env:
-          OMNIFS_PACKAGE: omnifs-daemon
-          OMNIFS_BIN: omnifsd
-        run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
+      - name: Verify Linux x64 omnifsd
+        run: test -x "${{ steps.build.outputs.daemon_artifact }}"
 
       - name: Package Linux x64 omnifsd
         run: |
           set -euo pipefail
           mkdir -p dist/daemon/linux-x64
           staging="$(mktemp -d)"
-          cp "${{ steps.build_daemon.outputs.artifact }}" "$staging/omnifsd"
+          cp "${{ steps.build.outputs.daemon_artifact }}" "$staging/omnifsd"
           chmod 0755 "$staging/omnifsd"
           tar -C "$staging" -cJf dist/daemon/linux-x64/omnifsd-linux-x64.tar.xz omnifsd
 
@@ -260,6 +261,7 @@ jobs:
 
   cli-linux-arm64:
     name: cli linux arm64
+    needs: preflight
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -291,6 +293,8 @@ jobs:
 
       - name: Build Linux arm64 CLI
         id: build
+        env:
+          OMNIFS_BUILD_DAEMON: "1"
         run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
@@ -310,19 +314,15 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Build Linux arm64 omnifsd
-        id: build_daemon
-        env:
-          OMNIFS_PACKAGE: omnifs-daemon
-          OMNIFS_BIN: omnifsd
-        run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
+      - name: Verify Linux arm64 omnifsd
+        run: test -x "${{ steps.build.outputs.daemon_artifact }}"
 
       - name: Package Linux arm64 omnifsd
         run: |
           set -euo pipefail
           mkdir -p dist/daemon/linux-arm64
           staging="$(mktemp -d)"
-          cp "${{ steps.build_daemon.outputs.artifact }}" "$staging/omnifsd"
+          cp "${{ steps.build.outputs.daemon_artifact }}" "$staging/omnifsd"
           chmod 0755 "$staging/omnifsd"
           tar -C "$staging" -cJf dist/daemon/linux-arm64/omnifsd-linux-arm64.tar.xz omnifsd
 
@@ -336,6 +336,7 @@ jobs:
 
   cli-darwin:
     name: cli darwin
+    needs: preflight
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -670,7 +671,6 @@ jobs:
     needs:
       - preflight
       - components
-      - host-build
       - host-test
       - cli-linux-x64
       - cli-linux-arm64
