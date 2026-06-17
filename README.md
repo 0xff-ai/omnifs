@@ -12,7 +12,7 @@ omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The filesystem is exposed through FUSE, and omnifs runs in a Docker container in supported environments for compatibility, rootless execution, and simpler setup across Linux, macOS, and Windows. NFSv4 and FSKit support are planned, and we will remove the Docker requirement when native mounts are ready.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The projected tree is served through two frontends: FUSE, run in a Docker container today for compatibility, rootless execution, and simpler setup across Linux, macOS, and Windows; and a read-only NFSv4 loopback frontend that mounts host-native with no container. The packaged setup still defaults to the Docker and FUSE path while the host-native flow is finished; FSKit on macOS is planned. We will remove the Docker requirement as native mounts land.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">

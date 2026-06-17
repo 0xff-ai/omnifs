@@ -108,9 +108,9 @@ These were tried, designed against, or explicitly ruled out, and still bound the
 - No fake resumable cursors and no `exhaustive` claim over a truncated set (section 6).
 - No provider-owned content caches or TTLs; the host owns all caching, evicting only by capacity or explicit invalidation.
 - No writable projected read-model files as an implicit mutation mechanism. Writes, when they land, are explicit, atomic, and auditable (see the future roadmap).
-- No macFUSE / `diskutil` / macOS-specific mount behaviour. The runtime FUSE mount is Linux-only; macOS and Windows run it inside a Linux container today, with native NFSv4/FSKit frontends gated to later.
+- No macFUSE / `diskutil` / macOS-specific mount behaviour. The FUSE frontend is Linux-only; a read-only NFSv4 loopback frontend (`crates/omnifs-nfs`) now serves stock macOS and Linux host-native, with FSKit a later horizon.
 - No `canonical = serde(Self)`; the canonical is the verbatim upstream body.
-- WIT changes are flag-day breaking for every built provider until a negotiation story exists; batch them and call them out.
+- WIT changes break every built provider until a negotiation story exists; rebuild all providers and update affected docs in the same change. Breakage is expected in alpha; the rule is keeping providers and docs in step, not preserving the contract.
 
 xattrs (`Object::xattrs` / `upstream_url`) were deliberately dropped in v1 rather than orphaned, with a forward-compatible restore path designed (a single opaque `xattrs` field on `canonical-store` the host would echo on `getxattr` without parsing keys). This records the deliberate scope cut and the re-entry design.
 
