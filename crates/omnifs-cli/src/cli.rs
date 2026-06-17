@@ -54,10 +54,10 @@ pub enum Commands {
     /// from the picker.
     Setup(commands::setup::SetupArgs),
 
-    /// Interactive setup for a new mount.
+    /// Interactive setup for a new mount (alias for `omnifs mounts add`).
     Init(commands::init::InitArgs),
 
-    /// Manage configured mounts.
+    /// Manage configured mounts: add, ls, rm.
     Mounts(commands::mounts::MountsArgs),
 
     /// Nuke every mount config and (by default) its stored credential,

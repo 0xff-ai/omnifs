@@ -29,12 +29,12 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 | 11 | Config file | Global `config.toml`, precedence flag > env > file > default | Cuts repeated flags off every `up` invocation; ships dotfile-friendly. |
 | 12 | `doctor` | Environment + auth, ~10 probes, no auto-fix | Diagnoses the failure modes our support replies already cover. |
 | 13 | `ps` vs `status` | Single `status`, `--verbose` reveals provider runtime detail | One source of truth; `ps` would duplicate. |
-| 14 | Auxiliary verbs | Only `mounts rm <name>` | Status lists, init picks; only removal needs its own verb. |
+| 14 | Mount lifecycle | `mounts add` / `mounts ls` / `mounts rm`, with `init` kept as an alias for `mounts add` | One verb group that rhymes (add/ls/rm) so the lifecycle is self-evident; `init` stays for muscle memory. Supersedes the original "only `mounts rm`" decision. |
 | 15 | Error codes | Free-form `anyhow` plus a `Try:` recovery block | A numbered taxonomy locks in too early. |
 | 16 | Completions | bash, zsh, fish via `clap_complete` | Covers the long tail of solo-dev terminals. |
 | 17 | Context detection | Env vars (`GITHUB_TOKEN` etc.); GitHub-specific `gh auth status` probe with scope warning, default No | Cheap delight; safety rails on the gh path. |
 | 18 | Device flow | `arboard` auto-copy + countdown spinner + auto-open `verification_uri_complete` | Highest-attention moment; polish pays for itself. |
-| 19 | Debug verbs | Hide `mount-tree`, `auth-manifest` under `omnifs debug`; no "not yet implemented" surfaces | Debug is useful but not for `--help`. |
+| 19 | Debug verbs | Hide `mount-tree` under `omnifs debug`; no "not yet implemented" surfaces | Debug is useful but not for `--help`. (`auth-manifest` graduated to `omnifs auth explain`.) |
 | 20 | `version` | One line by default; rich on `--detail` | Matches `gh`, `docker`. |
 | 21 | Telemetry | None | Solo-dev persona skews privacy-conscious; reversible. |
 
@@ -56,7 +56,7 @@ A global `config.toml` under `config_dir` supplies defaults for the runtime imag
 
 ### Surface
 
-Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. Diagnostic surfaces (`mount-tree`, `auth-manifest`) live under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
+Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. The `mount-tree` diagnostic lives under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
 
 ### Tracing
 
@@ -76,9 +76,11 @@ On the host, `runtime` reports `unknown` and users are pointed at `omnifs doctor
 
 Ten probes in dependency order. `image_cached` depends on `docker_reachable`. `auth_ready` depends on `mount_configs_valid` and reuses the same loaders as `status`. `network` is best-effort and never red. Exit code: 0 if all green/skipped, 1 if any red, 2 if no red but any yellow.
 
-### `mounts rm`
+### `mounts`
 
-Validates the mount name through `MountName::new` (from `omnifs_core`) before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
+`mounts add` is the same flow as top-level `init` (the alias dispatches to the same `InitArgs::run`); `mounts ls` lists each configured mount with its provider and resolved auth state, reusing the same `AuthReadiness` loader as `status`.
+
+`mounts rm` validates the mount name through `MountName::new` (from `omnifs_core`) before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
 
 ### Token input
 
@@ -97,7 +99,7 @@ The following are explicitly not part of this design and should not be folded in
 - Multi-account support and the `--account` flag.
 - Telemetry, crash reporting, usage analytics.
 - Numbered stable error codes.
-- A `mounts ls` / `mounts show` listing verb (status covers it).
+- A `mounts show <name>` detail verb (`status` and `mounts ls` cover listing).
 - A `providers ls` / `providers info` verb (init picker covers it).
 - Renaming `up`/`down`/`shell` to product-specific verbs.
 - Per-directory `omnifs.toml` lookup walking from cwd.

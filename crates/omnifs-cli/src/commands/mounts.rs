@@ -23,6 +23,10 @@ pub struct MountsArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MountsCommand {
+    /// Add a mount interactively (same as `omnifs init`).
+    Add(crate::commands::init::InitArgs),
+    /// List configured mounts with their provider and auth state.
+    Ls,
     /// Remove a mount config (and its stored credential, by default).
     Rm {
         name: String,
@@ -37,17 +41,19 @@ pub enum MountsCommand {
 
 impl MountsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve_default()?;
-        let paths = ctx.paths();
-        let catalog = ctx.catalog();
-        let workspace = ctx.workspace();
-        let mounts = workspace.mounts()?;
         match self.command {
+            MountsCommand::Add(args) => args.run().await,
+            MountsCommand::Ls => ls(),
             MountsCommand::Rm {
                 name,
                 force,
                 keep_credentials,
             } => {
+                let ctx = AppContext::resolve_default()?;
+                let paths = ctx.paths();
+                let catalog = ctx.catalog();
+                let workspace = ctx.workspace();
+                let mounts = workspace.mounts()?;
                 rm(
                     paths,
                     catalog,
@@ -61,6 +67,37 @@ impl MountsArgs {
             },
         }
     }
+}
+
+fn ls() -> anyhow::Result<()> {
+    let ctx = AppContext::resolve_default()?;
+    let paths = ctx.paths();
+    let mounts = ctx.workspace().mounts()?;
+    if mounts.is_empty() {
+        anstream::println!(
+            "No mounts configured. Add one with `omnifs mounts add` (or `omnifs init`)."
+        );
+        return Ok(());
+    }
+    let store = FileStore::new(&paths.credentials_file);
+    for mount in &mounts {
+        let name = crate::style::bold(mount.name.as_str());
+        match ctx.catalog().resolve_mount_spec(mount.config.clone(), false) {
+            Ok(resolved) => {
+                let provider = resolved
+                    .spec
+                    .provider_id()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| short_provider_name(&resolved.spec.provider));
+                let auth = crate::auth::AuthReadiness::from_config(&resolved, &store)
+                    .terminal_row()
+                    .summary;
+                anstream::println!("{name}  {}  {auth}", crate::style::dim(provider));
+            },
+            Err(error) => anstream::println!("{name}  {}", crate::style::error(error)),
+        }
+    }
+    Ok(())
 }
 
 pub async fn rm(
@@ -120,6 +157,18 @@ pub async fn rm(
         },
     }
     Ok(())
+}
+
+/// Best-effort short provider name from a wasm filename when no provider id is
+/// resolved: `omnifs_provider_arxiv.wasm` -> `arxiv`.
+fn short_provider_name(provider: &str) -> String {
+    Path::new(provider)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(
+            || provider.to_owned(),
+            |stem| stem.strip_prefix("omnifs_provider_").unwrap_or(stem).to_owned(),
+        )
 }
 
 fn confirm(
