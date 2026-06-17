@@ -5,6 +5,7 @@
   "description": "omnifs CLI binary for macOS x64",
   "files": [
     "bin/omnifs",
+    "bin/omnifsd",
     "README.md"
   ],
   "homepage": "https://github.com/0xff-ai/omnifs",
