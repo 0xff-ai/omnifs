@@ -113,11 +113,25 @@ fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut 
 /// clean unmount. Output is swallowed: `diskutil` prints a scary "Unmount
 /// failed" even for stale mounts it ultimately clears, so the authoritative
 /// signal is whether the mount survives (see `mount_settled`), not its exit text.
+#[cfg(target_os = "macos")]
 fn unmount(mount_point: &Path, force: bool) {
     let mut command = Command::new("diskutil");
     command.arg("unmount");
     if force {
         command.arg("force");
+    }
+    let _ = command
+        .arg(mount_point)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unmount(mount_point: &Path, force: bool) {
+    let mut command = Command::new("umount");
+    if force {
+        command.arg("-f");
     }
     let _ = command
         .arg(mount_point)
@@ -149,11 +163,11 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
-/// needs a beat to unmount after SIGTERM). Returns true once it is gone.
+/// needs a beat to unmount after SIGTERM). Uses the cross-platform live
+/// mount-table check from omnifs-nfs (`/proc/mounts` on Linux, `mount` on macOS).
 fn mount_settled(mount_point: &Path) -> bool {
-    let needle = mount_table_needle(mount_point);
     for attempt in 0..12 {
-        if !mount_present(&needle) {
+        if !omnifs_nfs::mount_is_active(mount_point) {
             return true;
         }
         if attempt + 1 < 12 {
@@ -161,26 +175,6 @@ fn mount_settled(mount_point: &Path) -> bool {
         }
     }
     false
-}
-
-/// The `mount(8)` "<src> on <path> (" fragment for `mount_point`, matched
-/// against the canonical path so a sibling mount sharing a path prefix cannot be
-/// mistaken for this one. Computed once per teardown, reused across poll ticks.
-fn mount_table_needle(mount_point: &Path) -> String {
-    let canonical = std::fs::canonicalize(mount_point).map_or_else(
-        |_| mount_point.to_string_lossy().into_owned(),
-        |path| path.to_string_lossy().into_owned(),
-    );
-    format!(" on {canonical} (")
-}
-
-fn mount_present(needle: &str) -> bool {
-    let Ok(output) = Command::new("/sbin/mount").output() else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.contains(needle))
 }
 
 fn remove_state_file(state_file: &Path) {

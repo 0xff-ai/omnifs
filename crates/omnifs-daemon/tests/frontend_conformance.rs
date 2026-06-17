@@ -1,7 +1,7 @@
 //! Frontend conformance: the projected tree must behave like real files for the
 //! standard toolbox, through *each* frontend (FUSE and NFS), not just one.
 //!
-//! This launches the real `omnifsd` binary against a hermetic `OMNIFS_HOME` with
+//! This launches the real daemon (`omnifs daemon`) against a hermetic `OMNIFS_HOME` with
 //! only the canned `test-provider` mounted, then runs one frontend-agnostic
 //! matrix (`run_matrix`) over the mount using the actual shell toolbox. The
 //! frontend is the only parameter; the assertions are shared. Migrated from the
@@ -29,6 +29,24 @@ fn release_wasm_dir() -> PathBuf {
         .nth(2)
         .expect("workspace root")
         .join("target/wasm32-wasip2/release")
+}
+
+/// Resolve the `omnifs` binary; the daemon runs as `omnifs daemon`. There is no
+/// separate `omnifsd` artifact, and `CARGO_BIN_EXE_*` is not set for another
+/// crate's binary, so resolve it from the integration-test target directory
+/// (tests run from `target/<profile>/deps/`) or an explicit `OMNIFS_BIN`.
+fn omnifs_bin() -> PathBuf {
+    if let Some(explicit) = std::env::var_os("OMNIFS_BIN") {
+        return PathBuf::from(explicit);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .and_then(Path::parent)
+                .map(|dir| dir.join("omnifs"))
+        })
+        .expect("resolve omnifs binary from target dir")
 }
 
 fn free_port() -> u16 {
@@ -107,8 +125,9 @@ fn start(frontend: &str) -> Option<Daemon> {
     let port = free_port();
     let base = format!("http://127.0.0.1:{port}");
 
-    let child = Command::new(env!("CARGO_BIN_EXE_omnifsd"))
+    let child = Command::new(omnifs_bin())
         .args([
+            "daemon",
             "--frontend",
             frontend,
             "--mount-point",

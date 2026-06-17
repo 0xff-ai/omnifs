@@ -98,12 +98,7 @@ impl Frontends {
                     source: mount.source,
                     fs_type: mount.fs_type,
                 }),
-            Frontend::Nfs(frontend) => proc_mounts::find_mount(&frontend.mount_point)
-                .filter(|mount| mount.fs_type.starts_with("nfs"))
-                .map(|mount| FrontendInfo {
-                    source: mount.source,
-                    fs_type: mount.fs_type,
-                }),
+            Frontend::Nfs(frontend) => nfs_serving(&frontend.mount_point),
         }
     }
 
@@ -117,4 +112,26 @@ impl Frontends {
             },
         }
     }
+}
+
+/// NFS readiness on Linux: read the kernel mount table at `/proc/mounts`.
+#[cfg(target_os = "linux")]
+fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
+    proc_mounts::find_mount(mount_point)
+        .filter(|mount| mount.fs_type.starts_with("nfs"))
+        .map(|mount| FrontendInfo {
+            source: mount.source,
+            fs_type: mount.fs_type,
+        })
+}
+
+/// NFS readiness off Linux (macOS): there is no `/proc/mounts`, so read the
+/// live OS mount table through omnifs-nfs. Without this, host-native `up` on
+/// macOS never reports ready and `up` times out.
+#[cfg(not(target_os = "linux"))]
+fn nfs_serving(mount_point: &Path) -> Option<FrontendInfo> {
+    omnifs_nfs::mount_is_active(mount_point).then(|| FrontendInfo {
+        source: "omnifs".to_string(),
+        fs_type: "nfs".to_string(),
+    })
 }

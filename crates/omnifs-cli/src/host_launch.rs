@@ -57,6 +57,13 @@ impl HostDaemon {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
 
+        // Default the daemon to info-level logging when the user has not set
+        // RUST_LOG. The CLI's own tracing defaults to warn, which would hide
+        // the daemon's startup diagnostics in daemon.log.
+        if std::env::var_os("RUST_LOG").is_none() {
+            command.env("RUST_LOG", "info");
+        }
+
         // Own process group so the daemon is not signalled when the CLI or its
         // shell exits. tokio's Child does not kill on drop, so `detach` simply
         // forgets it; setsid is unnecessary because the CLI never signals its

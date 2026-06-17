@@ -58,13 +58,16 @@ fn teardown_native(state_dir: &std::path::Path) -> anyhow::Result<()> {
             summary.swept_orphans
         );
     }
-    for path in &summary.failed {
-        anstream::eprintln!(
-            "warning: {} is still mounted; re-run `omnifs down`",
-            path.display()
+    if !summary.failed.is_empty() {
+        for path in &summary.failed {
+            anstream::eprintln!("warning: {} is still mounted", path.display());
+        }
+        anyhow::bail!(
+            "{} host-native mount(s) could not be unmounted; re-run `omnifs down`",
+            summary.failed.len()
         );
     }
-    if summary.unmounted == 0 && summary.swept_orphans == 0 && summary.failed.is_empty() {
+    if summary.unmounted == 0 && summary.swept_orphans == 0 {
         if summary.skipped > 0 {
             anstream::println!(
                 "No teardown performed; {} mount-state file(s) were unreadable (see warnings above).",
