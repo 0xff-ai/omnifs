@@ -133,11 +133,14 @@ pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
         ContentType::Json
     }
 
-    /// Default [`Stability`] for leaves projected from this object.
-    /// `Dynamic` is the safe default for anything live-edited upstream.
-    fn default_stability() -> Stability {
-        Stability::Dynamic
-    }
+    /// The [`Stability`] of this object's canonical bytes and every leaf
+    /// derived from them, evaluated for `key`. A rendering inherits the
+    /// canonical's stability, so an object declares it once here rather than
+    /// per leaf: `Stable` for a pinned identity (a versioned or
+    /// content-addressed key), `Dynamic` for a floating one (a "latest"
+    /// alias), `Live` for a moving target. There is no default; every object
+    /// must state it (via `#[object(stability = ..)]` / `stability_fn = ..`).
+    fn stability(key: &Self::Key) -> Stability;
 
     /// Parse the verbatim canonical bytes back into a value. Failures
     /// surface as invalid-input; never normalize bytes here to make

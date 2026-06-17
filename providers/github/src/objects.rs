@@ -106,7 +106,7 @@ impl ItemData {
     }
 }
 
-#[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey)]
+#[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey, stability = Dynamic)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct Issue(pub(crate) ItemData);
@@ -135,7 +135,7 @@ impl Representable<Markdown> for Issue {
     }
 }
 
-#[omnifs_sdk::object(kind = "github.pull", key = crate::item::PullKey)]
+#[omnifs_sdk::object(kind = "github.pull", key = crate::item::PullKey, stability = Dynamic)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PullRequest(pub(crate) ItemData);
@@ -164,14 +164,14 @@ impl Representable<Markdown> for PullRequest {
     }
 }
 
-#[omnifs_sdk::object(kind = "github.repo", key = crate::item::RepoKey)]
+#[omnifs_sdk::object(kind = "github.repo", key = crate::item::RepoKey, stability = Dynamic)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Repo {
     #[serde(default)]
     pub(crate) full_name: Option<String>,
 }
 
-#[omnifs_sdk::object(kind = "github.run", key = crate::item::RunKey)]
+#[omnifs_sdk::object(kind = "github.run", key = crate::item::RunKey, stability = Dynamic)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Run {
     pub(crate) id: u64,

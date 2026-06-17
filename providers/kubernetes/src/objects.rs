@@ -43,7 +43,7 @@ impl KubeManifest {
     }
 }
 
-#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey)]
+#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey, stability = Dynamic)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct NamespacedResource(KubeManifest);
@@ -68,7 +68,7 @@ impl Representable<Yaml> for NamespacedResource {
     }
 }
 
-#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey)]
+#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey, stability = Dynamic)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ClusterResource(KubeManifest);

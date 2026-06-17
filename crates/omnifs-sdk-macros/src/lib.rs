@@ -76,8 +76,13 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   content type. Non-JSON canonicals require `parse`.
 /// - `parse = path::to::fn`: custom `fn(&[u8]) -> Result<Self>` replacing
 ///   the default serde-JSON `parse_canonical`.
-/// - `stability = Dynamic | Stable | Live` (default `Dynamic`): the
-///   default stability for the object's projected leaves.
+/// - `stability = Stable | Dynamic | Live` (required unless `stability_fn`
+///   is given): the stability of this object's canonical and every leaf
+///   derived from it, the same for every key.
+/// - `stability_fn = path::to::fn`: a `fn(&Self::Key) -> Stability` for an
+///   object whose stability depends on the key (a pinned version is
+///   `Stable`, a "latest" alias is `Dynamic`). Mutually exclusive with
+///   `stability`; exactly one is required.
 #[proc_macro_attribute]
 pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as object_macro::ObjectArgs);

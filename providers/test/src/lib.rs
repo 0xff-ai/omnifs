@@ -75,7 +75,7 @@ impl PathSegment for StateFilter {
     }
 }
 
-#[omnifs_sdk::object(kind = "test.item", key = ItemKey)]
+#[omnifs_sdk::object(kind = "test.item", key = ItemKey, stability = Stable)]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Item {
     number: u64,

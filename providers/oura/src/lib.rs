@@ -234,7 +234,7 @@ impl DailyCollectionKey {
         let mut file = FileProj::deferred(
             Size::Unknown,
             ReadMode::Full,
-            DailyCollection::default_stability(),
+            DailyCollection::stability(&self),
         );
         if let Some(validator) = validator {
             file = file.with_version(validator);
@@ -245,7 +245,7 @@ impl DailyCollectionKey {
     }
 }
 
-#[omnifs_sdk::object(kind = "daily_collection", key = DailyCollectionKey)]
+#[omnifs_sdk::object(kind = "daily_collection", key = DailyCollectionKey, stability = Dynamic)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DailyCollection(Value);
 

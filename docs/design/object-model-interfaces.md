@@ -188,7 +188,7 @@ pub trait Object: Serialize + DeserializeOwned + Sized {
     type Key: Key<Object = Self>;
     fn kind() -> ObjectKind;                          // macro
     fn canonical_content_type() -> ContentType;       // macro, default Json
-    fn default_stability() -> Stability { Stability::Dynamic }   // macro from #[object(stability=)]
+    fn stability(key: &Self::Key) -> Stability;   // required; macro from #[object(stability = ..)] or stability_fn = ..
     fn parse_canonical(bytes: &[u8]) -> Result<Self> {           // default serde-JSON; override for Atom/XML
         serde_json::from_slice(bytes).map_err(|e| ProviderError::invalid_input(format!("canonical parse: {e}")))
     }
@@ -291,9 +291,10 @@ it. Overlap ⇒ `start()`-time error surfaced through `initialize()`. The same
   `IdentityCaptures::identity_captures()` (declaration order, Facet-excluded, flatten
   prepends parent), plus the generated round-trip `#[test]`. Does **not** emit
   `anchor()` (defaulted on `Key`).
-- `#[object(kind = "...", key = KeyType, canonical = ..., parse = ..., stability = ...)]`:
-  emits `Object::Key`, `kind`, `canonical_content_type`, `default_stability`
-  (default `Dynamic`), and optional custom `parse_canonical`. The old
+- `#[object(kind = "...", key = KeyType, canonical = ..., parse = ..., stability = .. | stability_fn = ..)]`:
+  emits `Object::Key`, `kind`, `canonical_content_type`, `stability` (required:
+  a constant `stability = Variant` or key-conditional `stability_fn = path`),
+  and optional custom `parse_canonical`. The old
   `#[omnifs(field(...))]` / `represents` / `repr_stem` / `routes_type` attributes are
   **removed**; fields are hand-written `&self` methods referenced by `.project`, and
   renders are hand-written `Representable<F>` impls.

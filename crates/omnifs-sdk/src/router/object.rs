@@ -77,11 +77,7 @@ pub(super) struct ObjectSpec<O: Object> {
 pub(super) enum ObjectLeaf<O: Object> {
     /// A `stem.ext` leaf: the canonical bytes themselves or a registered
     /// render of them.
-    Representation {
-        leaf_name: String,
-        ct: ContentType,
-        stability: Stability,
-    },
+    Representation { leaf_name: String, ct: ContentType },
     /// A field leaf computed from the parsed object value. `lazy` excludes it
     /// from listing-time eager preloads; reads still serve it.
     Projected {
@@ -89,7 +85,6 @@ pub(super) enum ObjectLeaf<O: Object> {
         project: ProjectFn<O>,
         content_type: ContentType,
         lazy: bool,
-        stability: Stability,
     },
     HandlerFile {
         suffix: String,
@@ -106,27 +101,20 @@ pub(super) enum ObjectLeaf<O: Object> {
 impl<O: Object> Clone for ObjectLeaf<O> {
     fn clone(&self) -> Self {
         match self {
-            Self::Representation {
-                leaf_name,
-                ct,
-                stability,
-            } => Self::Representation {
+            Self::Representation { leaf_name, ct } => Self::Representation {
                 leaf_name: leaf_name.clone(),
                 ct: *ct,
-                stability: *stability,
             },
             Self::Projected {
                 leaf_name,
                 project,
                 content_type,
                 lazy,
-                stability,
             } => Self::Projected {
                 leaf_name: leaf_name.clone(),
                 project: *project,
                 content_type: *content_type,
                 lazy: *lazy,
-                stability: *stability,
             },
             Self::HandlerFile {
                 suffix,
@@ -177,7 +165,6 @@ pub struct FileLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
     lazy: bool,
-    stability: Option<Stability>,
 }
 
 /// A pending dir leaf named in [`DirObjectBlock::dir`]; finish with
@@ -208,8 +195,9 @@ impl<O: Object> DirObjectBlock<O> {
     /// `stem.<ext>` per entry in the render set `R` (e.g. `(Markdown,)`
     /// adds `item.md`; `()` adds none). Each leaf is claimed against
     /// [`Router::seal`](super::Router::seal). All representation leaves
-    /// share [`Object::default_stability`]; renders are recomputed from
-    /// cached canonical bytes, never fetched separately.
+    /// carry the object's [`Object::stability`] (a rendering inherits its
+    /// canonical's); renders are recomputed from cached canonical bytes,
+    /// never fetched separately.
     pub fn representations<R: RenderSet<O>>(
         &mut self,
         stem: &'static str,
@@ -236,7 +224,6 @@ impl<O: Object> DirObjectBlock<O> {
             self.leaves.push(ObjectLeaf::Representation {
                 leaf_name: leaf,
                 ct: *ct,
-                stability: O::default_stability(),
             });
         }
 
@@ -245,7 +232,6 @@ impl<O: Object> DirObjectBlock<O> {
         self.leaves.push(ObjectLeaf::Representation {
             leaf_name: source_leaf,
             ct: source_ct,
-            stability: O::default_stability(),
         });
         Ok(self)
     }
@@ -258,7 +244,6 @@ impl<O: Object> DirObjectBlock<O> {
             block: self,
             name,
             lazy: false,
-            stability: None,
         }
     }
 
@@ -324,9 +309,10 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     /// Register a projected field leaf: `method` maps the loaded object value
     /// to the leaf's bytes (`fn(&O) -> Result<FileContent>`), so reads can be
     /// served from cached canonical bytes with no upstream call. The default
-    /// content type is `text/plain`; default stability is
-    /// [`Object::default_stability`]; the leaf is eager (preloaded into the
-    /// view cache when the anchor is listed) unless flagged lazy. Eager
+    /// content type is `text/plain`; its stability is the object's
+    /// [`Object::stability`] for the key (a projected field inherits the
+    /// canonical's); the leaf is eager (preloaded into the view cache when
+    /// the anchor is listed) unless flagged lazy. Eager
     /// projections must produce inline bytes; listing fails otherwise.
     pub fn project(self, method: ProjectFn<O>) -> Result<&'a mut DirObjectBlock<O>> {
         let pattern = parse_pattern(&format!(
@@ -340,7 +326,6 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
             project: method,
             content_type: ContentType::Custom("text/plain"),
             lazy: self.lazy,
-            stability: self.stability.unwrap_or_else(O::default_stability),
         });
         Ok(self.block)
     }
@@ -381,43 +366,6 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     pub fn lazy(mut self) -> Self {
         self.lazy = true;
         self
-    }
-
-    /// Set this projected leaf's stability to immutable.
-    ///
-    /// This is a modifier for the pending [`Self::project`] leaf:
-    /// `o.file("version").stable().project(Item::version)?`.
-    #[must_use]
-    pub fn stable(mut self) -> Self {
-        self.stability = Some(Stability::Stable);
-        self
-    }
-
-    /// Set this projected leaf's stability to mutable.
-    ///
-    /// This is a modifier for the pending [`Self::project`] leaf:
-    /// `o.file("state").dynamic().project(Item::state)?`.
-    #[must_use]
-    pub fn dynamic(mut self) -> Self {
-        self.stability = Some(Stability::Dynamic);
-        self
-    }
-
-    /// Assert that the most recently registered leaf is a `.handler` file
-    /// leaf; registers nothing itself (volatility actually comes from the
-    /// handler returning a ranged projection with volatile attrs). Errors
-    /// otherwise, because volatile content requires a ranged source.
-    pub fn live(self) -> Result<&'a mut DirObjectBlock<O>> {
-        let is_handler = matches!(
-            self.block.leaves.last(),
-            Some(ObjectLeaf::HandlerFile { .. })
-        );
-        if !is_handler {
-            return Err(ProviderError::invalid_input(
-                ".live() is only valid on ranged .handler leaves",
-            ));
-        }
-        Ok(self.block)
     }
 }
 
@@ -597,6 +545,7 @@ impl<O: Object> ObjectRoute<O> {
                 "object not found: {list_path}"
             )));
         }
+        let stability = O::stability(&key);
 
         let since = cx.version().cloned();
         let (value, canonical, extra_effects) = match key.load(cx, since).await? {
@@ -621,7 +570,7 @@ impl<O: Object> ObjectRoute<O> {
             self.view_leaves(&list_path)?,
         );
         effects.extend(extra_effects);
-        self.project_eager_fields(&mut effects, &id, &value, &list_path)?;
+        self.project_eager_fields(&mut effects, &id, &value, &list_path, stability)?;
         Ok(effects)
     }
 
@@ -656,6 +605,8 @@ impl<O: Object> ObjectRoute<O> {
             return Ok(ReadOutcome::NotFound(None));
         }
 
+        let stability = O::stability(&key);
+
         if let Some(ref push) = cached
             && push.matches_anchor(&key.anchor())
         {
@@ -663,8 +614,11 @@ impl<O: Object> ObjectRoute<O> {
                 target,
                 &push.bytes,
                 push.validator.clone(),
-                &self.render_table,
-                &self.leaves,
+                ServeCtx {
+                    render_table: &self.render_table,
+                    leaves: &self.leaves,
+                    stability,
+                },
             );
         }
 
@@ -682,7 +636,16 @@ impl<O: Object> ObjectRoute<O> {
                     )
                 })?;
                 let validator = cached.as_ref().and_then(|p| p.validator.clone());
-                return serve_warm::<O>(target, bytes, validator, &self.render_table, &self.leaves);
+                return serve_warm::<O>(
+                    target,
+                    bytes,
+                    validator,
+                    ServeCtx {
+                        render_table: &self.render_table,
+                        leaves: &self.leaves,
+                        stability,
+                    },
+                );
             },
             Load::NotFound => return Ok(ReadOutcome::NotFound(Some(key.anchor()))),
         };
@@ -701,8 +664,11 @@ impl<O: Object> ObjectRoute<O> {
             target,
             &canonical.bytes,
             canonical.validator.clone(),
-            &self.render_table,
-            &self.leaves,
+            ServeCtx {
+                render_table: &self.render_table,
+                leaves: &self.leaves,
+                stability,
+            },
             effects,
         )
     }
@@ -730,21 +696,22 @@ impl<O: Object> ObjectRoute<O> {
     /// time, tagged with the object id so leaf invalidation cascades. This is
     /// the preload discipline applied to objects: the value is already in
     /// hand, so its cheap fields ship now instead of forcing per-leaf reads.
-    /// Errors when a projection yields non-inline bytes; eager preloads must
-    /// be inline.
+    /// Every leaf carries the object's `stability` (the rendering inherits the
+    /// canonical's). Errors when a projection yields non-inline bytes; eager
+    /// preloads must be inline.
     fn project_eager_fields(
         &self,
         effects: &mut Effects,
         id: &crate::identity::LogicalId,
         value: &O,
         list_path: &str,
+        stability: Stability,
     ) -> Result<()> {
         for leaf in &self.leaves {
             let ObjectLeaf::Projected {
                 leaf_name,
                 project,
                 lazy,
-                stability,
                 ..
             } = leaf
             else {
@@ -759,7 +726,7 @@ impl<O: Object> ObjectRoute<O> {
                     "projected object leaf {leaf_name:?} cannot preload non-inline bytes"
                 ))
             })?;
-            let mut file = FileProj::inline(bytes.to_vec(), *stability, None);
+            let mut file = FileProj::inline(bytes.to_vec(), stability, None);
             if let Some(content_type) = content.content_type() {
                 file = file.with_content_type(content_type);
             }
@@ -916,45 +883,54 @@ where
     })
 }
 
+/// The object projection context shared by every serve path: the route-owned
+/// render table and leaf set, plus the key-resolved `stability` that every
+/// leaf inherits. Grouped so the serve helpers keep a sane argument count.
+struct ServeCtx<'a, O: Object> {
+    render_table: &'a RenderTable,
+    leaves: &'a [ObjectLeaf<O>],
+    stability: Stability,
+}
+
+// All fields are `Copy` (two shared borrows and a `Stability`); a manual impl
+// keeps `ServeCtx` `Copy` without a derive's spurious `O: Copy` bound.
+impl<O: Object> Clone for ServeCtx<'_, O> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<O: Object> Copy for ServeCtx<'_, O> {}
+
 /// Serve from host-pushed canonical bytes with no effects: the host already
 /// owns these bytes, so re-storing them would be redundant.
 fn serve_warm<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
     validator: Option<VersionToken>,
-    render_table: &RenderTable,
-    leaves: &[ObjectLeaf<O>],
+    ctx: ServeCtx<'_, O>,
 ) -> Result<ReadOutcome> {
-    serve_from_canonical::<O>(
-        target,
-        bytes,
-        validator,
-        render_table,
-        leaves,
-        Effects::new(),
-    )
+    serve_from_canonical::<O>(target, bytes, validator, ctx, Effects::new())
 }
 
 /// Serve right after a fresh load, attaching the canonical-store effects.
 /// A projected target uses the already-parsed value (no re-parse of the
-/// bytes); representations render from the canonical bytes.
+/// bytes); representations render from the canonical bytes. Every leaf
+/// carries the object's `stability` (a rendering inherits the canonical's).
 fn serve_fresh<O: Object>(
     value: &O,
     target: ObjectReadTarget,
     bytes: &[u8],
     validator: Option<VersionToken>,
-    render_table: &RenderTable,
-    leaves: &[ObjectLeaf<O>],
+    ctx: ServeCtx<'_, O>,
     effects: Effects,
 ) -> Result<ReadOutcome> {
     match target {
         ObjectReadTarget::Projected(name) => {
-            for leaf in leaves {
+            for leaf in ctx.leaves {
                 if let ObjectLeaf::Projected {
                     leaf_name,
                     project,
                     content_type,
-                    stability,
                     ..
                 } = leaf
                     && leaf_name == &name
@@ -963,7 +939,7 @@ fn serve_fresh<O: Object>(
                     let size = content_size(&content);
                     content = content
                         .with_content_type(*content_type)
-                        .with_attrs(FileAttrs::new(Size::Exact(size), *stability));
+                        .with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
                     return Ok(ReadOutcome::Found(content.with_effects(effects)));
                 }
             }
@@ -973,8 +949,7 @@ fn serve_fresh<O: Object>(
             ObjectReadTarget::Representation(ct),
             bytes,
             validator,
-            render_table,
-            leaves,
+            ctx,
             effects,
         ),
     }
@@ -984,41 +959,39 @@ fn serve_fresh<O: Object>(
 /// with the `byte-source::canonical` identity terminal (the host already
 /// holds the bytes; they are not echoed back); other representations render
 /// through the table; a projected field re-parses the canonical and runs
-/// its projection.
+/// its projection. Every target carries the object's `stability`, resolved
+/// once from the key by the caller (a rendering inherits the canonical's).
 fn serve_from_canonical<O: Object>(
     target: ObjectReadTarget,
     bytes: &[u8],
     validator: Option<VersionToken>,
-    render_table: &RenderTable,
-    leaves: &[ObjectLeaf<O>],
+    ctx: ServeCtx<'_, O>,
     effects: Effects,
 ) -> Result<ReadOutcome> {
     match target {
         ObjectReadTarget::Representation(ct) => {
-            let stability = representation_stability::<O>(ct, leaves);
-            if ct == render_table.source_ct {
+            if ct == ctx.render_table.source_ct {
                 return Ok(ReadOutcome::Found(
                     FileContent::canonical(representation_attrs(
                         Size::Unknown,
-                        stability,
+                        ctx.stability,
                         validator,
                     ))
                     .with_effects(effects),
                 ));
             }
-            let rendered = render_table.serve(ct, bytes)?;
+            let rendered = ctx.render_table.serve(ct, bytes)?;
             Ok(ReadOutcome::Found(
-                body_file_content(rendered, ct, stability, validator).with_effects(effects),
+                body_file_content(rendered, ct, ctx.stability, validator).with_effects(effects),
             ))
         },
         ObjectReadTarget::Projected(name) => {
             let value = O::parse_canonical(bytes)?;
-            for leaf in leaves {
+            for leaf in ctx.leaves {
                 if let ObjectLeaf::Projected {
                     leaf_name,
                     project,
                     content_type,
-                    stability,
                     ..
                 } = leaf
                     && leaf_name == &name
@@ -1027,7 +1000,7 @@ fn serve_from_canonical<O: Object>(
                     let size = content_size(&content);
                     content = content
                         .with_content_type(*content_type)
-                        .with_attrs(FileAttrs::new(Size::Exact(size), *stability));
+                        .with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
                     return Ok(ReadOutcome::Found(content.with_effects(effects)));
                 }
             }
@@ -1119,20 +1092,6 @@ fn content_size(content: &FileContent) -> u64 {
     content
         .content()
         .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
-}
-
-fn representation_stability<O: Object>(ct: ContentType, leaves: &[ObjectLeaf<O>]) -> Stability {
-    leaves
-        .iter()
-        .find_map(|leaf| match leaf {
-            ObjectLeaf::Representation {
-                ct: leaf_ct,
-                stability,
-                ..
-            } if *leaf_ct == ct => Some(*stability),
-            _ => None,
-        })
-        .unwrap_or_else(O::default_stability)
 }
 
 fn representation_attrs(
