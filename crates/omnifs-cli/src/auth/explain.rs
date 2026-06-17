@@ -44,11 +44,21 @@ impl AuthMode {
     /// One-line summary for pickers and listings.
     pub(crate) fn summary(self) -> &'static str {
         match self {
-            AuthMode::StaticToken => "Paste a long-lived token you create in the provider's settings.",
-            AuthMode::OauthDeviceCode => "Approve a short code in your browser; works on headless hosts.",
-            AuthMode::OauthPkceLoopback => "Your browser opens, you approve, and you're redirected back automatically.",
-            AuthMode::OauthPkceManualCode => "Your browser opens; you paste the final redirect URL back here.",
-            AuthMode::OauthClientSideToken => "Your browser opens; the access token comes back in the redirect.",
+            AuthMode::StaticToken => {
+                "Paste a long-lived token you create in the provider's settings."
+            },
+            AuthMode::OauthDeviceCode => {
+                "Approve a short code in your browser; works on headless hosts."
+            },
+            AuthMode::OauthPkceLoopback => {
+                "Your browser opens, you approve, and you're redirected back automatically."
+            },
+            AuthMode::OauthPkceManualCode => {
+                "Your browser opens; you paste the final redirect URL back here."
+            },
+            AuthMode::OauthClientSideToken => {
+                "Your browser opens; the access token comes back in the redirect."
+            },
         }
     }
 
@@ -98,7 +108,9 @@ pub(crate) fn render_modes_catalog() {
     anstream::println!("{}", style::bold("Authentication modes omnifs supports"));
     anstream::println!(
         "{}",
-        style::dim("How a provider authenticates is declared in its manifest; run `omnifs auth explain <provider>` for a specific one.")
+        style::dim(
+            "How a provider authenticates is declared in its manifest; run `omnifs auth explain <provider>` for a specific one."
+        )
     );
     for mode in AuthMode::ALL {
         anstream::println!();
@@ -109,7 +121,9 @@ pub(crate) fn render_modes_catalog() {
     anstream::println!();
     anstream::println!(
         "{}",
-        style::dim("Some providers need no auth at all (public APIs). OAuth flows may use omnifs's registered app or your own: when a provider ships no client id, you create an app and supply its client id and secret.")
+        style::dim(
+            "Some providers need no auth at all (public APIs). OAuth flows may use omnifs's registered app or your own: when a provider ships no client id, you create an app and supply its client id and secret."
+        )
     );
 }
 
@@ -167,12 +181,18 @@ fn render_scheme(key: &str, scheme: &AuthScheme, guidance: &SchemeGuidance, is_d
         },
         AuthScheme::Oauth(o) => {
             if !o.default_scopes.is_empty() {
-                anstream::println!("  {} {}", style::dim("Scopes:"), o.default_scopes.join(", "));
+                anstream::println!(
+                    "  {} {}",
+                    style::dim("Scopes:"),
+                    o.default_scopes.join(", ")
+                );
             }
             if o.default_client_id.is_none() {
                 anstream::println!(
                     "  {}",
-                    style::warn("Needs your own OAuth app: omnifs ships no client id for this scheme.")
+                    style::warn(
+                        "Needs your own OAuth app: omnifs ships no client id for this scheme."
+                    )
                 );
             }
         },

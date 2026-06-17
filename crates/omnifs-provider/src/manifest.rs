@@ -1051,8 +1051,14 @@ mod tests {
         let auth = manifest.auth.as_ref().expect("auth");
         let guidance = auth.guidance_for("pat");
         assert_eq!(guidance.summary.as_deref(), Some("Paste a personal token"));
-        assert_eq!(guidance.setup_steps, ["Open settings", "Click create token"]);
-        assert_eq!(guidance.docs_url.as_deref(), Some("https://demo.test/docs/auth"));
+        assert_eq!(
+            guidance.setup_steps,
+            ["Open settings", "Click create token"]
+        );
+        assert_eq!(
+            guidance.docs_url.as_deref(),
+            Some("https://demo.test/docs/auth")
+        );
 
         // Round-trip back to the compact on-disk form and re-parse.
         let reparsed = encode_provider_manifest(&manifest).unwrap();

@@ -82,7 +82,10 @@ fn ls() -> anyhow::Result<()> {
     let store = FileStore::new(&paths.credentials_file);
     for mount in &mounts {
         let name = crate::style::bold(mount.name.as_str());
-        match ctx.catalog().resolve_mount_spec(mount.config.clone(), false) {
+        match ctx
+            .catalog()
+            .resolve_mount_spec(mount.config.clone(), false)
+        {
             Ok(resolved) => {
                 let provider = resolved.spec.provider_id().map_or_else(
                     || short_provider_name(&resolved.spec.provider),
@@ -166,7 +169,11 @@ fn short_provider_name(provider: &str) -> String {
         .and_then(|stem| stem.to_str())
         .map_or_else(
             || provider.to_owned(),
-            |stem| stem.strip_prefix("omnifs_provider_").unwrap_or(stem).to_owned(),
+            |stem| {
+                stem.strip_prefix("omnifs_provider_")
+                    .unwrap_or(stem)
+                    .to_owned()
+            },
         )
 }
 
