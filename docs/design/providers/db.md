@@ -103,16 +103,16 @@ The right long-term fix is `wasmtime_wasi::p2::add_to_linker_async` (switches th
 
 | File | Size | Bytes | Stability | Version |
 |---|---|---|---|---|
-| `/meta/version.txt` | Exact | Inline | Mutable | hash of (sqlite_version) |
-| `/meta/path.txt` | Exact | Inline | Mutable | hash of configured path |
-| `/meta/info.json` | Exact | Inline | Mutable | hash of (page_count, journal_mode, app_id, user_version) |
-| `/tables/{name}/schema.sql` | Exact | Inline | Mutable | hash of `sqlite_master.sql` row |
-| `/tables/{name}/schema.json` | Exact | Inline | Mutable | hash of column metadata |
-| `/tables/{name}/indexes.json` | Exact | Inline | Mutable | hash of index metadata |
-| `/tables/{name}/count.txt` | Exact | Inline | Mutable | no version (cheap to recompute) |
-| `/tables/{name}/sample.json` | Exact | Inline/Deferred per size | Mutable | hash of (column set, current count, max rowid) |
+| `/meta/version.txt` | Exact | Inline | Dynamic | hash of (sqlite_version) |
+| `/meta/path.txt` | Exact | Inline | Dynamic | hash of configured path |
+| `/meta/info.json` | Exact | Inline | Dynamic | hash of (page_count, journal_mode, app_id, user_version) |
+| `/tables/{name}/schema.sql` | Exact | Inline | Dynamic | hash of `sqlite_master.sql` row |
+| `/tables/{name}/schema.json` | Exact | Inline | Dynamic | hash of column metadata |
+| `/tables/{name}/indexes.json` | Exact | Inline | Dynamic | hash of index metadata |
+| `/tables/{name}/count.txt` | Exact | Inline | Dynamic | no version (cheap to recompute) |
+| `/tables/{name}/sample.json` | Exact | Inline/Deferred per size | Dynamic | hash of (column set, current count, max rowid) |
 
-`Mutable` reflects that SQL operations against the database can change these values; v1 mounts are read-only at the FUSE layer, so "mutable" here describes the upstream behavior, not the user's ability to write. The DB provider does not emit canonical object-cache entries. It reads metadata directly from SQLite for the requested path.
+`Dynamic` reflects that SQL operations against the database can change these values; v1 mounts are read-only at the FUSE layer, so "dynamic" here describes the upstream behavior, not the user's ability to write. The DB provider does not emit canonical object-cache entries. It reads metadata directly from SQLite for the requested path.
 
 Inline byte cap: 64 KiB per file, 512 KiB aggregate per response. `sample.json` for wide tables can exceed the per-file cap and gets ranged reads automatically; the file handler materializes the bytes on read.
 
@@ -190,7 +190,7 @@ The first slice to ship: single-column PK lookup, single `row.json` per row, sam
 }
 ```
 
-Each label materializes as a single file at `/db/queries/{label}.json`. Reading the file executes the query and returns the result set as a JSON array of objects (column names as keys). Files use `Stability::Mutable` with no version token; every read re-executes.
+Each label materializes as a single file at `/db/queries/{label}.json`. Reading the file executes the query and returns the result set as a JSON array of objects (column names as keys). Files use `Stability::Dynamic` with no version token; every read re-executes.
 
 Open questions:
 
@@ -248,7 +248,7 @@ md5sum /db/tables/Album/sample.json
 
 What does not work and why:
 
-- `tail -f` on any file: nothing is volatile; live tailing has no source.
+- `tail -f` on any file: nothing is live; live tailing has no source.
 - Writes (`echo > ...`, `rm`, `mv`): mount is read-only.
 - Per-row lookup (`cat /db/tables/Album/rows/42/title`): not yet implemented (see "Future shape").
 - `find /db/tables/Album/rows -type d`: same; no `rows/` directory yet.

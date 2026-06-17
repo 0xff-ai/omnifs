@@ -3,11 +3,11 @@
 //!
 //! These attributes are the contract the host derives filesystem behavior
 //! from: the `st_size` reported before any read, kernel attribute/content
-//! caching policy, direct I/O and the ranged live path for volatile files,
+//! caching policy, direct I/O and the ranged live path for live files,
 //! and version-keyed durable content caching. Declare only what you actually
 //! know; the host learns the rest (for example the real size after the
 //! first read). Lying here breaks standard tools: an inflated size breaks
-//! `tail -c`, a false `Immutable` serves stale bytes forever.
+//! `tail -c`, a false `Stable` serves stale bytes forever.
 
 use crate::error::{ProviderError, Result};
 use omnifs_core::ContentType;
@@ -31,7 +31,7 @@ pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 ///
 /// A version token lets the host key durable content by version and lets
 /// conditional reloads answer cheaply ([`crate::object::Load::Unchanged`]).
-/// It carries the most weight on `Mutable` content, where it is the proof
+/// It carries the most weight on `Dynamic` content, where it is the proof
 /// that cached bytes are still current.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileAttrs {
@@ -194,7 +194,7 @@ impl FileProj {
     /// Directory listing entry: attrs for `stat`/`ls` without inline bytes; content
     /// is loaded on `read-file` or via an object/canonical path.
     pub fn listing_shape() -> Self {
-        Self::deferred(Size::Unknown, ReadMode::Full, Stability::Immutable)
+        Self::deferred(Size::Unknown, ReadMode::Full, Stability::Stable)
     }
 
     #[must_use]
@@ -211,7 +211,7 @@ impl FileProj {
 
     /// Enforce the structural legality rules:
     ///
-    /// - `Stability::Volatile` requires `ProjBytes::Deferred { read:
+    /// - `Stability::Live` requires `ProjBytes::Deferred { read:
     ///   ReadMode::Ranged }`: bytes that can change mid-read may only be
     ///   served through the ranged live path, never inline or full-read.
     /// - Inline bytes require `Size::Exact` equal to the actual byte
@@ -221,7 +221,7 @@ impl FileProj {
     pub fn validate(&self) -> Result<()> {
         self.attrs.validate()?;
 
-        if self.attrs.stability == Stability::Volatile
+        if self.attrs.stability == Stability::Live
             && !matches!(
                 self.bytes,
                 ProjBytes::Deferred {
@@ -230,7 +230,7 @@ impl FileProj {
             )
         {
             return Err(ProviderError::invalid_input(
-                "Stability::Volatile requires ProjBytes::Deferred { read: ReadMode::Ranged }",
+                "Stability::Live requires ProjBytes::Deferred { read: ReadMode::Ranged }",
             ));
         }
 
@@ -299,23 +299,23 @@ pub enum ReadMode {
 /// How the bytes behave over time for one logical identity; the host
 /// derives its caching policy from this.
 ///
-/// - `Immutable`: the bytes never change for this path identity (a pinned
+/// - `Stable`: the bytes never change for this path identity (a pinned
 ///   version, a content-addressed artifact). The host may cache content and
 ///   learned size indefinitely.
-/// - `Mutable`: bytes may change between reads but not during one. Durable
+/// - `Dynamic`: bytes may change between reads but not during one. Durable
 ///   caching is tied to version evidence and invalidations.
-/// - `Volatile`: bytes may change while being observed (`tail -f` shapes).
+/// - `Live`: bytes may change while being observed (`tail -f` shapes).
 ///   The host serves it through direct I/O and the ranged live path and
 ///   never caches content or learned size. Structurally requires a
 ///   deferred ranged projection ([`FileProj::validate`]).
 ///
-/// Declaring `Mutable` when unsure is safe; declaring `Immutable` when the
+/// Declaring `Dynamic` when unsure is safe; declaring `Stable` when the
 /// content can change pins stale bytes in caches with no expiry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stability {
-    Immutable,
-    Mutable,
-    Volatile,
+    Stable,
+    Dynamic,
+    Live,
 }
 
 impl From<Size> for wit_types::FileSize {
@@ -358,9 +358,9 @@ impl From<ReadFileBytes> for wit_types::ByteSource {
 impl From<Stability> for wit_types::Stability {
     fn from(stability: Stability) -> Self {
         match stability {
-            Stability::Immutable => Self::Immutable,
-            Stability::Mutable => Self::Mutable,
-            Stability::Volatile => Self::Volatile,
+            Stability::Stable => Self::Stable,
+            Stability::Dynamic => Self::Dynamic,
+            Stability::Live => Self::Live,
         }
     }
 }

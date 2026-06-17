@@ -60,13 +60,13 @@ NFSv4 brings a few extra host responsibilities:
 
 - Filehandles should resolve to stable omnifs identity: provider id, path or
   file identity, and enough generation/version data to reject stale handles.
-- `OPEN`, `READ`, and `CLOSE` stateids map naturally to mutable ranged
-  snapshots and volatile live handles.
+- `OPEN`, `READ`, and `CLOSE` stateids map naturally to dynamic ranged
+  snapshots and live handles.
 - `READDIR` can include per-entry attrs. The NFS frontend should use projected
   attrs directly instead of forcing an extra getattr path when clients ask for
   them.
 - NFS clients cache using attrs such as `size`, `change`, `ctime`, and `mtime`.
-  `Mutable` and `Volatile` files need disciplined change values and should not
+  `Dynamic` and `Live` files need disciplined change values and should not
   receive delegations that imply stronger stability than omnifs can honor.
 - NFS still needs a size attribute. The file-attributes contract maps directly:
   `Size::Exact(n)` reports `n`, `Size::NonZero` reports `1`, and
@@ -145,7 +145,7 @@ Recommended structure:
 2. Use `set -euo pipefail`, `timeout`, `test`, `grep`, `stat`, and `wc` so
    blank output fails hard.
 3. Add a mounted test-provider profile in Docker so synthetic `Exact`,
-   `NonZero`, `Unknown`, `Mutable`, `Volatile`, inline cap, version token, and
+   `NonZero`, `Unknown`, `Dynamic`, `Live`, inline cap, version token, and
    ranged EOF cases run through real FUSE or NFS, not only Rust tests.
 4. Run cold and warm cache passes. Clear `/tmp/omnifs-cache`, assert first
    read behavior, assert second read behavior, and inspect cache/log evidence

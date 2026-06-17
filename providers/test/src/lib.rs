@@ -246,6 +246,7 @@ impl TestProvider {
         r.dir("/items").handler(items_root)?;
         r.dir("/items/{filter}").handler(item_list)?;
         r.object::<Item>("/items/{filter}/{number}", |o| {
+            o.stable();
             o.representations("item", (Markdown,))?;
             o.file("title").project(Item::title)?;
             o.file("state").project(Item::state)?;
@@ -362,13 +363,13 @@ async fn fresh_full(cx: Cx<State>) -> Result<FileProjection> {
     });
     Ok(
         FileProjection::body(format!("fresh-full-{read}\n").into_bytes())
-            .mutable()
+            .dynamic()
             .build(),
     )
 }
 
 // ===========================================================================
-// Ranged / unknown-size / volatile files
+// Ranged / unknown-size / live files
 // ===========================================================================
 
 async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
@@ -376,7 +377,7 @@ async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
         b"abcdefghijklmnopqrstuvwxyz".to_vec(),
     ))
     .size(Size::Exact(26))
-    .mutable()
+    .dynamic()
     .version("alphabet-v1")
     .build())
 }
@@ -385,7 +386,7 @@ async fn unknown_ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(
         FileProjection::ranged(MemoryRangeReader::new(b"unknown-size\n".to_vec()))
             .size(Size::Unknown)
-            .immutable()
+            .stable()
             .build(),
     )
 }
@@ -393,14 +394,14 @@ async fn unknown_ranged(_cx: Cx<State>) -> Result<FileProjection> {
 async fn large_ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(LargeRangedReader)
         .size(Size::Exact(LARGE_RANGED_SIZE))
-        .immutable()
+        .stable()
         .build())
 }
 
 async fn volatile_tail(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(LiveTailReader)
         .size(Size::Unknown)
-        .volatile()
+        .live()
         .build())
 }
 
@@ -500,7 +501,7 @@ async fn checkout(_cx: Cx<State>) -> Result<TreeRef> {
 }
 
 // ===========================================================================
-// Live-tail range reader for the volatile file
+// Live-tail range reader for the live file
 // ===========================================================================
 
 #[derive(Clone, Debug)]

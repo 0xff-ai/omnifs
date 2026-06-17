@@ -22,7 +22,7 @@
     v{n}/
 ```
 
-A paper is an object whose canonical is the upstream Atom feed: `paper.atom` serves it verbatim and `paper.json` renders a lossy metadata view (title, authors, categories, DOIs, resource URLs). `@latest` is mutable because it can move when arXiv publishes a new version; numbered `vN` directories are immutable once the paper feed reports that version.
+A paper is an object whose canonical is the upstream Atom feed: `paper.atom` serves it verbatim and `paper.json` renders a lossy metadata view (title, authors, categories, DOIs, resource URLs). `@latest` is dynamic because it can move when arXiv publishes a new version; numbered `vN` directories are stable once the paper feed reports that version.
 
 `{id}` accepts modern ids like `2401.12345` directly. Old-style ids must use a single encoded path segment, for example `cs.LG%2F0512345`; versioned ids such as `2401.12345v2` are not accepted in `{id}` and must be accessed as `2401.12345/v2/...`.
 

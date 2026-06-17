@@ -250,7 +250,7 @@ mod tests {
         wit_types::FileOut {
             attrs: wit_types::FileAttrs {
                 size: wit_types::FileSize::Exact(bytes.len() as u64),
-                stability: wit_types::Stability::Immutable,
+                stability: wit_types::Stability::Stable,
                 version_token: None,
             },
             bytes: wit_types::ByteSource::Inline(bytes.to_vec()),

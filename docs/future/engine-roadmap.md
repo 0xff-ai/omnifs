@@ -32,7 +32,7 @@ The `db` provider is read-only SQLite and path-oriented today (schema, indexes, 
 
 ## arXiv category browsing
 
-Category listings today are flat, stateless, and cursor-paged: `/categories/{category}/papers` emits paper-id directories and stores no member canonicals. The deferred opportunity is a live `recent` scan that pages `export.arxiv.org` and materializes immutable day buckets (`submissions/{YYYYMMDD}`) derived from already-fetched pages. The grain is the Atom `<published>` timestamp paired with `sortBy=submittedDate` (not `<updated>`), bucketed by UTC published date; the feed-level `<updated>` is the snapshot/reset key, and contiguous-prefix completion marks a day fully scanned. This stays path-oriented (no member canonicals) and keeps rate-limit handling in the host HTTP path, not a provider-side sleep loop.
+Category listings today are flat, stateless, and cursor-paged: `/categories/{category}/papers` emits paper-id directories and stores no member canonicals. The deferred opportunity is a live `recent` scan that pages `export.arxiv.org` and materializes stable day buckets (`submissions/{YYYYMMDD}`) derived from already-fetched pages. The grain is the Atom `<published>` timestamp paired with `sortBy=submittedDate` (not `<updated>`), bucketed by UTC published date; the feed-level `<updated>` is the snapshot/reset key, and contiguous-prefix completion marks a day fully scanned. This stays path-oriented (no member canonicals) and keeps rate-limit handling in the host HTTP path, not a provider-side sleep loop.
 
 ## Cross-object canonical references
 

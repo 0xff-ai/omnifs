@@ -10,7 +10,6 @@ pub(crate) struct ObjectArgs {
     pub key: Path,
     pub canonical: Option<Ident>,
     pub parse: Option<Path>,
-    pub stability: Option<Ident>,
 }
 
 impl Parse for ObjectArgs {
@@ -19,7 +18,6 @@ impl Parse for ObjectArgs {
         let mut object_key: Option<Path> = None;
         let mut canonical: Option<Ident> = None;
         let mut parse: Option<Path> = None;
-        let mut stability: Option<Ident> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -55,20 +53,10 @@ impl Parse for ObjectArgs {
                     let _: Token![=] = input.parse()?;
                     parse = Some(input.parse()?);
                 },
-                "stability" => {
-                    if stability.is_some() {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            "duplicate `stability` argument",
-                        ));
-                    }
-                    let _: Token![=] = input.parse()?;
-                    stability = Some(input.parse()?);
-                },
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, `parse = path::to::function`, and `stability = Ident`",
+                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, and `parse = path::to::function`",
                     ));
                 },
             }
@@ -95,7 +83,6 @@ impl Parse for ObjectArgs {
             key: object_key,
             canonical,
             parse,
-            stability,
         })
     }
 }
@@ -118,12 +105,6 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
         ));
     }
 
-    let stability_tokens = if let Some(stability) = &args.stability {
-        quote! { omnifs_sdk::file_attrs::Stability::#stability }
-    } else {
-        quote! { omnifs_sdk::file_attrs::Stability::Mutable }
-    };
-
     let parse_tokens = args.parse.as_ref().map(|parse| {
         quote! {
             fn parse_canonical(bytes: &[u8]) -> omnifs_sdk::error::Result<Self> {
@@ -144,10 +125,6 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
 
             fn canonical_content_type() -> omnifs_sdk::ContentType {
                 omnifs_sdk::ContentType::#canonical_ident
-            }
-
-            fn default_stability() -> omnifs_sdk::file_attrs::Stability {
-                #stability_tokens
             }
 
             #parse_tokens

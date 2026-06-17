@@ -30,7 +30,7 @@ pub(crate) fn file_kind_placeholder() -> wit_types::EntryKind {
     wit_types::EntryKind::File(wit_types::FileOut {
         attrs: wit_types::FileAttrs {
             size: wit_types::FileSize::Unknown,
-            stability: wit_types::Stability::Mutable,
+            stability: wit_types::Stability::Dynamic,
             version_token: None,
         },
         bytes: wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
@@ -38,14 +38,14 @@ pub(crate) fn file_kind_placeholder() -> wit_types::EntryKind {
     })
 }
 
-/// Volatile-file `EntryMeta` for a synthetic mount-root ignore file. Its size
+/// Live-file `EntryMeta` for a synthetic mount-root ignore file. Its size
 /// is exact (the ignore content is fixed) so `ls -l`/`cat` report the right
 /// length without a learned-size round trip.
 pub(crate) fn root_ignore_meta() -> EntryMeta {
     EntryMeta::file(FileAttrsCache {
         size: view_types::FileSize::Exact(pagination::IGNORE_CONTENT.len() as u64),
         bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-        stability: view_types::Stability::Volatile,
+        stability: view_types::Stability::Live,
         version_token: None,
     })
 }

@@ -34,9 +34,9 @@ pub enum ReadMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stability {
-    Immutable,
-    Mutable,
-    Volatile,
+    Stable,
+    Dynamic,
+    Live,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,7 +56,7 @@ impl FileAttrsCache {
     }
 
     pub fn should_direct_io(&self) -> bool {
-        !matches!(self.size, FileSize::Exact(_)) || !matches!(self.stability, Stability::Immutable)
+        !matches!(self.size, FileSize::Exact(_)) || !matches!(self.stability, Stability::Stable)
     }
 
     pub fn inline_bytes(&self) -> Option<&[u8]> {
@@ -67,7 +67,7 @@ impl FileAttrsCache {
     }
 
     pub fn cache_key_aux(&self) -> Option<String> {
-        if matches!(self.stability, Stability::Mutable) {
+        if matches!(self.stability, Stability::Dynamic) {
             self.version_token
                 .as_ref()
                 .map(|token| format!("version:{token}"))
@@ -78,17 +78,17 @@ impl FileAttrsCache {
 
     pub fn durable_cache_aux(&self) -> Option<Option<String>> {
         match self.stability {
-            Stability::Immutable => Some(None),
-            Stability::Mutable => self.cache_key_aux().map(Some),
-            Stability::Volatile => None,
+            Stability::Stable => Some(None),
+            Stability::Dynamic => self.cache_key_aux().map(Some),
+            Stability::Live => None,
         }
     }
 
     pub fn durable_content_cacheable(&self) -> bool {
         match self.stability {
-            Stability::Immutable => true,
-            Stability::Mutable => self.version_token.is_some(),
-            Stability::Volatile => false,
+            Stability::Stable => true,
+            Stability::Dynamic => self.version_token.is_some(),
+            Stability::Live => false,
         }
     }
 
@@ -100,17 +100,17 @@ impl FileAttrsCache {
     /// silent about size (no `Exact` of its own), and the two share a content
     /// identity: same byte source and version token. Stability is otherwise
     /// ignored, because directory listings project a kind-derived placeholder
-    /// stability rather than the file's real one; only `Volatile` is rejected
-    /// outright (a volatile file is never durably size-learned, so the `Exact`
+    /// stability rather than the file's real one; only `Live` is rejected
+    /// outright (a live file is never durably size-learned, so the `Exact`
     /// guard already excludes it, but the explicit check states the intent).
     ///
-    /// Keeping `self`'s attributes is safe even for mutable files: the next
+    /// Keeping `self`'s attributes is safe even for dynamic files: the next
     /// complete read re-learns the size from the bytes it returns, so a stale
     /// value never reaches a read check.
     pub fn keeps_learned_size_over(&self, incoming: &FileAttrsCache) -> bool {
         matches!(self.size, FileSize::Exact(_))
             && !matches!(incoming.size, FileSize::Exact(_))
-            && !matches!(self.stability, Stability::Volatile)
+            && !matches!(self.stability, Stability::Live)
             && self.bytes == incoming.bytes
             && self.version_token == incoming.version_token
     }
@@ -126,11 +126,11 @@ impl FileAttrsCache {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if matches!(self.stability, Stability::Volatile)
+        if matches!(self.stability, Stability::Live)
             && !matches!(self.bytes, ByteSource::Deferred(ReadMode::Ranged))
         {
             return Err(
-                "Stability::Volatile requires ByteSource::Deferred(ReadMode::Ranged)".to_string(),
+                "Stability::Live requires ByteSource::Deferred(ReadMode::Ranged)".to_string(),
             );
         }
 
@@ -394,7 +394,7 @@ mod tests {
         let meta = EntryMeta::file(FileAttrsCache {
             size: FileSize::Exact(4),
             bytes: ByteSource::Inline(vec![0xde, 0xad, 0xbe, 0xef]),
-            stability: Stability::Immutable,
+            stability: Stability::Stable,
             version_token: Some("v1".to_string()),
         });
 
@@ -406,7 +406,7 @@ mod tests {
         assert!(decoded.is_file());
         let attrs = decoded.attrs.expect("file should carry attrs");
         assert_eq!(attrs.size, FileSize::Exact(4));
-        assert_eq!(attrs.stability, Stability::Immutable);
+        assert_eq!(attrs.stability, Stability::Stable);
         assert_eq!(attrs.version_token.as_deref(), Some("v1"));
         assert_eq!(attrs.inline_bytes(), Some(&[0xde, 0xad, 0xbe, 0xef][..]));
 
@@ -437,13 +437,13 @@ mod tests {
         let meta = EntryMeta::file(FileAttrsCache {
             size: FileSize::Unknown,
             bytes: ByteSource::Deferred(ReadMode::Ranged),
-            stability: Stability::Volatile,
+            stability: Stability::Live,
             version_token: None,
         });
         let bytes = AttrPayload { meta }.serialize().unwrap();
         let decoded = AttrPayload::deserialize(&bytes).unwrap();
         let attrs = decoded.meta.attrs.expect("file should carry attrs");
-        assert_eq!(attrs.stability, Stability::Volatile);
+        assert_eq!(attrs.stability, Stability::Live);
         assert_eq!(attrs.bytes, ByteSource::Deferred(ReadMode::Ranged));
     }
 

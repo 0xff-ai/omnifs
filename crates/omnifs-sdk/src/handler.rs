@@ -126,7 +126,7 @@ impl From<FileChunk> for omnifs_wit::provider::types::ReadChunkResult {
 /// `eof = true` when the chunk reaches the current end of content. An
 /// `offset` at or past the end yields an empty chunk with `eof = true`,
 /// not an error. Short chunks are legal; the host keeps reading. This is
-/// the only handler shape allowed to serve `Stability::Volatile` content,
+/// the only handler shape allowed to serve `Stability::Live` content,
 /// and the reader may be polled repeatedly on one open handle (`tail -f`),
 /// so each call should observe current bytes rather than a snapshot when
 /// volatility is the point.

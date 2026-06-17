@@ -67,17 +67,17 @@ impl ItemData {
     pub(crate) fn listed_dir(&self, include_pull_files: bool) -> Result<DirProjection> {
         let body = FileProjection::deferred(Size::Unknown)
             .full()
-            .mutable()
+            .dynamic()
             .content_type(ContentType::Markdown)
             .build();
         let item_md = FileProjection::deferred(Size::Unknown)
             .full()
-            .mutable()
+            .dynamic()
             .content_type(ContentType::Markdown)
             .build();
         let item_json = FileProjection::deferred(Size::Unknown)
             .full()
-            .immutable()
+            .stable()
             .content_type(ContentType::Json)
             .build();
 
@@ -96,7 +96,7 @@ impl ItemData {
         if include_pull_files {
             let diff = FileProjection::deferred(Size::Unknown)
                 .full()
-                .mutable()
+                .dynamic()
                 .content_type(ContentType::Custom("text/x-diff"))
                 .build();
             projection = projection.preload_file("diff", diff);

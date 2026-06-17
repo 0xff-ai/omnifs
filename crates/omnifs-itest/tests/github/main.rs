@@ -1070,8 +1070,8 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
             );
             assert_eq!(
                 project_file_stability(effects, "/octocat/Hello-World/actions/runs/123/conclusion"),
-                Some(Stability::Mutable),
-                "conclusion should be Mutable"
+                Some(Stability::Dynamic),
+                "conclusion should be Dynamic"
             );
         },
         other => panic!("expected run dir listing with preloads, got {other:?}"),
@@ -1304,9 +1304,9 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
             let EntryKind::File(file) = &listing.entries[0].kind else {
                 panic!("expected comment entry to be a file");
             };
-            // comment listing entries use the default Immutable stability;
-            // the Mutable stability is carried on the read result from comment_read.
-            assert_eq!(file.attrs.stability, Stability::Immutable);
+            // comment listing entries use the default Stable stability;
+            // the Dynamic stability is carried on the read result from comment_read.
+            assert_eq!(file.attrs.stability, Stability::Stable);
         },
         other => panic!("expected issue comment listing, got {other:?}"),
     }
@@ -1332,7 +1332,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         .unwrap();
     match issue_page_two.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(
                 omnifs_itest::expect_inline(file),
                 b"octocat:\npage two issue comment\n"
@@ -1353,7 +1353,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         .unwrap();
     match pr_first.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(
                 omnifs_itest::expect_inline(file),
                 b"hubot:\nfirst pr comment\n"
@@ -1383,7 +1383,7 @@ fn github_provider_comment_routes_refetch_and_reject_zero_index() {
         .unwrap();
     match pr_page_two.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(
                 omnifs_itest::expect_inline(file),
                 b"hubot:\npage two pr comment\n"

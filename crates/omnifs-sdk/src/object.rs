@@ -13,7 +13,7 @@ use crate::browse::{Effects, FileContent};
 use crate::captures::FromCaptures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{Stability, VersionToken};
+use crate::file_attrs::VersionToken;
 use crate::identity::{IdentityCaptures, LogicalId};
 use omnifs_core::ContentType;
 
@@ -131,12 +131,6 @@ pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
     /// representation leaf serves these bytes as-is under this type.
     fn canonical_content_type() -> ContentType {
         ContentType::Json
-    }
-
-    /// Default [`Stability`] for leaves projected from this object.
-    /// `Mutable` is the safe default for anything live-edited upstream.
-    fn default_stability() -> Stability {
-        Stability::Mutable
     }
 
     /// Parse the verbatim canonical bytes back into a value. Failures

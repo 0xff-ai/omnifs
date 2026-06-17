@@ -5,7 +5,7 @@ Status: implemented
 ## Summary
 
 The arXiv provider models a paper as a version family. Every readable paper
-artifact belongs to either the mutable `@latest` alias or an immutable numbered
+artifact belongs to either the dynamic `@latest` alias or a stable numbered
 version such as `v1`. There are no direct files under the paper directory.
 
 The surface is:
@@ -46,8 +46,8 @@ children look like a different resource class than numbered version children.
 
 The version-first surface removes that ambiguity:
 
-- `@latest` is a mutable alias to the latest version known from the Atom feed.
-- `vN` is an immutable version selector.
+- `@latest` is a dynamic alias to the latest version known from the Atom feed.
+- `vN` is a stable version selector.
 - The paper directory is only the version-family root.
 - `paper.atom`, `paper.json`, `paper.pdf`, and `source.tar.gz` always live under
   a version selector.
@@ -126,7 +126,7 @@ canonical bytes. The listing is exhaustive once the Atom is loaded.
 /{paper}/@latest/source.tar.gz
 ```
 
-`@latest/*` leaves are mutable because the upstream paper can receive a new
+`@latest/*` leaves are dynamic because the upstream paper can receive a new
 version and the alias can move.
 
 ### Numbered versions
@@ -140,7 +140,7 @@ version and the alias can move.
 /{paper}/vN/source.tar.gz
 ```
 
-`vN/*` leaves are immutable.
+`vN/*` leaves are stable.
 
 There are no direct `paper.*` or `source.tar.gz` leaves under `{paper}`, and no
 `versions/` subtree. Every readable artifact lives under a version selector. A
@@ -167,10 +167,10 @@ current paper metadata plus a concrete version selector.
 
 `paper.pdf` and `source.tar.gz` are blob-backed path reads:
 
-- `@latest/paper.pdf` fetches `/pdf/{paper}.pdf` and is mutable.
-- `@latest/source.tar.gz` fetches `/e-print/{paper}` and is mutable.
-- `vN/paper.pdf` fetches `/pdf/{paper}vN.pdf` and is immutable.
-- `vN/source.tar.gz` fetches `/e-print/{paper}vN` and is immutable.
+- `@latest/paper.pdf` fetches `/pdf/{paper}.pdf` and is dynamic.
+- `@latest/source.tar.gz` fetches `/e-print/{paper}` and is dynamic.
+- `vN/paper.pdf` fetches `/pdf/{paper}vN.pdf` and is stable.
+- `vN/source.tar.gz` fetches `/e-print/{paper}vN` and is stable.
 
 Blob cache keys are version-scoped, so `@latest` (unpinned arXiv URLs) and `vN`
 (version-pinned arXiv URLs) never collide:

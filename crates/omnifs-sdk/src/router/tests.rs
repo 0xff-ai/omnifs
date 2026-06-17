@@ -199,8 +199,21 @@ impl FacetedKey {
 fn demo_handle() -> Result<ObjectHandle<DemoObj>> {
     object("/items/{id}", |o| {
         o.representations("item", (Markdown,))?;
+        o.dynamic();
         Ok(())
     })
+}
+
+#[test]
+fn object_without_stability_fails_to_finish() {
+    let result = object::<DemoObj>("/items/{id}", |o| {
+        o.representations("item", (Markdown,))?;
+        Ok(())
+    });
+    let Err(err) = result else {
+        panic!("an object block that declares no stability must fail to finish");
+    };
+    assert_eq!(err.kind(), ProviderErrorKind::InvalidInput);
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +283,7 @@ fn seal_rejects_overlapping_routes() {
     router
         .object::<DemoObj>("/items/{id}", |o| {
             o.representations("item", (Markdown,))?;
+            o.dynamic();
             Ok(())
         })
         .unwrap();
@@ -282,6 +296,7 @@ fn seal_rejects_overlapping_routes() {
 fn object_listing_includes_top_level_handler_leaves_only() {
     let handle = object("/items/{id}", |o| {
         o.representations("item", (Markdown,))?;
+        o.dynamic();
         o.file("summary")
             .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"summary").build()) })?;
         o.dir("comments").handler(|_cx: DirCx<()>| async {
@@ -317,12 +332,13 @@ fn object_listing_includes_top_level_handler_leaves_only() {
 }
 
 #[test]
-fn projected_leaf_modifiers_apply_to_pending_leaf() {
+fn lazy_excluded_eager_leaves_inherit_object_stability() {
     let handle = object("/items/{id}", |o| {
         o.representations("item", (Markdown,))?;
+        o.dynamic();
         o.file("title").project(DemoObj::title)?;
         o.file("body").lazy().project(DemoObj::body)?;
-        o.file("state").immutable().project(DemoObj::state)?;
+        o.file("state").project(DemoObj::state)?;
         Ok(())
     })
     .unwrap();
@@ -360,10 +376,10 @@ fn projected_leaf_modifiers_apply_to_pending_leaf() {
     assert_eq!(
         projected,
         vec![
-            ("/items/42/state", wit_types::Stability::Immutable),
-            ("/items/42/title", wit_types::Stability::Mutable),
+            ("/items/42/state", wit_types::Stability::Dynamic),
+            ("/items/42/title", wit_types::Stability::Dynamic),
         ],
-        "lazy body must not eager-project, and stability must apply to the pending state leaf"
+        "lazy body must not eager-project; every eager leaf carries the object's stability"
     );
 }
 
@@ -373,6 +389,7 @@ fn route_shape_tracks_object_handler_leaves() {
     router
         .object::<DemoObj>("/items/{id}", |o| {
             o.representations("item", (Markdown,))?;
+            o.dynamic();
             o.file("summary")
                 .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"summary").build()) })?;
             o.dir("comments").handler(|_cx: DirCx<()>| async {

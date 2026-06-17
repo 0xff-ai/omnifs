@@ -326,7 +326,7 @@ fn omnifs_export_positive_cache_evidence_beats_expected_negative_probe() {
         let attrs = FileAttrsCache {
             size: view_types::FileSize::Exact(5),
             bytes: view_types::ByteSource::Inline(b"live\n".to_vec()),
-            stability: view_types::Stability::Mutable,
+            stability: view_types::Stability::Dynamic,
             version_token: None,
         };
         let dirents = DirentsPayload {
@@ -367,7 +367,7 @@ fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
     let attrs = FileAttrsCache {
         size: view_types::FileSize::Unknown,
         bytes: view_types::ByteSource::Inline(b"live\n".to_vec()),
-        stability: view_types::Stability::Mutable,
+        stability: view_types::Stability::Dynamic,
         version_token: None,
     };
     let dirents = DirentsPayload {

@@ -151,6 +151,7 @@ impl LinearProvider {
         r.dir("/teams/{team}/issues/{filter}")
             .handler(IssueListKey::list)?;
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
+            o.dynamic();
             o.representations("item", (Markdown,))?;
             o.file("title").project(Issue::title)?;
             o.file("state").project(Issue::state)?;

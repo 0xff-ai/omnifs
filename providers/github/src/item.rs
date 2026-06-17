@@ -379,7 +379,7 @@ impl PullKey {
             .error_for_status()?;
         Ok(FileProjection::blob(blob.id())
             .size(Size::Exact(blob.size))
-            .mutable()
+            .dynamic()
             .content_type(ContentType::Custom("text/x-diff"))
             .build())
     }
@@ -414,13 +414,13 @@ impl RunListKey {
                 .preload_file(
                     format!("{base}/status"),
                     FileProjection::inline(run.status.clone().into_bytes())
-                        .mutable()
+                        .dynamic()
                         .build(),
                 )
                 .preload_file(
                     format!("{base}/conclusion"),
                     FileProjection::inline(run.conclusion.clone().unwrap_or_default().into_bytes())
-                        .mutable()
+                        .dynamic()
                         .build(),
                 );
         }
@@ -436,7 +436,7 @@ impl RunKey {
             .send()
             .await?;
         let body = github_check_status(resp)?.into_body();
-        Ok(FileProjection::body(unzip_logs(&body)).mutable().build())
+        Ok(FileProjection::body(unzip_logs(&body)).dynamic().build())
     }
 }
 
@@ -484,7 +484,7 @@ async fn comment_read(
     let body = comment.body.as_deref().unwrap_or("");
     Ok(
         FileProjection::body(format!("{}:\n{body}\n", comment.user.login).into_bytes())
-            .mutable()
+            .dynamic()
             .build(),
     )
 }

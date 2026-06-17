@@ -31,7 +31,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::clock::{self, MUTABLE_TTL_MILLIS};
+use crate::clock::{self, DYNAMIC_TTL_MILLIS};
 use crate::object_id::ObjectId;
 use crate::op::Op;
 use crate::op_validate;
@@ -417,7 +417,7 @@ impl Runtime {
             &protocol_path(path),
             id_bytes.as_deref(),
             op_gen,
-            MUTABLE_TTL_MILLIS,
+            DYNAMIC_TTL_MILLIS,
             now_millis,
         );
     }

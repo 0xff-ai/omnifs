@@ -11,6 +11,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
 - **Fix:** A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
 - **Improvement:** Kubernetes provider unit tests have been ported to host-driven integration tests, exercising the provider through the same code path as real consumers. (#127)
+- **Breaking:** The stability levels are renamed: `Immutable`/`Mutable`/`Volatile` are now `stable`/`dynamic`/`live`, freeing the old words for a future write model. (#132)
+- **Breaking:** Every object must now declare its stability (`o.stable()`, `o.dynamic()`, `o.live()`, or a key-dependent closure); there is no default. Omitting it is a build error, which prevents pinned identities from being silently treated as `dynamic` and given needless cache TTLs and eviction. (#132)
 
 ### Runtime & mounts
 - **Feature:** `omnifsd` can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.

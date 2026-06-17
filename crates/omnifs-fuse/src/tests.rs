@@ -280,7 +280,7 @@ impl FuseHarness {
         };
         self.fs
             .prefetch_full_file_on_open(&target, None)
-            .expect("mutable full prefetch succeeds")
+            .expect("dynamic full prefetch succeeds")
             .expect("unknown full file prefetches on open");
         let bytes = self
             .fs
@@ -555,7 +555,7 @@ fn mutable_unversioned_full_prefetch_is_per_handle_not_durable() {
     let runtime = h.fs.runtime_for_mount(FuseHarness::MOUNT).expect("runtime");
     assert!(
         runtime.cache_get(path, RecordKind::File, None).is_none(),
-        "unversioned mutable full-read bytes must not be written to durable view cache",
+        "unversioned dynamic full-read bytes must not be written to durable view cache",
     );
 }
 
@@ -922,7 +922,7 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
     );
 }
 
-// Proves the omnifs side of `tail -f`: opening a volatile ranged file spawns a
+// Proves the omnifs side of `tail -f`: opening a live ranged file spawns a
 // follow pump whose upstream probes advance the size `getattr` reports, between
 // the follower's own reads. Composed with the standalone FUSE spike (which
 // proved a polling `tail -f` reads forward whenever that size grows under
@@ -937,7 +937,7 @@ fn volatile_follow_pump_advances_reported_size() {
 
     // Drive the real lookup->open path: the inode carries only the cheap
     // Deferred(Full) lookup placeholder, and `open_ranged_file` probes
-    // `open_file` to discover the file is actually ranged + volatile.
+    // `open_file` to discover the file is actually ranged + live.
     let (attrs, synthetic) =
         h.fs.inodes
             .get(&ino)
@@ -952,9 +952,7 @@ fn volatile_follow_pump_advances_reported_size() {
         attrs,
         synthetic,
     };
-    let flags =
-        h.fs.open_ranged_file(&target)
-            .expect("open ranged volatile");
+    let flags = h.fs.open_ranged_file(&target).expect("open ranged live");
     assert!(flags.is_some(), "ranged open serves direct I/O");
 
     // The size getattr would report to the kernel: the read-promoted inode size
@@ -1006,7 +1004,7 @@ fn volatile_follow_pump_probes_from_foreground_eof() {
         synthetic,
     };
     h.fs.open_ranged_file(&target)
-        .expect("open ranged volatile")
+        .expect("open ranged live")
         .expect("ranged open serves direct I/O");
 
     let foreground_eof = 4096;

@@ -20,7 +20,7 @@ Everything else follows from this. The WIT read interface is byte-level; the hos
 Two path kinds exist, and the host cannot tell them apart (it sees only file attributes and which byte op it invokes):
 
 - **Object** (a promotion). Content with a single canonical model rendered into one or more content-typed Representations. Reach for it when content renders to multiple representations, the same entity is reachable at multiple paths, or you want object-level revalidation. Object is not the default; it is earned.
-- **Structural file** (the default). A single-format file served as direct bytes under the file-attributes contract, with no canonical model behind it. `Stability::Volatile` content (live logs, `tail -f`, direct IO) can never be an Object: a canonical model is a finite snapshot and a Version cannot be honest for a moving target.
+- **Structural file** (the default). A single-format file served as direct bytes under the file-attributes contract, with no canonical model behind it. `Stability::Live` content (live logs, `tail -f`, direct IO) can never be an Object: a canonical model is a finite snapshot and a Version cannot be honest for a moving target.
 
 Identity is two-layer, and the layering is the security boundary: `LogicalId = (Object::kind(), normalized non-Facet captures)` is computed in the provider; `ObjectId = (mount, LogicalId)` is formed by the host. Mount-prefixing every object/view/reverse/negative/tombstone key is what stops two GitHub mounts with different credentials from sharing private canonical bytes for the same `owner/repo/number`. The WIT carries `logical-id { kind, captures }`; the host resolves a path to an id by exact map lookup, never a prefix probe (`crates/omnifs-cache/src/object.rs`).
 
@@ -36,9 +36,9 @@ The host owns storage as plain bytes. It owns no semantics. There are exactly th
 
 Read path: on a view miss the host resolves the path to a logical id by exact map lookup and **pushes** the cached canonical (`canonical-input { id, validator, bytes }`) into `read-file`; the SDK self-checks the pushed id against its route-derived id and renders without an upstream call (`crates/omnifs-sdk/src/router/object.rs`). There is no `canonical-read` callout; the host pushes, the provider never pulls. Identity representations (`byte-source::canonical`) live only in the object cache and are never copied into the view cache.
 
-Eviction and coherence: there is **no TTL on canonical bytes**; an object entry leaves only by capacity eviction or explicit invalidation, and capacity eviction drops the canonical and its validator atomically (no stranded validator). Object overwrite drops the object's prior rendered view leaves but unions (never removes) its alias set; `invalidate object(id)` is the only operation that removes path-to-id entries. View leaves, by contrast, **do** carry a `Stability`-derived freshness deadline: `Mutable` is `now + 3000ms`, `Volatile` is `now` (immediate), `Immutable` has none (`crates/omnifs-host/src/materialize.rs`, `clock.rs`; `crates/omnifs-cache/src/lib.rs`). So "no TTL" is precise for the object cache and wrong for the view layer; providers still add no TTLs or LRUs of their own.
+Eviction and coherence: there is **no TTL on canonical bytes**; an object entry leaves only by capacity eviction or explicit invalidation, and capacity eviction drops the canonical and its validator atomically (no stranded validator). Object overwrite drops the object's prior rendered view leaves but unions (never removes) its alias set; `invalidate object(id)` is the only operation that removes path-to-id entries. View leaves, by contrast, **do** carry a `Stability`-derived freshness deadline: `Dynamic` is `now + 3000ms`, `Live` is `now` (immediate), `Stable` has none (`crates/omnifs-host/src/materialize.rs`, `clock.rs`; `crates/omnifs-cache/src/lib.rs`). So "no TTL" is precise for the object cache and wrong for the view layer; providers still add no TTLs or LRUs of their own.
 
-A per-mount **generation + tombstone fence** rejects a write derived from data read before a concurrent invalidation. It is in-memory and resets on restart; resetting the generation to 0 is safe because the only thing it fences (rendered view bytes, in-flight loads) does not survive restart, and a lost tombstone self-corrects via `Mutable` revalidation (`crates/omnifs-cache/src/lib.rs`).
+A per-mount **generation + tombstone fence** rejects a write derived from data read before a concurrent invalidation. It is in-memory and resets on restart; resetting the generation to 0 is safe because the only thing it fences (rendered view bytes, in-flight loads) does not survive restart, and a lost tombstone self-corrects via `Dynamic` revalidation (`crates/omnifs-cache/src/lib.rs`).
 
 ## 4. Effects: the only host-mutation channel
 
@@ -80,7 +80,7 @@ Subtree handoff is result data, not a host mutation: a `subtree(tree-ref)` looku
 
 Every projected file carries `FileAttrs { size, stability, version }` (bytes are deliberately not an attribute; byte availability is a separate `ProjBytes` / WIT `byte-source`). The structural rules bind (enforced in `crates/omnifs-sdk/src/file_attrs.rs` and re-checked host-side in `crates/omnifs-core/src/view.rs`):
 
-- `Stability::Volatile` requires `Bytes::Deferred { read: Ranged }`; inline and whole-file reads cannot model bytes that change mid-observation. The SDK typestate makes `.volatile()` reachable only on a `Ranged` builder.
+- `Stability::Live` requires `Bytes::Deferred { read: Ranged }`; inline and whole-file reads cannot model bytes that change mid-observation. The SDK typestate makes `.live()` reachable only on a `Ranged` builder.
 - `Bytes::Inline` requires `Size::Exact(len)`, capped at 64 KiB; the aggregate eager-byte cap per terminal is 512 KiB.
 - Unknown and NonZero sizes report a truthful `st_size = 1` sentinel (never 0, which makes tools skip the file as empty; never a large fake value, which breaks `tail -n` / `tar c`). The exact size is learned and promoted on a complete read; unknown-size files open with `FOPEN_DIRECT_IO` so the page cache cannot serve a truncated read against the sentinel.
 - Stat-size and read-termination are decoupled: read termination never depends on a stat-size guess. Sizes are learned only by flowing real read bytes through the cache; there is no HEAD-probing on stat.
@@ -127,5 +127,5 @@ The past decisions that still govern the system today, condensed (each lives in 
 - `Stability` drives the view-leaf deadline; the object cache itself is deadline-less (section 3).
 - The fence is runtime-only and resets on restart (section 3).
 - Listing honesty: exhaustive only when enumerated, cap becomes open, never a fake cursor (section 6).
-- Object is an optional promotion; structural files are first-class and the default; Volatile is always structural and ranged (sections 2, 8).
+- Object is an optional promotion; structural files are first-class and the default; Live is always structural and ranged (sections 2, 8).
 - Capabilities come from the provider manifest, not runtime caps (section 10); providers never hold tokens (section 10).

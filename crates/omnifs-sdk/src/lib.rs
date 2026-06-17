@@ -114,7 +114,7 @@
 //! - Freshness is event-driven, not TTL-driven: emit invalidations from
 //!   event handlers, or attach [`file_attrs::VersionToken`]s so conditional
 //!   reloads (`Load::Unchanged`) are cheap.
-//! - [`file_attrs::Stability::Volatile`] content (changes mid-read) must use
+//! - [`file_attrs::Stability::Live`] content (changes mid-read) must use
 //!   deferred ranged reads; the projection validator enforces this.
 //!
 //! # Module map

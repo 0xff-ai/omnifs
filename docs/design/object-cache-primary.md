@@ -242,7 +242,7 @@ The object cache (precious, low write rate) is **durable and global**; the view 
 
 Budgets: object DB global LRU; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
 
-"No TTL" is precise only for the object cache: canonical bytes carry no time deadline and leave by capacity eviction or explicit invalidation. View leaves do carry a `Stability`-derived freshness deadline: `freshness_expiry` sets a `Mutable` leaf to `now + 3000ms` and a `Volatile` leaf to `now` (immediate), and `view_get` drops a leaf past its deadline (`crates/omnifs-host/src/clock.rs`, `materialize.rs`; `crates/omnifs-cache/src/lib.rs`). The negative cache likewise carries TTLs. Providers still add no TTLs or LRUs of their own.
+"No TTL" is precise only for the object cache: canonical bytes carry no time deadline and leave by capacity eviction or explicit invalidation. View leaves do carry a `Stability`-derived freshness deadline: `freshness_expiry` sets a `Dynamic` leaf to `now + 3000ms` and a `Live` leaf to `now` (immediate), and `view_get` drops a leaf past its deadline (`crates/omnifs-host/src/clock.rs`, `materialize.rs`; `crates/omnifs-cache/src/lib.rs`). The negative cache likewise carries TTLs. Providers still add no TTLs or LRUs of their own.
 
 ## Tradeoffs accepted
 

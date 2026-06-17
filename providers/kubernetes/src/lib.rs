@@ -199,6 +199,7 @@ fn register_routes(r: &mut Router<State>) -> Result<()> {
     r.dir("/namespaces/{ns}/{rtype}")
         .handler(ns_resources_dir)?;
     r.object::<NamespacedResource>("/namespaces/{ns}/{rtype}/{name}", |o| {
+        o.dynamic();
         o.representations("manifest", (Yaml,))?;
         o.file("status.yaml")
             .project(NamespacedResource::status_yaml)?;
@@ -214,6 +215,7 @@ fn register_routes(r: &mut Router<State>) -> Result<()> {
     r.dir("/cluster").handler(cluster_types_dir)?;
     r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
     r.object::<ClusterResource>("/cluster/{rtype}/{name}", |o| {
+        o.dynamic();
         o.representations("manifest", (Yaml,))?;
         o.file("status.yaml")
             .project(ClusterResource::status_yaml)?;
@@ -333,7 +335,7 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
     let reader = PodLogReader::new(endpoint, key.ns.as_str(), key.name.as_str(), container);
     Ok(FileProjection::ranged(reader)
         .size(Size::Unknown)
-        .volatile()
+        .live()
         .build())
 }
 

@@ -157,7 +157,7 @@ fn version_blob_immutable_latest_mutable() {
     resume_blob(&mut version_pdf_step, 1);
     match version_pdf_step.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Immutable);
+            assert_eq!(file.attrs.stability, Stability::Stable);
         },
         other => panic!("expected version pdf, got {other:?}"),
     }
@@ -185,7 +185,7 @@ fn version_blob_immutable_latest_mutable() {
     resume_blob(&mut latest_pdf_step, 2);
     match latest_pdf_step.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_ne!(file.attrs.stability, Stability::Immutable);
+            assert_ne!(file.attrs.stability, Stability::Stable);
         },
         other => panic!("expected latest pdf, got {other:?}"),
     }

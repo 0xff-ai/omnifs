@@ -17,7 +17,7 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 4. **Never write stub handlers for intermediate directories.** Any registered route's literal prefix is auto-navigable; listings merge your enumeration with literal sibling routes at that depth.
 5. **Capture parse rejection = fallthrough**, not NotFound: the route becomes a non-candidate and dispatch tries the next-most-specific route. Use it (e.g. `@latest` vs `v{n}` selectors as distinct types).
 6. **Captures validate syntax only.** Existence is decided by handlers, lookup intent, or `Key::load`. Exception: a finite `choices()` set when the universe is truly static or a dynamic route would otherwise synthesize false anchors (the DB provider's table-name case).
-7. **Attribute honesty.** Inline bytes require `Size::Exact(len)` and are capped at 64 KiB (`MAX_PROJECTED_BYTES`); bigger or unknown content is deferred. `Stability::Volatile` requires `Deferred { read: Ranged }` (the validator rejects anything else). Mutable upstream = mutable projection; versioned upstream = immutable projection.
+7. **Attribute honesty.** Inline bytes require `Size::Exact(len)` and are capped at 64 KiB (`MAX_PROJECTED_BYTES`); bigger or unknown content is deferred. `Stability::Live` requires `Deferred { read: Ranged }` (the validator rejects anything else). Dynamic upstream = dynamic projection; versioned upstream = stable projection.
 8. **Identity vs facets.** A key's non-`Facet` fields, in declaration order, ARE the object's identity (its logical id and cache key). Route-context captures that must not split the cache (list filter, version selector, team alias) are `Facet<T>`. Changing an object's `kind` string or identity captures orphans every cached object.
 9. **Auth never appears in provider code.** Credentials are declared in `omnifs.provider.json` and materialized into requests by the host. `#[endpoint(auth = ..)]` is rejected at compile time by design.
 10. **Reuse the SDK, stdlib, and imported crates before writing plumbing.** Check `omnifs-sdk` projections, endpoint helpers, object/load APIs, typed captures, `time`, `url`, `serde_json`, `strum`, and other already-present workspace dependencies before adding local parsers, date math, enum tables, HTTP glue, cache shims, or projection helpers.
@@ -35,7 +35,7 @@ Decide per route family, not per provider; hybrids are normal (arxiv, github).
 | Is there ONE canonical upstream payload (an issue, a paper, a PR) serving several derived leaves (`title`, `body`, `item.json`)? | yes | **Object-oriented**: `r.object::<O>(template, \|o\| ..)` with `#[omnifs_sdk::object]` + a `#[path_captures]` key implementing `Key::load` |
 | Is the data a query result or operational state with no durable object behind it (DNS answer, `docker ps`, a DB row read, live metrics)? | yes | **Path-oriented**: `r.dir`/`r.file` handlers returning fresh bytes with honest stability; emit NO canonical-store effects |
 | Is the subtree a real tree the host can materialize wholesale (git repo, release archive)? | yes | **Treeref handoff**: `r.treeref(template).handler(..)` returning `TreeRef`; provider dispatch stops there |
-| Is a leaf a mutable alias of a versioned resource (`@latest` vs `vN`)? | yes | Version selector as a `Facet` route capture; numbered versions immutable, the alias mutable (arxiv pattern) |
+| Is a leaf a dynamic alias of a versioned resource (`@latest` vs `vN`)? | yes | Version selector as a `Facet` route capture; numbered versions stable, the alias dynamic (arxiv pattern) |
 | Is it a list/discovery route whose upstream payload already carries object fields? | yes | Path-oriented discovery handler that eager-projects the object leaves it can vouch for, deferred files for the rest (github/linear pattern) |
 | Tempted to add an object so something gets cached? | stop | If there is no canonical payload, a fake object corrupts the cache model. Path-oriented + honest stability is correct |
 
@@ -82,7 +82,7 @@ impl ExampleProvider {
                     .get(format!("/items/{}", key.id))
                     .json()
                     .await?;
-                Ok(FileProjection::body(item.title).mutable().build())
+                Ok(FileProjection::body(item.title).dynamic().build())
             },
         )?;
         Ok(State::from(config))
@@ -151,7 +151,7 @@ The contract that makes caching work: `Load::Fresh` must carry the **verbatim** 
 
 ## Events and freshness
 
-`events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Effects>`; emit invalidations there (`Effects` carries `invalidations` for objects and listing paths/prefixes). Non-timer provider events are currently swallowed with empty effects. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per mutable route family.
+`events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Effects>`; emit invalidations there (`Effects` carries `invalidations` for objects and listing paths/prefixes). Non-timer provider events are currently swallowed with empty effects. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
 
 ## Manifest (`omnifs.provider.json`)
 

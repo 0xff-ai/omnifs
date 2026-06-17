@@ -371,7 +371,7 @@ struct ListItemMeta {
 const INITIAL_TAIL_LINES: u32 = 2000;
 
 /// Offset-addressable, append-only reader for one pod container's log. Backs
-/// the `Volatile`/`Ranged` `<container>.log` leaf so the host follow pump and a
+/// the `Live`/`Ranged` `<container>.log` leaf so the host follow pump and a
 /// `tail -f` see the log grow: each read at or past the buffered end
 /// delta-fetches new lines (kubectl-style `Accept: */*`, `timestamps=true` for
 /// a resume marker, `sinceTime` to bound the fetch) and appends them with the
@@ -573,6 +573,6 @@ fn render_event_list(list: EventList) -> String {
 pub(crate) fn text_file(bytes: Vec<u8>) -> FileProjection {
     FileProjection::body(bytes)
         .content_type(ContentType::Custom("text/plain"))
-        .mutable()
+        .dynamic()
         .build()
 }

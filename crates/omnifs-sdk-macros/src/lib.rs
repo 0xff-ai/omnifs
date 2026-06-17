@@ -76,8 +76,10 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   content type. Non-JSON canonicals require `parse`.
 /// - `parse = path::to::fn`: custom `fn(&[u8]) -> Result<Self>` replacing
 ///   the default serde-JSON `parse_canonical`.
-/// - `stability = Mutable | Immutable | Volatile` (default `Mutable`): the
-///   default stability for the object's projected leaves.
+///
+/// Stability is declared in the object builder, not here: call
+/// `o.stable()` / `o.dynamic()` / `o.live()` for a constant, or
+/// `o.stability(|key| ..)` when it depends on the key.
 #[proc_macro_attribute]
 pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as object_macro::ObjectArgs);

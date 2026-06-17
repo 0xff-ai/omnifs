@@ -465,7 +465,7 @@ fn dns_record_read_is_mutable_not_immutable() {
 
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             let effects = op.effects().unwrap();
             assert!(
                 effects.fs.is_empty(),
