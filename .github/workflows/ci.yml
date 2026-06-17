@@ -19,8 +19,59 @@ env:
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
+  # Decide whether this run executes the build matrix. Every build job
+  # transitively `needs: preflight`, so gating preflight here cascades a skip to
+  # the whole matrix (a skipped dependency skips its dependents). A run skips the
+  # matrix only when the *latest push* to a PR touched nothing but CHANGELOG.md
+  # (the changelog bot's `/changelog` commit), keeping the changelog on its own
+  # track off the build. Status checks are advisory (the `main` ruleset requires
+  # none), so a skip never blocks a merge.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # Detect changes in the *latest push* to a PR (before..after), not the
+      # whole PR diff, so the changelog bot's `/changelog` commit is judged on
+      # its own delta. The step is skipped on a fresh PR or a branch push (no
+      # prior head SHA); `decide` then defaults to running the matrix.
+      - id: filter
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.before != '' &&
+          github.event.before != '0000000000000000000000000000000000000000'
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.before }}
+          ref: ${{ github.event.after }}
+          filters: |
+            code:
+              - '**'
+              - '!CHANGELOG.md'
+      - id: decide
+        env:
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          CODE_CHANGED: ${{ steps.filter.outputs.code }}
+        run: |
+          set -euo pipefail
+          # Skip the matrix only when the filter ran and saw nothing but
+          # CHANGELOG.md in the latest push; otherwise run the full matrix.
+          if [ "$FILTER_OUTCOME" = "success" ] && [ "$CODE_CHANGED" = "false" ]; then
+            code=false
+          else
+            code=true
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "filter_outcome=$FILTER_OUTCOME code_changed=${CODE_CHANGED:-<none>} -> code=$code"
+
   preflight:
     name: preflight
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
