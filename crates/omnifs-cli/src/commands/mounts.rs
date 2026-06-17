@@ -84,11 +84,10 @@ fn ls() -> anyhow::Result<()> {
         let name = crate::style::bold(mount.name.as_str());
         match ctx.catalog().resolve_mount_spec(mount.config.clone(), false) {
             Ok(resolved) => {
-                let provider = resolved
-                    .spec
-                    .provider_id()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| short_provider_name(&resolved.spec.provider));
+                let provider = resolved.spec.provider_id().map_or_else(
+                    || short_provider_name(&resolved.spec.provider),
+                    str::to_owned,
+                );
                 let auth = crate::auth::AuthReadiness::from_config(&resolved, &store)
                     .terminal_row()
                     .summary;
