@@ -62,13 +62,13 @@ impl Frontend {
                         return;
                     };
                     if matches!(ranged.attrs.stability, view_types::Stability::Live) {
-                        // A volatile file (tail -f shapes) is meant to change
+                        // A live file (tail -f shapes) is meant to change
                         // while observed, so a freshly observed end never
                         // contradicts the open-time size. Grow the inode size
                         // monotonically so getattr reports the new length and a
                         // polling reader re-stats and reads the appended bytes.
                         ranged.observed_end.fetch_max(eof_size, Ordering::Relaxed);
-                        self.grow_volatile_size(ino, eof_size);
+                        self.grow_live_size(ino, eof_size);
                     } else {
                         if let Err(error) = ranged.attrs.validate_observed_size(eof_size) {
                             warn!(
@@ -377,7 +377,7 @@ impl Frontend {
             Ok(opened) => {
                 let opened_attrs = opened_file_attrs(&opened.attrs);
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
-                let is_volatile = matches!(opened_attrs.stability, view_types::Stability::Live);
+                let is_live = matches!(opened_attrs.stability, view_types::Stability::Live);
                 let observed_end = Arc::new(AtomicU64::new(0));
                 self.ranged_handles.insert(
                     target.fh,
@@ -390,7 +390,7 @@ impl Frontend {
                         observed_end: Arc::clone(&observed_end),
                     },
                 );
-                if is_volatile {
+                if is_live {
                     self.spawn_follow_pump(
                         target.ino,
                         target.fh,
@@ -580,13 +580,13 @@ impl Frontend {
         entry.attrs = Some(attrs);
     }
 
-    /// Grow a volatile file's cached size from an observed ranged EOF, never
-    /// shrinking. The file stays volatile, so it keeps direct I/O and a zero
-    /// attr TTL (`ttl_for_attrs` only grants the long TTL to immutable exact
+    /// Grow a live file's cached size from an observed ranged EOF, never
+    /// shrinking. The file stays live, so it keeps direct I/O and a zero
+    /// attr TTL (`ttl_for_attrs` only grants the long TTL to stable exact
     /// files), which is what lets a polling `tail -f` see the new size on its
     /// next `stat` and read forward. Rotation/truncation is handled by the
     /// reader reopening, not by a size that moves backwards mid-follow.
-    fn grow_volatile_size(&self, ino: u64, observed_end: u64) {
+    fn grow_live_size(&self, ino: u64, observed_end: u64) {
         let Some(mut entry) = self.inodes.get_mut(&ino) else {
             return;
         };
@@ -599,7 +599,7 @@ impl Frontend {
         }
     }
 
-    /// Spawn a background pump for a volatile file: on a cadence it probes the
+    /// Spawn a background pump for a live file: on a cadence it probes the
     /// provider's `read_chunk` at the current end purely to learn the upstream
     /// size, recording it in `follow_sizes`. `getattr` reports that size, so a
     /// polling `tail -f` re-stats (TTL=0), sees growth, and reads the new bytes

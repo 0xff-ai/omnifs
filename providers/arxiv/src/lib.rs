@@ -188,7 +188,7 @@ pub struct PaperVersionKey {
 }
 
 /// Stability of a paper's canonical and every rendering of it. A numbered
-/// version (`vN`) is a pinned, immutable identity, so `Stable`; the `@latest`
+/// version (`vN`) is a pinned, fixed identity, so `Stable`; the `@latest`
 /// alias moves as the paper gains versions, so `Dynamic`.
 pub(crate) fn paper_stability(key: &PaperVersionKey) -> omnifs_sdk::file_attrs::Stability {
     if key.version.is_numbered() {

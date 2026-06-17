@@ -86,7 +86,7 @@ pub(crate) struct Frontend {
     ranged_handles: DashMap<u64, RangedFileHandle>,
     /// Latest upstream size observed by a per-handle follow pump, keyed by
     /// inode. `getattr` reports `max(entry.size, follow_sizes[ino])` so a
-    /// polling `tail -f` sees a volatile file grow between its own reads.
+    /// polling `tail -f` sees a live file grow between its own reads.
     follow_sizes: Arc<DashMap<u64, u64>>,
     /// Abort handles for follow pumps, keyed by file handle; aborted on release.
     follow_pumps: DashMap<u64, tokio::task::AbortHandle>,

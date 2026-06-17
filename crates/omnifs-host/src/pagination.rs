@@ -280,7 +280,7 @@ impl Runtime {
     }
 }
 
-/// A small volatile file: each `cat` re-fires the control action and directory
+/// A small dynamic file: each `cat` re-fires the control action and directory
 /// recursion never descends through it.
 fn control_entry_meta() -> EntryMeta {
     EntryMeta::file(FileAttrsCache {

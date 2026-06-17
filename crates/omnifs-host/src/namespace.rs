@@ -99,7 +99,7 @@ impl Namespace<'_> {
         }
 
         // Single cache lookup: derive both the warm_id (for coalescing key and
-        // volatile check) and the CanonicalInput (byte buffer for the provider).
+        // live check) and the CanonicalInput (byte buffer for the provider).
         let (warm_id, cached_canonical) = match self.runtime.cache.cached_canonical_for(&path) {
             Some((host_id, bytes, validator)) => {
                 let canonical = ObjectId::from_bytes(host_id.clone()).to_wit().map(|id| {
@@ -114,7 +114,7 @@ impl Namespace<'_> {
             None => (None, None),
         };
 
-        let volatile = warm_id
+        let live = warm_id
             .as_ref()
             .and_then(|_| leaf_stability(self, &path))
             .is_some_and(|s| s == Stability::Live);
@@ -132,7 +132,7 @@ impl Namespace<'_> {
         };
 
         let path_key = path.as_str();
-        let result = if volatile {
+        let result = if live {
             self.runtime.run_op(op, fuse_trace).await?
         } else if let Some(host_id) = warm_id {
             let id_key = hex::encode(&host_id);

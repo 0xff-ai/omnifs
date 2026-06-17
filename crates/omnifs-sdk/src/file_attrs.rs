@@ -3,7 +3,7 @@
 //!
 //! These attributes are the contract the host derives filesystem behavior
 //! from: the `st_size` reported before any read, kernel attribute/content
-//! caching policy, direct I/O and the ranged live path for volatile files,
+//! caching policy, direct I/O and the ranged live path for live files,
 //! and version-keyed durable content caching. Declare only what you actually
 //! know; the host learns the rest (for example the real size after the
 //! first read). Lying here breaks standard tools: an inflated size breaks

@@ -12,7 +12,7 @@ use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta, Stability};
 use tracing::{debug, warn};
 
-use crate::clock::MUTABLE_TTL_MILLIS;
+use crate::clock::DYNAMIC_TTL_MILLIS;
 use crate::object_id::ObjectId;
 use crate::pagination;
 use crate::projection::{self, push_projected_entry, push_projected_file_content};
@@ -284,7 +284,7 @@ impl<'a> Materializer<'a> {
             child_path,
             id_bytes.as_deref(),
             op_gen,
-            MUTABLE_TTL_MILLIS,
+            DYNAMIC_TTL_MILLIS,
             now_millis,
         );
     }
@@ -377,7 +377,7 @@ fn split_projected_path(path: &str) -> Option<(Path, String)> {
 fn freshness_expiry(stability: Stability, now_millis: u64) -> Option<u64> {
     match stability {
         Stability::Stable => None,
-        Stability::Dynamic => Some(now_millis.saturating_add(MUTABLE_TTL_MILLIS)),
+        Stability::Dynamic => Some(now_millis.saturating_add(DYNAMIC_TTL_MILLIS)),
         Stability::Live => Some(now_millis),
     }
 }

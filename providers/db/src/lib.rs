@@ -242,7 +242,7 @@ impl TableLeaf {
                 requested = requested.dynamic();
             },
             Stability::Live => {
-                return Err(ProviderError::internal("table leaves cannot be volatile"));
+                return Err(ProviderError::internal("table leaves cannot be live"));
             },
         }
         if let Some(version) = attrs.version {

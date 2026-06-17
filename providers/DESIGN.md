@@ -35,7 +35,7 @@ selector. The paper route is a version family:
 /categories/{category}/papers/{paper}/vN/...
 ```
 
-`@latest` is mutable. Numbered versions are immutable. The version selector is
+`@latest` is dynamic. Numbered versions are stable. The version selector is
 a route facet, not part of paper identity. Direct paper leaves and the old
 `versions/` directory are removed.
 
@@ -62,7 +62,7 @@ object cache.
 Flavor: path-oriented.
 
 DNS answers are query results, not durable objects. Domain and resolver captures
-are validated path segments, and record files are mutable query leaves. The
+are validated path segments, and record files are dynamic query leaves. The
 provider should stay direct: routes call resolver policy, resolver policy owns
 default versus named resolver selection, and there is no fake DNS object cache.
 
@@ -143,9 +143,9 @@ right attributes instead of pretending the list row is canonical.
 
 ### Stability
 
-Mutable upstream resources are mutable projections. Versioned upstream
-resources are immutable projections. Local database snapshots use backend
-validators when available. Volatile files require ranged reads.
+Dynamic upstream resources are dynamic projections. Versioned upstream
+resources are stable projections. Local database snapshots use backend
+validators when available. Live files require ranged reads.
 
 ### Errors
 
@@ -162,7 +162,7 @@ helper only to rename the error.
 - [x] Add `@latest` and `vN` path capture support.
 - [x] Keep version as a facet, not canonical paper identity.
 - [x] Make the paper root list `@latest` plus numbered versions from Atom.
-- [x] Mark `@latest` leaves mutable and numbered version leaves immutable.
+- [x] Mark `@latest` leaves dynamic and numbered version leaves stable.
 - [x] Remove provider-local paper cache.
 - [x] Reject old direct paper leaves and old `versions/` paths in tests.
 

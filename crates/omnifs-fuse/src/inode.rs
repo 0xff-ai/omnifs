@@ -470,7 +470,7 @@ mod tests {
                 let existing = attrs(view_types::FileSize::Exact(42), None);
                 let incoming = attrs(view_types::FileSize::Unknown, None);
                 RefreshCase {
-                    name: "unversioned mutable refresh keeps learned exact",
+                    name: "unversioned dynamic refresh keeps learned exact",
                     existing: existing.clone(),
                     incoming,
                     expected: existing,
@@ -488,7 +488,7 @@ mod tests {
                     None,
                 );
                 RefreshCase {
-                    name: "immutable silent refresh keeps learned exact",
+                    name: "stable silent refresh keeps learned exact",
                     existing: existing.clone(),
                     incoming,
                     expected: existing,

@@ -17,7 +17,7 @@ A Linear provider for omnifs. Exposes Linear teams and issues as a virtual files
 /linear/teams/{KEY}/issues/{filter}/{KEY-N}/description.md  # markdown body
 ```
 
-Each issue file declares `Stability::Mutable` with `version=updatedAt`,
+Each issue file declares `Stability::Dynamic` with `version=updatedAt`,
 so the host can reuse cached content across opens until Linear's
 `updatedAt` advances.
 

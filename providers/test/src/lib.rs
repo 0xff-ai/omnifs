@@ -368,7 +368,7 @@ async fn fresh_full(cx: Cx<State>) -> Result<FileProjection> {
 }
 
 // ===========================================================================
-// Ranged / unknown-size / volatile files
+// Ranged / unknown-size / live files
 // ===========================================================================
 
 async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
@@ -500,7 +500,7 @@ async fn checkout(_cx: Cx<State>) -> Result<TreeRef> {
 }
 
 // ===========================================================================
-// Live-tail range reader for the volatile file
+// Live-tail range reader for the live file
 // ===========================================================================
 
 #[derive(Clone, Debug)]

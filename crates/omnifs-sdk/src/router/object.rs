@@ -925,26 +925,7 @@ fn serve_fresh<O: Object>(
     effects: Effects,
 ) -> Result<ReadOutcome> {
     match target {
-        ObjectReadTarget::Projected(name) => {
-            for leaf in ctx.leaves {
-                if let ObjectLeaf::Projected {
-                    leaf_name,
-                    project,
-                    content_type,
-                    ..
-                } = leaf
-                    && leaf_name == &name
-                {
-                    let mut content = project(value)?;
-                    let size = content_size(&content);
-                    content = content
-                        .with_content_type(*content_type)
-                        .with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
-                    return Ok(ReadOutcome::Found(content.with_effects(effects)));
-                }
-            }
-            Err(ProviderError::not_found(format!("field {name} not found")))
-        },
+        ObjectReadTarget::Projected(name) => serve_projected(value, &name, ctx, effects),
         ObjectReadTarget::Representation(ct) => serve_from_canonical::<O>(
             ObjectReadTarget::Representation(ct),
             bytes,
@@ -987,26 +968,38 @@ fn serve_from_canonical<O: Object>(
         },
         ObjectReadTarget::Projected(name) => {
             let value = O::parse_canonical(bytes)?;
-            for leaf in ctx.leaves {
-                if let ObjectLeaf::Projected {
-                    leaf_name,
-                    project,
-                    content_type,
-                    ..
-                } = leaf
-                    && leaf_name == &name
-                {
-                    let mut content = project(&value)?;
-                    let size = content_size(&content);
-                    content = content
-                        .with_content_type(*content_type)
-                        .with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
-                    return Ok(ReadOutcome::Found(content.with_effects(effects)));
-                }
-            }
-            Err(ProviderError::not_found(format!("field {name} not found")))
+            serve_projected(&value, &name, ctx, effects)
         },
     }
+}
+
+/// Serve a projected field leaf by name from an already-parsed object value,
+/// stamping the object's `stability`. Shared by the warm/fresh path (value in
+/// hand) and the canonical re-render path (value parsed from pushed bytes).
+fn serve_projected<O: Object>(
+    value: &O,
+    name: &str,
+    ctx: ServeCtx<'_, O>,
+    effects: Effects,
+) -> Result<ReadOutcome> {
+    for leaf in ctx.leaves {
+        if let ObjectLeaf::Projected {
+            leaf_name,
+            project,
+            content_type,
+            ..
+        } = leaf
+            && leaf_name == name
+        {
+            let mut content = project(value)?;
+            let size = content_size(&content);
+            content = content
+                .with_content_type(*content_type)
+                .with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
+            return Ok(ReadOutcome::Found(content.with_effects(effects)));
+        }
+    }
+    Err(ProviderError::not_found(format!("field {name} not found")))
 }
 
 /// The per-mount facet axes: which template segments are identity-neutral

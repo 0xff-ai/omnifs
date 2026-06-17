@@ -3,7 +3,7 @@
 use omnifs_cache::{BatchRecord, RecordKind};
 use omnifs_core::view::{AttrPayload, FilePayload, LookupPayload};
 use omnifs_host::Error;
-use omnifs_host::clock::MUTABLE_TTL_MILLIS;
+use omnifs_host::clock::DYNAMIC_TTL_MILLIS;
 use omnifs_host::wit_protocol;
 use omnifs_itest::make_initialized_runtime;
 use omnifs_wit::provider::types::{
@@ -346,7 +346,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
     assert!(
         harness
             .runtime
-            .negative_for(path, now + MUTABLE_TTL_MILLIS + 1)
+            .negative_for(path, now + DYNAMIC_TTL_MILLIS + 1)
             .is_none(),
         "negative expires after TTL"
     );

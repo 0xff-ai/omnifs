@@ -106,7 +106,7 @@ grep -r --include=manifest.yaml image: /omnifs/k8s/namespaces/default
   `events.txt` cover the same information for v1.
 - **Pod logs** are a current-logs snapshot per container (equivalent to
   `kubectl logs <pod> -c <container>`). Streaming follow (`tail -f`),
-  `--previous`, and `--timestamps` are follow-ups (they need the ranged/volatile
+  `--previous`, and `--timestamps` are follow-ups (they need the ranged/live
   file path / extra log options).
 - **Listings** issue a single unpaginated `LIST` (the API returns the full
   collection — no silent truncation). Chunked listing (`limit`/`continue`, as

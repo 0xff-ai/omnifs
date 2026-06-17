@@ -233,7 +233,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
             .runtime
             .cache_get(path, RecordKind::File, None)
             .is_none(),
-        "unversioned mutable full-read bytes must not be durably cached",
+        "unversioned dynamic full-read bytes must not be durably cached",
     );
 
     let second = harness
@@ -248,7 +248,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
             .runtime
             .cache_get(path, RecordKind::File, None)
             .is_none(),
-        "second unversioned mutable read must not create a durable file payload",
+        "second unversioned dynamic read must not create a durable file payload",
     );
 }
 

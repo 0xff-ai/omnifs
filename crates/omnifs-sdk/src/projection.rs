@@ -145,7 +145,7 @@ impl FileProjection {
 
     /// Inline projection assembled from a [`FileContent`]'s size, stability,
     /// version evidence, and content type. Errors when the content bytes are
-    /// not inline or when the stability is `Live` (volatile requires a
+    /// not inline or when the stability is `Live` (live requires a
     /// ranged source, not an inline one).
     pub fn from_content(content: &FileContent) -> Result<FileProjection> {
         let attrs = content.attrs().clone();
@@ -160,7 +160,7 @@ impl FileProjection {
             Stability::Dynamic => builder.dynamic(),
             Stability::Live => {
                 return Err(ProviderError::internal(
-                    "list preload cannot project volatile inline bytes",
+                    "list preload cannot project live inline bytes",
                 ));
             },
         };
