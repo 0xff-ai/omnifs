@@ -61,11 +61,23 @@ impl SetupArgs {
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        let runtime = connect_runtime(os, ctx.runtime()).await?;
+        // Record the launch backend so `omnifs up`/`down` read it, and skip the
+        // Docker-only connect/pull when this machine runs host-native (the
+        // default on macOS, where Docker may not be present at all).
+        let runtime = ctx.config().runtime();
+        if ctx.config().system.runtime.is_none() {
+            let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
+            file.set_system_runtime(runtime)?;
+            file.save()?;
+        }
+        let host_native = runtime == crate::config::Runtime::Native;
 
-        runtime
-            .pull_image_with_progress(ctx.runtime().image().as_str())
-            .await?;
+        if !host_native {
+            let runtime = connect_runtime(os, ctx.runtime()).await?;
+            runtime
+                .pull_image_with_progress(ctx.runtime().image().as_str())
+                .await?;
+        }
 
         let catalog = ctx.catalog();
         let mounts = ctx.workspace().mounts()?;
@@ -337,7 +349,7 @@ async fn run_init_loop(
 
 async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
     anstream::println!();
-    anstream::println!("Launching container ...");
+    anstream::println!("Launching omnifs ...");
     up::UpArgs {
         image: config.image.clone(),
         container_name: config.container_name.clone(),

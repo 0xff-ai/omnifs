@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use omnifs_mount::mounts::Spec;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -32,7 +32,7 @@ pub struct ConfigSystem {
 
 /// Daemon launch backend. `omnifs setup` records the choice; `omnifs up`
 /// reads it and starts the daemon that way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     /// Daemon runs inside a Docker container; the CLI owns the container
@@ -143,6 +143,24 @@ impl ConfigFile {
         Ok(mounts.len() != before)
     }
 
+    /// Set `[system].runtime`, preserving the rest of the config. `omnifs setup`
+    /// records the launch backend here so `omnifs up` reads it.
+    pub fn set_system_runtime(&mut self, runtime: Runtime) -> Result<()> {
+        let root = self
+            .doc
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", self.path.display()))?;
+        let system = root
+            .entry("system".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let system = system.as_table_mut().ok_or_else(|| {
+            anyhow::anyhow!("{} has a non-table [system] value", self.path.display())
+        })?;
+        let value = toml::Value::try_from(runtime).context("serialize runtime as TOML")?;
+        system.insert("runtime".to_string(), value);
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
@@ -196,5 +214,24 @@ mod tests {
 
         assert_eq!(config.container_name.as_deref(), Some("omnifs-test"));
         assert_eq!(config.image.as_deref(), Some("ghcr.io/example/omnifs:test"));
+    }
+
+    // Guards the on-disk `[system].runtime` token: `setup` writes it and `up`
+    // reads it, so a rename of the serialized form would silently break the
+    // runtime selection across a CLI upgrade.
+    #[test]
+    fn runtime_round_trips_through_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut file = ConfigFile::load(&path).unwrap();
+        file.set_system_runtime(Runtime::Native).unwrap();
+        file.save().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("runtime = \"native\""), "got:\n{raw}");
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.system.runtime, Some(Runtime::Native));
+        assert_eq!(config.runtime(), Runtime::Native);
     }
 }
