@@ -14,7 +14,7 @@ This document splits the binary into `omnifsd` (the runtime daemon) and `omnifs`
 
 Two standing constraints shape everything below:
 
-- **The dockerless future is load-bearing.** The NFSv4 loopback frontend has landed (`omnifsd --frontend nfs`); wiring the CLI to launch `omnifsd` directly with no container, and later FSKit, is what remains. Docker is *one launch mechanism*, owned entirely by the CLI; nothing in `omnifsd` or the control protocol may assume a container exists.
+- **The dockerless future is load-bearing.** NFSv4 (and later FSKit) support will let `omnifsd` run directly on the host with no container. Docker is *one launch mechanism*, owned entirely by the CLI; nothing in `omnifsd` or the control protocol may assume a container exists.
 - **This is alpha software and breakage is fine.** The split is the opportunity to delete awkward machinery, not to preserve it behind shims. No transition re-exports, no compatibility subcommands, no dual code paths kept "just in case."
 
 ## Decisions
@@ -32,7 +32,7 @@ Two standing constraints shape everything below:
 
 ## Binaries and crates
 
-**`crates/omnifs-daemon`** (new, binary `omnifsd`): the daemon main. Absorbs the body of `commands/daemon.rs` — paths, `GitCloner`, `ProviderRegistry`, FUSE `run_blocking` — plus the HTTP server and the mount manager (hot add/remove). Depends on `omnifs-host`, `omnifs-fuse`, axum. Linux is the primary target (FUSE); the crate keeps building without container assumptions, which is why the NFSv4 frontend (since added, `crates/omnifs-nfs`) was a frontend addition, not a port.
+**`crates/omnifs-daemon`** (new, binary `omnifsd`): the daemon main. Absorbs the body of `commands/daemon.rs` — paths, `GitCloner`, `ProviderRegistry`, FUSE `run_blocking` — plus the HTTP server and the mount manager (hot add/remove). Depends on `omnifs-host`, `omnifs-fuse`, axum. Linux is the only supported target today (FUSE); the crate must keep building without container assumptions so the native NFSv4 mode is a frontend addition, not a port.
 
 Flags: `--mount-point`, `--config-dir`, `--cache-dir`, `--listen <addr>` (a `SocketAddr`, TCP loopback only today), `--root-symlinks` (container-image nicety: maintain `/github → /omnifs/github` links as mounts come and go; off by default, passed by the entrypoint, meaningless and absent in native mode).
 
@@ -44,14 +44,14 @@ Flags: `--mount-point`, `--config-dir`, `--cache-dir`, `--listen <addr>` (a `Soc
 
 ## Daemon topology and startup
 
-`omnifsd` starts with an **empty registry**: it brings up the filesystem frontend (FUSE by default, NFS via `--frontend nfs`) on `--mount-point` and the HTTP listener, then waits for mounts. `GET /v1/ready` reports true once both are up. Mounts arrive exclusively via `POST /v1/mounts`; there is no mounts-dir scan.
+`omnifsd` starts with an **empty registry**: it brings up the filesystem frontend (FUSE today) on `--mount-point` and the HTTP listener, then waits for mounts. `GET /v1/ready` reports true once both are up. Mounts arrive exclusively via `POST /v1/mounts`; there is no mounts-dir scan.
 
 **Docker mode** (the only shipped mode for now): the entrypoint shrinks to directory creation, the log tee, and `exec omnifsd --root-symlinks --listen 0.0.0.0:7878 ...`. Container binds shrink to exactly:
 
 - the host `OMNIFS_HOME` directory as the daemon's writable runtime home, including `credentials.json`, `mounts/`, `providers/`, `cache/`, and `config.toml`;
 - environmental passthroughs that are not omnifs surface: `SSH_AUTH_SOCK`, `/var/run/docker.sock` (optional), user preopened paths, dev-flow extras.
 
-**Native mode** (the dockerless CLI launch is still ahead): the CLI spawns `omnifsd` directly with the same resolved `OMNIFS_HOME` and, once the flag grows `unix:path` parsing, `--listen` at a Unix socket. Nothing else changes: same API, same credential contract, same lifecycle verbs. The FUSE frontend is swapped for the NFSv4 server, since implemented (`crates/omnifs-nfs`, `omnifsd --frontend nfs`, `docs/design/nfsv4-loopback-mount.md`), behind the same registry.
+**Native mode** (future, with NFSv4/FSKit): the CLI spawns `omnifsd` directly with the same resolved `OMNIFS_HOME` and, once the flag grows `unix:path` parsing, `--listen` at a Unix socket. Nothing else changes: same API, same credential contract, same lifecycle verbs. The FUSE frontend is swapped for an NFSv4 server behind the same registry; that frontend is a separate design when it lands.
 
 A bare `docker run` of the image yields an empty filesystem until a CLI pushes mounts. This is deliberate; `omnifs dev` pushes the built-in dev mount specs through the API, and the entrypoint's `install-dev-mounts` step is deleted.
 
@@ -96,7 +96,7 @@ Failure after container launch tears the daemon down.
 
 - **Add**: resolve the spec against provider WASM metadata (daemon-side, providers dir), instantiate the `Runtime`, insert, spawn that mount's timer task. Timer tasks move from one bulk `start_timers` to per-mount spawn/abort so add and remove are symmetric.
 - **Remove**: abort the timer task, call `runtime.shutdown()`, drop the entry. FUSE inodes belonging to the removed mount answer `ENOENT`; the kernel root listing is invalidated through the existing notifier. View-cache entries for the mount are dropped; durable object-cache entries are left to capacity eviction (mount-prefixed, harmless, and a re-added mount benefits from them).
-- The frontend's root listing derives from the live registry, so mounts appear and disappear in `ls /omnifs` without remount. This registry contract is frontend-agnostic and carries over to the NFSv4 frontend unchanged.
+- The frontend's root listing derives from the live registry, so mounts appear and disappear in `ls /omnifs` without remount. This registry contract is frontend-agnostic and carries over to the future NFSv4 frontend unchanged.
 
 ## Credentials
 
@@ -133,7 +133,7 @@ Each phase lands independently and keeps `omnifs dev` plus the smoke harness gre
 
 ## Non-goals
 
-- Shipping the native (dockerless) launch mode, the FSKit frontend, or a host-side supervisor daemon now (the NFSv4 loopback frontend has since landed, `crates/omnifs-nfs`). This design only guarantees they slot in without protocol or daemon changes.
+- Shipping the native (dockerless) mode, the NFSv4/FSKit frontend, or a host-side supervisor daemon now. This design only guarantees they slot in without protocol or daemon changes.
 - API authentication (recorded mitigation only), multi-session, or remote (non-loopback) access.
 - Mutations, mount config editing via the API, or any write surface beyond mount add/remove.
 - Changing the clone transport, auth model, or provider protocol.

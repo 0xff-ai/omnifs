@@ -53,6 +53,7 @@ async fn test_list_root() {
             assert!(names.contains(&"items"));
             assert!(names.contains(&"hello"));
             assert!(names.contains(&"scoped"));
+            assert!(names.contains(&"dynamic"));
             assert!(names.contains(&"checkout"));
             assert!(names.contains(&"dynamic"));
             assert!(
@@ -88,6 +89,7 @@ async fn test_list_hello_dir() {
             assert!(names.contains(&"fresh-full"));
             assert!(names.contains(&"ranged"));
             assert!(names.contains(&"unknown-ranged"));
+            assert!(names.contains(&"large-ranged"));
             assert!(names.contains(&"volatile-tail"));
             assert!(names.contains(&"bundle"));
             assert!(names.contains(&"feed"));
