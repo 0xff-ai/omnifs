@@ -14,23 +14,23 @@ mod lookup;
 pub mod mount;
 mod read;
 mod read_helpers;
-mod synthetic;
 mod trace;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use common::{DirSnapshot, ROOT_INO, RangedFileHandle, TTL, TTL_DYNAMIC};
+pub(crate) use common::{DirSnapshot, ROOT_INO, RangedSlot, TTL, TTL_DYNAMIC};
 
 use dashmap::DashMap;
 use fuser::{FileAttr, INodeNo, MountOption, Notifier};
 use inode::NodeEntry;
-use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::view as view_types;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
+#[cfg(test)]
 use omnifs_host::Runtime;
 use omnifs_host::path_key::{PathKey, PathToInode};
 use omnifs_host::registry::ProviderRegistry;
+use omnifs_tree::Tree;
 use omnifs_wit::provider::types as wit_types;
 use parking_lot::Mutex;
 use std::ffi::OsStr;
@@ -72,6 +72,13 @@ fn path_prefix_matches(prefix: &str, path: &str) -> bool {
 pub(crate) struct Frontend {
     rt: Handle,
     registry: Arc<ProviderRegistry>,
+    /// The renderer-neutral projection core. Owns the listing/lookup/read
+    /// DECISION logic (cache consult+populate, pagination, the `@next`/`@all`
+    /// controls and mount-root ignore files, invalidation drain). The FUSE
+    /// adapter enters the async runtime once per fuser callback to call it, then
+    /// builds kernel identity (inodes) and reply structures on the neutral
+    /// `Node`/`Listing`/`ReadResult` it returns.
+    tree: Tree,
     inodes: DashMap<u64, NodeEntry>,
     /// Reverse lookup: (mount name, path) -> inode, for dedup.
     /// Shared via `Arc` so the FUSE notifier can also hold a reference
@@ -83,10 +90,15 @@ pub(crate) struct Frontend {
     next_fh: AtomicU64,
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
-    ranged_handles: DashMap<u64, RangedFileHandle>,
+    /// `Tree`-owned ranged read handles bound to a FUSE `fh`, each paired with
+    /// the kernel inode it serves. The handle owns its `Arc<Runtime>` + provider
+    /// handle; the adapter drives `read`/`close` and promotes any learned size
+    /// to the inode.
+    ranged_handles: DashMap<u64, RangedSlot>,
     /// Latest upstream size observed by a per-handle follow pump, keyed by
     /// inode. `getattr` reports `max(entry.size, follow_sizes[ino])` so a
-    /// polling `tail -f` sees a live file grow between its own reads.
+    /// polling `tail -f` sees a live file grow between its own reads. The size
+    /// source is `Tree::probe_live_growth`; this map is the FUSE-side reporting.
     follow_sizes: Arc<DashMap<u64, u64>>,
     /// Abort handles for follow pumps, keyed by file handle; aborted on release.
     follow_pumps: DashMap<u64, tokio::task::AbortHandle>,
@@ -131,9 +143,12 @@ impl Frontend {
         };
         inodes.insert(ROOT_INO, root_entry);
 
+        let tree = Tree::new(Arc::clone(&registry));
+
         Self {
             rt,
             registry,
+            tree,
             inodes,
             path_to_inode,
             notifier,
@@ -153,6 +168,10 @@ impl Frontend {
         config
     }
 
+    /// The runtime serving `mount`, if present. The live adapter reaches the
+    /// runtime through `Tree`; this registry accessor exists for the in-crate
+    /// harness, which seeds caches and inspects mount-level state directly.
+    #[cfg(test)]
     pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Runtime>> {
         self.registry.get(mount)
     }
@@ -175,41 +194,17 @@ impl Frontend {
         current
     }
 
-    pub(crate) fn mem_get(
-        &self,
-        mount: &str,
-        path: &str,
-        kind: RecordKind,
-    ) -> Option<Arc<CacheRecord>> {
-        self.runtime_for_mount(mount)?.mem_get(path, kind, None)
-    }
-
-    fn mem_get_with_aux(
-        &self,
-        mount: &str,
-        path: &str,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<Arc<CacheRecord>> {
-        self.runtime_for_mount(mount)?.mem_get(path, kind, aux)
-    }
-
-    pub(crate) fn mem_invalidate(&self, mount: &str, path: &str, kind: RecordKind) {
-        if let Some(runtime) = self.runtime_for_mount(mount) {
-            runtime.mem_invalidate(path, kind, None);
-        }
-    }
-
-    /// Drain pending runtime invalidations, evict matching mem entries, and
-    /// notify the kernel about deleted entries or changed directories.
+    /// Drain pending runtime invalidations and drive the kernel-side fan-out.
+    ///
+    /// `Tree::drain_invalidations` owns the renderer-neutral half: it drains the
+    /// runtime's invalidation queues and evicts the matching mem entries. The
+    /// FUSE adapter consumes the returned `InvalidationReport` to drive its own
+    /// kernel notifier (`inval_entry`/`inval_inode`) and prune the
+    /// `path_to_inode` dedup table, which are kernel/inode-table concerns the
+    /// projection core must not own.
     pub(crate) fn drain_and_evict_pending(&self, mount: &str) {
-        let Some(runtime) = self.runtime_for_mount(mount) else {
-            return;
-        };
-        let prefixes = runtime.drain_invalidated_prefixes();
-        let paths = runtime.drain_invalidated_paths();
-        let changed_dirs = runtime.drain_changed_dirs();
-        if prefixes.is_empty() && paths.is_empty() && changed_dirs.is_empty() {
+        let report = self.tree.drain_invalidations(mount);
+        if report.is_empty() {
             return;
         }
 
@@ -220,10 +215,11 @@ impl Frontend {
                 continue;
             }
             let path = &key.path;
-            let matches_exact = paths.iter().any(|p| p == path);
-            let matches_prefix = prefixes
+            let matches_exact = report.paths.iter().any(|p| p.as_str() == path);
+            let matches_prefix = report
+                .prefixes
                 .iter()
-                .any(|prefix| path_prefix_matches(prefix, path));
+                .any(|prefix| path_prefix_matches(prefix.as_str(), path));
             if matches_exact || matches_prefix {
                 to_remove.push(key.clone());
             }
@@ -233,20 +229,9 @@ impl Frontend {
             self.notify_entry_deleted(mount, &path_key.path);
             self.path_to_inode.remove(path_key);
         }
-        for path in &changed_dirs {
-            self.notify_dir_changed(mount, path);
+        for path in &report.changed_dirs {
+            self.notify_dir_changed(mount, path.as_str());
         }
-
-        runtime.mem_invalidate_entries_if({
-            let paths = paths.clone();
-            let prefixes = prefixes.clone();
-            move |k, _| {
-                paths.contains(&k.path)
-                    || prefixes
-                        .iter()
-                        .any(|prefix| path_prefix_matches(prefix, &k.path))
-            }
-        });
     }
 
     fn notify_entry_deleted(&self, mount: &str, path: &str) {

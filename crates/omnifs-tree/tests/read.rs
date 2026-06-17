@@ -206,7 +206,12 @@ async fn open_ranged_then_read_chunks() {
     let ctx = RequestCtx::default();
 
     let node = ranged_node("/hello/ranged");
-    let handle = t.tree.open(&node, &ctx).await.expect("open ranged file");
+    let handle = t
+        .tree
+        .open(&node, &ctx)
+        .await
+        .expect("open ranged file")
+        .expect("file is ranged");
     // open_file reports the provider's real attrs: Exact(26), Dynamic.
     assert_eq!(handle.attrs().size, FileSize::Exact(26));
     assert_eq!(handle.attrs().stability, Stability::Dynamic);
@@ -247,7 +252,12 @@ async fn open_unknown_ranged_learns_size_on_eof() {
         Backing::Provider,
     );
 
-    let handle = t.tree.open(&node, &ctx).await.expect("open unknown-ranged");
+    let handle = t
+        .tree
+        .open(&node, &ctx)
+        .await
+        .expect("open unknown-ranged")
+        .expect("unknown-ranged is ranged");
     assert_eq!(handle.attrs().size, FileSize::Unknown);
 
     // Reading from offset 8 returns the tail "size\n" and EOF. The exact size is
@@ -263,25 +273,24 @@ async fn open_unknown_ranged_learns_size_on_eof() {
     handle.close().expect("close handle");
 }
 
-/// `Tree::open` refuses a node that is not `Deferred(Ranged)`: the guard rejects
-/// a whole-file (`listing_shape`) projection before any provider round trip.
+/// `Tree::open` probes `open_file` to discover the read mode the cheap lookup
+/// placeholder omits. A non-ranged source reports `InvalidInput`/`NotFound`,
+/// which surfaces as `Ok(None)` so the renderer falls through to a full read
+/// rather than binding a ranged handle.
 #[tokio::test(flavor = "multi_thread")]
-async fn open_rejects_non_ranged_node() {
+async fn open_probe_returns_none_for_non_ranged_node() {
     let t = test_tree();
     let ctx = RequestCtx::default();
 
     let node = t.tree.resolve(&path("/hello/message"), &ctx).await.unwrap();
-    // `RangedHandle` is not `Debug`, so go through `.err()` (TreeError is Debug)
-    // rather than `expect_err`, which would require the Ok value to be Debug.
-    let err = t
+    let opened = t
         .tree
         .open(&node, &ctx)
         .await
-        .err()
-        .expect("a non-ranged node must not open as a ranged handle");
+        .expect("the open probe itself succeeds");
     assert!(
-        err.message.contains("ranged"),
-        "guard message should name the ranged requirement, got: {err}"
+        opened.is_none(),
+        "a non-ranged source must not open as a ranged handle"
     );
 }
 

@@ -259,7 +259,12 @@ async fn reads_ranged_file_in_chunks() {
     // FUSE inode carrying `Deferred(Ranged)` before `open_ranged_file`). The
     // harness plays that renderer role.
     let node = ranged_node("/hello/ranged");
-    let handle = t.tree.open(&node, &t.ctx).await.expect("open ranged file");
+    let handle = t
+        .tree
+        .open(&node, &t.ctx)
+        .await
+        .expect("open ranged file")
+        .expect("file is ranged");
     assert_eq!(handle.attrs().size, FileSize::Exact(26));
     assert_eq!(handle.attrs().stability, Stability::Dynamic);
 

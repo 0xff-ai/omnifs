@@ -174,6 +174,12 @@ impl Frontend {
     /// so replaying a cached listing/control over a synthesized node never
     /// demotes it. Use [`get_or_alloc_ino_meta_resolved`](Self::get_or_alloc_ino_meta_resolved)
     /// when a genuine provider resolution should win over a synthetic marker.
+    ///
+    /// The live adapter allocates from a `Tree` `Node`/`Entry` with an asserted
+    /// origin (`_resolved`/`_synthetic`/`_backing`); this origin-agnostic refresh
+    /// variant is exercised by the in-crate harness to prove a cached-metadata
+    /// replay does not demote a still-synthetic node.
+    #[cfg(test)]
     pub(crate) fn get_or_alloc_ino_meta(
         &self,
         mount_name: &str,

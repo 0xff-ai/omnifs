@@ -3725,6 +3725,7 @@ dependencies = [
  "omnifs-host",
  "omnifs-inspector",
  "omnifs-mount",
+ "omnifs-tree",
  "omnifs-wit",
  "parking_lot",
  "tempfile",
