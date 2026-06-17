@@ -8,6 +8,7 @@ use crate::protocol::consts::{
     OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -334,6 +335,7 @@ impl OpenTable {
             .retain(|_, state| !inodes.contains(&state.inode));
     }
 
+    #[cfg(test)]
     pub(crate) fn active_inodes(&self) -> HashSet<u64> {
         self.states
             .iter()

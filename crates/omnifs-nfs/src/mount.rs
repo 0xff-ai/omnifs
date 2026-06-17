@@ -473,7 +473,10 @@ fn parse_macos_mounts(contents: &str) -> Vec<MountTableEntry> {
         .collect()
 }
 
-fn mount_is_active(mount_point: &Path) -> bool {
+/// Whether an NFS mount is currently active at `mount_point`, read from the
+/// live OS mount table (`/proc/mounts` on Linux, `mount` on macOS). The daemon
+/// uses this for readiness on hosts without `/proc`.
+pub fn mount_is_active(mount_point: &Path) -> bool {
     match mount_table_entries() {
         Ok(entries) => mount_table_contains(&entries, mount_point),
         Err(error) => {

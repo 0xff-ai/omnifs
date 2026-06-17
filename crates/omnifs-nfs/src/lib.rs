@@ -20,7 +20,9 @@ pub use export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, ReadOnlyExport, StateId, Status,
     StatusResult,
 };
-pub use mount::{NfsMountOptions, NfsMountState, mount_blocking, read_mount_states, unmount};
+pub use mount::{
+    NfsMountOptions, NfsMountState, mount_blocking, mount_is_active, read_mount_states, unmount,
+};
 pub use protocol::consts::{
     NFS4_OK, NFS4ERR_ACCESS, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR, NFS4ERR_NOENT,
     NFS4ERR_NOTDIR, NFS4ERR_RESOURCE, NFS4ERR_ROFS, NFS4ERR_STALE,

@@ -13,6 +13,7 @@ keywords = ["omnifs", "nfs", "filesystem"]
 omnifs-cache = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-host = { workspace = true }
+omnifs-tree = { workspace = true }
 omnifs-wit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
