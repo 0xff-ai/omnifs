@@ -905,6 +905,9 @@ where
                         pattern: child_pattern,
                         handler: handler.clone(),
                         validator: validator.clone(),
+                        // Object representation/field leaves are whole-payload
+                        // renders, never ranged sessions.
+                        ranged: false,
                     });
                 }
             },

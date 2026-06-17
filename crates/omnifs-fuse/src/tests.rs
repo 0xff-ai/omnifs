@@ -511,10 +511,7 @@ fn mutable_unversioned_full_prefetch_is_per_handle_not_durable() {
     let path = "/hello/fresh-full";
 
     let (first_fh, first) = h.prefetch_mutable_unversioned_full(path);
-    assert!(
-        first.starts_with(b"fresh-full-"),
-        "prefetch returns a fresh full-read value, got {first:?}"
-    );
+    assert_eq!(first, b"fresh-full-1\n");
     h.release(first_fh);
     let runtime = h.fs.runtime_for_mount(FuseHarness::MOUNT).expect("runtime");
     assert!(
@@ -535,13 +532,7 @@ fn learned_full_read_size_survives_cached_non_exact_refresh() {
     );
 
     let (fh, bytes) = h.prefetch_mutable_unversioned_full(path);
-    // Each open discovers the read mode by probing `open_file` before the full
-    // read, so the mutable counter has advanced past `-1`; the learned size (the
-    // property under test) is what must survive.
-    assert!(
-        bytes.starts_with(b"fresh-full-"),
-        "prefetch returns a fresh full-read value, got {bytes:?}"
-    );
+    assert_eq!(bytes, b"fresh-full-1\n");
     h.release(fh);
     assert_eq!(
         h.inode_size(ino),

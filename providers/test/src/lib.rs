@@ -263,10 +263,16 @@ impl TestProvider {
         r.file("/hello/projected").handler(projected)?;
         r.file("/hello/lazy").handler(lazy)?;
         r.file("/hello/fresh-full").handler(fresh_full)?;
-        r.file("/hello/ranged").handler(ranged)?;
-        r.file("/hello/unknown-ranged").handler(unknown_ranged)?;
-        r.file("/hello/large-ranged").handler(large_ranged)?;
-        r.file("/hello/volatile-tail").handler(volatile_tail)?;
+        r.file("/hello/ranged").ranged().handler(ranged)?;
+        r.file("/hello/unknown-ranged")
+            .ranged()
+            .handler(unknown_ranged)?;
+        r.file("/hello/large-ranged")
+            .ranged()
+            .handler(large_ranged)?;
+        r.file("/hello/volatile-tail")
+            .ranged()
+            .handler(volatile_tail)?;
         r.dir("/hello/bundle").handler(bundle)?;
         r.dir("/hello/feed").handler(feed)?;
         r.dir("/hello/unbounded").handler(unbounded_feed)?;

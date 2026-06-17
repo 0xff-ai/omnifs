@@ -58,9 +58,9 @@ work that has not happened.
 
 ## File attributes
 
-Metadata leaves are direct read projections. `sample.json` is **`Dynamic`** with
-a content hash version token; large samples switch to a deferred ranged
-projection above the inline cap (`MAX_PROJECTED_BYTES = 64 KiB`).
+Metadata leaves are direct read projections. `sample.json` is a **`Dynamic`**
+ranged projection (the route is declared `ranged`) with a content hash version
+token, so a sample of any size is served through one ranged session.
 
 ## Example config
 

@@ -197,6 +197,14 @@ impl FileProj {
         Self::deferred(Size::Unknown, ReadMode::Full, Stability::Stable)
     }
 
+    /// Listing entry for a route declared `ranged`: like [`Self::listing_shape`]
+    /// but with `ReadMode::Ranged`, so a lookup/listing placeholder tells the
+    /// host the file streams through `open-file`/`read-chunk` without running
+    /// the handler. The real size and stability are learned at `open-file`.
+    pub fn ranged_listing_shape() -> Self {
+        Self::deferred(Size::Unknown, ReadMode::Ranged, Stability::Stable)
+    }
+
     #[must_use]
     pub fn with_version(mut self, version: impl Into<VersionToken>) -> Self {
         self.attrs.version = Some(version.into());

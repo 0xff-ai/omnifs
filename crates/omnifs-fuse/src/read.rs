@@ -181,15 +181,13 @@ impl Frontend {
 
         let node = provider_file_node(target);
 
-        // A deferred provider file may be ranged or full, and the cheap lookup
-        // placeholder can't tell (read mode is only known by asking the
-        // provider). Probe `open_file` through `Tree::open`: `Some` => the
-        // source is ranged, bind a `RangedHandle` to `fh`; `None` => a non-ranged
-        // source (a full file, an object representation, or a projected leaf)
-        // reported `InvalidInput`/`NotFound`, so fall through to the full/lazy
-        // read path below. This costs one extra provider round trip when opening
-        // a full file, the price of discovering read mode the placeholder omits.
-        if is_deferred(target.attrs.as_ref())
+        // A route declared `ranged` carries a `Deferred(Ranged)` placeholder, so
+        // dispatch straight to `open_file` and bind a `RangedHandle` to `fh`. A
+        // full file (the default) skips this and takes the full read path below,
+        // so a whole-payload provider is asked exactly once. `Tree::open`
+        // returning `None` means the route declared `ranged` but the handler
+        // answered full (a provider bug): fall through and serve it as full.
+        if is_ranged(target.attrs.as_ref())
             && let Some(flags) = self.open_ranged_handle(target, &node, trace)?
         {
             return Ok(flags);
@@ -392,8 +390,13 @@ fn node_meta_from_entry(entry: &NodeEntry) -> EntryMeta {
     }
 }
 
-fn is_deferred(attrs: Option<&FileAttrsCache>) -> bool {
-    attrs.is_some_and(|attrs| matches!(attrs.bytes, view_types::ByteSource::Deferred(_)))
+fn is_ranged(attrs: Option<&FileAttrsCache>) -> bool {
+    attrs.is_some_and(|attrs| {
+        matches!(
+            attrs.bytes,
+            view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
+        )
+    })
 }
 
 fn should_prefetch_full(attrs: Option<&FileAttrsCache>) -> bool {

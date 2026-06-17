@@ -34,7 +34,7 @@ impl<S> Shape<'_, S> {
     ) -> Vec<BrowseEntry> {
         let parent_segments: Vec<&str> = absolute_parent.segments().collect();
         let mut entries = std::collections::BTreeMap::<String, BrowseEntry>::new();
-        for (pattern, validator, kind) in self.routes_extending_parent(&parent_segments) {
+        for (pattern, validator, kind, ranged) in self.routes_extending_parent(&parent_segments) {
             let Some((name, extends_below)) = pattern.literal_child_after(&parent_segments) else {
                 continue;
             };
@@ -51,6 +51,8 @@ impl<S> Shape<'_, S> {
             entries.entry(name.to_string()).or_insert_with(|| {
                 if extends_below || matches!(kind, BrowseEntryKind::Directory) {
                     BrowseEntry::dir(name)
+                } else if ranged {
+                    BrowseEntry::file(name, FileProj::ranged_listing_shape())
                 } else {
                     BrowseEntry::file(name, FileProj::listing_shape())
                 }
@@ -93,7 +95,7 @@ impl<S> Shape<'_, S> {
     pub(super) fn has_capture_child_under(&self, absolute_parent: &Path) -> bool {
         let parent_segments: Vec<&str> = absolute_parent.segments().collect();
         self.routes_extending_parent(&parent_segments)
-            .any(|(pattern, _, _)| pattern.has_dynamic_child_after(&parent_segments))
+            .any(|(pattern, _, _, _)| pattern.has_dynamic_child_after(&parent_segments))
     }
 
     /// Every route (all kinds, including object handler leaves) whose
@@ -102,34 +104,34 @@ impl<S> Shape<'_, S> {
     fn routes_extending_parent<'a>(
         &'a self,
         parent_segments: &'a [&'a str],
-    ) -> impl Iterator<Item = (&'a Pattern, &'a RouteValidator, BrowseEntryKind)> + 'a {
+    ) -> impl Iterator<Item = (&'a Pattern, &'a RouteValidator, BrowseEntryKind, bool)> + 'a {
         let dirs = self
             .router
             .dirs
             .iter()
             .chain(self.router.handler_dirs.iter())
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory));
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         let files = self
             .router
             .files
             .iter()
             .chain(self.router.handler_files.iter())
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File));
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File, r.ranged));
         let treerefs = self
             .router
             .treerefs
             .iter()
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory));
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         let objects = self.router.objects.iter().map(|r| {
             let kind = match r.shape {
                 ObjectShape::Dir => BrowseEntryKind::Directory,
                 ObjectShape::File => BrowseEntryKind::File,
             };
-            (&r.pattern, &r.validator, kind)
+            (&r.pattern, &r.validator, kind, false)
         });
         dirs.chain(files)
             .chain(treerefs)
             .chain(objects)
-            .filter(move |(pattern, _, _)| pattern.accepts_as_strict_ancestor(parent_segments))
+            .filter(move |(pattern, _, _, _)| pattern.accepts_as_strict_ancestor(parent_segments))
     }
 }

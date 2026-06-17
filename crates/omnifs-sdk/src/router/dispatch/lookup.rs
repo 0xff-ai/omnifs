@@ -75,8 +75,8 @@ impl<S> Router<S> {
             return Ok(object_file_lookup);
         }
 
-        if file_match.is_some() {
-            return Ok(shape.static_file_lookup(&parent_abs, name));
+        if let Some(file_route) = file_match.as_ref() {
+            return Ok(shape.static_file_lookup(&parent_abs, name, file_route.entry.ranged));
         }
 
         if shape.is_implicit_prefix_dir(&child_abs) {

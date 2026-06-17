@@ -86,6 +86,7 @@ impl<S> Router<S> {
         FileRoute {
             router: self,
             template,
+            ranged: false,
         }
     }
 
@@ -189,6 +190,7 @@ impl<S> Router<S> {
     fn file_at<Marker, H: IntoFileHandler<S, Marker>>(
         &mut self,
         template: &str,
+        ranged: bool,
         h: H,
     ) -> Result<()> {
         let pattern = parse_pattern(template)?;
@@ -197,6 +199,7 @@ impl<S> Router<S> {
             pattern: pattern.clone(),
             handler,
             validator,
+            ranged,
         });
         self.leaf_claims.push(pattern);
         Ok(())
@@ -275,6 +278,7 @@ pub struct DirRoute<'r, S> {
 pub struct FileRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
     pub(super) template: &'static str,
+    pub(super) ranged: bool,
 }
 
 /// A pending [`Router::treeref`] registration; nothing is recorded until
@@ -297,11 +301,25 @@ impl<'r, S> DirRoute<'r, S> {
 }
 
 impl<'r, S> FileRoute<'r, S> {
+    /// Declare that this route streams its content through the
+    /// `open-file`/`read-chunk` session (`ReadMode::Ranged`) rather than a
+    /// whole-payload `read-file`. The declaration flows into the lookup/listing
+    /// placeholder so the host dispatches `open` straight to `open-file` without
+    /// a discovery probe; the handler must return a [`FileProjection::ranged`]
+    /// projection at `open-file`. Required for any live (`tail -f`) file.
+    ///
+    /// [`FileProjection::ranged`]: crate::projection::FileProjection::ranged
+    #[must_use]
+    pub fn ranged(mut self) -> Self {
+        self.ranged = true;
+        self
+    }
+
     /// Register the file handler and claim the template as a leaf. Accepted
     /// shapes: `async fn(Cx<S>)`, `async fn(Cx<S>, K)`, or
     /// `async fn(K, Cx<S>)`, with `K: FromCaptures`.
     pub fn handler<Marker, H: IntoFileHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
-        self.router.file_at(self.template, h)?;
+        self.router.file_at(self.template, self.ranged, h)?;
         Ok(self.router)
     }
 }

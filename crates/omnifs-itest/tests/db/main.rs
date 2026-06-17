@@ -285,27 +285,36 @@ async fn db_missing_table_negative_record() {
 }
 
 #[tokio::test]
-async fn db_sample_ranged_above_inline_cap() {
+async fn db_sample_served_ranged() {
     let (_dir, harness) = db_harness();
 
-    let opened = harness
-        .runtime
-        .namespace()
-        .open_file("/tables/Wide/sample.json")
-        .await
-        .unwrap();
-    let chunk = harness
-        .runtime
-        .namespace()
-        .read_chunk(opened.handle, 0, 4096)
-        .await
-        .unwrap();
-    assert!(chunk.content.starts_with(b"["));
-    harness.runtime.call_close_file(opened.handle).unwrap();
+    // `sample.json` is declared `ranged`, so every sample (any size) is served
+    // through the open-file/read-chunk session, never a full read.
+    let wide = read_ranged(&harness, "/tables/Wide/sample.json").await;
+    assert!(wide.starts_with(b"["));
 
-    let sample = read_bytes(&harness, "/tables/Album/sample.json").await;
-    let sample_text = String::from_utf8_lossy(&sample);
-    assert!(sample_text.contains("For Those About To Rock"));
+    let album = read_ranged(&harness, "/tables/Album/sample.json").await;
+    let album_text = String::from_utf8_lossy(&album);
+    assert!(album_text.contains("For Those About To Rock"));
+}
+
+/// Read a ranged file whole: open, pull chunks until EOF, close.
+async fn read_ranged(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
+    let ns = harness.runtime.namespace();
+    let opened = ns.open_file(path).await.unwrap();
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = ns
+            .read_chunk(opened.handle, bytes.len() as u64, 64 * 1024)
+            .await
+            .unwrap();
+        bytes.extend_from_slice(&chunk.content);
+        if chunk.eof {
+            break;
+        }
+    }
+    harness.runtime.call_close_file(opened.handle).unwrap();
+    bytes
 }
 
 #[tokio::test]
