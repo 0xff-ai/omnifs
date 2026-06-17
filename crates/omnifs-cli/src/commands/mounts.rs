@@ -13,6 +13,7 @@ use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::session::MountConfig;
+#[cfg(test)]
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
@@ -54,16 +55,7 @@ impl MountsArgs {
                 let catalog = ctx.catalog();
                 let workspace = ctx.workspace();
                 let mounts = workspace.mounts()?;
-                rm(
-                    paths,
-                    catalog,
-                    workspace,
-                    &mounts,
-                    &name,
-                    force,
-                    keep_credentials,
-                )
-                .await
+                rm(paths, catalog, &mounts, &name, force, keep_credentials).await
             },
         }
     }
@@ -105,7 +97,6 @@ fn ls() -> anyhow::Result<()> {
 pub async fn rm(
     paths: &Paths,
     catalog: &ProviderCatalog,
-    workspace: &Workspace,
     mounts: &[MountConfig],
     name: &str,
     force: bool,
@@ -119,7 +110,6 @@ pub async fn rm(
         .find(|m| m.name == name)
         .ok_or_else(|| missing_mount_error(paths, mounts, name.as_str()).unwrap_err())?;
     let config_path = mount.source.clone();
-    let inline = config_path == paths.config_file;
     let config = mount.config.clone();
     let resolved = catalog
         .resolve_mount_spec(config, false)
@@ -139,12 +129,8 @@ pub async fn rm(
     let store = FileStore::new(&paths.credentials_file);
     delete_credentials(&store, &credential_target, keep_credentials, name.as_str())?;
 
-    if inline {
-        workspace.remove_inline_mount(name.as_str())?;
-    } else {
-        std::fs::remove_file(&config_path)
-            .with_context(|| format!("remove {}", config_path.display()))?;
-    }
+    std::fs::remove_file(&config_path)
+        .with_context(|| format!("remove {}", config_path.display()))?;
     anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
 
     match crate::live::remove_mount(name.as_str()).await {
@@ -268,13 +254,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
         let catalog = catalog_for(&paths);
-        let workspace = Workspace::new(paths.clone(), Vec::new());
+        let workspace = Workspace::new(paths.clone());
         let mounts = workspace.mounts().unwrap();
-        let err = rm(
-            &paths, &catalog, &workspace, &mounts, "../leak", true, false,
-        )
-        .await
-        .unwrap_err();
+        let err = rm(&paths, &catalog, &mounts, "../leak", true, false)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
     #[test]
