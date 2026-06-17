@@ -70,15 +70,22 @@ pub(crate) fn wasm_with_provider_metadata(id: &str, provider: &str) -> Vec<u8> {
             }
         }
     });
+    wasm_with_metadata_section(&serde_json::to_vec(&metadata).unwrap())
+}
+
+/// Frame raw metadata-section bytes into a minimal wasm module. Use directly to
+/// build fixtures with malformed metadata; most tests want
+/// [`wasm_with_provider_metadata`].
+#[cfg(test)]
+pub(crate) fn wasm_with_metadata_section(data: &[u8]) -> Vec<u8> {
     let mut wasm = b"\0asm\x01\0\0\0".to_vec();
-    let data = serde_json::to_vec(&metadata).unwrap();
     let mut section = Vec::new();
     push_uleb(
         omnifs_provider::PROVIDER_METADATA_SECTION_NAME.len(),
         &mut section,
     );
     section.extend_from_slice(omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes());
-    section.extend_from_slice(&data);
+    section.extend_from_slice(data);
     wasm.push(0);
     push_uleb(section.len(), &mut wasm);
     wasm.extend(section);

@@ -14,8 +14,11 @@ use std::sync::Arc;
 
 use super::shared::format_scopes;
 use crate::app_context::AppContext;
+use crate::auth::explain::{self, AuthMode};
 use crate::catalog::ProviderCatalog;
 use crate::paths::PathOverrides;
+use crate::style;
+use omnifs_provider::SchemeGuidance;
 
 pub(super) async fn login(
     catalog: &ProviderCatalog,
@@ -28,7 +31,13 @@ pub(super) async fn login(
 ) -> anyhow::Result<()> {
     let mount_auth = catalog.load_mount_auth(mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
-    print_oauth_consent_summary(mount, &request);
+    let guidance = catalog
+        .provider_auth_manifest_for(mount_auth.config())
+        .ok()
+        .flatten()
+        .map(|auth| auth.guidance_for(&request.scheme().key))
+        .unwrap_or_default();
+    print_oauth_consent_summary(mount, &request, &guidance);
     let client = OAuthClient::new()?;
     let entry = match request.into_login_request() {
         LoginRequest::Loopback(request) if no_browser => client
@@ -172,17 +181,30 @@ pub(super) fn present_device_prompt(
     bar.set_message("Authorizing — waiting for confirmation");
 }
 
-pub(super) fn print_oauth_consent_summary(mount: &str, request: &OAuthRequest) {
+pub(super) fn print_oauth_consent_summary(
+    mount: &str,
+    request: &OAuthRequest,
+    guidance: &SchemeGuidance,
+) {
+    let scheme = request.scheme();
+    let mode = AuthMode::from_oauth_flow(&scheme.flow);
     anstream::println!(
-        "Requesting OAuth for `{mount}` using scheme `{}`",
-        request.scheme().key
+        "Requesting OAuth for `{mount}` using scheme `{}` ({})",
+        scheme.key,
+        mode.label()
     );
+    explain::render_oauth_intro(mode, guidance);
     anstream::println!(
-        "Scopes: {}",
-        format_scopes(&request.scheme().default_scopes)
+        "  {} {}",
+        style::dim("Scopes:"),
+        format_scopes(&scheme.default_scopes)
     );
-    if !request.scheme().inject_domains.is_empty() {
-        anstream::println!("Applies to: {}", request.scheme().inject_domains.join(", "));
+    if !scheme.inject_domains.is_empty() {
+        anstream::println!(
+            "  {} {}",
+            style::dim("Applies to:"),
+            scheme.inject_domains.join(", ")
+        );
     }
 }
 

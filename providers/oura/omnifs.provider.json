@@ -27,6 +27,7 @@
         "type": "oauth",
         "displayName": "Oura OAuth",
         "clientId": "9443bed5-98df-4a2d-b08e-d2a10c1851ae",
+        "summary": "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
         "scopes": [
           "email",
           "personal",

@@ -59,29 +59,6 @@ pub(super) fn scopes(
     Ok(())
 }
 
-pub(super) fn schemes(
-    catalog: &ProviderCatalog,
-    mounts: &[MountConfig],
-    mount: &str,
-) -> anyhow::Result<()> {
-    let mount = catalog.load_mount_auth(mounts, mount)?;
-    match mount.auth_manifest() {
-        Some(manifest) => {
-            anstream::println!("{}", serde_json::to_string_pretty(&manifest)?);
-        },
-        None => anstream::println!("no auth schemes declared"),
-    }
-    Ok(())
-}
-
-pub(crate) fn run_auth_manifest(
-    catalog: &ProviderCatalog,
-    mounts: &[MountConfig],
-    mount: &str,
-) -> anyhow::Result<()> {
-    schemes(catalog, mounts, mount)
-}
-
 pub(super) fn import_static_token_value(
     catalog: &ProviderCatalog,
     mounts: &[MountConfig],

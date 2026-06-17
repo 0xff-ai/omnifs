@@ -327,6 +327,27 @@
             "description": {
               "type": "string"
             },
+            "docsUrl": {
+              "description": "Link to provider documentation for this auth path.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "setup": {
+              "description": "Ordered provider-specific prerequisite steps beyond creating the token.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "summary": {
+              "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "type": "string",
               "const": "staticToken"
@@ -361,6 +382,13 @@
             "displayName": {
               "type": "string"
             },
+            "docsUrl": {
+              "description": "Link to provider documentation for this auth path.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "flow": {
               "$ref": "#/$defs/ManifestOAuthFlow"
             },
@@ -369,6 +397,24 @@
               "items": {
                 "type": "string"
               }
+            },
+            "setup": {
+              "description": "Ordered provider-specific prerequisite steps (create an OAuth app,\nenable an API). Required when no `clientId` is shipped.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "summary": {
+              "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokenEndpointAuth": {
+              "description": "How the host authenticates at the token endpoint. `none` (the default)\nsuits public PKCE clients; confidential clients that must present a\nsecret use `clientSecretPost` or `clientSecretBasic`.",
+              "$ref": "#/$defs/TokenEndpointAuthMethod"
             },
             "type": {
               "type": "string",
@@ -521,6 +567,25 @@
       "type": [
         "object",
         "boolean"
+      ]
+    },
+    "TokenEndpointAuthMethod": {
+      "oneOf": [
+        {
+          "description": "Public client: no secret presented at the token endpoint (PKCE).",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Confidential client: secret sent in the token request body.",
+          "type": "string",
+          "const": "clientSecretPost"
+        },
+        {
+          "description": "Confidential client: secret sent via HTTP Basic auth.",
+          "type": "string",
+          "const": "clientSecretBasic"
+        }
       ]
     },
     "TokenValidation": {

@@ -2,8 +2,8 @@
 
 use crate::auth_wire::{
     AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme,
-    PkceLoopbackConfig, PkceManualCodeConfig, StaticTokenScheme, TokenEndpointAuthMethod,
-    TokenValidation,
+    PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
+    TokenEndpointAuthMethod, TokenValidation,
 };
 use crate::config::ConfigSchema;
 use crate::runtime_grants::{PreopenedPath, ProviderCapabilities};
@@ -146,6 +146,9 @@ pub struct ProviderAuthManifest {
     /// Key of the scheme used by `omnifs init` when no explicit choice.
     pub default: String,
     pub schemes: BTreeMap<String, AuthScheme>,
+    /// Per-scheme display guidance, keyed by the same scheme key as `schemes`.
+    /// Display metadata only; never affects header injection.
+    pub guidance: BTreeMap<String, SchemeGuidance>,
 }
 
 impl ProviderAuthManifest {
@@ -153,6 +156,13 @@ impl ProviderAuthManifest {
     pub fn default_scheme(&self) -> Option<(&str, &AuthScheme)> {
         let scheme = self.schemes.get(&self.default)?;
         Some((self.default.as_str(), scheme))
+    }
+
+    /// Provider-supplied setup guidance for a scheme, or the empty default when
+    /// the provider declared none.
+    #[must_use]
+    pub fn guidance_for(&self, scheme_key: &str) -> SchemeGuidance {
+        self.guidance.get(scheme_key).cloned().unwrap_or_default()
     }
 
     /// Auth manifest derived from provider metadata for host HTTP injection.
@@ -173,6 +183,18 @@ impl ProviderAuthManifest {
         }
         for (key, scheme) in &self.schemes {
             validate_scheme(key, scheme, &self.inject)?;
+            // A bring-your-own-app OAuth scheme (no shipped client id) forces the
+            // user to create their own app; it must say how.
+            if let AuthScheme::Oauth(oauth) = scheme
+                && oauth.default_client_id.is_none()
+            {
+                let guidance = self.guidance_for(key);
+                if guidance.setup_steps.is_empty() && guidance.docs_url.is_none() {
+                    return Err(ProviderMetadataError::Validation(format!(
+                        "auth.schemes.{key}: OAuth scheme ships no clientId, so it must declare `setup` steps or a `docsUrl` explaining how to create an app"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -197,6 +219,21 @@ struct RawOauthScheme {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<String>,
     flow: RawOAuthFlow,
+    /// How the host authenticates at the token endpoint. `none` (the default)
+    /// suits public PKCE clients; confidential clients that must present a
+    /// secret use `clientSecretPost` or `clientSecretBasic`.
+    #[serde(default, skip_serializing_if = "TokenEndpointAuthMethod::is_none")]
+    token_endpoint_auth: TokenEndpointAuthMethod,
+    /// One-line summary shown in scheme pickers and `omnifs auth explain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// Ordered provider-specific prerequisite steps (create an OAuth app,
+    /// enable an API). Required when no `clientId` is shipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    setup: Vec<String>,
+    /// Link to provider documentation for this auth path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docs_url: Option<String>,
 }
 
 /// On-disk compact flow descriptor inside an OAuth scheme.
@@ -242,6 +279,15 @@ struct RawStaticTokenScheme {
     creation_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     validation: Option<TokenValidation>,
+    /// One-line summary shown in scheme pickers and `omnifs auth explain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// Ordered provider-specific prerequisite steps beyond creating the token.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    setup: Vec<String>,
+    /// Link to provider documentation for this auth path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docs_url: Option<String>,
 }
 
 /// On-disk discriminant for a scheme entry.
@@ -281,6 +327,7 @@ impl Serialize for ProviderAuthManifest {
             .schemes
             .iter()
             .map(|(key, scheme)| {
+                let guidance = self.guidance.get(key).cloned().unwrap_or_default();
                 let raw = match scheme {
                     AuthScheme::None => {
                         // None schemes cannot appear in provider manifests.
@@ -293,6 +340,9 @@ impl Serialize for ProviderAuthManifest {
                             description: s.description.clone(),
                             creation_url: s.creation_url.clone(),
                             validation: s.validation.clone(),
+                            summary: guidance.summary,
+                            setup: guidance.setup_steps,
+                            docs_url: guidance.docs_url,
                         })
                     },
                     AuthScheme::Oauth(o) => {
@@ -327,6 +377,10 @@ impl Serialize for ProviderAuthManifest {
                             client_id: o.default_client_id.clone(),
                             scopes: o.default_scopes.clone(),
                             flow,
+                            token_endpoint_auth: o.token_endpoint_auth,
+                            summary: guidance.summary,
+                            setup: guidance.setup_steps,
+                            docs_url: guidance.docs_url,
                         })
                     },
                 };
@@ -345,34 +399,53 @@ impl Serialize for ProviderAuthManifest {
 impl<'de> Deserialize<'de> for ProviderAuthManifest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = RawProviderAuthManifest::deserialize(deserializer)?;
-        let schemes = raw
-            .schemes
-            .into_iter()
-            .map(|(key, raw_scheme)| {
-                let scheme = expand_raw_scheme(&key, raw_scheme, &raw.inject);
-                (key, scheme)
-            })
-            .collect();
+        let mut schemes = BTreeMap::new();
+        let mut guidance = BTreeMap::new();
+        for (key, raw_scheme) in raw.schemes {
+            let (scheme, scheme_guidance) = expand_raw_scheme(&key, raw_scheme, &raw.inject);
+            if !scheme_guidance.is_empty() {
+                guidance.insert(key.clone(), scheme_guidance);
+            }
+            schemes.insert(key, scheme);
+        }
         Ok(Self {
             inject: raw.inject,
             default: raw.default,
             schemes,
+            guidance,
         })
     }
 }
 
-fn expand_raw_scheme(key: &str, raw: RawAuthScheme, inject: &AuthInject) -> AuthScheme {
+fn expand_raw_scheme(
+    key: &str,
+    raw: RawAuthScheme,
+    inject: &AuthInject,
+) -> (AuthScheme, SchemeGuidance) {
     match raw {
-        RawAuthScheme::StaticToken(s) => AuthScheme::StaticToken(StaticTokenScheme {
-            key: key.to_string(),
-            header_name: Some(inject.header.clone()),
-            value_prefix: inject.prefix.clone(),
-            description: s.description,
-            inject_domains: inject.domains.clone(),
-            creation_url: s.creation_url,
-            validation: s.validation,
-        }),
+        RawAuthScheme::StaticToken(s) => {
+            let guidance = SchemeGuidance {
+                summary: s.summary,
+                setup_steps: s.setup,
+                docs_url: s.docs_url,
+            };
+            let scheme = AuthScheme::StaticToken(StaticTokenScheme {
+                key: key.to_string(),
+                header_name: Some(inject.header.clone()),
+                value_prefix: inject.prefix.clone(),
+                description: s.description,
+                inject_domains: inject.domains.clone(),
+                creation_url: s.creation_url,
+                validation: s.validation,
+            });
+            (scheme, guidance)
+        },
         RawAuthScheme::Oauth(o) => {
+            let guidance = SchemeGuidance {
+                summary: o.summary,
+                setup_steps: o.setup,
+                docs_url: o.docs_url,
+            };
             let refresh_token_rotates = matches!(o.flow, RawOAuthFlow::PkceLoopback { .. });
             let (authorization_endpoint, token_endpoint, flow) = match o.flow {
                 RawOAuthFlow::DeviceCode {
@@ -420,7 +493,7 @@ fn expand_raw_scheme(key: &str, raw: RawAuthScheme, inject: &AuthInject) -> Auth
                     }),
                 ),
             };
-            AuthScheme::Oauth(OauthScheme {
+            let scheme = AuthScheme::Oauth(OauthScheme {
                 key: key.to_string(),
                 display_name: o.display_name,
                 authorization_endpoint,
@@ -429,14 +502,15 @@ fn expand_raw_scheme(key: &str, raw: RawAuthScheme, inject: &AuthInject) -> Auth
                 default_client_id: o.client_id,
                 default_scopes: o.scopes,
                 flow,
-                token_endpoint_auth: TokenEndpointAuthMethod::None,
+                token_endpoint_auth: o.token_endpoint_auth,
                 refresh_token_rotates,
                 extra_authorize_params: Vec::new(),
                 extra_token_params: Vec::new(),
                 inject_domains: inject.domains.clone(),
                 inject_header_name: Some(inject.header.clone()),
                 inject_value_prefix: inject.prefix.clone(),
-            })
+            });
+            (scheme, guidance)
         },
     }
 }
@@ -952,6 +1026,131 @@ mod tests {
         assert!(
             matches!(error, ProviderMetadataError::Validation(message) if message.contains("auth.inject.domains"))
         );
+    }
+
+    #[test]
+    fn scheme_guidance_round_trips_through_manifest() {
+        let manifest = ProviderManifest::from_bytes(
+            br#"{
+                "id": "demo",
+                "displayName": "Demo",
+                "provider": "demo.wasm",
+                "defaultMount": "demo",
+                "auth": {
+                    "inject": { "domains": ["api.demo.test"], "header": "Authorization", "prefix": "Bearer " },
+                    "default": "pat",
+                    "schemes": {
+                        "pat": {
+                            "type": "staticToken",
+                            "description": "Demo API token",
+                            "creationUrl": "https://demo.test/settings/tokens",
+                            "summary": "Paste a personal token",
+                            "setup": ["Open settings", "Click create token"],
+                            "docsUrl": "https://demo.test/docs/auth"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let auth = manifest.auth.as_ref().expect("auth");
+        let guidance = auth.guidance_for("pat");
+        assert_eq!(guidance.summary.as_deref(), Some("Paste a personal token"));
+        assert_eq!(
+            guidance.setup_steps,
+            ["Open settings", "Click create token"]
+        );
+        assert_eq!(
+            guidance.docs_url.as_deref(),
+            Some("https://demo.test/docs/auth")
+        );
+
+        // Round-trip back to the compact on-disk form and re-parse.
+        let reparsed = encode_provider_manifest(&manifest).unwrap();
+        assert_eq!(reparsed.auth.unwrap().guidance, auth.guidance);
+    }
+
+    #[test]
+    fn oauth_token_endpoint_auth_round_trips() {
+        let manifest = ProviderManifest::from_bytes(
+            br#"{
+                "id": "conf",
+                "displayName": "Confidential",
+                "provider": "conf.wasm",
+                "defaultMount": "conf",
+                "auth": {
+                    "inject": { "domains": ["api.conf.test"], "header": "Authorization", "prefix": "Bearer " },
+                    "default": "oauth",
+                    "schemes": {
+                        "oauth": {
+                            "type": "oauth",
+                            "displayName": "Conf OAuth",
+                            "clientId": "abc",
+                            "tokenEndpointAuth": "clientSecretPost",
+                            "flow": {
+                                "kind": "pkceLoopback",
+                                "authorizationEndpoint": "https://conf.test/oauth/authorize",
+                                "tokenEndpoint": "https://conf.test/oauth/token",
+                                "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let method = |manifest: &ProviderManifest| match &manifest.auth.as_ref().unwrap().schemes["oauth"]
+        {
+            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth,
+            other => panic!("expected oauth scheme, got {other:?}"),
+        };
+        assert_eq!(method(&manifest), TokenEndpointAuthMethod::ClientSecretPost);
+
+        // The confidential-client method survives the compact on-disk round-trip;
+        // a default (`none`) scheme would omit the field entirely.
+        let reparsed = encode_provider_manifest(&manifest).unwrap();
+        assert_eq!(method(&reparsed), TokenEndpointAuthMethod::ClientSecretPost);
+    }
+
+    #[test]
+    fn byo_oauth_scheme_without_client_id_requires_guidance() {
+        let json = serde_json::json!({
+            "id": "byo",
+            "displayName": "BYO",
+            "provider": "byo.wasm",
+            "defaultMount": "byo",
+            "auth": {
+                "inject": { "domains": ["api.byo.test"], "header": "Authorization", "prefix": "Bearer " },
+                "default": "oauth",
+                "schemes": {
+                    "oauth": {
+                        "type": "oauth",
+                        "displayName": "BYO OAuth",
+                        "flow": {
+                            "kind": "pkceLoopback",
+                            "authorizationEndpoint": "https://byo.test/oauth/authorize",
+                            "tokenEndpoint": "https://byo.test/oauth/token",
+                            "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
+                        }
+                    }
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let error = ProviderManifest::from_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(&error, ProviderMetadataError::Validation(message) if message.contains("ships no clientId")),
+            "unexpected error: {error}"
+        );
+
+        // Adding setup steps satisfies the rule.
+        let mut json = json;
+        json["auth"]["schemes"]["oauth"]["setup"] =
+            serde_json::json!(["Create an OAuth app at https://byo.test/apps"]);
+        let bytes = serde_json::to_vec(&json).unwrap();
+        ProviderManifest::from_bytes(&bytes).expect("guidance satisfies BYO rule");
     }
 
     fn oauth_provider_manifest() -> ProviderManifest {

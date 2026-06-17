@@ -83,7 +83,7 @@ impl Builtins {
         provider_file_name(&config.provider).and_then(|file_name| self.by_provider_file(file_name))
     }
 
-    fn manifest_for_resolved(&self, config: &Resolved) -> Option<&ProviderManifest> {
+    pub(crate) fn manifest_for_resolved(&self, config: &Resolved) -> Option<&ProviderManifest> {
         self.by_id(&config.provider_id).or_else(|| {
             provider_file_name(&config.spec.provider)
                 .and_then(|file_name| self.by_provider_file(file_name))

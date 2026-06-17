@@ -18,10 +18,14 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
 - **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.
 - **Feature:** The runtime now runs as a standalone `omnifsd` daemon that owns the FUSE mount and exposes an HTTP control API; the `omnifs` CLI drives it over that API and no longer links the WASM runtime or FUSE.
+- **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
 - **Fix:** The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
+- **Feature:** You can now see every authentication method omnifs supports with `omnifs auth modes`, and get provider-specific setup guidance with `omnifs auth explain <provider>`. (#131)
+- **Feature:** Provider manifests can now declare how the host authenticates at the token endpoint, enabling confidential-client OAuth flows like Google Workspace. (#131)
+- **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
 
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.

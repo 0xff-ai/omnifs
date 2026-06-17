@@ -21,8 +21,6 @@ pub enum DebugCommand {
         #[arg(long)]
         by_type: bool,
     },
-    /// Print the provider auth manifest for a mount (formerly `auth schemes`).
-    AuthManifest { mount: String },
 }
 
 impl DebugArgs {
@@ -42,11 +40,6 @@ impl DebugArgs {
                 let data = crate::mount_tree::read_from_wasm(&path)?;
                 anstream::print!("{}", data.render(views));
                 Ok(())
-            },
-            DebugCommand::AuthManifest { mount } => {
-                let ctx = crate::app_context::AppContext::resolve_default()?;
-                let mounts = ctx.workspace().mounts()?;
-                crate::commands::auth::run_auth_manifest(ctx.catalog(), &mounts, &mount)
             },
         }
     }

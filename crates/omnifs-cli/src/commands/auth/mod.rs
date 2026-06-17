@@ -8,13 +8,16 @@ mod status;
 
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
+use omnifs_provider::ProviderManifest;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::app_context::AppContext;
+use crate::catalog::{ProviderCatalog, ProviderTemplate};
 use crate::paths::PathOverrides;
 use crate::presentation::OutputFormat;
+use crate::session::MountConfig;
 
-pub(crate) use import::run_auth_manifest;
 pub(crate) use login::login_with_paths;
 
 #[derive(Debug, Clone, Args)]
@@ -28,6 +31,16 @@ pub struct AuthArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AuthCommand {
+    /// List the authentication mechanisms omnifs supports, in general.
+    Modes,
+    /// Explain how to authenticate a provider or mount, scheme by scheme.
+    Explain {
+        /// Provider id (e.g. `github`) or a configured mount name.
+        target: String,
+        /// Print the raw auth manifest as JSON instead of rendered guidance.
+        #[arg(long)]
+        json: bool,
+    },
     Login {
         mount: String,
         #[arg(long)]
@@ -72,6 +85,12 @@ impl AuthArgs {
         let mounts = ctx.workspace().mounts()?;
         let store = Box::new(FileStore::new(&paths.credentials_file));
         match self.command {
+            // A static reference card; ignores the mount/credential context above.
+            AuthCommand::Modes => {
+                crate::auth::explain::render_modes_catalog();
+                Ok(())
+            },
+            AuthCommand::Explain { target, json } => run_explain(catalog, &mounts, &target, json),
             AuthCommand::Login {
                 mount,
                 no_browser,
@@ -123,6 +142,55 @@ impl AuthArgs {
             },
         }
     }
+}
+
+fn run_explain(
+    catalog: &ProviderCatalog,
+    mounts: &[MountConfig],
+    target: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let templates = catalog.provider_templates()?;
+    let manifest = resolve_target_manifest(&templates, mounts, target)?;
+
+    if json {
+        match manifest.wasm_auth_manifest() {
+            Some(wire) => anstream::println!("{}", serde_json::to_string_pretty(&wire)?),
+            None => anstream::println!("null"),
+        }
+        return Ok(());
+    }
+
+    match &manifest.auth {
+        Some(auth) => crate::auth::explain::render_provider_auth(&manifest.display_name, auth),
+        None => anstream::println!("{} needs no authentication.", manifest.display_name),
+    }
+    Ok(())
+}
+
+/// Resolve an `auth explain` target, which may be a provider id or a configured
+/// mount name, to the owning provider manifest.
+fn resolve_target_manifest<'a>(
+    templates: &'a BTreeMap<String, ProviderTemplate>,
+    mounts: &[MountConfig],
+    target: &str,
+) -> anyhow::Result<&'a ProviderManifest> {
+    if let Some(template) = templates.get(target) {
+        return Ok(&template.manifest);
+    }
+    if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target) {
+        let provider_ref = &mount.config.provider;
+        if let Some(template) = templates
+            .values()
+            .find(|t| t.manifest.id == *provider_ref || t.manifest.provider == *provider_ref)
+        {
+            return Ok(&template.manifest);
+        }
+    }
+    anyhow::bail!(
+        "no provider or mount named `{target}`; known providers: {}",
+        templates.keys().cloned().collect::<Vec<_>>().join(", ")
+    )
 }
 
 #[cfg(test)]

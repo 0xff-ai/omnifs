@@ -113,10 +113,13 @@ OauthScheme:
 OAuthFlow:
   pkceLoopback(PkceLoopbackConfig)
   pkceManualCode(PkceManualCodeConfig)
+  clientSideToken(ClientSideTokenConfig)
   deviceCode(DeviceCodeConfig)
 ```
 
 The per-scheme `injectDomains`, `injectHeaderName`, and `injectValuePrefix` fields above are the resolved runtime shape. Provider manifests author them once in an `auth.inject` block (`auth.inject.domains`, with optional header name and value prefix), which is eagerly applied to every scheme at deserialization.
+
+Each scheme may also carry display-only setup guidance, authored on-disk as `summary` (a one-line picker label), `setup` (ordered provider-specific prerequisite steps, required for an OAuth scheme that ships no `clientId`), and `docsUrl`. This guidance never affects header injection, so the parsed `ProviderAuthManifest` keeps it in a `guidance` map keyed by scheme key rather than on the injection-facing `AuthScheme`; the host pairs it with its own canned per-flow-kind explanation at display time.
 
 Manifest validation runs as imperative checks at provider load, stricter than a bare URI parse for OAuth endpoints:
 
@@ -400,20 +403,27 @@ A provider can declare multiple schemes. Linear, for example, declares both `sta
 
 Each provider design under `docs/design/providers/` carries an "Authentication schemes" subsection that pins down its auth manifest entry.
 
+## Authentication modes and setup guidance
+
+The mechanics of each flow are identical across providers, so omnifs owns the plain-language explanation of every mechanism it supports: static token plus the four OAuth flows (device code, PKCE loopback, PKCE manual-code, client-side token). `omnifs auth modes` prints that catalog as a reference card; it needs no provider or configuration.
+
+A provider manifest supplies only what is specific to it: which token to create (`creationUrl` on a static-token scheme), which app to register, any prerequisite `setup` steps, and a `docsUrl`. `omnifs auth explain <provider|mount>` renders each declared scheme by pairing the host's canned flow-kind copy with the provider's own guidance, and the same combined guidance appears inline during `omnifs init` and `omnifs auth login` before the user is prompted. These commands are the live per-provider reference; this document does not duplicate per-provider auth copy.
+
 ## CLI surface
 
 `omnifs auth` is a subcommand group. Every subcommand is provider-agnostic; the CLI reads metadata from the daemon and runs the generic engine.
 
 | Command | Description |
 |---|---|
-| `omnifs auth login <mount>` | Run the configured scheme's flow. Opens the browser, runs the loopback listener (or prompts for a code), stores the token. Prints scopes and expiry. |
+| `omnifs auth modes` | Print the catalog of authentication mechanisms omnifs supports, with a plain-language description of each. No provider needed. |
+| `omnifs auth explain <provider\|mount>` | Render each declared scheme for a provider (or a mount's provider): flow-kind explanation, setup steps, token creation URL, scopes, and docs link. `--json` prints the raw auth manifest. |
+| `omnifs auth login <mount>` | Run the configured scheme's flow. Opens the browser, runs the loopback listener (or prompts for a code), stores the token. Prints the flow explanation, scopes, and expiry. |
 | `omnifs auth login <mount> --no-browser` | Print the URL to stdout instead of opening a browser. |
 | `omnifs auth logout <mount>` | Delete the token from the store. With `--revoke`, call the vendor's `revocationEndpoint` if declared. |
-| `omnifs auth status` | List all mounts with credentials. Show provider, scheme, account, scopes, expiry, last-refresh time, store backend. |
+| `omnifs auth status` | List all mounts, their stored credential state, and the schemes each provider declares. Show scopes, expiry, last-refresh time, store backend. |
 | `omnifs auth refresh <mount>` | Force a refresh. |
 | `omnifs auth scopes <mount>` | Show currently-granted scopes vs the scheme's declared `defaultScopes`. |
 | `omnifs auth import <mount> --token-env VAR` | Import a static token under the same store-key shape as OAuth. |
-| `omnifs debug auth-manifest <mount>` | Print the extracted auth manifest for the mount's provider. Diagnostic / authoring aid. |
 
 First-run experience: a mount config without a stored credential causes the first FUSE operation to fail with `permission-denied`; `omnifs status` flags the mount as "needs login" and points at `omnifs auth login <mount>`. The daemon does not pop a browser by itself.
 
@@ -431,7 +441,7 @@ A future WIT extension may add a per-callout `auth-context` arm so providers can
 
 ## Failure modes
 
-All diagnostic surfaces (`omnifs auth status`, `omnifs auth scopes`, `omnifs debug auth-manifest`) read from the auth manifest and the store, not from any host-internal table. Failure modes like "scope drift" surface clearly: the diff between the scheme's declared `defaultScopes` and the stored entry's `scopes` is visible immediately.
+All diagnostic surfaces (`omnifs auth status`, `omnifs auth scopes`, `omnifs auth explain`) read from the auth manifest and the store, not from any host-internal table. Failure modes like "scope drift" surface clearly: the diff between the scheme's declared `defaultScopes` and the stored entry's `scopes` is visible immediately.
 
 | Failure | Symptom | Recovery |
 |---|---|---|
@@ -487,7 +497,7 @@ ssh -F /dev/null -T git@github.com
 
 5. **Daemon-driven login.** Today the CLI process runs the OAuth flow and tells the daemon to reload. The alternative (daemon runs the flow over a local RPC, CLI relays) is cleaner for in-flight retries. Defer.
 
-6. **Provider-supplied UI strings.** The provider declares `displayName`; should it also declare a help URL the CLI prints during login? Cheap manifest addition; consider when the next provider lands.
+6. **Provider-supplied UI strings.** Resolved. A scheme may declare `summary`, `setup` steps, and `docsUrl`; the CLI prints them during `omnifs init`, `omnifs auth login`, and `omnifs auth explain`, paired with the host's canned per-flow-kind copy.
 
 ## References
 

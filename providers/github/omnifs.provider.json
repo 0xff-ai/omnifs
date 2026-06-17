@@ -32,6 +32,11 @@
         "type": "staticToken",
         "description": "GitHub personal access token",
         "creationUrl": "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
+        "summary": "A classic personal access token; the create link pre-selects the read:user scope.",
+        "setup": [
+          "Add the repo scope as well if you want to browse private repositories and their issues or pull requests."
+        ],
+        "docsUrl": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
         "validation": {
           "method": "GET",
           "url": "https://api.github.com/user",
@@ -43,6 +48,7 @@
         "type": "oauth",
         "displayName": "GitHub OAuth device flow",
         "clientId": "Ov23licogxMDzS47s9sF",
+        "summary": "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",
         "scopes": [],
         "flow": {
           "kind": "deviceCode",

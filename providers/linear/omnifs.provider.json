@@ -27,6 +27,7 @@
         "type": "staticToken",
         "description": "Linear personal access token or API key",
         "creationUrl": "https://linear.app/settings/api",
+        "summary": "A personal API key created in Linear's API settings.",
         "validation": {
           "method": "POST",
           "url": "https://api.linear.app/graphql",
@@ -43,6 +44,7 @@
         "type": "oauth",
         "displayName": "Linear OAuth",
         "clientId": "4dc7b7c05f651306a318de6f9f963b40",
+        "summary": "Browser sign-in through omnifs's Linear app, granting read access to your workspace.",
         "scopes": ["read"],
         "flow": {
           "kind": "pkceLoopback",
