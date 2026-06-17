@@ -126,7 +126,7 @@ pub(crate) fn exact_file_attrs(size: u64) -> FileAttrsCache {
     FileAttrsCache {
         size: view_types::FileSize::Exact(size),
         bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-        stability: view_types::Stability::Immutable,
+        stability: view_types::Stability::Stable,
         version_token: None,
     }
 }
@@ -201,8 +201,8 @@ pub(crate) fn learned_ranged_eof_attrs(
 
 fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
     match attrs.stability {
-        view_types::Stability::Immutable | view_types::Stability::Mutable => true,
-        view_types::Stability::Volatile => false,
+        view_types::Stability::Stable | view_types::Stability::Dynamic => true,
+        view_types::Stability::Live => false,
     }
 }
 
@@ -217,7 +217,7 @@ pub(crate) fn full_read_matches_attrs(attrs: &FileAttrsCache, content_len: usize
 }
 
 pub(crate) fn file_payload_matches_attrs(attrs: &FileAttrsCache, payload: &FilePayload) -> bool {
-    if matches!(attrs.stability, view_types::Stability::Mutable)
+    if matches!(attrs.stability, view_types::Stability::Dynamic)
         && payload.version_token != attrs.version_token
     {
         return false;
@@ -308,7 +308,7 @@ fn should_preserve_learned_exact_size(
         && existing.bytes == incoming.bytes
         && existing.stability == incoming.stability
         && existing.version_token == incoming.version_token
-        && (matches!(existing.stability, view_types::Stability::Immutable)
-            || (matches!(existing.stability, view_types::Stability::Mutable)
+        && (matches!(existing.stability, view_types::Stability::Stable)
+            || (matches!(existing.stability, view_types::Stability::Dynamic)
                 && existing.version_token.is_some()))
 }

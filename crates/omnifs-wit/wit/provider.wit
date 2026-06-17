@@ -199,9 +199,9 @@ interface types {
     }
 
     enum stability {
-        immutable,
-        mutable,
-        volatile,
+        stable,
+        dynamic,
+        live,
     }
 
     /// File metadata. Bytes are deliberately not attributes.

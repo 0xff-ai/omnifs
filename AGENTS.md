@@ -33,6 +33,8 @@ cargo nextest run
 
 Use the repo checks when touching broad surfaces or provider code: `just check` (fmt, clippy/tests, wasm provider/tool checks, npm validate, docs link check), `just providers-check`, `just providers-build`. The `justfile` is the human command surface; run `just` to list grouped commands, and keep recipes as thin wrappers over Cargo, Bun, Docker, and shell.
 
+Gate on the default members, not the whole workspace. `cargo check` and `cargo nextest run` build the host default members (`omnifs-cli`, `omnifs-host`, `omnifs-daemon`) and their dependencies; that is the host gate. Do not gate with `cargo check --workspace --all-targets`: it forces the wasm guest crates (`providers/*`, `crates/omnifs-tool-*`) onto the host target, where the wit-bindgen guest bindings (the `Guest` trait, the `export!` macro) do not exist, so it fails with `E0404`/`E0432` on `main` too. Those crates are built for wasm via `just providers-build` / `just providers-check`. After editing a `.wit`, incremental builds can serve stale wit-bindgen codegen and surface phantom errors in downstream crates; run `cargo clean -p omnifs-wit` (or a clean build) before trusting a failure.
+
 For mount, provider, clone, traversal, or runtime behavior changes, do not stop at Rust-only checks: validate through the supported runtime path (`omnifs dev`, then exercise the live mount). The contributor runtime is `omnifs dev` / `shell` / `logs` / `status` / `down`. The exact build/provider commands, the live-runtime validation recipe, and the debugging runbook are in `CONTRIBUTING.md`.
 
 ## Subsystem map

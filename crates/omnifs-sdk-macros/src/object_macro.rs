@@ -121,7 +121,7 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
     let stability_tokens = if let Some(stability) = &args.stability {
         quote! { omnifs_sdk::file_attrs::Stability::#stability }
     } else {
-        quote! { omnifs_sdk::file_attrs::Stability::Mutable }
+        quote! { omnifs_sdk::file_attrs::Stability::Dynamic }
     };
 
     let parse_tokens = args.parse.as_ref().map(|parse| {

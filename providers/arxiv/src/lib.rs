@@ -258,9 +258,9 @@ impl PaperVersionKey {
         let blob = download_pdf(&cx, key.paper.decoded(), version).await?;
         let builder = FileProjection::blob(blob.id).size(Size::Exact(blob.size));
         Ok(if key.version.is_numbered() {
-            builder.immutable().build()
+            builder.stable().build()
         } else {
-            builder.mutable().build()
+            builder.dynamic().build()
         })
     }
 
@@ -273,9 +273,9 @@ impl PaperVersionKey {
         let blob = download_source(&cx, key.paper.decoded(), version).await?;
         let builder = FileProjection::blob(blob.id).size(Size::Exact(blob.size));
         Ok(if key.version.is_numbered() {
-            builder.immutable().build()
+            builder.stable().build()
         } else {
-            builder.mutable().build()
+            builder.dynamic().build()
         })
     }
 
@@ -287,9 +287,9 @@ impl PaperVersionKey {
         let builder = FileProjection::body(paper.metadata_json_bytes(key.version.number())?)
             .content_type(ContentType::Json);
         Ok(if key.version.is_numbered() {
-            builder.immutable().build()
+            builder.stable().build()
         } else {
-            builder.mutable().build()
+            builder.dynamic().build()
         })
     }
 }

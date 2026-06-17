@@ -117,7 +117,7 @@ impl Namespace<'_> {
         let volatile = warm_id
             .as_ref()
             .and_then(|_| leaf_stability(self, &path))
-            .is_some_and(|s| s == Stability::Volatile);
+            .is_some_and(|s| s == Stability::Live);
 
         // Cheap op for the error arm: no byte buffer, same path/content_type shape.
         let op_for_error = Op::ReadFile {

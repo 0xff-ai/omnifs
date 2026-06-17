@@ -235,13 +235,13 @@ impl TableLeaf {
             .to_vec();
         let mut requested = FileProjection::body(bytes).size(attrs.size);
         match attrs.stability {
-            Stability::Immutable => {
-                requested = requested.immutable();
+            Stability::Stable => {
+                requested = requested.stable();
             },
-            Stability::Mutable => {
-                requested = requested.mutable();
+            Stability::Dynamic => {
+                requested = requested.dynamic();
             },
-            Stability::Volatile => {
+            Stability::Live => {
                 return Err(ProviderError::internal("table leaves cannot be volatile"));
             },
         }
@@ -289,7 +289,7 @@ async fn meta_info_json(cx: Cx<State>) -> Result<FileProjection> {
     let bytes = pretty_json(&info)?;
     Ok(FileProjection::body(bytes)
         .content_type(ContentType::Json)
-        .mutable()
+        .dynamic()
         .build())
 }
 
@@ -342,7 +342,7 @@ async fn table_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
     let bytes = pretty_json(&doc)?;
     Ok(FileProjection::body(bytes)
         .content_type(ContentType::Json)
-        .mutable()
+        .dynamic()
         .build())
 }
 
@@ -425,13 +425,13 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         let mut builder = FileProjection::ranged(MemoryRangeReader::new(bytes))
             .size(size)
-            .mutable();
+            .dynamic();
         if let Some(v) = version {
             builder = builder.version(v);
         }
         return Ok(builder.build());
     }
-    let mut builder = FileProjection::body(bytes).mutable();
+    let mut builder = FileProjection::body(bytes).dynamic();
     if let Some(v) = version {
         builder = builder.version(v);
     }
@@ -448,9 +448,9 @@ fn file_content_projection(content: FileContent) -> FileProjection {
     let bytes = content.content().unwrap_or_default().to_vec();
     let mut builder = FileProjection::body(bytes).size(attrs.size);
     builder = match attrs.stability {
-        Stability::Immutable => builder.immutable(),
-        Stability::Mutable => builder.mutable(),
-        Stability::Volatile => builder.mutable(),
+        Stability::Stable => builder.stable(),
+        Stability::Dynamic => builder.dynamic(),
+        Stability::Live => builder.dynamic(),
     };
     if let Some(version) = attrs.version {
         builder = builder.version(version);

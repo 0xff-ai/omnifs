@@ -62,7 +62,7 @@ fn preload_file_effect(id: &LogicalId, path: &str, inline: &[u8]) -> Effects {
                 content_type: None,
                 attrs: FileAttrs {
                     size: FileSize::Exact(inline.len() as u64),
-                    stability: Stability::Mutable,
+                    stability: Stability::Dynamic,
                     version_token: None,
                 },
                 bytes: ByteSource::Inline(inline.to_vec()),
@@ -182,7 +182,7 @@ fn leaf_records_share_one_deadline() {
             content_type: None,
             attrs: FileAttrs {
                 size: FileSize::Exact(5),
-                stability: Stability::Mutable,
+                stability: Stability::Dynamic,
                 version_token: None,
             },
             bytes: ByteSource::Inline(b"title".to_vec()),

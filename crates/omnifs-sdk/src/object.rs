@@ -134,9 +134,9 @@ pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
     }
 
     /// Default [`Stability`] for leaves projected from this object.
-    /// `Mutable` is the safe default for anything live-edited upstream.
+    /// `Dynamic` is the safe default for anything live-edited upstream.
     fn default_stability() -> Stability {
-        Stability::Mutable
+        Stability::Dynamic
     }
 
     /// Parse the verbatim canonical bytes back into a value. Failures

@@ -386,7 +386,7 @@ impl Export {
     }
 
     fn promote_file_attrs(&self, id: u64, attrs: FileAttrsCache) {
-        if matches!(attrs.stability, view_types::Stability::Volatile) {
+        if matches!(attrs.stability, view_types::Stability::Live) {
             return;
         }
         if let Some(mut entry) = self.entries.get_mut(&id)
@@ -2009,7 +2009,7 @@ mod tests {
         let attrs = FileAttrsCache {
             size: declared_size,
             bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-            stability: view_types::Stability::Immutable,
+            stability: view_types::Stability::Stable,
             version_token: None,
         };
         let recorded_size = match declared_size {
@@ -2200,12 +2200,12 @@ mod tests {
         ] {
             let existing = attrs(
                 view_types::FileSize::Exact(42),
-                view_types::Stability::Mutable,
+                view_types::Stability::Dynamic,
                 existing_version,
             );
             let incoming = attrs(
                 incoming_size,
-                view_types::Stability::Mutable,
+                view_types::Stability::Dynamic,
                 incoming_version,
             );
 

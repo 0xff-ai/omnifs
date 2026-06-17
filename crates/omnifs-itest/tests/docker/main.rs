@@ -54,7 +54,7 @@ fn assert_no_cache_effects(effects: &Effects) {
 fn assert_inline_file(op: &TestOp<'_>, expected: &[u8]) {
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             match &file.bytes {
                 ByteSource::Inline(bytes) => assert_eq!(bytes.as_slice(), expected),
                 other => panic!("expected inline docker bytes, got {other:?}"),

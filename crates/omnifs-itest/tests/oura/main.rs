@@ -56,7 +56,7 @@ fn resume_json(op: &mut omnifs_host::TestOp<'_>, body: &'static [u8]) {
 fn read_query_body(op: &omnifs_host::TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Mutable);
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
             assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
             match &file.bytes {
                 ByteSource::Canonical => op.effects().unwrap().canonical[0].bytes.clone(),
@@ -122,7 +122,7 @@ fn assert_projected_lazy_file(op: &omnifs_host::TestOp<'_>, path: &str) {
     let FsKind::File(file) = &write.kind else {
         panic!("expected file projection for {path}, got {:?}", write.kind);
     };
-    assert_eq!(file.attrs.stability, Stability::Mutable);
+    assert_eq!(file.attrs.stability, Stability::Dynamic);
     assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
     assert!(matches!(file.attrs.size, FileSize::Unknown));
     assert!(matches!(file.bytes, ByteSource::Deferred(ReadMode::Full)));

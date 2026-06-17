@@ -109,8 +109,8 @@ pub(super) fn opened_file_attrs(opened: &omnifs_wit::provider::types::FileAttrs)
 
 pub(super) fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
     match attrs.stability {
-        view_types::Stability::Immutable | view_types::Stability::Mutable => true,
-        view_types::Stability::Volatile => false,
+        view_types::Stability::Stable | view_types::Stability::Dynamic => true,
+        view_types::Stability::Live => false,
     }
 }
 
@@ -130,7 +130,7 @@ pub(super) fn file_payload_for_attrs(
 ) -> Option<FilePayload> {
     let payload = FilePayload::deserialize(&record.payload)?;
     let attrs = attrs?;
-    if matches!(attrs.stability, view_types::Stability::Mutable)
+    if matches!(attrs.stability, view_types::Stability::Dynamic)
         && payload.version_token != attrs.version_token
     {
         return None;

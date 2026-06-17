@@ -322,7 +322,7 @@ fn projected_leaf_modifiers_apply_to_pending_leaf() {
         o.representations("item", (Markdown,))?;
         o.file("title").project(DemoObj::title)?;
         o.file("body").lazy().project(DemoObj::body)?;
-        o.file("state").immutable().project(DemoObj::state)?;
+        o.file("state").stable().project(DemoObj::state)?;
         Ok(())
     })
     .unwrap();
@@ -360,8 +360,8 @@ fn projected_leaf_modifiers_apply_to_pending_leaf() {
     assert_eq!(
         projected,
         vec![
-            ("/items/42/state", wit_types::Stability::Immutable),
-            ("/items/42/title", wit_types::Stability::Mutable),
+            ("/items/42/state", wit_types::Stability::Stable),
+            ("/items/42/title", wit_types::Stability::Dynamic),
         ],
         "lazy body must not eager-project, and stability must apply to the pending state leaf"
     );

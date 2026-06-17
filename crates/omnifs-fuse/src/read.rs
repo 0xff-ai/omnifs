@@ -61,7 +61,7 @@ impl Frontend {
                         reply.error(Errno::EIO);
                         return;
                     };
-                    if matches!(ranged.attrs.stability, view_types::Stability::Volatile) {
+                    if matches!(ranged.attrs.stability, view_types::Stability::Live) {
                         // A volatile file (tail -f shapes) is meant to change
                         // while observed, so a freshly observed end never
                         // contradicts the open-time size. Grow the inode size
@@ -377,7 +377,7 @@ impl Frontend {
             Ok(opened) => {
                 let opened_attrs = opened_file_attrs(&opened.attrs);
                 self.promote_inode_attrs(target.ino, opened_attrs.clone());
-                let is_volatile = matches!(opened_attrs.stability, view_types::Stability::Volatile);
+                let is_volatile = matches!(opened_attrs.stability, view_types::Stability::Live);
                 let observed_end = Arc::new(AtomicU64::new(0));
                 self.ranged_handles.insert(
                     target.fh,
@@ -570,7 +570,7 @@ impl Frontend {
     }
 
     fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
-        if matches!(attrs.stability, view_types::Stability::Volatile) {
+        if matches!(attrs.stability, view_types::Stability::Live) {
             return;
         }
         let Some(mut entry) = self.inodes.get_mut(&ino) else {

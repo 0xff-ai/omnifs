@@ -18,9 +18,9 @@ pub fn file_size_from_wit(size: wit_types::FileSize) -> FileSize {
 
 pub fn stability_from_wit(stability: wit_types::Stability) -> Stability {
     match stability {
-        wit_types::Stability::Immutable => Stability::Immutable,
-        wit_types::Stability::Mutable => Stability::Mutable,
-        wit_types::Stability::Volatile => Stability::Volatile,
+        wit_types::Stability::Stable => Stability::Stable,
+        wit_types::Stability::Dynamic => Stability::Dynamic,
+        wit_types::Stability::Live => Stability::Live,
     }
 }
 
@@ -85,7 +85,7 @@ pub fn entry_kind_to_wit(kind: &EntryKind) -> wit_types::EntryKind {
         EntryKind::File => wit_types::EntryKind::File(wit_types::FileOut {
             attrs: wit_types::FileAttrs {
                 size: wit_types::FileSize::Unknown,
-                stability: wit_types::Stability::Mutable,
+                stability: wit_types::Stability::Dynamic,
                 version_token: None,
             },
             bytes: wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),

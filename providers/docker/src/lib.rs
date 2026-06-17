@@ -429,7 +429,7 @@ async fn fetch_container(cx: &Cx, reference: &ContainerRef) -> Result<Container>
 }
 
 fn snapshot_body(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::body(bytes).mutable().build()
+    FileProjection::body(bytes).dynamic().build()
 }
 
 pub(crate) async fn list_containers(cx: &Cx) -> Result<Vec<ContainerSummary>> {

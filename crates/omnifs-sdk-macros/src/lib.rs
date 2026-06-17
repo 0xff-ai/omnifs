@@ -76,7 +76,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   content type. Non-JSON canonicals require `parse`.
 /// - `parse = path::to::fn`: custom `fn(&[u8]) -> Result<Self>` replacing
 ///   the default serde-JSON `parse_canonical`.
-/// - `stability = Mutable | Immutable | Volatile` (default `Mutable`): the
+/// - `stability = Dynamic | Stable | Live` (default `Dynamic`): the
 ///   default stability for the object's projected leaves.
 #[proc_macro_attribute]
 pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {

@@ -299,7 +299,7 @@ impl Frontend {
             return TTL;
         };
         if !matches!(attrs.size, view_types::FileSize::Exact(_))
-            || !matches!(attrs.stability, view_types::Stability::Immutable)
+            || !matches!(attrs.stability, view_types::Stability::Stable)
         {
             return TTL_DYNAMIC;
         }

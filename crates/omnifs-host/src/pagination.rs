@@ -285,12 +285,12 @@ impl Runtime {
 fn control_entry_meta() -> EntryMeta {
     EntryMeta::file(FileAttrsCache {
         size: FileSize::Unknown,
-        // `Mutable`, not `Volatile`: each open recomputes the status (the action
+        // `Dynamic`, not `Live`: each open recomputes the status (the action
         // runs once per open, served from the per-`fh` buffer), so a re-read may
-        // differ, but it is not a live ranged stream. `Volatile` would also
-        // violate the attrs invariant (`Volatile` requires `Deferred(Ranged)`).
+        // differ, but it is not a live ranged stream. `Live` would also
+        // violate the attrs invariant (`Live` requires `Deferred(Ranged)`).
         bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: Stability::Mutable,
+        stability: Stability::Dynamic,
         version_token: None,
     })
 }
@@ -305,7 +305,7 @@ pub fn control_read_attrs(len: u64) -> FileAttrsCache {
     FileAttrsCache {
         size: FileSize::Exact(len),
         bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: Stability::Mutable,
+        stability: Stability::Dynamic,
         version_token: None,
     }
 }

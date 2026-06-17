@@ -386,20 +386,20 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     /// Set this projected leaf's stability to immutable.
     ///
     /// This is a modifier for the pending [`Self::project`] leaf:
-    /// `o.file("version").immutable().project(Item::version)?`.
+    /// `o.file("version").stable().project(Item::version)?`.
     #[must_use]
-    pub fn immutable(mut self) -> Self {
-        self.stability = Some(Stability::Immutable);
+    pub fn stable(mut self) -> Self {
+        self.stability = Some(Stability::Stable);
         self
     }
 
     /// Set this projected leaf's stability to mutable.
     ///
     /// This is a modifier for the pending [`Self::project`] leaf:
-    /// `o.file("state").mutable().project(Item::state)?`.
+    /// `o.file("state").dynamic().project(Item::state)?`.
     #[must_use]
-    pub fn mutable(mut self) -> Self {
-        self.stability = Some(Stability::Mutable);
+    pub fn dynamic(mut self) -> Self {
+        self.stability = Some(Stability::Dynamic);
         self
     }
 
@@ -407,14 +407,14 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     /// leaf; registers nothing itself (volatility actually comes from the
     /// handler returning a ranged projection with volatile attrs). Errors
     /// otherwise, because volatile content requires a ranged source.
-    pub fn volatile(self) -> Result<&'a mut DirObjectBlock<O>> {
+    pub fn live(self) -> Result<&'a mut DirObjectBlock<O>> {
         let is_handler = matches!(
             self.block.leaves.last(),
             Some(ObjectLeaf::HandlerFile { .. })
         );
         if !is_handler {
             return Err(ProviderError::invalid_input(
-                ".volatile() is only valid on ranged .handler leaves",
+                ".live() is only valid on ranged .handler leaves",
             ));
         }
         Ok(self.block)

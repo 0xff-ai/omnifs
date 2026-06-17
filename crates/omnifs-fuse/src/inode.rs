@@ -395,7 +395,7 @@ mod tests {
     use omnifs_core::view as view_types;
 
     fn attrs(size: view_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
-        attrs_with(size, view_types::Stability::Mutable, version_token)
+        attrs_with(size, view_types::Stability::Dynamic, version_token)
     }
 
     fn attrs_with(
@@ -479,12 +479,12 @@ mod tests {
             {
                 let existing = attrs_with(
                     view_types::FileSize::Exact(42),
-                    view_types::Stability::Immutable,
+                    view_types::Stability::Stable,
                     None,
                 );
                 let incoming = attrs_with(
                     view_types::FileSize::Unknown,
-                    view_types::Stability::Immutable,
+                    view_types::Stability::Stable,
                     None,
                 );
                 RefreshCase {
@@ -497,12 +497,12 @@ mod tests {
             {
                 let existing = attrs_with(
                     view_types::FileSize::Exact(42),
-                    view_types::Stability::Mutable,
+                    view_types::Stability::Dynamic,
                     None,
                 );
                 let incoming = attrs_with(
                     view_types::FileSize::Unknown,
-                    view_types::Stability::Immutable,
+                    view_types::Stability::Stable,
                     None,
                 );
                 RefreshCase {

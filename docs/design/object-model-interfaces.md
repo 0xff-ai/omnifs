@@ -12,7 +12,7 @@ concrete shape (it is the resolution of the spec's deferred decisions).
 
 The gate review returned **GO**. The adversarial pass (D4) found no hole in the
 freshness/identity/multikey machinery. The spec needed three doc fixes (applied
-separately: SIC-1 object-record fields, SIC-2 `.volatile()` restriction,
+separately: SIC-1 object-record fields, SIC-2 `.live()` restriction,
 NEG-CHANNEL negative wire channel) plus polish; those do not change the model.
 
 ## 0. The two orchestrator decisions (settled)
@@ -188,7 +188,7 @@ pub trait Object: Serialize + DeserializeOwned + Sized {
     type Key: Key<Object = Self>;
     fn kind() -> ObjectKind;                          // macro
     fn canonical_content_type() -> ContentType;       // macro, default Json
-    fn default_stability() -> Stability { Stability::Mutable }   // macro from #[object(stability=)]
+    fn default_stability() -> Stability { Stability::Dynamic }   // macro from #[object(stability=)]
     fn parse_canonical(bytes: &[u8]) -> Result<Self> {           // default serde-JSON; override for Atom/XML
         serde_json::from_slice(bytes).map_err(|e| ProviderError::invalid_input(format!("canonical parse: {e}")))
     }
@@ -260,7 +260,7 @@ impl<S> Router<S> {
 // Dir-shape block (File-shape omits file/dir):
 impl<O: Object> DirObjectBlock<O> {
     fn representations<R: RenderSet<O>>(&mut self, stem: &'static str, renders: R) -> Result<&mut Self>;
-    fn file(&mut self, name) -> LeafBuilder<'_, O>;   // .project(O::method) | .handler(Key::method) | .lazy()/.immutable()/.mutable()/.volatile()
+    fn file(&mut self, name) -> LeafBuilder<'_, O>;   // .project(O::method) | .handler(Key::method) | .lazy()/.stable()/.dynamic()/.live()
     fn dir(&mut self, name) -> ChildBuilder<'_, O>;   // .handler(Key::method)
     fn when(&mut self, pred: fn(&O::Key) -> bool) -> Result<&mut Self>;
 }
@@ -293,7 +293,7 @@ it. Overlap ⇒ `start()`-time error surfaced through `initialize()`. The same
   `anchor()` (defaulted on `Key`).
 - `#[object(kind = "...", key = KeyType, canonical = ..., parse = ..., stability = ...)]`:
   emits `Object::Key`, `kind`, `canonical_content_type`, `default_stability`
-  (default `Mutable`), and optional custom `parse_canonical`. The old
+  (default `Dynamic`), and optional custom `parse_canonical`. The old
   `#[omnifs(field(...))]` / `represents` / `repr_stem` / `routes_type` attributes are
   **removed**; fields are hand-written `&self` methods referenced by `.project`, and
   renders are hand-written `Representable<F>` impls.
@@ -333,9 +333,9 @@ freshness : key = mount ++ 0x1F ++ path
 ```
 
 Written together with a leaf's records and checked on read: a leaf is *fresh* when
-`now < expires_at` (or `expires_at = None` for Immutable). `expires_at` is
-Stability-derived at write time: Immutable ⇒ `None`; Mutable ⇒ `now + ttl` (host
-config, default a few seconds); Volatile ⇒ `now` (TTL 0). The Store reads the host
+`now < expires_at` (or `expires_at = None` for Stable). `expires_at` is
+Stability-derived at write time: Stable ⇒ `None`; Dynamic ⇒ `now + ttl` (host
+config, default a few seconds); Live ⇒ `now` (TTL 0). The Store reads the host
 clock; this is the only clock dependency.
 
 ### 6.3 In-memory per-mount state (in `Store`, reset on restart)
@@ -418,7 +418,7 @@ impl Store {
 2. Else consult `negative_for(path)`: live + unfenced ⇒ ENOENT, no dispatch.
 3. Else `cached_canonical_for(path)`:
    - **Some** ⇒ push `canonical-input { id, bytes, validator }`; SDK self-checks
-     `key.anchor() == id`, renders without upstream; if the leaf is Mutable and
+     `key.anchor() == id`, renders without upstream; if the leaf is Dynamic and
      expired it may revalidate with `validator` (`load(Some(v))`): `304 → Unchanged`
      re-render + reset deadline; `200 → Fresh` emit overwrite `canonical-store`.
    - **None** ⇒ dispatch `read_file(path, ct, None)`; SDK routes, computes the id,
@@ -426,7 +426,7 @@ impl Store {
      `not-found(Some(id))`). Host stores under the id and indexes the leaves.
 
 The host never suspends mid-read; identity collapse comes from the multikey store
-(§4), not a suspend-to-ask. **Volatile leaves bypass singleflight** (they are ranged
+(§4), not a suspend-to-ask. **Live leaves bypass singleflight** (they are ranged
 sources): each read issues its own ranged read.
 
 **Singleflight** keys on `ObjectId`: concurrent reads of any leaf of one object

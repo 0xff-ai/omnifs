@@ -450,12 +450,12 @@ impl Lookup {
     }
 
     /// A found file with inline bytes, defaulting to
-    /// `Stability::Immutable` and no version token; build the [`Entry`]
+    /// `Stability::Stable` and no version token; build the [`Entry`]
     /// yourself when the content can change.
     pub fn file(name: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
         let content = content.into();
         Self::Entry(LookupEntry {
-            target: Entry::file(name, FileProj::inline(content, Stability::Immutable, None)),
+            target: Entry::file(name, FileProj::inline(content, Stability::Stable, None)),
             siblings: Vec::new(),
             exhaustive: true,
             effects: Effects::new(),
@@ -662,28 +662,28 @@ impl From<ContentBytes> for wit_types::ByteSource {
 
 impl FileContent {
     /// Inline bytes with default attrs `Size::Exact(len)` plus
-    /// `Stability::Immutable`. Override with [`Self::with_attrs`] when the
-    /// content can change; the immutable default licenses the host to
+    /// `Stability::Stable`. Override with [`Self::with_attrs`] when the
+    /// content can change; the stable default licenses the host to
     /// cache it indefinitely.
     pub fn new(content: impl Into<Vec<u8>>) -> Self {
         let content = content.into();
         let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
         Self {
             content_type: None,
-            attrs: FileAttrs::new(Size::Exact(size), Stability::Immutable),
+            attrs: FileAttrs::new(Size::Exact(size), Stability::Stable),
             bytes: ContentBytes::Read(ReadFileBytes::Inline(content)),
             effects: Effects::new(),
         }
     }
 
     /// Serve from a host-resident blob; no bytes cross the WIT. Attrs
-    /// default to `Size::Unknown` plus `Stability::Immutable`: set the real
+    /// default to `Size::Unknown` plus `Stability::Stable`: set the real
     /// size via [`Self::with_attrs`] when the blob fetch reported one, so
     /// `stat` is honest before the first read.
     pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
         Self {
             content_type: None,
-            attrs: FileAttrs::new(Size::Unknown, Stability::Immutable),
+            attrs: FileAttrs::new(Size::Unknown, Stability::Stable),
             bytes: ContentBytes::Read(ReadFileBytes::Blob(blob.into())),
             effects: Effects::new(),
         }

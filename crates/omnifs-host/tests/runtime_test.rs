@@ -226,7 +226,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
         .await
         .unwrap();
     assert_eq!(inline_content(&first), b"fresh-full-1\n");
-    assert_eq!(first.attrs.stability, Stability::Mutable);
+    assert_eq!(first.attrs.stability, Stability::Dynamic);
     assert_eq!(first.attrs.version_token, None);
     assert!(
         harness
@@ -401,7 +401,7 @@ async fn test_ranged_open_read_chunk_contract() {
         .await
         .unwrap();
     assert!(matches!(opened.attrs.size, FileSize::Exact(26)));
-    assert_eq!(opened.attrs.stability, Stability::Mutable);
+    assert_eq!(opened.attrs.stability, Stability::Dynamic);
     assert_eq!(opened.attrs.version_token.as_deref(), Some("alphabet-v1"));
 
     let chunk = harness
@@ -462,7 +462,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .open_file("/hello/volatile-tail")
         .await
         .unwrap();
-    assert_eq!(opened.attrs.stability, Stability::Volatile);
+    assert_eq!(opened.attrs.stability, Stability::Live);
     assert!(matches!(opened.attrs.size, FileSize::Unknown));
     let chunk = harness
         .runtime

@@ -12,7 +12,7 @@ A projected file in omnifs needs to communicate three core properties to the hos
 - whether bytes are already inline or must be read later,
 - how stable the bytes are expected to be.
 
-It may also carry optional version evidence for mutable snapshots.
+It may also carry optional version evidence for dynamic snapshots.
 
 Earlier designs compressed these into:
 
@@ -25,7 +25,7 @@ Each compression caused real bugs or left important shapes unexpressed:
 - `tail -n` panicked on the 256 MiB placeholder.
 - `tar c` archived 256 MiB worth of pad bytes for unsized files.
 - Streamed but stable files, such as a large image layer that should be chunked and cacheable, had no expressible shape.
-- Mutable but non-live files, such as `inspect.json`, were forced into the same bucket as live logs.
+- Dynamic but non-live files, such as `inspect.json`, were forced into the same bucket as live logs.
 
 The redesign treats each property as a provider-declared fact or hint. The provider does not tell the host to refresh on open, bypass caches, or choose a FUSE flag. The host derives FUSE flags, cache placement, and invalidation behavior from the declared attributes.
 
@@ -97,14 +97,14 @@ pub enum ReadMode {
 
 pub enum Stability {
     /// Bytes for this file identity do not change.
-    Immutable,
+    Stable,
 
     /// Bytes may change between observations, but one observation should
     /// represent a consistent snapshot.
-    Mutable,
+    Dynamic,
 
     /// Bytes may change while being observed.
-    Volatile,
+    Live,
 }
 ```
 
@@ -115,13 +115,13 @@ These names are part of the public contract:
 - `ReadMode` describes the provider's deferred read capability.
 - `Stability` describes the provider's claim about byte stability.
 
-The attributes are deliberately declarative. They are not host instructions. For example, `Stability::Mutable` does not mean "refetch on open"; it means permanent content caching is not safe unless the host has invalidation or version proof.
+The attributes are deliberately declarative. They are not host instructions. For example, `Stability::Dynamic` does not mean "refetch on open"; it means permanent content caching is not safe unless the host has invalidation or version proof.
 
 ## Size semantics
 
 `Size::Exact(n)` means the provider knows the exact byte length for the declared file observation or identity.
 
-For `Stability::Immutable`, exactness can be treated as exact for the file identity. For `Stability::Mutable`, exactness is scoped to the projected observation unless a stronger version identity says otherwise. For `Stability::Volatile`, exactness is only meaningful if the live source itself exposes a stable length for the observation.
+For `Stability::Stable`, exactness can be treated as exact for the file identity. For `Stability::Dynamic`, exactness is scoped to the projected observation unless a stronger version identity says otherwise. For `Stability::Live`, exactness is only meaningful if the live source itself exposes a stable length for the observation.
 
 `Size::NonZero` means the provider knows the file has at least one byte, but does not know the exact length. This is weaker and more truthful than an estimate. It is useful because many upstream systems can cheaply distinguish empty from non-empty without computing a byte length.
 
@@ -149,15 +149,15 @@ For `Size::Exact(0)`, the host can serve EOF without calling a deferred handler.
 
 ## Stability semantics
 
-`Stability::Immutable` means bytes for this file identity do not change. Once materialized, the host can cache content indefinitely subject to capacity and explicit invalidation of the identity.
+`Stability::Stable` means bytes for this file identity do not change. Once materialized, the host can cache content indefinitely subject to capacity and explicit invalidation of the identity.
 
-`Stability::Mutable` means bytes may change between observations, but each observation should be a consistent snapshot. For inline bytes and full reads, the observation is the projected entry or the full read response. For ranged reads, one open file handle is one observation, so chunks served through that handle must belong to the same snapshot. The host should not assume permanent content caching is safe unless invalidation or version identity proves it. This covers normal dynamic files such as status, metadata, API response projections, and small JSON/text files that may be regenerated.
+`Stability::Dynamic` means bytes may change between observations, but each observation should be a consistent snapshot. For inline bytes and full reads, the observation is the projected entry or the full read response. For ranged reads, one open file handle is one observation, so chunks served through that handle must belong to the same snapshot. The host should not assume permanent content caching is safe unless invalidation or version identity proves it. This covers normal dynamic files such as status, metadata, API response projections, and small JSON/text files that may be regenerated.
 
-`Stability::Volatile` means bytes may change while being observed. For ranged volatile reads, each `read-chunk` can observe a newer source state than the previous chunk. This covers live logs, tail-like files, metrics streams, and other moving targets. The host must not serve these from normal whole-file caches.
+`Stability::Live` means bytes may change while being observed. For ranged live reads, each `read-chunk` can observe a newer source state than the previous chunk. This covers live logs, tail-like files, metrics streams, and other moving targets. The host must not serve these from normal whole-file caches.
 
-`version` is optional provider evidence for one observed file identity. It can be an ETag, commit SHA, API update timestamp, content digest, or upstream revision. It is a fact about the observation, not an instruction to cache. When absent, `Stability::Mutable` defaults to observation-only caching unless an invalidation channel covers the path.
+`version` is optional provider evidence for one observed file identity. It can be an ETag, commit SHA, API update timestamp, content digest, or upstream revision. It is a fact about the observation, not an instruction to cache. When absent, `Stability::Dynamic` defaults to observation-only caching unless an invalidation channel covers the path.
 
-Version tokens are meaningful cache-key material only for `Stability::Mutable`. For `Stability::Immutable`, a version token is redundant metadata and must not create a second cache identity for the same immutable file. For `Stability::Volatile`, a version token is observation-tagging metadata only and must not make volatile bytes durably cacheable. Tokens are non-empty opaque UTF-8 strings, capped at 256 bytes, compared by byte equality with no normalization.
+Version tokens are meaningful cache-key material only for `Stability::Dynamic`. For `Stability::Stable`, a version token is redundant metadata and must not create a second cache identity for the same stable file. For `Stability::Live`, a version token is observation-tagging metadata only and must not make live bytes durably cacheable. Tokens are non-empty opaque UTF-8 strings, capped at 256 bytes, compared by byte equality with no normalization.
 
 ## Host-derived policy
 
@@ -165,7 +165,7 @@ The provider declares attributes; the host derives FUSE and cache behavior from 
 
 | Attributes | `st_size` before read | Open/read policy | Content cache policy | Post-read size learning |
 |---|---:|---|---|---|
-| `Size::Exact(n)` | `n` | Normal reads unless `Stability::Volatile` forces the ranged live path. | Derived from `Stability`. | Already exact. Inline and deferred reads validate against `n`. |
+| `Size::Exact(n)` | `n` | Normal reads unless `Stability::Live` forces the ranged live path. | Derived from `Stability`. | Already exact. Inline and deferred reads validate against `n`. |
 | `Size::NonZero` | `1` | Materialize full-deferred files on open before the first read; use direct I/O while non-exact. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
 | `Size::Unknown` | `1` | Materialize full-deferred files on open before the first read; use direct I/O while non-exact or until the file is known to be live. | Derived from `Stability`. | Learn real size only when the read shape proves a complete observation. |
 
@@ -179,73 +179,73 @@ Size learning is valid only when the host has a complete observation:
 
 - `Deferred { read: Full }` learns the exact size from the returned byte length, subject to stability cache rules.
 - `Deferred { read: Ranged }` learns the exact size only when the ranged protocol proves EOF for the observation.
-- `Stability::Volatile` does not publish a durable learned size, because later chunks or opens can observe a different source state.
+- `Stability::Live` does not publish a durable learned size, because later chunks or opens can observe a different source state.
 
-`Size::Exact(n) + Stability::Volatile` still reports `st_size = n`, but reads use the live ranged path. The exact size is metadata about the listing or lookup observation that produced it, not permission to serve bytes from a whole-file cache or clamp future live reads without checking the source. Because volatile sizes can drift and are not learned durably from reads, the host treats volatile attrs as file-handle-aware or short-TTL metadata; a fresh listing or lookup is required to update `n`.
+`Size::Exact(n) + Stability::Live` still reports `st_size = n`, but reads use the live ranged path. The exact size is metadata about the listing or lookup observation that produced it, not permission to serve bytes from a whole-file cache or clamp future live reads without checking the source. Because live sizes can drift and are not learned durably from reads, the host treats live attrs as file-handle-aware or short-TTL metadata; a fresh listing or lookup is required to update `n`.
 
-For `Stability::Mutable`, each listing, lookup, open, or full-read observation supersedes prior size and bytes for that path unless the prior and current observations share the same version token. If a later observation reports `Size::Exact(m)` where an earlier observation reported `Size::Exact(n)`, the host invalidates cached kernel attrs and publishes the newer observation according to the same cache-proof rules.
+For `Stability::Dynamic`, each listing, lookup, open, or full-read observation supersedes prior size and bytes for that path unless the prior and current observations share the same version token. If a later observation reports `Size::Exact(m)` where an earlier observation reported `Size::Exact(n)`, the host invalidates cached kernel attrs and publishes the newer observation according to the same cache-proof rules.
 
 The host-derived FUSE policy is deliberately host-owned:
 
 | Stability / size condition | FUSE/cache behavior |
 |---|---|
-| `Immutable + Exact` | Normal attribute TTLs and content caches are safe by identity. |
-| `Immutable + NonZero/Unknown` | Materialize full-deferred files on open, use direct I/O while non-exact, and retain learned exact size across stale non-exact dirent refreshes. |
-| `Mutable` without version or invalidation proof | Keep content and learned size within the current observation only. Use short attribute TTLs and do not reuse whole-file content across opens. |
-| `Mutable` with version or invalidation proof | Cache by version identity and invalidate path aliases through provider events. |
-| `Volatile` | Use the ranged live path, direct I/O, short or zero attribute TTLs, and file-handle-aware attributes where the kernel path requires them. Do not use durable whole-file caches. |
+| `Stable + Exact` | Normal attribute TTLs and content caches are safe by identity. |
+| `Stable + NonZero/Unknown` | Materialize full-deferred files on open, use direct I/O while non-exact, and retain learned exact size across stale non-exact dirent refreshes. |
+| `Dynamic` without version or invalidation proof | Keep content and learned size within the current observation only. Use short attribute TTLs and do not reuse whole-file content across opens. |
+| `Dynamic` with version or invalidation proof | Cache by version identity and invalidate path aliases through provider events. |
+| `Live` | Use the ranged live path, direct I/O, short or zero attribute TTLs, and file-handle-aware attributes where the kernel path requires them. Do not use durable whole-file caches. |
 
 Cache placement follows `Stability`:
 
 | Stability | Host policy |
 |---|---|
-| `Immutable` | File content and learned size may be cached by identity until capacity eviction or explicit invalidation. |
-| `Mutable` | File content and learned size may be cached only when tied to a version proof or invalidation regime. Without that proof, cache only within the current observation. |
-| `Volatile` | Do not place whole-file content, ranged chunks, or learned size in durable file caches. Per-handle buffers are allowed only as implementation details of one live read path. |
+| `Stable` | File content and learned size may be cached by identity until capacity eviction or explicit invalidation. |
+| `Dynamic` | File content and learned size may be cached only when tied to a version proof or invalidation regime. Without that proof, cache only within the current observation. |
+| `Live` | Do not place whole-file content, ranged chunks, or learned size in durable file caches. Per-handle buffers are allowed only as implementation details of one live read path. |
 
-## Mutable proof model
+## Dynamic proof model
 
-`Stability::Mutable` is intentionally weaker than a host instruction. It says the bytes may change between observations, while each observation should be consistent. The host needs proof before it treats mutable content as durably cacheable.
+`Stability::Dynamic` is intentionally weaker than a host instruction. It says the bytes may change between observations, while each observation should be consistent. The host needs proof before it treats dynamic content as durably cacheable.
 
 There are three viable proof mechanisms:
 
 | Mechanism | Shape | Pros | Cons |
 |---|---|---|---|
 | Explicit invalidation | Provider returns `effects { invalidations: [...] }` carrying `object(logical-id)` or `listing(path-or-prefix)` entries when upstream state changes. | Fits the existing host cache model and works for event-driven providers. | Requires reliable provider events; polling gaps can serve stale content. |
-| Version identity | Provider attaches `version` to the file observation, such as an ETag, commit SHA, API update timestamp, or content digest. | Makes cache keys precise and lets mutable files become cacheable snapshots. | Requires providers to define token scope consistently for each path. |
-| Observation-only cache | Host caches mutable content only inside one read/open observation. | Safe default with no extra protocol. | Gives up cross-open cache reuse for mutable files. |
+| Version identity | Provider attaches `version` to the file observation, such as an ETag, commit SHA, API update timestamp, or content digest. | Makes cache keys precise and lets dynamic files become cacheable snapshots. | Requires providers to define token scope consistently for each path. |
+| Observation-only cache | Host caches dynamic content only inside one read/open observation. | Safe default with no extra protocol. | Gives up cross-open cache reuse for dynamic files. |
 
 The default policy should be observation-only. Providers can opt into stronger caching by supplying either invalidation proof or version identity. When both exist, version identity should key cached content, while invalidation removes stale path aliases and directory metadata.
 
-Versioned mutable content is keyed by `(provider-id, file-identity, version-token)`. `file-identity` is the provider-relative file path under that provider. The token is not globally unique by itself; two paths may legitimately share the same ETag or digest.
+Versioned dynamic content is keyed by `(provider-id, file-identity, version-token)`. `file-identity` is the provider-relative file path under that provider. The token is not globally unique by itself; two paths may legitimately share the same ETag or digest.
 
-Invalidation is delivered through the `invalidations` field in the provider return's `effects` record. A provider that declares `Stability::Mutable` but has no event source covering that path has not supplied invalidation proof; it remains observation-only unless it supplies a version token. This keeps `Mutable` as a provider fact and keeps refresh timing as host policy.
+Invalidation is delivered through the `invalidations` field in the provider return's `effects` record. A provider that declares `Stability::Dynamic` but has no event source covering that path has not supplied invalidation proof; it remains observation-only unless it supplies a version token. This keeps `Dynamic` as a provider fact and keeps refresh timing as host policy.
 
 ## Legal combinations
 
 One structural rule constrains the matrix:
 
-- **`Stability::Volatile` requires `Bytes::Deferred { read: ReadMode::Ranged }`.**
+- **`Stability::Live` requires `Bytes::Deferred { read: ReadMode::Ranged }`.**
 
 Inline bytes and full deferred reads produce a whole-file observation. They cannot model bytes that change during the same observation. Ranged/session reads are the only deferred shape that can represent a live file without stitching together unrelated whole-file snapshots.
 
-| Bytes | `Stability::Immutable` | `Stability::Mutable` | `Stability::Volatile` |
+| Bytes | `Stability::Stable` | `Stability::Dynamic` | `Stability::Live` |
 |---|---|---|---|
 | `Inline(bytes)` | Valid. The projection carries exact bytes and size is `bytes.len()`. The host can cache the materialized content for the file identity. | Valid. The projection carries a consistent snapshot. The host must not treat it as permanently cacheable without invalidation or version proof. | Invalid. Inline bytes cannot change while being observed. |
 | `Deferred { read: Full }` | Valid. The provider can fetch the whole file on read. After a successful read, the host can cache content for the file identity. | Valid. A whole-file read produces one consistent observation. The host must not treat the content as permanently cacheable without invalidation or version proof. | Invalid. Whole-file reads cannot safely model bytes changing during observation. |
-| `Deferred { read: Ranged }` | Valid. Large stable files can be served in chunks and cached by identity. | Valid. Large mutable files can be served as ranged consistent observations. Permanent caching still requires invalidation or version proof. | Valid. This is the required shape for live, tail-like, or otherwise moving files. |
+| `Deferred { read: Ranged }` | Valid. Large stable files can be served in chunks and cached by identity. | Valid. Large dynamic files can be served as ranged consistent observations. Permanent caching still requires invalidation or version proof. | Valid. This is the required shape for live, tail-like, or otherwise moving files. |
 
 Size compatibility rules:
 
 | Size | Meaning | Notes |
 |---|---|---|
-| `Exact(n)` | Provider knows the exact byte length for the declared file observation or identity. | For inline bytes, derive this from `bytes.len()`. For mutable files, exactness is scoped to the observation unless version identity says otherwise. |
+| `Exact(n)` | Provider knows the exact byte length for the declared file observation or identity. | For inline bytes, derive this from `bytes.len()`. For dynamic files, exactness is scoped to the observation unless version identity says otherwise. |
 | `NonZero` | Provider knows the file is not empty but does not know the length. | Useful hint, but not an exact `st_size`. The host must not use it as a read bound. |
 | `Unknown` | Provider has no length information. | The host should avoid treating stat size as a read bound. |
 
 Hard validation rules:
 
-- `Stability::Volatile` requires `Bytes::Deferred { read: ReadMode::Ranged }`.
+- `Stability::Live` requires `Bytes::Deferred { read: ReadMode::Ranged }`.
 - `Bytes::Inline(bytes)` requires `Size::Exact(bytes.len() as u64)`.
 - `Bytes::Inline(bytes)` rejects `Size::NonZero` and `Size::Unknown`.
 - `Bytes::Inline(bytes)` is rejected when `bytes.len() > MAX_PROJECTED_BYTES`.
@@ -262,19 +262,19 @@ The provider declares files via the imperative registration API. Inline files ca
 ```rust
 // Inline: bytes carried with the projection, no separate file handler needed.
 // r.file("/_README.md").handler(readme_file)?;  -- or inline via projection builder:
-FileProjection::inline(README.into()).immutable().build()
+FileProjection::inline(README.into()).stable().build()
 
 // Deferred full read: handler called on read-file.
-FileProjection::deferred(Size::Unknown).full().mutable().build()
+FileProjection::deferred(Size::Unknown).full().dynamic().build()
 
 // Deferred full read with known size and version:
-FileProjection::deferred(Size::Exact(8)).full().mutable().version(state_revision).build()
+FileProjection::deferred(Size::Exact(8)).full().dynamic().version(state_revision).build()
 
 // Deferred ranged read: handler called on open-file / read-chunk.
-FileProjection::deferred(Size::Exact(layer_size)).ranged().immutable().build()
+FileProjection::deferred(Size::Exact(layer_size)).ranged().stable().build()
 
-// Deferred ranged volatile: live-log shape.
-FileProjection::deferred(Size::NonZero).ranged().volatile().build()
+// Deferred ranged live: live-log shape.
+FileProjection::deferred(Size::NonZero).ranged().live().build()
 ```
 
 For byte-producing handlers:
@@ -290,7 +290,7 @@ The SDK and host validate attrs at the response boundary and at read/open time. 
 Validation phase:
 
 - Registry build validates route conflicts before the provider serves requests.
-- Runtime validates dynamic projection entries returned by handlers, including inline size consistency, inline byte caps, illegal volatile combinations, version tokens, and aggregate eager-byte caps.
+- Runtime validates dynamic projection entries returned by handlers, including inline size consistency, inline byte caps, illegal live combinations, version tokens, and aggregate eager-byte caps.
 - `read-file` validates complete content against returned attrs and rejects streams or ranged content on the full-read path.
 - `open-file` validates ranged attrs and rejects whole-byte content on the ranged path.
 - First-use runtime errors are expected for dynamic handler/attrs pairing violations that cannot be proven from route shape alone.
@@ -324,9 +324,9 @@ variant byte-source {
 }
 
 enum stability {
-    immutable,
-    mutable,
-    volatile,
+    stable,
+    dynamic,
+    live,
 }
 
 // file-attrs carries metadata only; byte availability lives in file-out.bytes.
@@ -380,7 +380,7 @@ Inline bytes live inside `byte-source.inline`. The SDK and host validate after W
 
 Deferred full files map to the `read-file` operation. Deferred ranged files map to the `open-file` / `read-chunk` / `close-file` operation family. The ranged request shape is explicit-offset: `open-file(path) -> file-handle`, `read-chunk(handle, offset, len) -> read-chunk-result`, and `close-file(handle)`.
 
-`read-chunk` returns `read-chunk-result { content, eof }`. For `Mutable + Ranged`, `eof = true` means the end of the snapshot for that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one mutable handle must return bytes from the same snapshot. For `Volatile + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size.
+`read-chunk` returns `read-chunk-result { content, eof }`. For `Dynamic + Ranged`, `eof = true` means the end of the snapshot for that open handle, so the host may learn an observation-scoped size. Re-reading the same `(offset, len)` on one dynamic handle must return bytes from the same snapshot. For `Live + Ranged`, `eof = true` only terminates the current live read and never publishes a durable learned size.
 
 Additional paths learned while serving a request travel through the effects record (`effects { canonical, fs, invalidations }`). The `fs` field carries `fs-write` entries for paths the host should install into the view cache; the `canonical` field carries `canonical-store` entries for object anchors. There are no separate sibling-file or preload fields on the terminal result.
 
@@ -390,14 +390,14 @@ These cases are the minimum behavior expected from the supported Linux toolbox.
 
 | Shape | Tool scenario | Expected behavior |
 |---|---|---|
-| `Exact + Inline + Immutable` | `ls -l`, `cat`, `tar c`, `rsync --size-only` | `st_size` equals `bytes.len()`. Reads serve the inline bytes. Archive/copy tools see the real size and complete without padding. |
-| `Exact + Deferred + Immutable` | `cp`, `sha256sum`, `tar c` | Host reads deferred bytes, validates/read-clamps against exact size, and may cache content by identity. |
-| `NonZero + Deferred + Immutable` | `find -size +0`, `cat`, later `stat` | Initial stat reports size `1`, so non-empty-sensitive tools do not skip it. Opening the file materializes the full content and publishes the exact size before the first read. Later stat reports exact size. |
-| `Unknown + Deferred + Immutable` | `cat`, `head`, later `stat` | Initial stat reports size `1` as a compatibility sentinel. Opening the file materializes the full content and publishes exact size before the first read, including exact zero. |
-| `Exact + Inline + Mutable` | `cat` twice across observations | Each projected inline payload is a consistent snapshot. Host does not reuse it permanently unless invalidation or version identity proves it is still current. |
-| `Unknown + Deferred + Mutable` | `cat`, then later `cat` | Each complete read produces a consistent observation. Learned size is observation-scoped unless version identity or invalidation proof allows durable reuse. |
-| `NonZero + Deferred + Volatile` | `tail -f`, repeated `read` on one handle | Initial stat reports size `1`. Host uses the ranged live path, avoids whole-file caches, and does not publish a durable learned size from partial live reads. |
-| `Unknown + Deferred + Volatile` | `tail -f`, `head`, `less` | Initial stat reports size `1` as a compatibility sentinel. Host uses the ranged live path. Tools that stream reads should see current bytes without stale whole-file caching. |
+| `Exact + Inline + Stable` | `ls -l`, `cat`, `tar c`, `rsync --size-only` | `st_size` equals `bytes.len()`. Reads serve the inline bytes. Archive/copy tools see the real size and complete without padding. |
+| `Exact + Deferred + Stable` | `cp`, `sha256sum`, `tar c` | Host reads deferred bytes, validates/read-clamps against exact size, and may cache content by identity. |
+| `NonZero + Deferred + Stable` | `find -size +0`, `cat`, later `stat` | Initial stat reports size `1`, so non-empty-sensitive tools do not skip it. Opening the file materializes the full content and publishes the exact size before the first read. Later stat reports exact size. |
+| `Unknown + Deferred + Stable` | `cat`, `head`, later `stat` | Initial stat reports size `1` as a compatibility sentinel. Opening the file materializes the full content and publishes exact size before the first read, including exact zero. |
+| `Exact + Inline + Dynamic` | `cat` twice across observations | Each projected inline payload is a consistent snapshot. Host does not reuse it permanently unless invalidation or version identity proves it is still current. |
+| `Unknown + Deferred + Dynamic` | `cat`, then later `cat` | Each complete read produces a consistent observation. Learned size is observation-scoped unless version identity or invalidation proof allows durable reuse. |
+| `NonZero + Deferred + Live` | `tail -f`, repeated `read` on one handle | Initial stat reports size `1`. Host uses the ranged live path, avoids whole-file caches, and does not publish a durable learned size from partial live reads. |
+| `Unknown + Deferred + Live` | `tail -f`, `head`, `less` | Initial stat reports size `1` as a compatibility sentinel. Host uses the ranged live path. Tools that stream reads should see current bytes without stale whole-file caching. |
 
 For `NonZero` and `Unknown`, the matrix intentionally excludes `tar c`, `wc -c`, `tail -n`, `tail -c`, and size-only traversal modes as guaranteed scenarios. Those tools can be correct after materialization promotes the inode to `Size::Exact`, but they cannot be promised before exact size is known.
 

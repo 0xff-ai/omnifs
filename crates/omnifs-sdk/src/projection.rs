@@ -2,10 +2,10 @@
 //!
 //! [`FileProjection`] is the author-facing file projection. Its byte-source
 //! constructor fixes a typestate marker (`Inline`/`Body`/`Full`/`Ranged`/
-//! `Blob`/`Deferred`) that gates which finishers are legal: `.volatile()`
+//! `Blob`/`Deferred`) that gates which finishers are legal: `.live()`
 //! exists only on a `Ranged` source, and a `Deferred` source cannot `.build()`
-//! until its read mode is chosen. The illegal §7 cells (`Volatile+Inline`,
-//! `Volatile+Full`, deferred-without-read-mode) are therefore unrepresentable.
+//! until its read mode is chosen. The illegal §7 cells (`Live+Inline`,
+//! `Live+Full`, deferred-without-read-mode) are therefore unrepresentable.
 //!
 //! [`DirProjection`] is the author-facing directory listing. It lowers onto
 //! [`crate::browse::Listing`]/[`crate::browse::Effects`]; the router applies
@@ -85,7 +85,7 @@ impl FileProjection {
     }
 
     /// Live or large; served by the ranged session path. The only source that
-    /// may be `.volatile()`.
+    /// may be `.live()`.
     pub fn ranged(reader: impl RangeReader + 'static) -> FileProjBuilder<Ranged> {
         FileProjBuilder::new(FileSource::Ranged(Rc::new(reader)), Size::Unknown)
     }
@@ -145,7 +145,7 @@ impl FileProjection {
 
     /// Inline projection assembled from a [`FileContent`]'s size, stability,
     /// version evidence, and content type. Errors when the content bytes are
-    /// not inline or when the stability is `Volatile` (volatile requires a
+    /// not inline or when the stability is `Live` (volatile requires a
     /// ranged source, not an inline one).
     pub fn from_content(content: &FileContent) -> Result<FileProjection> {
         let attrs = content.attrs().clone();
@@ -156,9 +156,9 @@ impl FileProjection {
             .to_vec();
         let mut builder = FileProjection::inline(bytes).size(attrs.size);
         builder = match attrs.stability {
-            Stability::Immutable => builder.immutable(),
-            Stability::Mutable => builder.mutable(),
-            Stability::Volatile => {
+            Stability::Stable => builder.stable(),
+            Stability::Dynamic => builder.dynamic(),
+            Stability::Live => {
                 return Err(ProviderError::internal(
                     "list preload cannot project volatile inline bytes",
                 ));
@@ -201,7 +201,7 @@ impl FileProjection {
     }
 }
 
-// Byte-source typestate markers. Only `Ranged` is `Volatile`-eligible; only
+// Byte-source typestate markers. Only `Ranged` is `Live`-eligible; only
 // `Buildable` states may `.build()`, so a bare `Deferred` cannot.
 pub struct Inline;
 pub struct Body;
@@ -233,7 +233,7 @@ impl<Src> FileProjBuilder<Src> {
     fn new(source: FileSource, size: Size) -> Self {
         Self {
             source,
-            attrs: FileAttrs::new(size, Stability::Immutable),
+            attrs: FileAttrs::new(size, Stability::Stable),
             content_type: None,
             extra_files: Vec::new(),
             _src: core::marker::PhantomData,
@@ -257,14 +257,14 @@ impl<Src> FileProjBuilder<Src> {
     }
 
     #[must_use]
-    pub fn immutable(mut self) -> Self {
-        self.attrs.stability = Stability::Immutable;
+    pub fn stable(mut self) -> Self {
+        self.attrs.stability = Stability::Stable;
         self
     }
 
     #[must_use]
-    pub fn mutable(mut self) -> Self {
-        self.attrs.stability = Stability::Mutable;
+    pub fn dynamic(mut self) -> Self {
+        self.attrs.stability = Stability::Dynamic;
         self
     }
 
@@ -303,22 +303,22 @@ impl FileProjBuilder<Deferred> {
     }
 }
 
-// §7: `Volatile` requires a ranged source. `inline(..).volatile()` does not
+// §7: `Live` requires a ranged source. `inline(..).live()` does not
 // compile.
 impl FileProjBuilder<Ranged> {
     /// Mark the projection live: its bytes may change between reads. Only a
-    /// ranged source is `Volatile`-eligible (§7).
+    /// ranged source is `Live`-eligible (§7).
     ///
-    /// `.volatile()` does not exist on a non-ranged source, so the following
+    /// `.live()` does not exist on a non-ranged source, so the following
     /// must fail to compile:
     ///
     /// ```compile_fail
     /// use omnifs_sdk::projection::FileProjection;
-    /// let _ = FileProjection::inline(b"x".to_vec()).volatile().build();
+    /// let _ = FileProjection::inline(b"x".to_vec()).live().build();
     /// ```
     #[must_use]
-    pub fn volatile(mut self) -> Self {
-        self.attrs.stability = Stability::Volatile;
+    pub fn live(mut self) -> Self {
+        self.attrs.stability = Stability::Live;
         self
     }
 }
@@ -559,7 +559,7 @@ impl DirProjection {
 
 /// A directory entry: a bare name plus a kind. Unlike the v1
 /// [`crate::browse::Entry`], a file entry carries no [`FileProj`] argument; it
-/// lowers to a default deferred-Full-Immutable file projection. An optional content type types a
+/// lowers to a default deferred-Full-Stable file projection. An optional content type types a
 /// bare-name leaf the host suffix map cannot.
 pub struct Entry {
     name: String,
@@ -617,7 +617,7 @@ impl Entry {
     }
 
     /// Lower to a v1 browse [`Entry`]. A file lowers to the default
-    /// deferred-Full-Immutable projection; the per-entry SDK content type does
+    /// deferred-Full-Stable projection; the per-entry SDK content type does
     /// not survive this lowering (the browse [`FileProj`] has no content-type
     /// field), so the router reads it from [`Entry::declared_content_type`].
     pub fn to_browse_entry(&self) -> BrowseEntry {

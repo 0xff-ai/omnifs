@@ -128,14 +128,14 @@ impl DnsProvider {
             .handler(|cx: Cx<State>, key: ReverseKey| async move {
                 let ip = key.ip.to_string();
                 let bytes = read_reverse_bytes(&cx, None, &ip).await?;
-                Ok(FileProjection::body(bytes).mutable().build())
+                Ok(FileProjection::body(bytes).dynamic().build())
             })?;
         r.dir("/{domain}")
             .handler(|_cx: DirCx<State>, _key: DomainKey| async move { Ok(record_projection()) })?;
         r.file("/{domain}/{record}")
             .handler(|cx: Cx<State>, key: DomainRecordKey| async move {
                 let bytes = read_record_bytes(&cx, None, &key.domain, &key.record).await?;
-                Ok(FileProjection::body(bytes).mutable().build())
+                Ok(FileProjection::body(bytes).dynamic().build())
             })?;
 
         // Per-resolver paths under `/@{resolver}`.
@@ -150,7 +150,7 @@ impl DnsProvider {
             |cx: Cx<State>, key: ResolverReverseKey| async move {
                 let ip = key.ip.to_string();
                 let bytes = read_reverse_bytes(&cx, Some(&key.resolver), &ip).await?;
-                Ok(FileProjection::body(bytes).mutable().build())
+                Ok(FileProjection::body(bytes).dynamic().build())
             },
         )?;
         r.dir("/@{resolver}/{domain}").handler(
@@ -160,7 +160,7 @@ impl DnsProvider {
             |cx: Cx<State>, key: ResolverDomainRecordKey| async move {
                 let bytes =
                     read_record_bytes(&cx, Some(&key.resolver), &key.domain, &key.record).await?;
-                Ok(FileProjection::body(bytes).mutable().build())
+                Ok(FileProjection::body(bytes).dynamic().build())
             },
         )?;
 

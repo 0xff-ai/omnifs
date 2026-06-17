@@ -164,7 +164,7 @@ mod attr_contract_tests {
         file_out(
             wit_types::FileSize::Exact(size),
             wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
-            wit_types::Stability::Immutable,
+            wit_types::Stability::Stable,
         )
     }
 
@@ -178,7 +178,7 @@ mod attr_contract_tests {
                     kind: wit_types::EntryKind::File(file_out(
                         wit_types::FileSize::Unknown,
                         wit_types::ByteSource::Inline(b"bad".to_vec()),
-                        wit_types::Stability::Immutable,
+                        wit_types::Stability::Stable,
                     )),
                 }],
                 exhaustive: true,
@@ -201,7 +201,7 @@ mod attr_contract_tests {
                     kind: wit_types::EntryKind::File(file_out(
                         wit_types::FileSize::Unknown,
                         wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
-                        wit_types::Stability::Volatile,
+                        wit_types::Stability::Live,
                     )),
                 }],
                 exhaustive: true,
@@ -211,7 +211,7 @@ mod attr_contract_tests {
         ));
 
         let error = validate_operation_result(&result).unwrap_err();
-        assert!(error.contains("Stability::Volatile requires"));
+        assert!(error.contains("Stability::Live requires"));
     }
 
     fn fs_file_write(path: String, file: wit_types::FileOut) -> wit_types::FsWrite {
@@ -262,7 +262,7 @@ mod attr_contract_tests {
                             wit_types::FileOut {
                                 attrs: attrs(
                                     wit_types::FileSize::Exact(bytes.len() as u64),
-                                    wit_types::Stability::Immutable,
+                                    wit_types::Stability::Stable,
                                 ),
                                 bytes: wit_types::ByteSource::Inline(bytes),
                                 content_type: None,
@@ -282,10 +282,7 @@ mod attr_contract_tests {
         let result = wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::Found(
             wit_types::ReadFileResult {
                 content_type: None,
-                attrs: attrs(
-                    wit_types::FileSize::NonZero,
-                    wit_types::Stability::Immutable,
-                ),
+                attrs: attrs(wit_types::FileSize::NonZero, wit_types::Stability::Stable),
                 bytes: wit_types::ByteSource::Inline(Vec::new()),
             },
         ));

@@ -333,7 +333,7 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
     let reader = PodLogReader::new(endpoint, key.ns.as_str(), key.name.as_str(), container);
     Ok(FileProjection::ranged(reader)
         .size(Size::Unknown)
-        .volatile()
+        .live()
         .build())
 }
 

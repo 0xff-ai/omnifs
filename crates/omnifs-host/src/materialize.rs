@@ -376,8 +376,8 @@ fn split_projected_path(path: &str) -> Option<(Path, String)> {
 
 fn freshness_expiry(stability: Stability, now_millis: u64) -> Option<u64> {
     match stability {
-        Stability::Immutable => None,
-        Stability::Mutable => Some(now_millis.saturating_add(MUTABLE_TTL_MILLIS)),
-        Stability::Volatile => Some(now_millis),
+        Stability::Stable => None,
+        Stability::Dynamic => Some(now_millis.saturating_add(MUTABLE_TTL_MILLIS)),
+        Stability::Live => Some(now_millis),
     }
 }
