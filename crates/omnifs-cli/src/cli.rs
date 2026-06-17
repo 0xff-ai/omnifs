@@ -47,11 +47,12 @@ pub enum Commands {
     /// Open an interactive shell inside the running container.
     Shell(commands::shell::ShellArgs),
 
-    /// Guided onboarding walkthrough: detect OS, explain Docker, pick
-    /// providers, run init per provider, launch the container.
+    /// First-run wizard: detect OS, explain Docker, pick several providers,
+    /// authenticate each, and launch the container in one pass.
     ///
-    /// Re-runnable. Already-configured providers are listed but excluded
-    /// from the picker.
+    /// Run this once to get started; use `omnifs mounts add` (or `omnifs init`)
+    /// to add a single provider later. Re-runnable: already-configured
+    /// providers are listed but excluded from the picker.
     Setup(commands::setup::SetupArgs),
 
     /// Interactive setup for a new mount (alias for `omnifs mounts add`).

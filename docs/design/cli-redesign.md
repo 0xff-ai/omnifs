@@ -82,6 +82,10 @@ Ten probes in dependency order. `image_cached` depends on `docker_reachable`. `a
 
 `mounts rm` validates the mount name through `MountName::new` (from `omnifs_core`) before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
 
+### Onboarding: setup vs mounts add
+
+`setup` and `mounts add` are complementary, not redundant. `setup` is the first-run wizard: it detects the host OS, explains the Docker runtime, pulls the image, walks a multi-provider picker, authenticates each, and launches the container, orchestrating `mounts add`/`init` per provider and then `up`. `mounts add` (alias `init`) is the single-mount primitive for adding one provider later. `setup` is kept distinct rather than folded into `init` because it owns runtime concerns (OS detection, Docker, image pull, launch) that a single-mount add has no business carrying.
+
 ### Token input
 
 `auth import` and `init` accept `--token -` (stdin) and `--token-env VAR`. `--token <value>` is rejected (keeps secrets out of shell history). A `TokenSource` enum (`Stdin | Env | Interactive`) carries the source through the call chain so the read site is uniform.

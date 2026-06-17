@@ -93,7 +93,7 @@ impl SetupArgs {
             anstream::println!("\nSkipping container launch (--no-up).");
         } else if !any_ready {
             anstream::println!(
-                "\nNo mounts to launch. Add one with `omnifs init <provider>`, then run `omnifs up`."
+                "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
             );
         } else {
             launch_via_up(ctx.config()).await?;
@@ -107,7 +107,7 @@ fn require_tty() -> anyhow::Result<()> {
         return Ok(());
     }
     Err(anyhow!(
-        "`omnifs setup` requires an interactive terminal. For non-interactive use, run `omnifs init <provider>` per provider and then `omnifs up`."
+        "`omnifs setup` requires an interactive terminal. For non-interactive use, run `omnifs mounts add <provider>` per provider and then `omnifs up`."
     ))
 }
 
