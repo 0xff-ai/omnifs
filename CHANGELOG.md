@@ -29,6 +29,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Feature:** You can now see every authentication method omnifs supports with `omnifs auth modes`, and get provider-specific setup guidance with `omnifs auth explain <provider>`. (#131)
 - **Feature:** Provider manifests can now declare how the host authenticates at the token endpoint, enabling confidential-client OAuth flows like Google Workspace. (#131)
 - **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
+- **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
+- **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
 
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
