@@ -186,8 +186,26 @@ impl ProviderCatalog {
                 continue;
             }
 
-            let Some(manifest) = read_provider_metadata_file(&path)? else {
-                continue;
+            // A single incompatible disk provider (e.g. one built against a newer
+            // manifest shape) must not brick every command that enumerates the
+            // catalog. Skip it with a warning; builtins still resolve.
+            let manifest = match read_provider_metadata_file(&path) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => continue,
+                Err(error) => {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("<unknown>");
+                    anstream::eprintln!(
+                        "{}",
+                        crate::style::warn(format!(
+                            "skipping provider `{name}`: its metadata failed to parse (likely built against a newer omnifs); rebuild or remove it. Re-run with `-vv` for details."
+                        ))
+                    );
+                    tracing::debug!(provider = %path.display(), error = ?error, "skipping provider with unreadable metadata");
+                    continue;
+                },
             };
             let file_name = path
                 .file_name()
@@ -294,4 +312,62 @@ fn read_provider_metadata_file(path: &Path) -> anyhow::Result<Option<ProviderMan
     };
     omnifs_provider::read_provider_metadata_section(&bytes)
         .with_context(|| format!("extract provider metadata from {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{push_uleb, wasm_with_provider_metadata};
+
+    /// A wasm whose metadata section is present but holds a manifest that fails
+    /// validation: the shape a provider built against a newer (or older) omnifs
+    /// takes. Distinct from a wasm with no metadata section, which is skipped
+    /// silently.
+    fn wasm_with_unparseable_metadata() -> Vec<u8> {
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        let data = br#"{"id":"x","displayName":"X","unknownField":true}"#;
+        let mut section = Vec::new();
+        push_uleb(
+            omnifs_provider::PROVIDER_METADATA_SECTION_NAME.len(),
+            &mut section,
+        );
+        section.extend_from_slice(omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes());
+        section.extend_from_slice(data);
+        wasm.push(0);
+        push_uleb(section.len(), &mut wasm);
+        wasm.extend(section);
+        wasm
+    }
+
+    /// A single incompatible disk provider must not brick catalog enumeration:
+    /// the valid providers alongside it still load.
+    #[test]
+    fn provider_templates_skips_unparseable_disk_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("omnifs_provider_demo.wasm"),
+            wasm_with_provider_metadata("demo", "omnifs_provider_demo.wasm"),
+        )
+        .unwrap();
+        std::fs::write(
+            providers_dir.join("omnifs_provider_broken.wasm"),
+            wasm_with_unparseable_metadata(),
+        )
+        .unwrap();
+
+        let catalog = ProviderCatalog::for_dirs(tmp.path().join("mounts"), &providers_dir);
+        let templates = catalog
+            .provider_templates()
+            .expect("a broken disk provider must not fail catalog enumeration");
+
+        assert!(
+            matches!(
+                templates.get("demo").map(|t| &t.source),
+                Some(ProviderSource::Disk(_))
+            ),
+            "the valid disk provider should load despite the broken sibling"
+        );
+    }
 }
