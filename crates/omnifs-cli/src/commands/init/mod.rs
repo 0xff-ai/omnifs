@@ -173,6 +173,22 @@ impl InitArgs {
                     );
                 })?;
             } else {
+                if interactive
+                    && let Ok((scheme, _inject)) = auth.static_token_scheme(&template.manifest)
+                {
+                    let guidance = template
+                        .manifest
+                        .auth
+                        .as_ref()
+                        .map(|manifest| manifest.guidance_for(&scheme.key))
+                        .unwrap_or_default();
+                    anstream::println!();
+                    anstream::println!("Authenticating `{mount_name}` with a static token:");
+                    crate::auth::explain::render_static_token_intro(
+                        scheme.creation_url.as_deref(),
+                        &guidance,
+                    );
+                }
                 let source = TokenSource::resolve(
                     self.token.as_deref(),
                     self.token_env.as_deref(),

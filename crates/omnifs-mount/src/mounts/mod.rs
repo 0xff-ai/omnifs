@@ -16,7 +16,8 @@ use utoipa::ToSchema;
 
 use crate::{Auth, OAuth, ProviderConfig, StaticToken};
 use omnifs_provider::{
-    AuthManifest, ProviderCapabilities, ProviderManifest, UnixSocketEndpointError,
+    AuthManifest, ProviderAuthManifest, ProviderCapabilities, ProviderManifest,
+    UnixSocketEndpointError,
 };
 
 /// Raw user-authored mount JSON.
@@ -306,6 +307,24 @@ impl Catalog {
             return Ok(Some(auth));
         }
         Ok(Builtins::embedded()?.auth_manifest_for(config))
+    }
+
+    /// The full auth block (including display guidance) for a single mount's
+    /// provider. Unlike [`auth_manifest_for`](Self::auth_manifest_for), which
+    /// returns the injection-only wire form, this carries the per-scheme setup
+    /// guidance. Loads only this mount's provider, never the whole directory.
+    pub fn provider_auth_manifest_for(
+        &self,
+        config: &Resolved,
+    ) -> Result<Option<ProviderAuthManifest>, Error> {
+        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&config.spec.provider)?
+            && manifest.auth.is_some()
+        {
+            return Ok(manifest.auth);
+        }
+        Ok(Builtins::embedded()?
+            .manifest_for_resolved(config)
+            .and_then(|manifest| manifest.auth.clone()))
     }
 
     #[must_use]

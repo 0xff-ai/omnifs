@@ -8,7 +8,7 @@
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_mount::mounts::{Catalog as MountCatalog, Resolved, Spec};
-use omnifs_provider::{AuthManifest, ProviderManifest};
+use omnifs_provider::{AuthManifest, ProviderAuthManifest, ProviderManifest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -143,6 +143,15 @@ impl ProviderCatalog {
         mount: &Resolved,
     ) -> anyhow::Result<Option<AuthManifest>> {
         self.mounts.auth_manifest_for(mount).map_err(Into::into)
+    }
+
+    pub(crate) fn provider_auth_manifest_for(
+        &self,
+        mount: &Resolved,
+    ) -> anyhow::Result<Option<ProviderAuthManifest>> {
+        self.mounts
+            .provider_auth_manifest_for(mount)
+            .map_err(Into::into)
     }
 
     pub(crate) fn provider_templates(&self) -> anyhow::Result<BTreeMap<String, ProviderTemplate>> {

@@ -57,12 +57,17 @@ impl AuthMode {
         match scheme {
             AuthScheme::None => None,
             AuthScheme::StaticToken(_) => Some(AuthMode::StaticToken),
-            AuthScheme::Oauth(oauth) => Some(match oauth.flow {
-                OAuthFlow::DeviceCode(_) => AuthMode::OauthDeviceCode,
-                OAuthFlow::PkceLoopback(_) => AuthMode::OauthPkceLoopback,
-                OAuthFlow::PkceManualCode(_) => AuthMode::OauthPkceManualCode,
-                OAuthFlow::ClientSideToken(_) => AuthMode::OauthClientSideToken,
-            }),
+            AuthScheme::Oauth(oauth) => Some(AuthMode::from_oauth_flow(&oauth.flow)),
+        }
+    }
+
+    /// The mode an OAuth flow drives.
+    pub(crate) fn from_oauth_flow(flow: &OAuthFlow) -> AuthMode {
+        match flow {
+            OAuthFlow::DeviceCode(_) => AuthMode::OauthDeviceCode,
+            OAuthFlow::PkceLoopback(_) => AuthMode::OauthPkceLoopback,
+            OAuthFlow::PkceManualCode(_) => AuthMode::OauthPkceManualCode,
+            OAuthFlow::ClientSideToken(_) => AuthMode::OauthClientSideToken,
         }
     }
 
@@ -174,6 +179,10 @@ fn render_scheme(key: &str, scheme: &AuthScheme, guidance: &SchemeGuidance, is_d
         AuthScheme::None => {},
     }
 
+    print_steps_and_docs(guidance);
+}
+
+fn print_steps_and_docs(guidance: &SchemeGuidance) {
     if !guidance.setup_steps.is_empty() {
         anstream::println!("  {}", style::dim("Setup:"));
         for (i, step) in guidance.setup_steps.iter().enumerate() {
@@ -183,4 +192,24 @@ fn render_scheme(key: &str, scheme: &AuthScheme, guidance: &SchemeGuidance, is_d
     if let Some(url) = &guidance.docs_url {
         anstream::println!("  {} {}", style::dim("Docs:"), style::accent(url));
     }
+}
+
+/// Print what an OAuth login is about to do, plus any provider setup steps.
+/// Used at login time, after the caller has printed the scheme header.
+pub(crate) fn render_oauth_intro(mode: AuthMode, guidance: &SchemeGuidance) {
+    anstream::println!("  {}", style::dim(mode.experience()));
+    print_steps_and_docs(guidance);
+}
+
+/// Print how to obtain a static token before prompting the user for one.
+pub(crate) fn render_static_token_intro(creation_url: Option<&str>, guidance: &SchemeGuidance) {
+    anstream::println!("  {}", style::dim(AuthMode::StaticToken.experience()));
+    if let Some(url) = creation_url {
+        anstream::println!(
+            "  {} {}",
+            style::dim("Create a token at:"),
+            style::accent(url)
+        );
+    }
+    print_steps_and_docs(guidance);
 }
