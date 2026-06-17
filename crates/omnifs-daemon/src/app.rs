@@ -1,12 +1,12 @@
-//! omnifsd: the omnifs runtime daemon.
+//! Daemon entrypoint: argument surface and the blocking run loop.
 //!
-//! Loads the provider registry, serves the control API, and serves the FUSE
-//! mount until unmounted. Runs as the runtime container's entrypoint today,
-//! but must stay free of container assumptions so it can later run
-//! host-native (see `docs/design/daemon-cli-split.md`).
+//! These are invoked by the `omnifs daemon` subcommand (the single-binary
+//! entrypoint); there is no standalone `omnifsd` binary. The daemon still
+//! runs as its own process and speaks the HTTP control API; it must stay
+//! free of container assumptions so it can later run host-native (see
+//! `docs/design/daemon-cli-split.md`).
 
-use clap::{Parser, ValueEnum};
-use omnifs_daemon::{frontends, server};
+use clap::{Args, ValueEnum};
 use omnifs_home::{PathOverrides, Paths};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
@@ -18,43 +18,45 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-#[derive(Parser, Debug)]
-#[command(name = "omnifsd", version, about = "omnifs runtime daemon")]
-struct Args {
+use crate::{frontends, server};
+
+/// Arguments for the `omnifs daemon` subcommand (the runtime daemon).
+#[derive(Args, Debug)]
+pub struct DaemonArgs {
     /// Directory to serve the FUSE filesystem at.
     #[arg(long)]
-    mount_point: PathBuf,
+    pub mount_point: PathBuf,
     /// Filesystem frontend to serve.
     #[arg(long, value_enum, default_value_t = FrontendKind::Fuse)]
-    frontend: FrontendKind,
+    pub frontend: FrontendKind,
     /// NFS loopback listen port. 0 asks the OS for an ephemeral port.
     #[arg(long, default_value_t = 0)]
-    nfs_port: u16,
+    pub nfs_port: u16,
     /// Directory for NFS mount-state files. Defaults under the cache dir.
     #[arg(long)]
-    nfs_state_dir: Option<PathBuf>,
+    pub nfs_state_dir: Option<PathBuf>,
     /// Optional NFS trace log.
     #[arg(long)]
-    nfs_trace: Option<PathBuf>,
+    pub nfs_trace: Option<PathBuf>,
     /// Config directory. Defaults through omnifs home resolution.
     #[arg(long)]
-    config_dir: Option<PathBuf>,
+    pub config_dir: Option<PathBuf>,
     /// Cache directory. Defaults through omnifs home resolution.
     #[arg(long)]
-    cache_dir: Option<PathBuf>,
+    pub cache_dir: Option<PathBuf>,
     /// Control API listen address. The container entrypoint passes
     /// `0.0.0.0` so Docker can publish the port on the host loopback.
     #[arg(long, default_value_t = default_listen())]
-    listen: SocketAddr,
+    pub listen: SocketAddr,
     /// Maintain `/<mount>` → `<mount-point>/<mount>` convenience symlinks
     /// as mounts come and go. Container-image nicety; off by default and
     /// meaningless when running host-native.
     #[arg(long)]
-    root_symlinks: bool,
+    pub root_symlinks: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum FrontendKind {
+pub enum FrontendKind {
     Fuse,
     Nfs,
 }
@@ -63,13 +65,10 @@ fn default_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], omnifs_api::DEFAULT_PORT))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    init_tracing();
-    run(Args::parse())
-}
-
-fn run(args: Args) -> anyhow::Result<()> {
+/// Bring up the registry, control API, and filesystem frontend, then serve
+/// until unmounted. Blocks; expects to run on a tokio runtime (the caller
+/// owns runtime and tracing setup).
+pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     let paths = Paths::resolve(PathOverrides {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
@@ -143,15 +142,4 @@ fn run(args: Args) -> anyhow::Result<()> {
     );
     daemon.serve(&rt)?;
     Ok(())
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .with_env_filter(filter)
-        .init();
 }

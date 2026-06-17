@@ -10,10 +10,6 @@ categories = ["filesystem"]
 keywords = ["omnifs", "fuse", "filesystem", "wasm", "daemon"]
 
 [[bin]]
-name = "omnifsd"
-path = "src/main.rs"
-
-[[bin]]
 name = "omnifsd-openapi"
 path = "src/bin/openapi.rs"
 

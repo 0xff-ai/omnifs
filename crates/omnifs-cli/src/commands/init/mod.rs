@@ -211,7 +211,8 @@ impl InitArgs {
 
         let config = crate::session::MountConfig::from_parsed(spec, paths.config_file.clone())?;
         let store = FileStore::new(&paths.credentials_file);
-        match crate::live::add_mount(catalog, &store, config).await {
+        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
+        match crate::live::add_mount(catalog, &store, config, host_native).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },

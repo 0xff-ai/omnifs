@@ -27,11 +27,10 @@ COPY scripts/container-zshrc.zsh /etc/zsh/zshrc
 COPY scripts/demo.sh /tmp/demo.sh
 COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
 COPY omnifs /usr/local/bin/omnifs
-COPY omnifsd /usr/local/bin/omnifsd
 
 ENV SHELL=/bin/zsh \
     OMNIFS_HOME=/root/.omnifs
-RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint /usr/local/bin/omnifs /usr/local/bin/omnifsd \
+RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint /usr/local/bin/omnifs \
     && mkdir -p "$OMNIFS_HOME/cache" /tmp/omnifs-provider-manifests
 
 SHELL ["/bin/zsh", "-c"]

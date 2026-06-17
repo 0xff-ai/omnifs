@@ -47,6 +47,12 @@ impl UpArgs {
 
         crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
 
+        // The runtime backend is a machine property recorded by `omnifs setup`;
+        // `up` reads it. Host-native serves the mount over NFS at a host path;
+        // Docker serves it inside the container.
+        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
+        let mount_point = paths.config_dir.join("mnt");
+
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_runtime(
             LaunchSpec {
@@ -56,20 +62,32 @@ impl UpArgs {
                 verb: "omnifs up",
                 configs,
                 extras: ContainerExtras::default(),
+                host_native,
+                mount_point: mount_point.clone(),
+                cache_dir: paths.cache_dir.clone(),
             },
             catalog,
         )
         .await?;
 
-        anstream::println!(
-            "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
-            runtime.container_name()
-        );
-        anstream::println!();
-        anstream::println!(
-            "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
-            crate::style::bold("omnifs shell"),
-        );
+        if host_native {
+            anstream::println!("✓ omnifs is mounted at {}", mount_point.display());
+            anstream::println!();
+            anstream::println!(
+                "Browse it directly: `{}`",
+                crate::style::bold(format!("ls {}", mount_point.display())),
+            );
+        } else {
+            anstream::println!(
+                "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
+                runtime.container_name()
+            );
+            anstream::println!();
+            anstream::println!(
+                "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
+                crate::style::bold("omnifs shell"),
+            );
+        }
         Ok(())
     }
 }

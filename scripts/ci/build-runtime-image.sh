@@ -24,15 +24,9 @@ case "$platform" in
 esac
 
 binary="${OMNIFS_BINARY:-$root/target/$target/release/omnifs}"
-daemon_binary="${OMNIFSD_BINARY:-$root/target/$target/release/omnifsd}"
 
 if [[ ! -x "$binary" ]]; then
   echo "missing native Linux binary: $binary" >&2
-  exit 1
-fi
-
-if [[ ! -x "$daemon_binary" ]]; then
-  echo "missing native Linux daemon binary: $daemon_binary" >&2
   exit 1
 fi
 
@@ -44,7 +38,6 @@ trap cleanup EXIT
 
 mkdir -p "$context/scripts"
 cp "$binary" "$context/omnifs"
-cp "$daemon_binary" "$context/omnifsd"
 cp "$root/scripts/demo.sh" "$context/scripts/demo.sh"
 cp "$root/scripts/container-entrypoint.sh" "$context/scripts/container-entrypoint.sh"
 cp "$root/scripts/container-zshrc.zsh" "$context/scripts/container-zshrc.zsh"
@@ -91,4 +84,3 @@ echo "image=$image"
 echo "platform=$platform"
 echo "digest=$digest"
 echo "binary=$binary"
-echo "daemon_binary=$daemon_binary"

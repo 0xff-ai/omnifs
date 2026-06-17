@@ -24,12 +24,13 @@ pub(crate) async fn add_mount(
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
     config: MountConfig,
+    host_native: bool,
 ) -> anyhow::Result<LiveApply> {
     let client = DaemonClient::new();
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
-    let (binds, payload) = config.materialize(catalog, store)?;
+    let (binds, payload) = config.materialize(catalog, store, host_native)?;
     if !binds.is_empty() {
         // New host binds (user preopens) cannot be added to a running
         // container; the mount config is saved and `omnifs up` picks it up.

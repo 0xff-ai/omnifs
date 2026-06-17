@@ -25,6 +25,33 @@ pub struct Config {
 pub struct ConfigSystem {
     pub container_name: Option<String>,
     pub image: Option<String>,
+    /// Daemon launch backend, recorded by `omnifs setup`. Unset falls back to
+    /// the platform default (host-native on macOS, Docker elsewhere).
+    pub runtime: Option<Runtime>,
+}
+
+/// Daemon launch backend. `omnifs setup` records the choice; `omnifs up`
+/// reads it and starts the daemon that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runtime {
+    /// Daemon runs inside a Docker container; the CLI owns the container
+    /// lifecycle.
+    Docker,
+    /// Daemon runs host-native as a child process serving the NFS frontend.
+    Native,
+}
+
+impl Runtime {
+    /// Default when `setup` has recorded nothing: host-native on macOS (no
+    /// Docker assumption), Docker elsewhere.
+    pub fn platform_default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Native
+        } else {
+            Self::Docker
+        }
+    }
 }
 
 impl Config {
@@ -50,6 +77,14 @@ impl Config {
             .clone()
             .or(self.system.container_name.clone());
         self.image = self.image.clone().or(self.system.image.clone());
+    }
+
+    /// Daemon launch backend: the recorded `[system].runtime`, or the platform
+    /// default when `setup` has not chosen one.
+    pub fn runtime(&self) -> Runtime {
+        self.system
+            .runtime
+            .unwrap_or_else(Runtime::platform_default)
     }
 }
 
