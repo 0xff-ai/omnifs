@@ -4,7 +4,7 @@
 //! promote `disk` hits into `mem`. Writes go to both. Invalidations
 //! remove from both, keeping them coherent.
 
-use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches};
+use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches, write_txn};
 use anyhow::Result;
 use moka::sync::Cache as MokaCache;
 use redb::{Database, ReadableTable, TableDefinition};
@@ -312,15 +312,11 @@ impl Cache {
             return;
         };
         if let Ok(bytes) = postcard::to_allocvec(&freshness)
-            && let Err(error) = (|| -> anyhow::Result<()> {
-                let txn = disk.begin_write()?;
-                {
-                    let mut table = txn.open_table(FRESHNESS_TABLE)?;
-                    table.insert(scoped_path, bytes.as_slice())?;
-                }
-                txn.commit()?;
+            && let Err(error) = write_txn(disk, |txn| {
+                let mut table = txn.open_table(FRESHNESS_TABLE)?;
+                table.insert(scoped_path, bytes.as_slice())?;
                 Ok(())
-            })()
+            })
         {
             tracing::debug!(path = scoped_path, error = %error, "view freshness put failed");
         }
@@ -343,15 +339,11 @@ impl Cache {
         let Some(ref disk) = self.disk else {
             return;
         };
-        if let Err(error) = (|| -> anyhow::Result<()> {
-            let txn = disk.begin_write()?;
-            {
-                let mut table = txn.open_table(FRESHNESS_TABLE)?;
-                table.remove(scoped_path)?;
-            }
-            txn.commit()?;
+        if let Err(error) = write_txn(disk, |txn| {
+            let mut table = txn.open_table(FRESHNESS_TABLE)?;
+            table.remove(scoped_path)?;
             Ok(())
-        })() {
+        }) {
             tracing::debug!(path = scoped_path, error = %error, "view freshness delete failed");
         }
     }
@@ -430,23 +422,31 @@ impl Cache {
         Ok(())
     }
 
-    fn disk_delete_exact(disk: &Database, path: &str) -> Result<usize> {
+    /// Scan the metadata, content, and bulk tables for wire keys under every
+    /// record kind at `scan_path`, deleting those whose path-and-aux suffix
+    /// (the `rest` after the `"{kind}:"` tag) satisfies `matches`. Returns the
+    /// number of rows removed.
+    ///
+    /// Wire key format: `"{kind_char}:{path}"` or
+    /// `"{kind_char}:{path}\x1f{hex_aux}"`. The range scan bounds I/O to keys
+    /// sharing the `"{kind}:{scan_path}"` prefix; `matches` decides the exact
+    /// boundary (exact / child / aux) per caller.
+    fn disk_delete_where(
+        disk: &Database,
+        scan_path: &str,
+        matches: impl Fn(&str) -> bool,
+    ) -> Result<usize> {
         let txn = disk.begin_write()?;
         let mut deleted = 0;
         let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
-        // Suffix that distinguishes "exact path with aux" from a child path.
-        // For example, for path "mount\x1f/a/b" the key with aux is
-        // "F:mount\x1f/a/b\x1f<hex>" while a child key starts with
-        // "L:mount\x1f/a/b/". The `\x1f` suffix catches the aux case.
-        let aux_separator = format!("{path}\x1f");
 
         for table_def in tables {
             let mut table = txn.open_table(table_def)?;
             let mut to_delete = Vec::new();
             for kind in RecordKind::ALL {
-                let wire_prefix = format!("{}:{path}", kind_prefix(kind));
-                let range_end = range_end_for_prefix(&wire_prefix);
                 let after_kind = format!("{}:", kind_prefix(kind));
+                let wire_prefix = format!("{after_kind}{scan_path}");
+                let range_end = range_end_for_prefix(&wire_prefix);
                 let range = table.range::<&str>(wire_prefix.as_str()..range_end.as_str())?;
                 for entry in range {
                     let entry = entry?;
@@ -454,10 +454,7 @@ impl Cache {
                     let Some(rest) = wire_key.strip_prefix(after_kind.as_str()) else {
                         continue;
                     };
-                    // Match: rest == path (exact, no aux)
-                    //        rest starts with path + "\x1f" (same path, has aux)
-                    // Do NOT match rest starting with path + "/" (child path).
-                    if rest == path || rest.starts_with(aux_separator.as_str()) {
+                    if matches(rest) {
                         to_delete.push(wire_key.to_string());
                     }
                 }
@@ -470,96 +467,43 @@ impl Cache {
 
         txn.commit()?;
         Ok(deleted)
+    }
+
+    /// Delete the record(s) at exactly `path`: the bare path and any
+    /// aux-qualified sibling (`path\x1f<hex>`), but never a child path
+    /// (`path/...`).
+    fn disk_delete_exact(disk: &Database, path: &str) -> Result<usize> {
+        let aux_separator = format!("{path}\x1f");
+        Self::disk_delete_where(disk, path, |rest| {
+            rest == path || rest.starts_with(aux_separator.as_str())
+        })
     }
 
     /// Delete all records whose stored path equals `scoped_prefix` or starts
     /// with `scoped_prefix + "/"`. For use with pre-scoped keys that include
     /// the mount separator `"\x1f"` — no omnifs path parsing, plain string
-    /// segment matching only.
-    ///
-    /// Wire key format: `"{kind_char}:{path}"` or `"{kind_char}:{path}\x1f{hex_aux}"`.
-    /// Because scoped paths contain `\x1f` themselves (the mount separator), we
-    /// must match on the wire key directly rather than extracting the path via
-    /// `stored_key_path` (which splits on the first `\x1f` and would stop at the
-    /// mount boundary).
+    /// segment matching only. Because scoped paths embed `\x1f` themselves, the
+    /// match runs on the path-and-aux suffix directly: a descendant is
+    /// `scoped_prefix + "/"` and an aux sibling is `scoped_prefix + "\x1f"`.
     fn disk_delete_scoped_prefix(disk: &Database, scoped_prefix: &str) -> Result<usize> {
-        let txn = disk.begin_write()?;
-        let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
         let child_prefix = format!("{scoped_prefix}/");
         let aux_prefix = format!("{scoped_prefix}\x1f");
-
-        for table_def in tables {
-            let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
-            for kind in RecordKind::ALL {
-                // Scan wire keys that start with "{kind}:{scoped_prefix}".
-                // A wire key matches if the path portion (everything after
-                // "{kind}:") equals `scoped_prefix`, or starts with
-                // `scoped_prefix + "/"` (descendant on a segment boundary), or
-                // starts with `scoped_prefix + "\x1f"` (same path with an aux
-                // field, e.g. a versioned file record).
-                let wire_prefix = format!("{}:{scoped_prefix}", kind_prefix(kind));
-                let range_end = range_end_for_prefix(&wire_prefix);
-                let after_kind = format!("{}:", kind_prefix(kind));
-                let range = table.range::<&str>(wire_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let wire_key = entry.0.value();
-                    // Extract the raw path+aux suffix after "{kind}:".
-                    let Some(rest) = wire_key.strip_prefix(after_kind.as_str()) else {
-                        continue;
-                    };
-                    // Match: rest == scoped_prefix (exact, no aux)
-                    //        rest starts with scoped_prefix + "/" (child path)
-                    //        rest starts with scoped_prefix + "\x1f" (same path, has aux)
-                    let is_match = rest == scoped_prefix
-                        || rest.starts_with(child_prefix.as_str())
-                        || rest.starts_with(aux_prefix.as_str());
-                    if is_match {
-                        to_delete.push(wire_key.to_string());
-                    }
-                }
-            }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
-        }
-        txn.commit()?;
-        Ok(deleted)
+        Self::disk_delete_where(disk, scoped_prefix, |rest| {
+            rest == scoped_prefix
+                || rest.starts_with(child_prefix.as_str())
+                || rest.starts_with(aux_prefix.as_str())
+        })
     }
 
     /// Delete all records whose logical path is equal to `prefix` or lies
-    /// beneath it on a segment boundary.
+    /// beneath it on a segment boundary. `prefix` is an unscoped omnifs path
+    /// (no mount separator), so the path portion is everything before the aux
+    /// separator and is matched with `path_prefix_matches`.
     fn disk_delete_prefix(disk: &Database, prefix: &str) -> Result<usize> {
-        let txn = disk.begin_write()?;
-        let mut deleted = 0;
-        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
-
-        for table_def in tables {
-            let mut table = txn.open_table(table_def)?;
-            let mut to_delete = Vec::new();
-            for kind in RecordKind::ALL {
-                let scan_prefix = make_key(&Key::new(prefix, kind));
-                let range_end = range_end_for_prefix(&scan_prefix);
-                let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
-                for entry in range {
-                    let entry = entry?;
-                    let key = entry.0.value().to_string();
-                    let path = stored_key_path(&key).unwrap_or("");
-                    if path_prefix_matches(prefix, path) {
-                        to_delete.push(key);
-                    }
-                }
-            }
-            for key in &to_delete {
-                table.remove(key.as_str())?;
-                deleted += 1;
-            }
-        }
-        txn.commit()?;
-        Ok(deleted)
+        Self::disk_delete_where(disk, prefix, |rest| {
+            let path = rest.split_once('\u{1f}').map_or(rest, |(p, _)| p);
+            path_prefix_matches(prefix, path)
+        })
     }
 
     fn read_from_table(
@@ -602,15 +546,6 @@ fn make_key(key: &Key) -> String {
         Some(aux) => format!("{prefix}:{}\u{1f}{}", key.path, hex_bytes(aux)),
         None => format!("{prefix}:{}", key.path),
     }
-}
-
-fn stored_key_path(key: &str) -> Option<&str> {
-    let (_, path_and_aux) = key.split_once(':')?;
-    Some(
-        path_and_aux
-            .split_once('\u{1f}')
-            .map_or(path_and_aux, |(path, _)| path),
-    )
 }
 
 fn range_end_for_prefix(prefix: &str) -> String {

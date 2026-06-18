@@ -85,9 +85,9 @@ fn canonical_eviction_drops_validator() {
 
     let cached = harness.runtime.cached_canonical_for(leaf);
     assert!(cached.is_some());
-    let (_, cached_bytes, validator) = cached.unwrap();
-    assert_eq!(cached_bytes, bytes);
-    assert_eq!(validator.as_deref(), Some("etag"));
+    let cached = cached.unwrap();
+    assert_eq!(cached.bytes, bytes);
+    assert_eq!(cached.validator.as_deref(), Some("etag"));
 
     let invalidate = Effects {
         invalidations: vec![Invalidation::Object(id.clone())],

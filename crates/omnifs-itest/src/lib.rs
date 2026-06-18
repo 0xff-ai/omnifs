@@ -132,7 +132,7 @@ impl RuntimeHarness {
         self.runtime.cache_get(path, kind, aux)
     }
 
-    pub fn cached_canonical_for(&self, path: &str) -> Option<(Vec<u8>, Vec<u8>, Option<String>)> {
+    pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
         self.runtime.cached_canonical_for(path)
     }
 

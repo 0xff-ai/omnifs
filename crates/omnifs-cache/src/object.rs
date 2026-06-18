@@ -8,6 +8,7 @@
 //! (`Store::scoped_id` / `Store::scoped_path_bytes`). The per-mount generation
 //! fence lives in `Store`.
 
+use crate::write_txn;
 use anyhow::Result;
 #[allow(unused_imports)]
 use redb::ReadableTable as _;
@@ -150,23 +151,17 @@ impl Cache {
             return;
         }
 
-        let result = (|| -> Result<()> {
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                let mut paths = txn.open_table(PATHS_TABLE)?;
-                for ((scoped_id, payload), entry) in prepared.iter().zip(entries.iter()) {
-                    objects.insert(scoped_id.as_slice(), payload.as_slice())?;
-                    for leaf in &entry.new_leaves {
-                        paths.insert(leaf.as_bytes(), scoped_id.as_slice())?;
-                    }
+        if let Err(e) = write_txn(&self.disk, |txn| {
+            let mut objects = txn.open_table(OBJECTS_TABLE)?;
+            let mut paths = txn.open_table(PATHS_TABLE)?;
+            for ((scoped_id, payload), entry) in prepared.iter().zip(entries.iter()) {
+                objects.insert(scoped_id.as_slice(), payload.as_slice())?;
+                for leaf in &entry.new_leaves {
+                    paths.insert(leaf.as_bytes(), scoped_id.as_slice())?;
                 }
             }
-            txn.commit()?;
             Ok(())
-        })();
-
-        if let Err(e) = result {
+        }) {
             tracing::warn!(error = %e, "object cache: batch write failed");
         }
     }
@@ -200,21 +195,15 @@ impl Cache {
             view_evict(leaf);
         }
 
-        let result = (|| -> Result<()> {
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                let mut paths = txn.open_table(PATHS_TABLE)?;
-                objects.remove(scoped_id)?;
-                for leaf in &leaves {
-                    paths.remove(leaf.as_bytes())?;
-                }
+        if let Err(e) = write_txn(&self.disk, |txn| {
+            let mut objects = txn.open_table(OBJECTS_TABLE)?;
+            let mut paths = txn.open_table(PATHS_TABLE)?;
+            objects.remove(scoped_id)?;
+            for leaf in &leaves {
+                paths.remove(leaf.as_bytes())?;
             }
-            txn.commit()?;
             Ok(())
-        })();
-
-        if let Err(e) = result {
+        }) {
             tracing::warn!(error = %e, "object cache: evict_object failed");
         }
     }
@@ -230,18 +219,12 @@ impl Cache {
         }
         obj.canonical = None;
 
-        let result = (|| -> Result<()> {
-            let payload = postcard::to_allocvec(&obj).map_err(anyhow::Error::from)?;
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                objects.insert(scoped_id, payload.as_slice())?;
-            }
-            txn.commit()?;
+        if let Err(e) = write_txn(&self.disk, |txn| {
+            let payload = postcard::to_allocvec(&obj)?;
+            let mut objects = txn.open_table(OBJECTS_TABLE)?;
+            objects.insert(scoped_id, payload.as_slice())?;
             Ok(())
-        })();
-
-        if let Err(e) = result {
+        }) {
             tracing::warn!(error = %e, "object cache: capacity_evict failed");
         }
     }
@@ -260,21 +243,15 @@ impl Cache {
             },
         };
 
-        let result = (|| -> Result<()> {
-            let txn = self.disk.begin_write()?;
-            {
-                let mut objects = txn.open_table(OBJECTS_TABLE)?;
-                let mut paths = txn.open_table(PATHS_TABLE)?;
-                objects.insert(scoped_id, payload.as_slice())?;
-                for leaf in new_leaves {
-                    paths.insert(leaf.as_bytes(), scoped_id)?;
-                }
+        match write_txn(&self.disk, |txn| {
+            let mut objects = txn.open_table(OBJECTS_TABLE)?;
+            let mut paths = txn.open_table(PATHS_TABLE)?;
+            objects.insert(scoped_id, payload.as_slice())?;
+            for leaf in new_leaves {
+                paths.insert(leaf.as_bytes(), scoped_id)?;
             }
-            txn.commit()?;
             Ok(())
-        })();
-
-        match result {
+        }) {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!(error = %e, "object cache: write failed");

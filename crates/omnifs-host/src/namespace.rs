@@ -101,7 +101,11 @@ impl Namespace<'_> {
         // Single cache lookup: derive both the warm_id (for coalescing key and
         // live check) and the CanonicalInput (byte buffer for the provider).
         let (warm_id, cached_canonical) = match self.runtime.cache.cached_canonical_for(&path) {
-            Some((host_id, bytes, validator)) => {
+            Some(omnifs_cache::CachedCanonical {
+                id: host_id,
+                bytes,
+                validator,
+            }) => {
                 let canonical = ObjectId::from_bytes(host_id.clone()).to_wit().map(|id| {
                     wit_types::CanonicalInput {
                         id,
