@@ -19,7 +19,6 @@ path = "src/bin/openapi.rs"
 
 [dependencies]
 omnifs-api = { workspace = true }
-omnifs-fuse = { workspace = true }
 omnifs-home = { workspace = true }
 omnifs-host = { workspace = true }
 omnifs-inspector = { workspace = true }
@@ -36,11 +35,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { workspace = true }
 
+# FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
+[target.'cfg(target_os = "linux")'.dependencies]
+omnifs-fuse = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 
-# Image-only artifact; cargo-dist packages the CLI for macOS only.
+# Not a cargo-dist target: omnifsd ships in the npm CLI platform packages
+# (staged beside omnifs by release.yml), and in the runtime image.
 [package.metadata.dist]
 dist = false
 

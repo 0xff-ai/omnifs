@@ -1,0 +1,33 @@
+[package]
+name = "omnifs-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Renderer-neutral async projection core shared by omnifs frontends (FUSE, NFS, itest)"
+categories = ["filesystem"]
+keywords = ["omnifs", "filesystem", "projection"]
+
+[dependencies]
+omnifs-host = { workspace = true }
+omnifs-cache = { workspace = true }
+omnifs-core = { workspace = true }
+omnifs-inspector = { workspace = true }
+# Deviation from blueprint: omnifs-wit is a direct (not dev-only) dependency.
+# Namespace::list_children returns the raw wit ListChildrenResult, and omnifs-host
+# does not re-export the provider::types module, so list.rs must name the wit
+# variants (Entries/Unchanged/Subtree) to destructure them at the conversion
+# seam. The host-bindings feature unifies with omnifs-host's identical edge.
+omnifs-wit = { workspace = true, features = ["host-bindings"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+omnifs-itest = { path = "../omnifs-itest" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

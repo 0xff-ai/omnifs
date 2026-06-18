@@ -61,10 +61,17 @@ impl MountConfig {
         })
     }
 
+    /// Materialize a mount config into a payload plus the host binds the
+    /// runtime needs. When `host_native` is true the daemon runs on the host
+    /// and opens user preopen directories directly through wasmtime, so the
+    /// preopen `host` field is canonicalized in place and no binds are emitted.
+    /// When false the Docker path rewrites each user preopen to a container
+    /// bind path and returns the corresponding `host:container:mode` strings.
     pub(crate) fn materialize(
         &self,
         catalog: &ProviderCatalog,
         store: &dyn CredentialStore,
+        host_native: bool,
     ) -> anyhow::Result<(Vec<String>, MountPayload)> {
         let mut instance = self.config.clone();
         let user_preopen_count = instance
@@ -88,7 +95,8 @@ impl MountConfig {
                     self.source.display()
                 )
             })?;
-        let preopen_binds = self.materialize_preopened_paths(&mut instance, user_preopen_count)?;
+        let preopen_binds =
+            self.materialize_preopened_paths(&mut instance, user_preopen_count, host_native)?;
 
         Ok((
             preopen_binds,
@@ -149,6 +157,7 @@ impl MountConfig {
         &self,
         instance: &mut Spec,
         user_preopen_count: usize,
+        host_native: bool,
     ) -> anyhow::Result<Vec<String>> {
         if user_preopen_count == 0 {
             return Ok(Vec::new());
@@ -173,17 +182,26 @@ impl MountConfig {
                     anyhow::bail!("preopen {} is not a directory", host_path.display());
                 }
 
+                if host_native {
+                    // Host-native: the daemon opens the real host directory
+                    // directly via wasmtime preopened_dir, so the spec keeps
+                    // the canonical host path and there is no bind to return.
+                    preopen.host = host_path.display().to_string();
+                    return Ok(None);
+                }
+
                 let container_path = format!("{GUEST_PREOPENS_DIR}/{}/{index}", self.name);
                 let bind_mode = match preopen.mode {
                     PreopenMode::Ro => "ro",
                     PreopenMode::Rw => "rw",
                 };
                 preopen.host.clone_from(&container_path);
-                Ok(format!(
+                Ok(Some(format!(
                     "{}:{container_path}:{bind_mode}",
                     host_path.display()
-                ))
+                )))
             })
+            .filter_map(Result::transpose)
             .collect()
     }
 }
@@ -272,7 +290,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store).unwrap();
+        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
         let written = payload_json(&payload);
 
         assert_eq!(written["auth"][0]["scheme"], "pat");
@@ -311,7 +329,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store).unwrap();
+        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
         let written = payload_json(&payload);
         assert_eq!(written["auth"][0]["token_env"], "FOO");
     }
@@ -346,7 +364,7 @@ mod tests {
         .unwrap();
 
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store).unwrap();
+        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
         let written = payload_json(&payload);
         assert_eq!(written["auth"][0]["scheme"], "device");
     }
@@ -379,7 +397,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store).unwrap();
+        config.materialize(&catalog, &store, false).unwrap();
     }
 
     #[test]
@@ -402,7 +420,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store).unwrap();
+        config.materialize(&catalog, &store, false).unwrap();
     }
 
     #[test]
@@ -423,7 +441,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store).unwrap();
+        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
         let written = payload_json(&payload);
         assert_eq!(
             written["capabilities"]["unix_sockets"],
@@ -459,7 +477,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (binds, payload) = config.materialize(&catalog, &store).unwrap();
+        let (binds, payload) = config.materialize(&catalog, &store, false).unwrap();
 
         assert_eq!(
             binds,
@@ -484,6 +502,53 @@ mod tests {
     }
 
     #[test]
+    fn materialize_host_native_keeps_canonical_host_and_no_binds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
+        let canonical = db_dir.canonicalize().unwrap();
+
+        let store = MemoryStore::new();
+        let config = MountConfig {
+            name: MountName::try_from("db").unwrap(),
+            config: Spec::parse(&format!(
+                r#"{{
+                    "provider": "omnifs_provider_db.wasm",
+                    "mount": "db",
+                    "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                    "capabilities": {{
+                        "preopened_paths": [
+                            {{"host": "{}", "guest": "/data", "mode": "ro"}}
+                        ]
+                    }}
+                }}"#,
+                db_dir.display()
+            ))
+            .unwrap(),
+            source: PathBuf::from("/dev/null"),
+        };
+
+        let catalog = test_catalog(tmp.path());
+        let (binds, payload) = config.materialize(&catalog, &store, true).unwrap();
+
+        assert!(
+            binds.is_empty(),
+            "host-native preopens are opened directly and emit no binds"
+        );
+        let written = payload_json(&payload);
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["host"],
+            canonical.display().to_string(),
+            "host-native keeps the canonical host path, not a guest preopen path"
+        );
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["guest"],
+            "/data",
+        );
+    }
+
+    #[test]
     fn materialize_leaves_manifest_preopens_container_native() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new();
@@ -501,7 +566,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (binds, payload) = config.materialize(&catalog, &store).unwrap();
+        let (binds, payload) = config.materialize(&catalog, &store, false).unwrap();
 
         assert!(
             binds.is_empty(),
@@ -539,7 +604,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = config.materialize(&catalog, &store).unwrap_err();
+        let err = config.materialize(&catalog, &store, false).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("no stored credential"),

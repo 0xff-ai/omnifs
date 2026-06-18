@@ -286,6 +286,11 @@ pub(super) struct FileEntry<S> {
     pub(super) pattern: Pattern,
     pub(super) handler: BoxedFileHandler<S>,
     pub(super) validator: RouteValidator,
+    /// The route was declared `ranged`, so its listing/lookup placeholder
+    /// projects `ReadMode::Ranged` and the host dispatches `open` straight to
+    /// `open-file` without probing. The handler still supplies the real reader,
+    /// size, and stability at `open-file`.
+    pub(super) ranged: bool,
 }
 
 pub(super) struct TreeRefEntry<S> {

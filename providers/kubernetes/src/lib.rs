@@ -210,6 +210,7 @@ fn register_routes(r: &mut Router<State>) -> Result<()> {
     r.dir("/namespaces/{ns}/{rtype}/{name}/logs")
         .handler(pod_logs_dir)?;
     r.file("/namespaces/{ns}/{rtype}/{name}/logs/{logfile}")
+        .ranged()
         .handler(pod_log_read)?;
 
     r.dir("/cluster").handler(cluster_types_dir)?;

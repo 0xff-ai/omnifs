@@ -106,15 +106,19 @@ fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let frontends = match args.frontend {
+        #[cfg(target_os = "linux")]
         FrontendKind::Fuse => frontends::Frontends::fuse(
             args.mount_point.clone(),
             Arc::clone(&registry),
             omnifs_fuse::new_notifier_handle(),
         ),
+        #[cfg(not(target_os = "linux"))]
+        FrontendKind::Fuse => anyhow::bail!(
+            "the fuse frontend is only available on Linux; use --frontend nfs for host-native mounts"
+        ),
         FrontendKind::Nfs => {
             let mut options = omnifs_nfs::NfsMountOptions::loopback(
-                args.nfs_state_dir
-                    .unwrap_or_else(|| paths.cache_dir.join("nfs")),
+                args.nfs_state_dir.unwrap_or_else(|| paths.nfs_state_dir()),
             );
             options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
             options.trace_path = args.nfs_trace;

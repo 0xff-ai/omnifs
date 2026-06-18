@@ -176,6 +176,7 @@ impl DbProvider {
         r.file("/tables/{table}/count.txt")
             .handler(table_count_txt)?;
         r.file("/tables/{table}/sample.json")
+            .ranged()
             .handler(table_sample)?;
 
         Ok(state)
@@ -421,17 +422,13 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         Ok((bytes, version))
     })?;
 
-    if bytes.len() > MAX_PROJECTED_BYTES {
-        let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        let mut builder = FileProjection::ranged(MemoryRangeReader::new(bytes))
-            .size(size)
-            .dynamic();
-        if let Some(v) = version {
-            builder = builder.version(v);
-        }
-        return Ok(builder.build());
-    }
-    let mut builder = FileProjection::body(bytes).dynamic();
+    // Always ranged: the sample bytes are already in memory, and the route is
+    // declared `ranged`, so the host serves any size through one ranged session
+    // (a small sample is a single chunk) without an inline-size cap.
+    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    let mut builder = FileProjection::ranged(MemoryRangeReader::new(bytes))
+        .size(size)
+        .dynamic();
     if let Some(v) = version {
         builder = builder.version(v);
     }
