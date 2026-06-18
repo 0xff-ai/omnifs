@@ -4,7 +4,7 @@
 //! promote `disk` hits into `mem`. Writes go to both. Invalidations
 //! remove from both, keeping them coherent.
 
-use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches, write_txn};
+use crate::{BatchRecord, Key, Record, RecordKind, write_txn};
 use anyhow::Result;
 use moka::sync::Cache as MokaCache;
 use omnifs_core::path::Path;
@@ -255,7 +255,7 @@ impl Cache {
         // Mem: use predicate-based eviction on path prefix.
         let prefix_owned = prefix.clone();
         self.mem
-            .invalidate_entries_if(move |k, _| path_prefix_matches(&prefix_owned, &k.path))
+            .invalidate_entries_if(move |k, _| k.path.has_prefix(&prefix_owned))
             .expect("invalidation closures enabled at cache construction");
         // Flush pending maintenance so the predicate is applied immediately
         // (moka applies invalidate_entries_if lazily otherwise).
@@ -454,11 +454,11 @@ impl Cache {
 
     /// Delete all records whose logical path is equal to `prefix` or lies
     /// beneath it on a segment boundary. The path portion is everything before
-    /// the aux separator and is matched with `path_prefix_matches`.
+    /// the aux separator and is matched on a segment boundary.
     fn disk_delete_prefix(disk: &Database, prefix: &Path) -> Result<usize> {
         Self::disk_delete_where(disk, prefix.as_str(), |rest| {
             let path = rest.split_once('\u{1f}').map_or(rest, |(p, _)| p);
-            Path::parse(path).is_ok_and(|parsed| path_prefix_matches(prefix, &parsed))
+            Path::parse(path).is_ok_and(|parsed| parsed.has_prefix(prefix))
         })
     }
 

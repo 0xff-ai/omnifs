@@ -54,18 +54,7 @@ pub struct CanonicalBatchEntry {
     pub id: Vec<u8>,
     pub bytes: Vec<u8>,
     pub validator: Option<String>,
-    pub view_leaves: Vec<String>,
-}
-
-/// Parse view-leaf wire paths, rejecting (and logging) the whole store on the
-/// first invalid path. Parsing is `Path::parse_all`; the reject-on-bad-path
-/// decision is cache policy, which is why it lives here rather than in core.
-fn accept_view_leaves(view_leaves: &[String]) -> Option<Vec<Path>> {
-    Path::parse_all(view_leaves)
-        .map_err(|error| {
-            tracing::warn!(%error, "wire path is not a valid protocol path; rejecting cache store");
-        })
-        .ok()
+    pub view_leaves: Vec<Path>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -256,7 +245,6 @@ pub struct Negative {
 pub struct Store {
     caches: Arc<Caches>,
     mount: String,
-    mount_segment: Segment,
     generation: AtomicU64,
     /// Scoped `ObjectId` bytes → generation at which the id was invalidated.
     tombstones: DashMap<Vec<u8>, u64>,
@@ -269,12 +257,12 @@ pub struct Store {
 impl Store {
     fn new(caches: Arc<Caches>, mount: impl Into<String>) -> Self {
         let mount = mount.into();
-        let mount_segment =
-            Segment::try_from(mount.as_str()).expect("store mount must be a path segment");
+        // Mount names must be a single path segment; fail fast at construction
+        // so `scope_unscoped` can build keys without re-validating.
+        Segment::try_from(mount.as_str()).expect("store mount must be a path segment");
         Self {
             caches,
             mount,
-            mount_segment,
             generation: AtomicU64::new(0),
             tombstones: DashMap::new(),
             negatives: DashMap::new(),
@@ -305,12 +293,20 @@ impl Store {
 
     /// Scoped view-cache key as a valid protocol path: `/{mount}{path}`.
     fn scoped(&self, path: &Path) -> Path {
-        let mut scoped = Path::root().join_segment(&self.mount_segment);
-        for segment in path.segments() {
-            let segment = Segment::try_from(segment).expect("validated path segment");
-            scoped = scoped.join_segment(&segment);
+        self.scope_unscoped(path.as_str())
+    }
+
+    /// Scope an already-valid, unscoped protocol-path string into this mount's
+    /// view-cache key. Both `unscoped` and `self.mount` are validated, so the
+    /// key is built by concatenation with no re-parsing: root scopes to
+    /// `/{mount}` (no trailing slash), any other path appends its leading-slash
+    /// string to `/{mount}`.
+    fn scope_unscoped(&self, unscoped: &str) -> Path {
+        if unscoped == "/" {
+            Path::from_validated(format!("/{}", self.mount))
+        } else {
+            Path::from_validated(format!("/{}{}", self.mount, unscoped))
         }
-        scoped
     }
 
     /// Scoped `ObjectId` bytes: `mount.as_bytes() ++ [0x1F] ++ id`.
@@ -343,8 +339,9 @@ impl Store {
         if mount != self.mount {
             return None;
         }
-        let path = Path::parse(path).ok()?;
-        Some(self.scoped(&path))
+        // `path` is the unscoped, already-valid protocol path that
+        // `scoped_object_leaf` stored; re-scope it without re-parsing.
+        Some(self.scope_unscoped(path))
     }
 
     fn host_id_from_scoped(&self, scoped_id: &[u8]) -> Option<Vec<u8>> {
@@ -471,7 +468,7 @@ impl Store {
         id: &[u8],
         bytes: Vec<u8>,
         validator: Option<String>,
-        view_leaves: &[String],
+        view_leaves: &[Path],
         op_gen: u64,
     ) -> bool {
         let scoped_id = self.scoped_id(id);
@@ -479,9 +476,6 @@ impl Store {
             return false;
         }
 
-        let Some(view_leaves) = accept_view_leaves(view_leaves) else {
-            return false;
-        };
         let scoped_leaves: Vec<String> = view_leaves
             .iter()
             .map(|p| self.scoped_object_leaf(p))
@@ -504,19 +498,12 @@ impl Store {
     /// Ownership is consumed so the caller need not clone; the function drains
     /// the Vec.
     pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) -> bool {
-        let Some(entries) = entries
-            .into_iter()
-            .map(|entry| accept_view_leaves(&entry.view_leaves).map(|leaves| (entry, leaves)))
-            .collect::<Option<Vec<(CanonicalBatchEntry, Vec<Path>)>>>()
-        else {
-            return false;
-        };
         let view = &self.caches.view;
 
         // Per-entry fence check and view eviction; collect accepted entries.
         let batch: Vec<object::StoreBatchEntry> = entries
             .into_iter()
-            .filter_map(|(entry, view_leaves)| {
+            .filter_map(|entry| {
                 let scoped_id = self.scoped_id(&entry.id);
                 if self.id_tombstoned_after(&scoped_id, op_gen) {
                     return None;
@@ -527,7 +514,8 @@ impl Store {
                         view.delete_exact(&path);
                     }
                 }
-                let scoped_leaves: Vec<String> = view_leaves
+                let scoped_leaves: Vec<String> = entry
+                    .view_leaves
                     .iter()
                     .map(|p| self.scoped_object_leaf(p))
                     .collect();
@@ -547,14 +535,11 @@ impl Store {
     }
 
     /// Preload index-only store, fenced. Canonical-beats-preload in the object tier.
-    pub fn put_index_only(&self, id: &[u8], view_leaves: &[String], op_gen: u64) -> bool {
+    pub fn put_index_only(&self, id: &[u8], view_leaves: &[Path], op_gen: u64) -> bool {
         let scoped_id = self.scoped_id(id);
         if self.id_tombstoned_after(&scoped_id, op_gen) {
             return false;
         }
-        let Some(view_leaves) = accept_view_leaves(view_leaves) else {
-            return false;
-        };
         let scoped_leaves: Vec<String> = view_leaves
             .iter()
             .map(|p| self.scoped_object_leaf(p))
@@ -773,9 +758,6 @@ impl Store {
     }
 }
 
-pub(crate) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
-    path.has_prefix(prefix)
-}
 
 #[cfg(test)]
 mod tests {
@@ -812,8 +794,8 @@ mod tests {
     fn identity_collapse() {
         let (_dir, _caches, store) = open_store("gh");
         let leaves = [
-            "/issues/open/42/item.json".to_string(),
-            "/issues/all/42/item.json".to_string(),
+            p("/issues/open/42/item.json"),
+            p("/issues/all/42/item.json"),
         ];
         assert!(store.put_canonical(
             OBJ_ID,
@@ -861,14 +843,14 @@ mod tests {
             OBJ_ID,
             b"from-a".to_vec(),
             None,
-            &[path.to_string()],
+            &[p(path)],
             op_gen,
         ));
         assert!(store_b.put_canonical(
             OBJ_ID,
             b"from-b".to_vec(),
             None,
-            &[path.to_string()],
+            &[p(path)],
             op_gen,
         ));
 
@@ -882,8 +864,8 @@ mod tests {
     #[test]
     fn overwrite_unions_aliases_keeps_index() {
         let (_dir, _caches, store) = open_store("m");
-        let l1 = "/p/L1".to_string();
-        let l2 = "/p/L2".to_string();
+        let l1 = p("/p/L1");
+        let l2 = p("/p/L2");
         let scoped_id = test_scoped_id("m", OBJ_ID);
 
         store.put_canonical(OBJ_ID, b"v1".to_vec(), None, std::slice::from_ref(&l1), 0);
@@ -914,7 +896,7 @@ mod tests {
     fn canonical_beats_preload() {
         let (_dir, _caches, store) = open_store("m");
         let scoped_id = test_scoped_id("m", OBJ_ID);
-        let l1 = "/issues/42/item.json".to_string();
+        let l1 = p("/issues/42/item.json");
         assert!(store.put_canonical(
             OBJ_ID,
             b"data".to_vec(),
@@ -922,7 +904,7 @@ mod tests {
             std::slice::from_ref(&l1),
             0,
         ));
-        assert!(store.put_index_only(OBJ_ID, &["/issues/42/title".to_string()], 0));
+        assert!(store.put_index_only(OBJ_ID, &[p("/issues/42/title")], 0));
 
         let got = store.caches.object.get(&scoped_id).unwrap();
         assert!(got.canonical.is_some());
@@ -933,7 +915,7 @@ mod tests {
     fn capacity_evict_keeps_index_drops_validator() {
         let (_dir, _caches, store) = open_store("m");
         let scoped_id = test_scoped_id("m", OBJ_ID);
-        let leaf = "/a/leaf".to_string();
+        let leaf = p("/a/leaf");
         store.put_canonical(
             OBJ_ID,
             b"data".to_vec(),
@@ -960,7 +942,7 @@ mod tests {
     fn delete_object_removes_index() {
         let (_dir, _caches, store) = open_store("m");
         let scoped_id = test_scoped_id("m", OBJ_ID);
-        let leaf = "/issues/42/item.json".to_string();
+        let leaf = p("/issues/42/item.json");
         store.put_canonical(
             OBJ_ID,
             b"data".to_vec(),
@@ -987,7 +969,7 @@ mod tests {
     fn delete_listing_keeps_canonicals() {
         let (_dir, _caches, store) = open_store("m");
         let scoped_id = test_scoped_id("m", OBJ_ID);
-        let leaf = "/dir/child.json".to_string();
+        let leaf = p("/dir/child.json");
         store.put_canonical(
             OBJ_ID,
             b"data".to_vec(),
@@ -1034,7 +1016,7 @@ mod tests {
         let (_dir, _caches, store) = open_store("m");
         let op_gen = store.current_generation();
         store.delete_object(OBJ_ID);
-        assert!(!store.put_canonical(OBJ_ID, b"late".to_vec(), None, &["/x".to_string()], op_gen,));
+        assert!(!store.put_canonical(OBJ_ID, b"late".to_vec(), None, &[p("/x")], op_gen,));
         assert!(store.cached_canonical_for(&p("/x")).is_none());
     }
 

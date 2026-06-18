@@ -396,18 +396,6 @@ impl Runtime {
     }
 
     #[doc(hidden)]
-    pub fn cache_view_leaf_for_test(
-        &self,
-        path: &Path,
-        records: &[BatchRecord],
-        expires_at: Option<u64>,
-        op_gen: u64,
-    ) -> bool {
-        self.cache
-            .cache_view_leaf(path, records, expires_at, op_gen)
-    }
-
-    #[doc(hidden)]
     pub fn apply_not_found_negative(
         &self,
         path: &Path,

@@ -82,15 +82,14 @@ impl<'a> Materializer<'a> {
                         return None;
                     },
                 };
-                let view_leaf_refs = view_leaves.iter().collect::<Vec<_>>();
-                if self.rejects_conflicting_id(&view_leaf_refs, &id) {
+                if self.rejects_conflicting_id(&view_leaves.iter().collect::<Vec<_>>(), &id) {
                     return None;
                 }
                 Some(CanonicalBatchEntry {
                     id: id.as_bytes().to_vec(),
                     bytes: store.bytes.clone(),
                     validator: store.validator.clone(),
-                    view_leaves: store.view_leaves.clone(),
+                    view_leaves,
                 })
             })
             .collect();
@@ -129,7 +128,7 @@ impl<'a> Materializer<'a> {
                 }
                 self.store.put_index_only(
                     oid.as_bytes(),
-                    std::slice::from_ref(&write.path),
+                    std::slice::from_ref(&write_path),
                     op_gen,
                 );
                 if self.store.write_fenced(&write_path, op_gen) {
@@ -356,9 +355,8 @@ impl<'a> Materializer<'a> {
         if self.rejects_conflicting_id(&[&entry_path], &oid) {
             return;
         }
-        let entry_path_string = entry_path.to_string();
         self.store
-            .put_index_only(oid.as_bytes(), &[entry_path_string], op_gen);
+            .put_index_only(oid.as_bytes(), std::slice::from_ref(&entry_path), op_gen);
     }
 
     /// True if any of `paths` is already indexed to an id != `id` (a provider bug).

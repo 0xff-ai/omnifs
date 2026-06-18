@@ -3,7 +3,7 @@ use omnifs_cache::{Key, Record, RecordKind};
 use omnifs_core::path::Path;
 
 fn p(path: &str) -> Path {
-    Path::parse(path).unwrap_or_else(|_| Path::from_validated(path))
+    Path::parse(path).expect("test path must be valid")
 }
 
 #[test]

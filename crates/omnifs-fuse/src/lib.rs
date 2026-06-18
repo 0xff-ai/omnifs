@@ -59,10 +59,6 @@ pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
     }
 }
 
-fn path_prefix_matches(prefix: &omnifs_core::path::Path, path: &omnifs_core::path::Path) -> bool {
-    path.has_prefix(prefix)
-}
-
 pub(crate) struct Frontend {
     rt: Handle,
     registry: Arc<ProviderRegistry>,
@@ -213,7 +209,7 @@ impl Frontend {
             let matches_prefix = report
                 .prefixes
                 .iter()
-                .any(|prefix| path_prefix_matches(prefix, path));
+                .any(|prefix| path.has_prefix(prefix));
             if matches_exact || matches_prefix {
                 to_remove.push(key.clone());
             }
