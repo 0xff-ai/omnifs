@@ -26,8 +26,8 @@ pub use crate::repr::{
     Atom, Diff, Format, Html, Json, Markdown, Octet, RenderSet, RenderTable, Representable, Yaml,
 };
 pub use crate::router::{
-    DirObjectBlock, DirRoute, FileObjectBlock, FileRoute, ObjectHandle, RouteHandle, Router,
-    TreeRefRoute, object,
+    DirObjectBlock, DirRoute, FileObjectBlock, FileRoute, ObjectHandle, RouteDescriptor,
+    RouteHandle, RouteKind, RouteManifest, Router, TreeRefRoute, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

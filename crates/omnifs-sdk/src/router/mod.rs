@@ -44,6 +44,7 @@ mod object;
 pub(crate) mod pattern;
 mod projection;
 mod register;
+mod routes;
 
 #[cfg(test)]
 mod tests;
@@ -55,3 +56,4 @@ pub use handlers::{
 };
 pub use object::{DirObjectBlock, FileObjectBlock, ObjectHandle, object};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
+pub use routes::{RouteDescriptor, RouteKind, RouteManifest};

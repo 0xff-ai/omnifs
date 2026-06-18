@@ -1,0 +1,46 @@
+{
+  "routes": [
+    {
+      "template": "/teams",
+      "kind": "dir"
+    },
+    {
+      "template": "/teams/{team}/issues",
+      "kind": "dir"
+    },
+    {
+      "template": "/teams/{team}/issues/{filter}",
+      "kind": "dir"
+    },
+    {
+      "template": "/teams/{team}/issues/{filter}/{ident}",
+      "kind": "object",
+      "representations": [
+        "item.md",
+        "item.json"
+      ],
+      "children": [
+        {
+          "template": "/teams/{team}/issues/{filter}/{ident}/title",
+          "kind": "file"
+        },
+        {
+          "template": "/teams/{team}/issues/{filter}/{ident}/state",
+          "kind": "file"
+        },
+        {
+          "template": "/teams/{team}/issues/{filter}/{ident}/priority",
+          "kind": "file"
+        },
+        {
+          "template": "/teams/{team}/issues/{filter}/{ident}/assignee",
+          "kind": "file"
+        },
+        {
+          "template": "/teams/{team}/issues/{filter}/{ident}/description.md",
+          "kind": "file"
+        }
+      ]
+    }
+  ]
+}

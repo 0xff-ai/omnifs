@@ -810,6 +810,9 @@ pub(super) struct MountedObject<S> {
     pub claims: Vec<Pattern>,
     pub handler_files: Vec<FileEntry<S>>,
     pub handler_dirs: Vec<DirEntry<S>>,
+    /// The introspectable descriptor for this object route: representation
+    /// leaf names plus nested file/dir children, ready for the route table.
+    pub descriptor: super::routes::RouteDescriptor,
 }
 
 type BoxedObjectRead<S> = Box<
@@ -927,6 +930,8 @@ where
         }
     }
 
+    let descriptor = object_descriptor(spec, shape, combined_template);
+
     let route = ObjectRoute::for_mount(spec, pattern)?;
 
     let entry = ObjectEntry {
@@ -946,7 +951,59 @@ where
         claims: leaf_claims,
         handler_files,
         handler_dirs,
+        descriptor,
     })
+}
+
+/// Build the introspectable [`RouteDescriptor`](super::routes::RouteDescriptor)
+/// for a mounted object: the anchor template and kind, the representation leaf
+/// names, and one child entry per nested file/dir leaf. Representation and
+/// projected leaves surface as representations; handler leaves surface as
+/// file/dir children at `<anchor>/<suffix>`.
+fn object_descriptor<O: Object>(
+    spec: &ObjectSpec<O>,
+    shape: ObjectShape,
+    combined_template: &str,
+) -> super::routes::RouteDescriptor {
+    use super::routes::{RouteDescriptor, RouteKind};
+
+    let anchor = combined_template.trim_end_matches('/');
+    let kind = match shape {
+        ObjectShape::Dir => RouteKind::Object,
+        ObjectShape::File => RouteKind::FileObject,
+    };
+    let mut representations = Vec::new();
+    let mut children = Vec::new();
+    for leaf in &spec.leaves {
+        match leaf {
+            ObjectLeaf::Representation { leaf_name, .. } => representations.push(leaf_name.clone()),
+            ObjectLeaf::Projected { leaf_name, .. } => {
+                children.push(RouteDescriptor::leaf(
+                    format!("{anchor}/{leaf_name}"),
+                    RouteKind::File,
+                ));
+            },
+            ObjectLeaf::HandlerFile { suffix, .. } => {
+                children.push(RouteDescriptor::leaf(
+                    format!("{anchor}/{suffix}"),
+                    RouteKind::File,
+                ));
+            },
+            ObjectLeaf::HandlerDir { suffix, .. } => {
+                children.push(RouteDescriptor::leaf(
+                    format!("{anchor}/{suffix}"),
+                    RouteKind::Dir,
+                ));
+            },
+        }
+    }
+    RouteDescriptor {
+        template: anchor.to_string(),
+        kind,
+        description: None,
+        representations,
+        children,
+    }
 }
 
 /// The object projection context shared by every serve path: the route-owned

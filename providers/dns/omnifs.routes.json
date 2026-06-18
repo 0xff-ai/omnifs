@@ -1,0 +1,48 @@
+{
+  "routes": [
+    {
+      "template": "/",
+      "kind": "dir"
+    },
+    {
+      "template": "/resolvers",
+      "kind": "file"
+    },
+    {
+      "template": "/reverse",
+      "kind": "dir"
+    },
+    {
+      "template": "/reverse/{ip}",
+      "kind": "file"
+    },
+    {
+      "template": "/{domain}",
+      "kind": "dir"
+    },
+    {
+      "template": "/{domain}/{record}",
+      "kind": "file"
+    },
+    {
+      "template": "/@{resolver}",
+      "kind": "dir"
+    },
+    {
+      "template": "/@{resolver}/reverse",
+      "kind": "dir"
+    },
+    {
+      "template": "/@{resolver}/reverse/{ip}",
+      "kind": "file"
+    },
+    {
+      "template": "/@{resolver}/{domain}",
+      "kind": "dir"
+    },
+    {
+      "template": "/@{resolver}/{domain}/{record}",
+      "kind": "file"
+    }
+  ]
+}

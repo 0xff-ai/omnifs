@@ -60,6 +60,36 @@ providers-build: wasi-sdk
     cargo build --target wasm32-wasip2 --release \
       -p 'omnifs-provider-*' \
       -p test-provider
+    just providers-introspect
+
+# Introspect each built provider's route table into providers/<name>/omnifs.routes.json.
+#
+# Instantiates each component through the host runtime (the omnifs-introspect-routes
+# binary), calls `initialize`, and writes the route table. Requires the wasm components
+# to be built first (providers-build runs this automatically). The provider WASM filename
+# comes from the `provider` field of each omnifs.provider.json.
+[group('providers')]
+providers-introspect:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p omnifs-host --bin omnifs-introspect-routes
+    bin="target/release/omnifs-introspect-routes"
+    wasm_dir="target/wasm32-wasip2/release"
+    shopt -s nullglob
+    for manifest in providers/*/omnifs.provider.json; do
+      dir="$(dirname "$manifest")"
+      wasm_name="$(sed -nE 's/.*"provider"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$manifest")"
+      if [[ -z "$wasm_name" ]]; then
+        printf 'no provider wasm filename in %s\n' "$manifest" >&2
+        exit 1
+      fi
+      wasm="$wasm_dir/$wasm_name"
+      if [[ ! -f "$wasm" ]]; then
+        printf 'missing built component %s (run just providers-build)\n' "$wasm" >&2
+        exit 1
+      fi
+      "$bin" "$wasm" "$dir/omnifs.routes.json"
+    done
 
 # Validate built WASM components.
 [group('providers')]

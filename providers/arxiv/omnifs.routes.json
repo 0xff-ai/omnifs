@@ -1,0 +1,62 @@
+{
+  "routes": [
+    {
+      "template": "/papers/{paper}/{version}",
+      "kind": "object",
+      "representations": [
+        "paper.atom"
+      ],
+      "children": [
+        {
+          "template": "/papers/{paper}/{version}/paper.json",
+          "kind": "file"
+        },
+        {
+          "template": "/papers/{paper}/{version}/paper.pdf",
+          "kind": "file"
+        },
+        {
+          "template": "/papers/{paper}/{version}/source.tar.gz",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/categories/{category}/papers/{paper}/{version}",
+      "kind": "object",
+      "representations": [
+        "paper.atom"
+      ],
+      "children": [
+        {
+          "template": "/categories/{category}/papers/{paper}/{version}/paper.json",
+          "kind": "file"
+        },
+        {
+          "template": "/categories/{category}/papers/{paper}/{version}/paper.pdf",
+          "kind": "file"
+        },
+        {
+          "template": "/categories/{category}/papers/{paper}/{version}/source.tar.gz",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/papers/{paper}",
+      "kind": "dir"
+    },
+    {
+      "template": "/categories/{category}/papers/{paper}",
+      "kind": "dir"
+    },
+    {
+      "template": "/categories/{category}",
+      "kind": "dir"
+    },
+    {
+      "template": "/categories/{category}/papers",
+      "kind": "dir"
+    }
+  ]
+}

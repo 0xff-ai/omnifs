@@ -24,6 +24,9 @@ impl<S> Init<S> {
                 name: name.into(),
                 version: version.into(),
                 description: String::new(),
+                // Populated from the sealed router by the `#[provider]` glue;
+                // a bare `Init` carries no routes.
+                routes: Vec::new(),
             },
         }
     }

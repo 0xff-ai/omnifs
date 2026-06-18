@@ -1,0 +1,132 @@
+{
+  "routes": [
+    {
+      "template": "/{owner}",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}",
+      "kind": "object",
+      "representations": [
+        "repo.json"
+      ]
+    },
+    {
+      "template": "/{owner}/{repo}/issues",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}/issues/{filter}",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}/issues/{filter}/{number}",
+      "kind": "object",
+      "representations": [
+        "item.md",
+        "item.json"
+      ],
+      "children": [
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/title",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/body",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/state",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/user",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/comments",
+          "kind": "dir"
+        },
+        {
+          "template": "/{owner}/{repo}/issues/{filter}/{number}/comments/{idx}",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/{owner}/{repo}/pulls",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}/pulls/{filter}",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}/pulls/{filter}/{number}",
+      "kind": "object",
+      "representations": [
+        "item.md",
+        "item.json"
+      ],
+      "children": [
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/title",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/body",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/state",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/user",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/comments",
+          "kind": "dir"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/comments/{idx}",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/pulls/{filter}/{number}/diff",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/{owner}/{repo}/repo",
+      "kind": "tree_ref"
+    },
+    {
+      "template": "/{owner}/{repo}/actions/runs",
+      "kind": "dir"
+    },
+    {
+      "template": "/{owner}/{repo}/actions/runs/{run_id}",
+      "kind": "object",
+      "representations": [
+        "run.json"
+      ],
+      "children": [
+        {
+          "template": "/{owner}/{repo}/actions/runs/{run_id}/status",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/actions/runs/{run_id}/conclusion",
+          "kind": "file"
+        },
+        {
+          "template": "/{owner}/{repo}/actions/runs/{run_id}/log",
+          "kind": "file"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "routes": [
+    {
+      "template": "/items",
+      "kind": "dir"
+    },
+    {
+      "template": "/items/{filter}",
+      "kind": "dir"
+    },
+    {
+      "template": "/items/{filter}/{number}",
+      "kind": "object",
+      "representations": [
+        "item.md",
+        "item.json"
+      ],
+      "children": [
+        {
+          "template": "/items/{filter}/{number}/title",
+          "kind": "file"
+        },
+        {
+          "template": "/items/{filter}/{number}/state",
+          "kind": "file"
+        },
+        {
+          "template": "/items/{filter}/{number}/body",
+          "kind": "file"
+        },
+        {
+          "template": "/items/{filter}/{number}/comments",
+          "kind": "dir"
+        },
+        {
+          "template": "/items/{filter}/{number}/comments/{idx}",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/hello",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/message",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/greeting",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/projected",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/lazy",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/fresh-full",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/ranged",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/unknown-ranged",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/large-ranged",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/volatile-tail",
+      "kind": "file"
+    },
+    {
+      "template": "/hello/bundle",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/feed",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/unbounded",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/throttled",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/snapshot",
+      "kind": "dir"
+    },
+    {
+      "template": "/hello/snapshot/comments",
+      "kind": "dir"
+    },
+    {
+      "template": "/scoped",
+      "kind": "dir"
+    },
+    {
+      "template": "/scoped/item",
+      "kind": "file"
+    },
+    {
+      "template": "/dynamic/{name}",
+      "kind": "dir"
+    },
+    {
+      "template": "/checkout",
+      "kind": "tree_ref"
+    }
+  ]
+}

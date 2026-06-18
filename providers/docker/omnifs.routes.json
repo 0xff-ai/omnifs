@@ -1,0 +1,140 @@
+{
+  "routes": [
+    {
+      "template": "/system/info.json",
+      "kind": "file"
+    },
+    {
+      "template": "/system/version.json",
+      "kind": "file"
+    },
+    {
+      "template": "/system/df.json",
+      "kind": "file"
+    },
+    {
+      "template": "/system/ping",
+      "kind": "file"
+    },
+    {
+      "template": "/containers.json",
+      "kind": "file"
+    },
+    {
+      "template": "/compose.json",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-name",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/by-name/{reference}",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/by-name/{reference}/inspect.json",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-name/{reference}/state",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-name/{reference}/summary.txt",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-id",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/by-id/{reference}",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/by-id/{reference}/inspect.json",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-id/{reference}/state",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/by-id/{reference}/summary.txt",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/running",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/running/{reference}",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/running/{reference}/inspect.json",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/running/{reference}/state",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/running/{reference}/summary.txt",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/stopped",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/stopped/{reference}",
+      "kind": "dir"
+    },
+    {
+      "template": "/containers/stopped/{reference}/inspect.json",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/stopped/{reference}/state",
+      "kind": "file"
+    },
+    {
+      "template": "/containers/stopped/{reference}/summary.txt",
+      "kind": "file"
+    },
+    {
+      "template": "/compose/{project}",
+      "kind": "dir"
+    },
+    {
+      "template": "/compose/{project}/services",
+      "kind": "dir"
+    },
+    {
+      "template": "/compose/{project}/services/{service}",
+      "kind": "dir"
+    },
+    {
+      "template": "/compose/{project}/services/{service}/containers",
+      "kind": "dir"
+    },
+    {
+      "template": "/compose/{project}/services/{service}/containers/{reference}",
+      "kind": "dir"
+    },
+    {
+      "template": "/compose/{project}/services/{service}/containers/{reference}/inspect.json",
+      "kind": "file"
+    },
+    {
+      "template": "/compose/{project}/services/{service}/containers/{reference}/state",
+      "kind": "file"
+    },
+    {
+      "template": "/compose/{project}/services/{service}/containers/{reference}/summary.txt",
+      "kind": "file"
+    }
+  ]
+}

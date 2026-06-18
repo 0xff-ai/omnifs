@@ -12,6 +12,7 @@ use super::object::{
     DirObjectBlock, FileObjectBlock, ObjectHandle, file_object, mount_object, object,
 };
 use super::pattern::parse_pattern;
+use super::routes::{RouteDescriptor, RouteKind, RouteManifest};
 
 // ===========================================================================
 // Router
@@ -48,6 +49,10 @@ pub struct Router<S = ()> {
     pub(super) handler_files: Vec<super::handlers::FileEntry<S>>,
     pub(super) handler_dirs: Vec<super::handlers::DirEntry<S>>,
     pub(super) leaf_claims: Vec<super::pattern::Pattern>,
+    /// Serializable route descriptors in registration order, accumulated
+    /// alongside dispatch state so the macro glue can introspect the surface
+    /// after `seal`. Carries no handlers, only route shape.
+    pub(super) route_descriptors: Vec<RouteDescriptor>,
 }
 
 impl<S> Default for Router<S> {
@@ -60,6 +65,7 @@ impl<S> Default for Router<S> {
             handler_files: Vec::new(),
             handler_dirs: Vec::new(),
             leaf_claims: Vec::new(),
+            route_descriptors: Vec::new(),
         }
     }
 }
@@ -171,6 +177,7 @@ impl<S> Router<S> {
         self.leaf_claims.extend(mounted.claims);
         self.handler_files.extend(mounted.handler_files);
         self.handler_dirs.extend(mounted.handler_dirs);
+        self.route_descriptors.push(mounted.descriptor);
         Ok(self)
     }
 
@@ -183,6 +190,8 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
+        self.route_descriptors
+            .push(RouteDescriptor::leaf(template.to_string(), RouteKind::Dir));
         Ok(())
     }
 
@@ -199,6 +208,8 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
+        self.route_descriptors
+            .push(RouteDescriptor::leaf(template.to_string(), RouteKind::File));
         Ok(())
     }
 
@@ -215,7 +226,24 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
+        self.route_descriptors.push(RouteDescriptor::leaf(
+            template.to_string(),
+            RouteKind::TreeRef,
+        ));
         Ok(())
+    }
+
+    /// The full ordered route table accumulated during `start`, for
+    /// introspection. Called by the `#[omnifs_sdk::provider]` macro glue
+    /// after [`Self::seal`] so the route shape can ship through
+    /// `provider-info` at `initialize`; providers do not call it themselves.
+    /// Each object route carries its representation leaves and nested
+    /// file/dir children; plain routes are leaves.
+    #[must_use]
+    pub fn route_manifest(&self) -> RouteManifest {
+        RouteManifest {
+            routes: self.route_descriptors.clone(),
+        }
     }
 
     /// One-path-one-route: reject overlapping leaf claims.

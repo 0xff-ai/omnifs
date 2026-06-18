@@ -1,0 +1,19 @@
+{
+  "routes": [
+    {
+      "template": "/",
+      "kind": "dir"
+    },
+    {
+      "template": "/{day}",
+      "kind": "dir"
+    },
+    {
+      "template": "/{day}/{collection}",
+      "kind": "file_object",
+      "representations": [
+        "collection.json"
+      ]
+    }
+  ]
+}

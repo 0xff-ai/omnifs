@@ -1,0 +1,64 @@
+{
+  "routes": [
+    {
+      "template": "/namespaces",
+      "kind": "dir"
+    },
+    {
+      "template": "/namespaces/{ns}",
+      "kind": "dir"
+    },
+    {
+      "template": "/namespaces/{ns}/{rtype}",
+      "kind": "dir"
+    },
+    {
+      "template": "/namespaces/{ns}/{rtype}/{name}",
+      "kind": "object",
+      "representations": [
+        "manifest.yaml",
+        "manifest.json"
+      ],
+      "children": [
+        {
+          "template": "/namespaces/{ns}/{rtype}/{name}/status.yaml",
+          "kind": "file"
+        }
+      ]
+    },
+    {
+      "template": "/namespaces/{ns}/{rtype}/{name}/events.txt",
+      "kind": "file"
+    },
+    {
+      "template": "/namespaces/{ns}/{rtype}/{name}/logs",
+      "kind": "dir"
+    },
+    {
+      "template": "/namespaces/{ns}/{rtype}/{name}/logs/{logfile}",
+      "kind": "file"
+    },
+    {
+      "template": "/cluster",
+      "kind": "dir"
+    },
+    {
+      "template": "/cluster/{rtype}",
+      "kind": "dir"
+    },
+    {
+      "template": "/cluster/{rtype}/{name}",
+      "kind": "object",
+      "representations": [
+        "manifest.yaml",
+        "manifest.json"
+      ],
+      "children": [
+        {
+          "template": "/cluster/{rtype}/{name}/status.yaml",
+          "kind": "file"
+        }
+      ]
+    }
+  ]
+}

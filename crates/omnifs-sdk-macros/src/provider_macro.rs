@@ -334,11 +334,15 @@ fn provider_info_tokens(
         (None, Some(desc)) => quote! { #desc.to_string() },
         (None, None) => quote! { String::new() },
     };
+    // `routes` is filled in at `initialize` time from the sealed router's
+    // introspected route table (it depends on `start` having run); the
+    // compile-time info carries an empty list.
     quote! {
         omnifs_sdk::prelude::ProviderInfo {
             name: #name,
             version: #version,
             description: #description,
+            routes: Vec::new(),
         }
     }
 }
@@ -420,13 +424,17 @@ fn generate_lifecycle(
                 if let Err(error) = router.seal() {
                     return omnifs_sdk::prelude::err(error);
                 }
+                // Introspect the sealed route table before the router moves
+                // into its slot, so `provider-info` ships the live surface.
+                let routes = router.route_manifest().to_wit();
                 STATE.with(|slot| {
                     *slot.borrow_mut() = Some(std::rc::Rc::new(core::cell::RefCell::new(state)));
                 });
                 ROUTER.with(|slot| {
                     *slot.borrow_mut() = Some(std::rc::Rc::new(router));
                 });
-                let info = #info_tokens;
+                let mut info = #info_tokens;
+                info.routes = routes;
                 let capabilities = #caps_tokens;
                 omnifs_sdk::prelude::ProviderReturn::terminal(
                     omnifs_sdk::prelude::OpResult::Initialize(

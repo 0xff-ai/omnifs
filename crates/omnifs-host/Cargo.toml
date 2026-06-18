@@ -9,6 +9,10 @@ description = "Host runtime for the omnifs virtual filesystem with WASM provider
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "fuse", "wasm", "wasmtime", "filesystem"]
 
+[[bin]]
+name = "omnifs-introspect-routes"
+path = "src/bin/introspect_routes.rs"
+
 [dependencies]
 wasmtime = { workspace = true }
 tokio = { workspace = true }

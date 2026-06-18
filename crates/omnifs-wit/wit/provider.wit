@@ -418,10 +418,46 @@ interface types {
         error,
     }
 
+    /// The kind of a registered route, mirroring the SDK registration verbs.
+    enum route-kind {
+        dir,
+        file,
+        tree-ref,
+        object,
+        file-object,
+    }
+
+    /// One entry in a provider's introspected route table.
+    ///
+    /// The route table is a *flattened* tree: nested object children
+    /// (leaves declared inside an `object`/`file-object` block) are emitted
+    /// as their own entries with `parent` set to the index of their parent
+    /// entry in the same list. Top-level routes carry `parent: none`. Order
+    /// is registration order, and every parent precedes its children, so a
+    /// consumer can rebuild the tree in one forward pass.
+    record route-descriptor {
+        /// The absolute route template, e.g. "/items/{filter}/{number}".
+        template: string,
+        kind: route-kind,
+        /// Always `none` today; a later iteration wires a `.desc()` DSL call
+        /// through to here. The field and its encoding exist now so adding
+        /// content is not a contract change.
+        description: option<string>,
+        /// Object representation leaf names (e.g. "item.json", "item.md");
+        /// empty for non-object routes.
+        representations: list<string>,
+        /// Index into the enclosing route list of this entry's parent object
+        /// route, or `none` for a top-level route.
+        parent: option<u32>,
+    }
+
     record provider-info {
         name: string,
         version: string,
         description: string,
+        /// The provider's full route table, introspected from the `Router`
+        /// after `start`/`seal` ran. Flattened tree; see `route-descriptor`.
+        routes: list<route-descriptor>,
     }
 
     record requested-capabilities {
