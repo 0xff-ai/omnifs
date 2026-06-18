@@ -99,6 +99,7 @@ impl ExampleProvider {
 - Prefix capture: `/@{resolver}`, `/v{version}` (literal prefix stripped before parse)
 - Trailing rest capture: `/{*path}` (must be last; captures remaining segments as one string)
 - Registration verbs: `r.dir(t).handler(h)`, `r.file(t).handler(h)`, `r.treeref(t).handler(h)`, `r.object::<O>(t, block)`, `r.file_object::<O>(t, block)`, `r.attach(prefix, &handle)` for a detached `object(..)` handle
+- `.desc("..")` attaches a human-readable description to any route or leaf, surfaced in the introspected route table (`omnifs.routes.json`, doc/CLI rendering); it carries no dispatch meaning. On path routes call it before `.handler(..)` (`r.dir(t).desc("..").handler(h)`); inside an object block `o.desc("..")` describes the object route itself and `o.file("title").desc("..").project(..)` / `o.dir("comments").desc("..").handler(..)` describe leaves. Keep descriptions short and agent-legible.
 
 Handlers are `async fn(Cx<S>) -> Result<..>`, `async fn(Cx<S>, Key) -> Result<..>` (file/treeref), or `async fn(DirCx<S>) / (DirCx<S>, Key)` (dir). `DirCx` carries the intent: one dir handler serves `Lookup{child}`, `List{cursor}`, and `ReadFile{name}`; check `cx.intent()` when behavior differs, and `cx.page_cursor(1)` for paged listings.
 
@@ -130,8 +131,9 @@ impl Key for IssueKey {
 }
 
 r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
+    o.desc("A GitHub issue");                   // describes the object route itself
     o.representations("item", (Markdown,))?;   // item.md (+ item.json from canonical)
-    o.file("title").project(Issue::title)?;    // eager leaf from the loaded object
+    o.file("title").desc("The issue title").project(Issue::title)?; // eager leaf
     o.file("body").lazy().project(Issue::body)?; // listed, but not eager-preloaded
     o.dir("comments").handler(IssueKey::comments)?; // dynamic child under the object
     Ok(())
@@ -181,7 +183,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched today.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
-11. Put projected-leaf modifiers before `.project()`: `o.file("body").lazy().project(f)` marks `body` lazy; `.project()` is the terminal registration call.
+11. Put projected-leaf modifiers (`.lazy()`, `.desc("..")`) before `.project()`/`.handler(..)`: `o.file("body").lazy().desc("..").project(f)`; `.project()`/`.handler(..)` is the terminal registration call. On path routes, `.desc("..")` likewise precedes the terminal `.handler(..)`.
 
 ## Where to look
 

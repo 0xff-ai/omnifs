@@ -2,7 +2,8 @@
   "routes": [
     {
       "template": "/items",
-      "kind": "dir"
+      "kind": "dir",
+      "description": "Synthetic item collection, grouped by state filter"
     },
     {
       "template": "/items/{filter}",
@@ -11,6 +12,7 @@
     {
       "template": "/items/{filter}/{number}",
       "kind": "object",
+      "description": "A single synthetic item, identity-collapsed across filters",
       "representations": [
         "item.md",
         "item.json"
@@ -18,7 +20,8 @@
       "children": [
         {
           "template": "/items/{filter}/{number}/title",
-          "kind": "file"
+          "kind": "file",
+          "description": "The item's title, as plain text"
         },
         {
           "template": "/items/{filter}/{number}/state",
@@ -30,7 +33,8 @@
         },
         {
           "template": "/items/{filter}/{number}/comments",
-          "kind": "dir"
+          "kind": "dir",
+          "description": "The item's comments, one file per comment index"
         },
         {
           "template": "/items/{filter}/{number}/comments/{idx}",
@@ -116,7 +120,8 @@
     },
     {
       "template": "/checkout",
-      "kind": "tree_ref"
+      "kind": "tree_ref",
+      "description": "Subtree handoff: the host takes over the whole checkout tree"
     }
   ]
 }

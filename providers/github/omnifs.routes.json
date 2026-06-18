@@ -2,18 +2,21 @@
   "routes": [
     {
       "template": "/{owner}",
-      "kind": "dir"
+      "kind": "dir",
+      "description": "A GitHub user or organization; lists their repositories"
     },
     {
       "template": "/{owner}/{repo}",
       "kind": "object",
+      "description": "A GitHub repository",
       "representations": [
         "repo.json"
       ]
     },
     {
       "template": "/{owner}/{repo}/issues",
-      "kind": "dir"
+      "kind": "dir",
+      "description": "Issue filters (open, all) for the repository"
     },
     {
       "template": "/{owner}/{repo}/issues/{filter}",
@@ -22,6 +25,7 @@
     {
       "template": "/{owner}/{repo}/issues/{filter}/{number}",
       "kind": "object",
+      "description": "A GitHub issue",
       "representations": [
         "item.md",
         "item.json"
@@ -29,7 +33,8 @@
       "children": [
         {
           "template": "/{owner}/{repo}/issues/{filter}/{number}/title",
-          "kind": "file"
+          "kind": "file",
+          "description": "The issue title"
         },
         {
           "template": "/{owner}/{repo}/issues/{filter}/{number}/body",
@@ -45,7 +50,8 @@
         },
         {
           "template": "/{owner}/{repo}/issues/{filter}/{number}/comments",
-          "kind": "dir"
+          "kind": "dir",
+          "description": "Issue comments, one file per comment"
         },
         {
           "template": "/{owner}/{repo}/issues/{filter}/{number}/comments/{idx}",
@@ -101,7 +107,8 @@
     },
     {
       "template": "/{owner}/{repo}/repo",
-      "kind": "tree_ref"
+      "kind": "tree_ref",
+      "description": "The repository's working tree, served as a cloned subtree"
     },
     {
       "template": "/{owner}/{repo}/actions/runs",

@@ -25,15 +25,15 @@ pub enum RouteKind {
 /// One introspected route, including (for object routes) the representation
 /// leaf names and the nested file/dir children declared inside the block.
 ///
-/// `description` is always `None` today; the field and its serde shape exist
-/// now so a later iteration can populate it from a `.desc("..")` DSL call
-/// without changing the wire contract.
+/// `description` is populated from a `.desc("..")` DSL call on the registering
+/// builder; it is `None` when the provider left the route undescribed.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RouteDescriptor {
     /// The absolute route template, e.g. `"/items/{filter}/{number}"`.
     pub template: String,
     pub kind: RouteKind,
-    /// Always `None` for now; reserved for a future `.desc("..")` DSL.
+    /// The provider's `.desc("..")` text for this route, or `None` when
+    /// undescribed. Static metadata only; carries no dispatch meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Object representation leaf names (`item.json`, `item.md`); empty for
@@ -55,6 +55,13 @@ impl RouteDescriptor {
             representations: Vec::new(),
             children: Vec::new(),
         }
+    }
+
+    /// Builder-style: set the description (a no-op when `None`), returning the
+    /// descriptor so leaf construction stays a single expression.
+    pub(super) fn described(mut self, description: Option<String>) -> Self {
+        self.description = description;
+        self
     }
 }
 

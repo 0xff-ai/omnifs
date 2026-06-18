@@ -63,26 +63,35 @@ impl PathSegment for StateFilter {
 )]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {
-        r.dir("/{owner}").handler(OwnerKey::repos)?;
+        r.dir("/{owner}")
+            .desc("A GitHub user or organization; lists their repositories")
+            .handler(OwnerKey::repos)?;
 
         r.object::<Repo>("/{owner}/{repo}", |o| {
+            o.desc("A GitHub repository");
             o.dynamic();
             o.representations("repo", ())?;
             Ok(())
         })?;
 
         r.dir("/{owner}/{repo}/issues")
+            .desc("Issue filters (open, all) for the repository")
             .handler(IssuesRootKey::filters)?;
         r.dir("/{owner}/{repo}/issues/{filter}")
             .handler(IssueListKey::list)?;
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
+            o.desc("A GitHub issue");
             o.dynamic();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(Issue::title)?;
+            o.file("title")
+                .desc("The issue title")
+                .project(Issue::title)?;
             o.file("body").lazy().project(Issue::body)?;
             o.file("state").project(Issue::state)?;
             o.file("user").project(Issue::user)?;
-            o.dir("comments").handler(IssueKey::comments)?;
+            o.dir("comments")
+                .desc("Issue comments, one file per comment")
+                .handler(IssueKey::comments)?;
             o.file("comments/{idx}").handler(IssueCommentKey::read)?;
             Ok(())
         })?;
@@ -104,7 +113,9 @@ impl GithubProvider {
             Ok(())
         })?;
 
-        r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
+        r.treeref("/{owner}/{repo}/repo")
+            .desc("The repository's working tree, served as a cloned subtree")
+            .handler(RepoKey::tree)?;
 
         r.dir("/{owner}/{repo}/actions/runs")
             .handler(RunListKey::list)?;

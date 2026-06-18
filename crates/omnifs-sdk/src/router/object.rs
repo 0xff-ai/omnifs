@@ -65,6 +65,8 @@ pub(super) struct ObjectSpec<O: Object> {
     pub render_table: RenderTable,
     pub source_stem: &'static str,
     pub source_ext: &'static str,
+    /// The object route's `.desc("..")` text, for the anchor descriptor.
+    pub description: Option<String>,
     pub leaves: Vec<ObjectLeaf<O>>,
 }
 
@@ -80,22 +82,26 @@ pub(super) enum ObjectLeaf<O: Object> {
     /// render of them.
     Representation { leaf_name: String, ct: ContentType },
     /// A field leaf computed from the parsed object value. `lazy` excludes it
-    /// from listing-time eager preloads; reads still serve it.
+    /// from listing-time eager preloads; reads still serve it. `description`
+    /// is the optional `.desc("..")` text, surfaced only in the route table.
     Projected {
         leaf_name: String,
         project: ProjectFn<O>,
         content_type: ContentType,
         lazy: bool,
+        description: Option<String>,
     },
     HandlerFile {
         suffix: String,
         handler: BoxedFileHandler<ObjectState<O>>,
         validator: RouteValidator,
+        description: Option<String>,
     },
     HandlerDir {
         suffix: String,
         handler: BoxedDirHandler<ObjectState<O>>,
         validator: RouteValidator,
+        description: Option<String>,
     },
 }
 
@@ -111,29 +117,35 @@ impl<O: Object> Clone for ObjectLeaf<O> {
                 project,
                 content_type,
                 lazy,
+                description,
             } => Self::Projected {
                 leaf_name: leaf_name.clone(),
                 project: *project,
                 content_type: *content_type,
                 lazy: *lazy,
+                description: description.clone(),
             },
             Self::HandlerFile {
                 suffix,
                 handler,
                 validator,
+                description,
             } => Self::HandlerFile {
                 suffix: suffix.clone(),
                 handler: Arc::clone(handler),
                 validator: validator.clone(),
+                description: description.clone(),
             },
             Self::HandlerDir {
                 suffix,
                 handler,
                 validator,
+                description,
             } => Self::HandlerDir {
                 suffix: suffix.clone(),
                 handler: Arc::clone(handler),
                 validator: validator.clone(),
+                description: description.clone(),
             },
         }
     }
@@ -148,6 +160,9 @@ pub struct DirObjectBlock<O: Object> {
     stability: Option<fn(&O::Key) -> Stability>,
     render_table: Option<RenderTable>,
     source_stem: Option<&'static str>,
+    /// The object route's own `.desc("..")` text, surfaced on the anchor's
+    /// route descriptor.
+    description: Option<String>,
     leaves: Vec<ObjectLeaf<O>>,
     leaf_claims: Vec<Pattern>,
     _marker: core::marker::PhantomData<O>,
@@ -167,6 +182,7 @@ pub struct FileLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
     lazy: bool,
+    description: Option<String>,
 }
 
 /// A pending dir leaf named in [`DirObjectBlock::dir`]; finish with
@@ -174,6 +190,7 @@ pub struct FileLeafBuilder<'a, O: Object> {
 pub struct DirLeafBuilder<'a, O: Object> {
     block: &'a mut DirObjectBlock<O>,
     name: &'static str,
+    description: Option<String>,
 }
 
 impl<O: Object> DirObjectBlock<O> {
@@ -185,10 +202,20 @@ impl<O: Object> DirObjectBlock<O> {
             stability: None,
             render_table: None,
             source_stem: None,
+            description: None,
             leaves: Vec::new(),
             leaf_claims: Vec::new(),
             _marker: core::marker::PhantomData,
         })
+    }
+
+    /// Describe the object route itself (the anchor). The text surfaces on the
+    /// object's route descriptor in the introspected table; it carries no
+    /// dispatch meaning. Chainable with the rest of the block: `o.desc("an
+    /// issue"); o.representations(..)?;`.
+    pub fn desc(&mut self, description: impl Into<String>) -> &mut Self {
+        self.description = Some(description.into());
+        self
     }
 
     /// Declare the anchor's representation leaves; mandatory, once per block.
@@ -247,13 +274,18 @@ impl<O: Object> DirObjectBlock<O> {
             block: self,
             name,
             lazy: false,
+            description: None,
         }
     }
 
     /// Begin a directory leaf under the anchor; finished with `.handler(..)`
     /// (there is no projected-dir form).
     pub fn dir(&mut self, name: &'static str) -> DirLeafBuilder<'_, O> {
-        DirLeafBuilder { block: self, name }
+        DirLeafBuilder {
+            block: self,
+            name,
+            description: None,
+        }
     }
 
     /// Gate the whole object on a key predicate. A key that fails the
@@ -313,6 +345,7 @@ impl<O: Object> DirObjectBlock<O> {
             render_table,
             source_stem,
             source_ext,
+            description: self.description,
             leaves: self.leaves,
         })
     }
@@ -363,12 +396,28 @@ impl<O: Object> FileObjectBlock<O> {
         self
     }
 
+    /// See [`DirObjectBlock::desc`]: describe the file-object route itself.
+    pub fn desc(&mut self, description: impl Into<String>) -> &mut Self {
+        self.inner.desc(description);
+        self
+    }
+
     fn finish(self) -> Result<ObjectSpec<O>> {
         self.inner.finish(ObjectShape::File)
     }
 }
 
 impl<'a, O: Object> FileLeafBuilder<'a, O> {
+    /// Describe this leaf (projected field or handler file). The text surfaces
+    /// on the leaf's child route descriptor; it carries no dispatch meaning.
+    /// Composes with [`Self::lazy`] and the terminal [`Self::project`] /
+    /// [`Self::handler`] in any order.
+    #[must_use]
+    pub fn desc(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// Register a projected field leaf: `method` maps the loaded object value
     /// to the leaf's bytes (`fn(&O) -> Result<FileContent>`), so reads can be
     /// served from cached canonical bytes with no upstream call. The default
@@ -389,6 +438,7 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
             project: method,
             content_type: ContentType::Custom("text/plain"),
             lazy: self.lazy,
+            description: self.description,
         });
         Ok(self.block)
     }
@@ -415,6 +465,7 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
             suffix,
             handler,
             validator,
+            description: self.description,
         });
         Ok(self.block)
     }
@@ -433,6 +484,14 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
 }
 
 impl<'a, O: Object> DirLeafBuilder<'a, O> {
+    /// Describe this dir leaf; see [`FileLeafBuilder::desc`]. Call before the
+    /// terminal [`Self::handler`].
+    #[must_use]
+    pub fn desc(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// Register an ordinary directory handler under the anchor (e.g. a
     /// `comments` listing). Mounted as a real dir route at `<anchor>/<name>`;
     /// see [`FileLeafBuilder::handler`] for the dispatch and capture rules.
@@ -452,6 +511,7 @@ impl<'a, O: Object> DirLeafBuilder<'a, O> {
             suffix,
             handler,
             validator,
+            description: self.description,
         });
         Ok(self.block)
     }
@@ -900,6 +960,7 @@ where
                 suffix,
                 handler,
                 validator,
+                ..
             } => {
                 let template = format!("{combined_template}/{suffix}");
                 if let Ok(child_pattern) = parse_pattern(&template) {
@@ -915,6 +976,7 @@ where
                 suffix,
                 handler,
                 validator,
+                ..
             } => {
                 let template = format!("{combined_template}/{suffix}");
                 if let Ok(child_pattern) = parse_pattern(&template) {
@@ -977,30 +1039,42 @@ fn object_descriptor<O: Object>(
     for leaf in &spec.leaves {
         match leaf {
             ObjectLeaf::Representation { leaf_name, .. } => representations.push(leaf_name.clone()),
-            ObjectLeaf::Projected { leaf_name, .. } => {
-                children.push(RouteDescriptor::leaf(
-                    format!("{anchor}/{leaf_name}"),
-                    RouteKind::File,
-                ));
+            ObjectLeaf::Projected {
+                leaf_name,
+                description,
+                ..
+            } => {
+                children.push(
+                    RouteDescriptor::leaf(format!("{anchor}/{leaf_name}"), RouteKind::File)
+                        .described(description.clone()),
+                );
             },
-            ObjectLeaf::HandlerFile { suffix, .. } => {
-                children.push(RouteDescriptor::leaf(
-                    format!("{anchor}/{suffix}"),
-                    RouteKind::File,
-                ));
+            ObjectLeaf::HandlerFile {
+                suffix,
+                description,
+                ..
+            } => {
+                children.push(
+                    RouteDescriptor::leaf(format!("{anchor}/{suffix}"), RouteKind::File)
+                        .described(description.clone()),
+                );
             },
-            ObjectLeaf::HandlerDir { suffix, .. } => {
-                children.push(RouteDescriptor::leaf(
-                    format!("{anchor}/{suffix}"),
-                    RouteKind::Dir,
-                ));
+            ObjectLeaf::HandlerDir {
+                suffix,
+                description,
+                ..
+            } => {
+                children.push(
+                    RouteDescriptor::leaf(format!("{anchor}/{suffix}"), RouteKind::Dir)
+                        .described(description.clone()),
+                );
             },
         }
     }
     RouteDescriptor {
         template: anchor.to_string(),
         kind,
-        description: None,
+        description: spec.description.clone(),
         representations,
         children,
     }

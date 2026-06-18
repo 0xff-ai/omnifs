@@ -243,15 +243,22 @@ impl TestProvider {
         }
 
         // Object family `Item`: facet collapse (#1), collection preload (#5).
-        r.dir("/items").handler(items_root)?;
+        r.dir("/items")
+            .desc("Synthetic item collection, grouped by state filter")
+            .handler(items_root)?;
         r.dir("/items/{filter}").handler(item_list)?;
         r.object::<Item>("/items/{filter}/{number}", |o| {
+            o.desc("A single synthetic item, identity-collapsed across filters");
             o.stable();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(Item::title)?;
+            o.file("title")
+                .desc("The item's title, as plain text")
+                .project(Item::title)?;
             o.file("state").project(Item::state)?;
             o.file("body").project(Item::body)?;
-            o.dir("comments").handler(item_comments)?;
+            o.dir("comments")
+                .desc("The item's comments, one file per comment index")
+                .handler(item_comments)?;
             o.file("comments/{idx}").handler(item_comment_read)?;
             Ok(())
         })?;
@@ -280,7 +287,9 @@ impl TestProvider {
 
         r.dir("/dynamic/{name}").handler(dynamic)?;
 
-        r.treeref("/checkout").handler(checkout)?;
+        r.treeref("/checkout")
+            .desc("Subtree handoff: the host takes over the whole checkout tree")
+            .handler(checkout)?;
 
         Ok(State::default())
     }

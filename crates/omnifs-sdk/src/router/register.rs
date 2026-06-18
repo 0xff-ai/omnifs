@@ -83,6 +83,7 @@ impl<S> Router<S> {
         DirRoute {
             router: self,
             template,
+            description: None,
         }
     }
 
@@ -92,6 +93,7 @@ impl<S> Router<S> {
         FileRoute {
             router: self,
             template,
+            description: None,
         }
     }
 
@@ -104,6 +106,7 @@ impl<S> Router<S> {
         TreeRefRoute {
             router: self,
             template,
+            description: None,
         }
     }
 
@@ -181,7 +184,12 @@ impl<S> Router<S> {
         Ok(self)
     }
 
-    fn dir_at<Marker, H: IntoDirHandler<S, Marker>>(&mut self, template: &str, h: H) -> Result<()> {
+    fn dir_at<Marker, H: IntoDirHandler<S, Marker>>(
+        &mut self,
+        template: &str,
+        description: Option<String>,
+        h: H,
+    ) -> Result<()> {
         let pattern = parse_pattern(template)?;
         let (handler, validator) = h.into_dir_handler();
         self.dirs.push(super::handlers::DirEntry {
@@ -190,14 +198,16 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
-        self.route_descriptors
-            .push(RouteDescriptor::leaf(template.to_string(), RouteKind::Dir));
+        self.route_descriptors.push(
+            RouteDescriptor::leaf(template.to_string(), RouteKind::Dir).described(description),
+        );
         Ok(())
     }
 
     fn file_at<Marker, H: IntoFileHandler<S, Marker>>(
         &mut self,
         template: &str,
+        description: Option<String>,
         h: H,
     ) -> Result<()> {
         let pattern = parse_pattern(template)?;
@@ -208,14 +218,16 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
-        self.route_descriptors
-            .push(RouteDescriptor::leaf(template.to_string(), RouteKind::File));
+        self.route_descriptors.push(
+            RouteDescriptor::leaf(template.to_string(), RouteKind::File).described(description),
+        );
         Ok(())
     }
 
     fn treeref_at<Marker, H: IntoTreeRefHandler<S, Marker>>(
         &mut self,
         template: &str,
+        description: Option<String>,
         h: H,
     ) -> Result<()> {
         let pattern = parse_pattern(template)?;
@@ -226,10 +238,9 @@ impl<S> Router<S> {
             validator,
         });
         self.leaf_claims.push(pattern);
-        self.route_descriptors.push(RouteDescriptor::leaf(
-            template.to_string(),
-            RouteKind::TreeRef,
-        ));
+        self.route_descriptors.push(
+            RouteDescriptor::leaf(template.to_string(), RouteKind::TreeRef).described(description),
+        );
         Ok(())
     }
 
@@ -296,6 +307,7 @@ fn combine_template(prefix: &str, template: &str) -> Result<String> {
 pub struct DirRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
     pub(super) template: &'static str,
+    pub(super) description: Option<String>,
 }
 
 /// A pending [`Router::file`] registration; nothing is recorded until
@@ -303,6 +315,7 @@ pub struct DirRoute<'r, S> {
 pub struct FileRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
     pub(super) template: &'static str,
+    pub(super) description: Option<String>,
 }
 
 /// A pending [`Router::treeref`] registration; nothing is recorded until
@@ -310,31 +323,58 @@ pub struct FileRoute<'r, S> {
 pub struct TreeRefRoute<'r, S> {
     pub(super) router: &'r mut Router<S>,
     pub(super) template: &'static str,
+    pub(super) description: Option<String>,
 }
 
 impl<'r, S> DirRoute<'r, S> {
+    /// Attach a human-readable description to this route. It carries no
+    /// dispatch meaning; it surfaces in the introspected route table (and so
+    /// in `omnifs.routes.json` and any doc/CLI rendering). Call before
+    /// [`Self::handler`]: `r.dir("/x").desc("..").handler(..)`.
+    #[must_use]
+    pub fn desc(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// Register the directory handler and claim the template as a leaf.
     /// Accepted shapes (the `Marker` parameter disambiguates them; see
     /// [`IntoDirHandler`]): `async fn(DirCx<S>)`, `async fn(DirCx<S>, K)`,
     /// `async fn(K, DirCx<S>)`, or sync `fn(K, DirCx<S>)`, with
     /// `K: FromCaptures`. Errors only on an invalid template.
     pub fn handler<Marker, H: IntoDirHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
-        self.router.dir_at(self.template, h)?;
+        self.router.dir_at(self.template, self.description, h)?;
         Ok(self.router)
     }
 }
 
 impl<'r, S> FileRoute<'r, S> {
+    /// Attach a human-readable description to this route; see
+    /// [`DirRoute::desc`]. Call before [`Self::handler`].
+    #[must_use]
+    pub fn desc(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// Register the file handler and claim the template as a leaf. Accepted
     /// shapes: `async fn(Cx<S>)`, `async fn(Cx<S>, K)`, or
     /// `async fn(K, Cx<S>)`, with `K: FromCaptures`.
     pub fn handler<Marker, H: IntoFileHandler<S, Marker>>(self, h: H) -> Result<&'r mut Router<S>> {
-        self.router.file_at(self.template, h)?;
+        self.router.file_at(self.template, self.description, h)?;
         Ok(self.router)
     }
 }
 
 impl<'r, S> TreeRefRoute<'r, S> {
+    /// Attach a human-readable description to this route; see
+    /// [`DirRoute::desc`]. Call before [`Self::handler`].
+    #[must_use]
+    pub fn desc(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// Register the subtree-handoff handler and claim the template as a
     /// leaf. Accepted shapes mirror [`FileRoute::handler`] but return a
     /// [`crate::handler::TreeRef`].
@@ -342,7 +382,7 @@ impl<'r, S> TreeRefRoute<'r, S> {
         self,
         h: H,
     ) -> Result<&'r mut Router<S>> {
-        self.router.treeref_at(self.template, h)?;
+        self.router.treeref_at(self.template, self.description, h)?;
         Ok(self.router)
     }
 }
