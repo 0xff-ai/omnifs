@@ -126,6 +126,7 @@ Judgment defaults, not absolutes.
 - **Project what you fetched.** If a handler holds an upstream payload, emit every derivable sibling and child instead of returning one field and forcing later refetches.
 - **Provider maps use `hashbrown::HashMap`.** It keeps provider internals predictable across WASI targets.
 - **Naming.** Reuse source-of-truth terms; do not invent names for public surfaces unless the rename is explicit; keep host internals out of SDK and WIT naming.
+- **Path type naming.** Refer to `omnifs_core::path::Path` as `Path`; never alias it (no `ProtocolPath`). A module that also needs the stdlib path type imports `std::path::Path as StdPath`, so the bare `Path` always means the omnifs path. Modules that use only stdlib paths need no alias.
 - **Abstraction fit.** Do not reuse an existing abstraction if it changes the behavior model; semantic fit matters more than code reuse.
 - **Protocol changes.** Write the exact interaction trace first and reject extra hops on hot paths; if something is conceptually one-way, fix the boundary rather than forcing it through request and response machinery.
 - **`From`/`TryFrom` at type boundaries** over `foo_to_bar` free functions for true one-to-one mappings. The exceptions and the existing conversion hubs are in `CONTRIBUTING.md`.
