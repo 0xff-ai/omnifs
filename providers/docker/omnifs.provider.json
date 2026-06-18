@@ -1,6 +1,7 @@
 {
   "id": "docker",
   "displayName": "Docker",
+  "color": "#2496ED",
   "provider": "omnifs_provider_docker.wasm",
   "defaultMount": "docker",
   "capabilities": [

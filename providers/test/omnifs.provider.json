@@ -1,6 +1,7 @@
 {
   "id": "test-provider",
   "displayName": "A test provider with canned data",
+  "color": "#6B7280",
   "provider": "test_provider.wasm",
   "defaultMount": "test",
   "configSchema": {

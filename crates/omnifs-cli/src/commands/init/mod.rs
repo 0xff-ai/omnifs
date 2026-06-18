@@ -730,6 +730,7 @@ mod tests {
         ProviderManifest {
             id: "linear".to_string(),
             display_name: "Linear".to_string(),
+            color: None,
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
             contract: None,

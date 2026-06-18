@@ -1,6 +1,7 @@
 {
   "id": "oura",
   "displayName": "Oura",
+  "color": "#2D3047",
   "provider": "omnifs_provider_oura.wasm",
   "defaultMount": "oura",
   "capabilities": [

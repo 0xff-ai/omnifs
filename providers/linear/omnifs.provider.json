@@ -1,6 +1,7 @@
 {
   "id": "linear",
   "displayName": "Linear",
+  "color": "#5E6AD2",
   "provider": "omnifs_provider_linear.wasm",
   "defaultMount": "linear",
   "capabilities": [

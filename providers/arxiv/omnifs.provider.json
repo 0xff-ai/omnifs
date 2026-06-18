@@ -1,6 +1,7 @@
 {
   "id": "arxiv",
   "displayName": "arXiv",
+  "color": "#B31B1B",
   "provider": "omnifs_provider_arxiv.wasm",
   "defaultMount": "arxiv",
   "capabilities": [

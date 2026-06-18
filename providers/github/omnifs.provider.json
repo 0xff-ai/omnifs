@@ -1,6 +1,7 @@
 {
   "id": "github",
   "displayName": "GitHub",
+  "color": "#181717",
   "provider": "omnifs_provider_github.wasm",
   "defaultMount": "github",
   "capabilities": [

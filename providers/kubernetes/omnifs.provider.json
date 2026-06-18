@@ -1,6 +1,7 @@
 {
   "id": "kubernetes",
   "displayName": "Kubernetes",
+  "color": "#326CE5",
   "provider": "omnifs_provider_kubernetes.wasm",
   "defaultMount": "k8s",
   "capabilities": [

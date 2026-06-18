@@ -1,6 +1,7 @@
 {
   "id": "db",
   "displayName": "Database",
+  "color": "#336791",
   "provider": "omnifs_provider_db.wasm",
   "defaultMount": "db",
   "capabilities": [

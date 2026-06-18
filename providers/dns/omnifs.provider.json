@@ -1,6 +1,7 @@
 {
   "id": "dns",
   "displayName": "DNS",
+  "color": "#0F9D58",
   "provider": "omnifs_provider_dns.wasm",
   "defaultMount": "dns",
   "capabilities": [

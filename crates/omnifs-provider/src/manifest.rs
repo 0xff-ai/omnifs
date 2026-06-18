@@ -20,6 +20,10 @@ pub const PROVIDER_WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
 pub struct ProviderManifest {
     pub id: String,
     pub display_name: String,
+    /// CSS hex brand color (e.g. `#2496ED`) used by doc-page generation and the
+    /// `omnifs provider info` surface. Static branding, not runtime state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// Filename of the provider WASM component.
     pub provider: String,
     pub default_mount: String,
@@ -554,6 +558,9 @@ impl ProviderManifest {
     fn validate(&self) -> Result<(), ProviderMetadataError> {
         validate_non_empty("id", &self.id)?;
         validate_non_empty("displayName", &self.display_name)?;
+        if let Some(color) = &self.color {
+            validate_hex_color("color", color)?;
+        }
         validate_non_empty("provider", &self.provider)?;
         validate_non_empty("defaultMount", &self.default_mount)?;
         if let Some(contract) = &self.contract {
@@ -681,6 +688,22 @@ fn validate_oauth_flow(key: &str, oauth: &OauthScheme) -> Result<(), ProviderMet
         },
     }
     Ok(())
+}
+
+/// Light validation for a CSS hex color: `#` followed by 3, 4, 6, or 8
+/// hex digits. Keeps obviously-malformed branding out of the manifest without
+/// pulling in a full CSS color parser.
+fn validate_hex_color(field: &str, value: &str) -> Result<(), ProviderMetadataError> {
+    let valid = value.strip_prefix('#').is_some_and(|hex| {
+        matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ProviderMetadataError::Validation(format!(
+            "{field} must be a CSS hex color like #2496ED"
+        )))
+    }
 }
 
 fn validate_non_empty(field: &str, value: &str) -> Result<(), ProviderMetadataError> {
@@ -819,6 +842,43 @@ mod tests {
                 "linear",
                 "oura"
             ]
+        );
+    }
+
+    #[test]
+    fn provider_manifest_color_round_trips_and_rejects_malformed() {
+        // A well-formed hex color survives parse and re-encode (the next branch's
+        // `omnifs provider info` and doc-page generation read it off the manifest).
+        let manifest = ProviderManifest::from_bytes(
+            br##"{
+                "id": "demo",
+                "displayName": "Demo",
+                "color": "#2496ED",
+                "provider": "demo.wasm",
+                "defaultMount": "demo"
+            }"##,
+        )
+        .unwrap();
+        assert_eq!(manifest.color.as_deref(), Some("#2496ED"));
+        let reparsed =
+            ProviderManifest::from_bytes(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(reparsed.color.as_deref(), Some("#2496ED"));
+
+        // A non-hex string is rejected at the manifest boundary, not silently
+        // accepted as branding.
+        let error = ProviderManifest::from_bytes(
+            br#"{
+                "id": "demo",
+                "displayName": "Demo",
+                "color": "blue",
+                "provider": "demo.wasm",
+                "defaultMount": "demo"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ProviderMetadataError::Validation(message) if message.contains("color")),
+            "unexpected error: {error}"
         );
     }
 
