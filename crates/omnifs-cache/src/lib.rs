@@ -758,7 +758,6 @@ impl Store {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,20 +838,8 @@ mod tests {
         let path = "/issues/42/item.json";
         let op_gen = store_a.current_generation();
 
-        assert!(store_a.put_canonical(
-            OBJ_ID,
-            b"from-a".to_vec(),
-            None,
-            &[p(path)],
-            op_gen,
-        ));
-        assert!(store_b.put_canonical(
-            OBJ_ID,
-            b"from-b".to_vec(),
-            None,
-            &[p(path)],
-            op_gen,
-        ));
+        assert!(store_a.put_canonical(OBJ_ID, b"from-a".to_vec(), None, &[p(path)], op_gen,));
+        assert!(store_b.put_canonical(OBJ_ID, b"from-b".to_vec(), None, &[p(path)], op_gen,));
 
         let a = store_a.cached_canonical_for(&p(path)).unwrap();
         let b = store_b.cached_canonical_for(&p(path)).unwrap();

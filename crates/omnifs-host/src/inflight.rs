@@ -17,16 +17,30 @@ use tokio::sync::broadcast;
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 
-/// Shared outcome sent from a leader to waiters of the same path.
+use crate::object_id::ObjectId;
+
+/// Shared outcome sent from a leader to waiters of the same op.
 /// Errors are shared as their `Display` form since `Error`
 /// wraps non-`Clone` sources; the unshared internal diagnostic is lost
 /// by waiters but still present for the leader's own return path.
 pub type SharedOutcome = std::result::Result<wit_types::OpResult, String>;
 
-/// Tracks paths with an in-flight provider call so concurrent callers
+/// Key a provider op coalesces under.
+///
+/// `Path` keys participate in ancestor coalescing: an in-flight op on a parent
+/// path subsumes descendant ops (the parent may populate descendant caches).
+/// `Object` keys are exact-match only, so concurrent reads of distinct paths
+/// that alias the same object (identity collapse) share a single op.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum CoalesceKey {
+    Path(Path),
+    Object(ObjectId),
+}
+
+/// Tracks ops with an in-flight provider call so concurrent callers
 /// coalesce instead of fanning out.
 pub struct InFlight {
-    map: Mutex<HashMap<Path, broadcast::Sender<SharedOutcome>>>,
+    map: Mutex<HashMap<CoalesceKey, broadcast::Sender<SharedOutcome>>>,
 }
 
 /// What an `acquire` caller should do next.
@@ -52,7 +66,7 @@ pub enum Acquired<'a> {
 /// waiters retry (they receive a channel-closed error from recv).
 pub struct LeaderGuard<'a> {
     inflight: &'a InFlight,
-    path: Path,
+    key: CoalesceKey,
     armed: bool,
 }
 
@@ -61,7 +75,7 @@ impl LeaderGuard<'_> {
         self.armed = false;
         let removed = {
             let mut map = self.inflight.map.lock();
-            map.remove(&self.path)
+            map.remove(&self.key)
         };
         if let Some(tx) = removed {
             let _ = tx.send(outcome);
@@ -73,7 +87,7 @@ impl Drop for LeaderGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             let mut map = self.inflight.map.lock();
-            map.remove(&self.path);
+            map.remove(&self.key);
         }
     }
 }
@@ -85,22 +99,35 @@ impl InFlight {
         }
     }
 
-    /// Claim or join the in-flight slot for `path`.
-    pub fn acquire(&self, path: &Path) -> Acquired<'_> {
+    /// Claim or join the in-flight slot for `key`.
+    pub fn acquire(&self, key: &CoalesceKey) -> Acquired<'_> {
         let mut map = self.map.lock();
-        if let Some((key, tx)) = longest_ancestor(&map, path) {
-            let rx = tx.subscribe();
-            if key == path {
-                return Acquired::ExactMatch { rx };
-            }
-            return Acquired::AncestorWait { rx };
+        match key {
+            // Path keys coalesce under the deepest in-flight ancestor (which
+            // includes an exact match for the same path).
+            CoalesceKey::Path(path) => {
+                if let Some((ancestor, tx)) = longest_ancestor(&map, path) {
+                    let rx = tx.subscribe();
+                    return if ancestor == path {
+                        Acquired::ExactMatch { rx }
+                    } else {
+                        Acquired::AncestorWait { rx }
+                    };
+                }
+            },
+            // Object keys have no ancestor relationship: exact match only.
+            CoalesceKey::Object(_) => {
+                if let Some(tx) = map.get(key) {
+                    return Acquired::ExactMatch { rx: tx.subscribe() };
+                }
+            },
         }
         let (tx, _) = broadcast::channel(1);
-        map.insert(path.clone(), tx);
+        map.insert(key.clone(), tx);
         Acquired::Leader {
             guard: LeaderGuard {
                 inflight: self,
-                path: path.clone(),
+                key: key.clone(),
                 armed: true,
             },
         }
@@ -114,11 +141,13 @@ impl Default for InFlight {
 }
 
 fn longest_ancestor<'a>(
-    map: &'a HashMap<Path, broadcast::Sender<SharedOutcome>>,
+    map: &'a HashMap<CoalesceKey, broadcast::Sender<SharedOutcome>>,
     path: &Path,
 ) -> Option<(&'a Path, &'a broadcast::Sender<SharedOutcome>)> {
     let mut best: Option<(&Path, &broadcast::Sender<SharedOutcome>)> = None;
     for (k, tx) in map {
+        // Only path keys have an ancestor relationship; object keys never match.
+        let CoalesceKey::Path(k) = k else { continue };
         // Ancestors of `path` form a nested chain, so "longest" means the
         // deepest (most segments): the most specific in-flight op to share.
         if path.has_prefix(k)
@@ -164,11 +193,19 @@ mod tests {
         Path::parse(value).unwrap()
     }
 
+    fn pk(value: &str) -> CoalesceKey {
+        CoalesceKey::Path(path(value))
+    }
+
+    fn obj(bytes: &[u8]) -> CoalesceKey {
+        CoalesceKey::Object(ObjectId::from_bytes(bytes.to_vec()))
+    }
+
     #[test]
     fn ancestor_match_prefers_longest() {
         let mut map = HashMap::new();
-        map.insert(path("/a"), sender());
-        map.insert(path("/a/b"), sender());
+        map.insert(CoalesceKey::Path(path("/a")), sender());
+        map.insert(CoalesceKey::Path(path("/a/b")), sender());
         let (k, _) = longest_ancestor(&map, &path("/a/b/c")).unwrap();
         assert_eq!(k.as_str(), "/a/b");
     }
@@ -176,7 +213,7 @@ mod tests {
     #[test]
     fn ancestor_match_requires_slash_boundary() {
         let mut map = HashMap::new();
-        map.insert(path("/abc"), sender());
+        map.insert(CoalesceKey::Path(path("/abc")), sender());
         assert!(longest_ancestor(&map, &path("/abcd")).is_none());
         assert!(longest_ancestor(&map, &path("/abc/d")).is_some());
         assert!(longest_ancestor(&map, &path("/abc")).is_some());
@@ -185,7 +222,7 @@ mod tests {
     #[test]
     fn root_path_is_ancestor_of_descendants() {
         let mut map = HashMap::new();
-        map.insert(Path::root(), sender());
+        map.insert(CoalesceKey::Path(Path::root()), sender());
         assert!(longest_ancestor(&map, &path("/a")).is_some());
         assert!(longest_ancestor(&map, &Path::root()).is_some());
     }
@@ -193,41 +230,60 @@ mod tests {
     #[test]
     fn acquire_returns_leader_when_slot_free() {
         let inflight = InFlight::new();
-        let outcome = inflight.acquire(&path("/a/b"));
+        let outcome = inflight.acquire(&pk("/a/b"));
         assert!(matches!(outcome, Acquired::Leader { .. }));
     }
 
     #[test]
     fn acquire_returns_exact_match_when_same_path_in_flight() {
         let inflight = InFlight::new();
-        let _leader = inflight.acquire(&path("/a/b"));
-        let second = inflight.acquire(&path("/a/b"));
+        let _leader = inflight.acquire(&pk("/a/b"));
+        let second = inflight.acquire(&pk("/a/b"));
         assert!(matches!(second, Acquired::ExactMatch { .. }));
     }
 
     #[test]
     fn acquire_returns_ancestor_wait_when_parent_in_flight() {
         let inflight = InFlight::new();
-        let _leader = inflight.acquire(&path("/a"));
-        let descendant = inflight.acquire(&path("/a/b/c"));
+        let _leader = inflight.acquire(&pk("/a"));
+        let descendant = inflight.acquire(&pk("/a/b/c"));
         assert!(matches!(descendant, Acquired::AncestorWait { .. }));
     }
 
     #[test]
     fn acquire_treats_siblings_as_independent() {
         let inflight = InFlight::new();
-        let _first = inflight.acquire(&path("/a/b"));
-        let sibling = inflight.acquire(&path("/a/c"));
+        let _first = inflight.acquire(&pk("/a/b"));
+        let sibling = inflight.acquire(&pk("/a/c"));
         assert!(matches!(sibling, Acquired::Leader { .. }));
+    }
+
+    #[test]
+    fn acquire_coalesces_distinct_paths_under_same_object() {
+        // Two paths that alias one object share a single in-flight op.
+        let inflight = InFlight::new();
+        let _leader = inflight.acquire(&obj(b"issue:42"));
+        let second = inflight.acquire(&obj(b"issue:42"));
+        assert!(matches!(second, Acquired::ExactMatch { .. }));
+    }
+
+    #[test]
+    fn acquire_object_keys_have_no_ancestor_relationship() {
+        // Objects coalesce by exact identity only; a byte-prefix is not an
+        // ancestor, so distinct objects never wait on each other.
+        let inflight = InFlight::new();
+        let _leader = inflight.acquire(&obj(b"issue:4"));
+        let other = inflight.acquire(&obj(b"issue:42"));
+        assert!(matches!(other, Acquired::Leader { .. }));
     }
 
     #[tokio::test]
     async fn complete_delivers_outcome_to_waiters() {
         let inflight = InFlight::new();
-        let Acquired::Leader { guard } = inflight.acquire(&path("/x")) else {
+        let Acquired::Leader { guard } = inflight.acquire(&pk("/x")) else {
             panic!("first acquire should be leader");
         };
-        let Acquired::ExactMatch { mut rx } = inflight.acquire(&path("/x")) else {
+        let Acquired::ExactMatch { mut rx } = inflight.acquire(&pk("/x")) else {
             panic!("second acquire should wait for exact match");
         };
         guard.complete(Err("oops".to_string()));
@@ -241,10 +297,10 @@ mod tests {
     #[tokio::test]
     async fn dropping_leader_releases_slot_and_closes_waiters() {
         let inflight = InFlight::new();
-        let Acquired::Leader { guard } = inflight.acquire(&path("/x")) else {
+        let Acquired::Leader { guard } = inflight.acquire(&pk("/x")) else {
             panic!("first acquire should be leader");
         };
-        let Acquired::ExactMatch { mut rx } = inflight.acquire(&path("/x")) else {
+        let Acquired::ExactMatch { mut rx } = inflight.acquire(&pk("/x")) else {
             panic!("second acquire should wait for exact match");
         };
         // Simulate leader aborting without completing.
@@ -253,7 +309,7 @@ mod tests {
         assert!(matches!(err, broadcast::error::RecvError::Closed));
         // Slot is freed; new callers acquire as leader.
         assert!(matches!(
-            inflight.acquire(&path("/x")),
+            inflight.acquire(&pk("/x")),
             Acquired::Leader { .. }
         ));
     }

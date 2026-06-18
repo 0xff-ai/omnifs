@@ -206,10 +206,7 @@ impl Frontend {
             }
             let path = &key.path;
             let matches_exact = report.paths.iter().any(|p| p == path);
-            let matches_prefix = report
-                .prefixes
-                .iter()
-                .any(|prefix| path.has_prefix(prefix));
+            let matches_prefix = report.prefixes.iter().any(|prefix| path.has_prefix(prefix));
             if matches_exact || matches_prefix {
                 to_remove.push(key.clone());
             }

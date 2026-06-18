@@ -1,5 +1,5 @@
 use crate::clock::now_millis;
-use crate::inflight::{Acquired, share_outcome, unshare_outcome};
+use crate::inflight::{Acquired, CoalesceKey, share_outcome, unshare_outcome};
 use crate::materialize::{LookupOutcome, Materializer};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
@@ -30,7 +30,9 @@ impl Namespace<'_> {
             name,
         };
         let result = self
-            .coalesced(&child_path, || self.runtime.run_op(op.clone(), fuse_trace))
+            .coalesced(CoalesceKey::Path(child_path.clone()), || {
+                self.runtime.run_op(op.clone(), fuse_trace)
+            })
             .await?;
 
         match result {
@@ -58,8 +60,10 @@ impl Namespace<'_> {
         let result = if is_continuation {
             self.runtime.run_op(op.clone(), fuse_trace).await?
         } else {
-            self.coalesced(path, || self.runtime.run_op(op.clone(), fuse_trace))
-                .await?
+            self.coalesced(CoalesceKey::Path(path.clone()), || {
+                self.runtime.run_op(op.clone(), fuse_trace)
+            })
+            .await?
         };
 
         if let wit_types::OpResult::ListChildren(wit_types::ListChildrenResult::Entries(
@@ -129,10 +133,17 @@ impl Namespace<'_> {
             cached_canonical,
         };
 
+        // Warm-but-not-live reads coalesce by object identity, so concurrent
+        // reads of distinct paths that alias the same object share one provider
+        // revalidation. Cold reads have no known id yet, so they key on the path.
+        let coalesce_key = match &warm_id {
+            Some(host_id) => CoalesceKey::Object(ObjectId::from_bytes(host_id.clone())),
+            None => CoalesceKey::Path(path.clone()),
+        };
         let result = if live {
             self.runtime.run_op(op, fuse_trace).await?
         } else {
-            self.coalesced(path, || self.runtime.run_op(op.clone(), fuse_trace))
+            self.coalesced(coalesce_key, || self.runtime.run_op(op.clone(), fuse_trace))
                 .await?
         };
 
@@ -177,13 +188,13 @@ impl Namespace<'_> {
         }
     }
 
-    async fn coalesced<F, Fu>(&self, key: &Path, op: F) -> Result<wit_types::OpResult>
+    async fn coalesced<F, Fu>(&self, key: CoalesceKey, op: F) -> Result<wit_types::OpResult>
     where
         F: Fn() -> Fu,
         Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
     {
         loop {
-            match self.runtime.inflight.acquire(key) {
+            match self.runtime.inflight.acquire(&key) {
                 Acquired::Leader { guard } => {
                     let result = op().await;
                     guard.complete(share_outcome(&result));

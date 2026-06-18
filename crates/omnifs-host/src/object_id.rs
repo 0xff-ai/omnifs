@@ -12,7 +12,7 @@ struct LogicalIdWire {
 }
 
 /// The opaque `ObjectId` body the cache keys on.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ObjectId(Vec<u8>);
 
 impl ObjectId {
