@@ -119,8 +119,10 @@ fn longest_ancestor<'a>(
 ) -> Option<(&'a Path, &'a broadcast::Sender<SharedOutcome>)> {
     let mut best: Option<(&Path, &broadcast::Sender<SharedOutcome>)> = None;
     for (k, tx) in map {
+        // Ancestors of `path` form a nested chain, so "longest" means the
+        // deepest (most segments): the most specific in-flight op to share.
         if path.has_prefix(k)
-            && best.is_none_or(|(existing, _)| k.as_str().len() > existing.as_str().len())
+            && best.is_none_or(|(existing, _)| k.segments().count() > existing.segments().count())
         {
             best = Some((k, tx));
         }
