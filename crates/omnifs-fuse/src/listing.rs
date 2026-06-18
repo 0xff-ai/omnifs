@@ -5,13 +5,14 @@
 //! which the renderer reads directly with no provider round trip.
 
 use super::Frontend;
-use super::common::{DirSnapshot, file_kind_placeholder, join_child_path};
+use super::common::{DirSnapshot, file_kind_placeholder};
 use super::lookup::provider_dir_node;
 use fuser::Errno;
+use omnifs_core::path::Path;
 use omnifs_host::wit_protocol;
 use omnifs_inspector::TraceId;
 use omnifs_tree::{ListOutcome, Listing, RequestCtx};
-use std::path::Path;
+use std::path::Path as StdPath;
 
 impl Frontend {
     /// Build a directory snapshot by reading the real filesystem (a resolved
@@ -19,8 +20,8 @@ impl Frontend {
     pub(super) fn snapshot_from_fs(
         &self,
         mount_name: &str,
-        path: &str,
-        rp: &Path,
+        path: &Path,
+        rp: &StdPath,
     ) -> Result<DirSnapshot, Errno> {
         let read_dir = std::fs::read_dir(rp).map_err(|_| Errno::EIO)?;
         let mut snapshot = Vec::new();
@@ -38,7 +39,9 @@ impl Frontend {
             } else {
                 file_kind_placeholder()
             };
-            let child_path = join_child_path(path, fname_str);
+            let child_path = path
+                .join(fname_str)
+                .expect("backing directory entry must be a valid path segment");
             let child_ino = self.get_or_alloc_ino_backing(
                 mount_name,
                 &child_path,
@@ -65,7 +68,7 @@ impl Frontend {
         &self,
         mount_name: &str,
         ino: u64,
-        path: &str,
+        path: &Path,
         trace: Option<TraceId>,
     ) -> Result<DirSnapshot, Errno> {
         // Drive the kernel-side invalidation fan-out (notify + prune) before the
@@ -73,7 +76,7 @@ impl Frontend {
         // `Tree::list`'s own cache consult then sees the post-eviction state.
         self.drain_and_evict_pending(mount_name);
 
-        let node = provider_dir_node(mount_name, path)?;
+        let node = provider_dir_node(mount_name, path);
         let ctx = RequestCtx { trace };
         match self
             .rt
@@ -101,19 +104,23 @@ impl Frontend {
     fn snapshot_from_listing(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         listing: &Listing,
     ) -> DirSnapshot {
         let mut snapshot = Vec::with_capacity(listing.entries.len() + listing.synthetic.len());
         for entry in &listing.entries {
-            let child_path = join_child_path(path, &entry.name);
+            let child_path = path
+                .join(&entry.name)
+                .expect("listing entry must be a valid path segment");
             let kind = wit_protocol::entry_kind_to_wit(&entry.meta.kind);
             let ino =
                 self.get_or_alloc_ino_meta_resolved(mount_name, &child_path, entry.meta.clone());
             snapshot.push((ino, entry.name.clone(), kind));
         }
         for entry in &listing.synthetic {
-            let child_path = join_child_path(path, &entry.name);
+            let child_path = path
+                .join(&entry.name)
+                .expect("synthetic entry must be a valid path segment");
             let kind = wit_protocol::entry_kind_to_wit(&entry.meta.kind);
             let ino = self.get_or_alloc_ino_synthetic(mount_name, &child_path, entry.meta.clone());
             snapshot.push((ino, entry.name.clone(), kind));

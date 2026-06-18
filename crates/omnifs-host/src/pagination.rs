@@ -24,6 +24,7 @@
 
 use super::{Error, Runtime};
 use omnifs_cache::{Record as CacheRecord, RecordKind};
+use omnifs_core::path::Path;
 use omnifs_core::view::{
     ByteSource, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FileSize, ReadMode,
     Stability,
@@ -119,7 +120,7 @@ impl Runtime {
     /// the kernel re-lists.
     ///
     /// On a provider error the stored dirents are left untouched.
-    pub async fn paginate_next(&self, path: &str, trace: Option<TraceId>) -> NextPageOutcome {
+    pub async fn paginate_next(&self, path: &Path, trace: Option<TraceId>) -> NextPageOutcome {
         // Serialize the read-modify-write of this directory's accumulated
         // dirents. Without this, two concurrent `@next` reads could both
         // snapshot the same base record below and each append only their own
@@ -216,7 +217,7 @@ impl Runtime {
     /// Loop [`paginate_next`](Self::paginate_next) until the feed is exhausted
     /// or [`MAX_PAGINATION_PAGES`] pages have been loaded. Returns a one-line
     /// summary suitable for use as the `@all` file content.
-    pub async fn paginate_all(&self, path: &str, trace: Option<TraceId>) -> String {
+    pub async fn paginate_all(&self, path: &Path, trace: Option<TraceId>) -> String {
         let mut pages: u32 = 0;
         let mut added_total: usize = 0;
         loop {
@@ -251,7 +252,7 @@ impl Runtime {
 
     /// Per-path lock guarding pagination's accumulated-dirents read-modify-write.
     /// One `Arc<Mutex<()>>` per directory path, created on first use.
-    fn pagination_lock(&self, path: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    fn pagination_lock(&self, path: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         self.pagination_locks
             .entry(path.to_string())
             .or_default()
@@ -268,11 +269,11 @@ impl Runtime {
     /// any read-modify-write, so it has nothing to serialize.
     ///
     /// [`pagination_locks`]: Runtime::pagination_locks
-    fn prune_pagination_lock(&self, path: &str) {
-        self.pagination_locks.remove(path);
+    fn prune_pagination_lock(&self, path: &Path) {
+        self.pagination_locks.remove(path.as_str());
     }
 
-    fn store_paginated_dirents(&self, path: &str, dirents: &DirentsPayload) {
+    fn store_paginated_dirents(&self, path: &Path, dirents: &DirentsPayload) {
         if let Some(payload) = dirents.serialize() {
             let record = CacheRecord::new(RecordKind::Dirents, payload);
             self.cache_put(path, RecordKind::Dirents, None, &record);

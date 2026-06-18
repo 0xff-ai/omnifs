@@ -67,7 +67,7 @@ impl<'a> Materializer<'a> {
         effects: &wit_types::Effects,
         op_gen: u64,
         now_millis: u64,
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> (Vec<Path>, Vec<Path>) {
         // Collect canonical-store effects that pass conflict detection, then
         // write them all in one redb write transaction via put_canonical_batch.
         let canonical_batch: Vec<CanonicalBatchEntry> = effects
@@ -75,14 +75,21 @@ impl<'a> Materializer<'a> {
             .iter()
             .filter_map(|store| {
                 let id = ObjectId::from_wit(&store.id);
-                if self.rejects_conflicting_id(&store.view_leaves, &id) {
+                let view_leaves = match Path::parse_all(&store.view_leaves) {
+                    Ok(leaves) => leaves,
+                    Err(error) => {
+                        warn!(%error, "skipping canonical store: invalid wire path");
+                        return None;
+                    },
+                };
+                if self.rejects_conflicting_id(&view_leaves.iter().collect::<Vec<_>>(), &id) {
                     return None;
                 }
                 Some(CanonicalBatchEntry {
                     id: id.as_bytes().to_vec(),
                     bytes: store.bytes.clone(),
                     validator: store.validator.clone(),
-                    view_leaves: store.view_leaves.clone(),
+                    view_leaves,
                 })
             })
             .collect();
@@ -103,7 +110,7 @@ impl<'a> Materializer<'a> {
                 continue;
             };
 
-            if let Some((_, name)) = split_projected_path(&write.path)
+            if let Some((_, name)) = split_projected_path(&write_path)
                 && pagination::is_reserved_provider_leaf(&name)
             {
                 warn!(
@@ -116,12 +123,12 @@ impl<'a> Materializer<'a> {
             let mut admit_view = true;
             if let Some(id) = &write.id {
                 let oid = ObjectId::from_wit(id);
-                if self.rejects_conflicting_id(std::slice::from_ref(&write.path), &oid) {
+                if self.rejects_conflicting_id(&[&write_path], &oid) {
                     continue;
                 }
                 self.store.put_index_only(
                     oid.as_bytes(),
-                    std::slice::from_ref(&write.path),
+                    std::slice::from_ref(&write_path),
                     op_gen,
                 );
                 if self.store.write_fenced(&write_path, op_gen) {
@@ -135,7 +142,7 @@ impl<'a> Materializer<'a> {
             }
 
             if admit_view {
-                if let Some((parent, name)) = split_projected_path(&write.path) {
+                if let Some((parent, name)) = split_projected_path(&write_path) {
                     let meta = match &write.kind {
                         wit_types::FsKind::Directory(_) => EntryMeta::directory(),
                         wit_types::FsKind::File(file) => {
@@ -153,20 +160,20 @@ impl<'a> Materializer<'a> {
                     wit_types::FsKind::Directory(_) => {
                         push_projected_entry(
                             &mut leaf_records,
-                            &write.path,
+                            &write_path,
                             &wit_types::EntryKind::Directory,
                         );
                     },
                     wit_types::FsKind::File(file) => {
                         push_projected_entry(
                             &mut leaf_records,
-                            &write.path,
+                            &write_path,
                             &wit_types::EntryKind::File(file.clone()),
                         );
                     },
                 }
                 if let wit_types::FsKind::File(file) = &write.kind {
-                    push_projected_file_content(&mut leaf_records, &write.path, file);
+                    push_projected_file_content(&mut leaf_records, &write_path, file);
                     if write.id.is_some() {
                         let stability = stability_from_wit(file.attrs.stability);
                         let expires_at = freshness_expiry(stability, now_millis);
@@ -217,16 +224,26 @@ impl<'a> Materializer<'a> {
                     invalidated_paths.extend(paths);
                 },
                 wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Path(p)) => {
-                    if let Ok(path) = Path::parse(p) {
-                        self.store.delete_listing_path(&path);
-                    }
-                    invalidated_paths.push(p.clone());
+                    let Ok(path) = Path::parse(p) else {
+                        warn!(
+                            path = p.as_str(),
+                            "invalidation effect used an invalid protocol path; rejecting"
+                        );
+                        continue;
+                    };
+                    self.store.delete_listing_path(&path);
+                    invalidated_paths.push(path);
                 },
                 wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Prefix(p)) => {
-                    if let Ok(prefix) = Path::parse(p) {
-                        self.store.delete_listing_prefix(&prefix);
-                    }
-                    invalidated_prefixes.push(p.clone());
+                    let Ok(prefix) = Path::parse(p) else {
+                        warn!(
+                            path = p.as_str(),
+                            "invalidation effect used an invalid protocol prefix; rejecting"
+                        );
+                        continue;
+                    };
+                    self.store.delete_listing_prefix(&prefix);
+                    invalidated_prefixes.push(prefix);
                 },
             }
         }
@@ -335,25 +352,17 @@ impl<'a> Materializer<'a> {
             return;
         };
         let oid = ObjectId::from_wit(id);
-        let entry_path_string = entry_path.as_str().to_string();
-        if self.rejects_conflicting_id(std::slice::from_ref(&entry_path_string), &oid) {
+        if self.rejects_conflicting_id(&[&entry_path], &oid) {
             return;
         }
         self.store
-            .put_index_only(oid.as_bytes(), &[entry_path_string], op_gen);
+            .put_index_only(oid.as_bytes(), std::slice::from_ref(&entry_path), op_gen);
     }
 
     /// True if any of `paths` is already indexed to an id != `id` (a provider bug).
-    fn rejects_conflicting_id(&self, paths: &[String], id: &ObjectId) -> bool {
+    fn rejects_conflicting_id(&self, paths: &[&Path], id: &ObjectId) -> bool {
         paths.iter().any(|p| {
-            let Ok(path) = Path::parse(p) else {
-                tracing::warn!(
-                    path = p.as_str(),
-                    "effect maps an invalid protocol path; rejecting"
-                );
-                return true;
-            };
-            self.store.id_of_path(&path).is_some_and(|existing| {
+            self.store.id_of_path(p).is_some_and(|existing| {
                 if existing.as_slice() == id.as_bytes() {
                     false
                 } else {
@@ -368,8 +377,7 @@ impl<'a> Materializer<'a> {
     }
 }
 
-fn split_projected_path(path: &str) -> Option<(Path, String)> {
-    let path = Path::parse(path).ok()?;
+fn split_projected_path(path: &Path) -> Option<(Path, String)> {
     let (parent, name) = path.parent_and_name()?;
     Some((parent, name.to_string()))
 }

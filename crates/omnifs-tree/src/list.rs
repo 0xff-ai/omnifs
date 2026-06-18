@@ -105,7 +105,7 @@ impl Tree {
         // entry never satisfies the consult below, then serve an authoritative
         // cached listing if one exists.
         self.drain_invalidations(node.mount());
-        if let Some(dirents) = consult_authoritative_listing(&runtime, path.as_str()) {
+        if let Some(dirents) = consult_authoritative_listing(&runtime, path) {
             return Ok(ListOutcome::Listing(listing_from_dirents(node, &dirents)));
         }
 
@@ -125,7 +125,7 @@ impl Tree {
         let wit_cursor = cached_cursor_to_wit(cursor.0);
         let result = runtime
             .namespace()
-            .list_children(path.as_str(), None, Some(wit_cursor), ctx.trace)
+            .list_children(path, None, Some(wit_cursor), ctx.trace)
             .await?;
         match result {
             wit_types::ListChildrenResult::Entries(listing) => Ok(Listing {
@@ -164,12 +164,12 @@ impl Tree {
         // A non-exhaustive cached dirents record may carry a listing validator
         // the provider can revalidate against; echo it so the provider can
         // answer `unchanged`.
-        let cached_dirents = cached_dirents_for_revalidation(runtime, path.as_str());
+        let cached_dirents = cached_dirents_for_revalidation(runtime, path);
         let cached_validator = cached_dirents.as_ref().and_then(|d| d.validator.clone());
 
         let result = runtime
             .namespace()
-            .list_children(path.as_str(), cached_validator, None, ctx.trace)
+            .list_children(path, cached_validator, None, ctx.trace)
             .await;
 
         match result {
@@ -269,7 +269,7 @@ fn snapshot_from_provider_listing(
     };
     if let Some(encoded) = dirents_payload.serialize() {
         let record = CacheRecord::new(RecordKind::Dirents, encoded);
-        runtime.cache_put(path.as_str(), RecordKind::Dirents, None, &record);
+        runtime.cache_put(path, RecordKind::Dirents, None, &record);
     }
 
     let entries: Vec<Entry> = dirent_records
@@ -352,7 +352,10 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
 /// children) and must NOT be returned as authoritative; the caller falls through
 /// to the provider. `mem` first, then the unified cache. Mirrors
 /// `Frontend::opendir_check_caches` + rate-limit serve-stale.
-fn consult_authoritative_listing(runtime: &Runtime, path: &str) -> Option<DirentsPayload> {
+fn consult_authoritative_listing(
+    runtime: &Runtime,
+    path: &omnifs_core::path::Path,
+) -> Option<DirentsPayload> {
     if let Some(record) = runtime.mem_get(path, RecordKind::Dirents, None)
         && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
         && dirents.is_authoritative_listing()
@@ -378,7 +381,10 @@ fn consult_authoritative_listing(runtime: &Runtime, path: &str) -> Option<Dirent
 /// listing validator for revalidation and to serve an `unchanged` result.
 /// `mem` first, then the unified cache. Mirrors
 /// `Frontend::cached_dirents_for_revalidation`.
-fn cached_dirents_for_revalidation(runtime: &Runtime, path: &str) -> Option<DirentsPayload> {
+fn cached_dirents_for_revalidation(
+    runtime: &Runtime,
+    path: &omnifs_core::path::Path,
+) -> Option<DirentsPayload> {
     if let Some(record) = runtime.mem_get(path, RecordKind::Dirents, None)
         && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
     {

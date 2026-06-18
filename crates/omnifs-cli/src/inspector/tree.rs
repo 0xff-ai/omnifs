@@ -27,7 +27,7 @@ pub struct PathNode {
     /// Last segment of the path; used for rendering.
     pub name: String,
     /// Full path under the mount (empty at the mount root).
-    pub path: String,
+    pub mount_relative_path: String,
     /// Children indexed by name.
     pub children: BTreeMap<String, PathNode>,
     /// What we currently know about this node.
@@ -46,10 +46,10 @@ pub struct PathNode {
 }
 
 impl PathNode {
-    fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
+    fn new(name: impl Into<String>, mount_relative_path: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            path: path.into(),
+            mount_relative_path: mount_relative_path.into(),
             children: BTreeMap::new(),
             status: NodeStatus::Untouched,
             last_touched_mono: 0,
@@ -371,7 +371,7 @@ impl PathNode {
             out.push(RenderRow {
                 depth,
                 name: child.name.clone(),
-                path: child.path.clone(),
+                path: child.mount_relative_path.clone(),
                 mount: mount.to_string(),
                 status: child.status,
                 is_subtree_handoff: child.is_subtree_handoff,
@@ -388,10 +388,10 @@ impl PathNode {
         if count == 0 {
             return;
         }
-        let summary_path = if self.path.is_empty() {
+        let summary_path = if self.mount_relative_path.is_empty() {
             COLLAPSED_SUMMARY_SUFFIX.to_string()
         } else {
-            format!("{}{}", self.path, COLLAPSED_SUMMARY_SUFFIX)
+            format!("{}{}", self.mount_relative_path, COLLAPSED_SUMMARY_SUFFIX)
         };
         out.push(RenderRow {
             depth,
@@ -419,7 +419,7 @@ mod tests {
         let omnifs = raulk.children.get("omnifs").expect("omnifs");
         let prs = omnifs.children.get("pulls").expect("pulls");
         let open = prs.children.get("open").expect("open");
-        assert_eq!(open.path, "raulk/omnifs/pulls/open");
+        assert_eq!(open.mount_relative_path, "raulk/omnifs/pulls/open");
         assert!(open.in_flight.contains(&1));
         assert_eq!(open.status, NodeStatus::InFlight);
     }

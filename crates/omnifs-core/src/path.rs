@@ -62,6 +62,14 @@ impl Path {
         Ok(Self(path.to_string()))
     }
 
+    /// Parse a batch of wire path strings, short-circuiting on the first
+    /// invalid entry. The returned `ParseError` names which validation failed
+    /// (and, for most variants, the offending path), so callers need not carry
+    /// the raw string alongside it.
+    pub fn parse_all(paths: &[String]) -> Result<Vec<Self>, ParseError> {
+        paths.iter().map(|path| Self::parse(path)).collect()
+    }
+
     pub fn validate_str(path: &str) -> Result<(), ParseError> {
         if path.is_empty() {
             return Err(ParseError::Empty);
@@ -206,6 +214,12 @@ impl Deref for Path {
 impl AsRef<str> for Path {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl From<Path> for String {
+    fn from(path: Path) -> Self {
+        path.0
     }
 }
 

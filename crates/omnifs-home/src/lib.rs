@@ -12,6 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
 
 // The on-disk structure of an omnifs root, relative to the root directory.
@@ -35,7 +37,7 @@ pub struct PathOverrides {
 }
 
 /// The fully resolved omnifs directory layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Paths {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,

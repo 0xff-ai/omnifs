@@ -230,7 +230,7 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
-    pub paths: PathsJson,
+    pub paths: Paths,
     pub mounts: Vec<MountStatusJson>,
     pub providers: Vec<ProviderStatusJson>,
 }
@@ -254,16 +254,6 @@ pub(crate) struct MountJson {
     pub source: String,
     pub mount_point: std::path::PathBuf,
     pub fs_type: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PathsJson {
-    pub config_dir: std::path::PathBuf,
-    pub cache_dir: std::path::PathBuf,
-    pub mounts_dir: std::path::PathBuf,
-    pub providers_dir: std::path::PathBuf,
-    pub credentials_file: std::path::PathBuf,
-    pub config_file: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -347,14 +337,7 @@ impl StatusReport {
                     fs_type: frontend.fs_type.clone(),
                 })
             }),
-            paths: PathsJson {
-                config_dir: self.paths.config_dir.clone(),
-                cache_dir: self.paths.cache_dir.clone(),
-                mounts_dir: self.paths.mounts_dir.clone(),
-                providers_dir: self.paths.providers_dir.clone(),
-                credentials_file: self.paths.credentials_file.clone(),
-                config_file: self.paths.config_file.clone(),
-            },
+            paths: self.paths.clone(),
             mounts: self.user_mounts.iter().map(mount_status_to_json).collect(),
             providers: self.providers.iter().map(provider_status_to_json).collect(),
         }

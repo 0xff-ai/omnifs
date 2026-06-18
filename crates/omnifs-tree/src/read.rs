@@ -75,7 +75,7 @@ impl Tree {
         }
 
         let runtime = self.runtime_for(node.mount())?;
-        let path = node.path().as_str();
+        let path = node.path();
         let attrs = node.attrs();
 
         // Exact-0 short-circuit: a file the projection sizes at exactly zero is
@@ -125,7 +125,7 @@ impl Tree {
             Ok(result) => result,
             Err(Error::ProviderError(error)) => {
                 warn!(
-                    path,
+                    path = %path,
                     kind = ?error.kind,
                     retryable = error.retryable,
                     message = error.message,
@@ -134,7 +134,7 @@ impl Tree {
                 return Err(Error::ProviderError(error).into());
             },
             Err(error) => {
-                warn!(path, error = %error, "read_file runtime error");
+                warn!(path = %path, error = %error, "read_file runtime error");
                 return Err(error.into());
             },
         };
@@ -169,11 +169,9 @@ impl Tree {
                     )));
                 };
                 let status = match action {
-                    PaginationControl::All => {
-                        runtime.paginate_all(parent.as_str(), ctx.trace).await
-                    },
+                    PaginationControl::All => runtime.paginate_all(&parent, ctx.trace).await,
                     PaginationControl::Next => {
-                        match runtime.paginate_next(parent.as_str(), ctx.trace).await {
+                        match runtime.paginate_next(&parent, ctx.trace).await {
                             NextPageOutcome::Loaded { added, more } => format!(
                                 "loaded +{added} entries; {}\n",
                                 if more { "more available" } else { "complete" }
@@ -187,7 +185,7 @@ impl Tree {
                 // dirents; drop the parent's mem listing so a later browse
                 // re-reads the stored record. The kernel re-list notify stays
                 // renderer-side (driven from the InvalidationReport).
-                runtime.mem_invalidate(parent.as_str(), RecordKind::Dirents, None);
+                runtime.mem_invalidate(&parent, RecordKind::Dirents, None);
                 let bytes = status.into_bytes();
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 Ok(ReadResult::Bytes {
@@ -205,7 +203,7 @@ impl Tree {
 /// rejects it.
 fn finish_read(
     runtime: &Runtime,
-    path: &str,
+    path: &omnifs_core::path::Path,
     result: ReadFileResult,
     op_gen: u64,
 ) -> Result<ReadResult> {
@@ -225,7 +223,7 @@ fn finish_read(
     let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
     if !full_read_matches_attrs(&attrs_cache, data.len()) {
         warn!(
-            path,
+            path = %path,
             expected = ?attrs_cache.size,
             actual = data.len(),
             "provider returned bytes that contradict file attrs"
@@ -259,7 +257,7 @@ fn finish_read(
 /// (caching it would reinstate stale bytes).
 fn cache_durable_file_payload(
     runtime: &Runtime,
-    path: &str,
+    path: &omnifs_core::path::Path,
     attrs_cache: &FileAttrsCache,
     data: &[u8],
     content_type: Option<String>,
@@ -292,7 +290,7 @@ fn cache_durable_file_payload(
 /// (logged at warn for diagnostics).
 fn resolve_read_payload(
     runtime: &Runtime,
-    path: &str,
+    path: &omnifs_core::path::Path,
     result: ReadFileResult,
 ) -> Option<(Vec<u8>, FileAttrsCache, Option<String>)> {
     let attrs = file_attrs_from_attrs(&result.attrs);
@@ -302,7 +300,7 @@ fn resolve_read_payload(
         ByteSource::Blob(blob) => match runtime.read_blob_full(blob) {
             Ok(bytes) => Some((bytes, attrs, content_type)),
             Err(e) => {
-                warn!(path, error = %e, "blob-backed read failed");
+                warn!(path = %path, error = %e, "blob-backed read failed");
                 None
             },
         },
@@ -311,7 +309,7 @@ fn resolve_read_payload(
                 Some((bytes, attrs, content_type))
             } else {
                 warn!(
-                    path,
+                    path = %path,
                     "read answered byte-source::canonical but no canonical covers the path"
                 );
                 None
@@ -321,7 +319,7 @@ fn resolve_read_payload(
         // reached; a read must produce bytes.
         ByteSource::Deferred(_) => {
             warn!(
-                path,
+                path = %path,
                 "read answered byte-source::deferred, which is not a valid read answer"
             );
             None
@@ -397,13 +395,15 @@ fn file_payload_for_attrs(
     Some(payload)
 }
 
-/// A cache hit serves the cached bytes; the renderer keeps the node's projected
-/// (already size-learned) attrs, mirroring FUSE serving from the inode whose
-/// size was promoted when the entry was first read.
+/// A cache hit serves complete cached bytes, so the read result can learn the
+/// exact size the same way a cold provider read does. Most hits already carry a
+/// learned size from an earlier read; preloaded file payloads can arrive before
+/// any renderer has promoted the placeholder attrs.
 fn read_result_from_cache(payload: FilePayload, attrs: Option<&FileAttrsCache>) -> ReadResult {
+    let content_len = payload.content.len();
     ReadResult::Bytes {
         data: payload.content,
-        attrs: attrs.cloned(),
+        attrs: attrs.map(|attrs| learned_full_read_attrs(attrs.clone(), content_len)),
         content_type: payload.content_type,
     }
 }

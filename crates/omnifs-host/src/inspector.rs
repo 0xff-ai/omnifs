@@ -388,7 +388,7 @@ impl InspectorProviderOp {
                 mount: mount.to_string(),
                 provider: provider.to_string(),
                 method: descriptor.method.to_string(),
-                path: descriptor.path,
+                path: descriptor.path.to_string(),
             },
         );
         Some(Self {

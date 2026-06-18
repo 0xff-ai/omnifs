@@ -42,19 +42,18 @@ pub enum Op {
 /// do not produce a user-observable `provider.start`/`provider.end` pair.
 pub struct LiveOpDescriptor {
     pub method: &'static str,
-    pub path: String,
+    pub path: Path,
 }
 
 impl Op {
     /// Return the descriptor when this op should appear in the live stream.
     pub fn live_descriptor(&self) -> Option<LiveOpDescriptor> {
         let (method, path) = match self {
-            Self::LookupChild { parent_path, name } => (
-                "lookup_child",
-                parent_path.join_segment(name).as_str().to_string(),
-            ),
-            Self::ListChildren { path, .. } => ("list_children", path.as_str().to_string()),
-            Self::ReadFile { path, .. } => ("read_file", path.as_str().to_string()),
+            Self::LookupChild { parent_path, name } => {
+                ("lookup_child", parent_path.join_segment(name))
+            },
+            Self::ListChildren { path, .. } => ("list_children", path.clone()),
+            Self::ReadFile { path, .. } => ("read_file", path.clone()),
             Self::OpenFile { .. }
             | Self::ReadChunk { .. }
             | Self::Initialize

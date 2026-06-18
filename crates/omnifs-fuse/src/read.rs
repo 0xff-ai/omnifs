@@ -9,7 +9,6 @@ use super::inode::NodeEntry;
 use super::lookup::provider_dir_node;
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
-use omnifs_core::path::Path;
 use omnifs_core::view as view_types;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::inspector::InspectorFuseScope;
@@ -83,7 +82,7 @@ impl Frontend {
             return;
         };
         let mount_name = inode_entry.mount_name.clone();
-        let path_str = inode_entry.path.clone();
+        let path = inode_entry.path.clone();
         let backing_path = inode_entry.backing_path.clone();
         let meta = node_meta_from_entry(&inode_entry);
         drop(inode_entry);
@@ -111,7 +110,6 @@ impl Frontend {
             return;
         }
 
-        let path = Path::parse(&path_str).expect("inode path must be a protocol path");
         let node = Node::new(mount_name, path, meta, Backing::Provider);
         let ctx = RequestCtx {
             trace: live.map(InspectorFuseScope::trace_id),
@@ -230,7 +228,7 @@ impl Frontend {
         let Some((parent_path, leaf)) = split_parent_leaf(&target.path) else {
             return Ok(None);
         };
-        let parent = provider_dir_node(&target.mount_name, &parent_path)?;
+        let parent = provider_dir_node(&target.mount_name, &parent_path);
         let ctx = RequestCtx { trace };
         // Resolve and render in one runtime entry: a `None` short-circuits when
         // the leaf is a real provider file (the caller falls through), so the
@@ -423,12 +421,16 @@ fn is_synthetic_candidate(target: &FullReadTarget) -> bool {
 /// `File`; the projected attrs drive `Tree::read`/`Tree::open` (the read mode,
 /// the durable aux key, the learned-size policy).
 fn provider_file_node(target: &FullReadTarget) -> Node {
-    let path = Path::parse(&target.path).expect("inode path must be a protocol path");
     let meta = EntryMeta {
         kind: omnifs_core::view::EntryKind::File,
         attrs: target.attrs.clone(),
     };
-    Node::new(target.mount_name.clone(), path, meta, Backing::Provider)
+    Node::new(
+        target.mount_name.clone(),
+        target.path.clone(),
+        meta,
+        Backing::Provider,
+    )
 }
 
 /// The open flags for a file served lazily (read on demand): direct I/O only

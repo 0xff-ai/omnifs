@@ -26,7 +26,7 @@ impl Frontend {
     pub(super) fn lookup_op(
         &self,
         mount_name: &str,
-        parent_path: &str,
+        parent_path: &Path,
         name: &str,
         trace: Option<TraceId>,
     ) -> Result<(FileAttr, Duration), Errno> {
@@ -36,7 +36,7 @@ impl Frontend {
         // sees the post-eviction state.
         self.drain_and_evict_pending(mount_name);
 
-        let parent = provider_dir_node(mount_name, parent_path)?;
+        let parent = provider_dir_node(mount_name, parent_path);
         let ctx = RequestCtx { trace };
         let node = self
             .rt
@@ -53,7 +53,7 @@ impl Frontend {
         mount_name: &str,
         node: &Node,
     ) -> (FileAttr, Duration) {
-        let child_path = node.path().as_str();
+        let child_path = node.path();
         match node.backing() {
             Backing::Subtree(dir) => {
                 let ino = self.get_or_alloc_ino_backing(
@@ -93,12 +93,11 @@ pub(super) fn node_meta(node: &Node) -> EntryMeta {
 /// Build the minimal directory `Node` `Tree` needs to resolve a child or list a
 /// directory: a provider-backed directory at (mount, path). The inode table has
 /// already proved this path is a directory.
-pub(super) fn provider_dir_node(mount_name: &str, path: &str) -> Result<Node, Errno> {
-    let path = Path::parse(path).map_err(|_| Errno::EINVAL)?;
-    Ok(Node::new(
+pub(super) fn provider_dir_node(mount_name: &str, path: &Path) -> Node {
+    Node::new(
         mount_name.to_string(),
-        path,
+        path.clone(),
         EntryMeta::directory(),
         Backing::Provider,
-    ))
+    )
 }

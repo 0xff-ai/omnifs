@@ -68,14 +68,14 @@ pub(crate) fn apply_continuation_projection(
 /// Push lookup + attr records for a projected path/kind pair.
 pub(crate) fn push_projected_entry(
     batch: &mut Vec<BatchRecord>,
-    path: &str,
+    path: &Path,
     kind: &wit_types::EntryKind,
 ) {
     let meta = entry_meta_from_kind(kind);
     let lookup = LookupPayload::Positive(meta.clone());
     if let Some(payload) = lookup.serialize() {
         batch.push(BatchRecord::new(
-            path.to_string(),
+            path.clone(),
             RecordKind::Lookup,
             None,
             Record::new(RecordKind::Lookup, payload),
@@ -84,7 +84,7 @@ pub(crate) fn push_projected_entry(
     let attr = AttrPayload { meta };
     if let Some(payload) = attr.serialize() {
         batch.push(BatchRecord::new(
-            path.to_string(),
+            path.clone(),
             RecordKind::Attr,
             None,
             Record::new(RecordKind::Attr, payload),
@@ -95,7 +95,7 @@ pub(crate) fn push_projected_entry(
 /// Push inline file content for a projected file when durable caching applies.
 pub(crate) fn push_projected_file_content(
     batch: &mut Vec<BatchRecord>,
-    file_path: &str,
+    file_path: &Path,
     file: &wit_types::FileOut,
 ) {
     let attrs_cache = file_attrs_from_file_out(file);
@@ -106,7 +106,7 @@ pub(crate) fn push_projected_file_content(
             .with_content_type(file.content_type.clone());
         if let Some(payload) = payload.serialize() {
             batch.push(BatchRecord::new(
-                file_path.to_string(),
+                file_path.clone(),
                 RecordKind::File,
                 aux,
                 Record::new(RecordKind::File, payload),
@@ -203,7 +203,7 @@ fn cache_projection_batch<'a, I>(
         && let Some(payload) = dirents_payload.serialize()
     {
         batch.push(BatchRecord::new(
-            parent_path.to_string(),
+            parent_path.clone(),
             RecordKind::Dirents,
             None,
             Record::new(RecordKind::Dirents, payload),
@@ -211,10 +211,12 @@ fn cache_projection_batch<'a, I>(
     }
 
     for entry in &entries {
-        let path = join_child_path(parent_path, &entry.name);
-        push_projected_entry(&mut batch, path.as_str(), &entry.kind);
+        let path = parent_path
+            .join(&entry.name)
+            .expect("protocol path segment");
+        push_projected_entry(&mut batch, &path, &entry.kind);
         if let wit_types::EntryKind::File(file) = &entry.kind {
-            push_projected_file_content(&mut batch, path.as_str(), file);
+            push_projected_file_content(&mut batch, &path, file);
         }
     }
 
@@ -227,10 +229,6 @@ fn cache_projection_batch<'a, I>(
         );
         store.cache_put_batch(&batch);
     }
-}
-
-fn join_child_path(parent_path: &Path, name: &str) -> Path {
-    parent_path.join(name).expect("protocol path segment")
 }
 
 #[cfg(test)]

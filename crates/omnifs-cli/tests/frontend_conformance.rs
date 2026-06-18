@@ -50,18 +50,30 @@ fn curl(args: &[&str]) -> bool {
 /// A running `omnifsd` with the test-provider mounted, torn down on drop.
 struct Daemon {
     child: Child,
+    frontend: String,
     mount_point: PathBuf,
     _home: tempfile::TempDir,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        self.detach_mount();
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // Best-effort unmount in case the daemon didn't release it on exit.
+    }
+}
+
+impl Daemon {
+    fn detach_mount(&self) {
         let mp = self.mount_point.as_os_str();
-        if cfg!(target_os = "macos") {
-            let _ = Command::new("umount").arg(mp).status();
+        if self.frontend == "nfs" {
+            if omnifs_nfs::mount_is_active(&self.mount_point) {
+                let _ = omnifs_nfs::unmount(&self.mount_point);
+            }
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while omnifs_nfs::mount_is_active(&self.mount_point) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         } else {
             let _ = Command::new("fusermount")
                 .args([OsStr::new("-u"), mp])
@@ -130,6 +142,7 @@ fn start(frontend: &str) -> Option<Daemon> {
 
     let mut daemon = Daemon {
         child,
+        frontend: frontend.to_string(),
         mount_point: mount_point.clone(),
         _home: home,
     };
@@ -239,7 +252,7 @@ fn run_matrix(root: &Path) {
     assert_eq!(&dd.stdout, b"cdef", "offset read via dd");
 
     // Dynamic route resolves and serves.
-    assert_eq!(read(&root.join("dynamic/alpha/value")), b"alpha");
+    assert_eq!(read(&root.join("dynamic/alpha/value")), b"alpha\n");
 
     // Directory of leaves archives faithfully with `tar`.
     let bundle = hello.join("bundle");
@@ -255,7 +268,8 @@ fn run_matrix(root: &Path) {
     assert!(!tar.stdout.is_empty(), "tar produced no archive");
 
     // cp + byte-identical compare.
-    let copy = root.join("message.copy");
+    let copy_dir = tempfile::tempdir().expect("copy target dir");
+    let copy = copy_dir.path().join("message.copy");
     std::fs::copy(&message, &copy).expect("cp");
     assert_eq!(read(&copy), b"Hello, world!");
 

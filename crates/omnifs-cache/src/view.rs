@@ -4,11 +4,12 @@
 //! promote `disk` hits into `mem`. Writes go to both. Invalidations
 //! remove from both, keeping them coherent.
 
-use crate::{BatchRecord, Key, Record, RecordKind, path_prefix_matches, write_txn};
+use crate::{BatchRecord, Key, Record, RecordKind, write_txn};
 use anyhow::Result;
 use moka::sync::Cache as MokaCache;
+use omnifs_core::path::Path;
 use redb::{Database, ReadableTable, TableDefinition};
-use std::path::Path;
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
 /// Maximum total byte weight of the `mem` tier per provider instance (32 MiB).
@@ -57,7 +58,7 @@ impl Cache {
     /// view is disposable — it is derived from the durable object cache and
     /// must never survive a restart to disagree with it. No sentinel, no
     /// crash detection; the host removes and reopens unconditionally.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &StdPath) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -152,7 +153,7 @@ impl Cache {
     /// Write a batch of records to the mem and the backing database.
     pub fn put_batch(&self, records: &[BatchRecord]) {
         for item in records {
-            let key = Key::with_aux(item.path.clone(), item.kind, item.aux.as_deref());
+            let key = Key::with_aux(&item.path, item.kind, item.aux.as_deref());
             if item.record.payload.len() <= VIEW_MEM_SKIP_THRESHOLD {
                 self.mem.insert(key, Arc::new(item.record.clone()));
             }
@@ -227,7 +228,7 @@ impl Cache {
     pub fn invalidate(&self, key: &Key) {
         self.mem.invalidate(key);
         if let Some(ref disk) = self.disk
-            && let Err(e) = Self::disk_delete_exact(disk, &key.path)
+            && let Err(e) = Self::disk_delete_exact(disk, key.path.as_str())
         {
             tracing::debug!(path = key.path.as_str(), error = %e, "view cache disk invalidate failed");
         }
@@ -248,14 +249,13 @@ impl Cache {
     /// Remove all records at `prefix` or beneath it on a segment boundary from
     /// both the mem and the database.
     ///
-    /// `prefix` must be an unscoped omnifs path (e.g. `/owner/repo`); the path
-    /// matching uses `path_prefix_matches` which parses it as an omnifs path.
-    /// For pre-scoped keys use `invalidate_scoped_prefix` instead.
-    pub fn invalidate_prefix(&self, prefix: &str) {
+    /// `prefix` may be a mount-scoped or unscoped omnifs path. Matching uses
+    /// typed path segment boundaries.
+    pub fn invalidate_prefix(&self, prefix: &Path) {
         // Mem: use predicate-based eviction on path prefix.
-        let prefix_owned = prefix.to_string();
+        let prefix_owned = prefix.clone();
         self.mem
-            .invalidate_entries_if(move |k, _| path_prefix_matches(&prefix_owned, &k.path))
+            .invalidate_entries_if(move |k, _| k.path.has_prefix(&prefix_owned))
             .expect("invalidation closures enabled at cache construction");
         // Flush pending maintenance so the predicate is applied immediately
         // (moka applies invalidate_entries_if lazily otherwise).
@@ -263,48 +263,25 @@ impl Cache {
         if let Some(ref disk) = self.disk
             && let Err(e) = Self::disk_delete_prefix(disk, prefix)
         {
-            tracing::debug!(prefix, error = %e, "view cache disk prefix delete failed");
-        }
-    }
-
-    /// Remove all records whose path equals `scoped_prefix` or starts with
-    /// `scoped_prefix + "/"`. For use with pre-scoped keys that include the
-    /// mount separator `"\x1f"` and cannot be parsed as omnifs paths.
-    pub fn invalidate_scoped_prefix(&self, scoped_prefix: &str) {
-        let owned = scoped_prefix.to_string();
-        let child_prefix = format!("{owned}/");
-        // The segment boundary: a path `p` matches if p == prefix or p starts
-        // with prefix followed by '/'. This is safe because the scope separator
-        // `\x1f` is never `/`, so cross-mount matches are impossible.
-        self.mem
-            .invalidate_entries_if(move |k, _| {
-                k.path == owned || k.path.starts_with(child_prefix.as_str())
-            })
-            .expect("invalidation closures enabled at cache construction");
-        // Flush pending maintenance so the predicate is applied immediately.
-        self.mem.run_pending_tasks();
-        if let Some(ref disk) = self.disk
-            && let Err(e) = Self::disk_delete_scoped_prefix(disk, scoped_prefix)
-        {
-            tracing::debug!(scoped_prefix, error = %e, "view cache disk scoped-prefix delete failed");
+            tracing::debug!(prefix = %prefix, error = %e, "view cache disk prefix delete failed");
         }
     }
 
     /// Remove all records whose logical path equals `path` from both tiers.
-    pub fn delete_exact(&self, path: &str) {
+    pub fn delete_exact(&self, path: &Path) {
         // Mem: exact-path eviction across all record kinds.
-        let path_owned = path.to_string();
+        let path_owned = path.clone();
         self.mem
             .invalidate_entries_if(move |k, _| k.path == path_owned)
             .expect("invalidation closures enabled at cache construction");
         // Flush pending maintenance so the predicate is applied immediately.
         self.mem.run_pending_tasks();
         if let Some(ref disk) = self.disk
-            && let Err(e) = Self::disk_delete_exact(disk, path)
+            && let Err(e) = Self::disk_delete_exact(disk, path.as_str())
         {
-            tracing::debug!(path, error = %e, "view cache disk exact delete failed");
+            tracing::debug!(path = %path, error = %e, "view cache disk exact delete failed");
         }
-        self.delete_freshness(path);
+        self.delete_freshness(path.as_str());
     }
 
     pub fn put_freshness(&self, scoped_path: &str, freshness: Freshness) {
@@ -396,11 +373,7 @@ impl Cache {
             let mut content = txn.open_table(CONTENT_TABLE)?;
             let mut bulk = txn.open_table(BULK_TABLE)?;
             for item in records {
-                let wire_key = make_key(&Key::with_aux(
-                    item.path.clone(),
-                    item.kind,
-                    item.aux.as_deref(),
-                ));
+                let wire_key = make_key(&Key::with_aux(&item.path, item.kind, item.aux.as_deref()));
                 let bytes = item.record.serialize();
                 let is_bulk = item.record.payload.len() >= VIEW_BULK_THRESHOLD;
                 match (item.kind, is_bulk) {
@@ -479,30 +452,13 @@ impl Cache {
         })
     }
 
-    /// Delete all records whose stored path equals `scoped_prefix` or starts
-    /// with `scoped_prefix + "/"`. For use with pre-scoped keys that include
-    /// the mount separator `"\x1f"` — no omnifs path parsing, plain string
-    /// segment matching only. Because scoped paths embed `\x1f` themselves, the
-    /// match runs on the path-and-aux suffix directly: a descendant is
-    /// `scoped_prefix + "/"` and an aux sibling is `scoped_prefix + "\x1f"`.
-    fn disk_delete_scoped_prefix(disk: &Database, scoped_prefix: &str) -> Result<usize> {
-        let child_prefix = format!("{scoped_prefix}/");
-        let aux_prefix = format!("{scoped_prefix}\x1f");
-        Self::disk_delete_where(disk, scoped_prefix, |rest| {
-            rest == scoped_prefix
-                || rest.starts_with(child_prefix.as_str())
-                || rest.starts_with(aux_prefix.as_str())
-        })
-    }
-
     /// Delete all records whose logical path is equal to `prefix` or lies
-    /// beneath it on a segment boundary. `prefix` is an unscoped omnifs path
-    /// (no mount separator), so the path portion is everything before the aux
-    /// separator and is matched with `path_prefix_matches`.
-    fn disk_delete_prefix(disk: &Database, prefix: &str) -> Result<usize> {
-        Self::disk_delete_where(disk, prefix, |rest| {
+    /// beneath it on a segment boundary. The path portion is everything before
+    /// the aux separator and is matched on a segment boundary.
+    fn disk_delete_prefix(disk: &Database, prefix: &Path) -> Result<usize> {
+        Self::disk_delete_where(disk, prefix.as_str(), |rest| {
             let path = rest.split_once('\u{1f}').map_or(rest, |(p, _)| p);
-            path_prefix_matches(prefix, path)
+            Path::parse(path).is_ok_and(|parsed| parsed.has_prefix(prefix))
         })
     }
 

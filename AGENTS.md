@@ -63,7 +63,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 Where the architecture is heading. Build with the grain; the "don't deepen" notes mark pieces in transition that should not accrete more weight. These are breakable with a call-out, not invariants.
 
 - **Frontend-agnostic seam.** Traversal, caching policy, coalescing, and invalidation belong in the shared layer (today `omnifs-host`) that every frontend consumes, not in any one frontend. Two frontends (FUSE, NFSv4) already share it. Don't add this logic to a single frontend, and keep frontend-specific machinery in its own crate: FUSE inode tables, kernel notifier, and reply types in `omnifs-fuse`; NFS filehandles, stateids, and leases in `omnifs-nfs`.
-- **Host-native delivery.** The daemon runs host-native, and the Docker container is one launch mechanism among others. Don't deepen container or Docker assumptions in the daemon; keep `omnifsd` free of them.
+- **Host-native delivery.** The daemon runs host-native, and the Docker container is one launch mechanism among others. Don't deepen container or Docker assumptions in the daemon.
 - **Host owns caching.** The host owns all caching as opaque byte storage and evicts only by capacity or explicit invalidation. Providers do not add their own LRUs or time-based expiration.
 - **Hot-path latency.** Warm reads should feel local. Don't turn provider latency into mount latency or add per-op blocking on the hot path. Not yet measured, so this is direction, not a gate.
 - **Writes as transactions.** The read model is read-only today. When writes land they are explicit, atomic, and auditable (drafts under a draft namespace, executed by moving a prepared transaction into a control namespace), never a side effect of writing to a projected file. See `docs/future/mutations-via-git.md`.
@@ -126,6 +126,7 @@ Judgment defaults, not absolutes.
 - **Project what you fetched.** If a handler holds an upstream payload, emit every derivable sibling and child instead of returning one field and forcing later refetches.
 - **Provider maps use `hashbrown::HashMap`.** It keeps provider internals predictable across WASI targets.
 - **Naming.** Reuse source-of-truth terms; do not invent names for public surfaces unless the rename is explicit; keep host internals out of SDK and WIT naming.
+- **Path type naming.** Refer to `omnifs_core::path::Path` as `Path`; never alias it (no `ProtocolPath`). A module that also needs the stdlib path type imports `std::path::Path as StdPath`, so the bare `Path` always means the omnifs path. Modules that use only stdlib paths need no alias.
 - **Abstraction fit.** Do not reuse an existing abstraction if it changes the behavior model; semantic fit matters more than code reuse.
 - **Protocol changes.** Write the exact interaction trace first and reject extra hops on hot paths; if something is conceptually one-way, fix the boundary rather than forcing it through request and response machinery.
 - **`From`/`TryFrom` at type boundaries** over `foo_to_bar` free functions for true one-to-one mappings. The exceptions and the existing conversion hubs are in `CONTRIBUTING.md`.

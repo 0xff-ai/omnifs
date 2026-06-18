@@ -2,7 +2,7 @@
 
 mod support;
 
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_host::{Error, LookupOutcome};
 use omnifs_itest::{make_initialized_runtime, try_make_runtime_from_config};
 use omnifs_wit::provider::types::{
@@ -10,6 +10,10 @@ use omnifs_wit::provider::types::{
     Stability,
 };
 use support::{canned_a_response, dns_harness, expect_fetch as dns_expect_fetch, expect_fetches};
+
+fn parse_path(s: &str) -> Path {
+    Path::parse(s).unwrap()
+}
 
 fn assert_materialized_lookup(
     lookup: LookupOutcome,
@@ -83,7 +87,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/", "resolvers", None)
+        .lookup_child(&parse_path("/"), "resolvers", None)
         .await
         .unwrap();
     assert_materialized_lookup(lookup, "/resolvers", false);
@@ -92,8 +96,8 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .runtime
         .namespace()
         .read_file(
-            "/resolvers",
-            OmnifsPath::parse("/resolvers")
+            &parse_path("/resolvers"),
+            Path::parse("/resolvers")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -111,7 +115,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let reverse_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/", "reverse", None)
+        .lookup_child(&parse_path("/"), "reverse", None)
         .await
         .unwrap();
     assert_materialized_lookup(reverse_lookup, "/reverse", true);
@@ -119,7 +123,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/", "@cloudflare", None)
+        .lookup_child(&parse_path("/"), "@cloudflare", None)
         .await
         .unwrap();
     assert_materialized_lookup(resolver_lookup, "/@cloudflare", true);
@@ -127,7 +131,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_domain_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/@cloudflare", "example.com", None)
+        .lookup_child(&parse_path("/@cloudflare"), "example.com", None)
         .await
         .unwrap();
     assert_materialized_lookup(resolver_domain_lookup, "/@cloudflare/example.com", true);
@@ -135,7 +139,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_reverse_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/@cloudflare", "reverse", None)
+        .lookup_child(&parse_path("/@cloudflare"), "reverse", None)
         .await
         .unwrap();
     assert_materialized_lookup(resolver_reverse_lookup, "/@cloudflare/reverse", true);
@@ -143,7 +147,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let reverse_ip_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/reverse", "8.8.8.8", None)
+        .lookup_child(&parse_path("/reverse"), "8.8.8.8", None)
         .await
         .unwrap();
     assert_materialized_lookup(reverse_ip_lookup, "/reverse/8.8.8.8", false);
@@ -151,7 +155,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_reverse_ip_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/@cloudflare/reverse", "8.8.8.8", None)
+        .lookup_child(&parse_path("/@cloudflare/reverse"), "8.8.8.8", None)
         .await
         .unwrap();
     assert_materialized_lookup(
@@ -163,7 +167,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let invalid_reverse_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/reverse", "not-an-ip", None)
+        .lookup_child(&parse_path("/reverse"), "not-an-ip", None)
         .await
         .unwrap();
     assert_lookup_not_found(&invalid_reverse_lookup);
@@ -171,7 +175,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let invalid_resolver_reverse_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/@cloudflare/reverse", "not-an-ip", None)
+        .lookup_child(&parse_path("/@cloudflare/reverse"), "not-an-ip", None)
         .await
         .unwrap();
     assert_lookup_not_found(&invalid_resolver_reverse_lookup);
@@ -179,7 +183,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let direct_ip_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/", "8.8.8.8", None)
+        .lookup_child(&parse_path("/"), "8.8.8.8", None)
         .await
         .unwrap();
     assert_lookup_not_found(&direct_ip_lookup);
@@ -187,7 +191,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_direct_ip_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/@cloudflare", "8.8.8.8", None)
+        .lookup_child(&parse_path("/@cloudflare"), "8.8.8.8", None)
         .await
         .unwrap();
     assert_lookup_not_found(&resolver_direct_ip_lookup);
@@ -195,7 +199,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let domain_lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/", "example.com", None)
+        .lookup_child(&parse_path("/"), "example.com", None)
         .await
         .unwrap();
     assert_materialized_lookup(domain_lookup, "/example.com", true);
@@ -205,7 +209,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children("/example.com", None, None, None)
+        .list_children(&parse_path("/example.com"), None, None, None)
         .await
         .unwrap();
     match listing {
@@ -227,7 +231,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let reverse_listing = harness
         .runtime
         .namespace()
-        .list_children("/reverse", None, None, None)
+        .list_children(&parse_path("/reverse"), None, None, None)
         .await
         .unwrap();
     match reverse_listing {
@@ -245,7 +249,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
     let resolver_reverse_listing = harness
         .runtime
         .namespace()
-        .list_children("/@cloudflare/reverse", None, None, None)
+        .list_children(&parse_path("/@cloudflare/reverse"), None, None, None)
         .await
         .unwrap();
     match resolver_reverse_listing {
@@ -279,8 +283,8 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         .runtime
         .namespace()
         .read_file(
-            "/@missing/example.com/A",
-            OmnifsPath::parse("/@missing/example.com/A")
+            &parse_path("/@missing/example.com/A"),
+            Path::parse("/@missing/example.com/A")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -318,8 +322,8 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .runtime
         .namespace()
         .read_file(
-            "/example.com/BOGUS",
-            OmnifsPath::parse("/example.com/BOGUS")
+            &parse_path("/example.com/BOGUS"),
+            Path::parse("/example.com/BOGUS")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -338,8 +342,8 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .runtime
         .namespace()
         .read_file(
-            "/@cloudflare/example.com/BOGUS",
-            OmnifsPath::parse("/@cloudflare/example.com/BOGUS")
+            &parse_path("/@cloudflare/example.com/BOGUS"),
+            Path::parse("/@cloudflare/example.com/BOGUS")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),

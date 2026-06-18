@@ -3,7 +3,7 @@
 mod support;
 
 use omnifs_cache::RecordKind;
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::DirentsPayload;
 use omnifs_host::LookupOutcome;
 use omnifs_wit::provider::types::{
@@ -14,6 +14,10 @@ use support::{
     TestOpExt, github_harness, project_file_is_deferred_full, project_file_stability,
     project_paths, seed_github_repo_cache,
 };
+
+fn parse_path(s: &str) -> Path {
+    Path::parse(s).unwrap()
+}
 
 #[test]
 fn github_provider_routes_namespace_and_numeric_paths() {
@@ -203,7 +207,7 @@ fn github_issue_list_projects_files() {
     let dirents = harness
         .runtime
         .view_get(
-            "/octocat/Hello-World/issues/open/7",
+            &parse_path("/octocat/Hello-World/issues/open/7"),
             RecordKind::Dirents,
             None,
         )
@@ -751,7 +755,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
     let repo_listing = harness
         .runtime
         .namespace()
-        .list_children("/octocat/Hello-World/repo", None, None, None)
+        .list_children(&parse_path("/octocat/Hello-World/repo"), None, None, None)
         .await
         .unwrap();
     match repo_listing {
@@ -771,7 +775,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
     let repo_child = harness
         .runtime
         .namespace()
-        .lookup_child("/octocat/Hello-World", "repo", None)
+        .lookup_child(&parse_path("/octocat/Hello-World"), "repo", None)
         .await
         .unwrap();
     match repo_child {
@@ -1811,15 +1815,25 @@ async fn open_then_all_one_load() {
     harness
         .runtime
         .apply_effects_for_test(effects, harness.runtime.current_generation());
-    assert!(harness.runtime.cached_canonical_for(open_title).is_some());
-    assert!(harness.runtime.cached_canonical_for(all_title).is_some());
+    assert!(
+        harness
+            .runtime
+            .cached_canonical_for(&parse_path(open_title))
+            .is_some()
+    );
+    assert!(
+        harness
+            .runtime
+            .cached_canonical_for(&parse_path(all_title))
+            .is_some()
+    );
 
     let warm = harness
         .runtime
         .namespace()
         .read_file(
-            all_title,
-            OmnifsPath::parse(all_title)
+            &parse_path(all_title),
+            Path::parse(all_title)
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
