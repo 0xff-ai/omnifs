@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use omnifs_cache::RecordKind;
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::{CachedCursor, DirentsPayload};
 use omnifs_host::Runtime;
 use omnifs_host::clock::now_millis;
@@ -63,8 +63,8 @@ fn test_tree() -> TestTree {
     }
 }
 
-fn path(s: &str) -> OmnifsPath {
-    OmnifsPath::parse(s).unwrap()
+fn path(s: &str) -> Path {
+    Path::parse(s).unwrap()
 }
 
 async fn listing(t: &TestTree, node: &Node, cursor: Option<Cursor>, ctx: &RequestCtx) -> Listing {
@@ -79,7 +79,7 @@ fn names(entries: &[omnifs_tree::Entry]) -> Vec<&str> {
 }
 
 fn cached_dirents(runtime: &Runtime, path_str: &str) -> Option<DirentsPayload> {
-    let record = runtime.cache_get(path_str, RecordKind::Dirents, None)?;
+    let record = runtime.cache_get(&path(path_str), RecordKind::Dirents, None)?;
     DirentsPayload::deserialize(&record.payload)
 }
 
@@ -390,7 +390,9 @@ async fn lookup_negative_cached() {
 
     // The miss armed the live negative index.
     assert!(
-        t.runtime.negative_for(missing, now_millis()).is_some(),
+        t.runtime
+            .negative_for(&path(missing), now_millis())
+            .is_some(),
         "a lookup miss must arm the negative index"
     );
 

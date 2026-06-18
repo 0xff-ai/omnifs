@@ -4,13 +4,12 @@
 
 use super::Frontend;
 use super::common::{
-    DirSnapshot, FullReadTarget, file_kind_placeholder, join_child_path, root_ignore_meta,
-    split_parent_leaf,
+    DirSnapshot, FullReadTarget, file_kind_placeholder, root_ignore_meta, split_parent_leaf,
 };
 use super::read_helpers::data_slice;
 use fuser::Errno;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
@@ -20,9 +19,13 @@ use omnifs_host::registry::ProviderRegistry;
 use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_wit::provider::types::ListChildrenResult;
-use std::path::{Path, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
+
+fn test_path(s: &str) -> Path {
+    Path::parse(s).expect("test path")
+}
 
 // ---- FUSE-path pagination harness -------------------------------------
 //
@@ -53,7 +56,7 @@ use tempfile::TempDir;
 // smoke harness, not by these unit tests.
 
 fn wasm_artifact_path(file_name: &str) -> PathBuf {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let workspace_root = StdPath::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("host crate must have a workspace parent")
         .parent()
@@ -148,10 +151,11 @@ impl FuseHarness {
     }
 
     fn try_opendir(&self, path: &str) -> Result<DirSnapshot, Errno> {
+        let path = Path::parse(path).expect("test path");
         let ino = self
             .fs
-            .get_or_alloc_ino(Self::MOUNT, path, wit_types::EntryKind::Directory, 0);
-        self.fs.opendir_op(Self::MOUNT, ino, path, None)
+            .get_or_alloc_ino(Self::MOUNT, &path, wit_types::EntryKind::Directory, 0);
+        self.fs.opendir_op(Self::MOUNT, ino, &path, None)
     }
 
     fn seed_stale_dirents(&self, path: &str, names: &[&str]) {
@@ -173,7 +177,8 @@ impl FuseHarness {
             payload.serialize().expect("serialize stale dirents"),
         );
         let runtime = self.fs.runtime_for_mount(Self::MOUNT).expect("runtime");
-        runtime.cache_put(path, RecordKind::Dirents, None, &record);
+        let path = test_path(path);
+        runtime.cache_put(&path, RecordKind::Dirents, None, &record);
     }
 
     /// `lookup` for a child, returning `Some(ino)` on a positive hit and
@@ -182,13 +187,14 @@ impl FuseHarness {
     /// lookup, the `@next`/`@all` control resolution, and the mount-root ignore
     /// synthesis after a negative provider result all live in `Tree`.
     fn lookup(&self, parent: &str, name: &str) -> Option<u64> {
-        let child = join_child_path(parent, name);
+        let parent_path = Path::parse(parent).expect("test parent path");
+        let child = parent_path.join(name).expect("test child segment");
         let ino_for = |fs: &Frontend| {
             fs.path_to_inode
-                .get(&PathKey::new(Self::MOUNT, &child))
+                .get(&PathKey::with_mount_str(Self::MOUNT, child.clone()).expect("mount name"))
                 .map(|r| *r)
         };
-        match self.fs.lookup_op(Self::MOUNT, parent, name, None) {
+        match self.fs.lookup_op(Self::MOUNT, &parent_path, name, None) {
             Ok(_) => ino_for(&self.fs),
             Err(_) => None,
         }
@@ -228,7 +234,7 @@ impl FuseHarness {
             ino,
             fh: self.fs.alloc_fh(),
             mount_name: Self::MOUNT.to_string(),
-            path: path.to_string(),
+            path: Path::parse(path).expect("test path"),
             backing_path: None,
             attrs,
             synthetic,
@@ -238,10 +244,11 @@ impl FuseHarness {
     /// Resolve a multi-segment mount-relative path to an inode, walking
     /// parent dirents so each segment is allocated.
     fn lookup_path(&self, path: &str) -> Option<u64> {
-        let (parent, leaf) = split_parent_leaf(path)?;
+        let path = Path::parse(path).ok()?;
+        let (parent, leaf) = split_parent_leaf(&path)?;
         // Ensure the parent is listed so its dirents (and controls) exist.
-        self.opendir(&parent);
-        self.lookup(&parent, &leaf)
+        self.opendir(parent.as_str());
+        self.lookup(parent.as_str(), &leaf)
     }
 
     fn release(&self, fh: u64) {
@@ -444,7 +451,7 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
     // A further open of @next fails cleanly (ENOENT), not a provider read.
     let ino = h.fs.get_or_alloc_ino(
         FuseHarness::MOUNT,
-        "/hello/feed/@next",
+        &test_path("/hello/feed/@next"),
         file_kind_placeholder(),
         0,
     );
@@ -452,7 +459,7 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
         ino,
         fh: h.fs.alloc_fh(),
         mount_name: FuseHarness::MOUNT.to_string(),
-        path: "/hello/feed/@next".to_string(),
+        path: test_path("/hello/feed/@next"),
         backing_path: None,
         attrs: None,
         synthetic: false,
@@ -515,7 +522,9 @@ fn mutable_unversioned_full_prefetch_is_per_handle_not_durable() {
     h.release(first_fh);
     let runtime = h.fs.runtime_for_mount(FuseHarness::MOUNT).expect("runtime");
     assert!(
-        runtime.cache_get(path, RecordKind::File, None).is_none(),
+        runtime
+            .cache_get(&test_path(path), RecordKind::File, None)
+            .is_none(),
         "unversioned dynamic full-read bytes must not be written to durable view cache",
     );
 }
@@ -611,7 +620,7 @@ fn preload_merge_into_paged_dir_preserves_pagination_state() {
     // The accumulated record is paginated with a live cursor.
     let before = DirentsPayload::deserialize(
         &runtime
-            .cache_get("/hello/feed", RecordKind::Dirents, None)
+            .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
             .expect("dirents before")
             .payload,
     )
@@ -644,7 +653,7 @@ fn preload_merge_into_paged_dir_preserves_pagination_state() {
 
     let after = DirentsPayload::deserialize(
         &runtime
-            .cache_get("/hello/feed", RecordKind::Dirents, None)
+            .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
             .expect("dirents after")
             .payload,
     )
@@ -699,7 +708,7 @@ fn fs_effect_projection_rejects_reserved_control_leaf() {
     // written for the shadowing path.
     assert!(
         runtime
-            .cache_get("/hello/feed/@next", RecordKind::Lookup, None)
+            .cache_get(&test_path("/hello/feed/@next"), RecordKind::Lookup, None)
             .is_none(),
         "a reserved '@'-prefixed fs-effect leaf is never cached"
     );
@@ -717,7 +726,7 @@ fn provider_gitignore_wins_over_synthetic_marker() {
 
     let meta = root_ignore_meta();
     let synth_ino =
-        h.fs.get_or_alloc_ino_synthetic(FuseHarness::MOUNT, "/.gitignore", meta);
+        h.fs.get_or_alloc_ino_synthetic(FuseHarness::MOUNT, &test_path("/.gitignore"), meta);
     assert!(
         h.fs.inodes.get(&synth_ino).is_some_and(|e| e.synthetic),
         "stale host-synthesized .gitignore starts synthetic"
@@ -737,7 +746,7 @@ fn provider_gitignore_wins_over_synthetic_marker() {
         ino: resolved_ino,
         fh: h.fs.alloc_fh(),
         mount_name: FuseHarness::MOUNT.to_string(),
-        path: "/.gitignore".to_string(),
+        path: test_path("/.gitignore"),
         backing_path: None,
         attrs: None,
         synthetic: false,
@@ -751,8 +760,8 @@ fn provider_gitignore_wins_over_synthetic_marker() {
     let result =
         h.rt.block_on(
             runtime.namespace().read_file(
-                "/.gitignore",
-                OmnifsPath::parse("/.gitignore")
+                &test_path("/.gitignore"),
+                Path::parse("/.gitignore")
                     .unwrap()
                     .content_type_mime(None)
                     .to_string(),
@@ -785,7 +794,7 @@ fn synthetic_root_ignore_survives_dirents_refresh() {
     // A refresh (NodeOrigin::Refresh) of the same path must leave the flag.
     let meta = root_ignore_meta();
     let refreshed =
-        h.fs.get_or_alloc_ino_meta(FuseHarness::MOUNT, "/.gitignore", meta);
+        h.fs.get_or_alloc_ino_meta(FuseHarness::MOUNT, &test_path("/.gitignore"), meta);
     assert_eq!(refreshed, synth_ino, "refresh reuses the inode");
     assert!(
         h.fs.inodes.get(&refreshed).is_some_and(|e| e.synthetic),
@@ -825,7 +834,7 @@ fn concurrent_next_accumulates_every_page_with_no_loss() {
             scope.spawn(move || {
                 let ino = fs.get_or_alloc_ino(
                     FuseHarness::MOUNT,
-                    "/hello/feed/@next",
+                    &test_path("/hello/feed/@next"),
                     file_kind_placeholder(),
                     0,
                 );
@@ -833,7 +842,7 @@ fn concurrent_next_accumulates_every_page_with_no_loss() {
                     ino,
                     fh: fs.alloc_fh(),
                     mount_name: FuseHarness::MOUNT.to_string(),
-                    path: "/hello/feed/@next".to_string(),
+                    path: test_path("/hello/feed/@next"),
                     backing_path: None,
                     attrs: None,
                     synthetic: false,
@@ -869,7 +878,7 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
     // Fetch page 1 directly as a continuation. This returns item-2/item-3
     // but must leave the cached dirents for `hello/feed` unchanged.
     let result = h.fs.rt.block_on(runtime.namespace().list_children(
-        "/hello/feed",
+        &test_path("/hello/feed"),
         None,
         Some(wit_types::Cursor::Page(1)),
         None,
@@ -880,7 +889,7 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
     );
 
     let record = runtime
-        .cache_get("/hello/feed", RecordKind::Dirents, None)
+        .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
         .expect("dirents record still cached");
     let dirents = DirentsPayload::deserialize(&record.payload).expect("dirents payload");
     let names: Vec<&str> = dirents.entries.iter().map(|e| e.name.as_str()).collect();
@@ -919,7 +928,7 @@ fn volatile_follow_pump_advances_reported_size() {
         ino,
         fh,
         mount_name: FuseHarness::MOUNT.to_string(),
-        path: path.to_string(),
+        path: test_path(path),
         backing_path: None,
         attrs,
         synthetic,
@@ -973,7 +982,7 @@ fn volatile_follow_pump_probes_from_foreground_eof() {
         ino,
         fh,
         mount_name: FuseHarness::MOUNT.to_string(),
-        path: path.to_string(),
+        path: test_path(path),
         backing_path: None,
         attrs,
         synthetic,

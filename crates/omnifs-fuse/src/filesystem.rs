@@ -1,7 +1,7 @@
 //! `fuser::Filesystem` trait implementation for [`super::Frontend`].
 
 use super::Frontend;
-use super::common::{FullReadTarget, ROOT_INO, TTL, file_kind_placeholder, join_child_path};
+use super::common::{FullReadTarget, ROOT_INO, TTL, file_kind_placeholder};
 use super::errno::inspector_outcome;
 use super::read_helpers::data_slice;
 use super::trace::FuseTrace;
@@ -9,6 +9,7 @@ use fuser::{
     Errno, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
+use omnifs_core::path::Path;
 use omnifs_host::inspector::{self, InspectorFuseScope};
 use omnifs_inspector::CacheKind;
 use omnifs_wit::provider::types as wit_types;
@@ -31,7 +32,7 @@ impl Filesystem for Frontend {
             if self.registry.get(name_str).is_some() {
                 let ino = self.get_or_alloc_ino(
                     name_str,
-                    omnifs_core::path::Path::ROOT,
+                    &Path::root(),
                     wit_types::EntryKind::Directory,
                     0,
                 );
@@ -51,9 +52,12 @@ impl Filesystem for Frontend {
         let parent_backing_path = parent_entry.backing_path.clone();
         drop(parent_entry);
 
-        let child_path = join_child_path(&parent_path, name_str);
-        let live_scope = inspector::global()
-            .map(|sink| InspectorFuseScope::begin(sink, "lookup", &mount_name, &child_path));
+        let child_path = parent_path
+            .join(name_str)
+            .expect("lookup name must be a valid path segment");
+        let live_scope = inspector::global().map(|sink| {
+            InspectorFuseScope::begin(sink, "lookup", &mount_name, child_path.as_str())
+        });
         let live = live_scope.as_ref();
 
         // If the parent has a backing path, resolve the child from the filesystem.
@@ -154,7 +158,8 @@ impl Filesystem for Frontend {
             let mounts = self.registry.mounts();
             let mut entries = Vec::new();
             for m in mounts {
-                let child_ino = self.get_or_alloc_ino(&m, "", wit_types::EntryKind::Directory, 0);
+                let child_ino =
+                    self.get_or_alloc_ino(&m, &Path::root(), wit_types::EntryKind::Directory, 0);
                 entries.push((child_ino, m, wit_types::EntryKind::Directory));
             }
             self.dir_snapshots.insert(fh, entries);
@@ -172,7 +177,7 @@ impl Filesystem for Frontend {
         drop(inode_entry);
 
         let live_scope = inspector::global()
-            .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, &path));
+            .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, path.to_string()));
         let live = live_scope.as_ref();
 
         // Passthrough for inodes with backing_path.
@@ -282,7 +287,7 @@ impl Filesystem for Frontend {
         drop(inode_entry);
 
         let live_scope = inspector::global()
-            .map(|sink| InspectorFuseScope::begin(sink, "read", &mount_name, &path));
+            .map(|sink| InspectorFuseScope::begin(sink, "read", &mount_name, path.to_string()));
         let live = live_scope.as_ref();
 
         // Host-synthetic control (`@next`/`@all`) and mount-root ignore files
@@ -332,8 +337,9 @@ impl Filesystem for Frontend {
             synthetic,
         };
 
-        let live_scope = inspector::global()
-            .map(|sink| InspectorFuseScope::begin(sink, "open", &target.mount_name, &target.path));
+        let live_scope = inspector::global().map(|sink| {
+            InspectorFuseScope::begin(sink, "open", &target.mount_name, target.path.to_string())
+        });
         let live = live_scope.as_ref();
         let fuse_trace = live.map(InspectorFuseScope::trace_id);
 
@@ -367,7 +373,7 @@ impl Filesystem for Frontend {
             pump.abort();
         }
         if let Some((_, slot)) = self.ranged_handles.remove(&fh.0) {
-            let path = slot.handle.path().as_str().to_string();
+            let path = slot.handle.path().to_string();
             if let Err(e) = slot.handle.close() {
                 debug!(path, error = %e, "close_file error");
             }

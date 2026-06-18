@@ -59,14 +59,8 @@ pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
     }
 }
 
-fn path_prefix_matches(prefix: &str, path: &str) -> bool {
-    let Ok(prefix) = omnifs_core::path::Path::parse(prefix) else {
-        return false;
-    };
-    let Ok(path) = omnifs_core::path::Path::parse(path) else {
-        return false;
-    };
-    path.has_prefix(&prefix)
+fn path_prefix_matches(prefix: &omnifs_core::path::Path, path: &omnifs_core::path::Path) -> bool {
+    path.has_prefix(prefix)
 }
 
 pub(crate) struct Frontend {
@@ -134,7 +128,7 @@ impl Frontend {
 
         let root_entry = NodeEntry {
             mount_name: registry.root_mount_name().unwrap_or_default(),
-            path: omnifs_core::path::Path::ROOT.to_string(),
+            path: omnifs_core::path::Path::root(),
             kind: wit_types::EntryKind::Directory,
             attrs: None,
             size: 0,
@@ -211,15 +205,15 @@ impl Frontend {
         let mut to_remove = Vec::new();
         for entry in self.path_to_inode.iter() {
             let key = entry.key();
-            if key.mount != mount {
+            if key.mount.as_str() != mount {
                 continue;
             }
             let path = &key.path;
-            let matches_exact = report.paths.iter().any(|p| p.as_str() == path);
+            let matches_exact = report.paths.iter().any(|p| p == path);
             let matches_prefix = report
                 .prefixes
                 .iter()
-                .any(|prefix| path_prefix_matches(prefix.as_str(), path));
+                .any(|prefix| path_prefix_matches(prefix, path));
             if matches_exact || matches_prefix {
                 to_remove.push(key.clone());
             }
@@ -230,27 +224,27 @@ impl Frontend {
             self.path_to_inode.remove(path_key);
         }
         for path in &report.changed_dirs {
-            self.notify_dir_changed(mount, path.as_str());
+            self.notify_dir_changed(mount, path);
         }
     }
 
-    fn notify_entry_deleted(&self, mount: &str, path: &str) {
+    fn notify_entry_deleted(&self, mount: &str, path: &omnifs_core::path::Path) {
         let Some((parent_path, child_name)) = parent_child_for_notify(path) else {
             return;
         };
         let parent_ino = self
             .path_to_inode
-            .get(&PathKey::new(mount.to_string(), parent_path))
+            .get(&PathKey::with_mount_str(mount, parent_path).expect("runtime mount name"))
             .map_or(ROOT_INO, |r| *r.value());
         if let Some(notifier) = self.notifier.lock().as_ref() {
             let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(&child_name));
         }
     }
 
-    fn notify_dir_changed(&self, mount: &str, path: &str) {
+    fn notify_dir_changed(&self, mount: &str, path: &omnifs_core::path::Path) {
         let Some(dir_ino) = self
             .path_to_inode
-            .get(&PathKey::new(mount.to_string(), path.to_string()))
+            .get(&PathKey::with_mount_str(mount, path.clone()).expect("runtime mount name"))
             .map(|r| *r.value())
         else {
             return;
@@ -300,6 +294,9 @@ impl Frontend {
     }
 }
 
-pub(crate) fn parent_child_for_notify(path: &str) -> Option<(String, String)> {
-    common::split_parent_leaf(path)
+pub(crate) fn parent_child_for_notify(
+    path: &omnifs_core::path::Path,
+) -> Option<(omnifs_core::path::Path, String)> {
+    let (parent, child) = path.parent_and_name()?;
+    Some((parent, child.to_string()))
 }

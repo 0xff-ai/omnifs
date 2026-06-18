@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use omnifs_cache::RecordKind;
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::{
     ByteSource, EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability,
 };
@@ -71,8 +71,8 @@ fn test_tree() -> TestTree {
     }
 }
 
-fn path(s: &str) -> OmnifsPath {
-    OmnifsPath::parse(s).unwrap()
+fn path(s: &str) -> Path {
+    Path::parse(s).unwrap()
 }
 
 // --- Whole-file reads --------------------------------------------------------
@@ -108,7 +108,7 @@ async fn read_whole_file_returns_provider_bytes() {
     // The payload is now in the durable view cache (immutable -> aux None).
     let record = t
         .runtime
-        .cache_get("/hello/message", RecordKind::File, None)
+        .cache_get(&path("/hello/message"), RecordKind::File, None)
         .expect("immutable whole-file read is durably cached");
     let payload = FilePayload::deserialize(&record.payload).expect("decode cached payload");
     assert_eq!(payload.content, b"Hello, world!");
@@ -131,7 +131,7 @@ async fn read_whole_file_second_read_hits_cache() {
     // The cold read durably cached "lazy\n" under the immutable (aux None) key.
     assert!(
         t.runtime
-            .cache_get("/hello/lazy", RecordKind::File, None)
+            .cache_get(&path("/hello/lazy"), RecordKind::File, None)
             .is_some(),
         "cold read must populate the durable view cache"
     );
@@ -334,12 +334,12 @@ async fn prime_cold_item_md(t: &TestTree, ctx: &RequestCtx) {
     );
     assert!(
         t.runtime
-            .cache_get(ITEM_MD, RecordKind::File, None)
+            .cache_get(&path(ITEM_MD), RecordKind::File, None)
             .is_none(),
         "view leaf must be cold before the cold read"
     );
     assert!(
-        t.runtime.cached_canonical_for(ITEM_MD).is_some(),
+        t.runtime.cached_canonical_for(&path(ITEM_MD)).is_some(),
         "the item object must stay indexed for the read"
     );
 }
@@ -373,7 +373,7 @@ async fn read_item_md_is_durably_cached() {
 
     assert!(
         t.runtime
-            .cache_get(ITEM_MD, RecordKind::File, None)
+            .cache_get(&path(ITEM_MD), RecordKind::File, None)
             .is_some(),
         "an Inline rendered representation must be durably cached"
     );
@@ -404,11 +404,13 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
     t.runtime
         .apply_effects_for_test(&listing_invalidation(json), t.runtime.current_generation());
     assert!(
-        t.runtime.cache_get(json, RecordKind::File, None).is_none(),
+        t.runtime
+            .cache_get(&path(json), RecordKind::File, None)
+            .is_none(),
         "view leaf must be cold before the canonical read"
     );
     assert!(
-        t.runtime.cached_canonical_for(json).is_some(),
+        t.runtime.cached_canonical_for(&path(json)).is_some(),
         "the identity representation lives in the object cache"
     );
 
@@ -429,12 +431,14 @@ async fn canonical_identity_read_is_not_copied_into_view_cache() {
     // The canonical bytes are served, but the view cache stays empty for this
     // identity leaf: the object cache is its sole home.
     assert!(
-        t.runtime.cache_get(json, RecordKind::File, None).is_none(),
+        t.runtime
+            .cache_get(&path(json), RecordKind::File, None)
+            .is_none(),
         "an identity byte-source::canonical read must NOT be copied into the view cache"
     );
     // The object cache still holds the canonical (it was the source, not evicted).
     assert!(
-        t.runtime.cached_canonical_for(json).is_some(),
+        t.runtime.cached_canonical_for(&path(json)).is_some(),
         "the canonical store remains the home of the identity bytes"
     );
 }

@@ -1,6 +1,7 @@
 //! Host + object-cache coherence tests (spec §14 invariants #7–#16).
 
 use omnifs_cache::{BatchRecord, RecordKind};
+use omnifs_core::path::Path;
 use omnifs_core::view::{AttrPayload, FilePayload, LookupPayload};
 use omnifs_host::Error;
 use omnifs_host::clock::DYNAMIC_TTL_MILLIS;
@@ -18,6 +19,10 @@ const CONFIG: &str = r#"
     "capabilities": { "domains": ["httpbin.org"] }
 }
 "#;
+
+fn p(value: &str) -> Path {
+    Path::parse(value).unwrap()
+}
 
 fn issue_id() -> LogicalId {
     LogicalId {
@@ -83,7 +88,7 @@ fn canonical_eviction_drops_validator() {
         .runtime
         .apply_effects_for_test(&canonical_effect(&id, leaf, bytes, Some("etag")), op_gen);
 
-    let cached = harness.runtime.cached_canonical_for(leaf);
+    let cached = harness.runtime.cached_canonical_for(&p(leaf));
     assert!(cached.is_some());
     let cached = cached.unwrap();
     assert_eq!(cached.bytes, bytes);
@@ -101,7 +106,7 @@ fn canonical_eviction_drops_validator() {
         .runtime
         .apply_effects_for_test(&invalidate, harness.runtime.current_generation());
 
-    assert!(harness.runtime.cached_canonical_for(leaf).is_none());
+    assert!(harness.runtime.cached_canonical_for(&p(leaf)).is_none());
 }
 
 #[test]
@@ -129,16 +134,16 @@ fn fence_rejects_stale_preload_and_negative() {
     assert!(
         harness
             .runtime
-            .cache_get(leaf, RecordKind::File, None)
+            .cache_get(&p(leaf), RecordKind::File, None)
             .is_none(),
         "stale preload must not land after object invalidation"
     );
 
     harness
         .runtime
-        .apply_not_found_negative(leaf, Some(&id), op_gen0, 1_000);
+        .apply_not_found_negative(&p(leaf), Some(&id), op_gen0, 1_000);
     assert!(
-        harness.runtime.negative_for(leaf, 1_500).is_none(),
+        harness.runtime.negative_for(&p(leaf), 1_500).is_none(),
         "stale negative must not land after object invalidation"
     );
 }
@@ -166,7 +171,7 @@ fn stale_canonical_fenced_by_midflight_invalidation() {
         &canonical_effect(&id, leaf, b"stale canonical", None),
         op_gen0,
     );
-    assert!(harness.runtime.cached_canonical_for(leaf).is_none());
+    assert!(harness.runtime.cached_canonical_for(&p(leaf)).is_none());
 }
 
 #[test]
@@ -190,19 +195,19 @@ fn leaf_records_share_one_deadline() {
     ));
     let lookup = LookupPayload::Positive(meta.clone());
     batch.push(BatchRecord::new(
-        path.to_string(),
+        Path::parse(path).unwrap(),
         RecordKind::Lookup,
         None,
         omnifs_cache::Record::new(RecordKind::Lookup, lookup.serialize().unwrap()),
     ));
     batch.push(BatchRecord::new(
-        path.to_string(),
+        Path::parse(path).unwrap(),
         RecordKind::Attr,
         None,
         omnifs_cache::Record::new(RecordKind::Attr, AttrPayload { meta }.serialize().unwrap()),
     ));
     batch.push(BatchRecord::new(
-        path.to_string(),
+        Path::parse(path).unwrap(),
         RecordKind::File,
         None,
         omnifs_cache::Record::new(
@@ -215,18 +220,22 @@ fn leaf_records_share_one_deadline() {
 
     let runtime = &harness.runtime;
     let op_gen = runtime.current_generation();
-    assert!(runtime.cache_view_leaf(path, &batch, Some(now.saturating_add(ttl)), op_gen,));
+    assert!(runtime.cache_view_leaf(&p(path), &batch, Some(now.saturating_add(ttl)), op_gen,));
 
     for kind in RecordKind::ALL {
         if kind == RecordKind::Dirents {
             continue;
         }
         assert!(
-            runtime.view_get_at(path, kind, None, now + 999).is_some(),
+            runtime
+                .view_get_at(&p(path), kind, None, now + 999)
+                .is_some(),
             "kind {kind:?} should be fresh at t=1999"
         );
         assert!(
-            runtime.view_get_at(path, kind, None, now + 4_000).is_none(),
+            runtime
+                .view_get_at(&p(path), kind, None, now + 4_000)
+                .is_none(),
             "kind {kind:?} should expire at t=5000 with the shared stamp"
         );
     }
@@ -237,12 +246,12 @@ async fn unindexed_path_dispatches_then_indexes() {
     let harness = make_initialized_runtime(CONFIG);
     let path = "/hello/message";
 
-    assert!(harness.runtime.cached_canonical_for(path).is_none());
+    assert!(harness.runtime.cached_canonical_for(&p(path)).is_none());
 
     let _ = harness
         .runtime
         .namespace()
-        .read_file(path, "application/octet-stream".to_string(), None)
+        .read_file(&p(path), "application/octet-stream".to_string(), None)
         .await
         .expect("cold read dispatches to provider");
 
@@ -255,7 +264,7 @@ async fn unindexed_path_dispatches_then_indexes() {
         harness.runtime.current_generation(),
     );
 
-    assert!(harness.runtime.cached_canonical_for(path).is_some());
+    assert!(harness.runtime.cached_canonical_for(&p(path)).is_some());
 }
 
 #[test]
@@ -290,8 +299,13 @@ fn object_vs_listing_invalidation() {
         },
         harness.runtime.current_generation(),
     );
-    assert!(harness.runtime.cached_canonical_for(open_leaf).is_none());
-    assert!(harness.runtime.cached_canonical_for(all_leaf).is_none());
+    assert!(
+        harness
+            .runtime
+            .cached_canonical_for(&p(open_leaf))
+            .is_none()
+    );
+    assert!(harness.runtime.cached_canonical_for(&p(all_leaf)).is_none());
 
     harness.runtime.apply_effects_for_test(
         &canonical_effect(&id, open_leaf, b"{}", None),
@@ -319,12 +333,15 @@ fn object_vs_listing_invalidation() {
     assert!(
         harness
             .runtime
-            .cache_get(all_leaf, RecordKind::File, None)
+            .cache_get(&p(all_leaf), RecordKind::File, None)
             .is_none(),
         "listing prefix invalidation evicts view leaves under the prefix"
     );
     assert!(
-        harness.runtime.cached_canonical_for(open_leaf).is_some(),
+        harness
+            .runtime
+            .cached_canonical_for(&p(open_leaf))
+            .is_some(),
         "object canonical must survive listing-only invalidation"
     );
 }
@@ -339,22 +356,22 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
 
     harness
         .runtime
-        .apply_not_found_negative(path, Some(&id), op_gen, now);
+        .apply_not_found_negative(&p(path), Some(&id), op_gen, now);
 
-    assert!(harness.runtime.negative_for(path, now + 100).is_some());
+    assert!(harness.runtime.negative_for(&p(path), now + 100).is_some());
 
     assert!(
         harness
             .runtime
-            .negative_for(path, now + DYNAMIC_TTL_MILLIS + 1)
+            .negative_for(&p(path), now + DYNAMIC_TTL_MILLIS + 1)
             .is_none(),
         "negative expires after TTL"
     );
 
     harness
         .runtime
-        .apply_not_found_negative(path, Some(&id), op_gen, now);
-    assert!(harness.runtime.negative_for(path, now + 100).is_some());
+        .apply_not_found_negative(&p(path), Some(&id), op_gen, now);
+    assert!(harness.runtime.negative_for(&p(path), now + 100).is_some());
 
     let invalidate = Effects {
         invalidations: vec![Invalidation::Object(id)],
@@ -368,7 +385,7 @@ fn negative_returns_enoent_until_deadline_or_invalidate() {
         .runtime
         .apply_effects_for_test(&invalidate, harness.runtime.current_generation());
     assert!(
-        harness.runtime.negative_for(path, now + 100).is_none(),
+        harness.runtime.negative_for(&p(path), now + 100).is_none(),
         "object invalidation clears the negative immediately"
     );
 }
@@ -380,7 +397,7 @@ async fn negative_short_circuits_read_without_provider_dispatch() {
     let path = "/no/such/leaf";
     let now = 5_000u64;
     harness.runtime.apply_not_found_negative(
-        path,
+        &p(path),
         Some(&id),
         harness.runtime.current_generation(),
         now,
@@ -389,7 +406,7 @@ async fn negative_short_circuits_read_without_provider_dispatch() {
     let error = harness
         .runtime
         .namespace()
-        .read_file(path, "application/octet-stream".to_string(), None)
+        .read_file(&p(path), "application/octet-stream".to_string(), None)
         .await
         .expect_err("negative must surface as ENOENT");
 

@@ -3741,6 +3741,7 @@ name = "omnifs-home"
 version = "0.2.1"
 dependencies = [
  "omnifs-core",
+ "serde",
 ]
 
 [[package]]

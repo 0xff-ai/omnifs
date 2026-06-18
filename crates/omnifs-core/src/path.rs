@@ -209,6 +209,12 @@ impl AsRef<str> for Path {
     }
 }
 
+impl From<Path> for String {
+    fn from(path: Path) -> Self {
+        path.0
+    }
+}
+
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

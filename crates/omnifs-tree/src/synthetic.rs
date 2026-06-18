@@ -143,11 +143,10 @@ fn cached_control_dirent(
     use omnifs_cache::RecordKind;
     use omnifs_core::view::DirentsPayload;
 
-    let dirents = if let Some(record) = runtime.mem_get(parent.as_str(), RecordKind::Dirents, None)
-    {
+    let dirents = if let Some(record) = runtime.mem_get(parent, RecordKind::Dirents, None) {
         DirentsPayload::deserialize(&record.payload)?
     } else {
-        let record = runtime.cache_get(parent.as_str(), RecordKind::Dirents, None)?;
+        let record = runtime.cache_get(parent, RecordKind::Dirents, None)?;
         DirentsPayload::deserialize(&record.payload)?
     };
     dirents.entries.into_iter().find(|e| e.name == name)

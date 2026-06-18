@@ -27,7 +27,8 @@ use crate::protocol::consts::{
 };
 use dashmap::DashMap;
 use omnifs_cache::RecordKind;
-use omnifs_core::path::{Path as ProtocolPath, Segment};
+use omnifs_core::MountName;
+use omnifs_core::path::{Path, Segment};
 use omnifs_core::view as view_types;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::path_key::PathKey;
@@ -56,7 +57,7 @@ struct NodeEntry {
     /// The same protocol path under the two roots gets two distinct inodes.
     scope: u64,
     mount_name: String,
-    path: ProtocolPath,
+    path: Path,
     parent: u64,
     kind: NodeKind,
     size: u64,
@@ -73,7 +74,7 @@ struct NodeEntry {
 struct EntrySeed<'a> {
     scope: u64,
     mount_name: &'a str,
-    path: &'a ProtocolPath,
+    path: &'a Path,
     parent: u64,
     kind: NodeKind,
     size: u64,
@@ -89,7 +90,7 @@ struct EntrySeed<'a> {
 struct RangedOpen {
     ino: u64,
     mount_name: String,
-    path: ProtocolPath,
+    path: Path,
     handle: RangedHandle,
     /// Background pump that learns live (`tail -f`) growth into `follow_sizes`,
     /// aborted when this open is torn down. `None` for a non-live ranged file.
@@ -100,25 +101,29 @@ struct RangedOpen {
 struct BackingOpen {
     id: u64,
     mount_name: String,
-    path: ProtocolPath,
+    path: Path,
     backing_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ObjectKey {
     scope: u64,
-    mount: String,
-    path: ProtocolPath,
+    key: PathKey,
 }
 
 impl ObjectKey {
-    fn new(scope: u64, mount: impl Into<String>, path: &ProtocolPath) -> Self {
+    fn new(scope: u64, mount: impl Into<String>, path: &Path) -> Self {
+        let mount = mount.into();
+        let mount = MountName::try_from(mount.as_str()).expect("runtime mount name");
         Self {
             scope,
-            mount: mount.into(),
-            path: path.clone(),
+            key: PathKey::new(mount, path.clone()),
         }
     }
+}
+
+fn path_key(mount_name: &str, path: &Path) -> PathKey {
+    PathKey::with_mount_str(mount_name, path.clone()).expect("runtime mount name")
 }
 
 pub struct Export {
@@ -163,7 +168,7 @@ impl Export {
                 NodeEntry {
                     scope,
                     mount_name: mount.clone(),
-                    path: ProtocolPath::root(),
+                    path: Path::root(),
                     parent: ROOT_ID,
                     kind: NodeKind::Directory,
                     size: 0,
@@ -174,7 +179,7 @@ impl Export {
                 },
             );
             if root_mount.is_some() {
-                path_to_inode.insert(ObjectKey::new(scope, &mount, &ProtocolPath::root()), scope);
+                path_to_inode.insert(ObjectKey::new(scope, &mount, &Path::root()), scope);
             }
         }
         Self {
@@ -220,7 +225,7 @@ impl Export {
         if report.is_empty() {
             return;
         }
-        let matches = |path: &ProtocolPath| {
+        let matches = |path: &Path| {
             report.paths.iter().any(|invalidated| invalidated == path)
                 || report.prefixes.iter().any(|prefix| path.has_prefix(prefix))
         };
@@ -230,8 +235,7 @@ impl Export {
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
-                let path = ProtocolPath::parse(&key.path).ok()?;
-                (key.mount == mount_name && matches(&path)).then(|| key.clone())
+                (key.mount.as_str() == mount_name && matches(&key.path)).then(|| key.clone())
             })
             .collect::<Vec<_>>();
         for key in stale_negative_lookups {
@@ -243,8 +247,10 @@ impl Export {
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
-                (key.mount == mount_name && !key.path.is_root() && matches(&key.path))
-                    .then(|| key.clone())
+                (key.key.mount.as_str() == mount_name
+                    && !key.key.path.is_root()
+                    && matches(&key.key.path))
+                .then(|| key.clone())
             })
             .collect::<Vec<_>>();
         let mut stale_inodes = Vec::with_capacity(stale_paths.len());
@@ -473,15 +479,8 @@ impl Export {
     /// FUSE has no analogue because it promotes size lazily on the inode at read
     /// time. The probe writes the learned attrs back through the cache so a later
     /// lookup serves them without re-probing.
-    fn probe_ranged_attrs(
-        &self,
-        runtime: &Arc<Runtime>,
-        path: &ProtocolPath,
-    ) -> Option<FileAttrsCache> {
-        let opened = match self
-            .rt
-            .block_on(runtime.namespace().open_file(path.as_str()))
-        {
+    fn probe_ranged_attrs(&self, runtime: &Arc<Runtime>, path: &Path) -> Option<FileAttrsCache> {
+        let opened = match self.rt.block_on(runtime.namespace().open_file(path)) {
             Ok(opened) => opened,
             Err(RuntimeError::ProviderError(error))
                 if matches!(
@@ -529,7 +528,7 @@ impl Export {
     fn promote_ranged_placeholder_meta(
         &self,
         runtime: &Arc<Runtime>,
-        child_path: &ProtocolPath,
+        child_path: &Path,
         mut meta: EntryMeta,
     ) -> EntryMeta {
         if meta
@@ -585,7 +584,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        parent_path: &ProtocolPath,
+        parent_path: &Path,
         parent: u64,
         name: &Segment,
         runtime: &Arc<Runtime>,
@@ -606,13 +605,13 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        child_path: &ProtocolPath,
+        child_path: &Path,
         parent: u64,
         mut meta: EntryMeta,
         runtime: Option<&Arc<Runtime>>,
     ) -> u64 {
         self.negative_lookups
-            .remove(&PathKey::new(mount_name, child_path.as_str()));
+            .remove(&path_key(mount_name, child_path));
         if let Some(runtime) = runtime {
             meta = self.promote_ranged_placeholder_meta(runtime, child_path, meta);
         }
@@ -641,7 +640,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        parent_path: &ProtocolPath,
+        parent_path: &Path,
         parent: u64,
         name: &Segment,
         runtime: &Arc<Runtime>,
@@ -657,7 +656,7 @@ impl Export {
             Err(error) if error.kind == TreeErrorKind::NotFound => {
                 if Self::expected_negative_probe(name.as_str()) {
                     self.negative_lookups
-                        .insert(PathKey::new(mount_name, child_path.as_str()), ());
+                        .insert(path_key(mount_name, &child_path), ());
                 }
                 Err(Status::NoEnt)
             },
@@ -688,7 +687,7 @@ impl Export {
     ) -> u64 {
         let child_path = node.path().clone();
         self.negative_lookups
-            .remove(&PathKey::new(mount_name, child_path.as_str()));
+            .remove(&path_key(mount_name, &child_path));
         if let Backing::Subtree(dir) = node.backing() {
             return self.get_or_alloc(EntrySeed {
                 scope,
@@ -728,7 +727,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        parent_path: &ProtocolPath,
+        parent_path: &Path,
         parent: u64,
         name: &Segment,
         root: &FsPath,
@@ -738,7 +737,7 @@ impl Export {
         let kind = Self::backing_kind(&metadata)?;
         let child_path = parent_path.join_segment(name);
         self.negative_lookups
-            .remove(&PathKey::new(mount_name, child_path.as_str()));
+            .remove(&path_key(mount_name, &child_path));
         Ok(self.get_or_alloc(EntrySeed {
             scope,
             mount_name,
@@ -760,7 +759,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         parent: u64,
         listing: &Listing,
         runtime: &Arc<Runtime>,
@@ -795,7 +794,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         parent: u64,
         entry: &TreeEntry,
         runtime: Option<&Arc<Runtime>>,
@@ -803,7 +802,7 @@ impl Export {
         let name = Segment::try_from(entry.name.as_str()).ok()?;
         let child_path = path.join_segment(&name);
         self.negative_lookups
-            .remove(&PathKey::new(mount_name, child_path.as_str()));
+            .remove(&path_key(mount_name, &child_path));
         let mut meta = entry.meta.clone();
         if let (None, Some(runtime)) = (entry.synthetic.as_ref(), runtime) {
             meta = self.promote_ranged_placeholder_meta(runtime, &child_path, meta);
@@ -842,7 +841,7 @@ impl Export {
         &self,
         scope: u64,
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         parent: u64,
         root: &FsPath,
     ) -> StatusResult<DirListing> {
@@ -895,7 +894,7 @@ impl Export {
         &self,
         id: u64,
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         attrs: Option<&FileAttrsCache>,
         synthetic: Option<Synthetic>,
         runtime: &Arc<Runtime>,
@@ -1046,7 +1045,7 @@ impl Export {
     /// projected files share the same byte-cap policy.
     fn enforce_materialize_cap(
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         attrs: Option<&FileAttrsCache>,
         backing_path: Option<&FsPath>,
     ) -> StatusResult<()> {
@@ -1113,7 +1112,7 @@ impl Export {
         &self,
         seed: OpenSeed,
         mount_name: &str,
-        path: &ProtocolPath,
+        path: &Path,
         projected_attrs: &FileAttrsCache,
         runtime: &Arc<Runtime>,
     ) -> StatusResult<Option<OpenResult>> {
@@ -1244,7 +1243,7 @@ fn node_meta(node: &Node) -> EntryMeta {
 /// consume, from inode-cached projection state.
 fn file_node(
     mount_name: &str,
-    path: &ProtocolPath,
+    path: &Path,
     attrs: Option<&FileAttrsCache>,
     synthetic: Option<Synthetic>,
 ) -> Node {
@@ -1268,7 +1267,7 @@ fn file_node(
 
 /// Build the minimal provider-backed directory `Node` `Tree` needs to resolve a
 /// child or list a directory. The inode table has already proved this is a dir.
-fn provider_dir_node(mount_name: &str, path: &ProtocolPath) -> Node {
+fn provider_dir_node(mount_name: &str, path: &Path) -> Node {
     Node::new(
         mount_name.to_string(),
         path.clone(),
@@ -1316,7 +1315,7 @@ impl ReadOnlyExport for Export {
             return Ok(self.get_or_alloc(EntrySeed {
                 scope: parent,
                 mount_name: name.as_str(),
-                path: &ProtocolPath::root(),
+                path: &Path::root(),
                 parent,
                 kind: NodeKind::Directory,
                 size: 0,
@@ -1380,7 +1379,7 @@ impl ReadOnlyExport for Export {
         if Self::expected_negative_probe(name.as_str())
             && self
                 .negative_lookups
-                .contains_key(&PathKey::new(&mount_name, child_path.as_str()))
+                .contains_key(&path_key(&mount_name, &child_path))
         {
             return Err(Status::NoEnt);
         }
@@ -1398,7 +1397,7 @@ impl ReadOnlyExport for Export {
                     let child = self.get_or_alloc(EntrySeed {
                         scope: id,
                         mount_name: &mount,
-                        path: &ProtocolPath::root(),
+                        path: &Path::root(),
                         parent: id,
                         kind: NodeKind::Directory,
                         size: 0,
@@ -1733,7 +1732,7 @@ mod tests {
     use omnifs_host::Dirs;
     use omnifs_host::cloner::GitCloner;
     use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
-    use std::path::Path;
+    use std::path::Path as StdPath;
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -1746,7 +1745,7 @@ mod tests {
     }
 
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let workspace_root = StdPath::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crate must have a workspace parent")
             .parent()
@@ -1817,10 +1816,8 @@ mod tests {
         }
     }
 
-    fn test_path(name: &str) -> ProtocolPath {
-        ProtocolPath::root()
-            .join(name)
-            .expect("test path segment is valid")
+    fn test_path(name: &str) -> Path {
+        Path::root().join(name).expect("test path segment is valid")
     }
 
     fn insert_full_mode_leaf(

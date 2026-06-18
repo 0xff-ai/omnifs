@@ -109,7 +109,7 @@ impl Runtime {
             wit_types::OpResult::ReadFile(wit_types::ReadFileOutcome::NotFound(maybe_id)),
         ) = (op, result)
         {
-            self.apply_not_found_negative(path.as_str(), maybe_id.as_ref(), op_gen, now_millis);
+            self.apply_not_found_negative(path, maybe_id.as_ref(), op_gen, now_millis);
         }
     }
 

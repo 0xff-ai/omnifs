@@ -9,28 +9,28 @@
 //! and the learned-attrs slot survival on the NFS inode table.
 
 use omnifs_cache::{Record as CacheRecord, RecordKind};
-use omnifs_core::path::Path as ProtocolPath;
+use omnifs_core::path::Path;
 use omnifs_core::view as view_types;
 use omnifs_core::view::{self as cache, EntryMeta, FileAttrsCache};
 use omnifs_host::Runtime;
 
 pub(crate) fn cache_get(
     runtime: &Runtime,
-    path: &ProtocolPath,
+    path: &Path,
     kind: RecordKind,
     aux: Option<&str>,
 ) -> Option<CacheRecord> {
-    runtime.cache_get(path.as_str(), kind, aux)
+    runtime.cache_get(path, kind, aux)
 }
 
 fn cache_put(
     runtime: &Runtime,
-    path: &ProtocolPath,
+    path: &Path,
     kind: RecordKind,
     aux: Option<&str>,
     record: &CacheRecord,
 ) {
-    runtime.cache_put(path.as_str(), kind, aux, record);
+    runtime.cache_put(path, kind, aux, record);
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ pub(crate) fn cached_dirent_lookup(record: &CacheRecord, name: &str) -> Option<L
     dirents.exhaustive.then_some(LookupCacheHit::Negative)
 }
 
-pub(crate) fn cached_file_attrs(runtime: &Runtime, path: &ProtocolPath) -> Option<FileAttrsCache> {
+pub(crate) fn cached_file_attrs(runtime: &Runtime, path: &Path) -> Option<FileAttrsCache> {
     if let Some(record) = cache_get(runtime, path, RecordKind::Lookup, None)
         && let Some(LookupCacheHit::Positive(meta)) = cached_lookup_record(&record)
         && let Some(attrs) = meta.attrs
@@ -63,7 +63,7 @@ pub(crate) fn cached_file_attrs(runtime: &Runtime, path: &ProtocolPath) -> Optio
     }
 
     runtime
-        .cache_get(path.as_str(), RecordKind::Attr, None)
+        .cache_get(path, RecordKind::Attr, None)
         .and_then(|record| cache::AttrPayload::deserialize(&record.payload))
         .and_then(|payload| payload.meta.attrs)
 }
@@ -97,7 +97,7 @@ pub(crate) fn full_read_matches_attrs(attrs: &FileAttrsCache, content_len: usize
     }
 }
 
-pub(crate) fn cache_file_metadata(runtime: &Runtime, path: &ProtocolPath, attrs: FileAttrsCache) {
+pub(crate) fn cache_file_metadata(runtime: &Runtime, path: &Path, attrs: FileAttrsCache) {
     let meta = EntryMeta::file(attrs);
     let lookup = cache::LookupPayload::Positive(meta.clone());
     if let Some(payload) = lookup.serialize() {

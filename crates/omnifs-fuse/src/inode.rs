@@ -5,6 +5,7 @@
 
 use crate::Frontend;
 use fuser::{FileAttr, FileType, INodeNo};
+use omnifs_core::path::Path;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
 use omnifs_host::path_key::PathKey;
 use omnifs_host::wit_protocol;
@@ -30,7 +31,7 @@ fn current_gid() -> u32 {
 /// Tracks the per-node state keyed by inode number for a provider mount.
 pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
-    pub(crate) path: String,
+    pub(crate) path: Path,
     pub(crate) kind: wit_types::EntryKind,
     pub(crate) attrs: Option<FileAttrsCache>,
     pub(crate) size: u64,
@@ -162,7 +163,7 @@ impl Frontend {
     pub(crate) fn get_or_alloc_ino(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         kind: wit_types::EntryKind,
         size: u64,
     ) -> u64 {
@@ -183,7 +184,7 @@ impl Frontend {
     pub(crate) fn get_or_alloc_ino_meta(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
@@ -205,7 +206,7 @@ impl Frontend {
     pub(crate) fn get_or_alloc_ino_meta_resolved(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
@@ -223,7 +224,7 @@ impl Frontend {
     pub(crate) fn get_or_alloc_ino_backing(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         kind: wit_types::EntryKind,
         size: u64,
         backing_path: PathBuf,
@@ -244,7 +245,7 @@ impl Frontend {
     pub(crate) fn get_or_alloc_ino_synthetic(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
@@ -262,13 +263,13 @@ impl Frontend {
     fn get_or_alloc_ino_inner(
         &self,
         mount_name: &str,
-        path: &str,
+        path: &Path,
         kind: wit_types::EntryKind,
         attrs: Option<FileAttrsCache>,
         size: u64,
         origin: &NodeOrigin,
     ) -> u64 {
-        let key = PathKey::new(mount_name, path);
+        let key = PathKey::with_mount_str(mount_name, path.clone()).expect("runtime mount name");
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
@@ -304,7 +305,7 @@ impl Frontend {
                     ino,
                     NodeEntry {
                         mount_name: mount_name.to_string(),
-                        path: path.to_string(),
+                        path: path.clone(),
                         kind,
                         attrs: incoming_attrs.clone(),
                         size,
@@ -421,7 +422,7 @@ mod tests {
         let size = attrs.st_size();
         NodeEntry {
             mount_name: "test".to_string(),
-            path: "/hello/fresh-full".to_string(),
+            path: Path::parse("/hello/fresh-full").unwrap(),
             kind: file_kind_placeholder(),
             attrs: Some(attrs),
             size,

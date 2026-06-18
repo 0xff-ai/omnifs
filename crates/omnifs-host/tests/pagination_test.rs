@@ -8,6 +8,7 @@
 //! page 2 is terminal.
 
 use omnifs_cache::RecordKind;
+use omnifs_core::path::Path;
 use omnifs_core::view::{CachedCursor, DirentsPayload};
 use omnifs_host::LookupOutcome;
 use omnifs_host::pagination::NextPageOutcome;
@@ -22,11 +23,15 @@ const CONFIG: &str = r#"
 }
 "#;
 
+fn p(value: &str) -> Path {
+    Path::parse(value).unwrap()
+}
+
 /// All cached dirent names, including any synthetic `@`-prefixed controls.
 fn cached_dirents(harness: &RuntimeHarness, path: &str) -> DirentsPayload {
     let record = harness
         .runtime
-        .cache_get(path, RecordKind::Dirents, None)
+        .cache_get(&p(path), RecordKind::Dirents, None)
         .expect("dirents must be cached");
     DirentsPayload::deserialize(&record.payload).expect("dirents must decode")
 }
@@ -64,7 +69,7 @@ async fn first_page_carries_cursor_and_caches_it() {
     let result = harness
         .runtime
         .namespace()
-        .list_children("/hello/feed", None, None, None)
+        .list_children(&p("/hello/feed"), None, None, None)
         .await
         .unwrap();
 
@@ -94,7 +99,7 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
     harness
         .runtime
         .namespace()
-        .list_children("/hello/feed", None, None, None)
+        .list_children(&p("/hello/feed"), None, None, None)
         .await
         .unwrap();
     let before = cached_dirents(&harness, "/hello/feed");
@@ -105,7 +110,7 @@ async fn lookup_sibling_hints_preserve_paged_parent_state() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/hello/feed", "item-0", None)
+        .lookup_child(&p("/hello/feed"), "item-0", None)
         .await
         .unwrap();
     let LookupOutcome::Entry(entry) = lookup else {
@@ -145,7 +150,7 @@ async fn paginate_next_accumulates_and_advances() {
     harness
         .runtime
         .namespace()
-        .list_children("/hello/feed", None, None, None)
+        .list_children(&p("/hello/feed"), None, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -155,7 +160,7 @@ async fn paginate_next_accumulates_and_advances() {
 
     // @next loads page 1 and appends it; the cursor advances to page 2. The
     // accumulated dirents still carry @next/@all because more pages remain.
-    match harness.runtime.paginate_next("/hello/feed", None).await {
+    match harness.runtime.paginate_next(&p("/hello/feed"), None).await {
         NextPageOutcome::Loaded { added, more } => {
             assert_eq!(added, 2, "page 1 adds two entries");
             assert!(more, "page 1 still has a successor (page 2)");
@@ -178,7 +183,7 @@ async fn paginate_next_accumulates_and_advances() {
 
     // @next loads the terminal page 2; the cursor is cleared (feed complete)
     // and the controls drop out of the accumulated dirents.
-    match harness.runtime.paginate_next("/hello/feed", None).await {
+    match harness.runtime.paginate_next(&p("/hello/feed"), None).await {
         NextPageOutcome::Loaded { added, more } => {
             assert_eq!(added, 2);
             assert!(!more, "page 2 is terminal");
@@ -202,7 +207,7 @@ async fn paginate_next_accumulates_and_advances() {
     // A further @next on the exhausted feed reports no more pages.
     assert!(
         matches!(
-            harness.runtime.paginate_next("/hello/feed", None).await,
+            harness.runtime.paginate_next(&p("/hello/feed"), None).await,
             NextPageOutcome::NoMore
         ),
         "exhausted feed yields NoMore"
@@ -217,13 +222,13 @@ async fn paginate_all_expands_to_completion() {
     harness
         .runtime
         .namespace()
-        .list_children("/hello/feed", None, None, None)
+        .list_children(&p("/hello/feed"), None, None, None)
         .await
         .unwrap();
 
     // @all loops to exhaustion. Two further pages (1 and 2) remain after the
     // seeded page 0, adding 4 entries total.
-    let summary = harness.runtime.paginate_all("/hello/feed", None).await;
+    let summary = harness.runtime.paginate_all(&p("/hello/feed"), None).await;
     assert_eq!(summary, "loaded 2 pages (+4); complete\n");
 
     assert_eq!(
@@ -237,7 +242,7 @@ async fn paginate_all_expands_to_completion() {
     assert_eq!(cached_cursor(&harness, "/hello/feed"), None);
 
     // @all on a fully-expanded feed has nothing to do.
-    let summary = harness.runtime.paginate_all("/hello/feed", None).await;
+    let summary = harness.runtime.paginate_all(&p("/hello/feed"), None).await;
     assert_eq!(summary, "no more pages\n");
 }
 
@@ -249,13 +254,16 @@ async fn paginate_next_on_non_paged_directory_is_no_more() {
     harness
         .runtime
         .namespace()
-        .list_children("/hello/bundle", None, None, None)
+        .list_children(&p("/hello/bundle"), None, None, None)
         .await
         .unwrap();
 
     assert!(
         matches!(
-            harness.runtime.paginate_next("/hello/bundle", None).await,
+            harness
+                .runtime
+                .paginate_next(&p("/hello/bundle"), None)
+                .await,
             NextPageOutcome::NoMore
         ),
         "a directory with no resume cursor cannot be paged"

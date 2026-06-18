@@ -2,11 +2,15 @@
 
 mod db_fixture;
 
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_host::{Error, LookupOutcome};
 use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
 use omnifs_wit::provider::types::{ByteSource, EntryKind, ErrorKind, ListChildrenResult};
 use serde::Deserialize;
+
+fn parse_path(s: &str) -> Path {
+    Path::parse(s).unwrap()
+}
 
 fn assert_lookup_not_found(lookup: &LookupOutcome) {
     assert!(
@@ -45,8 +49,8 @@ async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
         .runtime
         .namespace()
         .read_file(
-            path,
-            OmnifsPath::parse(path)
+            &parse_path(path),
+            Path::parse(path)
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -85,7 +89,7 @@ async fn db_tables_listing_exhaustive_names() {
     let root = harness
         .runtime
         .namespace()
-        .list_children("/", None, None, None)
+        .list_children(&parse_path("/"), None, None, None)
         .await
         .unwrap();
     match root {
@@ -101,7 +105,7 @@ async fn db_tables_listing_exhaustive_names() {
     let tables = harness
         .runtime
         .namespace()
-        .list_children("/tables", None, None, None)
+        .list_children(&parse_path("/tables"), None, None, None)
         .await
         .unwrap();
     match tables {
@@ -124,7 +128,7 @@ async fn db_tables_listing_exhaustive_names() {
     let missing = harness
         .runtime
         .namespace()
-        .lookup_child("/tables", "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
         .await
         .unwrap();
     assert_lookup_not_found(&missing);
@@ -137,7 +141,7 @@ async fn db_meta_listing_is_direct_path_surface() {
     let meta = harness
         .runtime
         .namespace()
-        .list_children("/meta", None, None, None)
+        .list_children(&parse_path("/meta"), None, None, None)
         .await
         .unwrap();
 
@@ -154,13 +158,13 @@ async fn db_meta_listing_is_direct_path_surface() {
     assert!(
         harness
             .runtime
-            .cached_canonical_for("/meta/info.json")
+            .cached_canonical_for(&parse_path("/meta/info.json"))
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cached_canonical_for("/meta/version.txt")
+            .cached_canonical_for(&parse_path("/meta/version.txt"))
             .is_none()
     );
 }
@@ -234,13 +238,13 @@ async fn db_table_direct_files_do_not_use_canonical_cache() {
     assert!(
         harness
             .runtime
-            .cached_canonical_for("/tables/Album/table.json")
+            .cached_canonical_for(&parse_path("/tables/Album/table.json"))
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cached_canonical_for("/tables/Album/schema.json")
+            .cached_canonical_for(&parse_path("/tables/Album/schema.json"))
             .is_none()
     );
 }
@@ -252,7 +256,7 @@ async fn db_missing_table_negative_record() {
     let lookup = harness
         .runtime
         .namespace()
-        .lookup_child("/tables", "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
         .await
         .unwrap();
     assert_lookup_not_found(&lookup);
@@ -261,8 +265,8 @@ async fn db_missing_table_negative_record() {
         .runtime
         .namespace()
         .read_file(
-            "/tables/NoSuchTable/schema.sql",
-            OmnifsPath::parse("/tables/NoSuchTable/schema.sql")
+            &parse_path("/tables/NoSuchTable/schema.sql"),
+            Path::parse("/tables/NoSuchTable/schema.sql")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -278,7 +282,7 @@ async fn db_missing_table_negative_record() {
     let lookup_again = harness
         .runtime
         .namespace()
-        .lookup_child("/tables", "NoSuchTable", None)
+        .lookup_child(&parse_path("/tables"), "NoSuchTable", None)
         .await
         .unwrap();
     assert_lookup_not_found(&lookup_again);
@@ -301,7 +305,7 @@ async fn db_sample_served_ranged() {
 /// Read a ranged file whole: open, pull chunks until EOF, close.
 async fn read_ranged(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
     let ns = harness.runtime.namespace();
-    let opened = ns.open_file(path).await.unwrap();
+    let opened = ns.open_file(&parse_path(path)).await.unwrap();
     let mut bytes = Vec::new();
     loop {
         let chunk = ns

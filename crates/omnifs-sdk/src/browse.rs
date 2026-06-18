@@ -165,7 +165,7 @@ impl Effects {
     pub fn project_dir(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
         self.fs.push(wit_types::FsWrite {
             id: None,
-            path: wire_path(path.as_ref())?,
+            path: wire_path(path.as_ref())?.into(),
             kind: wit_types::FsKind::Directory(false),
         });
         Ok(self)
@@ -178,7 +178,7 @@ impl Effects {
     pub fn project_dir_exhaustive(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
         self.fs.push(wit_types::FsWrite {
             id: None,
-            path: wire_path(path.as_ref())?,
+            path: wire_path(path.as_ref())?.into(),
             kind: wit_types::FsKind::Directory(true),
         });
         Ok(self)
@@ -191,7 +191,7 @@ impl Effects {
         file.validate()?;
         self.fs.push(wit_types::FsWrite {
             id: None,
-            path: wire_path(path.as_ref())?,
+            path: wire_path(path.as_ref())?.into(),
             kind: wit_types::FsKind::File(file.into()),
         });
         Ok(self)
@@ -236,7 +236,7 @@ impl Effects {
         file.validate()?;
         self.fs.push(wit_types::FsWrite {
             id: id.map(Into::into),
-            path: wire_path(path.as_ref())?,
+            path: wire_path(path.as_ref())?.into(),
             kind: wit_types::FsKind::File(file.into()),
         });
         Ok(self)
@@ -256,7 +256,7 @@ impl Effects {
     pub fn invalidate_listing_path(&mut self, path: impl AsRef<str>) -> &mut Self {
         let path = wire_path(path.as_ref()).expect("invalidation path must be a protocol path");
         self.invalidations.push(wit_types::Invalidation::Listing(
-            wit_types::PathOrPrefix::Path(path),
+            wit_types::PathOrPrefix::Path(path.into()),
         ));
         self
     }
@@ -267,7 +267,7 @@ impl Effects {
         let prefix =
             wire_path(prefix.as_ref()).expect("invalidation prefix must be a protocol path");
         self.invalidations.push(wit_types::Invalidation::Listing(
-            wit_types::PathOrPrefix::Prefix(prefix),
+            wit_types::PathOrPrefix::Prefix(prefix.into()),
         ));
         self
     }
@@ -785,13 +785,11 @@ impl From<FileContent> for wit_types::ReadFileResult {
 /// Normalize an effect path to protocol form: tolerate a missing leading
 /// slash, then validate through `Path::parse` so malformed paths surface
 /// as invalid-input here instead of corrupting the view cache.
-fn wire_path(path: &str) -> Result<String> {
+fn wire_path(path: &str) -> Result<Path> {
     let absolute = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
     };
-    Path::parse(&absolute)
-        .map(|path| path.as_str().to_string())
-        .map_err(|error| ProviderError::invalid_input(error.to_string()))
+    Path::parse(&absolute).map_err(|error| ProviderError::invalid_input(error.to_string()))
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use omnifs_cache::Caches;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::{DirentsPayload, FilePayload, LookupPayload};
 use omnifs_host::clock::now_millis;
 use omnifs_host::cloner::GitCloner;
@@ -13,6 +13,10 @@ use omnifs_itest::{
 };
 use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
+
+fn p(value: &str) -> Path {
+    Path::parse(value).unwrap()
+}
 
 fn test_dirs<'a>(
     cache_dir: &'a std::path::Path,
@@ -39,7 +43,7 @@ async fn test_list_root() {
     let result = harness
         .runtime
         .namespace()
-        .list_children("/", None, None, None)
+        .list_children(&p("/"), None, None, None)
         .await
         .unwrap();
     match result {
@@ -74,7 +78,7 @@ async fn test_list_hello_dir() {
     let result = harness
         .runtime
         .namespace()
-        .list_children("/hello", None, None, None)
+        .list_children(&p("/hello"), None, None, None)
         .await
         .unwrap();
     match result {
@@ -118,7 +122,7 @@ async fn test_list_projects_nested_files_into_cache() {
     let result = harness
         .runtime
         .namespace()
-        .list_children("/hello", None, None, None)
+        .list_children(&p("/hello"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -128,19 +132,19 @@ async fn test_list_projects_nested_files_into_cache() {
 
     let title = harness
         .runtime
-        .cache_get("/hello/bundle/title", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
         .expect("bundle title should be projected");
     let body = harness
         .runtime
-        .cache_get("/hello/bundle/body", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
         .expect("bundle body should be projected");
     let empty = harness
         .runtime
-        .cache_get("/hello/bundle/empty", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/empty"), RecordKind::File, None)
         .expect("bundle empty file should be projected");
     let bundle_dirents = harness
         .runtime
-        .cache_get("/hello/bundle", RecordKind::Dirents, None)
+        .cache_get(&p("/hello/bundle"), RecordKind::Dirents, None)
         .expect("bundle dirents should be projected");
     assert_eq!(file_payload(&title).content, b"title".to_vec());
     assert_eq!(file_payload(&body).content, b"body".to_vec());
@@ -174,7 +178,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
     let result = harness
         .runtime
         .namespace()
-        .list_children("/hello/bundle", None, None, None)
+        .list_children(&p("/hello/bundle"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -184,11 +188,11 @@ async fn test_list_projects_direct_file_content_into_cache() {
 
     let title = harness
         .runtime
-        .cache_get("/hello/bundle/title", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
         .expect("projected title should be cached at its own path");
     let body = harness
         .runtime
-        .cache_get("/hello/bundle/body", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
         .expect("projected body should be cached at its own path");
 
     assert_eq!(file_payload(&title).content, b"title".to_vec());
@@ -196,7 +200,7 @@ async fn test_list_projects_direct_file_content_into_cache() {
     assert!(
         harness
             .runtime
-            .cache_get("/hello/bundle/title/title", RecordKind::File, None)
+            .cache_get(&p("/hello/bundle/title/title"), RecordKind::File, None)
             .is_none(),
         "projected file content must not be nested under itself"
     );
@@ -217,14 +221,14 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     );
 
     let path = "/hello/fresh-full";
-    let content_type = OmnifsPath::parse(path)
+    let content_type = Path::parse(path)
         .unwrap()
         .content_type_mime(None)
         .to_string();
     let first = harness
         .runtime
         .namespace()
-        .read_file(path, content_type.clone(), None)
+        .read_file(&p(path), content_type.clone(), None)
         .await
         .unwrap();
     assert_eq!(inline_content(&first), b"fresh-full-1\n");
@@ -233,7 +237,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     assert!(
         harness
             .runtime
-            .cache_get(path, RecordKind::File, None)
+            .cache_get(&p(path), RecordKind::File, None)
             .is_none(),
         "unversioned dynamic full-read bytes must not be durably cached",
     );
@@ -241,14 +245,14 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let second = harness
         .runtime
         .namespace()
-        .read_file(path, content_type, None)
+        .read_file(&p(path), content_type, None)
         .await
         .unwrap();
     assert_eq!(inline_content(&second), b"fresh-full-2\n");
     assert!(
         harness
             .runtime
-            .cache_get(path, RecordKind::File, None)
+            .cache_get(&p(path), RecordKind::File, None)
             .is_none(),
         "second unversioned dynamic read must not create a durable file payload",
     );
@@ -271,8 +275,8 @@ async fn test_read_file() {
         .runtime
         .namespace()
         .read_file(
-            "/hello/message",
-            OmnifsPath::parse("/hello/message")
+            &p("/hello/message"),
+            Path::parse("/hello/message")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -286,8 +290,8 @@ async fn test_read_file() {
         .runtime
         .namespace()
         .read_file(
-            "/hello/lazy",
-            OmnifsPath::parse("/hello/lazy")
+            &p("/hello/lazy"),
+            Path::parse("/hello/lazy")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -315,7 +319,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children("/hello", None, None, None)
+        .list_children(&p("/hello"), None, None, None)
         .await
         .unwrap();
     match listing {
@@ -327,8 +331,8 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
         .runtime
         .namespace()
         .read_file(
-            "/hello/projected",
-            OmnifsPath::parse("/hello/projected")
+            &p("/hello/projected"),
+            Path::parse("/hello/projected")
                 .unwrap()
                 .content_type_mime(None)
                 .to_string(),
@@ -340,7 +344,7 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 
     let dirents_record = harness
         .runtime
-        .cache_get("/hello", RecordKind::Dirents, None)
+        .cache_get(&p("/hello"), RecordKind::Dirents, None)
         .expect("hello dirents should stay cached");
     let dirents = DirentsPayload::deserialize(&dirents_record.payload)
         .expect("dirents payload should deserialize");
@@ -372,11 +376,11 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
 
     let body = harness
         .runtime
-        .cache_get("/hello/body", RecordKind::File, None)
+        .cache_get(&p("/hello/body"), RecordKind::File, None)
         .expect("body sibling projection should be cached");
     let state = harness
         .runtime
-        .cache_get("/hello/state", RecordKind::File, None)
+        .cache_get(&p("/hello/state"), RecordKind::File, None)
         .expect("state sibling projection should be cached");
     assert_eq!(file_payload(&body).content, b"body\n");
     assert_eq!(file_payload(&state).content, b"open\n");
@@ -399,7 +403,7 @@ async fn test_ranged_open_read_chunk_contract() {
     let opened = harness
         .runtime
         .namespace()
-        .open_file("/hello/ranged")
+        .open_file(&p("/hello/ranged"))
         .await
         .unwrap();
     assert!(matches!(opened.attrs.size, FileSize::Exact(26)));
@@ -444,7 +448,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     let opened = harness
         .runtime
         .namespace()
-        .open_file("/hello/unknown-ranged")
+        .open_file(&p("/hello/unknown-ranged"))
         .await
         .unwrap();
     assert!(matches!(opened.attrs.size, FileSize::Unknown));
@@ -461,7 +465,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     let opened = harness
         .runtime
         .namespace()
-        .open_file("/hello/volatile-tail")
+        .open_file(&p("/hello/volatile-tail"))
         .await
         .unwrap();
     assert_eq!(opened.attrs.stability, Stability::Live);
@@ -484,7 +488,7 @@ async fn test_lookup_child() {
     let result = harness
         .runtime
         .namespace()
-        .lookup_child("/", "hello", None)
+        .lookup_child(&p("/"), "hello", None)
         .await
         .unwrap();
     match result {
@@ -498,7 +502,7 @@ async fn test_lookup_child() {
     let exact_file = harness
         .runtime
         .namespace()
-        .lookup_child("/hello", "lazy", None)
+        .lookup_child(&p("/hello"), "lazy", None)
         .await
         .unwrap();
     match exact_file {
@@ -511,7 +515,7 @@ async fn test_lookup_child() {
 
     let cached_lookup = harness
         .runtime
-        .cache_get("/hello/lazy", RecordKind::Lookup, None)
+        .cache_get(&p("/hello/lazy"), RecordKind::Lookup, None)
         .expect("lookup entry should be materialized");
     assert!(
         matches!(
@@ -524,7 +528,7 @@ async fn test_lookup_child() {
     let missing = harness
         .runtime
         .namespace()
-        .lookup_child("/hello", "missing", None)
+        .lookup_child(&p("/hello"), "missing", None)
         .await
         .unwrap();
     assert!(
@@ -535,14 +539,14 @@ async fn test_lookup_child() {
     assert!(
         harness
             .runtime
-            .cache_get("/hello/missing", RecordKind::Lookup, None)
+            .cache_get(&p("/hello/missing"), RecordKind::Lookup, None)
             .is_none(),
         "lookup miss must not create a non-expiring view-cache record"
     );
     assert!(
         harness
             .runtime
-            .negative_for("/hello/missing", now_millis())
+            .negative_for(&p("/hello/missing"), now_millis())
             .is_some(),
         "lookup miss should update the live negative index"
     );
@@ -565,7 +569,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let lookup_error = harness
         .runtime
         .namespace()
-        .lookup_child("/", "checkout", None)
+        .lookup_child(&p("/"), "checkout", None)
         .await
         .unwrap_err();
     assert!(
@@ -578,7 +582,7 @@ async fn test_subtree_handoff_rejects_unknown_tree_ref() {
     let listing_error = harness
         .runtime
         .namespace()
-        .list_children("/checkout", None, None, None)
+        .list_children(&p("/checkout"), None, None, None)
         .await
         .unwrap_err();
     assert!(
@@ -611,7 +615,7 @@ async fn test_list_projects_adjacent_files_into_cache() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children("/hello/bundle", None, None, None)
+        .list_children(&p("/hello/bundle"), None, None, None)
         .await
         .unwrap();
     match &listing {
@@ -622,15 +626,15 @@ async fn test_list_projects_adjacent_files_into_cache() {
     // Verify the projection effects were cached.
     let title = harness
         .runtime
-        .cache_get("/hello/bundle/title", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/title"), RecordKind::File, None)
         .expect("title should be in cache");
     let body = harness
         .runtime
-        .cache_get("/hello/bundle/body", RecordKind::File, None)
+        .cache_get(&p("/hello/bundle/body"), RecordKind::File, None)
         .expect("body should be in cache");
     let bundle_dirents = harness
         .runtime
-        .cache_get("/hello/bundle", RecordKind::Dirents, None)
+        .cache_get(&p("/hello/bundle"), RecordKind::Dirents, None)
         .expect("bundle dirents should be in cache");
 
     assert_eq!(file_payload(&title).content, b"title".to_vec());
@@ -664,7 +668,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     let result = harness
         .runtime
         .namespace()
-        .lookup_child("/hello", "snapshot", None)
+        .lookup_child(&p("/hello"), "snapshot", None)
         .await
         .unwrap();
 
@@ -678,7 +682,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
 
     let parent_dirents = harness
         .runtime
-        .cache_get("/hello", RecordKind::Dirents, None)
+        .cache_get(&p("/hello"), RecordKind::Dirents, None)
         .expect("lookup should materialize parent dirents");
     let parent_dirents =
         DirentsPayload::deserialize(&parent_dirents.payload).expect("dirents must deserialize");
@@ -712,7 +716,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     let listing = harness
         .runtime
         .namespace()
-        .list_children("/hello/snapshot", None, None, None)
+        .list_children(&p("/hello/snapshot"), None, None, None)
         .await
         .unwrap();
     match &listing {
@@ -722,7 +726,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
 
     let dirents_record = harness
         .runtime
-        .cache_get("/hello/snapshot", RecordKind::Dirents, None)
+        .cache_get(&p("/hello/snapshot"), RecordKind::Dirents, None)
         .expect("snapshot dirents should be cached");
     let dirents = DirentsPayload::deserialize(&dirents_record.payload)
         .expect("dirents payload should deserialize");
@@ -742,7 +746,7 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
     // The `status` file the handler preloads is cached alongside the listing.
     let status = harness
         .runtime
-        .cache_get("/hello/snapshot/status", RecordKind::File, None)
+        .cache_get(&p("/hello/snapshot/status"), RecordKind::File, None)
         .expect("status file preload should be cached");
     assert_eq!(file_payload(&status).content, b"open\n");
 }
@@ -759,32 +763,32 @@ fn cache_delete_prefix_respects_segment_boundaries() {
 
     harness
         .runtime
-        .cache_put("/owner/repo", RecordKind::Attr, None, &record);
+        .cache_put(&p("/owner/repo"), RecordKind::Attr, None, &record);
     harness
         .runtime
-        .cache_put("/owner/repo/issues", RecordKind::Attr, None, &record);
+        .cache_put(&p("/owner/repo/issues"), RecordKind::Attr, None, &record);
     harness
         .runtime
-        .cache_put("/owner/repobaz", RecordKind::Attr, None, &record);
+        .cache_put(&p("/owner/repobaz"), RecordKind::Attr, None, &record);
 
-    harness.runtime.cache_delete_prefix("/owner/repo");
+    harness.runtime.cache_delete_prefix(&p("/owner/repo"));
 
     assert!(
         harness
             .runtime
-            .cache_get("/owner/repo", RecordKind::Attr, None)
+            .cache_get(&p("/owner/repo"), RecordKind::Attr, None)
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cache_get("/owner/repo/issues", RecordKind::Attr, None)
+            .cache_get(&p("/owner/repo/issues"), RecordKind::Attr, None)
             .is_none()
     );
     assert!(
         harness
             .runtime
-            .cache_get("/owner/repobaz", RecordKind::Attr, None)
+            .cache_get(&p("/owner/repobaz"), RecordKind::Attr, None)
             .is_some()
     );
 }
@@ -856,41 +860,41 @@ async fn test_cache_isolated_by_mount_name() {
 
     let result = runtime_a
         .namespace()
-        .list_children("/hello", None, None, None)
+        .list_children(&p("/hello"), None, None, None)
         .await
         .unwrap();
     assert!(matches!(result, ListChildrenResult::Entries(_)));
     assert!(
         runtime_a
-            .cache_get("/hello", RecordKind::Dirents, None)
+            .cache_get(&p("/hello"), RecordKind::Dirents, None)
             .is_some()
     );
     assert!(
         runtime_b
-            .cache_get("/hello", RecordKind::Dirents, None)
+            .cache_get(&p("/hello"), RecordKind::Dirents, None)
             .is_none()
     );
 
     let scoped_a = runtime_a
         .namespace()
-        .list_children("/scoped", None, None, None)
+        .list_children(&p("/scoped"), None, None, None)
         .await
         .unwrap();
     let scoped_b = runtime_b
         .namespace()
-        .list_children("/scoped", None, None, None)
+        .list_children(&p("/scoped"), None, None, None)
         .await
         .unwrap();
     assert!(matches!(scoped_a, ListChildrenResult::Entries(_)));
     assert!(matches!(scoped_b, ListChildrenResult::Entries(_)));
     assert!(
         runtime_a
-            .cache_get("/scoped/item", RecordKind::Lookup, None)
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
             .is_some()
     );
     assert!(
         runtime_b
-            .cache_get("/scoped/item", RecordKind::Lookup, None)
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
             .is_some()
     );
 
@@ -898,18 +902,18 @@ async fn test_cache_isolated_by_mount_name() {
     assert!(matches!(tick, OpResult::OnEvent));
     assert!(
         runtime_a
-            .cache_get("/scoped/item", RecordKind::Lookup, None)
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
             .is_none()
     );
     assert!(
         runtime_b
-            .cache_get("/scoped/item", RecordKind::Lookup, None)
+            .cache_get(&p("/scoped/item"), RecordKind::Lookup, None)
             .is_some()
     );
     assert!(
         runtime_a
             .drain_invalidated_paths()
             .into_iter()
-            .any(|path| path == "/scoped/item")
+            .any(|path| path.as_str() == "/scoped/item")
     );
 }

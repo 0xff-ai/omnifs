@@ -10,7 +10,8 @@
 //! `Caches` holds the two global cache handles (one durable `object.redb` and
 //! one non-durable `view.redb` deleted on startup). It is opened once at
 //! process start and shared via `Arc`. `Caches::mount(name)` returns a
-//! per-mount `Store` that scopes all keys with `"{mount}\x1f{key}"`.
+//! per-mount `Store` that scopes view keys as typed `/{mount}{path}` paths and
+//! object keys with the object tier's byte separator.
 //!
 //! The per-mount generation fence lives in `Store`: each `Store` owns an
 //! atomic generation counter and a tombstone map. Object writes are rejected
@@ -28,9 +29,10 @@ pub const SCHEMA_VERSION: u8 = 7;
 pub mod object;
 pub mod view;
 
-use omnifs_core::path::Path as ProtocolPath;
+use omnifs_core::path::{Path, Segment};
 use std::collections::HashSet;
-use std::path::Path;
+use std::fmt;
+use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,6 +56,34 @@ pub struct CanonicalBatchEntry {
     pub bytes: Vec<u8>,
     pub validator: Option<String>,
     pub view_leaves: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WirePathError {
+    path: String,
+}
+
+impl fmt::Display for WirePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid protocol path `{}`", self.path)
+    }
+}
+
+impl std::error::Error for WirePathError {}
+
+pub fn parse_wire_paths(paths: &[String]) -> Result<Vec<Path>, WirePathError> {
+    paths
+        .iter()
+        .map(|path| {
+            Path::parse(path).map_err(|_| {
+                tracing::warn!(
+                    path = path.as_str(),
+                    "wire path is not a valid protocol path; rejecting cache store"
+                );
+                WirePathError { path: path.clone() }
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,27 +111,23 @@ impl RecordKind {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct Key {
-    pub path: String,
+    pub path: Path,
     pub kind: RecordKind,
     pub aux: Option<String>,
 }
 
 impl Key {
-    pub fn new(path: impl Into<String>, kind: RecordKind) -> Self {
+    pub fn new(path: &Path, kind: RecordKind) -> Self {
         Self {
-            path: path.into(),
+            path: path.clone(),
             kind,
             aux: None,
         }
     }
 
-    pub fn with_aux(
-        path: impl Into<String>,
-        kind: RecordKind,
-        aux: Option<impl Into<String>>,
-    ) -> Self {
+    pub fn with_aux(path: &Path, kind: RecordKind, aux: Option<impl Into<String>>) -> Self {
         Self {
-            path: path.into(),
+            path: path.clone(),
             kind,
             aux: aux.map(Into::into),
         }
@@ -117,21 +143,16 @@ pub struct Record {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchRecord {
-    pub path: String,
+    pub path: Path,
     pub kind: RecordKind,
     pub aux: Option<String>,
     pub record: Record,
 }
 
 impl BatchRecord {
-    pub fn new(
-        path: impl Into<String>,
-        kind: RecordKind,
-        aux: Option<String>,
-        record: Record,
-    ) -> Self {
+    pub fn new(path: Path, kind: RecordKind, aux: Option<String>, record: Record) -> Self {
         Self {
-            path: path.into(),
+            path,
             kind,
             aux,
             record,
@@ -221,24 +242,17 @@ impl Caches {
     ///
     /// Creates `dir/object.redb` (durable) and deletes+recreates
     /// `dir/view.redb` (non-durable, always cold, Codex #5).
-    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>> {
+    pub fn open(dir: &StdPath) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let object = object::Cache::open(&dir.join("object.redb"))?;
         let view = view::Cache::open(&dir.join("view.redb"))?;
         Ok(Arc::new(Self { object, view }))
     }
 
-    /// Return a per-mount `Store` facade. All keys for this store are scoped
-    /// with `"{mount}\x1f"` by `Store::scoped`.
+    /// Return a per-mount `Store` facade. View keys are scoped by
+    /// `Store::scoped`; object-tier keys use the store's byte separator.
     pub fn mount(self: &Arc<Self>, mount: impl Into<String>) -> Store {
-        Store {
-            caches: Arc::clone(self),
-            mount: mount.into(),
-            generation: AtomicU64::new(0),
-            tombstones: DashMap::new(),
-            negatives: DashMap::new(),
-            neg_by_id: DashMap::new(),
-        }
+        Store::new(Arc::clone(self), mount)
     }
 }
 
@@ -260,6 +274,7 @@ pub struct Negative {
 pub struct Store {
     caches: Arc<Caches>,
     mount: String,
+    mount_segment: Segment,
     generation: AtomicU64,
     /// Scoped `ObjectId` bytes → generation at which the id was invalidated.
     tombstones: DashMap<Vec<u8>, u64>,
@@ -270,6 +285,21 @@ pub struct Store {
 }
 
 impl Store {
+    fn new(caches: Arc<Caches>, mount: impl Into<String>) -> Self {
+        let mount = mount.into();
+        let mount_segment =
+            Segment::try_from(mount.as_str()).expect("store mount must be a path segment");
+        Self {
+            caches,
+            mount,
+            mount_segment,
+            generation: AtomicU64::new(0),
+            tombstones: DashMap::new(),
+            negatives: DashMap::new(),
+            neg_by_id: DashMap::new(),
+        }
+    }
+
     /// Construct an in-memory-only `Store` backed by an in-memory view cache
     /// and no durable object cache. Used by tests that don't need persistence.
     pub fn new_in_memory(mount: impl Into<String>) -> Self {
@@ -288,19 +318,17 @@ impl Store {
             },
             view: view::Cache::new(),
         });
-        Self {
-            caches,
-            mount: mount.into(),
-            generation: AtomicU64::new(0),
-            tombstones: DashMap::new(),
-            negatives: DashMap::new(),
-            neg_by_id: DashMap::new(),
-        }
+        Self::new(caches, mount)
     }
 
-    /// Scoped view/path key: `"{mount}\x1f{path}"`.
-    fn scoped(&self, key: &str) -> String {
-        format!("{}\x1f{key}", self.mount)
+    /// Scoped view-cache key as a valid protocol path: `/{mount}{path}`.
+    fn scoped(&self, path: &Path) -> Path {
+        let mut scoped = Path::root().join_segment(&self.mount_segment);
+        for segment in path.segments() {
+            let segment = Segment::try_from(segment).expect("validated path segment");
+            scoped = scoped.join_segment(&segment);
+        }
+        scoped
     }
 
     /// Scoped `ObjectId` bytes: `mount.as_bytes() ++ [0x1F] ++ id`.
@@ -317,6 +345,24 @@ impl Store {
         key.push(0x1f);
         key.extend_from_slice(path.as_bytes());
         key
+    }
+
+    /// Scoped object-cache leaf key: `mount\x1f{path}`.
+    fn scoped_object_leaf(&self, path: &Path) -> String {
+        let mut key = self.mount.clone();
+        key.push('\x1f');
+        key.push_str(path.as_str());
+        key
+    }
+
+    /// Convert an object-cache leaf key back to this mount's typed view path.
+    fn view_path_from_object_leaf(&self, scoped_leaf: &str) -> Option<Path> {
+        let (mount, path) = scoped_leaf.split_once('\x1f')?;
+        if mount != self.mount {
+            return None;
+        }
+        let path = Path::parse(path).ok()?;
+        Some(self.scoped(&path))
     }
 
     fn host_id_from_scoped(&self, scoped_id: &[u8]) -> Option<Vec<u8>> {
@@ -342,7 +388,7 @@ impl Store {
 
     /// Whether a view write for `path` derived at `op_gen` must be dropped
     /// because the path's object id carries a tombstone newer than `op_gen`.
-    pub fn write_fenced(&self, path: &ProtocolPath, op_gen: u64) -> bool {
+    pub fn write_fenced(&self, path: &Path, op_gen: u64) -> bool {
         let scoped_path = self.scoped_path_bytes(path.as_str());
         let Some(scoped_id) = self.caches.object.id_of(&scoped_path) else {
             return false;
@@ -352,29 +398,17 @@ impl Store {
 
     // --- View cache reads -----------------------------------------------------
 
-    pub fn cache_get(
-        &self,
-        path: &ProtocolPath,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<Record> {
+    pub fn cache_get(&self, path: &Path, kind: RecordKind, aux: Option<&str>) -> Option<Record> {
         self.caches
             .view
-            .get(&Key::with_aux(self.scoped(path.as_str()), kind, aux))
+            .get(&Key::with_aux(&self.scoped(path), kind, aux))
             .map(|arc| (*arc).clone())
     }
 
-    pub fn cache_put(
-        &self,
-        path: &ProtocolPath,
-        kind: RecordKind,
-        aux: Option<&str>,
-        record: &Record,
-    ) {
-        self.caches.view.put(
-            &Key::with_aux(self.scoped(path.as_str()), kind, aux),
-            record,
-        );
+    pub fn cache_put(&self, path: &Path, kind: RecordKind, aux: Option<&str>, record: &Record) {
+        self.caches
+            .view
+            .put(&Key::with_aux(&self.scoped(path), kind, aux), record);
     }
 
     pub fn cache_put_batch(&self, records: &[BatchRecord]) {
@@ -395,21 +429,16 @@ impl Store {
 
     // --- Mem-only operations (FUSE pagination accumulator) ----------------
 
-    pub fn mem_get(
-        &self,
-        path: &ProtocolPath,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<Arc<Record>> {
+    pub fn mem_get(&self, path: &Path, kind: RecordKind, aux: Option<&str>) -> Option<Arc<Record>> {
         self.caches
             .view
-            .mem_get(&Key::with_aux(self.scoped(path.as_str()), kind, aux))
+            .mem_get(&Key::with_aux(&self.scoped(path), kind, aux))
     }
 
-    pub fn mem_invalidate(&self, path: &ProtocolPath, kind: RecordKind, aux: Option<&str>) {
+    pub fn mem_invalidate(&self, path: &Path, kind: RecordKind, aux: Option<&str>) {
         self.caches
             .view
-            .mem_invalidate(&Key::with_aux(self.scoped(path.as_str()), kind, aux));
+            .mem_invalidate(&Key::with_aux(&self.scoped(path), kind, aux));
     }
 
     pub fn mem_invalidate_entries_if<P>(&self, predicate: P)
@@ -418,15 +447,18 @@ impl Store {
     {
         // The cache sees scoped keys, but callers predicate on mount-local
         // paths; strip this store's mount prefix before delegating.
-        let mount_prefix = format!("{}\x1f", self.mount);
+        let mount_prefix = self.scoped(&Path::root());
         self.caches.view.mem_invalidate_entries_if(move |k, v| {
             // Only match keys belonging to this mount.
-            if !k.path.starts_with(mount_prefix.as_str()) {
+            if !k.path.has_prefix(&mount_prefix) {
                 return false;
             }
             // Strip the mount prefix before passing to the caller's predicate.
+            let Some(path) = k.path.strip_prefix(&mount_prefix) else {
+                return false;
+            };
             let unscoped_key = Key {
-                path: k.path[mount_prefix.len()..].to_string(),
+                path,
                 kind: k.kind,
                 aux: k.aux.clone(),
             };
@@ -438,7 +470,7 @@ impl Store {
 
     /// Warm-read input: path → id → bytes + validator. Returns opaque host id
     /// bytes (mount prefix stripped). `None` when no canonical is indexed.
-    pub fn cached_canonical_for(&self, path: &ProtocolPath) -> Option<CachedCanonical> {
+    pub fn cached_canonical_for(&self, path: &Path) -> Option<CachedCanonical> {
         let scoped_path = self.scoped_path_bytes(path.as_str());
         let scoped_id = self.caches.object.id_of(&scoped_path)?;
         let obj = self.caches.object.get(&scoped_id)?;
@@ -465,13 +497,21 @@ impl Store {
             return false;
         }
 
-        let scoped_leaves: Vec<String> = view_leaves.iter().map(|p| self.scoped(p)).collect();
+        let Ok(view_leaves) = parse_wire_paths(view_leaves) else {
+            return false;
+        };
+        let scoped_leaves: Vec<String> = view_leaves
+            .iter()
+            .map(|p| self.scoped_object_leaf(p))
+            .collect();
         let canonical = object::Canonical { bytes, validator };
         let view = &self.caches.view;
         self.caches
             .object
             .store(&scoped_id, canonical, &scoped_leaves, |scoped_leaf| {
-                view.delete_exact(scoped_leaf);
+                if let Some(path) = self.view_path_from_object_leaf(scoped_leaf) {
+                    view.delete_exact(&path);
+                }
             })
     }
 
@@ -481,23 +521,35 @@ impl Store {
     ///
     /// Ownership is consumed so the caller need not clone; the function drains
     /// the Vec.
-    pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) {
+    pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) -> bool {
+        let entries: Vec<(CanonicalBatchEntry, Vec<Path>)> = match entries
+            .into_iter()
+            .map(|entry| parse_wire_paths(&entry.view_leaves).map(|leaves| (entry, leaves)))
+            .collect()
+        {
+            Ok(entries) => entries,
+            Err(_) => return false,
+        };
         let view = &self.caches.view;
 
         // Per-entry fence check and view eviction; collect accepted entries.
         let batch: Vec<object::StoreBatchEntry> = entries
             .into_iter()
-            .filter_map(|entry| {
+            .filter_map(|(entry, view_leaves)| {
                 let scoped_id = self.scoped_id(&entry.id);
                 if self.id_tombstoned_after(&scoped_id, op_gen) {
                     return None;
                 }
                 // Evict prior view leaves before the object is replaced.
                 for scoped_leaf in self.caches.object.leaves_of(&scoped_id) {
-                    view.delete_exact(&scoped_leaf);
+                    if let Some(path) = self.view_path_from_object_leaf(&scoped_leaf) {
+                        view.delete_exact(&path);
+                    }
                 }
-                let scoped_leaves: Vec<String> =
-                    entry.view_leaves.iter().map(|p| self.scoped(p)).collect();
+                let scoped_leaves: Vec<String> = view_leaves
+                    .iter()
+                    .map(|p| self.scoped_object_leaf(p))
+                    .collect();
                 Some(object::StoreBatchEntry {
                     scoped_id,
                     canonical: object::Canonical {
@@ -510,6 +562,7 @@ impl Store {
             .collect();
 
         self.caches.object.store_batch(&batch);
+        true
     }
 
     /// Preload index-only store, fenced. Canonical-beats-preload in the object tier.
@@ -518,7 +571,13 @@ impl Store {
         if self.id_tombstoned_after(&scoped_id, op_gen) {
             return false;
         }
-        let scoped_leaves: Vec<String> = view_leaves.iter().map(|p| self.scoped(p)).collect();
+        let Ok(view_leaves) = parse_wire_paths(view_leaves) else {
+            return false;
+        };
+        let scoped_leaves: Vec<String> = view_leaves
+            .iter()
+            .map(|p| self.scoped_object_leaf(p))
+            .collect();
         self.caches
             .object
             .store_index_only(&scoped_id, &scoped_leaves)
@@ -527,7 +586,7 @@ impl Store {
     /// Store a fenced negative for `path`. Rejected when the id tombstone is newer than `op_gen`.
     pub fn put_negative(
         &self,
-        path: &ProtocolPath,
+        path: &Path,
         id: Option<&[u8]>,
         op_gen: u64,
         ttl_millis: u64,
@@ -540,7 +599,7 @@ impl Store {
             }
         }
 
-        let scoped_path = self.scoped(path.as_str());
+        let scoped_path = self.scoped(path).to_string();
         let expires_at = ttl_millis
             .checked_add(now_millis)
             .filter(|_| ttl_millis > 0);
@@ -560,7 +619,7 @@ impl Store {
     }
 
     /// Forward index: unscoped path → host `ObjectId` bytes (mount prefix stripped).
-    pub fn id_of_path(&self, path: &ProtocolPath) -> Option<Vec<u8>> {
+    pub fn id_of_path(&self, path: &Path) -> Option<Vec<u8>> {
         let scoped_path = self.scoped_path_bytes(path.as_str());
         self.caches
             .object
@@ -569,21 +628,26 @@ impl Store {
     }
 
     /// Reverse index: host `ObjectId` bytes → current alias paths (mount prefix stripped).
-    pub fn paths_for_id(&self, id: &[u8]) -> Vec<String> {
+    pub fn paths_for_id(&self, id: &[u8]) -> Vec<Path> {
         let scoped_id = self.scoped_id(id);
-        let prefix = format!("{}\x1f", self.mount);
+        let mut prefix = self.mount.clone();
+        prefix.push('\x1f');
         self.caches
             .object
             .leaves_of(&scoped_id)
             .into_iter()
-            .filter_map(|scoped_leaf| scoped_leaf.strip_prefix(&prefix).map(str::to_string))
+            .filter_map(|scoped_leaf| {
+                scoped_leaf
+                    .strip_prefix(&prefix)
+                    .and_then(|path| Path::parse(path).ok())
+            })
             .collect()
     }
 
     /// Write a view leaf's records and its shared freshness stamp.
     pub fn cache_view_leaf(
         &self,
-        path: &ProtocolPath,
+        path: &Path,
         records: &[BatchRecord],
         expires_at: Option<u64>,
         op_gen: u64,
@@ -593,7 +657,7 @@ impl Store {
         }
         self.cache_put_batch(records);
         self.caches.view.put_freshness(
-            &self.scoped(path.as_str()),
+            self.scoped(path).as_str(),
             view::Freshness {
                 expires_at,
                 generation: op_gen,
@@ -605,13 +669,13 @@ impl Store {
     /// Freshness-aware view read: returns `None` when the leaf is past its deadline.
     pub fn view_get(
         &self,
-        path: &ProtocolPath,
+        path: &Path,
         kind: RecordKind,
         aux: Option<&str>,
         now_millis: u64,
     ) -> Option<Record> {
-        let scoped = self.scoped(path.as_str());
-        if let Some(f) = self.caches.view.get_freshness(&scoped)
+        let scoped = self.scoped(path);
+        if let Some(f) = self.caches.view.get_freshness(scoped.as_str())
             && f.expires_at.is_some_and(|exp| now_millis >= exp)
         {
             return None;
@@ -623,20 +687,20 @@ impl Store {
     /// callers own payload decoding, merging, and re-encoding.
     pub fn update_metadata_record<F>(
         &self,
-        path: &ProtocolPath,
+        path: &Path,
         kind: RecordKind,
         aux: Option<&str>,
         update: F,
     ) where
         F: FnOnce(Option<Record>) -> Option<Record>,
     {
-        let key = Key::with_aux(self.scoped(path.as_str()), kind, aux);
+        let key = Key::with_aux(&self.scoped(path), kind, aux);
         self.caches.view.update_metadata_record(&key, update);
     }
 
     /// Live negative for `path`. `None` when absent or expired.
-    pub fn negative_for(&self, path: &ProtocolPath, now_millis: u64) -> Option<Negative> {
-        let scoped_path = self.scoped(path.as_str());
+    pub fn negative_for(&self, path: &Path, now_millis: u64) -> Option<Negative> {
+        let scoped_path = self.scoped(path).to_string();
         let neg = self.negatives.get(&scoped_path)?;
         if neg.expires_at.is_some_and(|exp| now_millis >= exp) {
             return None;
@@ -654,9 +718,11 @@ impl Store {
         self.clear_negatives_for_id(&scoped_id);
 
         let view = &self.caches.view;
-        self.caches
-            .object
-            .evict_object(&scoped_id, |scoped_leaf| view.delete_exact(scoped_leaf));
+        self.caches.object.evict_object(&scoped_id, |scoped_leaf| {
+            if let Some(path) = self.view_path_from_object_leaf(scoped_leaf) {
+                view.delete_exact(&path);
+            }
+        });
         self.gc_tombstones();
         if self.negatives.len() > NEGATIVES_SOFT_CAP {
             self.gc_negatives(now_millis_for_gc());
@@ -664,15 +730,13 @@ impl Store {
     }
 
     /// View-only listing invalidation at an exact path.
-    pub fn delete_listing_path(&self, path: &ProtocolPath) {
-        self.caches.view.delete_exact(&self.scoped(path.as_str()));
+    pub fn delete_listing_path(&self, path: &Path) {
+        self.caches.view.delete_exact(&self.scoped(path));
     }
 
     /// View-only listing invalidation under a prefix (segment boundary).
-    pub fn delete_listing_prefix(&self, prefix: &ProtocolPath) {
-        self.caches
-            .view
-            .invalidate_scoped_prefix(&self.scoped(prefix.as_str()));
+    pub fn delete_listing_prefix(&self, prefix: &Path) {
+        self.caches.view.invalidate_prefix(&self.scoped(prefix));
     }
 
     // --- Private helpers ------------------------------------------------------
@@ -728,14 +792,8 @@ impl Store {
     }
 }
 
-pub(crate) fn path_prefix_matches(prefix: &str, path: &str) -> bool {
-    let Ok(prefix) = omnifs_core::path::Path::parse(prefix) else {
-        return false;
-    };
-    let Ok(path) = omnifs_core::path::Path::parse(path) else {
-        return false;
-    };
-    path.has_prefix(&prefix)
+pub(crate) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
+    path.has_prefix(prefix)
 }
 
 #[cfg(test)]
@@ -763,8 +821,8 @@ mod tests {
         key
     }
 
-    fn p(path: &str) -> ProtocolPath {
-        ProtocolPath::parse(path).unwrap()
+    fn p(path: &str) -> Path {
+        Path::parse(path).unwrap()
     }
 
     const OBJ_ID: &[u8] = b"issue:42";

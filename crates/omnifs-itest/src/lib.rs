@@ -1,5 +1,5 @@
 use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
-use omnifs_core::path::{Path as OmnifsPath, Segment};
+use omnifs_core::path::{Path, Segment};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use omnifs_host::{BuildError, Dirs, Error, Op, Runtime, TestOp};
@@ -8,7 +8,7 @@ use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
 };
-use std::path::{Path, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
@@ -129,11 +129,11 @@ impl RuntimeHarness {
         kind: RecordKind,
         aux: Option<&str>,
     ) -> Option<CacheRecord> {
-        self.runtime.cache_get(path, kind, aux)
+        self.runtime.cache_get(&parse_path(path), kind, aux)
     }
 
     pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
-        self.runtime.cached_canonical_for(path)
+        self.runtime.cached_canonical_for(&parse_path(path))
     }
 
     pub fn current_generation(&self) -> u64 {
@@ -332,7 +332,7 @@ pub fn test_provider_spec() -> Spec {
 }
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    StdPath::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
@@ -340,16 +340,15 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn parse_path(path: &str) -> OmnifsPath {
-    OmnifsPath::parse(path)
-        .unwrap_or_else(|error| panic!("test path must be absolute: {path}: {error}"))
+fn parse_path(path: &str) -> Path {
+    Path::parse(path).unwrap_or_else(|error| panic!("test path must be absolute: {path}: {error}"))
 }
 
 /// Initialises a git repo in `dir` with a README and a src/main.rs, then
 /// commits them. Used by tests that need a real local repo for the git
 /// executor or for seeding the clone cache. The README content is caller-
 /// supplied so tests can assert on it.
-pub fn create_test_repo(dir: &Path, readme_content: &str) {
+pub fn create_test_repo(dir: &StdPath, readme_content: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let run = |args: &[&str]| {
         let status = Command::new("git")

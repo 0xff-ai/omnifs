@@ -30,7 +30,7 @@
 use std::sync::Arc;
 
 use omnifs_cache::RecordKind;
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_core::view::{CachedCursor, FileSize, Stability};
 use omnifs_host::Runtime;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
@@ -82,8 +82,8 @@ pub fn tree_harness() -> ConformanceTree {
     }
 }
 
-fn path(s: &str) -> OmnifsPath {
-    OmnifsPath::parse(s).unwrap()
+fn path(s: &str) -> Path {
+    Path::parse(s).unwrap()
 }
 
 impl ConformanceTree {
@@ -241,7 +241,7 @@ async fn reads_whole_file_exact_bytes() {
     // The read durably cached the immutable payload (aux None).
     assert!(
         t.runtime
-            .cache_get("/hello/message", RecordKind::File, None)
+            .cache_get(&path("/hello/message"), RecordKind::File, None)
             .is_some(),
         "an immutable whole-file read is durably cached"
     );
@@ -383,7 +383,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
-            .cache_get("/hello/greeting", RecordKind::File, None)
+            .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the cold read must populate the durable view cache"
     );
@@ -396,7 +396,7 @@ async fn invalidation_evicts_cached_read() {
     );
     assert!(
         t.runtime
-            .cache_get("/hello/greeting", RecordKind::File, None)
+            .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_none(),
         "the invalidation must evict the durable view leaf"
     );
@@ -407,7 +407,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
-            .cache_get("/hello/greeting", RecordKind::File, None)
+            .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the re-render must re-populate the durable view cache"
     );

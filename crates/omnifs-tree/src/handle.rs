@@ -160,7 +160,7 @@ impl Tree {
         }
 
         let runtime = self.runtime_for(node.mount())?;
-        let opened = match runtime.namespace().open_file(node.path().as_str()).await {
+        let opened = match runtime.namespace().open_file(node.path()).await {
             Ok(opened) => opened,
             Err(Error::ProviderError(error))
                 if matches!(

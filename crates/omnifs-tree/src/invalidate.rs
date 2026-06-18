@@ -29,15 +29,6 @@ impl InvalidationReport {
 /// liveness lands.
 pub struct WatchStream(pub(crate) ());
 
-/// True when `prefix` is an ancestor of (or equal to) `path`, both protocol
-/// paths. Mirrors the FUSE `path_prefix_matches` semantics.
-fn path_prefix_matches(prefix: &str, path: &str) -> bool {
-    let (Ok(prefix), Ok(path)) = (Path::parse(prefix), Path::parse(path)) else {
-        return false;
-    };
-    path.has_prefix(&prefix)
-}
-
 impl Tree {
     /// LIVENESS PHASE, NOT NOW. SLICE 1: `todo!()`. Its signal already exists as
     /// `drain_invalidations` (pull); `watch` pushes the same
@@ -73,25 +64,15 @@ impl Tree {
                 let prefixes = prefixes.clone();
                 move |k, _| {
                     paths.contains(&k.path)
-                        || prefixes
-                            .iter()
-                            .any(|prefix| path_prefix_matches(prefix, &k.path))
+                        || prefixes.iter().any(|prefix| k.path.has_prefix(prefix))
                 }
             });
         }
 
         InvalidationReport {
-            paths: parse_paths(paths),
-            prefixes: parse_paths(prefixes),
-            changed_dirs: parse_paths(changed_dirs),
+            paths,
+            prefixes,
+            changed_dirs,
         }
     }
-}
-
-/// Parse drained protocol-path strings into typed `Path`s, dropping any that
-/// fail to parse (the runtime queues already store validated protocol paths).
-fn parse_paths(raw: Vec<String>) -> Vec<Path> {
-    raw.into_iter()
-        .filter_map(|p| Path::parse(&p).ok())
-        .collect()
 }

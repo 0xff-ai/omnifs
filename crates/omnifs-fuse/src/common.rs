@@ -51,20 +51,11 @@ pub(crate) fn root_ignore_meta() -> omnifs_core::view::EntryMeta {
     })
 }
 
-pub(crate) fn join_child_path(parent_path: &str, name: &str) -> String {
-    let parent = Path::parse(parent_path).expect("parent path must be absolute");
-    let child = parent
-        .join(name)
-        .expect("child name must be a valid path segment");
-    child.as_str().to_string()
-}
-
 /// Split a protocol path into `(parent, leaf)`. Returns `None` for the mount
 /// root (`/`).
-pub(crate) fn split_parent_leaf(path: &str) -> Option<(String, String)> {
-    let path = Path::parse(path).ok()?;
+pub(crate) fn split_parent_leaf(path: &Path) -> Option<(Path, String)> {
     let (parent, leaf) = path.parent_and_name()?;
-    Some((parent.as_str().to_string(), leaf.to_string()))
+    Some((parent, leaf.to_string()))
 }
 
 /// A `Tree`-owned ranged handle paired with the kernel inode it serves. The
@@ -80,7 +71,7 @@ pub(crate) struct FullReadTarget {
     pub(crate) ino: u64,
     pub(crate) fh: u64,
     pub(crate) mount_name: String,
-    pub(crate) path: String,
+    pub(crate) path: Path,
     pub(crate) backing_path: Option<PathBuf>,
     pub(crate) attrs: Option<FileAttrsCache>,
     /// True when the inode is a host-synthesized mount-root ignore file, so

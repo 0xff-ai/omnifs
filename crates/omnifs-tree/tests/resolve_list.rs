@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use omnifs_core::path::Path as OmnifsPath;
+use omnifs_core::path::Path;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_tree::{Backing, ListOutcome, RequestCtx, Tree, TreeErrorKind};
 use tempfile::TempDir;
@@ -59,14 +59,14 @@ async fn resolve_root_and_known_dirs() {
 
     // Root resolves to a directory.
     let root = tree
-        .resolve(&OmnifsPath::parse("/").unwrap(), &ctx)
+        .resolve(&Path::parse("/").unwrap(), &ctx)
         .await
         .expect("resolve root");
     assert!(root.is_dir(), "mount root must be a directory");
 
     // A known nested directory the test provider projects.
     let hello = tree
-        .resolve(&OmnifsPath::parse("/hello").unwrap(), &ctx)
+        .resolve(&Path::parse("/hello").unwrap(), &ctx)
         .await
         .expect("resolve /hello");
     assert!(hello.is_dir(), "/hello must be a directory");
@@ -75,7 +75,7 @@ async fn resolve_root_and_known_dirs() {
 
     // A known file under /hello (the provider's root listing proves "message").
     let message = tree
-        .resolve(&OmnifsPath::parse("/hello/message").unwrap(), &ctx)
+        .resolve(&Path::parse("/hello/message").unwrap(), &ctx)
         .await
         .expect("resolve /hello/message");
     assert!(message.is_file(), "/hello/message must be a file");
@@ -88,7 +88,7 @@ async fn resolve_missing_is_not_found() {
     let ctx = RequestCtx::default();
 
     let err = tree
-        .resolve(&OmnifsPath::parse("/hello/nonexistent").unwrap(), &ctx)
+        .resolve(&Path::parse("/hello/nonexistent").unwrap(), &ctx)
         .await
         .expect_err("missing child must error");
     assert_eq!(err.kind, TreeErrorKind::NotFound);
@@ -101,7 +101,7 @@ async fn list_root_yields_known_children() {
     let ctx = RequestCtx::default();
 
     let root = tree
-        .resolve(&OmnifsPath::parse("/").unwrap(), &ctx)
+        .resolve(&Path::parse("/").unwrap(), &ctx)
         .await
         .unwrap();
     let listing = match tree.list(&root, None, &ctx).await.expect("list root") {
@@ -129,7 +129,7 @@ async fn list_hello_yields_fourteen_children_with_message() {
     let ctx = RequestCtx::default();
 
     let hello = tree
-        .resolve(&OmnifsPath::parse("/hello").unwrap(), &ctx)
+        .resolve(&Path::parse("/hello").unwrap(), &ctx)
         .await
         .unwrap();
     let listing = match tree.list(&hello, None, &ctx).await.expect("list /hello") {
@@ -162,7 +162,7 @@ async fn checkout_dangling_treeref_surfaces_as_error() {
     let ctx = RequestCtx::default();
 
     let err = tree
-        .resolve(&OmnifsPath::parse("/checkout").unwrap(), &ctx)
+        .resolve(&Path::parse("/checkout").unwrap(), &ctx)
         .await
         .expect_err("dangling treeref must error in the kernel-free harness");
     assert!(
@@ -184,7 +184,7 @@ async fn resolve_rehydrates_by_path_without_re_walk() {
     let ctx = RequestCtx::default();
 
     let first = tree
-        .resolve(&OmnifsPath::parse("/hello/message").unwrap(), &ctx)
+        .resolve(&Path::parse("/hello/message").unwrap(), &ctx)
         .await
         .unwrap();
     let id = first.id();

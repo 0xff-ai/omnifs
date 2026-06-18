@@ -100,7 +100,7 @@ impl Tree {
 
         match runtime
             .namespace()
-            .lookup_child(parent.as_str(), name, ctx.trace)
+            .lookup_child(parent, name, ctx.trace)
             .await?
         {
             LookupOutcome::Entry(entry) => Ok(Node::new(

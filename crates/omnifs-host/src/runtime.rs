@@ -22,13 +22,13 @@ use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
-use omnifs_core::path::Path as ProtocolPath;
+use omnifs_core::path::Path;
 use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
 use crate::clock::{self, DYNAMIC_TTL_MILLIS};
@@ -49,18 +49,18 @@ const ARCHIVE_CACHE_SUBDIR: &str = "archives";
 /// Host directories needed to build one provider runtime.
 #[derive(Clone, Copy)]
 pub struct Dirs<'a> {
-    pub cache_dir: &'a Path,
-    pub config_dir: &'a Path,
-    pub providers_dir: &'a Path,
-    pub credentials_file: &'a Path,
+    pub cache_dir: &'a StdPath,
+    pub config_dir: &'a StdPath,
+    pub providers_dir: &'a StdPath,
+    pub credentials_file: &'a StdPath,
 }
 
 impl<'a> Dirs<'a> {
     pub fn new(
-        cache_dir: &'a Path,
-        config_dir: &'a Path,
-        providers_dir: &'a Path,
-        credentials_file: &'a Path,
+        cache_dir: &'a StdPath,
+        config_dir: &'a StdPath,
+        providers_dir: &'a StdPath,
+        credentials_file: &'a StdPath,
     ) -> Self {
         Self {
             cache_dir,
@@ -156,7 +156,7 @@ struct CacheDirs {
 }
 
 impl CacheDirs {
-    fn prepare(cache_dir: &Path, mount_name: &str) -> std::result::Result<Self, BuildError> {
+    fn prepare(cache_dir: &StdPath, mount_name: &str) -> std::result::Result<Self, BuildError> {
         let provider_root = Self::provider_root(cache_dir, mount_name);
         let dirs = Self {
             blob: provider_root.join(BLOB_CACHE_SUBDIR),
@@ -166,12 +166,12 @@ impl CacheDirs {
         Ok(dirs)
     }
 
-    fn provider_root(cache_dir: &Path, mount_name: &str) -> PathBuf {
+    fn provider_root(cache_dir: &StdPath, mount_name: &str) -> PathBuf {
         cache_dir.join(PROVIDER_CACHE_SUBDIR).join(mount_name)
     }
 
     #[cfg(test)]
-    fn blob_path(cache_dir: &Path, mount_name: &str) -> PathBuf {
+    fn blob_path(cache_dir: &StdPath, mount_name: &str) -> PathBuf {
         Self::provider_root(cache_dir, mount_name).join(BLOB_CACHE_SUBDIR)
     }
 
@@ -244,7 +244,7 @@ impl Runtime {
 
     pub fn new(
         engine: &wasmtime::Engine,
-        wasm_path: &Path,
+        wasm_path: &StdPath,
         config: &Resolved,
         cloner: Arc<GitCloner>,
         dirs: Dirs<'_>,
@@ -353,68 +353,71 @@ impl Runtime {
     }
 
     #[doc(hidden)]
-    pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
-        self.cache.cached_canonical_for(&protocol_path(path))
+    pub fn cached_canonical_for(&self, path: &Path) -> Option<omnifs_cache::CachedCanonical> {
+        self.cache.cached_canonical_for(path)
     }
 
     #[doc(hidden)]
-    pub fn negative_for(&self, path: &str, now_millis: u64) -> Option<omnifs_cache::Negative> {
-        self.cache.negative_for(&protocol_path(path), now_millis)
+    pub fn negative_for(&self, path: &Path, now_millis: u64) -> Option<omnifs_cache::Negative> {
+        self.cache.negative_for(path, now_millis)
     }
 
     #[doc(hidden)]
-    pub fn view_get(&self, path: &str, kind: RecordKind, aux: Option<&str>) -> Option<CacheRecord> {
-        self.cache
-            .view_get(&protocol_path(path), kind, aux, clock::now_millis())
+    pub fn view_get(
+        &self,
+        path: &Path,
+        kind: RecordKind,
+        aux: Option<&str>,
+    ) -> Option<CacheRecord> {
+        self.cache.view_get(path, kind, aux, clock::now_millis())
     }
 
     #[doc(hidden)]
     pub fn view_get_at(
         &self,
-        path: &str,
+        path: &Path,
         kind: RecordKind,
         aux: Option<&str>,
         now_millis: u64,
     ) -> Option<CacheRecord> {
-        self.cache
-            .view_get(&protocol_path(path), kind, aux, now_millis)
+        self.cache.view_get(path, kind, aux, now_millis)
     }
 
     #[doc(hidden)]
     pub fn cache_view_leaf(
         &self,
-        path: &str,
+        path: &Path,
         records: &[BatchRecord],
         expires_at: Option<u64>,
         op_gen: u64,
     ) -> bool {
         self.cache
-            .cache_view_leaf(&protocol_path(path), records, expires_at, op_gen)
+            .cache_view_leaf(path, records, expires_at, op_gen)
     }
 
     #[doc(hidden)]
     pub fn cache_view_leaf_for_test(
         &self,
-        path: &str,
+        path: &Path,
         records: &[BatchRecord],
         expires_at: Option<u64>,
         op_gen: u64,
     ) -> bool {
         self.cache
-            .cache_view_leaf(&protocol_path(path), records, expires_at, op_gen)
+            .cache_view_leaf(path, records, expires_at, op_gen)
     }
 
     #[doc(hidden)]
     pub fn apply_not_found_negative(
         &self,
-        path: &str,
+        path: &Path,
         maybe_id: Option<&wit_types::LogicalId>,
         op_gen: u64,
         now_millis: u64,
     ) {
         let id_bytes = maybe_id.map(|id| ObjectId::from_wit(id).as_bytes().to_vec());
         self.cache.put_negative(
-            &protocol_path(path),
+            path,
             id_bytes.as_deref(),
             op_gen,
             DYNAMIC_TTL_MILLIS,
@@ -424,16 +427,21 @@ impl Runtime {
 
     pub fn cache_get(
         &self,
-        path: &str,
+        path: &Path,
         kind: RecordKind,
         aux: Option<&str>,
     ) -> Option<CacheRecord> {
-        self.cache.cache_get(&protocol_path(path), kind, aux)
+        self.cache.cache_get(path, kind, aux)
     }
 
-    pub fn cache_put(&self, path: &str, kind: RecordKind, aux: Option<&str>, record: &CacheRecord) {
-        self.cache
-            .cache_put(&protocol_path(path), kind, aux, record);
+    pub fn cache_put(
+        &self,
+        path: &Path,
+        kind: RecordKind,
+        aux: Option<&str>,
+        record: &CacheRecord,
+    ) {
+        self.cache.cache_put(path, kind, aux, record);
     }
 
     pub fn cache_put_batch(&self, records: &[BatchRecord]) {
@@ -448,21 +456,21 @@ impl Runtime {
 
     /// Whether caching a view result for `path` rendered at `op_gen` must be
     /// dropped because an invalidation for it landed during the read.
-    pub fn write_fenced(&self, path: &str, op_gen: u64) -> bool {
-        self.cache.write_fenced(&protocol_path(path), op_gen)
+    pub fn write_fenced(&self, path: &Path, op_gen: u64) -> bool {
+        self.cache.write_fenced(path, op_gen)
     }
 
     pub fn mem_get(
         &self,
-        path: &str,
+        path: &Path,
         kind: RecordKind,
         aux: Option<&str>,
     ) -> Option<Arc<CacheRecord>> {
-        self.cache.mem_get(&protocol_path(path), kind, aux)
+        self.cache.mem_get(path, kind, aux)
     }
 
-    pub fn mem_invalidate(&self, path: &str, kind: RecordKind, aux: Option<&str>) {
-        self.cache.mem_invalidate(&protocol_path(path), kind, aux);
+    pub fn mem_invalidate(&self, path: &Path, kind: RecordKind, aux: Option<&str>) {
+        self.cache.mem_invalidate(path, kind, aux);
     }
 
     pub fn mem_invalidate_entries_if<P>(&self, predicate: P)
@@ -527,9 +535,9 @@ impl Runtime {
     /// `byte-source::canonical`: the host resolves the longest covering
     /// anchor and returns those bytes without copying across the WIT
     /// (ADR-0001 §5.1). `None` when no stored anchor covers `path`.
-    pub fn canonical_bytes_for(&self, path: &str) -> Option<Vec<u8>> {
+    pub fn canonical_bytes_for(&self, path: &Path) -> Option<Vec<u8>> {
         self.cache
-            .cached_canonical_for(&protocol_path(path))
+            .cached_canonical_for(path)
             .map(|canonical| canonical.bytes)
     }
 
@@ -544,10 +552,6 @@ impl Runtime {
         std::fs::read(path)
             .map_err(|e| Error::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
-}
-
-fn protocol_path(path: &str) -> ProtocolPath {
-    ProtocolPath::parse(path).expect("runtime cache path must be a protocol path")
 }
 
 impl<'a> TestOp<'a> {

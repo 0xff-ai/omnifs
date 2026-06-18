@@ -38,7 +38,6 @@ mod op_validate;
 mod operation_ids;
 pub mod pagination;
 mod projection;
-mod protocol_path;
 mod runtime;
 pub(crate) mod sandbox;
 pub mod tools;
