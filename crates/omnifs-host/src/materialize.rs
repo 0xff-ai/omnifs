@@ -36,6 +36,12 @@ pub struct LookupEntry {
 }
 
 impl LookupEntry {
+    /// A host-synthesized lookup entry (e.g. the mount-root `AGENTS.md`), built
+    /// without going through provider materialization.
+    pub fn synthetic(path: Path, meta: EntryMeta) -> Self {
+        Self { path, meta }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

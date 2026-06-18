@@ -13,6 +13,7 @@
 pub mod path_key;
 pub mod registry;
 
+mod agents_doc;
 mod archive;
 pub mod auth;
 pub mod blob;
@@ -49,6 +50,7 @@ pub mod wit_protocol;
 
 pub use omnifs_wit::provider::Provider;
 
+pub use agents_doc::{AGENTS_MD_CONTENT_TYPE, AGENTS_MD_NAME, AgentsDoc};
 pub use instance::Instance;
 pub use manifest::Artifact;
 pub use materialize::{LookupEntry, LookupOutcome};

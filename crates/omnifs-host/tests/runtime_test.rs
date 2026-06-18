@@ -44,7 +44,9 @@ async fn test_list_root() {
         .unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 5);
+            // Five provider directories plus the host-synthesized mount-root
+            // `AGENTS.md` leaf (see `mount_root_projects_agents_md_*`).
+            assert_eq!(listing.entries.len(), 6);
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -55,12 +57,16 @@ async fn test_list_root() {
             assert!(names.contains(&"scoped"));
             assert!(names.contains(&"checkout"));
             assert!(names.contains(&"dynamic"));
-            assert!(
-                listing
-                    .entries
-                    .iter()
-                    .all(|entry| matches!(entry.kind, EntryKind::Directory))
-            );
+            assert!(names.contains(&"AGENTS.md"));
+            // Every provider entry is a directory; the synthetic `AGENTS.md` is
+            // the sole file.
+            assert!(listing.entries.iter().all(|entry| {
+                if entry.name == "AGENTS.md" {
+                    matches!(entry.kind, EntryKind::File(_))
+                } else {
+                    matches!(entry.kind, EntryKind::Directory)
+                }
+            }));
         },
         other => panic!("expected list entries, got {other:?}"),
     }
@@ -747,6 +753,94 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
 
 fn file_payload(record: &CacheRecord) -> FilePayload {
     FilePayload::deserialize(&record.payload).expect("file payload should deserialize")
+}
+
+/// Regression: every mount root projects a synthetic, read-only `AGENTS.md`
+/// that documents the provider, and it behaves like a real file across the
+/// shared host seam both frontends consume. This protects the product thesis
+/// (behaves like real files) at the layer where the leaf is injected, without
+/// kernel FUSE (which is unavailable in this sandbox).
+///
+/// The catches it guards:
+///  - the leaf appears in a root listing exactly once (collision/dedup),
+///  - it resolves via `lookup`,
+///  - the size advertised by `lookup`/`list` equals the bytes `read` returns
+///    (the single most important correctness point: `stat`/`wc -c`/`head -c`
+///    must agree with `cat`),
+///  - the bytes carry real provider metadata (a known route template + its
+///    `.desc()` description), proving the doc is built from `provider-info`,
+///    not a placeholder.
+#[tokio::test]
+async fn mount_root_projects_agents_md_documenting_the_provider() {
+    let engine = make_engine();
+    let harness = make_runtime(&engine);
+    let ns = harness.runtime.namespace();
+
+    // 1. The root listing carries exactly one `AGENTS.md` entry, typed as a
+    //    file. The test provider does not project its own, so the host's wins.
+    let listing = match ns.list_children("/", None, None, None).await.unwrap() {
+        ListChildrenResult::Entries(listing) => listing,
+        other => panic!("expected list entries, got {other:?}"),
+    };
+    let agents_entries: Vec<_> = listing
+        .entries
+        .iter()
+        .filter(|entry| entry.name == "AGENTS.md")
+        .collect();
+    assert_eq!(
+        agents_entries.len(),
+        1,
+        "exactly one synthetic AGENTS.md must appear at the mount root"
+    );
+    let listed_size = match &agents_entries[0].kind {
+        EntryKind::File(file) => match file.attrs.size {
+            FileSize::Exact(size) => size,
+            other => panic!("AGENTS.md must advertise an exact size, got {other:?}"),
+        },
+        other => panic!("AGENTS.md must be a file, got {other:?}"),
+    };
+
+    // 2. It resolves via lookup with the same exact size.
+    let looked_up = match ns.lookup_child("/", "AGENTS.md", None).await.unwrap() {
+        LookupOutcome::Entry(entry) => entry,
+        other => panic!("expected AGENTS.md lookup entry, got {other:?}"),
+    };
+    assert_eq!(looked_up.path().as_str(), "/AGENTS.md");
+    assert!(looked_up.meta().is_file());
+    assert_eq!(
+        looked_up.meta().st_size(),
+        listed_size,
+        "lookup size must match the listed size"
+    );
+
+    // 3. read returns bytes whose length equals the advertised size, and
+    //    those bytes carry real provider metadata.
+    let result = ns
+        .read_file("/AGENTS.md", "text/markdown".to_string(), None)
+        .await
+        .unwrap();
+    let bytes = inline_content(&result);
+    assert_eq!(
+        bytes.len() as u64,
+        listed_size,
+        "read length must equal the advertised size (stat/wc -c/cat honesty)"
+    );
+
+    let doc = std::str::from_utf8(bytes).expect("AGENTS.md must be valid UTF-8");
+    // Built from the static manifest (display name) ...
+    assert!(
+        doc.contains("A test provider with canned data"),
+        "doc must carry the provider display name; got:\n{doc}"
+    );
+    // ... and from provider-info routes with descriptions (the centerpiece).
+    assert!(
+        doc.contains("/items"),
+        "doc must document the /items route; got:\n{doc}"
+    );
+    assert!(
+        doc.contains("Synthetic item collection, grouped by state filter"),
+        "doc must carry the /items route description; got:\n{doc}"
+    );
 }
 
 #[test]

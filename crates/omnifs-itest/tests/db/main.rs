@@ -93,7 +93,10 @@ async fn db_tables_listing_exhaustive_names() {
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"meta"));
             assert!(names.contains(&"tables"));
-            assert_eq!(names.len(), 2);
+            // The host synthesizes a mount-root `AGENTS.md` alongside the
+            // provider's own root entries.
+            assert!(names.contains(&"AGENTS.md"));
+            assert_eq!(names.len(), 3);
         },
         other => panic!("expected root listing, got {other:?}"),
     }

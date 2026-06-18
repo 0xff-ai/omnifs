@@ -87,6 +87,10 @@ impl<'a> Dirs<'a> {
 pub struct Runtime {
     pub(crate) instance: Instance,
     initialize_result: wit_types::InitializeResult,
+    /// Host-synthesized `AGENTS.md` for this mount root, rendered once from
+    /// `provider-info` plus the static manifest. Held verbatim so the size the
+    /// namespace advertises and the bytes it serves are the same buffer.
+    pub(crate) agents_doc: crate::agents_doc::AgentsDoc,
     pub(crate) mount_name: String,
     pub(crate) provider_id: String,
     pub(crate) operation_ids: OperationIds,
@@ -268,9 +272,21 @@ impl Runtime {
         let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities);
         let capability = Arc::new(CapabilityChecker::new(grants));
 
-        let auth_manifest = Artifact::load(wasm_path)
-            .and_then(|artifact| artifact.auth_manifest())
+        // Read the static manifest once: its auth block feeds host HTTP
+        // injection, and its branding/capabilities/auth feed the synthetic
+        // mount-root `AGENTS.md`. A missing manifest is not fatal for the doc;
+        // it renders from `provider-info` alone.
+        let provider_manifest = Artifact::load(wasm_path)
+            .and_then(|artifact| artifact.metadata())
             .map_err(BuildError::InvalidConfig)?;
+        let auth_manifest = provider_manifest
+            .as_ref()
+            .and_then(omnifs_provider::ProviderManifest::wasm_auth_manifest);
+        let agents_doc = crate::agents_doc::AgentsDoc::render(
+            mount_name,
+            &initialize_result.info,
+            provider_manifest.as_ref(),
+        );
         let auth = if config.spec.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
@@ -306,6 +322,7 @@ impl Runtime {
         Ok(Self {
             instance,
             initialize_result,
+            agents_doc,
             mount_name: mount_name.to_string(),
             provider_id: config.provider_id.clone(),
             operation_ids: OperationIds::new(),
@@ -336,6 +353,12 @@ impl Runtime {
     #[must_use]
     pub fn provider_info(&self) -> &wit_types::ProviderInfo {
         &self.initialize_result.info
+    }
+
+    /// The host-synthesized `AGENTS.md` projected at this mount's root.
+    #[must_use]
+    pub fn agents_doc(&self) -> &crate::agents_doc::AgentsDoc {
+        &self.agents_doc
     }
 
     pub fn call_close_file(&self, handle: u64) -> Result<()> {

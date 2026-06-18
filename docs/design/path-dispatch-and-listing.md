@@ -138,6 +138,7 @@ The host's mount table is a flat name → mount lookup. Mount names are unique; 
 
 ## Host invariants
 
+- The mount root carries a host-synthesized `AGENTS.md` leaf appended at the shared `Namespace` seam (`crates/omnifs-host/src/{agents_doc,namespace}.rs`). It is injected only at the root, only into a concrete listing, and only when the provider did not already enumerate or resolve `/AGENTS.md` (provider-first; a provider's own `/AGENTS.md` wins and the listing never duplicates the name). Its advertised size equals the bytes `read_file` returns, so it behaves like a real `text/markdown` file for `stat`/`wc -c`/`cat`.
 - The negative-cache short-circuit in `lookup_check_caches` reads the parent's cached `Dirents` only when `dirents.exhaustive` is true. The exhaustive flag is the SDK's responsibility to compute correctly per D7.
 - The lookup-side `cache_projection_batch` writes a `Dirents` record only when the lookup carried child information in the direct result. A bare lookup entry is not a directory listing and must not synthesize one.
 
