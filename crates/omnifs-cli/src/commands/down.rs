@@ -92,7 +92,7 @@ fn fallback_sweep(paths: &crate::paths::Paths) -> anyhow::Result<()> {
         } else {
             anstream::println!("Nothing to tear down.");
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
