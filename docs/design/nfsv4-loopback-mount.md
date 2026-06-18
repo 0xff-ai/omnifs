@@ -149,7 +149,7 @@ stability, byte mode, and version identity.
 
 The NFS frontend uses the shared provider cache and NFS-local object state. It
 does not add a FUSE-like browse cache. Under `noac`, repeated client lookups can
-still hit the server, but the warmed server path is a redb cache read plus
+still hit the server, but the warmed server path is a local cache read plus
 cache-record decode.
 
 Provider invalidations are drained before attr, provider-backed lookup,

@@ -123,7 +123,7 @@ behind the same API.
 
 ## Cache key encoding
 
-The view cache (non-durable `view.redb`, deleted and recreated on every startup) and object cache (durable `object.redb`) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
+The view cache (non-durable, cleared and reopened on every startup) and object cache (durable) both key on the path string. `Path` serialises through serde to the inner `String`, so on-disk records remain byte-identical to a naked string of the same value. A `SCHEMA_VERSION` bump is only needed if a postcard fixture comparison shows otherwise.
 
 ## Provider ergonomics
 
