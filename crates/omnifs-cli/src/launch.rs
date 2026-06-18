@@ -23,7 +23,7 @@ pub(crate) struct LaunchSpec<'a> {
     pub configs: Vec<MountConfig>,
     /// Extra binds layered on top of materialized preopens.
     pub extras: ContainerExtras,
-    /// Run the daemon host-native (spawn `omnifsd` over NFS) instead of
+    /// Run the daemon host-native (spawn `omnifs daemon` over NFS) instead of
     /// launching a Docker container.
     pub host_native: bool,
     /// Host directory the host-native daemon serves the mount at.
@@ -88,8 +88,8 @@ pub(crate) async fn launch_runtime(
     Ok(())
 }
 
-/// Spawn a detached host-native `omnifsd` over NFS, wait for it to serve,
-/// then push the mounts. On failure the spawned daemon is terminated.
+/// Spawn a detached host-native daemon over NFS, wait for it to serve, then
+/// push the mounts. On failure the spawned daemon is terminated.
 async fn launch_host_native(
     runtime_home: &Path,
     cache_dir: &Path,
@@ -97,7 +97,7 @@ async fn launch_host_native(
     payloads: &[MountPayload],
 ) -> anyhow::Result<()> {
     anstream::println!(
-        "Starting omnifsd (host-native, NFS) at {}",
+        "Starting omnifs daemon (host-native, NFS) at {}",
         mount_point.display()
     );
     let mut daemon = HostDaemon::spawn(runtime_home, cache_dir, mount_point)?;
@@ -112,16 +112,16 @@ async fn launch_host_native(
     Ok(())
 }
 
-/// Docker path: wait for the container's daemon to publish the mount, then
-/// push the mounts over the shared control-API path.
+/// Docker path: wait for the container's daemon to publish the mount, then push
+/// the mounts over the shared control-API path.
 async fn push_mounts_docker(rt: &Runtime, payloads: &[MountPayload]) -> anyhow::Result<()> {
     rt.wait_for_daemon_ready().await?;
     push_mounts(payloads).await
 }
 
-/// Verify control-API compatibility and load every mount on the running
-/// daemon. Shared by the Docker and host-native launch paths; the caller is
-/// responsible for ensuring the daemon is already serving.
+/// Verify control-API compatibility and load every mount on the running daemon.
+/// Shared by the Docker and host-native paths; the caller ensures the daemon is
+/// already serving.
 async fn push_mounts(payloads: &[MountPayload]) -> anyhow::Result<()> {
     let client = DaemonClient::new();
     client.require_compatible().await?;

@@ -26,6 +26,7 @@ readme = "README.md"
 omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-creds = { version = "0.2.1", path = "crates/omnifs-creds" }
+omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
 omnifs-home = { version = "0.2.1", path = "crates/omnifs-home" }
 omnifs-host = { version = "0.2.1", path = "crates/omnifs-host" }

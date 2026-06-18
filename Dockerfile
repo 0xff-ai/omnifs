@@ -90,9 +90,8 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
-    && cargo build --release -p omnifs-cli -p omnifs-daemon \
-    && cp /src/target/release/omnifs /omnifs \
-    && cp /src/target/release/omnifsd /omnifsd
+    && cargo build --release -p omnifs-cli \
+    && cp /src/target/release/omnifs /omnifs
 
 # --- Lint and test (CI targets) ---
 #
@@ -186,5 +185,5 @@ ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v1
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}
 LABEL ai.0xff.omnifs.launch-protocol=${OMNIFS_LAUNCH_PROTOCOL}
 
-COPY --from=builder /omnifs /omnifsd /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/omnifs /usr/local/bin/omnifsd
+COPY --from=builder /omnifs /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/omnifs

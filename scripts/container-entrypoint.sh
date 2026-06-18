@@ -26,7 +26,7 @@ tee -a "$OMNIFS_LOG_FILE" < "$log_pipe" &
 exec >"$log_pipe" 2>&1
 rm -f "$log_pipe"
 
-exec omnifsd \
+exec omnifs daemon \
   --mount-point "$OMNIFS_MOUNT_POINT" \
   --listen "$OMNIFS_LISTEN" \
   --root-symlinks

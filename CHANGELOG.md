@@ -15,11 +15,11 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Breaking:** Every object must now declare its stability (`o.stable()`, `o.dynamic()`, `o.live()`, or a key-dependent closure); there is no default. Omitting it is a build error, which prevents pinned identities from being silently treated as `dynamic` and given needless cache TTLs and eviction. (#132)
 
 ### Runtime & mounts
-- **Feature:** `omnifsd` can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
+- **Feature:** The daemon can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
 - **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
 - **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
 - **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.
-- **Feature:** The runtime now runs as a standalone `omnifsd` daemon that owns the FUSE mount and exposes an HTTP control API; the `omnifs` CLI drives it over that API and no longer links the WASM runtime or FUSE.
+- **Feature:** The runtime is a daemon that owns the mount and exposes an HTTP control API, driven by the `omnifs` CLI over that API. It ships as a single `omnifs` binary: the daemon runs as the internal `omnifs daemon` subcommand (its own process, same control API), not a separate `omnifsd`. `omnifs up` reads `[system].runtime` (`docker` or `native`) and starts the daemon in a Docker container or host-native over NFS, defaulting to host-native on macOS (no Docker required) and Docker on Linux; `omnifs setup` records the choice.
 - **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
 - **Feature:** On macOS, `omnifs up` now serves the projected filesystem over a local NFS loopback mount, no Docker required. (#134)
 - **Improvement:** The filesystem projection now runs through a single frontend-neutral core, with FUSE and NFS each serving as a thin adapter that renders the same projection into its own kernel vocabulary. (#134)
@@ -31,6 +31,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Feature:** You can now see every authentication method omnifs supports with `omnifs auth modes`, and get provider-specific setup guidance with `omnifs auth explain <provider>`. (#131)
 - **Feature:** Provider manifests can now declare how the host authenticates at the token endpoint, enabling confidential-client OAuth flows like Google Workspace. (#131)
 - **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
+- **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
+- **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
 
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.

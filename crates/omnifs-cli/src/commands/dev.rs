@@ -158,10 +158,9 @@ impl DevArgs {
                 verb: "omnifs dev",
                 configs,
                 extras: ContainerExtras { binds },
-                // `omnifs dev` is always the Docker path; the host-native
-                // mount point and cache dir are unused here.
+                // `omnifs dev` is always the Docker sandbox.
                 host_native: false,
-                mount_point: paths.cache_dir.join("mnt"),
+                mount_point: paths.config_dir.join("mnt"),
                 cache_dir: paths.cache_dir.clone(),
             },
             ctx.catalog(),

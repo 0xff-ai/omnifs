@@ -123,17 +123,15 @@ inspect_linux_artifacts() {
 }
 
 if [[ "$build_daemon" == "1" ]]; then
+  # The single `omnifs` binary contains the daemon (`omnifs daemon`); there is
+  # no separate `omnifsd` artifact.
   cargo zigbuild --release --target "$target" \
-    -p omnifs-cli --bin omnifs \
-    -p omnifs-daemon --bin omnifsd
+    -p omnifs-cli --bin omnifs
 
   artifact="$(find_artifact omnifs)"
-  daemon_artifact="$(find_artifact omnifsd)"
   emit_output artifact "$artifact"
-  emit_output daemon_artifact "$daemon_artifact"
   file "$artifact"
-  file "$daemon_artifact"
-  inspect_linux_artifacts "$artifact" "$daemon_artifact"
+  inspect_linux_artifacts "$artifact"
 else
   cargo zigbuild --release -p "$package" --target "$target" --bin "$bin"
 

@@ -1,4 +1,4 @@
-//! HTTP client for the omnifsd control API.
+//! HTTP client for the daemon control API.
 //!
 //! The daemon listens on the container's published loopback port (or its
 //! own loopback when running natively). `OMNIFS_DAEMON_ADDR` overrides the

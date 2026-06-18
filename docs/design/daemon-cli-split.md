@@ -1,6 +1,6 @@
 # Daemon / CLI split (omnifsd + omnifs)
 
-Status: implemented (all four phases)
+Status: implemented (all four phases). Partly superseded: the two binaries were later collapsed into a single `omnifs` binary. The daemon now runs as the hidden `omnifs daemon` subcommand (same separate-process model and HTTP control API, no separate `omnifsd` artifact), and `omnifs up` selects a docker or host-native backend via `[system].runtime`. The crate boundary and control protocol below are unchanged.
 Scope: new `crates/omnifs-daemon`, `crates/omnifs-cli`, `crates/omnifs-host` crate boundary, container entrypoint, control API, mount lifecycle
 Related: `docs/design/cli-redesign.md`, `docs/design/mount-lifecycle.md`, `docs/design/host-auth.md`, `docs/design/architecture.md` §9 (inspector emission)
 

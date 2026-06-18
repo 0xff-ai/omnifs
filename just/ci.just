@@ -46,11 +46,6 @@ ci-build-linux target:
 ci-build-darwin:
     scripts/ci/build-darwin-zigbuild.sh
 
-# Build Darwin omnifsd artifacts from Linux, mirroring ci-build-darwin.
-[group('ci')]
-ci-build-darwin-daemon:
-    OMNIFS_PACKAGE=omnifs-daemon OMNIFS_BIN=omnifsd scripts/ci/build-darwin-zigbuild.sh
-
 # Package a CLI binary for an npm platform id.
 [group('ci')]
 ci-package-cli platform binary:

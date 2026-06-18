@@ -13,66 +13,17 @@ pub struct DownArgs {
     /// `omnifs`.
     #[arg(long)]
     pub container_name: Option<String>,
-    /// Force the Docker container path even on macOS.
-    ///
-    /// macOS defaults to tearing down the host-native daemon (NFS);
-    /// `--isolated` selects the Docker container backend instead. On Linux the
-    /// Docker path is always used and this flag has no effect.
-    #[arg(long)]
-    pub isolated: bool,
 }
 
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         use crate::paths::PathOverrides;
 
-        let DownArgs {
-            container_name,
-            isolated,
-        } = self;
+        let DownArgs { container_name } = self;
         let (paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
 
-        // macOS tears down the host-native NFS mount by default; `--isolated`
-        // forces the Docker container path. Linux always uses Docker.
-        let host_native = cfg!(target_os = "macos") && !isolated;
-        if host_native {
-            let summary = crate::host_teardown::teardown_host_native(&paths.nfs_state_dir())?;
-            if !summary.failed.is_empty() {
-                for mount_point in &summary.failed {
-                    anstream::eprintln!(
-                        "⚠ could not unmount {0}; unmount it manually: diskutil unmount force {0}",
-                        mount_point.display()
-                    );
-                }
-                anyhow::bail!("{} mount(s) could not be unmounted", summary.failed.len());
-            }
-            if summary.unmounted > 0 {
-                anstream::println!("✓ omnifs unmounted");
-            } else if summary.swept_orphans > 0 {
-                anstream::println!(
-                    "Cleaned up {} stale mount record(s); no live mount was running.",
-                    summary.swept_orphans
-                );
-            } else if summary.skipped == 0 {
-                anstream::println!("No host-native omnifs mount is running.");
-            }
-            // Present-but-unreadable state files (e.g. a daemon-side format bump)
-            // must not be reported as "nothing running": a daemon may still hold
-            // a mount we could not parse.
-            if summary.skipped > 0 {
-                if summary.unmounted > 0 || summary.swept_orphans > 0 {
-                    anstream::eprintln!(
-                        "⚠ also found {} mount-state file(s) I could not read; a daemon may still be running — try upgrading omnifs",
-                        summary.skipped
-                    );
-                } else {
-                    anyhow::bail!(
-                        "{} mount-state file(s) could not be read; a daemon may still be running — try upgrading omnifs or unmount manually",
-                        summary.skipped
-                    );
-                }
-            }
-            return Ok(());
+        if config.runtime() == crate::config::Runtime::Native {
+            return teardown_native(&paths.cache_dir.join("nfs"));
         }
 
         let container_name = RuntimeTarget::resolve_container_name(container_name, &config)?;
@@ -92,4 +43,39 @@ impl DownArgs {
         }
         Ok(())
     }
+}
+
+/// Tear down host-native NFS mounts recorded under `state_dir` and report what
+/// actually happened (a live unmount, an orphan sweep, or nothing).
+fn teardown_native(state_dir: &std::path::Path) -> anyhow::Result<()> {
+    let summary = crate::host_teardown::teardown_host_native(state_dir)?;
+    if summary.unmounted > 0 {
+        anstream::println!("✓ Unmounted {} host-native mount(s)", summary.unmounted);
+    }
+    if summary.swept_orphans > 0 {
+        anstream::println!(
+            "✓ Swept {} orphaned mount-state file(s)",
+            summary.swept_orphans
+        );
+    }
+    if !summary.failed.is_empty() {
+        for path in &summary.failed {
+            anstream::eprintln!("warning: {} is still mounted", path.display());
+        }
+        anyhow::bail!(
+            "{} host-native mount(s) could not be unmounted; re-run `omnifs down`",
+            summary.failed.len()
+        );
+    }
+    if summary.unmounted == 0 && summary.swept_orphans == 0 {
+        if summary.skipped > 0 {
+            anstream::println!(
+                "No teardown performed; {} mount-state file(s) were unreadable (see warnings above).",
+                summary.skipped
+            );
+        } else {
+            anstream::println!("Nothing to tear down.");
+        }
+    }
+    Ok(())
 }

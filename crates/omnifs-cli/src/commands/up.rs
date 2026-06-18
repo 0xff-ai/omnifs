@@ -22,13 +22,6 @@ pub struct UpArgs {
     /// `omnifs`.
     #[arg(long)]
     pub container_name: Option<String>,
-    /// Force the Docker container path even on macOS.
-    ///
-    /// macOS defaults to a host-native daemon (NFS); `--isolated` selects the
-    /// Docker container backend instead. On Linux the Docker path is always
-    /// used and this flag has no effect.
-    #[arg(long)]
-    pub isolated: bool,
 }
 
 impl UpArgs {
@@ -54,11 +47,11 @@ impl UpArgs {
 
         crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
 
-        // macOS serves the mount host-native over NFS by default; `--isolated`
-        // forces the Docker container path. Linux always uses Docker.
-        let host_native = cfg!(target_os = "macos") && !self.isolated;
+        // The runtime backend is a machine property recorded by `omnifs setup`;
+        // `up` reads it. Host-native serves the mount over NFS at a host path;
+        // Docker serves it inside the container.
+        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
         let mount_point = paths.config_dir.join("mnt");
-        let cache_dir = paths.cache_dir.clone();
 
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_runtime(
@@ -71,7 +64,7 @@ impl UpArgs {
                 extras: ContainerExtras::default(),
                 host_native,
                 mount_point: mount_point.clone(),
-                cache_dir,
+                cache_dir: paths.cache_dir.clone(),
             },
             catalog,
         )

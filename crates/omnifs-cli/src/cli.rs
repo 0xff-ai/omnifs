@@ -82,6 +82,13 @@ pub enum Commands {
     /// Debug utilities. Hidden from `--help`.
     #[command(hide = true)]
     Debug(commands::debug::DebugArgs),
+
+    /// Run the runtime daemon. Internal: launched by the container
+    /// entrypoint (and, later, the host-native launcher), not invoked
+    /// directly. The daemon still runs as its own process over the
+    /// control API; this is the same binary, not a separate entrypoint.
+    #[command(hide = true)]
+    Daemon(omnifs_daemon::DaemonArgs),
 }
 
 impl Commands {
@@ -109,6 +116,7 @@ impl Commands {
             },
             Self::Version(args) => args.run().await,
             Self::Debug(args) => args.run(),
+            Self::Daemon(args) => omnifs_daemon::run(args),
         }
     }
 }

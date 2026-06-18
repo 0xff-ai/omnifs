@@ -1,7 +1,7 @@
 //! Frontend conformance: the projected tree must behave like real files for the
 //! standard toolbox, through *each* frontend (FUSE and NFS), not just one.
 //!
-//! This launches the real `omnifsd` binary against a hermetic `OMNIFS_HOME` with
+//! This launches the real daemon (`omnifs daemon`) against a hermetic `OMNIFS_HOME` with
 //! only the canned `test-provider` mounted, then runs one frontend-agnostic
 //! matrix (`run_matrix`) over the mount using the actual shell toolbox. The
 //! frontend is the only parameter; the assertions are shared. Migrated from the
@@ -107,8 +107,9 @@ fn start(frontend: &str) -> Option<Daemon> {
     let port = free_port();
     let base = format!("http://127.0.0.1:{port}");
 
-    let child = Command::new(env!("CARGO_BIN_EXE_omnifsd"))
+    let child = Command::new(env!("CARGO_BIN_EXE_omnifs"))
         .args([
+            "daemon",
             "--frontend",
             frontend,
             "--mount-point",
