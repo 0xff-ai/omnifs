@@ -3,7 +3,7 @@
 Status: implemented contract
 Derives from: the object model in `docs/design/architecture.md` §2 (authoritative
 spec), the Phase A gate review, and its three deferred-decision proposals
-(WIT / redb / SDK) reconciled here.
+(WIT / storage / SDK) reconciled here.
 
 This document is the **single contract** Tier 1 and Tier 2 build against. Every
 record, type, and method below is inlined so an implementer needs nothing else.
@@ -306,18 +306,18 @@ it. Overlap ⇒ `start()`-time error surfaced through `initialize()`. The same
 
 ## 6. Cache contracts (`crates/omnifs-cache` + host wiring)
 
-### 6.1 Durable redb (`object.redb`)
+### 6.1 Durable object database (fjall)
 
-Two tables, byte keys (the v1 `&str` keys migrate to `&[u8]` because the id is now
-structured).
+Each mount owns two keyspaces, byte keys. Mount isolation is structural (the
+mount is in the keyspace name), so the keys carry no mount prefix.
 
 ```
-objects : key = mount ++ 0x1F ++ postcard(logical-id)
-          val = postcard({ schema: u8, id: LogicalId,
-                           canonical: Option<{ bytes: Vec<u8>, validator: Option<String> }>,
-                           leaves: Vec<String> })           // leaves = full scoped paths
-paths   : key = mount ++ 0x1F ++ full-path-string
-          val = mount ++ 0x1F ++ postcard(logical-id)       // forward index, learned from effects
+objects.{mount} : key = logical-id bytes
+                  val = postcard({ schema: u8, id: LogicalId,
+                                   canonical: Option<{ bytes: Vec<u8>, validator: Option<String> }>,
+                                   leaves: Vec<String> })   // leaves = unscoped view paths
+view.{mount}    : key = full-path bytes
+                  val = logical-id bytes                    // forward index, learned from effects
 ```
 
 - `canonical: None` represents a **preload-only** object (id-bearing `fs-write`, no
@@ -326,7 +326,7 @@ paths   : key = mount ++ 0x1F ++ full-path-string
 - `leaves` is the durable **alias set** (every full path indexed for this id).
 - No `generation` field (SIC-1). The fence lives in `Store` (§6.3).
 
-### 6.2 Ephemeral view (`view.redb`, deleted + recreated on startup)
+### 6.2 Ephemeral view (disposable fjall database, cleared + reopened on startup)
 
 Existing per-record store (`Lookup`/`Attr`/`Dirents`/`File`) gains a per-leaf
 **freshness stamp** shared by all RecordKinds of one path:

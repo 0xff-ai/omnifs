@@ -1,17 +1,17 @@
 //! Host cache byte storage primitives.
 //!
-//! `view::Cache` owns both the in-memory moka mem and the durable redb
+//! `view::Cache` owns both the in-memory moka mem and the durable fjall
 //! backing behind one API. Cache entries do not carry TTLs: eviction is driven
 //! purely by capacity and explicit invalidation (`invalidate_prefix` or
 //! host-applied invalidation effects).
 //!
 //! ## Global caches, per-mount facade
 //!
-//! `Caches` holds the two global cache handles (one durable `object.redb` and
-//! one non-durable `view.redb` deleted on startup). It is opened once at
-//! process start and shared via `Arc`. `Caches::mount(name)` returns a
-//! per-mount `Store` that scopes view keys as typed `/{mount}{path}` paths and
-//! object keys with the object tier's byte separator.
+//! `Caches` holds the two fjall databases (a durable `object/` and a
+//! non-durable `view/` cleared on startup). It is opened once at process start
+//! and shared via `Arc`. `Caches::mount(name)` returns a per-mount `Store`. The
+//! object tier is isolated per mount by its own keyspaces (raw keys); the
+//! shared view tier is isolated by a `/{mount}` path prefix on its keys.
 //!
 //! The per-mount generation fence lives in `Store`: each `Store` owns an
 //! atomic generation counter and a tombstone map. Object writes are rejected
@@ -36,13 +36,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use redb::{Database, WriteTransaction};
 
 /// Shared handle to a host view store.
 pub type Handle = Arc<Store>;
 
-/// Result of a warm canonical lookup: the host object id (mount prefix
-/// stripped), the canonical bytes, and the optional validator.
+/// Result of a warm canonical lookup: the object id, the canonical bytes, and
+/// the optional validator.
 pub struct CachedCanonical {
     pub id: Vec<u8>,
     pub bytes: Vec<u8>,
@@ -185,24 +184,10 @@ fn now_millis_for_gc() -> u64 {
         .unwrap_or(0)
 }
 
-/// Run `f` inside a redb write transaction and commit. Returns the closure's
-/// error (or any begin/commit error) unlogged; callers log at their chosen
-/// level and decide the success value. Centralizes the begin-write → mutate →
-/// commit ceremony shared by the object and view tiers.
-pub(crate) fn write_txn(
-    disk: &Database,
-    f: impl FnOnce(&WriteTransaction) -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    let txn = disk.begin_write()?;
-    f(&txn)?;
-    txn.commit()?;
-    Ok(())
-}
-
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.
 ///
-/// `Caches::open(dir)` creates a durable `object.redb` and deletes+recreates
-/// `view.redb` (always cold after restart, Codex #5).
+/// `Caches::open(dir)` opens a durable `object/` database and clears+reopens a
+/// `view/` database (always cold after restart, Codex #5).
 pub struct Caches {
     pub object: object::Cache,
     pub view: view::Cache,
@@ -211,17 +196,17 @@ pub struct Caches {
 impl Caches {
     /// Open the global cache handles from `dir`.
     ///
-    /// Creates `dir/object.redb` (durable) and deletes+recreates
-    /// `dir/view.redb` (non-durable, always cold, Codex #5).
+    /// Opens `dir/object/` (durable) and clears+reopens `dir/view/`
+    /// (non-durable, always cold, Codex #5).
     pub fn open(dir: &StdPath) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
-        let object = object::Cache::open(&dir.join("object.redb"))?;
-        let view = view::Cache::open(&dir.join("view.redb"))?;
+        let object = object::Cache::open(&dir.join("object"))?;
+        let view = view::Cache::open(&dir.join("view"))?;
         Ok(Arc::new(Self { object, view }))
     }
 
-    /// Return a per-mount `Store` facade. View keys are scoped by
-    /// `Store::scoped`; object-tier keys use the store's byte separator.
+    /// Return a per-mount `Store` facade. The object tier gets its own
+    /// keyspaces (raw keys); view keys are scoped by `Store::scoped`.
     pub fn mount(self: &Arc<Self>, mount: impl Into<String>) -> Store {
         Store::new(Arc::clone(self), mount)
     }
@@ -237,20 +222,24 @@ pub struct Negative {
 
 /// Per-mount facade over the global `Caches`.
 ///
-/// All public methods take unscoped `path` strings and opaque `id` bytes
-/// (without the mount prefix). Scoping helpers inject the `mount\x1f` prefix.
+/// The object tier is structurally isolated per mount (its own keyspaces), so
+/// its keys are raw: object ids and view-leaf paths carry no mount prefix. The
+/// shared view tier is isolated by a `/{mount}` path prefix on its keys
+/// (`Store::scoped`).
 ///
 /// The generation fence is per-mount and runtime-only: `generation`,
 /// `tombstones`, and `negatives` are reset on construction and never persisted.
 pub struct Store {
     caches: Arc<Caches>,
+    /// This mount's object keyspaces (raw-keyed).
+    object: object::MountObjects,
     mount: String,
     generation: AtomicU64,
-    /// Scoped `ObjectId` bytes → generation at which the id was invalidated.
+    /// `ObjectId` bytes → generation at which the id was invalidated.
     tombstones: DashMap<Vec<u8>, u64>,
-    /// Scoped path → negative record.
+    /// Unscoped path → negative record.
     negatives: DashMap<String, Negative>,
-    /// Scoped `ObjectId` bytes → scoped paths with negatives.
+    /// `ObjectId` bytes → unscoped paths with negatives.
     neg_by_id: DashMap<Vec<u8>, HashSet<String>>,
 }
 
@@ -260,35 +249,19 @@ impl Store {
         // Mount names must be a single path segment; fail fast at construction
         // so `scope_unscoped` can build keys without re-validating.
         Segment::try_from(mount.as_str()).expect("store mount must be a path segment");
+        let object = caches
+            .object
+            .mount(&mount)
+            .expect("open object keyspaces for mount");
         Self {
             caches,
+            object,
             mount,
             generation: AtomicU64::new(0),
             tombstones: DashMap::new(),
             negatives: DashMap::new(),
             neg_by_id: DashMap::new(),
         }
-    }
-
-    /// Construct an in-memory-only `Store` backed by an in-memory view cache
-    /// and no durable object cache. Used by tests that don't need persistence.
-    pub fn new_in_memory(mount: impl Into<String>) -> Self {
-        // Build a minimal Caches with in-memory caches.
-        // The object cache still needs a real redb file (it's always durable);
-        // for in-memory use a temp file that we open and immediately discard.
-        // Tests that need the object cache should use `Caches::open`.
-        let caches = Arc::new(Caches {
-            object: {
-                let dir = tempfile::tempdir().expect("tempdir for in-memory object cache");
-                object::Cache::open(&dir.path().join("object.redb"))
-                    .expect("in-memory object cache")
-                // dir drops here — the file is deleted, but the Database
-                // handle keeps the fd open. On Linux this is fine for tests.
-                // On macOS the file is unlinked but the redb handle still works.
-            },
-            view: view::Cache::new(),
-        });
-        Self::new(caches, mount)
     }
 
     /// Scoped view-cache key as a valid protocol path: `/{mount}{path}`.
@@ -309,54 +282,8 @@ impl Store {
         }
     }
 
-    /// Scoped `ObjectId` bytes: `mount.as_bytes() ++ [0x1F] ++ id`.
-    fn scoped_id(&self, id: &[u8]) -> Vec<u8> {
-        let mut key = self.mount.as_bytes().to_vec();
-        key.push(0x1f);
-        key.extend_from_slice(id);
-        key
-    }
-
-    /// Scoped path bytes for the object forward index.
-    fn scoped_path_bytes(&self, path: &str) -> Vec<u8> {
-        let mut key = self.mount.as_bytes().to_vec();
-        key.push(0x1f);
-        key.extend_from_slice(path.as_bytes());
-        key
-    }
-
-    /// Scoped object-cache leaf key: `mount\x1f{path}`.
-    fn scoped_object_leaf(&self, path: &Path) -> String {
-        let mut key = self.mount.clone();
-        key.push('\x1f');
-        key.push_str(path.as_str());
-        key
-    }
-
-    /// Convert an object-cache leaf key back to this mount's typed view path.
-    fn view_path_from_object_leaf(&self, scoped_leaf: &str) -> Option<Path> {
-        let (mount, path) = scoped_leaf.split_once('\x1f')?;
-        if mount != self.mount {
-            return None;
-        }
-        // `path` is the unscoped, already-valid protocol path that
-        // `scoped_object_leaf` stored; re-scope it without re-parsing.
-        Some(self.scope_unscoped(path))
-    }
-
-    fn host_id_from_scoped(&self, scoped_id: &[u8]) -> Option<Vec<u8>> {
-        let prefix = self.mount.as_bytes();
-        if scoped_id.len() <= prefix.len() + 1 {
-            return None;
-        }
-        if scoped_id[..prefix.len()] != prefix[..] || scoped_id[prefix.len()] != 0x1f {
-            return None;
-        }
-        Some(scoped_id[prefix.len() + 1..].to_vec())
-    }
-
-    fn id_tombstoned_after(&self, scoped_id: &[u8], op_gen: u64) -> bool {
-        self.tombstones.get(scoped_id).is_some_and(|g| *g > op_gen)
+    fn id_tombstoned_after(&self, id: &[u8], op_gen: u64) -> bool {
+        self.tombstones.get(id).is_some_and(|g| *g > op_gen)
     }
 
     /// Current per-mount generation. Capture this before starting a browse op
@@ -368,11 +295,10 @@ impl Store {
     /// Whether a view write for `path` derived at `op_gen` must be dropped
     /// because the path's object id carries a tombstone newer than `op_gen`.
     pub fn write_fenced(&self, path: &Path, op_gen: u64) -> bool {
-        let scoped_path = self.scoped_path_bytes(path.as_str());
-        let Some(scoped_id) = self.caches.object.id_of(&scoped_path) else {
+        let Some(id) = self.object.id_of(path.as_str().as_bytes()) else {
             return false;
         };
-        self.id_tombstoned_after(&scoped_id, op_gen)
+        self.id_tombstoned_after(&id, op_gen)
     }
 
     // --- View cache reads -----------------------------------------------------
@@ -447,16 +373,14 @@ impl Store {
 
     // --- Canonical object cache -----------------------------------------------
 
-    /// Warm-read input: path → id → bytes + validator. Returns opaque host id
-    /// bytes (mount prefix stripped). `None` when no canonical is indexed.
+    /// Warm-read input: path → id → bytes + validator. Returns the raw object
+    /// id. `None` when no canonical is indexed.
     pub fn cached_canonical_for(&self, path: &Path) -> Option<CachedCanonical> {
-        let scoped_path = self.scoped_path_bytes(path.as_str());
-        let scoped_id = self.caches.object.id_of(&scoped_path)?;
-        let obj = self.caches.object.get(&scoped_id)?;
+        let id = self.object.id_of(path.as_str().as_bytes())?;
+        let obj = self.object.get(&id)?;
         let canonical = obj.canonical?;
-        let host_id = self.host_id_from_scoped(&obj.id)?;
         Some(CachedCanonical {
-            id: host_id,
+            id: obj.id,
             bytes: canonical.bytes,
             validator: canonical.validator,
         })
@@ -471,29 +395,21 @@ impl Store {
         view_leaves: &[Path],
         op_gen: u64,
     ) -> bool {
-        let scoped_id = self.scoped_id(id);
-        if self.id_tombstoned_after(&scoped_id, op_gen) {
+        if self.id_tombstoned_after(id, op_gen) {
             return false;
         }
 
-        let scoped_leaves: Vec<String> = view_leaves
-            .iter()
-            .map(|p| self.scoped_object_leaf(p))
-            .collect();
+        let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
         let canonical = object::Canonical { bytes, validator };
         let view = &self.caches.view;
-        self.caches
-            .object
-            .store(&scoped_id, canonical, &scoped_leaves, |scoped_leaf| {
-                if let Some(path) = self.view_path_from_object_leaf(scoped_leaf) {
-                    view.delete_exact(&path);
-                }
-            })
+        self.object.store(id, canonical, &leaves, |leaf| {
+            view.delete_exact(&self.scope_unscoped(leaf));
+        })
     }
 
     /// Batch canonical store for effect application. Fenced per-entry; rejected
     /// entries are skipped and the rest of the batch proceeds. Prior-leaf view
-    /// evictions fire per-object before the batch redb commit.
+    /// evictions fire per-object before the batch commit.
     ///
     /// Ownership is consumed so the caller need not clone; the function drains
     /// the Vec.
@@ -504,49 +420,40 @@ impl Store {
         let batch: Vec<object::StoreBatchEntry> = entries
             .into_iter()
             .filter_map(|entry| {
-                let scoped_id = self.scoped_id(&entry.id);
-                if self.id_tombstoned_after(&scoped_id, op_gen) {
+                if self.id_tombstoned_after(&entry.id, op_gen) {
                     return None;
                 }
                 // Evict prior view leaves before the object is replaced.
-                for scoped_leaf in self.caches.object.leaves_of(&scoped_id) {
-                    if let Some(path) = self.view_path_from_object_leaf(&scoped_leaf) {
-                        view.delete_exact(&path);
-                    }
+                for leaf in self.object.leaves_of(&entry.id) {
+                    view.delete_exact(&self.scope_unscoped(&leaf));
                 }
-                let scoped_leaves: Vec<String> = entry
+                let leaves: Vec<String> = entry
                     .view_leaves
                     .iter()
-                    .map(|p| self.scoped_object_leaf(p))
+                    .map(|p| p.as_str().to_string())
                     .collect();
                 Some(object::StoreBatchEntry {
-                    scoped_id,
+                    id: entry.id,
                     canonical: object::Canonical {
                         bytes: entry.bytes,
                         validator: entry.validator,
                     },
-                    new_leaves: scoped_leaves,
+                    new_leaves: leaves,
                 })
             })
             .collect();
 
-        self.caches.object.store_batch(&batch);
+        self.object.store_batch(&batch);
         true
     }
 
     /// Preload index-only store, fenced. Canonical-beats-preload in the object tier.
     pub fn put_index_only(&self, id: &[u8], view_leaves: &[Path], op_gen: u64) -> bool {
-        let scoped_id = self.scoped_id(id);
-        if self.id_tombstoned_after(&scoped_id, op_gen) {
+        if self.id_tombstoned_after(id, op_gen) {
             return false;
         }
-        let scoped_leaves: Vec<String> = view_leaves
-            .iter()
-            .map(|p| self.scoped_object_leaf(p))
-            .collect();
-        self.caches
-            .object
-            .store_index_only(&scoped_id, &scoped_leaves)
+        let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
+        self.object.store_index_only(id, &leaves)
     }
 
     /// Store a fenced negative for `path`. Rejected when the id tombstone is newer than `op_gen`.
@@ -558,55 +465,42 @@ impl Store {
         ttl_millis: u64,
         now_millis: u64,
     ) -> bool {
-        if let Some(id) = id {
-            let scoped_id = self.scoped_id(id);
-            if self.id_tombstoned_after(&scoped_id, op_gen) {
-                return false;
-            }
+        if let Some(id) = id
+            && self.id_tombstoned_after(id, op_gen)
+        {
+            return false;
         }
 
-        let scoped_path = self.scoped(path).to_string();
+        let path_key = path.as_str().to_string();
         let expires_at = ttl_millis
             .checked_add(now_millis)
             .filter(|_| ttl_millis > 0);
         let neg = Negative {
-            id: id.map(|raw| self.scoped_id(raw)),
+            id: id.map(<[u8]>::to_vec),
             expires_at,
             as_of_gen: op_gen,
         };
-        self.negatives.insert(scoped_path.clone(), neg);
+        self.negatives.insert(path_key.clone(), neg);
         if let Some(id) = id {
             self.neg_by_id
-                .entry(self.scoped_id(id))
+                .entry(id.to_vec())
                 .or_default()
-                .insert(scoped_path);
+                .insert(path_key);
         }
         true
     }
 
-    /// Forward index: unscoped path → host `ObjectId` bytes (mount prefix stripped).
+    /// Forward index: path → object id bytes.
     pub fn id_of_path(&self, path: &Path) -> Option<Vec<u8>> {
-        let scoped_path = self.scoped_path_bytes(path.as_str());
-        self.caches
-            .object
-            .id_of(&scoped_path)
-            .and_then(|scoped_id| self.host_id_from_scoped(&scoped_id))
+        self.object.id_of(path.as_str().as_bytes())
     }
 
-    /// Reverse index: host `ObjectId` bytes → current alias paths (mount prefix stripped).
+    /// Reverse index: object id bytes → current alias paths.
     pub fn paths_for_id(&self, id: &[u8]) -> Vec<Path> {
-        let scoped_id = self.scoped_id(id);
-        let mut prefix = self.mount.clone();
-        prefix.push('\x1f');
-        self.caches
-            .object
-            .leaves_of(&scoped_id)
+        self.object
+            .leaves_of(id)
             .into_iter()
-            .filter_map(|scoped_leaf| {
-                scoped_leaf
-                    .strip_prefix(&prefix)
-                    .and_then(|path| Path::parse(path).ok())
-            })
+            .filter_map(|leaf| Path::parse(&leaf).ok())
             .collect()
     }
 
@@ -650,7 +544,9 @@ impl Store {
     }
 
     /// Atomically update one view record. The cache supplies raw bytes only;
-    /// callers own payload decoding, merging, and re-encoding.
+    /// callers own payload decoding, merging, and re-encoding. `update` may be
+    /// rerun on a write-write conflict, so it must be a pure function of its
+    /// input.
     pub fn update_metadata_record<F>(
         &self,
         path: &Path,
@@ -658,7 +554,7 @@ impl Store {
         aux: Option<&str>,
         update: F,
     ) where
-        F: FnOnce(Option<Record>) -> Option<Record>,
+        F: FnMut(Option<Record>) -> Option<Record>,
     {
         let key = Key::with_aux(&self.scoped(path), kind, aux);
         self.caches.view.update_metadata_record(&key, update);
@@ -666,8 +562,7 @@ impl Store {
 
     /// Live negative for `path`. `None` when absent or expired.
     pub fn negative_for(&self, path: &Path, now_millis: u64) -> Option<Negative> {
-        let scoped_path = self.scoped(path).to_string();
-        let neg = self.negatives.get(&scoped_path)?;
+        let neg = self.negatives.get(path.as_str())?;
         if neg.expires_at.is_some_and(|exp| now_millis >= exp) {
             return None;
         }
@@ -678,16 +573,13 @@ impl Store {
 
     /// Invalidate object(id): bump gen, tombstone id, evict object + index + negatives.
     pub fn delete_object(&self, id: &[u8]) {
-        let scoped_id = self.scoped_id(id);
         let g = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.tombstones.insert(scoped_id.clone(), g);
-        self.clear_negatives_for_id(&scoped_id);
+        self.tombstones.insert(id.to_vec(), g);
+        self.clear_negatives_for_id(id);
 
         let view = &self.caches.view;
-        self.caches.object.evict_object(&scoped_id, |scoped_leaf| {
-            if let Some(path) = self.view_path_from_object_leaf(scoped_leaf) {
-                view.delete_exact(&path);
-            }
+        self.object.evict_object(id, |leaf| {
+            view.delete_exact(&self.scope_unscoped(leaf));
         });
         self.gc_tombstones();
         if self.negatives.len() > NEGATIVES_SOFT_CAP {
@@ -707,8 +599,8 @@ impl Store {
 
     // --- Private helpers ------------------------------------------------------
 
-    fn clear_negatives_for_id(&self, scoped_id: &[u8]) {
-        if let Some((_, paths)) = self.neg_by_id.remove(scoped_id) {
+    fn clear_negatives_for_id(&self, id: &[u8]) {
+        if let Some((_, paths)) = self.neg_by_id.remove(id) {
             for path in paths {
                 self.negatives.remove(&path);
             }
@@ -769,18 +661,14 @@ mod tests {
         (dir, caches, store)
     }
 
-    fn test_scoped_id(mount: &str, id: &[u8]) -> Vec<u8> {
-        let mut key = mount.as_bytes().to_vec();
-        key.push(0x1f);
-        key.extend_from_slice(id);
-        key
+    // Object keys are raw now (per-mount keyspaces); the mount arg is retained
+    // only to keep call sites readable about which mount they target.
+    fn test_scoped_id(_mount: &str, id: &[u8]) -> Vec<u8> {
+        id.to_vec()
     }
 
-    fn test_scoped_path(mount: &str, path: &str) -> Vec<u8> {
-        let mut key = mount.as_bytes().to_vec();
-        key.push(0x1f);
-        key.extend_from_slice(path.as_bytes());
-        key
+    fn test_scoped_path(_mount: &str, path: &str) -> Vec<u8> {
+        path.as_bytes().to_vec()
     }
 
     fn p(path: &str) -> Path {
@@ -808,22 +696,14 @@ mod tests {
         let p2 = test_scoped_path("gh", "/issues/all/42/item.json");
         let scoped_id = test_scoped_id("gh", OBJ_ID);
         assert_eq!(
-            store.caches.object.id_of(&p1).as_deref(),
+            store.object.id_of(&p1).as_deref(),
             Some(scoped_id.as_slice())
         );
         assert_eq!(
-            store.caches.object.id_of(&p2).as_deref(),
+            store.object.id_of(&p2).as_deref(),
             Some(scoped_id.as_slice())
         );
-        assert!(
-            store
-                .caches
-                .object
-                .get(&scoped_id)
-                .unwrap()
-                .canonical
-                .is_some()
-        );
+        assert!(store.object.get(&scoped_id).unwrap().canonical.is_some());
         assert!(
             store
                 .cached_canonical_for(&p("/issues/open/42/item.json"))
@@ -862,15 +742,11 @@ mod tests {
 
         assert!(store.put_canonical(OBJ_ID, b"v2".to_vec(), None, std::slice::from_ref(&l2), 0));
 
-        let obj = store.caches.object.get(&scoped_id).unwrap();
+        let obj = store.object.get(&scoped_id).unwrap();
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L1")));
         assert!(obj.leaves.iter().any(|p| p.ends_with("/p/L2")));
         assert_eq!(
-            store
-                .caches
-                .object
-                .id_of(&test_scoped_path("m", &l1))
-                .as_deref(),
+            store.object.id_of(&test_scoped_path("m", &l1)).as_deref(),
             Some(scoped_id.as_slice())
         );
         assert!(
@@ -893,7 +769,7 @@ mod tests {
         ));
         assert!(store.put_index_only(OBJ_ID, &[p("/issues/42/title")], 0));
 
-        let got = store.caches.object.get(&scoped_id).unwrap();
+        let got = store.object.get(&scoped_id).unwrap();
         assert!(got.canonical.is_some());
         assert_eq!(got.canonical.as_ref().unwrap().bytes, b"data");
     }
@@ -911,16 +787,12 @@ mod tests {
             0,
         );
 
-        store.caches.object.capacity_evict(&scoped_id, |_| {});
+        store.object.capacity_evict(&scoped_id, |_| {});
 
-        let got = store.caches.object.get(&scoped_id).unwrap();
+        let got = store.object.get(&scoped_id).unwrap();
         assert!(got.canonical.is_none());
         assert_eq!(
-            store
-                .caches
-                .object
-                .id_of(&test_scoped_path("m", &leaf))
-                .as_deref(),
+            store.object.id_of(&test_scoped_path("m", &leaf)).as_deref(),
             Some(scoped_id.as_slice())
         );
     }
@@ -941,14 +813,8 @@ mod tests {
 
         store.delete_object(OBJ_ID);
 
-        assert!(store.caches.object.get(&scoped_id).is_none());
-        assert!(
-            store
-                .caches
-                .object
-                .id_of(&test_scoped_path("m", &leaf))
-                .is_none()
-        );
+        assert!(store.object.get(&scoped_id).is_none());
+        assert!(store.object.id_of(&test_scoped_path("m", &leaf)).is_none());
         assert!(store.negative_for(&p(&leaf), 1_000).is_none());
     }
 
@@ -974,21 +840,9 @@ mod tests {
 
         store.delete_listing_prefix(&p("/dir"));
 
-        assert!(
-            store
-                .caches
-                .object
-                .get(&scoped_id)
-                .unwrap()
-                .canonical
-                .is_some()
-        );
+        assert!(store.object.get(&scoped_id).unwrap().canonical.is_some());
         assert_eq!(
-            store
-                .caches
-                .object
-                .id_of(&test_scoped_path("m", &leaf))
-                .as_deref(),
+            store.object.id_of(&test_scoped_path("m", &leaf)).as_deref(),
             Some(scoped_id.as_slice())
         );
         assert!(
@@ -1101,30 +955,12 @@ mod tests {
         );
 
         // Reverse index consistency: id_expired must have no entry (or empty set).
-        let scoped_expired = {
-            let mut k = "m".as_bytes().to_vec();
-            k.push(0x1f);
-            k.extend_from_slice(id_expired);
-            k
-        };
-        let scoped_fresh = {
-            let mut k = "m".as_bytes().to_vec();
-            k.push(0x1f);
-            k.extend_from_slice(id_fresh);
-            k
-        };
         assert!(
-            store
-                .neg_by_id
-                .get(&scoped_expired)
-                .is_none_or(|s| s.is_empty()),
+            store.neg_by_id.get(id_expired).is_none_or(|s| s.is_empty()),
             "neg_by_id for expired id should be absent or empty"
         );
         assert!(
-            store
-                .neg_by_id
-                .get(&scoped_fresh)
-                .is_some_and(|s| !s.is_empty()),
+            store.neg_by_id.get(id_fresh).is_some_and(|s| !s.is_empty()),
             "neg_by_id for fresh id should still have entries"
         );
     }

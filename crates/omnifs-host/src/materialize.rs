@@ -69,7 +69,7 @@ impl<'a> Materializer<'a> {
         now_millis: u64,
     ) -> (Vec<Path>, Vec<Path>) {
         // Collect canonical-store effects that pass conflict detection, then
-        // write them all in one redb write transaction via put_canonical_batch.
+        // write them all in one batch via put_canonical_batch.
         let canonical_batch: Vec<CanonicalBatchEntry> = effects
             .canonical
             .iter()
@@ -194,8 +194,13 @@ impl<'a> Materializer<'a> {
                     .update_metadata_record(&dir, RecordKind::Dirents, None, |existing| {
                         let existing = existing
                             .and_then(|record| DirentsPayload::deserialize(&record.payload));
-                        let payload =
-                            DirentsPayload::merged(existing, new_children, listing_exhaustive);
+                        // The merge reruns on a write-write conflict, so clone
+                        // the incoming children rather than moving them.
+                        let payload = DirentsPayload::merged(
+                            existing,
+                            new_children.clone(),
+                            listing_exhaustive,
+                        );
                         payload
                             .serialize()
                             .map(|payload| Record::new(RecordKind::Dirents, payload))

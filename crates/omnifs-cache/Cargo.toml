@@ -15,7 +15,7 @@ dashmap = { workspace = true }
 moka = { workspace = true }
 parking_lot = { workspace = true }
 postcard = { workspace = true }
-redb = { workspace = true }
+fjall = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }

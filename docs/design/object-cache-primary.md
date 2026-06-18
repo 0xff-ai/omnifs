@@ -5,7 +5,7 @@ Related: `architecture.md` §3-§5 (the cache invariants this doc details), `fil
 
 ## Decision
 
-The **object cache** (canonical upstream bytes) is the durable, primary host cache. The **view cache** (rendered bytes shell tools read) is derived and recomputable from it without an upstream refetch. This inverts today's code, where the view tier is durable (`view.redb`) and the canonical store is a volatile in-memory LRU.
+The **object cache** (canonical upstream bytes) is the durable, primary host cache. The **view cache** (rendered bytes shell tools read) is derived and recomputable from it without an upstream refetch. This inverts the older model, where the view tier was the durable store and the canonical store was a volatile in-memory LRU.
 
 Three host caches, all byte-level, named by role:
 
@@ -57,7 +57,7 @@ and effect materialization live in `omnifs-host`.
 ```
 omnifs-cache/
   object.rs   object::Cache   durable; id → Canonical; paths index
-  view.rs     view::Cache     moka `mem` tier + redb `disk` tier
+  view.rs     view::Cache     moka `mem` tier + fjall `disk` tier
   lib.rs      Caches, Store    per-mount facade; RecordKind + batch/record types; storage primitives
 ```
 
@@ -76,7 +76,7 @@ impl Materializer<'_> {
     // kernel cache-invalidation notifications.
     fn apply(&self, effects: &wit::Effects, op_gen: u64, now_millis: u64) -> (Vec<String>, Vec<String>) {
         // Canonical-store entries that pass conflict detection are collected and committed in one
-        // redb write transaction. put_canonical evicts the id's prior derived view leaves before
+        // fjall write batch. put_canonical evicts the id's prior derived view leaves before
         // storing new ones, so an evict-then-refetch can't leave a mixed-version view (Codex #6).
         // Fenced by op_gen.
         let batch = collect_canonical(&effects.canonical);
@@ -112,10 +112,10 @@ pub struct Canonical { pub bytes: Vec<u8>, pub validator: Option<String> }
 The caches are process-global handles opened once; `Store` is the cheap per-mount view that owns the **single mount-scoping policy site**. Recurring context (mount + handles) is bundled here so no method threads `(mount, ...)` repeatedly.
 
 ```rust
-pub struct Caches { object: object::Cache, view: view::Cache }   // object.redb (durable); view.redb (deleted on startup)
+pub struct Caches { object: object::Cache, view: view::Cache }   // durable object DB; disposable view DB (cleared on startup)
 
 impl Caches {
-    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;            // open durable object DB; delete + recreate view.redb (always cold)
+    pub fn open(dir: &Path) -> anyhow::Result<Arc<Self>>;            // open durable object DB; clear + reopen view DB (always cold)
     pub fn mount(self: &Arc<Self>, mount: impl Into<String>) -> Store; // per-mount handle
 }
 
@@ -137,22 +137,22 @@ impl Store {
     pub fn delete_listing_prefix(&self, prefix: &ProtocolPath);
     pub fn current_generation(&self) -> u64;        // per-mount clock (Codex #7)
 
-    fn scoped(&self, key: &str) -> String;          // "{mount}\x1f{key}" — the only place mount enters a key
+    fn scoped(&self, path: &Path) -> Path;          // "/{mount}{path}" — view-tier mount scoping
 }
 ```
 
 The push carries the logical id (Codex #2: the SDK self-checks it) and the
-`op_gen` captured before the push (Codex #1: fence the render). The caches
-operate on already-scoped keys; they are mount-agnostic byte stores. Mount
-isolation lives in `Store::scoped` alone. The fence clock and tombstones are
-**per-mount** (Codex #7): a noisy mount can no longer GC another mount's live
-tombstone.
+`op_gen` captured before the push (Codex #1: fence the render). The object tier
+is structurally isolated per mount (its own keyspaces), so its keys are raw; the
+shared view tier is isolated by the `/{mount}` path prefix `Store::scoped`
+applies. The fence clock and tombstones are **per-mount** (Codex #7): a noisy
+mount can no longer GC another mount's live tombstone.
 
 ### object::Cache
 
 ```rust
 pub struct Cache {
-    disk: Arc<redb::Database>,   // objects: scoped-id → { canonical, leaves };  paths: scoped-leaf → scoped-id
+    db: fjall::Database,   // per-mount keyspaces: objects.{mount} id → { canonical, leaves };  view.{mount} leaf → id
 }
 
 impl Cache {
@@ -175,10 +175,10 @@ The per-mount fence (generation counter plus tombstone map) lives on `Store`, no
 5. **Leaf invalidation cascades to the object.** Invalidating a representation path (which `architecture.md` §5 does on version advance) consults the path index and, if the path is a known leaf, evicts the whole object + its leaves, never just the one view entry (Codex #3).
 6. **Object cache is opt-in.** Structural providers emit no `canonical-store`; the cache self-selects. No host shape declaration.
 7. **No double storage.** Identity representations (`byte-source::canonical`) live only in the object cache; the view never copies them.
-8. **View is disposable.** A separate `view.redb`, deleted and recreated on every startup — no crash-detection, no sentinel. It never survives a restart to disagree with the durable object (Codex #5); object and view need no cross-store atomicity.
+8. **View is disposable.** A separate fjall database, cleared and reopened on every startup — no crash-detection, no sentinel. It never survives a restart to disagree with the durable object (Codex #5); object and view need no cross-store atomicity.
 9. **Schema decoupled from wire.** `omnifs-cache` has no `omnifs-wit` dependency; the durable serde schema is versioned independently; the host owns the wire bridge.
 10. **Release-validated leaves.** `op_validate` (not a `debug_assert`) rejects empty logical ids, empty or invalid view leaves, invalidation ids, and oversized validator tokens (Codex #10).
-11. **Mount isolation by key prefix.** Cross-mount reads are unrepresentable.
+11. **Mount isolation, no in-key separator.** The object tier gets a keyspace per mount (raw keys); the view tier prefixes keys with `/{mount}`. Cross-mount reads are unrepresentable.
 
 ## Wire delta (`architecture.md` §4 ↔ shipped WIT)
 
@@ -227,18 +227,18 @@ logical id.
 
 ## Storage
 
-The object cache (precious, low write rate) is **durable and global**; the view cache (high write rate, disposable) is **non-durable** — a separate redb DB deleted and recreated on every startup. This split is what makes the contention and atomicity findings tractable, with no bespoke crash-detection machinery.
+The object cache (precious, low write rate) is **durable and global**; the view cache (high write rate, disposable) is **non-durable** — a separate fjall database cleared and reopened on every startup. This split is what makes the contention and atomicity findings tractable, with no bespoke crash-detection machinery. Both tiers are fjall (LSM-tree) databases.
 
 ```
-<cache-dir>/object.redb               durable, global, survives restart
-    objects : "{mount}\x1f{anchor}"    -> { canonical, leaves }   // leaves = reverse set for exact eviction
-    paths   : "{mount}\x1f{leaf-path}" -> anchor                  // forward map for the read-path push
-<cache-dir>/view.redb                 non-durable: deleted + recreated on every startup
-    metadata/content/bulk : "{mount}\x1f{kind}:{path}"[<aux>]
+<cache-dir>/object/                  durable, global, survives restart (fjall database)
+    objects.{mount} : "{anchor}"      -> { canonical, leaves }   // leaves = reverse set for exact eviction
+    view.{mount}    : "{leaf-path}"   -> anchor                  // forward map for the read-path push
+<cache-dir>/view/                    non-durable: cleared + reopened on every startup (fjall database)
+    metadata/content/bulk : "{kind}:/{mount}{path}"[\x1f<hex-aux>]
 ```
 
-- **Object DB: one global file, mount-prefixed keys.** Object writes happen only on a cold fetch, so the single writer lock barely contends (Codex #9). Mount prefix reuses the existing range-scan machinery and keeps `TableDefinition` names static.
-- **View DB: a separate redb, deleted on startup.** No sentinel, no clean-vs-crash distinction — the host removes `view.redb` at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. If the single view writer lock contends under load (Codex #9), split the view into per-mount files with the same delete-on-startup rule — no other change.
+- **Object DB: per-mount keyspaces, raw keys.** Mount isolation is structural (a keyspace per mount), so the key carries no mount prefix and there is no in-key separator. Object writes happen only on a cold fetch, so contention is negligible (Codex #9).
+- **View DB: a separate fjall database, cleared on startup.** No sentinel, no clean-vs-crash distinction — the host deletes the `view/` directory at startup and reopens it empty, so the view is always cold after any restart and can never survive to disagree with the durable object (Codex #5). The view recomputes from the object with no upstream refetch. Because the view is disposable, object and view need no cross-store atomicity. The view keyspaces are shared across mounts; isolation comes from the `/{mount}` path prefix on each key.
 
 Budgets: object DB global LRU; view LRU; in-memory `mem` tier (moka) over each. Per-mount fairness for the object DB is deferred until a noisy mount is shown to starve a quiet one.
 
@@ -246,8 +246,8 @@ Budgets: object DB global LRU; view LRU; in-memory `mem` tier (moka) over each. 
 
 ## Tradeoffs accepted
 
-- **Object DB single writer lock (global).** Only cold-fetch writes contend, and large deletes (mount teardown) are chunked so they don't hold the lock across an unrelated mount's fetch.
-- **View recompute after any restart.** Startup deletes `view.redb`, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
+- **Object writes commit per cold fetch.** fjall has no global writer lock; object writes (batched objects + view-index commits) happen only on a cold fetch, so they barely contend.
+- **View recompute after any restart.** Startup clears the view DB, so the first read of each path after a restart re-renders from the durable object (local, no upstream). Cheaper than the machinery to keep a warm view across clean shutdowns.
 - **Large ranged `.raw`.** A `Deferred { Ranged }` object `.raw` still has no `read-file` byte source; remains deferred per `architecture.md` §8.
 
 ## Adversarial review (Codex gpt-5.5, accepted findings)
@@ -258,11 +258,11 @@ The design was hardened against an adversarial review. Folded in above:
 - **#2 (Critical)** wrong/stale map silently renders -> `canonical-input` carries the logical id; SDK self-checks before rendering.
 - **#3 (Critical)** invalidating a representation path left the object alive -> leaf invalidation cascades to the logical id via the path index.
 - **#4 (High)** File-shape breaks prefix deletion -> exact-leaf eviction from the object's reverse leaf set; the "textual-containment means free range-delete" claim is withdrawn.
-- **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate `view.redb` deleted on every startup, so no view survives a restart to disagree with the object.
+- **#5 (High)** cross-DB invalidation isn't crash-atomic → the view is a separate fjall database cleared on every startup, so no view survives a restart to disagree with the object.
 - **#6 (High)** object eviction + refetch -> mixed versions -> a `canonical-store` overwrite evicts the object's prior derived views first.
 - **#7 (High)** global generation + tombstone GC unsafe across mounts -> the fence is per-mount.
-- **#8 (Medium)** concurrent dirent merge lost-update -> `Store::cache_put_batch` keeps the read-modify-write transactional inside the cache.
-- **#9 (Medium)** global write-lock contention -> object DB is global but cold-write-only, so it barely contends. The view is a **single global `view.redb`** (per the chosen storage layout), so its writer lock is shared across mounts; this is accepted for now. If it contends under load, split the view into per-mount files (same delete-on-startup rule) and chunk large prefix deletes; deferred until shown necessary.
+- **#8 (Medium)** concurrent dirent merge lost-update -> the dirent merge runs through fjall's optimistic `update_fetch`, which reruns on a write-write conflict and always merges onto the latest value, so plain writes never lose a concurrent merge.
+- **#9 (Medium)** global write-lock contention -> fjall has no global writer lock. Object writes are cold-fetch-only, so they barely contend; the shared view keyspaces take lock-free plain writes plus the optimistic merge above.
 - **#10 (Medium)** `leaves` only `debug_assert`ed → release validation in `op_validate`.
 
 Confirmed fine: structural files under an object dir; dropping `content-type`.
