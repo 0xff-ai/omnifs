@@ -56,7 +56,7 @@ A global `config.toml` under `config_dir` supplies defaults for the runtime imag
 
 ### Surface
 
-Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. The `mount-tree` diagnostic lives under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
+Top-level verbs: `init`, `setup`, `up`, `down`, `status`, `doctor`, `mounts`, `provider`, `reset`, `dev`, `auth`, `shell`, `logs`, `inspect`, `completions`, `version`. The `mount-tree` diagnostic lives under hidden `omnifs debug`. The runtime entry point is the separate `omnifsd` binary, which the container entrypoint invokes (see `docs/design/daemon-cli-split.md`).
 
 ### Runtime start verbs
 
@@ -86,6 +86,10 @@ Ten probes in dependency order. `image_cached` depends on `docker_reachable`. `a
 
 `mounts rm` validates the mount name through `MountName::new` (from `omnifs_core`) before any path construction; otherwise `mounts rm "../providers/foo"` could escape the mounts dir. Offers credential cleanup in the same flow because `auth logout` derives its credential key from the mount config file, which `rm` just deleted. Credentials with `ConfiguredExternally` source (`token_env`, `token_file`) are reported as unchanged.
 
+### `provider`
+
+`provider info <PROVIDER>` prints a man-page-style dump of a provider's full metadata: branding (the manifest `color` accents the NAME header), default mount, contract versions, capabilities with their justifications, auth schemes, and the route tree with descriptions and object representations. `<PROVIDER>` resolves by manifest id, default mount, or wasm file stem against the providers dir (`--providers-dir` overrides), or is an explicit path to a `.wasm`. `--json` emits the assembled model for agents. The route table comes from running the provider through the host runtime (`initialize`), with a fallback to the committed `omnifs.routes.json` for config-gated providers and an honest "requires configuration" note when neither is available. The model assembly (`commands::provider::assemble_provider_metadata`) is shared with doc-page generation.
+
 ### Onboarding: setup vs mounts add
 
 `setup` and `mounts add` are complementary, not redundant. `setup` is the first-run wizard: it detects the host OS, explains the Docker runtime, pulls the image, walks a multi-provider picker, authenticates each, and launches the container, orchestrating `mounts add`/`init` per provider and then `up`. `mounts add` (alias `init`) is the single-mount primitive for adding one provider later. `setup` is kept distinct rather than folded into `init` because it owns runtime concerns (OS detection, Docker, image pull, launch) that a single-mount add has no business carrying.
@@ -108,7 +112,7 @@ The following are explicitly not part of this design and should not be folded in
 - Telemetry, crash reporting, usage analytics.
 - Numbered stable error codes.
 - A `mounts show <name>` detail verb (`status` and `mounts ls` cover listing).
-- A `providers ls` / `providers info` verb (init picker covers it).
+- A `providers ls` verb (the init picker covers discovery). Per-provider detail is served by `provider info` (see the `provider` section above).
 - Renaming `up`/`down`/`shell` to product-specific verbs.
 - Per-directory `omnifs.toml` lookup walking from cwd.
 

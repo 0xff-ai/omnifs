@@ -64,6 +64,11 @@ pub enum Commands {
     /// Manage configured mounts: add, ls, rm.
     Mounts(commands::mounts::MountsArgs),
 
+    /// Inspect providers. `provider info <PROVIDER>` prints a man-page-style
+    /// dump of a provider's metadata: branding, mount, contract, capabilities,
+    /// auth, and its full route tree.
+    Provider(commands::provider::ProviderArgs),
+
     /// Nuke every mount config and (by default) its stored credential,
     /// then stop and remove the container. Asks for confirmation unless
     /// `--yes` is set.
@@ -102,6 +107,7 @@ impl Commands {
             Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run(),
             Self::Mounts(args) => args.run().await,
+            Self::Provider(args) => args.run(),
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();

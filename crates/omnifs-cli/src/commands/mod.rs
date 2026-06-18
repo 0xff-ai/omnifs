@@ -8,6 +8,7 @@ pub mod init;
 pub mod inspect;
 pub mod logs;
 pub mod mounts;
+pub mod provider;
 pub mod reset;
 pub mod setup;
 pub mod shell;
