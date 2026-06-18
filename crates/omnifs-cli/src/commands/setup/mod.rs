@@ -353,6 +353,7 @@ async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
     up::UpArgs {
         image: config.image.clone(),
         container_name: config.container_name.clone(),
+        ..Default::default()
     }
     .run()
     .await

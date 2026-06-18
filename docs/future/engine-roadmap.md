@@ -52,4 +52,4 @@ GitHub fetches objects via the endpoint path (no rate-limit detection) while str
 
 ## Native mount frontends
 
-The NFSv4 loopback frontend has landed (`omnifsd --frontend nfs`, `crates/omnifs-nfs`, `docs/design/nfsv4-loopback-mount.md`). FSKit on macOS and the distributed frontend-runtime split remain ahead; their detailed design lives in the internal design notes. The architecture keeps FUSE and NFSv4 as frontends of the projected tree behind the `omnifs_host::Namespace` seam, so no provider-facing API depends on the frontend. Wiring the host-native frontend into the default `omnifs up` flow is product-gated, not technically blocked.
+The detailed design for additional frontends (NFSv4 loopback, FSKit on macOS) and the distributed frontend-runtime split lives in the internal design notes; the architecture already keeps FUSE as one frontend of the projected tree behind the `omnifs_host::Namespace` seam, so no provider-facing API depends on the frontend. This is product-gated, not technically blocked.

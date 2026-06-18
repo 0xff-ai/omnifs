@@ -254,6 +254,15 @@ jobs:
           path: dist-download
           merge-multiple: false
 
+      - name: Download platform omnifsd archives from CI
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ steps.ci_run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: omnifsd-*
+          path: dist-download
+          merge-multiple: false
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -302,6 +311,27 @@ jobs:
             mkdir -p "$pkg/bin"
             cp "$binary" "$pkg/bin/omnifs"
             chmod 755 "$pkg/bin/omnifs"
+
+            daemon_archive="$(find dist-download -type f -name "omnifsd-${platform}.tar.xz" | head -n 1)"
+            if [[ -z "$daemon_archive" ]]; then
+              echo "missing omnifsd archive for $platform" >&2
+              find dist-download -type f >&2 || true
+              exit 1
+            fi
+
+            daemon_dir="$RUNNER_TEMP/extract-daemon-$platform"
+            rm -rf "$daemon_dir"
+            mkdir -p "$daemon_dir"
+            tar -xJf "$daemon_archive" -C "$daemon_dir"
+            daemon_binary="$daemon_dir/omnifsd"
+            if [[ ! -x "$daemon_binary" ]]; then
+              echo "missing omnifsd binary in $daemon_archive" >&2
+              find "$daemon_dir" -type f >&2 || true
+              exit 1
+            fi
+            cp "$daemon_binary" "$pkg/bin/omnifsd"
+            chmod 755 "$pkg/bin/omnifsd"
+
             npm pack "$pkg" --pack-destination "$RUNNER_TEMP"
 
             if [[ "$SHOULD_PUBLISH" == "true" ]]; then

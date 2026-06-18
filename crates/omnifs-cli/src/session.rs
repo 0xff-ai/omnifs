@@ -502,6 +502,53 @@ mod tests {
     }
 
     #[test]
+    fn materialize_host_native_keeps_canonical_host_and_no_binds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        fs::create_dir_all(&db_dir).unwrap();
+        fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
+        let canonical = db_dir.canonicalize().unwrap();
+
+        let store = MemoryStore::new();
+        let config = MountConfig {
+            name: MountName::try_from("db").unwrap(),
+            config: Spec::parse(&format!(
+                r#"{{
+                    "provider": "omnifs_provider_db.wasm",
+                    "mount": "db",
+                    "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                    "capabilities": {{
+                        "preopened_paths": [
+                            {{"host": "{}", "guest": "/data", "mode": "ro"}}
+                        ]
+                    }}
+                }}"#,
+                db_dir.display()
+            ))
+            .unwrap(),
+            source: PathBuf::from("/dev/null"),
+        };
+
+        let catalog = test_catalog(tmp.path());
+        let (binds, payload) = config.materialize(&catalog, &store, true).unwrap();
+
+        assert!(
+            binds.is_empty(),
+            "host-native preopens are opened directly and emit no binds"
+        );
+        let written = payload_json(&payload);
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["host"],
+            canonical.display().to_string(),
+            "host-native keeps the canonical host path, not a guest preopen path"
+        );
+        assert_eq!(
+            written["capabilities"]["preopened_paths"][0]["guest"],
+            "/data",
+        );
+    }
+
+    #[test]
     fn materialize_leaves_manifest_preopens_container_native() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new();

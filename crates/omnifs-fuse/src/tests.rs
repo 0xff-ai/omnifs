@@ -22,23 +22,26 @@ use omnifs_wit::provider::types as wit_types;
 use omnifs_wit::provider::types::ListChildrenResult;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 use tempfile::TempDir;
 
 // ---- FUSE-path pagination harness -------------------------------------
 //
-// WHAT THIS HARNESS PROVES: the per-method interception logic the
-// `Filesystem` trait methods delegate to, driven in the same order the
-// kernel calls them (`opendir` -> `lookup` -> `open` -> `read` -> `release`):
-//   - `opendir_check_caches`/`opendir_via_provider` (snapshot building),
-//   - `lookup_check_caches` + provider-lookup fallback (synthetic controls,
-//     synthetic root-ignore synthesis only after a negative lookup, ENOENT
-//     for dead controls),
-//   - `open_synthetic_file` (per-`fh` buffer materialization, `synthetic`
-//     inode gating),
+// WHAT THIS HARNESS PROVES: the FUSE op boundary, driven in the same order
+// the kernel calls it (`opendir` -> `lookup` -> `open` -> `read` ->
+// `release`). Each op enters the async runtime once and delegates the
+// listing/lookup/read DECISION to `Tree`; the adapter then builds the kernel
+// snapshot/inode/reply state on the neutral result. The harness drives those
+// op-boundary methods and asserts the observable kernel-facing result:
+//   - `opendir_op` (snapshot building from `Tree::list`, including the
+//     `@next`/`@all` controls and mount-root ignore files as inode-allocated
+//     synthetic entries, and the serve-stale-on-rate-limit path),
+//   - `lookup_op` (synthetic-control resolution, root-ignore synthesis after a
+//     negative provider result, ENOENT for dead controls),
+//   - `open_op` / `open_synthetic` (per-`fh` buffer materialization from
+//     `Tree::read`, `synthetic` inode gating, full-deferred prefetch),
 //   - the per-`fh` `file_cache` + `data_slice` read slicing,
-//   - `serve_control_read` (the exact method `open`/`read` invoke to run a
-//     control action and invalidate the mem).
+//   - the inode-table `synthetic`-marker semantics (`get_or_alloc_ino_*`),
+//     which FUSE keeps even though the byte sources moved into `Tree`.
 //
 // WHAT IT DOES NOT PROVE: the kernel reply plumbing itself. fuser's
 // `Reply*` sinks have only a `pub(crate)` constructor and their test
@@ -136,8 +139,10 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
 impl FuseHarness {
     const MOUNT: &'static str = "test";
 
-    /// Mirror the kernel `opendir` cache-miss path: seed the directory's
-    /// dirents + controls by listing through the provider.
+    /// Drive the kernel `opendir` op boundary: allocate the directory inode and
+    /// build its snapshot through `Tree::list` (the same `opendir_op` the fuser
+    /// `opendir` callback calls). The snapshot carries the provider children plus
+    /// the host-synthesized `@next`/`@all` controls and mount-root ignore files.
     fn opendir(&self, path: &str) -> DirSnapshot {
         self.try_opendir(path).expect("opendir")
     }
@@ -146,15 +151,7 @@ impl FuseHarness {
         let ino = self
             .fs
             .get_or_alloc_ino(Self::MOUNT, path, wit_types::EntryKind::Directory, 0);
-        if let Some(snapshot) =
-            self.fs
-                .opendir_check_caches(Self::MOUNT, ino, path, None, Instant::now())?
-        {
-            return Ok(snapshot);
-        }
-        let runtime = self.fs.runtime_for_mount(Self::MOUNT).expect("runtime");
-        self.fs
-            .opendir_via_provider(&runtime, Self::MOUNT, ino, path, None)
+        self.fs.opendir_op(Self::MOUNT, ino, path, None)
     }
 
     fn seed_stale_dirents(&self, path: &str, names: &[&str]) {
@@ -180,10 +177,10 @@ impl FuseHarness {
     }
 
     /// `lookup` for a child, returning `Some(ino)` on a positive hit and
-    /// `None` on ENOENT. Mirrors the real `Filesystem::lookup` ordering:
-    /// cache check, then provider lookup, then host-synthesis of a mount-root
-    /// ignore file ONLY after a negative result (so a real provider file is
-    /// never shadowed).
+    /// `None` on ENOENT. Drives the `lookup_op` op boundary (the same
+    /// `Tree::resolve_child` the fuser `lookup` callback calls): the cache-first
+    /// lookup, the `@next`/`@all` control resolution, and the mount-root ignore
+    /// synthesis after a negative provider result all live in `Tree`.
     fn lookup(&self, parent: &str, name: &str) -> Option<u64> {
         let child = join_child_path(parent, name);
         let ino_for = |fs: &Frontend| {
@@ -191,56 +188,22 @@ impl FuseHarness {
                 .get(&PathKey::new(Self::MOUNT, &child))
                 .map(|r| *r)
         };
-        // Synthesize a root ignore file after any negative, exactly as the
-        // trait method does at each ENOENT exit.
-        let synth = |fs: &Frontend| {
-            fs.synthesize_root_ignore_lookup(Self::MOUNT, parent, name)
-                .and_then(|_| ino_for(fs))
-        };
-        match self
-            .fs
-            .lookup_check_caches(Self::MOUNT, parent, name, None, Instant::now())
-        {
-            Ok(Some(_)) => ino_for(&self.fs),
-            Ok(None) => {
-                let runtime = self.fs.runtime_for_mount(Self::MOUNT).expect("runtime");
-                match self
-                    .fs
-                    .lookup_via_provider(&runtime, Self::MOUNT, parent, name, None)
-                {
-                    Ok(_) => ino_for(&self.fs),
-                    Err(_) => synth(&self.fs),
-                }
-            },
-            Err(_) => synth(&self.fs),
+        match self.fs.lookup_op(Self::MOUNT, parent, name, None) {
+            Ok(_) => ino_for(&self.fs),
+            Err(_) => None,
         }
     }
 
     /// Mirror the kernel `open` then `read` path for a control/ignore leaf:
-    /// run the synthetic open (which materializes the per-`fh` buffer), then
-    /// serve `read` at the given offsets via `data_slice`. Returns the bytes
-    /// served per read, concatenated, plus the allocated `fh`.
+    /// run the open op (which materializes the per-`fh` buffer through
+    /// `Tree::read`), then serve `read` at the given offsets via `data_slice`.
+    /// Returns the bytes served per read, concatenated, plus the allocated `fh`.
     fn open_and_read(&self, path: &str, reads: &[(u64, u32)]) -> (u64, Vec<u8>) {
-        let ino = self.lookup_path(path).expect("path resolves before open");
-        let (attrs, synthetic) = self
-            .fs
-            .inodes
-            .get(&ino)
-            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
-        let fh = self.fs.alloc_fh();
-        let target = FullReadTarget {
-            ino,
-            fh,
-            mount_name: Self::MOUNT.to_string(),
-            path: path.to_string(),
-            backing_path: None,
-            attrs,
-            synthetic,
-        };
+        let target = self.read_target(path);
+        let fh = target.fh;
         self.fs
-            .open_synthetic_file(&target, None)
-            .expect("synthetic open")
-            .expect("path is a synthetic control/ignore file");
+            .open_op(&target, None)
+            .expect("open of a synthetic control/ignore file materializes the per-fh buffer");
 
         let mut out = Vec::new();
         for &(offset, size) in reads {
@@ -248,6 +211,28 @@ impl FuseHarness {
             out.extend_from_slice(data_slice(&cached, offset, size));
         }
         (fh, out)
+    }
+
+    /// Build the `FullReadTarget` the `open`/`read` op boundary consumes:
+    /// resolve `path` to an inode (walking parent dirents so each segment is
+    /// allocated), allocate a fresh `fh`, and snapshot the inode-cached
+    /// projection (attrs + `synthetic` marker) the open dispatch reads.
+    fn read_target(&self, path: &str) -> FullReadTarget {
+        let ino = self.lookup_path(path).expect("path resolves before open");
+        let (attrs, synthetic) = self
+            .fs
+            .inodes
+            .get(&ino)
+            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+        FullReadTarget {
+            ino,
+            fh: self.fs.alloc_fh(),
+            mount_name: Self::MOUNT.to_string(),
+            path: path.to_string(),
+            backing_path: None,
+            attrs,
+            synthetic,
+        }
     }
 
     /// Resolve a multi-segment mount-relative path to an inode, walking
@@ -264,23 +249,10 @@ impl FuseHarness {
     }
 
     fn prefetch_mutable_unversioned_full(&self, path: &str) -> (u64, Vec<u8>) {
-        let ino = self.lookup_path(path).expect("path resolves before open");
-        let (attrs, synthetic) = self.fs.inodes.get(&ino).map_or((None, false), |entry| {
-            (entry.attrs.clone(), entry.synthetic)
-        });
-        let fh = self.fs.alloc_fh();
-        let target = FullReadTarget {
-            ino,
-            fh,
-            mount_name: Self::MOUNT.to_string(),
-            path: path.to_string(),
-            backing_path: None,
-            attrs,
-            synthetic,
-        };
+        let target = self.read_target(path);
+        let fh = target.fh;
         self.fs
-            .prefetch_full_file_on_open(&target, None)
-            .expect("dynamic full prefetch succeeds")
+            .open_op(&target, None)
             .expect("unknown full file prefetches on open");
         let bytes = self
             .fs
@@ -343,21 +315,10 @@ fn rate_limit_window_is_recorded_and_short_circuits_provider() {
         "provider 429 records the mount-level rate-limit window"
     );
 
-    let ino = h.fs.get_or_alloc_ino(
-        FuseHarness::MOUNT,
-        "/hello/throttled",
-        wit_types::EntryKind::Directory,
-        0,
-    );
-    let cached =
-        h.fs.opendir_check_caches(
-            FuseHarness::MOUNT,
-            ino,
-            "/hello/throttled",
-            None,
-            Instant::now(),
-        )
-        .expect("cache check")
+    // A second opendir while the rate-limit window is open serves the stale
+    // dirents from cache rather than calling the provider and getting EAGAIN.
+    let cached = h
+        .try_opendir("/hello/throttled")
         .expect("open rate-limit window serves stale dirents");
     assert_eq!(
         FuseHarness::snapshot_names(&cached),
@@ -497,7 +458,7 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
         synthetic: false,
     };
     assert!(
-        matches!(h.fs.open_synthetic_file(&target, None), Err(e) if i32::from(e) == i32::from(Errno::ENOENT)),
+        matches!(h.fs.open_synthetic(&target, None), Err(e) if i32::from(e) == i32::from(Errno::ENOENT)),
         "opening a dead control is ENOENT, never a provider read_file"
     );
 }
@@ -782,7 +743,7 @@ fn provider_gitignore_wins_over_synthetic_marker() {
         synthetic: false,
     };
     assert!(
-        h.fs.open_synthetic_file(&target, None).unwrap().is_none(),
+        h.fs.open_synthetic(&target, None).unwrap().is_none(),
         "a provider-backed .gitignore is not served by the synthetic ignore path"
     );
 
@@ -855,18 +816,29 @@ fn concurrent_next_accumulates_every_page_with_no_loss() {
 
     let fs = &h.fs;
 
-    // Drive both advances through the production `serve_control_read` (what
-    // `read` of `@next` calls: it paginates under the per-path lock and
-    // invalidates the mem), from two threads at once.
+    // Drive both advances through the production open op boundary (what an
+    // `open("@next")` runs: `Tree::read` paginates under the per-path lock and
+    // invalidates the mem), from two threads at once. Each thread builds its own
+    // `@next` open target so the concurrent read-modify-writes race.
     std::thread::scope(|scope| {
         for _ in 0..2 {
             scope.spawn(move || {
-                fs.serve_control_read(
+                let ino = fs.get_or_alloc_ino(
                     FuseHarness::MOUNT,
-                    "/hello/feed",
-                    pagination::CTRL_NEXT,
-                    None,
+                    "/hello/feed/@next",
+                    file_kind_placeholder(),
+                    0,
                 );
+                let target = FullReadTarget {
+                    ino,
+                    fh: fs.alloc_fh(),
+                    mount_name: FuseHarness::MOUNT.to_string(),
+                    path: "/hello/feed/@next".to_string(),
+                    backing_path: None,
+                    attrs: None,
+                    synthetic: false,
+                };
+                let _ = fs.open_op(&target, None);
             });
         }
     });
@@ -952,8 +924,11 @@ fn volatile_follow_pump_advances_reported_size() {
         attrs,
         synthetic,
     };
-    let flags = h.fs.open_ranged_file(&target).expect("open ranged live");
-    assert!(flags.is_some(), "ranged open serves direct I/O");
+    let flags = h.fs.open_op(&target, None).expect("open ranged live");
+    assert!(
+        flags.contains(fuser::FopenFlags::FOPEN_DIRECT_IO),
+        "ranged open serves direct I/O"
+    );
 
     // The size getattr would report to the kernel: the read-promoted inode size
     // maxed with the follow pump's latest observed upstream end.
@@ -1003,14 +978,13 @@ fn volatile_follow_pump_probes_from_foreground_eof() {
         attrs,
         synthetic,
     };
-    h.fs.open_ranged_file(&target)
-        .expect("open ranged live")
-        .expect("ranged open serves direct I/O");
+    h.fs.open_op(&target, None).expect("open ranged live");
 
     let foreground_eof = 4096;
     let ranged = h.fs.ranged_handles.get(&fh).expect("ranged handle present");
     ranged
-        .observed_end
+        .handle
+        .observed_end()
         .fetch_max(foreground_eof, Ordering::Relaxed);
     drop(ranged);
 

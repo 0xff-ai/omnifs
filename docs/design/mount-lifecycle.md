@@ -147,7 +147,7 @@ Future docs should keep this distinction clear: `init` owns mount generation for
 
 ## Non-goals
 
-Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions. The supported runtimes are Linux FUSE (the container workflow) and the read-only NFSv4 loopback frontend (`omnifsd --frontend nfs`), which mounts host-native with no kernel extension.
+Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions. The supported runtime remains Linux FUSE through the container workflow.
 
 Do not make the daemon a credential-store client. The daemon consumes files supplied to the session.
 

@@ -72,7 +72,7 @@ pub fn cached_cursor_from_wit(cursor: wit_types::Cursor) -> CachedCursor {
     }
 }
 
-pub(crate) fn cached_cursor_to_wit(cursor: CachedCursor) -> wit_types::Cursor {
+pub fn cached_cursor_to_wit(cursor: CachedCursor) -> wit_types::Cursor {
     match cursor {
         CachedCursor::Opaque(token) => wit_types::Cursor::Opaque(token),
         CachedCursor::Page(page) => wit_types::Cursor::Page(page),

@@ -145,13 +145,19 @@ impl<S> Shape<'_, S> {
     }
 
     /// The file analog of [`Self::static_dir_lookup`]; the entry carries the
-    /// default listing-shape projection (size and bytes resolve at read
-    /// time).
-    pub(super) fn static_file_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
+    /// listing-shape projection (size and bytes resolve at read time). A route
+    /// declared `ranged` projects `ReadMode::Ranged` so the host dispatches
+    /// `open` straight to `open-file`.
+    pub(super) fn static_file_lookup(&self, parent_abs: &Path, name: &str, ranged: bool) -> Lookup {
         let mut siblings = self.static_entries_for_parent(parent_abs);
         siblings.retain(|entry| entry.name() != name);
         let exhaustive = !self.has_capture_child_under(parent_abs);
-        Lookup::entry(BrowseEntry::file(name, FileProj::listing_shape()))
+        let shape = if ranged {
+            FileProj::ranged_listing_shape()
+        } else {
+            FileProj::listing_shape()
+        };
+        Lookup::entry(BrowseEntry::file(name, shape))
             .with_siblings(siblings)
             .exhaustive(exhaustive)
     }
