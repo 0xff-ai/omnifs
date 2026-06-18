@@ -37,6 +37,9 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
 - **Fix:** The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
+- **Improvement:** The cache now uses the fjall database engine instead of redb, which simplifies how data is keyed and written across mounts. (#140)
+- **Improvement:** Object cache keys are now stored without the mount prefix, as each mount gets its own dedicated storage area. (#140)
+- **Security:** Path segments now reject control characters, making the internal delimiter used in view cache keys safe from accidental collisions. (#140)
 
 ## [0.2.1] - 2026-06-08
 
