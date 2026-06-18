@@ -149,6 +149,8 @@ impl DevArgs {
             }
         }
 
+        write_dev_mounts(&paths.mounts_dir, &configs)?;
+
         let store = Box::new(FileStore::new(&paths.credentials_file));
         launch_runtime(
             LaunchSpec {
@@ -160,7 +162,6 @@ impl DevArgs {
                 extras: ContainerExtras { binds },
                 // `omnifs dev` is always the Docker sandbox.
                 host_native: false,
-                mount_point: paths.config_dir.join("mnt"),
                 cache_dir: paths.cache_dir.clone(),
             },
             ctx.catalog(),
@@ -286,6 +287,19 @@ fn confirm_session(
         .map_err(|e| anyhow::anyhow!("confirm prompt: {e}"))?;
     if !proceed {
         anyhow::bail!("aborted by user");
+    }
+    Ok(())
+}
+
+/// Persist the synthesized dev mounts so the in-container daemon reconciles them
+/// from `mounts/` on start; no spec is pushed over the control API.
+fn write_dev_mounts(mounts_dir: &Path, configs: &[MountConfig]) -> anyhow::Result<()> {
+    fs::create_dir_all(mounts_dir).with_context(|| format!("create {}", mounts_dir.display()))?;
+    for config in configs {
+        let path = mounts_dir.join(format!("{}.json", config.name));
+        let json = serde_json::to_vec_pretty(&config.config)
+            .with_context(|| format!("serialize dev mount `{}`", config.name))?;
+        fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(())
 }

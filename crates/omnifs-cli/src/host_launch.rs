@@ -1,7 +1,7 @@
 //! Host-native daemon launch for `omnifs up`.
 //!
 //! Spawns the omnifs binary in daemon role (`omnifs daemon`) as a detached
-//! child serving the NFS frontend and self-mounting the loopback export, then
+//! child serving the platform frontend, then
 //! waits for the control API to report readiness. The daemon must outlive the
 //! CLI process: `omnifs up` returns while the mount stays serving, exactly as
 //! the Docker path leaves a container running.
@@ -21,13 +21,13 @@ pub(crate) struct HostDaemon {
 }
 
 impl HostDaemon {
-    /// Spawn a detached `omnifs daemon` serving the NFS frontend at `mount_point`.
+    /// Spawn a detached `omnifs daemon`. The daemon resolves its own frontend
+    /// and mount point, so the CLI passes neither; it passes only the home
+    /// directories and the control listen address.
     ///
     /// The daemon is this same binary re-invoked as `omnifs daemon`; there is
     /// no separate `omnifsd` artifact.
-    pub(crate) fn spawn(config_dir: &Path, cache_dir: &Path, mount_point: &Path) -> Result<Self> {
-        std::fs::create_dir_all(mount_point)
-            .with_context(|| format!("create mount point {}", mount_point.display()))?;
+    pub(crate) fn spawn(config_dir: &Path, cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)
             .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
 
@@ -43,10 +43,6 @@ impl HostDaemon {
         let mut command = Command::new(&binary);
         command
             .arg("daemon")
-            .arg("--frontend")
-            .arg("nfs")
-            .arg("--mount-point")
-            .arg(mount_point)
             .arg("--config-dir")
             .arg(config_dir)
             .arg("--cache-dir")

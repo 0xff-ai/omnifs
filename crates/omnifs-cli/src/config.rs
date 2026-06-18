@@ -24,7 +24,7 @@ pub struct ConfigSystem {
     pub container_name: Option<String>,
     pub image: Option<String>,
     /// Daemon launch backend, recorded by `omnifs setup`. Unset falls back to
-    /// the platform default (host-native on macOS, Docker elsewhere).
+    /// the platform default (host-native).
     pub runtime: Option<Runtime>,
 }
 
@@ -36,19 +36,15 @@ pub enum Runtime {
     /// Daemon runs inside a Docker container; the CLI owns the container
     /// lifecycle.
     Docker,
-    /// Daemon runs host-native as a child process serving the NFS frontend.
+    /// Daemon runs host-native as a child process serving the platform frontend.
     Native,
 }
 
 impl Runtime {
-    /// Default when `setup` has recorded nothing: host-native on macOS (no
-    /// Docker assumption), Docker elsewhere.
+    /// Default when `setup` has recorded nothing: host-native everywhere.
+    /// Docker remains an optional backend selected explicitly in config.
     pub fn platform_default() -> Self {
-        if cfg!(target_os = "macos") {
-            Self::Native
-        } else {
-            Self::Docker
-        }
+        Self::Native
     }
 }
 

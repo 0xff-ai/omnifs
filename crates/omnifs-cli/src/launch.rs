@@ -10,7 +10,7 @@ use crate::client::DaemonClient;
 use crate::host_launch::HostDaemon;
 use crate::runtime::{ContainerExtras, Runtime};
 use crate::runtime_target::RuntimeTarget;
-use crate::session::{MountConfig, MountPayload};
+use crate::session::MountConfig;
 
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
@@ -23,11 +23,9 @@ pub(crate) struct LaunchSpec<'a> {
     pub configs: Vec<MountConfig>,
     /// Extra binds layered on top of materialized preopens.
     pub extras: ContainerExtras,
-    /// Run the daemon host-native (spawn `omnifs daemon` over NFS) instead of
+    /// Run the daemon host-native (spawn `omnifs daemon`) instead of
     /// launching a Docker container.
     pub host_native: bool,
-    /// Host directory the host-native daemon serves the mount at.
-    pub mount_point: PathBuf,
     /// Cache directory passed to the host-native daemon (also holds its log).
     pub cache_dir: PathBuf,
 }
@@ -45,29 +43,26 @@ pub(crate) async fn launch_runtime(
         configs,
         mut extras,
         host_native,
-        mount_point,
         cache_dir,
     } = spec;
 
     std::fs::create_dir_all(runtime_home)
         .with_context(|| format!("create runtime home {}", runtime_home.display()))?;
 
-    anstream::println!("Materializing mount configs");
-    let mut preopen_binds = Vec::new();
-    let mut payloads = Vec::new();
-    for config in &configs {
-        let (binds, payload) = config.materialize(catalog, store.as_ref(), host_native)?;
-        preopen_binds.extend(binds);
-        payloads.push(payload);
-    }
-    anstream::println!("✓ Materialized {} mount(s)", configs.len());
-
+    // Host-native: the daemon loads and materializes mounts from `mounts/`
+    // itself, so the CLI only spawns it and triggers a reconcile. No CLI-side
+    // materialize-and-push on this path.
     if host_native {
-        anyhow::ensure!(
-            preopen_binds.is_empty(),
-            "host-native launch produced container binds; preopens should be opened directly"
-        );
-        return launch_host_native(runtime_home, &cache_dir, &mount_point, &payloads).await;
+        return launch_host_native(runtime_home, &cache_dir).await;
+    }
+
+    anstream::println!("Computing container binds for {} mount(s)", configs.len());
+    let mut preopen_binds = Vec::new();
+    for config in &configs {
+        // Docker needs preopen binds present before `docker create`; the spec
+        // itself is not pushed, only read to derive the binds.
+        let binds = config.materialize(catalog, store.as_ref(), host_native)?;
+        preopen_binds.extend(binds);
     }
 
     // Materialized preopen binds come first; caller extras append after.
@@ -78,7 +73,7 @@ pub(crate) async fn launch_runtime(
     let rt = Runtime::connect_ready(runtime, verb).await?;
     rt.launch_container(runtime_home, extras).await?;
 
-    if let Err(error) = push_mounts_docker(&rt, &payloads).await {
+    if let Err(error) = finish_docker_launch(&rt).await {
         if let Err(teardown) = rt.remove().await {
             anstream::eprintln!("also failed to remove the container: {teardown:#}");
         }
@@ -88,54 +83,55 @@ pub(crate) async fn launch_runtime(
     Ok(())
 }
 
-/// Spawn a detached host-native daemon over NFS, wait for it to serve, then
-/// push the mounts. On failure the spawned daemon is terminated.
-async fn launch_host_native(
-    runtime_home: &Path,
-    cache_dir: &Path,
-    mount_point: &Path,
-    payloads: &[MountPayload],
-) -> anyhow::Result<()> {
-    anstream::println!(
-        "Starting omnifs daemon (host-native, NFS) at {}",
-        mount_point.display()
-    );
-    let mut daemon = HostDaemon::spawn(runtime_home, cache_dir, mount_point)?;
+/// Spawn a detached host-native daemon and wait for it to serve. The daemon
+/// reconciles `mounts/` on start; the CLI triggers one more reconcile to
+/// converge any change since and to surface per-mount failures. On failure
+/// before detach the spawned daemon is terminated.
+async fn launch_host_native(runtime_home: &Path, cache_dir: &Path) -> anyhow::Result<()> {
+    anstream::println!("Starting omnifs daemon (host-native)");
+    let mut daemon = HostDaemon::spawn(runtime_home, cache_dir)?;
     daemon.wait_ready().await?;
-    anstream::println!("✓ Mount is serving at {}", mount_point.display());
 
-    if let Err(error) = push_mounts(payloads).await {
-        daemon.kill().await;
-        return Err(error);
+    let client = DaemonClient::new();
+    match client.reconcile().await {
+        Ok(report) => report_reconcile_failures(&report),
+        Err(error) => {
+            daemon.kill().await;
+            return Err(error);
+        },
+    }
+    // The daemon owns the mount point; read it back for the user-facing message.
+    if let Ok(status) = client.status().await {
+        anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
+        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
     }
     daemon.detach();
     Ok(())
 }
 
-/// Docker path: wait for the container's daemon to publish the mount, then push
-/// the mounts over the shared control-API path.
-async fn push_mounts_docker(rt: &Runtime, payloads: &[MountPayload]) -> anyhow::Result<()> {
-    rt.wait_for_daemon_ready().await?;
-    push_mounts(payloads).await
+/// Print any mounts that failed to converge during reconcile as warnings; a
+/// failed mount does not abort the launch, since the rest are serving.
+fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
+    for failure in &report.failed {
+        anstream::eprintln!(
+            "warning: mount `{}` did not load: {}",
+            failure.mount,
+            failure.reason
+        );
+    }
 }
 
-/// Verify control-API compatibility and load every mount on the running daemon.
-/// Shared by the Docker and host-native paths; the caller ensures the daemon is
-/// already serving.
-async fn push_mounts(payloads: &[MountPayload]) -> anyhow::Result<()> {
+/// Docker path: wait for the in-container daemon to serve (it reconciles from
+/// `mounts/` on start), then converge once more over the control API to surface
+/// any per-mount failure. No spec crosses the wire.
+async fn finish_docker_launch(rt: &Runtime) -> anyhow::Result<()> {
+    rt.wait_for_daemon_ready().await?;
     let client = DaemonClient::new();
     client.require_compatible().await?;
-    anstream::println!("Loading {} mount(s) into the daemon", payloads.len());
-    futures_util::future::try_join_all(payloads.iter().map(|payload| {
-        let client = &client;
-        async move {
-            client
-                .add_mount(&payload.spec)
-                .await
-                .with_context(|| format!("load mount `{}`", payload.name))
-        }
-    }))
-    .await?;
-    anstream::println!("✓ Runtime sees {} provider(s)", payloads.len());
+    let report = client.reconcile().await?;
+    report_reconcile_failures(&report);
+    if let Ok(status) = client.status().await {
+        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+    }
     Ok(())
 }

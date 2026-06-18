@@ -5,8 +5,7 @@
 //! `host:port` for non-default setups.
 
 use anyhow::{Context as _, Result};
-use omnifs_api::{API_VERSION, DaemonStatus, VersionInfo};
-use omnifs_mount::mounts::Spec;
+use omnifs_api::{API_VERSION, DaemonStatus, ReconcileReport, StopReport, VersionInfo};
 use std::time::Duration;
 
 use crate::inspector::daemon_addr;
@@ -99,46 +98,44 @@ impl DaemonClient {
         response.json().await.context("parse daemon status")
     }
 
-    /// Load one mount on the running daemon. The spec references secrets
-    /// as session file paths; secret values never ride this call.
-    pub(crate) async fn add_mount(&self, spec: &Spec) -> Result<()> {
+    /// Converge the running daemon's mount set to the on-disk desired state
+    /// under `mounts/*.json`. Reconcile compiles WASM for added or changed
+    /// mounts, so it gets the long mount-load timeout rather than the default.
+    pub(crate) async fn reconcile(&self) -> Result<ReconcileReport> {
         let response = self
             .http
-            .post(format!("{}/v1/mounts", self.base))
-            // Loading a mount compiles provider WASM; give it far longer
-            // than the default control-call timeout.
+            .post(format!("{}/v1/reconcile", self.base))
             .timeout(Duration::from_secs(180))
-            .json(spec)
             .send()
             .await
-            .with_context(|| format!("push mount to daemon at {}", self.base))?;
-        Self::require_success(response, "rejected mount").await
+            .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?
+            .error_for_status()
+            .context("daemon reconcile request failed")?;
+        response.json().await.context("parse reconcile report")
     }
 
-    /// Unload one mount from the running daemon. A mount that is not
-    /// loaded is treated as already removed.
-    pub(crate) async fn remove_mount(&self, name: &str) -> Result<()> {
-        let response = self
+    /// Ask the daemon to unmount its frontend and exit, returning what it tore
+    /// down. `None` when no daemon answered, so the caller can fall back to a
+    /// stale-mount sweep.
+    pub(crate) async fn shutdown(&self) -> Result<Option<StopReport>> {
+        match self
             .http
-            .delete(format!("{}/v1/mounts/{name}", self.base))
+            .post(format!("{}/v1/shutdown", self.base))
             .send()
             .await
-            .with_context(|| format!("remove mount from daemon at {}", self.base))?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(());
+        {
+            Ok(response) => {
+                let report = response
+                    .error_for_status()
+                    .context("daemon shutdown request failed")?
+                    .json()
+                    .await
+                    .context("parse stop report")?;
+                Ok(Some(report))
+            },
+            Err(error) if error.is_connect() || error.is_timeout() => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("shutdown daemon at {}", self.base)),
         }
-        Self::require_success(response, "failed to remove mount").await
-    }
-
-    /// Bail with the daemon's response body when a mutation call did not
-    /// succeed. The 404-as-already-removed case is handled by callers.
-    async fn require_success(response: reqwest::Response, action: &str) -> Result<()> {
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("daemon {action} ({status}): {}", body.trim());
     }
 
     /// True once the daemon reports the filesystem is serving.

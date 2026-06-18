@@ -1,4 +1,4 @@
-//! `omnifs up` — container lifecycle: start.
+//! `omnifs up` — daemon lifecycle: start.
 
 use clap::Args;
 use omnifs_creds::FileStore;
@@ -48,10 +48,9 @@ impl UpArgs {
         crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
 
         // The runtime backend is a machine property recorded by `omnifs setup`;
-        // `up` reads it. Host-native serves the mount over NFS at a host path;
-        // Docker serves it inside the container.
+        // `up` reads it. Host-native serves a host mount; Docker serves FUSE
+        // inside the container.
         let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
-        let mount_point = paths.config_dir.join("mnt");
 
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_runtime(
@@ -63,7 +62,6 @@ impl UpArgs {
                 configs,
                 extras: ContainerExtras::default(),
                 host_native,
-                mount_point: mount_point.clone(),
                 cache_dir: paths.cache_dir.clone(),
             },
             catalog,
@@ -71,12 +69,13 @@ impl UpArgs {
         .await?;
 
         if host_native {
-            anstream::println!("✓ omnifs is mounted at {}", mount_point.display());
             anstream::println!();
-            anstream::println!(
-                "Browse it directly: `{}`",
-                crate::style::bold(format!("ls {}", mount_point.display())),
-            );
+            if let Ok(status) = crate::client::DaemonClient::new().status().await {
+                anstream::println!(
+                    "Browse it directly: `{}`",
+                    crate::style::bold(format!("ls {}", status.mount_point.display())),
+                );
+            }
         } else {
             anstream::println!(
                 "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",

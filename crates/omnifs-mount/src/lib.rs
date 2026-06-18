@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod materialize;
 mod mount_config;
 pub mod mounts;
 

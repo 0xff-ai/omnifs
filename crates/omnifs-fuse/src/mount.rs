@@ -14,10 +14,10 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::info;
 
-/// Mount the FUSE filesystem and block until it exits. Calls
-/// `registry.shutdown_all()` on exit regardless of how the mount ends.
-/// `notifier` is the caller's handle for kernel invalidation; it is filled
-/// once the session is up and cleared on exit.
+/// Mount the FUSE filesystem and block until it exits. Provider teardown is the
+/// daemon's responsibility after `serve` returns, not this function's, so FUSE
+/// and NFS tear down symmetrically. `notifier` is the caller's handle for kernel
+/// invalidation; it is filled once the session is up and cleared on exit.
 pub fn run_blocking(
     mount_point: &Path,
     registry: &Arc<ProviderRegistry>,
@@ -59,9 +59,7 @@ pub fn run_blocking(
     // Drop the notifier before joining the session.
     notifier.lock().take();
 
-    info!("FUSE mount exited, shutting down providers");
-    registry.shutdown_all();
-
+    info!("FUSE mount exited");
     result
 }
 

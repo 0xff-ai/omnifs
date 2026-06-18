@@ -10,7 +10,7 @@ fi
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
 : "${OMNIFS_LISTEN:=0.0.0.0:7878}"
 : "${RUST_LOG:=info}"
-export OMNIFS_HOME RUST_LOG
+export OMNIFS_HOME RUST_LOG OMNIFS_MOUNT_POINT
 omnifs_cache_dir="$OMNIFS_HOME/cache"
 
 mkdir -p \
@@ -26,7 +26,8 @@ tee -a "$OMNIFS_LOG_FILE" < "$log_pipe" &
 exec >"$log_pipe" 2>&1
 rm -f "$log_pipe"
 
+# The daemon resolves its own mount point; it reads OMNIFS_MOUNT_POINT (exported
+# above) and falls back to $HOME/omnifs host-native.
 exec omnifs daemon \
-  --mount-point "$OMNIFS_MOUNT_POINT" \
   --listen "$OMNIFS_LISTEN" \
   --root-symlinks

@@ -7,7 +7,6 @@
 
 pub mod app;
 pub mod frontends;
-pub mod mounts;
 #[cfg(target_os = "linux")]
 mod proc_mounts;
 pub mod server;

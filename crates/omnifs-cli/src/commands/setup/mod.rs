@@ -1,10 +1,9 @@
 //! `omnifs setup`: guided onboarding walkthrough.
 //!
 //! Sequential, npx-style: each step prints inline and stays in scrollback.
-//! Detects host OS, explains the alpha runtime model, verifies Docker,
-//! eagerly pulls the image, walks the user through selecting providers,
-//! confirms capabilities per provider, runs `init`, and (unless `--no-up`)
-//! launches the container.
+//! Detects host OS, explains the runtime model, prepares the selected runtime,
+//! walks the user through selecting providers, confirms capabilities per
+//! provider, runs `init`, and (unless `--no-up`) launches the daemon.
 
 pub mod host_os;
 pub mod summary;
@@ -31,7 +30,7 @@ use self::summary::InitResult;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct SetupArgs {
-    /// Skip the final container launch.
+    /// Skip the final daemon launch.
     #[arg(long)]
     pub no_up: bool,
     /// Skip confirmations; auto-accept detected ambient credentials.
@@ -61,9 +60,8 @@ impl SetupArgs {
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        // Record the launch backend so `omnifs up`/`down` read it, and skip the
-        // Docker-only connect/pull when this machine runs host-native (the
-        // default on macOS, where Docker may not be present at all).
+        // Record the launch backend so `omnifs up`/`down` read it. Docker is
+        // optional; native mode does not require a Docker daemon or image pull.
         let runtime = ctx.config().runtime();
         if ctx.config().system.runtime.is_none() {
             let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
@@ -90,10 +88,26 @@ impl SetupArgs {
         let selected = resolve_selection(&self, &templates, &configured)?;
         let results = run_init_loop(&selected, &self, &templates).await;
 
+        let (mount_label, mount_root, browse_hint) = if host_native {
+            let mount_point = crate::paths::default_host_mount_point()?;
+            let mount_root = crate::paths::Paths::display(&mount_point);
+            (
+                "Host mount",
+                mount_root.clone(),
+                format!("`ls {mount_root}`"),
+            )
+        } else {
+            (
+                "Container FUSE mount",
+                GUEST_FUSE_MOUNT.to_string(),
+                format!("`omnifs shell` then `ls {GUEST_FUSE_MOUNT}`"),
+            )
+        };
         let report = summary::SetupSummary::new(
             paths,
-            ctx.runtime().container_name().as_str(),
-            GUEST_FUSE_MOUNT,
+            mount_label,
+            &mount_root,
+            &browse_hint,
             &configured,
             &results,
         );
@@ -102,7 +116,7 @@ impl SetupArgs {
         let any_succeeded = results.iter().any(|r| r.outcome.is_ok());
         let any_ready = any_succeeded || !configured.is_empty();
         if self.no_up {
-            anstream::println!("\nSkipping container launch (--no-up).");
+            anstream::println!("\nSkipping daemon launch (--no-up).");
         } else if !any_ready {
             anstream::println!(
                 "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
@@ -134,7 +148,7 @@ fn print_banner(os: HostOs) {
 }
 
 fn print_explainer(os: HostOs) {
-    anstream::println!("{}", host_os::explain_alpha_runtime(os));
+    anstream::println!("{}", host_os::explain_runtime(os));
     anstream::println!();
 }
 
