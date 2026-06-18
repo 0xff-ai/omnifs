@@ -1,9 +1,9 @@
 //! Shared discovery for configured mounts and provider templates.
 //!
 //! `ProviderCatalog` owns `Spec`-to-`Resolved` resolution and provider
-//! template discovery. Mount enumeration (the merged `config.toml` inline
-//! mounts + per-file specs) lives in `Workspace::mounts()`; methods here
-//! that need the list accept it as a parameter.
+//! template discovery. Mount enumeration (per-file specs from the `mounts/`
+//! directory) lives in `Workspace::mounts()`; methods here that need the
+//! list accept it as a parameter.
 
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
@@ -38,41 +38,13 @@ impl ProviderCatalog {
 
     /// Build removal targets tolerantly, for use by `omnifs reset`.
     ///
-    /// Unlike `mount_removal_targets`, this method enumerates the per-file
-    /// spec paths directly and tolerates unparsable files: a broken JSON file
-    /// still produces a removal target with `CredentialTarget::None` so reset
-    /// can nuke broken state. Inline `config.toml` mounts are included first
-    /// and resolved tolerantly too.
-    pub(crate) fn reset_removal_targets(
-        &self,
-        inline_mounts: &[Spec],
-        config_file: &std::path::Path,
-    ) -> anyhow::Result<Vec<MountRemovalTarget>> {
+    /// Enumerates the per-file spec paths directly and tolerates unparsable
+    /// files: a broken JSON file still produces a removal target with
+    /// `CredentialTarget::None` so reset can nuke broken state.
+    pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
         use omnifs_mount::mounts::Spec as MountSpec;
 
         let mut targets = Vec::new();
-
-        // Inline config.toml mounts — tolerant resolve.
-        for spec in inline_mounts {
-            let name = spec.mount.clone();
-            let credential = match self.resolve_mount_spec(spec.clone(), false) {
-                Ok(resolved) => CredentialTarget::for_mount(&resolved),
-                Err(error) => {
-                    tracing::warn!(
-                        config = %config_file.display(),
-                        mount = name,
-                        %error,
-                        "unresolvable inline mount config; will remove the entry but cannot drop credentials"
-                    );
-                    CredentialTarget::None
-                },
-            };
-            targets.push(MountRemovalTarget {
-                name,
-                path: config_file.to_path_buf(),
-                credential,
-            });
-        }
 
         // Per-file specs — enumerate paths, parse tolerantly.
         let paths = crate::workspace::per_file_mount_paths(self.mounts.mounts_dir())?;

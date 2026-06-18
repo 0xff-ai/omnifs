@@ -23,6 +23,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
 - **Feature:** On macOS, `omnifs up` now serves the projected filesystem over a local NFS loopback mount, no Docker required. (#134)
 - **Improvement:** The filesystem projection now runs through a single frontend-neutral core, with FUSE and NFS each serving as a thin adapter that renders the same projection into its own kernel vocabulary. (#134)
+- **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
