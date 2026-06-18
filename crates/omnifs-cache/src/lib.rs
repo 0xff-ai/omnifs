@@ -35,9 +35,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use redb::{Database, WriteTransaction};
 
 /// Shared handle to a host view store.
 pub type Handle = Arc<Store>;
+
+/// Result of a warm canonical lookup: the host object id (mount prefix
+/// stripped), the canonical bytes, and the optional validator.
+pub struct CachedCanonical {
+    pub id: Vec<u8>,
+    pub bytes: Vec<u8>,
+    pub validator: Option<String>,
+}
 
 /// One entry for `Store::put_canonical_batch`.
 pub struct CanonicalBatchEntry {
@@ -182,6 +191,20 @@ fn now_millis_for_gc() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// Run `f` inside a redb write transaction and commit. Returns the closure's
+/// error (or any begin/commit error) unlogged; callers log at their chosen
+/// level and decide the success value. Centralizes the begin-write → mutate →
+/// commit ceremony shared by the object and view tiers.
+pub(crate) fn write_txn(
+    disk: &Database,
+    f: impl FnOnce(&WriteTransaction) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let txn = disk.begin_write()?;
+    f(&txn)?;
+    txn.commit()?;
+    Ok(())
 }
 
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.
@@ -415,16 +438,17 @@ impl Store {
 
     /// Warm-read input: path → id → bytes + validator. Returns opaque host id
     /// bytes (mount prefix stripped). `None` when no canonical is indexed.
-    pub fn cached_canonical_for(
-        &self,
-        path: &ProtocolPath,
-    ) -> Option<(Vec<u8>, Vec<u8>, Option<String>)> {
+    pub fn cached_canonical_for(&self, path: &ProtocolPath) -> Option<CachedCanonical> {
         let scoped_path = self.scoped_path_bytes(path.as_str());
         let scoped_id = self.caches.object.id_of(&scoped_path)?;
         let obj = self.caches.object.get(&scoped_id)?;
         let canonical = obj.canonical?;
         let host_id = self.host_id_from_scoped(&obj.id)?;
-        Some((host_id, canonical.bytes, canonical.validator))
+        Some(CachedCanonical {
+            id: host_id,
+            bytes: canonical.bytes,
+            validator: canonical.validator,
+        })
     }
 
     /// Store a canonical object entry, gated on the per-mount id fence.
@@ -811,9 +835,9 @@ mod tests {
 
         let a = store_a.cached_canonical_for(&p(path)).unwrap();
         let b = store_b.cached_canonical_for(&p(path)).unwrap();
-        assert_eq!(a.1, b"from-a");
-        assert_eq!(b.1, b"from-b");
-        assert_ne!(a.1, b.1);
+        assert_eq!(a.bytes, b"from-a");
+        assert_eq!(b.bytes, b"from-b");
+        assert_ne!(a.bytes, b.bytes);
     }
 
     #[test]

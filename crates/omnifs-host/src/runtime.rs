@@ -353,7 +353,7 @@ impl Runtime {
     }
 
     #[doc(hidden)]
-    pub fn cached_canonical_for(&self, path: &str) -> Option<(Vec<u8>, Vec<u8>, Option<String>)> {
+    pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
         self.cache.cached_canonical_for(&protocol_path(path))
     }
 
@@ -530,7 +530,7 @@ impl Runtime {
     pub fn canonical_bytes_for(&self, path: &str) -> Option<Vec<u8>> {
         self.cache
             .cached_canonical_for(&protocol_path(path))
-            .map(|(_id, bytes, _validator)| bytes)
+            .map(|canonical| canonical.bytes)
     }
 
     /// Read the full bytes of a stored blob. Used by the FUSE read path
