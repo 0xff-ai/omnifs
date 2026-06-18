@@ -35,6 +35,8 @@ pub enum ParseError {
     RelativeSegment(String),
     #[error("name segment contains `/`: {0:?}")]
     SlashInSegment(String),
+    #[error("path segment contains a control character: {0:?}")]
+    ControlCharInSegment(String),
     #[error("path segment is not valid UTF-8")]
     NonUtf8Segment,
 }
@@ -332,6 +334,12 @@ fn validate_segment_str(segment: &str) -> Result<(), ParseError> {
     if matches!(segment, "." | "..") {
         return Err(ParseError::RelativeSegment(segment.to_string()));
     }
+    // Reject control characters. Besides being invalid in real filenames, this
+    // keeps low separator bytes (e.g. the cache's `\x1f` aux separator) free of
+    // collisions with path content.
+    if segment.chars().any(char::is_control) {
+        return Err(ParseError::ControlCharInSegment(segment.to_string()));
+    }
     Ok(())
 }
 
@@ -375,6 +383,16 @@ mod path_tests {
         assert!(matches!(
             Path::parse("/owner/../repo"),
             Err(ParseError::RelativeSegment(_))
+        ));
+        // Control characters (e.g. the cache's 0x1F separator) are rejected so
+        // path content can never collide with a low separator byte.
+        assert!(matches!(
+            Path::parse("/owner/re\x1fpo"),
+            Err(ParseError::ControlCharInSegment(_))
+        ));
+        assert!(matches!(
+            Path::parse("/owner/re\u{0}po"),
+            Err(ParseError::ControlCharInSegment(_))
         ));
     }
 
