@@ -31,7 +31,6 @@ pub mod view;
 
 use omnifs_core::path::{Path, Segment};
 use std::collections::HashSet;
-use std::fmt;
 use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,32 +57,15 @@ pub struct CanonicalBatchEntry {
     pub view_leaves: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct WirePathError {
-    path: String,
-}
-
-impl fmt::Display for WirePathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid protocol path `{}`", self.path)
-    }
-}
-
-impl std::error::Error for WirePathError {}
-
-pub fn parse_wire_paths(paths: &[String]) -> Result<Vec<Path>, WirePathError> {
-    paths
-        .iter()
-        .map(|path| {
-            Path::parse(path).map_err(|_| {
-                tracing::warn!(
-                    path = path.as_str(),
-                    "wire path is not a valid protocol path; rejecting cache store"
-                );
-                WirePathError { path: path.clone() }
-            })
+/// Parse view-leaf wire paths, rejecting (and logging) the whole store on the
+/// first invalid path. Parsing is `Path::parse_all`; the reject-on-bad-path
+/// decision is cache policy, which is why it lives here rather than in core.
+fn accept_view_leaves(view_leaves: &[String]) -> Option<Vec<Path>> {
+    Path::parse_all(view_leaves)
+        .map_err(|error| {
+            tracing::warn!(%error, "wire path is not a valid protocol path; rejecting cache store");
         })
-        .collect()
+        .ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -497,7 +479,7 @@ impl Store {
             return false;
         }
 
-        let Ok(view_leaves) = parse_wire_paths(view_leaves) else {
+        let Some(view_leaves) = accept_view_leaves(view_leaves) else {
             return false;
         };
         let scoped_leaves: Vec<String> = view_leaves
@@ -522,13 +504,12 @@ impl Store {
     /// Ownership is consumed so the caller need not clone; the function drains
     /// the Vec.
     pub fn put_canonical_batch(&self, entries: Vec<CanonicalBatchEntry>, op_gen: u64) -> bool {
-        let entries: Vec<(CanonicalBatchEntry, Vec<Path>)> = match entries
+        let Some(entries) = entries
             .into_iter()
-            .map(|entry| parse_wire_paths(&entry.view_leaves).map(|leaves| (entry, leaves)))
-            .collect()
-        {
-            Ok(entries) => entries,
-            Err(_) => return false,
+            .map(|entry| accept_view_leaves(&entry.view_leaves).map(|leaves| (entry, leaves)))
+            .collect::<Option<Vec<(CanonicalBatchEntry, Vec<Path>)>>>()
+        else {
+            return false;
         };
         let view = &self.caches.view;
 
@@ -571,7 +552,7 @@ impl Store {
         if self.id_tombstoned_after(&scoped_id, op_gen) {
             return false;
         }
-        let Ok(view_leaves) = parse_wire_paths(view_leaves) else {
+        let Some(view_leaves) = accept_view_leaves(view_leaves) else {
             return false;
         };
         let scoped_leaves: Vec<String> = view_leaves

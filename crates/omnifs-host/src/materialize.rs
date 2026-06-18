@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use omnifs_cache::{BatchRecord, CanonicalBatchEntry, Record, RecordKind, Store, parse_wire_paths};
+use omnifs_cache::{BatchRecord, CanonicalBatchEntry, Record, RecordKind, Store};
 use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta, Stability};
 use tracing::{debug, warn};
@@ -75,7 +75,13 @@ impl<'a> Materializer<'a> {
             .iter()
             .filter_map(|store| {
                 let id = ObjectId::from_wit(&store.id);
-                let view_leaves = parse_wire_paths(&store.view_leaves).ok()?;
+                let view_leaves = match Path::parse_all(&store.view_leaves) {
+                    Ok(leaves) => leaves,
+                    Err(error) => {
+                        warn!(%error, "skipping canonical store: invalid wire path");
+                        return None;
+                    },
+                };
                 let view_leaf_refs = view_leaves.iter().collect::<Vec<_>>();
                 if self.rejects_conflicting_id(&view_leaf_refs, &id) {
                     return None;
