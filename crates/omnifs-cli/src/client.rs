@@ -5,7 +5,7 @@
 //! `host:port` for non-default setups.
 
 use anyhow::{Context as _, Result};
-use omnifs_api::{API_VERSION, DaemonStatus, ReconcileReport, StopReport, VersionInfo};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, ReconcileReport, StopReport, VersionInfo};
 use std::time::Duration;
 
 use crate::inspector::daemon_addr;
@@ -15,6 +15,7 @@ pub(crate) struct DaemonClient {
     http: reqwest::Client,
 }
 
+#[derive(Debug)]
 pub(crate) enum DaemonProbe {
     Unreachable,
     Compatible(VersionInfo),
@@ -34,17 +35,30 @@ impl DaemonClient {
     }
 
     /// Probe for a daemon and verify its control API version in one step.
+    ///
+    /// Returns `Unreachable` when no daemon answers. Returns `Compatible` when
+    /// the daemon's major matches ours (any minor). Refuses on major mismatch;
+    /// emits a one-line warning when the minor differs and the major matches.
     pub(crate) async fn probe(&self) -> Result<DaemonProbe> {
         let Some(info) = self.version().await? else {
             return Ok(DaemonProbe::Unreachable);
         };
         anyhow::ensure!(
-            info.api_version == API_VERSION,
-            "daemon speaks control API v{}, this CLI speaks v{API_VERSION}; \
+            info.api_major == API_MAJOR,
+            "daemon speaks control API v{}.{}, this CLI speaks v{API_MAJOR}.{API_MINOR}; \
              upgrade so the CLI and runtime image versions match (daemon v{})",
-            info.api_version,
+            info.api_major,
+            info.api_minor,
             info.version,
         );
+        if info.api_minor != API_MINOR {
+            anstream::eprintln!(
+                "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
+                 proceeding (minor skew is non-breaking)",
+                info.api_major,
+                info.api_minor,
+            );
+        }
         Ok(DaemonProbe::Compatible(info))
     }
 
@@ -178,7 +192,7 @@ mod tests {
                 let request = String::from_utf8_lossy(&request[..read]);
                 let response = if request.starts_with("GET /v1/version ") {
                     json_response(&format!(
-                        r#"{{"version":"test-daemon","api_version":{API_VERSION}}}"#
+                        r#"{{"version":"test-daemon","api_major":{API_MAJOR},"api_minor":{API_MINOR}}}"#
                     ))
                 } else if request.starts_with("GET /v1/status ") {
                     "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_string()
@@ -205,6 +219,73 @@ mod tests {
         let error = client.status().await.unwrap_err();
         assert!(format!("{error:#}").contains("daemon status request failed"));
         server.await.unwrap();
+    }
+
+    /// A daemon reporting a different major must be refused.
+    #[tokio::test]
+    async fn probe_refuses_on_major_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            let _ = String::from_utf8_lossy(&request[..read]);
+            let response = json_response(&format!(
+                r#"{{"version":"old-daemon","api_major":{},"api_minor":0}}"#,
+                API_MAJOR + 1
+            ));
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient {
+            base: format!("http://{addr}"),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(500))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+
+        let err = client.probe().await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("control API"),
+            "error should mention control API mismatch: {msg}"
+        );
+    }
+
+    /// A daemon reporting the same major but a different minor must proceed (with a warning).
+    #[tokio::test]
+    async fn probe_proceeds_on_minor_skew() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            let _ = String::from_utf8_lossy(&request[..read]);
+            let response = json_response(&format!(
+                r#"{{"version":"newer-daemon","api_major":{API_MAJOR},"api_minor":{}}}"#,
+                API_MINOR + 1
+            ));
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient {
+            base: format!("http://{addr}"),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(500))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+
+        // Minor skew: probe must succeed (return Compatible).
+        assert!(matches!(
+            client.probe().await.unwrap(),
+            DaemonProbe::Compatible(_)
+        ));
     }
 
     fn json_response(body: &str) -> String {

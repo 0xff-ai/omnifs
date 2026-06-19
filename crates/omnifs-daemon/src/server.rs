@@ -11,8 +11,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use omnifs_api::{
-    API_VERSION, DaemonStatus, FrontendInfo, LaunchKind, MountFailure, MountInfo, ReadyInfo,
-    ReconcileReport, StopReport, VersionInfo,
+    API_MAJOR, API_MINOR, DaemonStatus, FrontendInfo, LaunchKind, MountFailure, MountInfo,
+    ReadyInfo, ReconcileReport, StopReport, VersionInfo,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
@@ -138,7 +138,8 @@ impl Daemon {
         let identity = version_info();
         DaemonStatus {
             version: identity.version,
-            api_version: identity.api_version,
+            api_major: identity.api_major,
+            api_minor: identity.api_minor,
             pid: identity.pid,
             executable: identity.executable,
             mount_point: self.frontends.mount_point().to_path_buf(),
@@ -190,7 +191,7 @@ impl Daemon {
         // Remember the failures so `status` can show a dark mount and why,
         // instead of it simply being absent from `mounts`.
         if let Ok(mut last) = self.last_failed.lock() {
-            *last = failed.clone();
+            last.clone_from(&failed);
         }
         ReconcileReport {
             added: outcome.added,
@@ -356,7 +357,8 @@ async fn version() -> Json<VersionInfo> {
 fn version_info() -> VersionInfo {
     VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        api_version: API_VERSION,
+        api_major: API_MAJOR,
+        api_minor: API_MINOR,
         pid: std::process::id(),
         executable: current_executable(),
     }

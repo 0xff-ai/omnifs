@@ -216,9 +216,16 @@
           "mounts"
         ],
         "properties": {
-          "api_version": {
+          "api_major": {
             "type": "integer",
             "format": "int32",
+            "description": "Control API major version. Incompatible change when this differs.",
+            "minimum": 0
+          },
+          "api_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Control API minor version. Additive change; CLI warns and proceeds.",
             "minimum": 0
           },
           "cache_dir": {
@@ -413,12 +420,20 @@
         "description": "`GET /v1/version`",
         "required": [
           "version",
-          "api_version"
+          "api_major",
+          "api_minor"
         ],
         "properties": {
-          "api_version": {
+          "api_major": {
             "type": "integer",
             "format": "int32",
+            "description": "Control API major version. Incompatible change when this differs.",
+            "minimum": 0
+          },
+          "api_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Control API minor version. Additive change; CLI warns and proceeds.",
             "minimum": 0
           },
           "executable": {

@@ -1,4 +1,15 @@
-//! `omnifs down` — daemon lifecycle: stop.
+//! `omnifs down`: daemon lifecycle stop.
+//!
+//! Resolution order:
+//!   1. Probe the control port: if a live daemon answers, trust
+//!      `DaemonStatus.launch` to identify the backend.
+//!   2. Fall back to the launch record: if the daemon is dead, the record
+//!      says what was started.
+//!   3. If neither applies, nothing is running.
+//!
+//! The backend is never inferred from `[system].runtime`. `down` is
+//! backend-transparent: it dispatches through `Backend::reclaim` without
+//! naming Docker or native.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -7,17 +18,10 @@ use std::time::Duration;
 use clap::Args;
 
 use crate::client::DaemonClient;
-use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
+use crate::launch_record::{LaunchRecord, backend_from_launch_kind};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DownArgs {
-    /// Container name.
-    ///
-    /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
-    /// `omnifs`.
-    #[arg(long)]
-    pub container_name: Option<String>,
     /// Force the host-native unmount if a clean shutdown leaves the mount busy.
     #[arg(long)]
     pub force: bool,
@@ -27,46 +31,92 @@ impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         use crate::paths::PathOverrides;
 
-        let DownArgs {
-            container_name,
-            force,
-        } = self;
-        let (paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
+        let DownArgs { force } = self;
+        let (paths, _config) = crate::paths::resolve_with_config(PathOverrides::default())?;
 
-        if config.runtime() == crate::config::Runtime::Native {
-            return teardown_native(&paths, force).await;
-        }
+        teardown_daemon(&paths, force).await?;
 
-        let container_name = RuntimeTarget::resolve_container_name(container_name, &config)?;
-        let remove_result = match Runtime::connect_docker() {
-            Ok(runtime) => runtime.remove_existing(&container_name).await,
-            Err(error) => Err(error),
-        };
-        remove_result?;
-        anstream::println!("✓ Container `{container_name}` removed");
-
-        // Best-effort teardown of the kubernetes dev cluster stack, if this is
-        // a workspace checkout. Idempotent when no cluster is running.
-        if let Ok(workspace) = crate::dev_support::WorkspaceRoot::discover()
-            && let Err(error) = crate::kubernetes_testenv::down(workspace.path())
-        {
-            anstream::eprintln!("note: dev cluster teardown: {error:#}");
-        }
+        // A dev sandbox in a workspace checkout also brings up a local
+        // Kubernetes cluster (via `omnifs dev`); tear it down so `omnifs down`
+        // is a full stop. A no-op outside a workspace checkout, so production
+        // `down` never touches it.
+        teardown_dev_cluster();
         Ok(())
     }
 }
 
-/// Stop a host-native daemon. The daemon owns the frontend handle, so the CLI
-/// asks it to unmount itself and waits for the mount to settle. Only a dead
-/// daemon falls back to the platform sweep (stale state, stuck mount).
-async fn teardown_native(paths: &crate::paths::Paths, force: bool) -> anyhow::Result<()> {
-    match DaemonClient::new().shutdown().await? {
-        Some(report) => {
-            wait_unmounted(&report.mount_point, force)?;
-            anstream::println!("✓ Unmounted {}", report.mount_point.display());
-            Ok(())
+/// Stop the running daemon and reclaim its backend using the module's
+/// resolution order. The backend is identified from the live daemon or the
+/// launch record, never from `[system].runtime`.
+async fn teardown_daemon(paths: &crate::paths::Paths, force: bool) -> anyhow::Result<()> {
+    let config_dir = &paths.config_dir;
+    let nfs_state_dir = paths.nfs_state_dir();
+    let client = DaemonClient::new();
+
+    // Step 1: a live daemon answers; ask it to shut down, then reclaim.
+    if let Some(status) = probe_live_daemon(&client).await? {
+        anstream::println!("Stopping daemon (pid {})…", status.pid);
+        match client.shutdown().await? {
+            Some(report) => {
+                wait_unmounted(&report.mount_point, force)?;
+                anstream::println!("✓ Unmounted {}", report.mount_point.display());
+            },
+            None => {
+                // Daemon disappeared between probe and shutdown; the reclaim
+                // below sweeps whatever it left behind.
+                anstream::println!("Daemon exited before shutdown completed; sweeping…");
+            },
+        }
+        let backend = backend_from_launch_kind(status.launch, config_dir)?;
+        backend
+            .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir, force)
+            .await?;
+        LaunchRecord::remove(config_dir)?;
+        return Ok(());
+    }
+
+    // Step 2: no live daemon; the launch record says what was started.
+    if let Some(record) = LaunchRecord::read(config_dir)? {
+        let mount_point = record.mount_point().map(Path::to_path_buf);
+        anstream::println!("No live daemon found; sweeping from launch record…");
+        let backend = record.into_backend()?;
+        backend
+            .reclaim(mount_point.as_deref(), &nfs_state_dir, force)
+            .await?;
+        LaunchRecord::remove(config_dir)?;
+        return Ok(());
+    }
+
+    // Step 3: nothing is running.
+    anstream::println!("Nothing to tear down.");
+    Ok(())
+}
+
+/// Best-effort teardown of the contributor dev Kubernetes cluster. Only a
+/// workspace checkout ever starts one (via `omnifs dev`); outside a workspace
+/// this is a no-op.
+fn teardown_dev_cluster() {
+    let Ok(workspace) = crate::dev_support::WorkspaceRoot::discover() else {
+        return;
+    };
+    if let Err(error) = crate::kubernetes_testenv::down(workspace.path()) {
+        anstream::eprintln!("note: dev cluster teardown: {error:#}");
+    }
+}
+
+/// Probe the control port. Returns `Some(status)` if a live daemon answered,
+/// `None` otherwise. Any error or absence is treated as "not reachable" so a
+/// sick-but-present daemon (a 5xx from the control API, or one mid-shutdown)
+/// falls through to the launch-record sweep instead of failing `down` hard.
+async fn probe_live_daemon(
+    client: &DaemonClient,
+) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
+    match client.version().await {
+        Ok(Some(_)) => match client.status().await {
+            Ok(status) => Ok(Some(status)),
+            Err(_) => Ok(None),
         },
-        None => fallback_sweep(paths),
+        Ok(None) | Err(_) => Ok(None),
     }
 }
 
@@ -141,65 +191,3 @@ impl fmt::Display for StillMounted {
 }
 
 impl std::error::Error for StillMounted {}
-
-/// Dead-daemon fallback: sweep a stale mount the daemon can no longer unmount
-/// itself.
-fn fallback_sweep(paths: &crate::paths::Paths) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = paths;
-        let mount_point = crate::paths::default_host_mount_point()?;
-        if crate::host_teardown::teardown_host_native_fuse(&mount_point)? {
-            anstream::println!("✓ Unmounted {}", mount_point.display());
-        } else {
-            anstream::println!("Nothing to tear down.");
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    teardown_native_nfs(&paths.nfs_state_dir())
-}
-
-/// Tear down host-native NFS mounts recorded under `state_dir` and report what
-/// actually happened (a live unmount, an orphan sweep, or nothing).
-#[cfg(not(target_os = "linux"))]
-fn teardown_native_nfs(state_dir: &std::path::Path) -> anyhow::Result<()> {
-    let summary = crate::host_teardown::teardown_host_native_nfs(state_dir)?;
-    if summary.unmounted > 0 {
-        anstream::println!("✓ Unmounted {} host-native mount(s)", summary.unmounted);
-    }
-    if summary.swept_orphans > 0 {
-        anstream::println!(
-            "✓ Swept {} orphaned mount-state file(s)",
-            summary.swept_orphans
-        );
-    }
-    if !summary.failed.is_empty() {
-        if summary.failed.len() == 1 {
-            return Err(StillMounted::inspect(&summary.failed[0], false).into());
-        }
-        let details = summary
-            .failed
-            .iter()
-            .map(|path| StillMounted::inspect(path, false).to_string())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        anyhow::bail!(
-            "{} host-native mount(s) could not be unmounted\n\n{}",
-            summary.failed.len(),
-            details
-        );
-    }
-    if summary.unmounted == 0 && summary.swept_orphans == 0 {
-        if summary.skipped > 0 {
-            anstream::println!(
-                "No teardown performed; {} mount-state file(s) were unreadable (see warnings above).",
-                summary.skipped
-            );
-        } else {
-            anstream::println!("Nothing to tear down.");
-        }
-    }
-    Ok(())
-}

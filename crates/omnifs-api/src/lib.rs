@@ -8,9 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
-/// Control API version. Bump on breaking changes to routes or payloads;
-/// the CLI refuses to manage a daemon with a different major version.
-pub const API_VERSION: u32 = 1;
+/// Control API major version. The CLI refuses to talk to a daemon with a
+/// different major. Bump when routes or payloads change incompatibly.
+pub const API_MAJOR: u16 = 1;
+
+/// Control API minor version. The CLI warns but proceeds when the daemon's
+/// minor differs. Bump for additive, backward-compatible additions.
+pub const API_MINOR: u16 = 0;
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds `omnifsd` with zero config.
@@ -20,7 +24,10 @@ pub const DEFAULT_PORT: u16 = 7878;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VersionInfo {
     pub version: String,
-    pub api_version: u32,
+    /// Control API major version. Incompatible change when this differs.
+    pub api_major: u16,
+    /// Control API minor version. Additive change; CLI warns and proceeds.
+    pub api_minor: u16,
     #[serde(default)]
     pub pid: u32,
     #[serde(default)]
@@ -41,8 +48,12 @@ pub struct ReadyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DaemonStatus {
     pub version: String,
+    /// Control API major version. Incompatible change when this differs.
     #[serde(default)]
-    pub api_version: u32,
+    pub api_major: u16,
+    /// Control API minor version. Additive change; CLI warns and proceeds.
+    #[serde(default)]
+    pub api_minor: u16,
     #[serde(default)]
     pub pid: u32,
     #[serde(default)]

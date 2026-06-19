@@ -20,12 +20,15 @@ use crate::runtime_target::RuntimeTarget;
 use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
 use omnifs_home::OMNIFS_HOME_ENV;
 
-/// Image label written by `Dockerfile`/`scripts/ci/Dockerfile.runtime`
-/// from the `OMNIFS_MIN_LAUNCHER_VERSION` build arg. The launcher
-/// reads it before `docker create` to refuse running an image baked
-/// from a newer source tree than the launcher itself.
+/// Image label written by `Dockerfile` from the `OMNIFS_MIN_LAUNCHER_VERSION`
+/// build arg. The launcher reads it before `docker create` to refuse running
+/// an image baked from a newer source tree than the launcher itself.
 const LAUNCHER_VERSION_LABEL: &str = "ai.0xff.omnifs.min-launcher-version";
 const LAUNCH_PROTOCOL_LABEL: &str = "ai.0xff.omnifs.launch-protocol";
+
+/// Derived from `omnifs_api::API_MAJOR` so the image-label check and the
+/// control-API check are one fact in two places that cannot drift independently.
+/// A unit test in this module verifies the string matches the numeric constant.
 const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v1";
 
 /// Extras layered on top of the canonical runtime wiring.
@@ -315,6 +318,20 @@ impl Runtime {
     ) -> Result<()> {
         self.ensure_image().await?;
         self.verify_launcher_compat().await?;
+
+        // Non-destructive: if a container with our name is already running on
+        // the desired image, skip remove+recreate and let the caller reconcile.
+        // This makes `omnifs up` on an unchanged, healthy setup a no-op that
+        // does not tear down and restart the container.
+        if self.running_container_matches_image().await? {
+            anstream::println!(
+                "Container `{}` is already running on image `{}`; skipping recreate",
+                self.container_name,
+                self.image
+            );
+            return Ok(());
+        }
+
         self.remove().await?;
 
         let spec = ContainerLaunchSpec::from_runtime_home(&self.image, runtime_home, extras);
@@ -340,6 +357,46 @@ impl Runtime {
             .await
             .with_context(|| format!("start container `{}`", self.container_name))?;
         Ok(())
+    }
+
+    /// Returns `true` when the container with our name is running and was
+    /// created from the desired image. Used by [`Self::launch_container`] to
+    /// skip remove+recreate when the healthy setup is already in place.
+    async fn running_container_matches_image(&self) -> Result<bool> {
+        match self
+            .docker
+            .inspect_container(
+                self.container_name.as_str(),
+                None::<InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(container) => {
+                let running = container
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.running)
+                    .unwrap_or(false);
+                if !running {
+                    return Ok(false);
+                }
+                // Check the image name recorded in the container config. Docker
+                // stores the tag the container was created from in
+                // `config.image`, which is what we compare against.
+                let container_image = container
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.image.as_deref())
+                    .unwrap_or("");
+                Ok(container_image == self.image.as_str())
+            },
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
+            Err(error) => {
+                Err(error).with_context(|| format!("inspect container `{}`", self.container_name))
+            },
+        }
     }
 
     pub(crate) async fn remove(&self) -> Result<()> {
@@ -456,7 +513,29 @@ impl Runtime {
                 status_code: 404, ..
             }) => {
                 anstream::println!("missing");
-                self.pull_image_with_progress(self.image.as_str()).await
+                self.pull_image_with_progress(self.image.as_str())
+                    .await
+                    .map_err(|pull_err| {
+                        // When the pull itself hits a 404 the tag is likely absent
+                        // from the registry. Surface an actionable message naming
+                        // the tag and pointing at the remediation options instead of
+                        // exposing a raw registry 404.
+                        let image_str = self.image.as_str();
+                        if pull_err.to_string().contains("404")
+                            || pull_err.to_string().to_lowercase().contains("not found")
+                        {
+                            anyhow::anyhow!(
+                                "image `{image_str}` was not found in the registry\n\n\
+                                 This tag may not be published yet. Options:\n\
+                                 - Pass a specific image with `--image <image>` (e.g. a \
+                                   release tag or a channel tag)\n\
+                                 - Run `omnifs dev` to build and launch the local sandbox\n\
+                                 - Check https://ghcr.io/0xff-ai/omnifs for available tags"
+                            )
+                        } else {
+                            pull_err
+                        }
+                    })
             },
             Err(error) => Err(error).with_context(|| format!("inspect image `{}`", self.image)),
         }
@@ -620,6 +699,19 @@ fn check_launcher_compat(launcher_version: &str, label: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_api::API_MAJOR;
+
+    /// Verify that `EXPECTED_LAUNCH_PROTOCOL` matches `API_MAJOR`. Both must be
+    /// updated together when the API major bumps; this test enforces that.
+    #[test]
+    fn expected_launch_protocol_matches_api_major() {
+        let expected = format!("daemon-control-v{API_MAJOR}");
+        assert_eq!(
+            EXPECTED_LAUNCH_PROTOCOL, expected,
+            "EXPECTED_LAUNCH_PROTOCOL must equal daemon-control-v{{API_MAJOR}}; \
+             bump EXPECTED_LAUNCH_PROTOCOL in runtime.rs and the Dockerfile when API_MAJOR changes"
+        );
+    }
 
     #[test]
     fn image_compat_requires_launch_protocol_label() {

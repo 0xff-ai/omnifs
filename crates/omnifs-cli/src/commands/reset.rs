@@ -1,23 +1,27 @@
 //! `omnifs reset`: nuke every mount config (and, by default, the stored
-//! credentials they reference) and tear down the running container.
+//! credentials they reference) and tear down the running daemon.
 //!
 //! Bulk equivalent of `omnifs mounts rm` over every mount, plus
 //! `omnifs down`. Reuses the credential-target logic so external-source
 //! credentials (`token_file` / `token_env`) are left untouched.
+//!
+//! Backend-transparent: probes the control port then falls back to the launch
+//! record, never branches on `[system].runtime`.
 
 use std::fs;
+use std::path::Path;
 
 use anyhow::Context;
 use clap::Args;
 
 use crate::app_context::AppContext;
+use crate::backend::Backend;
 use crate::catalog::MountRemovalTarget;
+use crate::client::DaemonClient;
 use crate::commands::mounts::delete_credentials;
-use crate::container_name::ContainerName;
 use crate::credential_target::CredentialTarget;
+use crate::launch_record::{LaunchRecord, backend_from_launch_kind};
 use crate::paths::Paths;
-use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
 use omnifs_creds::FileStore;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -25,15 +29,9 @@ pub struct ResetArgs {
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long)]
     pub yes: bool,
-    /// Keep stored credentials; only delete mount configs and the container.
+    /// Keep stored credentials; only delete mount configs and the daemon.
     #[arg(long)]
     pub keep_credentials: bool,
-    /// Container name.
-    ///
-    /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
-    /// `omnifs`.
-    #[arg(long)]
-    pub container_name: Option<String>,
 }
 
 impl ResetArgs {
@@ -41,18 +39,15 @@ impl ResetArgs {
         let ResetArgs {
             yes,
             keep_credentials,
-            container_name,
         } = self;
         let ctx = AppContext::resolve_default()?;
         let paths = ctx.paths();
-        let config = ctx.config();
-        let container_name = RuntimeTarget::resolve_container_name(container_name, config)?;
         let targets = ctx.catalog().reset_removal_targets()?;
 
         if targets.is_empty() {
             anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
         }
-        print_preview(&targets, keep_credentials, container_name.as_str());
+        print_preview(&targets, keep_credentials);
 
         if !yes {
             let proceed = inquire::Confirm::new("Proceed?")
@@ -65,10 +60,10 @@ impl ResetArgs {
             }
         }
 
-        // Tear down the container first so a daemon writing files won't race
-        // the credential or mount-config delete. Best-effort: a non-running
-        // Docker (or an absent container) isn't a reset failure.
-        teardown_container(&container_name).await;
+        // Tear down the daemon first so a daemon writing files won't race the
+        // credential or mount-config delete. Best-effort: a non-running daemon
+        // or an absent launch record is not a reset failure.
+        teardown_daemon(paths).await;
 
         let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
@@ -85,7 +80,7 @@ impl ResetArgs {
     }
 }
 
-fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool, container_name: &str) {
+fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
     anstream::println!("This will:");
     for target in targets {
         anstream::println!("  • delete {}", Paths::display(&target.path));
@@ -104,19 +99,71 @@ fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool, contain
             CredentialTarget::None => {},
         }
     }
-    anstream::println!("  • stop and remove container `{container_name}` (if running)");
+    anstream::println!("  • stop the running daemon (if any)");
 }
 
-async fn teardown_container(container_name: &ContainerName) {
-    match Runtime::connect_docker() {
-        Ok(runtime) => match runtime.remove_existing(container_name).await {
-            Ok(()) => anstream::println!("✓ Container `{container_name}` removed"),
-            Err(error) => {
-                anstream::println!("⚠  Could not remove container `{container_name}`: {error}");
-            },
+/// Best-effort daemon teardown using the same resolution order as `omnifs
+/// down`: probe the control port, fall back to the launch record.
+async fn teardown_daemon(paths: &crate::paths::Paths) {
+    let config_dir = &paths.config_dir;
+    let nfs_state_dir = paths.nfs_state_dir();
+    let client = DaemonClient::new();
+
+    // Try live daemon first.
+    let backend = match resolve_backend(&client, config_dir).await {
+        Ok(Some(backend)) => backend,
+        Ok(None) => {
+            anstream::println!("⚠  No running daemon found; skipping daemon teardown");
+            return;
         },
         Err(error) => {
-            anstream::println!("⚠  Docker not reachable; skipping container teardown ({error})");
+            anstream::eprintln!("⚠  Could not identify daemon backend: {error:#}");
+            return;
         },
+    };
+
+    // Graceful shutdown first.
+    let mount_point = match client.shutdown().await {
+        Ok(Some(report)) => {
+            anstream::println!("✓ Daemon stopped");
+            Some(report.mount_point)
+        },
+        Ok(None) => {
+            anstream::println!("No daemon answered shutdown; sweeping…");
+            None
+        },
+        Err(error) => {
+            anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
+            None
+        },
+    };
+
+    // Backend-specific reclaim.
+    if let Err(error) = backend
+        .reclaim(mount_point.as_deref(), &nfs_state_dir, false)
+        .await
+    {
+        anstream::eprintln!("⚠  Backend reclaim failed: {error:#}");
     }
+
+    let _ = LaunchRecord::remove(config_dir);
+}
+
+/// Identify the backend from the live daemon or the launch record.
+async fn resolve_backend(
+    client: &DaemonClient,
+    config_dir: &Path,
+) -> anyhow::Result<Option<Backend>> {
+    // Probe the live daemon; on any error fall through to the launch record.
+    if let Ok(status) = client.status().await {
+        let backend = backend_from_launch_kind(status.launch, config_dir)?;
+        return Ok(Some(backend));
+    }
+
+    // Fall back to launch record.
+    if let Some(record) = LaunchRecord::read(config_dir)? {
+        return Ok(Some(record.into_backend()?));
+    }
+
+    Ok(None)
 }

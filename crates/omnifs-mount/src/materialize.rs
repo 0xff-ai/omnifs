@@ -51,6 +51,19 @@ pub enum MaterializeError {
     },
     #[error("preopen `{0}` is not a directory")]
     PreopenNotDir(String),
+    /// The spec's stamped contract block does not match the live provider
+    /// contract, indicating the spec was not updated through `omnifs up`
+    /// after a provider upgrade. The daemon refuses to serve a mount whose
+    /// contract the spec was not written against.
+    #[error(
+        "contract mismatch for mount `{mount}`: spec stamped against contract {spec_hash}, \
+         live provider contract is {live_hash}; run `omnifs up` to reconcile"
+    )]
+    ContractMismatch {
+        mount: String,
+        spec_hash: String,
+        live_hash: String,
+    },
 }
 
 /// Materialize `spec` against `catalog`.
@@ -59,6 +72,13 @@ pub enum MaterializeError {
 /// host paths are canonicalized in place and no binds are returned; otherwise
 /// each user preopen is rewritten to a container path and its host bind is
 /// collected for the launcher.
+///
+/// When the spec carries a `contract` block, the live provider contract is
+/// derived and compared against it. A mismatch is a hard error: the daemon
+/// backstop guarantees it never serves a mount whose contract the spec was not
+/// written against. The CLI clears mismatches before reconcile through the
+/// `omnifs up` pre-flight; a mismatch here means the spec drifted behind the
+/// CLI's back (for example by a hand-edit or an out-of-band provider swap).
 pub fn materialize(
     mut spec: Spec,
     catalog: &Catalog,
@@ -71,6 +91,29 @@ pub fn materialize(
         .as_ref()
         .and_then(|capabilities| capabilities.preopened_paths.as_ref())
         .map_or(0, Vec::len);
+
+    // Backstop: when the spec carries a contract block, verify it matches the
+    // live provider contract before proceeding. This runs before
+    // `apply_metadata` so the spec's provider field is still in its authored
+    // form (not yet mutated by metadata application).
+    if let Some(stamped) = &spec.contract {
+        let live = catalog
+            .live_contract_for(&spec)
+            .map_err(MaterializeError::Metadata)?;
+        if let Some(live) = live {
+            let spec_hash = stamped.hash();
+            let live_hash = live.hash();
+            if spec_hash != live_hash {
+                return Err(MaterializeError::ContractMismatch {
+                    mount: spec.mount.clone(),
+                    spec_hash,
+                    live_hash,
+                });
+            }
+        }
+        // When no live manifest is found (unknown provider), skip the check
+        // and let the rest of the pipeline decide whether to proceed or fail.
+    }
 
     catalog
         .apply_metadata(&mut spec)

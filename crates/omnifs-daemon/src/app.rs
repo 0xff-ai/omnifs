@@ -168,12 +168,16 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         args.root_symlinks,
         host_native,
     ));
-    match std::net::TcpListener::bind(args.listen) {
-        Ok(listener) => daemon.spawn_control(listener, &rt)?,
-        Err(error) => {
-            warn!(%error, addr = %args.listen, "failed to bind control API listener");
-        },
-    }
+    let listener = std::net::TcpListener::bind(args.listen).map_err(|error| {
+        anyhow::anyhow!(
+            "cannot bind control API listener on {}: {error}\n\
+             \n\
+             Likely cause: another omnifs daemon is already running on that port.\n\
+             Run `omnifs down` to stop it, then try again.",
+            args.listen
+        )
+    })?;
+    daemon.spawn_control(listener, &rt)?;
 
     // Load desired state from `mounts/*.json` before serving, so the tree is
     // populated when the frontend comes up. Both the host-native and the

@@ -80,8 +80,27 @@ impl StatusReport {
             Cell::new(Paths::display(&self.paths.cache_dir)),
         ]);
         let _ = writeln!(out, "{table}");
-        let _ = writeln!(out);
 
+        // Surface mounts that did not converge at the last reconcile. A dark
+        // mount is visible here with its failure reason, not silently absent
+        // from the mounts list below.
+        if let Some(runtime) = &self.runtime
+            && !runtime.failed.is_empty()
+        {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Failed mounts ({}):", runtime.failed.len());
+            for failure in &runtime.failed {
+                let _ = writeln!(
+                    out,
+                    "  {}  {:<14} {}",
+                    crate::style::error("●"),
+                    failure.mount,
+                    failure.reason
+                );
+            }
+        }
+
+        let _ = writeln!(out);
         let _ = writeln!(out, "Mounts ({})", self.user_mounts.len());
         if self.user_mounts.is_empty() {
             let _ = writeln!(
@@ -241,7 +260,8 @@ pub(crate) enum RuntimeJson {
     /// A daemon answered on the control API.
     Running {
         version: String,
-        api_version: u32,
+        api_major: u16,
+        api_minor: u16,
         pid: u32,
         executable: std::path::PathBuf,
         mount_point: std::path::PathBuf,
@@ -249,8 +269,17 @@ pub(crate) enum RuntimeJson {
         cache_dir: std::path::PathBuf,
         /// Mount names loaded in the daemon's registry.
         mounts: Vec<String>,
+        /// Mounts that did not converge at the last reconcile. Empty when every
+        /// desired mount is serving; a dark mount appears here with its reason.
+        failed_mounts: Vec<FailedMountJson>,
     },
     NotRunning,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FailedMountJson {
+    pub mount: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -327,13 +356,22 @@ impl StatusReport {
                 .as_ref()
                 .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
                     version: r.version.clone(),
-                    api_version: r.api_version,
+                    api_major: r.api_major,
+                    api_minor: r.api_minor,
                     pid: r.pid,
                     executable: r.executable.clone(),
                     mount_point: r.mount_point.clone(),
                     config_dir: r.config_dir.clone(),
                     cache_dir: r.cache_dir.clone(),
                     mounts: r.mounts.iter().map(|mount| mount.mount.clone()).collect(),
+                    failed_mounts: r
+                        .failed
+                        .iter()
+                        .map(|f| FailedMountJson {
+                            mount: f.mount.clone(),
+                            reason: f.reason.clone(),
+                        })
+                        .collect(),
                 });
         StatusJson {
             version: env!("CARGO_PKG_VERSION").to_string(),

@@ -5,6 +5,7 @@
 
 mod app_context;
 mod auth;
+mod backend;
 mod capability;
 mod catalog;
 mod cli;
@@ -12,16 +13,17 @@ mod client;
 mod commands;
 pub mod config;
 mod container_name;
+mod contract_preflight;
 mod credential_target;
 mod dev_mounts;
 mod dev_support;
 mod error;
-mod host_launch;
 mod host_teardown;
 mod image_ref;
 mod inspector;
 mod kubernetes_testenv;
 mod launch;
+mod launch_record;
 mod live;
 mod mount_report;
 mod mount_tree;

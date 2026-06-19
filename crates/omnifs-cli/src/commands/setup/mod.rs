@@ -89,7 +89,12 @@ impl SetupArgs {
         let results = run_init_loop(&selected, &self, &templates).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
-            let mount_point = crate::paths::default_host_mount_point()?;
+            // The daemon resolves its own mount point; we preview the expected
+            // default here for the setup summary (HOME/omnifs, same logic as
+            // the daemon's `resolve_mount_point` default).
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve host mount point: set HOME"))?;
+            let mount_point = std::path::PathBuf::from(home).join("omnifs");
             let mount_root = crate::paths::Paths::display(&mount_point);
             (
                 "Host mount",

@@ -3944,10 +3944,12 @@ name = "omnifs-mount"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "hex",
  "omnifs-core",
  "omnifs-provider",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "utoipa",

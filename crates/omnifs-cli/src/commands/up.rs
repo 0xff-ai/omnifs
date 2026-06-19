@@ -1,4 +1,4 @@
-//! `omnifs up` — daemon lifecycle: start.
+//! `omnifs up`: daemon lifecycle start.
 
 use clap::Args;
 use omnifs_creds::FileStore;
@@ -51,6 +51,15 @@ impl UpArgs {
         // `up` reads it. Host-native serves a host mount; Docker serves FUSE
         // inside the container.
         let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
+
+        // Contract pre-flight: classify any provider contract changes and
+        // auto-migrate additive-only ones before the daemon sees the specs.
+        // Breaking changes and capability/auth deltas are hard errors here.
+        crate::contract_preflight::run_preflight(
+            &paths.mounts_dir,
+            &paths.providers_dir,
+            &configs,
+        )?;
 
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_runtime(

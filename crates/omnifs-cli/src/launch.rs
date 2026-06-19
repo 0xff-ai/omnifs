@@ -1,14 +1,16 @@
 //! Shared launch choreography for `omnifs up` and `omnifs dev`.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_VERSION, DaemonStatus, VersionInfo};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, VersionInfo};
 use omnifs_creds::CredentialStore;
 
+use crate::backend::{Backend, LaunchParams};
 use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
-use crate::host_launch::HostDaemon;
+use crate::launch_record::LaunchRecord;
 use crate::runtime::{ContainerExtras, Runtime};
 use crate::runtime_target::RuntimeTarget;
 use crate::session::MountConfig;
@@ -74,7 +76,15 @@ pub(crate) async fn launch_runtime(
     let rt = Runtime::connect_ready(runtime, verb).await?;
     rt.launch_container(runtime_home, extras).await?;
 
-    if let Err(error) = finish_docker_launch(&rt).await {
+    if let Err(error) = finish_docker_launch(
+        &rt,
+        runtime_home,
+        runtime.container_name(),
+        runtime.image(),
+        &[],
+    )
+    .await
+    {
         if let Err(teardown) = rt.remove().await {
             anstream::eprintln!("also failed to remove the container: {teardown:#}");
         }
@@ -86,8 +96,7 @@ pub(crate) async fn launch_runtime(
 
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
-/// converge any change since and to surface per-mount failures. On failure
-/// before detach the spawned daemon is terminated.
+/// converge any change since and to surface per-mount failures.
 async fn launch_host_native(
     runtime_home: &Path,
     cache_dir: &Path,
@@ -95,24 +104,71 @@ async fn launch_host_native(
 ) -> anyhow::Result<()> {
     reject_existing_host_daemon(runtime_home, cache_dir, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
-    let mut daemon = HostDaemon::spawn(runtime_home, cache_dir)?;
-    daemon.wait_ready().await?;
+
+    // Build the params and delegate spawn+wait to the backend abstraction so
+    // the native path and Docker path share the same argument generator.
+    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
+        .parse()
+        .expect("static address is valid");
+    let params = LaunchParams {
+        config_dir: runtime_home.to_path_buf(),
+        cache_dir: cache_dir.to_path_buf(),
+        control_addr: addr,
+        mount_point: None, // the daemon resolves its default
+        backend: Backend::Native,
+    };
+    crate::backend::launch_native(&params).await?;
 
     let client = DaemonClient::new();
     match client.reconcile().await {
         Ok(report) => report_reconcile_failures(&report),
         Err(error) => {
-            daemon.kill().await;
             return Err(error);
         },
     }
-    // The daemon owns the mount point; read it back for the user-facing message.
+
+    // Read daemon status to get the mount point and PID for the launch record.
     if let Ok(status) = client.status().await {
         anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        write_native_launch_record(
+            runtime_home,
+            cache_dir,
+            status.pid,
+            Some(&status.mount_point),
+        );
     }
-    daemon.detach();
     Ok(())
+}
+
+/// Write the launch record for a native daemon. Best-effort: a failure here
+/// is logged but does not abort the launch, since the daemon is already up.
+fn write_native_launch_record(
+    config_dir: &Path,
+    cache_dir: &Path,
+    daemon_pid: u32,
+    mount_point: Option<&Path>,
+) {
+    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
+        .parse()
+        .expect("static address is valid");
+    let params = LaunchParams {
+        config_dir: config_dir.to_path_buf(),
+        cache_dir: cache_dir.to_path_buf(),
+        control_addr: addr,
+        mount_point: mount_point.map(Path::to_path_buf),
+        backend: Backend::Native,
+    };
+    match LaunchRecord::new(&params, Some(daemon_pid)) {
+        Ok(record) => {
+            if let Err(error) = record.write(config_dir) {
+                anstream::eprintln!("warning: could not write launch record: {error:#}");
+            }
+        },
+        Err(error) => {
+            anstream::eprintln!("warning: could not build launch record: {error:#}");
+        },
+    }
 }
 
 async fn reject_existing_host_daemon(
@@ -125,7 +181,7 @@ async fn reject_existing_host_daemon(
         return Ok(());
     };
 
-    let status = if version.api_version == API_VERSION {
+    let status = if version.api_major == API_MAJOR {
         client.status().await.ok()
     } else {
         None
@@ -188,8 +244,7 @@ impl ExistingDaemon {
     }
 
     fn title(&self) -> &'static str {
-        if self.version.api_version != API_VERSION
-            || self.version.version != env!("CARGO_PKG_VERSION")
+        if self.version.api_major != API_MAJOR || self.version.version != env!("CARGO_PKG_VERSION")
         {
             "A different omnifs daemon is already running"
         } else if self.paths_match() == Some(false) {
@@ -207,17 +262,19 @@ impl std::fmt::Display for ExistingDaemon {
         writeln!(f, "{}", self.title())?;
         writeln!(
             f,
-            "  daemon  v{}  API {}  pid {}  {}",
+            "  daemon  v{}  API {}.{}  pid {}  {}",
             self.version.version,
-            self.version.api_version,
+            self.version.api_major,
+            self.version.api_minor,
             self.version.pid,
             display_path(self.daemon_executable())
         )?;
         writeln!(
             f,
-            "  this    v{}  API {}       {}",
+            "  this    v{}  API {}.{}       {}",
             env!("CARGO_PKG_VERSION"),
-            API_VERSION,
+            API_MAJOR,
+            API_MINOR,
             display_path(&std::env::current_exe().unwrap_or_else(|_| PathBuf::new()))
         )?;
         if let Some(status) = &self.status {
@@ -228,8 +285,7 @@ impl std::fmt::Display for ExistingDaemon {
             writeln!(f, "  this cache     {}", self.cache_dir.display())?;
         }
         writeln!(f)?;
-        if self.version.api_version != API_VERSION
-            || self.version.version != env!("CARGO_PKG_VERSION")
+        if self.version.api_major != API_MAJOR || self.version.version != env!("CARGO_PKG_VERSION")
         {
             writeln!(
                 f,
@@ -284,7 +340,13 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
 /// Docker path: wait for the in-container daemon to serve (it reconciles from
 /// `mounts/` on start), then converge once more over the control API to surface
 /// any per-mount failure. No spec crosses the wire.
-async fn finish_docker_launch(rt: &Runtime) -> anyhow::Result<()> {
+async fn finish_docker_launch(
+    rt: &Runtime,
+    runtime_home: &Path,
+    container_name: &crate::container_name::ContainerName,
+    image: &crate::image_ref::ImageRef,
+    extra_binds: &[String],
+) -> anyhow::Result<()> {
     rt.wait_for_daemon_ready().await?;
     let client = DaemonClient::new();
     client.require_compatible().await?;
@@ -292,6 +354,47 @@ async fn finish_docker_launch(rt: &Runtime) -> anyhow::Result<()> {
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        write_docker_launch_record(
+            runtime_home,
+            container_name,
+            image,
+            extra_binds,
+            Some(&status.mount_point),
+        );
     }
     Ok(())
+}
+
+/// Write the launch record for a Docker daemon. Best-effort.
+fn write_docker_launch_record(
+    config_dir: &Path,
+    container_name: &crate::container_name::ContainerName,
+    image: &crate::image_ref::ImageRef,
+    extra_binds: &[String],
+    mount_point: Option<&Path>,
+) {
+    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
+        .parse()
+        .expect("static address is valid");
+    let params = LaunchParams {
+        config_dir: config_dir.to_path_buf(),
+        cache_dir: config_dir.join("cache"),
+        control_addr: addr,
+        mount_point: mount_point.map(Path::to_path_buf),
+        backend: Backend::Docker {
+            container_name: container_name.clone(),
+            image: image.clone(),
+            extra_binds: extra_binds.to_vec(),
+        },
+    };
+    match LaunchRecord::new(&params, None) {
+        Ok(record) => {
+            if let Err(error) = record.write(config_dir) {
+                anstream::eprintln!("warning: could not write launch record: {error:#}");
+            }
+        },
+        Err(error) => {
+            anstream::eprintln!("warning: could not build launch record: {error:#}");
+        },
+    }
 }

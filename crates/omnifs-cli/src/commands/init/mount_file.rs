@@ -2,8 +2,8 @@ use super::config_generation::GeneratedMountConfig;
 use crate::auth::AuthSelection;
 use anyhow::Context;
 use omnifs_core::{AuthKind, MountName};
-use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
+use omnifs_mount::{Contract, ProviderConfig};
 use omnifs_provider::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
 use std::fs;
@@ -63,6 +63,7 @@ impl<'a> MountFile<'a> {
                 .config
                 .as_ref()
                 .map(|value| ProviderConfig::from_value(value.clone())),
+            contract: Some(Contract::from_manifest(self.manifest)),
         }
     }
 }
@@ -82,6 +83,10 @@ struct SerializableMountFile<'a> {
     capabilities: Option<ProviderCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<ProviderConfig>,
+    /// Provider contract snapshot stamped at init time. Absent for providers
+    /// with no manifest (unknown providers); always present for built-in providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contract: Option<Contract>,
 }
 
 #[derive(Serialize)]
