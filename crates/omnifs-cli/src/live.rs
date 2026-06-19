@@ -19,7 +19,11 @@ pub(crate) enum LiveApply {
     RestartRequired(&'static str),
 }
 
-/// Materialize the new mount and load it on the running daemon.
+/// Reconcile the running daemon after the caller has written the new mount's
+/// spec file. The daemon loads it from `mounts/` itself; no spec crosses the
+/// wire. On Docker a mount that introduces new host preopen binds cannot be
+/// added to a running container, so it is reported as restart-required and the
+/// reconcile is left for the next `omnifs up`.
 pub(crate) async fn add_mount(
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
@@ -30,23 +34,30 @@ pub(crate) async fn add_mount(
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
-    let (binds, payload) = config.materialize(catalog, store, host_native)?;
-    if !binds.is_empty() {
-        // New host binds (user preopens) cannot be added to a running
-        // container; the mount config is saved and `omnifs up` picks it up.
-        return Ok(LiveApply::RestartRequired("it needs new host binds"));
+    if !host_native {
+        let binds = config.materialize(catalog, store, host_native)?;
+        if !binds.is_empty() {
+            return Ok(LiveApply::RestartRequired("it needs new host binds"));
+        }
     }
-    client.add_mount(&payload.spec).await?;
+    let report = client.reconcile().await?;
+    if let Some(failure) = report
+        .failed
+        .iter()
+        .find(|failure| failure.mount == config.name.as_str())
+    {
+        anyhow::bail!("mount `{}` did not load: {}", config.name, failure.reason);
+    }
     Ok(LiveApply::Applied)
 }
 
-/// Unload a mount from the running daemon. A mount that is configured but
-/// not loaded is not an error.
-pub(crate) async fn remove_mount(name: &str) -> anyhow::Result<LiveApply> {
+/// Reconcile the running daemon after the caller has removed the mount's spec
+/// file. The daemon drops any mount no longer present in `mounts/`.
+pub(crate) async fn remove_mount() -> anyhow::Result<LiveApply> {
     let client = DaemonClient::new();
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
-    client.remove_mount(name).await?;
+    client.reconcile().await?;
     Ok(LiveApply::Applied)
 }

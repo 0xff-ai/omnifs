@@ -8,8 +8,9 @@ use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::{Artifact, BuildError, Dirs, Runtime, component_engine};
 use omnifs_cache::Caches;
-use omnifs_mount::mounts::{Resolved, Spec};
-use std::collections::HashMap;
+use omnifs_mount::materialize::materialize;
+use omnifs_mount::mounts::{Catalog, Resolved, Spec, spec_paths_in};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +34,12 @@ pub struct ProviderRegistry {
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Per-mount materialized fingerprint, used by [`Self::reconcile`] to detect
+    /// a spec or provider-artifact change. Keyed by mount name.
+    fingerprints: parking_lot::RwLock<HashMap<String, u64>>,
+    /// Serializes reconcile passes so concurrent triggers cannot race the
+    /// add/remove sequence.
+    reconcile_lock: parking_lot::Mutex<()>,
 }
 
 impl ProviderRegistry {
@@ -72,6 +79,8 @@ impl ProviderRegistry {
             root_mount: parking_lot::RwLock::new(None),
             timer_shutdown,
             timer_tasks: parking_lot::Mutex::new(HashMap::new()),
+            fingerprints: parking_lot::RwLock::new(HashMap::new()),
+            reconcile_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -215,6 +224,101 @@ impl ProviderRegistry {
         }
     }
 
+    /// Converge the running mount set to the desired state under
+    /// `<config_dir>/mounts/*.json`.
+    ///
+    /// Desired specs are materialized (metadata, runtime capabilities, preopen
+    /// rewriting) and fingerprinted; a spec that is new is added, one whose
+    /// fingerprint changed is replaced, one that disappeared is removed, and one
+    /// that fails to materialize or instantiate is recorded in
+    /// [`ReconcileOutcome::failed`] without aborting the pass. `host_native`
+    /// selects host-direct preopens (true) versus container-rewritten preopens.
+    pub fn reconcile(
+        &self,
+        handle: &tokio::runtime::Handle,
+        host_native: bool,
+    ) -> ReconcileOutcome {
+        let _guard = self.reconcile_lock.lock();
+        let mut outcome = ReconcileOutcome::default();
+
+        let catalog = Catalog::new(self.config_dir.join("mounts"), &self.providers_dir);
+        let paths = match spec_paths_in(catalog.mounts_dir()) {
+            Ok(paths) => paths,
+            Err(error) => {
+                outcome.failed.push(MountFailure {
+                    mount: catalog.mounts_dir().display().to_string(),
+                    reason: format!("scan mounts dir: {error}"),
+                });
+                return outcome;
+            },
+        };
+
+        let mut desired = HashSet::new();
+        for path in paths {
+            let spec = match Spec::from_file(&path) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    outcome.failed.push(MountFailure {
+                        mount: path.display().to_string(),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                },
+            };
+            let materialized = match materialize(spec, &catalog, host_native) {
+                Ok(materialized) => materialized.spec,
+                Err(error) => {
+                    outcome.failed.push(MountFailure {
+                        mount: path.display().to_string(),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                },
+            };
+            let mount = materialized.mount.clone();
+            desired.insert(mount.clone());
+
+            let wasm_path = self.dirs().provider_path(&materialized.provider);
+            let fingerprint = mount_fingerprint(&materialized, &wasm_path);
+            let running = self.instances.read().contains_key(&mount);
+            let unchanged = running && self.fingerprints.read().get(&mount) == Some(&fingerprint);
+            if unchanged {
+                continue;
+            }
+            if running {
+                let _ = self.remove_mount(&mount);
+            }
+            match self.add_mount(materialized, handle) {
+                Ok(_) => {
+                    self.fingerprints.write().insert(mount.clone(), fingerprint);
+                    if running {
+                        outcome.updated.push(mount);
+                    } else {
+                        outcome.added.push(mount);
+                    }
+                },
+                Err(error) => {
+                    self.fingerprints.write().remove(&mount);
+                    outcome.failed.push(MountFailure {
+                        mount,
+                        reason: error.to_string(),
+                    });
+                },
+            }
+        }
+
+        for mount in self.mounts() {
+            if !desired.contains(&mount) {
+                if self.remove_mount(&mount).is_ok() {
+                    outcome.removed.push(mount.clone());
+                }
+                self.fingerprints.write().remove(&mount);
+            }
+        }
+
+        outcome
+    }
+
     fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
         let interval_secs = runtime.requested_capabilities().refresh_interval_secs;
         if interval_secs == 0 {
@@ -250,6 +354,45 @@ impl ProviderRegistry {
         });
         self.timer_tasks.lock().insert(mount, task);
     }
+}
+
+/// One mount that did not converge during [`ProviderRegistry::reconcile`].
+#[derive(Debug, Clone)]
+pub struct MountFailure {
+    /// Mount name, or the spec path when the name could not be parsed.
+    pub mount: String,
+    pub reason: String,
+}
+
+/// What a reconcile pass changed. Host-local; the daemon maps it to the
+/// control-API report type.
+#[derive(Debug, Default)]
+pub struct ReconcileOutcome {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub updated: Vec<String>,
+    pub failed: Vec<MountFailure>,
+}
+
+/// Fingerprint a materialized spec plus its provider artifact, so a reconcile
+/// detects both config edits and a swapped-out provider binary. The provider
+/// stamp uses file length and mtime rather than a content hash to keep the pass
+/// cheap; a rebuilt provider changes both.
+fn mount_fingerprint(spec: &Spec, wasm_path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Ok(bytes) = serde_json::to_vec(spec) {
+        bytes.hash(&mut hasher);
+    }
+    if let Ok(meta) = std::fs::metadata(wasm_path) {
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified()
+            && let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            since_epoch.as_nanos().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn registry_error(mount: &str, error: BuildError) -> RegistryError {

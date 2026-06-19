@@ -40,67 +40,19 @@
       }
     },
     "/v1/mounts": {
-      "post": {
+      "get": {
         "tags": [],
-        "summary": "`POST /v1/mounts`: resolve and load one mount from a raw mount spec.\nSecret material never rides this call: specs reference credential files\nmaterialized into the session by the CLI.",
-        "operationId": "add_mount",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Spec"
-              }
-            }
-          },
-          "required": true
-        },
+        "operationId": "mounts_list",
         "responses": {
-          "201": {
-            "description": "mount loaded",
+          "200": {
+            "description": "loaded provider mounts",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MountInfo"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "invalid mount spec",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "provider not found",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "mount already loaded",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "mount load failed",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MountInfo"
+                  }
                 }
               }
             }
@@ -109,10 +61,9 @@
       }
     },
     "/v1/mounts/{name}": {
-      "delete": {
+      "get": {
         "tags": [],
-        "summary": "`DELETE /v1/mounts/{name}`: shut down and unregister a mount.",
-        "operationId": "remove_mount",
+        "operationId": "mount_inspect",
         "parameters": [
           {
             "name": "name",
@@ -125,21 +76,18 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "mount removed"
-          },
-          "404": {
-            "description": "mount not found",
+          "200": {
+            "description": "the mount",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/MountInfo"
                 }
               }
             }
           },
-          "500": {
-            "description": "mount remove failed",
+          "404": {
+            "description": "mount not found",
             "content": {
               "text/plain": {
                 "schema": {
@@ -172,6 +120,44 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReadyInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reconcile": {
+      "post": {
+        "tags": [],
+        "summary": "`POST /v1/reconcile`: converge the running mount set to `mounts/*.json`.",
+        "operationId": "reconcile",
+        "responses": {
+          "200": {
+            "description": "what the reconcile changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shutdown": {
+      "post": {
+        "tags": [],
+        "summary": "`POST /v1/shutdown`: unmount the frontend and exit. The daemon holds the\nfrontend handle, so it tears itself down; `omnifs down` no longer infers the\nteardown from configuration.",
+        "operationId": "shutdown",
+        "responses": {
+          "200": {
+            "description": "what the daemon tore down before exiting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopReport"
                 }
               }
             }
@@ -218,53 +204,6 @@
   },
   "components": {
     "schemas": {
-      "Auth": {
-        "oneOf": [
-          {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/StaticToken"
-              },
-              {
-                "type": "object",
-                "required": [
-                  "type"
-                ],
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "static-token"
-                    ]
-                  }
-                }
-              }
-            ]
-          },
-          {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/OAuth"
-              },
-              {
-                "type": "object",
-                "required": [
-                  "type"
-                ],
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "oauth"
-                    ]
-                  }
-                }
-              }
-            ]
-          }
-        ],
-        "description": "Authentication configuration for HTTP requests."
-      },
       "DaemonStatus": {
         "type": "object",
         "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
@@ -327,6 +266,22 @@
           }
         }
       },
+      "MountFailure": {
+        "type": "object",
+        "description": "One mount that did not converge during a reconcile. `mount` is the mount\nname, or the spec path when the name could not be parsed.",
+        "required": [
+          "mount",
+          "reason"
+        ],
+        "properties": {
+          "mount": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
       "MountInfo": {
         "type": "object",
         "required": [
@@ -346,170 +301,6 @@
           }
         }
       },
-      "OAuth": {
-        "type": "object",
-        "properties": {
-          "account": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "User-chosen account handle for host-managed credentials."
-          },
-          "client_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "OAuth public client id override for BYO OAuth applications."
-          },
-          "client_secret_env": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Environment variable containing an OAuth client secret."
-          },
-          "client_secret_file": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "File containing an OAuth client secret."
-          },
-          "domain": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "header": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "redirect_uri": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "OAuth redirect URI override for BYO apps that require an exact\nregistered callback."
-          },
-          "scheme": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Provider-declared auth scheme key for manifest-backed credentials."
-          },
-          "scopes": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "additionalProperties": false
-      },
-      "PreopenMode": {
-        "type": "string",
-        "enum": [
-          "ro",
-          "rw"
-        ]
-      },
-      "PreopenedPath": {
-        "type": "object",
-        "required": [
-          "host",
-          "guest"
-        ],
-        "properties": {
-          "guest": {
-            "type": "string"
-          },
-          "host": {
-            "type": "string"
-          },
-          "mode": {
-            "$ref": "#/components/schemas/PreopenMode"
-          }
-        }
-      },
-      "ProviderCapabilities": {
-        "type": "object",
-        "description": "Runtime capability grants for a mounted provider instance.\n\nThis type is user-authored in mount JSON configs and controls what\nsandbox capabilities are granted. It is distinct from `CapabilityEntry`\nwhich is the provider-manifest declaration of what a provider needs.",
-        "properties": {
-          "domains": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            }
-          },
-          "git_repos": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            }
-          },
-          "max_fetch_blob_bytes": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "max_memory_mb": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "max_read_blob_bytes": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "preopened_paths": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/PreopenedPath"
-            }
-          },
-          "unix_sockets": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "ProviderConfig": {
-        "type": "object",
-        "description": "Provider-specific configuration object from a mount JSON file's `\"config\"` field."
-      },
       "ReadyInfo": {
         "type": "object",
         "description": "`GET /v1/ready`: 200 with `ready: true` once the filesystem is\nserving; 503 with `ready: false` while starting up.",
@@ -522,83 +313,68 @@
           }
         }
       },
-      "Spec": {
+      "ReconcileReport": {
         "type": "object",
-        "description": "Raw user-authored mount JSON.\n\nLoaded from JSON files in the mount spec directory.",
+        "description": "`POST /v1/reconcile`: what converging the running mount set to the on-disk\ndesired state changed.",
         "required": [
-          "provider",
-          "mount"
+          "added",
+          "removed",
+          "updated",
+          "failed"
         ],
         "properties": {
-          "auth": {
+          "added": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Auth"
+              "type": "string"
             }
           },
-          "capabilities": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ProviderCapabilities"
-              }
-            ]
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MountFailure"
+            }
           },
-          "config": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ProviderConfig"
-              }
-            ]
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
-          "mount": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string",
-            "description": "Filename of the provider WASM component this mount loads, looked\nup in `providers_dir`."
-          },
-          "root_mount": {
-            "type": "boolean"
+          "updated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
-      "StaticToken": {
+      "StopReport": {
         "type": "object",
+        "description": "`POST /v1/shutdown`: what the daemon tore down before exiting.",
+        "required": [
+          "mount_point",
+          "providers_dropped"
+        ],
         "properties": {
-          "account": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "User-chosen account handle for host-managed credentials."
-          },
-          "scheme": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Provider-declared auth scheme key for manifest-backed credentials."
-          },
-          "token_env": {
-            "type": [
-              "string",
-              "null"
+          "frontend": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FrontendInfo"
+              }
             ]
           },
-          "token_file": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "mount_point": {
+            "type": "string"
+          },
+          "providers_dropped": {
+            "type": "integer",
+            "minimum": 0
           }
-        },
-        "additionalProperties": false
+        }
       },
       "VersionInfo": {
         "type": "object",

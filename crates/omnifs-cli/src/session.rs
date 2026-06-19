@@ -21,15 +21,7 @@ pub(crate) const ENV_IMAGE: &str = "OMNIFS_IMAGE";
 pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 
 pub(crate) const GUEST_FUSE_MOUNT: &str = "/omnifs";
-pub(crate) const GUEST_PREOPENS_DIR: &str = "/run/omnifs/preopens";
 pub(crate) const OMNIFS_HOME: &str = "/root/.omnifs";
-
-/// One mount ready for `POST /v1/mounts`.
-#[derive(Debug, Clone)]
-pub(crate) struct MountPayload {
-    pub(crate) name: MountName,
-    pub(crate) spec: Spec,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountConfig {
@@ -61,50 +53,50 @@ impl MountConfig {
         })
     }
 
-    /// Materialize a mount config into a payload plus the host binds the
-    /// runtime needs. When `host_native` is true the daemon runs on the host
-    /// and opens user preopen directories directly through wasmtime, so the
-    /// preopen `host` field is canonicalized in place and no binds are emitted.
-    /// When false the Docker path rewrites each user preopen to a container
-    /// bind path and returns the corresponding `host:container:mode` strings.
+    /// Compute the host binds the Docker runtime needs for this mount's user
+    /// preopens, validating host-managed credentials along the way. When
+    /// `host_native` is true the daemon opens preopen directories directly, so
+    /// no binds are emitted; when false each user preopen is rewritten to a
+    /// container path and the corresponding `host:container:mode` strings are
+    /// returned for `docker create`. The resolved spec is not returned: the
+    /// daemon reads it from `mounts/` itself, so nothing is pushed.
     pub(crate) fn materialize(
         &self,
         catalog: &ProviderCatalog,
         store: &dyn CredentialStore,
         host_native: bool,
-    ) -> anyhow::Result<(Vec<String>, MountPayload)> {
-        let mut instance = self.config.clone();
-        let user_preopen_count = instance
-            .capabilities
-            .as_ref()
-            .and_then(|capabilities| capabilities.preopened_paths.as_ref())
-            .map_or(0, Vec::len);
-        catalog
-            .apply_metadata(&mut instance)
-            .with_context(|| format!("apply provider metadata for {}", self.source.display()))?;
+    ) -> anyhow::Result<Vec<String>> {
+        // Materialize once through the shared materializer (metadata, runtime
+        // capabilities, preopen rewriting); the daemon reconciles with the same
+        // function. The resolved spec is not returned: the daemon reads it from
+        // `mounts/`, so nothing is pushed; only the Docker preopen binds are.
+        let materialized = omnifs_mount::materialize::materialize(
+            self.config.clone(),
+            catalog.inner(),
+            host_native,
+        )
+        .with_context(|| format!("materialize mount {}", self.source.display()))?;
+
+        // Validate host-managed credentials against the materialized spec before
+        // the daemon ever tries to load it, for a clear early CLI error.
         let resolved = catalog
-            .resolve_mount_spec(instance.clone(), false)
+            .resolve_mount_spec(materialized.spec, false)
             .with_context(|| format!("resolve mount config for {}", self.source.display()))?;
         let mount_auth = catalog.resolve_mount_auth_tolerating_manifest_errors(resolved);
         self.validate_host_managed_credentials(&mount_auth, store)?;
-        instance
-            .materialize_runtime_capabilities()
-            .with_context(|| {
-                format!(
-                    "materialize runtime capabilities for {}",
-                    self.source.display()
-                )
-            })?;
-        let preopen_binds =
-            self.materialize_preopened_paths(&mut instance, user_preopen_count, host_native)?;
 
-        Ok((
-            preopen_binds,
-            MountPayload {
-                name: self.name.clone(),
-                spec: instance,
-            },
-        ))
+        let binds = materialized
+            .preopen_binds
+            .into_iter()
+            .map(|bind| {
+                let mode = match bind.mode {
+                    PreopenMode::Ro => "ro",
+                    PreopenMode::Rw => "rw",
+                };
+                format!("{}:{}:{}", bind.host.display(), bind.container, mode)
+            })
+            .collect();
+        Ok(binds)
     }
 
     fn validate_host_managed_credentials(
@@ -152,58 +144,6 @@ impl MountConfig {
         }
         Ok(())
     }
-
-    fn materialize_preopened_paths(
-        &self,
-        instance: &mut Spec,
-        user_preopen_count: usize,
-        host_native: bool,
-    ) -> anyhow::Result<Vec<String>> {
-        if user_preopen_count == 0 {
-            return Ok(Vec::new());
-        }
-        let Some(preopens) = instance
-            .capabilities
-            .as_mut()
-            .and_then(|capabilities| capabilities.preopened_paths.as_mut())
-        else {
-            return Ok(Vec::new());
-        };
-
-        preopens
-            .iter_mut()
-            .take(user_preopen_count)
-            .enumerate()
-            .map(|(index, preopen)| {
-                let host_path = Path::new(&preopen.host)
-                    .canonicalize()
-                    .with_context(|| format!("canonicalize preopen {}", preopen.host))?;
-                if !host_path.is_dir() {
-                    anyhow::bail!("preopen {} is not a directory", host_path.display());
-                }
-
-                if host_native {
-                    // Host-native: the daemon opens the real host directory
-                    // directly via wasmtime preopened_dir, so the spec keeps
-                    // the canonical host path and there is no bind to return.
-                    preopen.host = host_path.display().to_string();
-                    return Ok(None);
-                }
-
-                let container_path = format!("{GUEST_PREOPENS_DIR}/{}/{index}", self.name);
-                let bind_mode = match preopen.mode {
-                    PreopenMode::Ro => "ro",
-                    PreopenMode::Rw => "rw",
-                };
-                preopen.host.clone_from(&container_path);
-                Ok(Some(format!(
-                    "{}:{container_path}:{bind_mode}",
-                    host_path.display()
-                )))
-            })
-            .filter_map(Result::transpose)
-            .collect()
-    }
 }
 
 pub(crate) fn env_string(name: &str) -> Option<String> {
@@ -229,7 +169,6 @@ mod tests {
     use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
     use omnifs_mount::mounts::Spec;
     use secrecy::SecretString;
-    use serde_json::Value;
     use time::OffsetDateTime;
 
     use crate::test_support::wasm_with_provider_metadata;
@@ -257,12 +196,8 @@ mod tests {
         ProviderCatalog::for_dirs(paths.mounts_dir, paths.providers_dir)
     }
 
-    fn payload_json(payload: &MountPayload) -> Value {
-        serde_json::to_value(&payload.spec).expect("serialize payload spec")
-    }
-
     #[test]
-    fn materialize_validates_host_managed_static_token_without_rewriting_auth() {
+    fn materialize_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::Paths::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -290,12 +225,10 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
-        let written = payload_json(&payload);
-
-        assert_eq!(written["auth"][0]["scheme"], "pat");
-        assert!(written["auth"][0].get("token_file").is_none());
-        assert!(written["auth"][0].get("token_env").is_none());
+        // Validation accepts the present host-managed token; no preopens, so no
+        // container binds.
+        let binds = config.materialize(&catalog, &store, false).unwrap();
+        assert!(binds.is_empty());
     }
 
     #[test]
@@ -329,9 +262,9 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
-        let written = payload_json(&payload);
-        assert_eq!(written["auth"][0]["token_env"], "FOO");
+        // A token_env credential is host-unmanaged, so validation requires no
+        // stored credential.
+        config.materialize(&catalog, &store, false).unwrap();
     }
 
     #[test]
@@ -364,9 +297,7 @@ mod tests {
         .unwrap();
 
         let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
-        let written = payload_json(&payload);
-        assert_eq!(written["auth"][0]["scheme"], "device");
+        config.materialize(&catalog, &store, false).unwrap();
     }
 
     #[test]
@@ -424,32 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_configured_docker_socket_grant() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("docker").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_docker.wasm",
-                    "mount": "docker",
-                    "config": {"endpoint": "unix:///var/run/docker.sock"}
-                }"#,
-            )
-            .unwrap(),
-            source: PathBuf::from("/dev/null"),
-        };
-
-        let catalog = test_catalog(tmp.path());
-        let (_, payload) = config.materialize(&catalog, &store, false).unwrap();
-        let written = payload_json(&payload);
-        assert_eq!(
-            written["capabilities"]["unix_sockets"],
-            serde_json::json!(["/var/run/docker.sock"]),
-        );
-    }
-
-    #[test]
     fn materialize_rewrites_preopens_to_container_bind_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
@@ -477,27 +382,16 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (binds, payload) = config.materialize(&catalog, &store, false).unwrap();
+        let binds = config.materialize(&catalog, &store, false).unwrap();
 
         assert_eq!(
             binds,
             vec![format!(
-                "{}:{GUEST_PREOPENS_DIR}/db/0:ro",
-                db_dir.canonicalize().unwrap().display()
+                "{}:{}/db/0:ro",
+                db_dir.canonicalize().unwrap().display(),
+                omnifs_mount::materialize::GUEST_PREOPENS_DIR,
             )],
-        );
-        let written = payload_json(&payload);
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["host"],
-            format!("{GUEST_PREOPENS_DIR}/db/0"),
-        );
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["guest"],
-            "/data",
-        );
-        assert_eq!(
-            written["config"]["path"], "/data/chinook.sqlite",
-            "provider config should keep the guest path selected by init"
+            "the CLI formats the container preopen bind for docker create"
         );
     }
 
@@ -507,7 +401,6 @@ mod tests {
         let db_dir = tmp.path().join("db");
         fs::create_dir_all(&db_dir).unwrap();
         fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
-        let canonical = db_dir.canonicalize().unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {
@@ -530,21 +423,10 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (binds, payload) = config.materialize(&catalog, &store, true).unwrap();
-
+        let binds = config.materialize(&catalog, &store, true).unwrap();
         assert!(
             binds.is_empty(),
             "host-native preopens are opened directly and emit no binds"
-        );
-        let written = payload_json(&payload);
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["host"],
-            canonical.display().to_string(),
-            "host-native keeps the canonical host path, not a guest preopen path"
-        );
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["guest"],
-            "/data",
         );
     }
 
@@ -566,20 +448,10 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let (binds, payload) = config.materialize(&catalog, &store, false).unwrap();
-
+        let binds = config.materialize(&catalog, &store, false).unwrap();
         assert!(
             binds.is_empty(),
             "manifest preopens are already container paths"
-        );
-        let written = payload_json(&payload);
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["host"],
-            "/data"
-        );
-        assert_eq!(
-            written["capabilities"]["preopened_paths"][0]["guest"],
-            "/data",
         );
     }
 

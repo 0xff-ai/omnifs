@@ -23,12 +23,6 @@ use crate::{frontends, server};
 /// Arguments for the `omnifs daemon` subcommand (the runtime daemon).
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
-    /// Directory to serve the FUSE filesystem at.
-    #[arg(long)]
-    pub mount_point: PathBuf,
-    /// Filesystem frontend to serve.
-    #[arg(long, value_enum, default_value_t = FrontendKind::Fuse)]
-    pub frontend: FrontendKind,
     /// NFS loopback listen port. 0 asks the OS for an ephemeral port.
     #[arg(long, default_value_t = 0)]
     pub nfs_port: u16,
@@ -61,8 +55,37 @@ pub enum FrontendKind {
     Nfs,
 }
 
+impl FrontendKind {
+    /// FUSE on Linux (native and inside the container), NFS loopback elsewhere
+    /// (macOS host-native). The daemon owns this choice; the CLI does not pass a
+    /// frontend flag.
+    #[cfg(target_os = "linux")]
+    fn platform_default() -> Self {
+        Self::Fuse
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn platform_default() -> Self {
+        Self::Nfs
+    }
+}
+
 fn default_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], omnifs_api::DEFAULT_PORT))
+}
+
+/// Resolve the host-visible mount point the daemon serves at. The container
+/// entrypoint exports `OMNIFS_MOUNT_POINT`; host-native falls back to
+/// `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted tree lives
+/// at a normal user-owned location.
+fn resolve_mount_point() -> anyhow::Result<PathBuf> {
+    if let Some(explicit) = std::env::var_os("OMNIFS_MOUNT_POINT") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
+    })?;
+    Ok(PathBuf::from(home).join("omnifs"))
 }
 
 /// Bring up the registry, control API, and filesystem frontend, then serve
@@ -73,8 +96,10 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         config_dir: args.config_dir,
         cache_dir: args.cache_dir,
     })?;
+    let frontend = FrontendKind::platform_default();
+    let mount_point = resolve_mount_point()?;
 
-    std::fs::create_dir_all(&args.mount_point)?;
+    std::fs::create_dir_all(&mount_point)?;
     std::fs::create_dir_all(&paths.cache_dir)?;
 
     let cloner = Arc::new(GitCloner::new(paths.cache_dir.clone()));
@@ -86,7 +111,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     );
 
     info!(
-        mount_point = %args.mount_point.display(),
+        mount_point = %mount_point.display(),
         config = %dirs.config_dir.display(),
         cache = %cloner.cache_dir().display(),
         providers = %dirs.providers_dir.display(),
@@ -104,16 +129,16 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    let frontends = match args.frontend {
+    let frontends = match frontend {
         #[cfg(target_os = "linux")]
         FrontendKind::Fuse => frontends::Frontends::fuse(
-            args.mount_point.clone(),
+            mount_point.clone(),
             Arc::clone(&registry),
             omnifs_fuse::new_notifier_handle(),
         ),
         #[cfg(not(target_os = "linux"))]
         FrontendKind::Fuse => anyhow::bail!(
-            "the fuse frontend is only available on Linux; use --frontend nfs for host-native mounts"
+            "the fuse frontend is only available on Linux; host-native uses the NFS loopback"
         ),
         FrontendKind::Nfs => {
             let mut options = omnifs_nfs::NfsMountOptions::loopback(
@@ -123,14 +148,20 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
             options.trace_path = args.nfs_trace;
             options.config_dir = Some(paths.config_dir.clone());
             options.cache_dir = Some(paths.cache_dir.clone());
-            frontends::Frontends::nfs(args.mount_point.clone(), Arc::clone(&registry), options)
+            frontends::Frontends::nfs(mount_point.clone(), Arc::clone(&registry), options)
         },
     };
+    // `--root-symlinks` is the container-launch marker, so its negation marks a
+    // host-native daemon: one that opens preopen directories directly rather
+    // than through container bind paths. A dedicated flag can replace this proxy
+    // when the container launch path also reconciles from `mounts/`.
+    let host_native = !args.root_symlinks;
     let daemon = Arc::new(server::Daemon::new(
         Arc::clone(&registry),
         sink,
         frontends,
         args.root_symlinks,
+        host_native,
     ));
     match std::net::TcpListener::bind(args.listen) {
         Ok(listener) => daemon.spawn_control(listener, &rt)?,
@@ -139,11 +170,32 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         },
     }
 
+    // Load desired state from `mounts/*.json` before serving, so the tree is
+    // populated when the frontend comes up. Both the host-native and the
+    // containerized launch reconcile here; the host_native flag carried on the
+    // daemon selects host-direct versus container-rewritten preopens.
+    let report = daemon.reconcile_blocking(&rt);
+    for failure in &report.failed {
+        warn!(mount = %failure.mount, reason = %failure.reason, "mount did not converge");
+    }
     info!(
-        frontend = ?args.frontend,
+        added = report.added.len(),
+        updated = report.updated.len(),
+        removed = report.removed.len(),
+        failed = report.failed.len(),
+        "reconciled mounts on start"
+    );
+
+    info!(
+        frontend = ?frontend,
         mount_point = %daemon.mount_point().display(),
         "starting filesystem frontend"
     );
     daemon.serve(&rt)?;
+
+    // `serve` returns once the frontend is unmounted (externally, or by the
+    // daemon's own shutdown path). Drop every provider here so teardown is
+    // symmetric across FUSE and NFS rather than living in one frontend crate.
+    registry.shutdown_all();
     Ok(())
 }

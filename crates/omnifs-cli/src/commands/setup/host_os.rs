@@ -41,23 +41,19 @@ pub fn name(os: HostOs) -> &'static str {
     }
 }
 
-pub fn explain_alpha_runtime(os: HostOs) -> String {
-    let lead = "omnifs runs inside a Docker container during alpha. This is temporary. \
-        The host CLI talks to a daemon inside the container, which mounts a FUSE filesystem \
-        and proxies it back out to the host.";
+pub fn explain_runtime(os: HostOs) -> String {
+    let lead = "omnifs runs a host-native daemon by default. Docker is optional; \
+        when selected, Docker runs the Linux FUSE frontend inside the container.";
 
     let per_os = match os {
         HostOs::MacOs => {
-            "On macOS, native FUSE integration needs a kernel extension we have not shipped yet. \
-            The container hosts a Linux FUSE stack and we project the mount back through a shared volume."
+            "On macOS, the native daemon serves a loopback NFS mount at a user-owned host path."
         },
         HostOs::LinuxNative => {
-            "On Linux, the container model gives one binary path for everyone while the runtime \
-            stabilises. Post-alpha, native Linux will skip the container entirely."
+            "On Linux, the native daemon serves the kernel FUSE frontend directly."
         },
         HostOs::LinuxWsl => {
-            "Inside WSL2, the container approach mirrors what we do on macOS and native Linux. \
-            Run setup from your WSL terminal, not from cmd.exe or PowerShell."
+            "Inside WSL2, run setup from your WSL terminal. Native mode uses the Linux FUSE frontend in that distro."
         },
         HostOs::Unsupported => {
             "Your platform is not yet supported by omnifs. \

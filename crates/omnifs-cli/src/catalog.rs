@@ -88,6 +88,12 @@ impl ProviderCatalog {
         Ok(targets)
     }
 
+    /// The underlying mount catalog, for callers that drive the shared
+    /// materializer (`omnifs_mount::materialize`) directly.
+    pub(crate) fn inner(&self) -> &MountCatalog {
+        &self.mounts
+    }
+
     /// Resolve runtime-ready mount, optionally requiring provider metadata.
     pub(crate) fn resolve_mount_spec(
         &self,
@@ -101,13 +107,6 @@ impl ProviderCatalog {
 
     pub(crate) fn provider_path(&self, mount: &Resolved) -> PathBuf {
         self.mounts.provider_path(mount)
-    }
-
-    /// Apply provider metadata to `config`, preferring metadata embedded in the
-    /// provider file on disk and falling back to the built-in catalog when the
-    /// provider is absent or carries no metadata section.
-    pub(crate) fn apply_metadata(&self, spec: &mut Spec) -> anyhow::Result<bool> {
-        self.mounts.apply_metadata(spec).map_err(Into::into)
     }
 
     pub(crate) fn auth_manifest_for(

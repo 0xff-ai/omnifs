@@ -24,6 +24,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Feature:** On macOS, `omnifs up` now serves the projected filesystem over a local NFS loopback mount, no Docker required. (#134)
 - **Improvement:** The filesystem projection now runs through a single frontend-neutral core, with FUSE and NFS each serving as a thin adapter that renders the same projection into its own kernel vocabulary. (#134)
 - **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
+- **Breaking:** The daemon loads its mount set from `mounts/*.json` on start and reconciles to that desired state, instead of the CLI pushing specs over the wire. (#141)
+- **Feature:** A new shutdown endpoint lets the daemon unmount its own filesystem, tear down providers, and exit gracefully. (#141)
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.

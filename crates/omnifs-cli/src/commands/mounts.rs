@@ -133,7 +133,7 @@ pub async fn rm(
         .with_context(|| format!("remove {}", config_path.display()))?;
     anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
 
-    match crate::live::remove_mount(name.as_str()).await {
+    match crate::live::remove_mount().await {
         Ok(crate::live::LiveApply::Applied) => {
             anstream::println!("✓ Unloaded from the running daemon");
         },

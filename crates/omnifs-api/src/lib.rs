@@ -63,3 +63,30 @@ pub struct MountInfo {
     pub provider_id: String,
     pub root_mount: bool,
 }
+
+/// One mount that did not converge during a reconcile. `mount` is the mount
+/// name, or the spec path when the name could not be parsed.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MountFailure {
+    pub mount: String,
+    pub reason: String,
+}
+
+/// `POST /v1/reconcile`: what converging the running mount set to the on-disk
+/// desired state changed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ReconcileReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub updated: Vec<String>,
+    pub failed: Vec<MountFailure>,
+}
+
+/// `POST /v1/shutdown`: what the daemon tore down before exiting.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StopReport {
+    pub frontend: Option<FrontendInfo>,
+    #[schema(value_type = String)]
+    pub mount_point: PathBuf,
+    pub providers_dropped: usize,
+}

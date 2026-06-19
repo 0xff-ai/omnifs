@@ -1,7 +1,11 @@
-//! `omnifs down` — container lifecycle: stop.
+//! `omnifs down` — daemon lifecycle: stop.
+
+use std::path::Path;
+use std::time::Duration;
 
 use clap::Args;
 
+use crate::client::DaemonClient;
 use crate::runtime::Runtime;
 use crate::runtime_target::RuntimeTarget;
 
@@ -23,7 +27,7 @@ impl DownArgs {
         let (paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
 
         if config.runtime() == crate::config::Runtime::Native {
-            return teardown_native(&paths.cache_dir.join("nfs"));
+            return teardown_native(&paths).await;
         }
 
         let container_name = RuntimeTarget::resolve_container_name(container_name, &config)?;
@@ -45,10 +49,61 @@ impl DownArgs {
     }
 }
 
+/// Stop a host-native daemon. The daemon owns the frontend handle, so the CLI
+/// asks it to unmount itself and waits for the mount to settle. Only a dead
+/// daemon falls back to the platform sweep (stale state, stuck mount).
+async fn teardown_native(paths: &crate::paths::Paths) -> anyhow::Result<()> {
+    match DaemonClient::new().shutdown().await? {
+        Some(report) => {
+            wait_unmounted(&report.mount_point)?;
+            anstream::println!("✓ Unmounted {}", report.mount_point.display());
+            Ok(())
+        },
+        None => fallback_sweep(paths),
+    }
+}
+
+/// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
+/// shortly after answering shutdown), up to ~3s.
+fn wait_unmounted(mount_point: &Path) -> anyhow::Result<()> {
+    for attempt in 0..12 {
+        if !omnifs_nfs::mount_is_active(mount_point) {
+            return Ok(());
+        }
+        if attempt + 1 < 12 {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    anyhow::bail!(
+        "{} is still mounted after shutdown; re-run `omnifs down`",
+        mount_point.display()
+    )
+}
+
+/// Dead-daemon fallback: sweep a stale mount the daemon can no longer unmount
+/// itself.
+fn fallback_sweep(paths: &crate::paths::Paths) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = paths;
+        let mount_point = crate::paths::default_host_mount_point()?;
+        if crate::host_teardown::teardown_host_native_fuse(&mount_point)? {
+            anstream::println!("✓ Unmounted {}", mount_point.display());
+        } else {
+            anstream::println!("Nothing to tear down.");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    teardown_native_nfs(&paths.nfs_state_dir())
+}
+
 /// Tear down host-native NFS mounts recorded under `state_dir` and report what
 /// actually happened (a live unmount, an orphan sweep, or nothing).
-fn teardown_native(state_dir: &std::path::Path) -> anyhow::Result<()> {
-    let summary = crate::host_teardown::teardown_host_native(state_dir)?;
+#[cfg(not(target_os = "linux"))]
+fn teardown_native_nfs(state_dir: &std::path::Path) -> anyhow::Result<()> {
+    let summary = crate::host_teardown::teardown_host_native_nfs(state_dir)?;
     if summary.unmounted > 0 {
         anstream::println!("✓ Unmounted {} host-native mount(s)", summary.unmounted);
     }

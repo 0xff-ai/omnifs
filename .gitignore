@@ -1,9 +1,8 @@
-/target
+**/target/
 .tmp/
 .cache/
 /dist-wasm
 /dist-cli
-/providers/target
 /dist
 node_modules/
 .worktrees/

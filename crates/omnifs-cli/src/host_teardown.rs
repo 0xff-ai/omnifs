@@ -1,24 +1,32 @@
 //! Host-native teardown for `omnifs down`.
 //!
-//! Unmounts the loopback NFS view via `diskutil`, signals the recording daemon
-//! so it exits cleanly, and sweeps any orphaned state files. The on-disk state
-//! shape is `omnifs_nfs::NfsMountState`, read directly now that the single
-//! binary links the nfs crate.
+//! Unmounts the host-native frontend. Linux native uses FUSE directly at the
+//! default host mount point. Non-Linux native uses the loopback NFS state files
+//! written by the daemon, signals the recording daemon so it exits cleanly, and
+//! sweeps any orphaned state files.
 
+#[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "linux"))]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use anyhow::Context as _;
+#[cfg(not(target_os = "linux"))]
 use omnifs_nfs::NfsMountState;
 
 /// State-file schema version this CLI understands. A daemon-side bump lands in
 /// `TeardownSummary::skipped` so `down` does not claim "nothing is running".
+#[cfg(not(target_os = "linux"))]
 const STATE_VERSION: u8 = 1;
 
 /// Outcome of a host-native teardown sweep, classified so `omnifs down` reports
 /// only what actually happened.
 #[derive(Debug, Default, PartialEq, Eq)]
+#[cfg(not(target_os = "linux"))]
 pub(crate) struct TeardownSummary {
     /// Records whose daemon was alive: a real running mount we tore down.
     pub unmounted: usize,
@@ -33,12 +41,36 @@ pub(crate) struct TeardownSummary {
     pub skipped: usize,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bool> {
+    if !omnifs_nfs::mount_is_active(mount_point) {
+        return Ok(false);
+    }
+
+    let status = Command::new("fusermount")
+        .arg("-u")
+        .arg(mount_point)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("run fusermount -u")?;
+
+    anyhow::ensure!(status.success(), "fusermount -u exited with {status}");
+    anyhow::ensure!(
+        mount_settled(mount_point),
+        "{} is still mounted; re-run `omnifs down`",
+        mount_point.display()
+    );
+    Ok(true)
+}
+
 /// Tear down every host-native NFS mount recorded under `state_dir`.
 ///
 /// Best-effort and idempotent: an already-unmounted view, a dead daemon, or a
 /// failed signal are all non-fatal. A missing `state_dir` means nothing is
 /// running (an empty summary).
-pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownSummary> {
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<TeardownSummary> {
     if !state_dir.exists() {
         return Ok(TeardownSummary::default());
     }
@@ -75,12 +107,14 @@ pub(crate) fn teardown_host_native(state_dir: &Path) -> anyhow::Result<TeardownS
     Ok(summary)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn read_state(path: &Path) -> anyhow::Result<NfsMountState> {
     let file = std::fs::File::open(path)?;
     Ok(serde_json::from_reader(file)?)
 }
 
 /// Tear down one recorded mount and record the outcome in `summary`.
+#[cfg(not(target_os = "linux"))]
 fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
     // A live daemon means a real running mount; a dead one means we are only
     // sweeping the stale file it left behind.
@@ -127,7 +161,7 @@ fn unmount(mount_point: &Path, force: bool) {
         .status();
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn unmount(mount_point: &Path, force: bool) {
     let mut command = Command::new("umount");
     if force {
@@ -142,6 +176,7 @@ fn unmount(mount_point: &Path, force: bool) {
 
 /// Best-effort SIGTERM so a live daemon exits promptly and releases the control
 /// port; a dead pid (the signal lands after the daemon self-exits) is harmless.
+#[cfg(not(target_os = "linux"))]
 fn signal_term(pid: u32) {
     let _ = Command::new("kill")
         .arg("-TERM")
@@ -151,6 +186,7 @@ fn signal_term(pid: u32) {
         .status();
 }
 
+#[cfg(not(target_os = "linux"))]
 fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
@@ -177,6 +213,7 @@ fn mount_settled(mount_point: &Path) -> bool {
     false
 }
 
+#[cfg(not(target_os = "linux"))]
 fn remove_state_file(state_file: &Path) {
     match std::fs::remove_file(state_file) {
         Ok(()) => {},

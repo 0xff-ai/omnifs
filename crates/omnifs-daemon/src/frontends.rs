@@ -111,6 +111,24 @@ impl Frontends {
         }
     }
 
+    /// Unmount the serving frontend from within the daemon, which unblocks the
+    /// `serve` loop so the process can shut down. Best-effort: a failure is
+    /// logged, since `omnifs down` falls back to an external sweep.
+    pub fn unmount(&self) {
+        let result = match &self.primary {
+            #[cfg(target_os = "linux")]
+            Frontend::Fuse(frontend) => {
+                omnifs_fuse::mount::unmount(&frontend.mount_point).map_err(|e| e.to_string())
+            },
+            Frontend::Nfs(frontend) => {
+                omnifs_nfs::unmount(&frontend.mount_point).map_err(|e| e.to_string())
+            },
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "self-unmount failed");
+        }
+    }
+
     pub fn invalidate_root_child(&self, name: &str) {
         match &self.primary {
             #[cfg(target_os = "linux")]
