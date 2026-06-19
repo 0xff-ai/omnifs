@@ -77,7 +77,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     mkdir -p /out/wasm; \
     cp /src/target/wasm32-wasip2/release/*.wasm /out/wasm/
 
-# Provider + tool WASM for host builds and macOS dist (CI artifact omnifs-wasm).
+# Provider + tool WASM for contributor dev homes and CI-internal host tests.
 FROM scratch AS wasm-artifacts
 COPY --from=providers /out/wasm/*.wasm /
 
@@ -89,7 +89,7 @@ COPY . .
 RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
-    cargo build --release -p 'omnifs-tool-*' --target wasm32-wasip2 \
+    cargo build --release --target wasm32-wasip2 -p 'omnifs-provider-*' -p 'omnifs-tool-*' \
     && cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
 
@@ -111,10 +111,10 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     set -eux; \
     cargo fmt --all --check; \
-    # The host links pre-built `omnifs-tool-*` wasm components via
-    # `include_bytes!`; clippy on the host crate cannot compile until
-    # those artifacts exist in the target dir.
-    cargo build --release --target wasm32-wasip2 -p 'omnifs-tool-*'; \
+    # The CLI embeds the built-in provider bundle, so host clippy needs the
+    # provider/tool WASM artifacts in the target dir first.
+    cargo build --release --target wasm32-wasip2 \
+        -p 'omnifs-provider-*' -p 'omnifs-tool-*'; \
     cargo clippy -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
         -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider -- -D warnings; \
     cargo clippy -p 'omnifs-provider-*' -p test-provider \
@@ -127,10 +127,9 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     set -eux; \
-    # The host's runtime tests load `test_provider.wasm` (and other
-    # provider components) from the target dir at run time; the same
-    # build step also satisfies the `include_bytes!` constraint on
-    # `omnifs-tool-*` that the host crate has at compile time.
+    # The host's runtime tests load `test_provider.wasm` from the target
+    # dir, and the CLI test build embeds the built-in provider/tool bundle
+    # from those same wasm artifacts.
     cargo build --release --target wasm32-wasip2 \
         -p 'omnifs-provider-*' -p test-provider -p 'omnifs-tool-*'; \
     cargo test --release -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \

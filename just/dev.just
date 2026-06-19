@@ -21,6 +21,13 @@ just-check:
 # Lint native host crates with warnings denied.
 [group('dev')]
 host-clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wasm_dir="target/wasm32-wasip2/release"
+    if [[ ! -f "$wasm_dir/omnifs_tool_archive.wasm" ]] ||
+       [[ -z "$(find "$wasm_dir" -maxdepth 1 -name 'omnifs_provider_*.wasm' -print -quit 2>/dev/null)" ]]; then
+      just providers-build
+    fi
     cargo clippy --workspace \
       --exclude 'omnifs-provider-*' \
       --exclude 'omnifs-tool-*' \

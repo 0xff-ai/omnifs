@@ -5,6 +5,7 @@ use omnifs_core::path::Path;
 use omnifs_core::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
+use omnifs_mount::mounts::Spec;
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
 use support::{root_mounted_test_export, test_export, test_export_with_mount};
 use tokio::runtime::Builder;
@@ -129,6 +130,40 @@ fn omnifs_export_lists_and_reads_through_runtime() {
         String::from_utf8_lossy(&item_json).contains(r#""number":7"#),
         "canonical item JSON should be readable through a mount-relative NFS path"
     );
+}
+
+#[test]
+fn mount_enumeration_root_change_tracks_loaded_mounts() {
+    let harness = test_export();
+    let export = &harness.export;
+    let root = export.root();
+    let before = export
+        .attr(root)
+        .expect("root attr before mount add")
+        .change;
+
+    harness
+        .registry
+        .add_mount(
+            Spec::parse(r#"{"provider":"test_provider.wasm","mount":"other"}"#)
+                .expect("second mount spec"),
+            harness.runtime.handle(),
+        )
+        .expect("load second test mount");
+
+    let after = export.attr(root).expect("root attr after mount add").change;
+    assert_ne!(
+        before, after,
+        "root directory change must move when the mount set changes so NFS clients drop stale empty listings"
+    );
+
+    let root_listing = export.readdir(root).expect("root listing after mount add");
+    let root_names = root_listing
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(root_names, vec!["other", "test"]);
 }
 
 #[test]

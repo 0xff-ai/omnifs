@@ -129,26 +129,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           cli=(release-assets/omnifs-cli-*/*.tar.xz)
-          provider_wasms=(release-assets/omnifs-wasm/omnifs_provider_*.wasm)
-          tool_wasms=(release-assets/omnifs-wasm/omnifs_tool_archive.wasm)
-          test_wasms=(release-assets/omnifs-wasm/test_provider.wasm)
           if (( ${#cli[@]} < 4 )); then
             printf 'expected 4 omnifs-cli archives, found %d\n' "${#cli[@]}" >&2
-            find release-assets -type f >&2 || true
-            exit 1
-          fi
-          if (( ${#provider_wasms[@]} == 0 )); then
-            printf 'expected omnifs_provider_*.wasm files\n' >&2
-            find release-assets -type f >&2 || true
-            exit 1
-          fi
-          if (( ${#tool_wasms[@]} != 1 )); then
-            printf 'expected omnifs_tool_archive.wasm\n' >&2
-            find release-assets -type f >&2 || true
-            exit 1
-          fi
-          if (( ${#test_wasms[@]} != 1 )); then
-            printf 'expected CI artifact to include test_provider.wasm for host tests\n' >&2
             find release-assets -type f >&2 || true
             exit 1
           fi
@@ -163,8 +145,6 @@ jobs:
           files: |
             release-assets/omnifs-cli-*/*.tar.xz
             release-assets/omnifs-cli-*/*.tar.xz.sha256
-            release-assets/omnifs-wasm/omnifs_provider_*.wasm
-            release-assets/omnifs-wasm/omnifs_tool_archive.wasm
           fail_on_unmatched_files: true
           prerelease: ${{ needs.plan.outputs.is_prerelease == 'true' }}
           make_latest: ${{ needs.plan.outputs.is_prerelease == 'true' && 'false' || 'true' }}

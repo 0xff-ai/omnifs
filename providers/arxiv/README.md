@@ -40,7 +40,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-arxiv
 ```
 
-The resulting `omnifs_provider_arxiv.wasm` is also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases). Configure in your omnifs mount config under the `arxiv` key.
+Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. Configure it in your omnifs mount config under the `arxiv` key.
 
 ## Status
 

@@ -46,7 +46,7 @@ This is a wasm component. Build with:
 cargo build --target wasm32-wasip2 --release -p omnifs-provider-github
 ```
 
-The resulting `omnifs_provider_github.wasm` is also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases). The provider's `omnifs.provider.json` is the source for the embedded provider metadata and auth section, and drives `omnifs init github`.
+Release CLI binaries embed this provider and unpack it into `OMNIFS_HOME/providers`. The provider's `omnifs.provider.json` is the source for the embedded provider metadata and auth section, and drives `omnifs init github`.
 
 ## Status
 
