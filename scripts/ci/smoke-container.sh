@@ -8,7 +8,7 @@
 #
 # Requires IMAGE (container image ref), GITHUB_TOKEN, and the `omnifs` CLI on
 # PATH. Optional: CONTAINER (default omnifs), RUNNER_TEMP. The provider WASM
-# bundle must be present at target/wasm32-wasip2/release (downloaded in CI).
+# bundle is embedded in the CLI and unpacked into the dev home before launch.
 set -euo pipefail
 
 : "${IMAGE:?IMAGE must be set to the container image ref}"
@@ -41,7 +41,7 @@ if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
 fi
 
 # Bring up the pre-built image through the contributor sandbox path. This
-# provisions credentials, installs the downloaded provider WASM, launches the
+# provisions credentials, unpacks the embedded provider WASM, launches the
 # container, and pushes the built-in dev mounts to the daemon.
 omnifs dev --yes --image "$IMAGE" || { SMOKE_FAILED=1; exit 1; }
 

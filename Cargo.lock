@@ -3758,6 +3758,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strsim",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -3766,6 +3767,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webbrowser",
+ "zstd",
 ]
 
 [[package]]

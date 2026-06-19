@@ -54,6 +54,8 @@ semver = "1"
 webbrowser = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"
+tar = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -61,6 +63,8 @@ tempfile = { workspace = true }
 [build-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true

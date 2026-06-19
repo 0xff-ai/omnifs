@@ -9,7 +9,7 @@ How omnifs ships: one maintainer command surface (`just`), two workflows (`ci.ym
 | 1. Development | You + feature PRs | CI `verify`; `changelog.yml` (0xff-ai/bot) drafts an entry | Sticky proposal; `/changelog` commits it to the PR branch; merge gated on an entry |
 | 2. Cut release | You on `origin/main` | `just release-cut` | Branch `release/vX.Y.Z`, version bump, changelog finalized, release PR opened |
 | 3. Review | You + release PR CI | CI verify; `just release-check` | Release PR shape validated |
-| 4. Merge | Merge to `main` | **CI** factory | `omnifs-wasm`, four `omnifs-cli-*` tarballs, runtime image `sha-<commit>` |
+| 4. Merge | Merge to `main` | **CI** factory | four embedded-bundle `omnifs-cli-*` tarballs, runtime image `sha-<commit>` |
 | 5. Ship | **Release** workflow after green CI | `just release-plan-json` → softprops → promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
 
 Nothing in phase 5 recompiles. Release downloads artifacts from the CI run that triggered it (`workflow_run`).
@@ -120,9 +120,8 @@ Entries in `## [Unreleased]` are grouped by product area, and each is tagged wit
 
 ## What gets released
 
-- **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container
-- **WASM**: `omnifs-wasm` artifact (`omnifs_provider_*.wasm`, `omnifs_tool_*.wasm`)
-- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag)
+- **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. These binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
+- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag). The runtime image stages the same Linux CLI binary; the launcher seeds the bind-mounted home before startup.
 - **npm**: `@0xff-ai/omnifs` + four platform packages
 
 ## npm platform catalog
@@ -233,7 +232,7 @@ Local **`just release-cut`**: requires `cargo-edit` (`cargo set-version`) so Car
 | Changelog proposal missing on a PR | Fork PR (no secret access) or LLM error; comment `/changelog <area>: text` or edit `CHANGELOG.md` directly, then the gate passes |
 | Release PR check failed | Ensure `## [version]` exists, `[Unreleased]` empty, versions synced |
 | Release workflow did not run | CI must succeed on `main` push first |
-| Missing GH assets | CI must upload `omnifs-wasm` + four `omnifs-cli-*`; re-run CI then Release |
+| Missing GH assets | CI must upload four `omnifs-cli-*` archives; re-run CI then Release |
 | npm failed | Check **promote** job; npm needs GHCR tag + CI CLI artifacts |
 | No ship after merge | `just release-plan-json` no-ops if version ≤ latest tag; run `just release-cut` again |
 

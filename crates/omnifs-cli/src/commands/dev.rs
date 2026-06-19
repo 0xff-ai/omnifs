@@ -39,10 +39,10 @@ pub struct DevArgs {
     pub yes: bool,
     /// Run a pre-built image instead of building one from the workspace.
     ///
-    /// Skips `docker build` and installs providers by copying the pre-built
-    /// WASM from `target/wasm32-wasip2/release` rather than re-exporting them.
-    /// CI uses this to smoke the published image through the real `omnifs dev`
-    /// launch path (credential provisioning, mount push, fixtures, and all).
+    /// Skips `docker build` and installs providers from the launcher's
+    /// embedded provider bundle. CI uses this to smoke the published image
+    /// through the real `omnifs dev` launch path (credential provisioning,
+    /// mount push, fixtures, and all).
     #[arg(long)]
     pub image: Option<String>,
 }
@@ -107,11 +107,10 @@ impl DevArgs {
         let paths = ctx.paths();
         let runtime = ctx.runtime();
 
-        // Providers: export freshly from the workspace, or copy the pre-built
+        // Providers: export freshly from the workspace, or unpack the launcher
         // bundle when running a pre-built image (no workspace build).
         if self.image.is_some() {
-            let wasm_dir = workspace.path().join("target/wasm32-wasip2/release");
-            crate::provider_bundle::install_local_bundle(&wasm_dir, &paths.providers_dir)?;
+            crate::provider_bundle::install_embedded_bundle(&paths.providers_dir)?;
         } else {
             crate::provider_bundle::install_workspace_bundle(
                 workspace.path(),

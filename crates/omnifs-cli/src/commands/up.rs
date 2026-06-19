@@ -45,7 +45,7 @@ impl UpArgs {
         let mounts_dir = paths.mounts_dir.clone();
         let store = Box::new(FileStore::new(&paths.credentials_file));
 
-        crate::provider_bundle::ensure_release_bundle(&paths.providers_dir).await?;
+        crate::provider_bundle::install_embedded_bundle(&paths.providers_dir)?;
 
         // The runtime backend is a machine property recorded by `omnifs setup`;
         // `up` reads it. Host-native serves a host mount; Docker serves FUSE

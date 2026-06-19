@@ -14,7 +14,7 @@ ci-wasm: providers-check providers-build wasm-validate
 [group('ci')]
 ci-host: ci-host-build ci-host-test
 
-# Compile host tests into CI artifacts without requiring provider WASM sidecars.
+# Lint host crates and compile host tests against staged provider WASM inputs.
 [group('ci')]
 ci-host-build:
     #!/usr/bin/env bash
