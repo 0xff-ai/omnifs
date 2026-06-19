@@ -419,15 +419,13 @@
         "type": "object",
         "description": "`GET /v1/version`",
         "required": [
-          "version",
-          "api_major",
-          "api_minor"
+          "version"
         ],
         "properties": {
           "api_major": {
             "type": "integer",
             "format": "int32",
-            "description": "Control API major version. Incompatible change when this differs.",
+            "description": "Control API major version. Incompatible change when this differs.\nDefaulted on decode so this endpoint stays parseable across versions\n(the one endpoint that must, since it is how skew is detected): a daemon\npredating major/minor versioning decodes to major 0 and is flagged\nincompatible rather than crashing the probe.",
             "minimum": 0
           },
           "api_minor": {

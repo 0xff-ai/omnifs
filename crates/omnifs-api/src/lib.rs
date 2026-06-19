@@ -25,8 +25,14 @@ pub const DEFAULT_PORT: u16 = 7878;
 pub struct VersionInfo {
     pub version: String,
     /// Control API major version. Incompatible change when this differs.
+    /// Defaulted on decode so this endpoint stays parseable across versions
+    /// (the one endpoint that must, since it is how skew is detected): a daemon
+    /// predating major/minor versioning decodes to major 0 and is flagged
+    /// incompatible rather than crashing the probe.
+    #[serde(default)]
     pub api_major: u16,
     /// Control API minor version. Additive change; CLI warns and proceeds.
+    #[serde(default)]
     pub api_minor: u16,
     #[serde(default)]
     pub pid: u32,

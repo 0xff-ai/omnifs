@@ -43,14 +43,22 @@ impl DaemonClient {
         let Some(info) = self.version().await? else {
             return Ok(DaemonProbe::Unreachable);
         };
-        anyhow::ensure!(
-            info.api_major == API_MAJOR,
-            "daemon speaks control API v{}.{}, this CLI speaks v{API_MAJOR}.{API_MINOR}; \
-             upgrade so the CLI and runtime image versions match (daemon v{})",
-            info.api_major,
-            info.api_minor,
-            info.version,
-        );
+        if info.api_major != API_MAJOR {
+            let detail = if info.api_major == 0 {
+                "this daemon predates major/minor API versioning".to_string()
+            } else {
+                format!(
+                    "daemon speaks control API v{}.{}",
+                    info.api_major, info.api_minor
+                )
+            };
+            anyhow::bail!(
+                "{detail}; this CLI speaks v{API_MAJOR}.{API_MINOR} (daemon binary v{}). \
+                 Stop it with `omnifs down`, or upgrade the runtime image so the CLI and \
+                 daemon versions match, then rerun.",
+                info.version,
+            );
+        }
         if info.api_minor != API_MINOR {
             anstream::eprintln!(
                 "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
