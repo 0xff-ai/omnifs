@@ -391,6 +391,12 @@ impl Export {
         }
     }
 
+    fn root_attr_from_entry(&self, id: u64, entry: &NodeEntry) -> Attr {
+        let mut attr = Self::attr_from_entry(id, entry);
+        attr.change = self.mount_enumeration_change(id, entry);
+        attr
+    }
+
     fn attr_from_metadata(
         id: u64,
         parent: u64,
@@ -442,6 +448,19 @@ impl Export {
             std::mem::discriminant(&attrs.stability).hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    fn mount_enumeration_change(&self, id: u64, entry: &NodeEntry) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        Self::entry_change(id, entry).hash(&mut hasher);
+        let mut mounts = self.registry.mounts();
+        mounts.sort();
+        mounts.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn is_mount_enumeration_root(&self, id: u64) -> bool {
+        (id == ROOT_ID || id == EXPORT_ROOT_ID) && self.root_mount.is_none()
     }
 
     fn metadata_change(id: u64, metadata: &std::fs::Metadata) -> u64 {
@@ -1294,7 +1313,11 @@ impl ReadOnlyExport for Export {
             let metadata = std::fs::symlink_metadata(path).map_err(|_| Status::Stale)?;
             Self::attr_from_metadata(id, entry.parent, &metadata)
         } else {
-            let mut attr = Self::attr_from_entry(id, &entry);
+            let mut attr = if self.is_mount_enumeration_root(id) {
+                self.root_attr_from_entry(id, &entry)
+            } else {
+                Self::attr_from_entry(id, &entry)
+            };
             // A live file's size is owned by its follow pump, never the inode
             // (`promote_file_attrs` skips Live); report the learned growth so a
             // polling `tail -f` re-stats and reads forward. Never shrinks.
