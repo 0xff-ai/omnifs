@@ -149,6 +149,9 @@ pub(crate) fn force_unmount_host_native(mount_point: &Path) {
 /// Best-effort and idempotent: an already-unmounted view, a dead daemon, or a
 /// failed signal are all non-fatal. A missing `state_dir` means nothing is
 /// running (an empty summary).
+///
+/// Every unmount is forced: the sweep runs only when the daemon is not managing
+/// its own teardown, where a non-force NFS unmount can block on a dead server.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<TeardownSummary> {
     if !state_dir.exists() {
@@ -211,11 +214,15 @@ fn read_state(path: &Path) -> anyhow::Result<NfsMountState> {
 }
 
 /// Tear down one recorded mount and record the outcome in `summary`.
+///
+/// The unmount is always forced. The sweep is reached only when the daemon is
+/// not managing its own teardown (it did not answer the control API), so a
+/// non-force `diskutil unmount` would block forever on an NFS server that has
+/// already vanished (a `kill -9` leaves exactly such a stale mount). A forced
+/// unmount is safe for a read-only projection and returns promptly.
 #[cfg(not(target_os = "linux"))]
 fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
-    // A live daemon self-exits once it sees the mount disappear, so a clean
-    // unmount suffices.
-    unmount(mount_point, false);
+    unmount(mount_point, true);
     signal_term(pid);
 
     if !mount_settled(mount_point) {
@@ -265,11 +272,45 @@ fn unmount(mount_point: &Path, force: bool) {
     if force {
         command.arg("force");
     }
-    let _ = command
+    command
         .arg(mount_point)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    // `diskutil` blocks indefinitely trying to reach a dead NFS server (a
+    // crashed daemon), so cap the wait: `omnifs down` must return promptly
+    // rather than hang. A dead-server mount diskutil cannot clear without root
+    // then surfaces through `mount_settled` as still mounted, and the kernel
+    // clears it on its own NFS timeout.
+    run_bounded(command, Duration::from_secs(5));
+}
+
+/// Run `command` to completion, killing it if it exceeds `limit`. Keeps a
+/// blocking unmount tool from hanging the caller on a wedged NFS mount whose
+/// server has vanished.
+#[cfg(target_os = "macos")]
+fn run_bounded(mut command: Command, limit: Duration) {
+    let Ok(mut child) = command.spawn() else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            // Exited cleanly, or we cannot poll it: nothing more to do.
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // SIGKILL but do NOT wait: a diskutil stuck in an
+                    // uninterruptible NFS unmount syscall ignores the signal
+                    // until the kernel NFS timeout, so waiting would reintroduce
+                    // the hang. Drop the handle; the CLI exits shortly and init
+                    // reaps the orphan.
+                    let _ = child.kill();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            },
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -288,25 +329,6 @@ fn unmount(mount_point: &Path, force: bool) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::render_lsof_handles;
-
-    #[test]
-    fn lsof_handle_summary_renders_each_process() {
-        let rendered = render_lsof_handles(
-            "p48817\ncfish\nfcwd\nn/Users/raul/omnifs/oura\nf3\nn/Users/raul/omnifs/oura\np48937\nccaffeinate\nfcwd\nn/Users/raul/omnifs/oura\n",
-        )
-        .expect("blockers render");
-
-        assert!(rendered.contains("Open handles inside the mount:"));
-        assert!(rendered.contains("fish pid 48817"));
-        assert!(rendered.contains("cwd /Users/raul/omnifs/oura"));
-        assert!(rendered.contains("3 /Users/raul/omnifs/oura"));
-        assert!(rendered.contains("caffeinate pid 48937"));
-    }
 }
 
 /// Best-effort SIGTERM so a live daemon exits promptly and releases the control
@@ -359,5 +381,24 @@ fn remove_state_file(state_file: &Path) {
                 state_file.display()
             );
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_lsof_handles;
+
+    #[test]
+    fn lsof_handle_summary_renders_each_process() {
+        let rendered = render_lsof_handles(
+            "p48817\ncfish\nfcwd\nn/Users/raul/omnifs/oura\nf3\nn/Users/raul/omnifs/oura\np48937\nccaffeinate\nfcwd\nn/Users/raul/omnifs/oura\n",
+        )
+        .expect("blockers render");
+
+        assert!(rendered.contains("Open handles inside the mount:"));
+        assert!(rendered.contains("fish pid 48817"));
+        assert!(rendered.contains("cwd /Users/raul/omnifs/oura"));
+        assert!(rendered.contains("3 /Users/raul/omnifs/oura"));
+        assert!(rendered.contains("caffeinate pid 48937"));
     }
 }

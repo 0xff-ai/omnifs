@@ -140,7 +140,7 @@ async fn teardown_daemon(paths: &crate::paths::Paths) {
 
     // Backend-specific reclaim.
     if let Err(error) = backend
-        .reclaim(mount_point.as_deref(), &nfs_state_dir, false)
+        .reclaim(mount_point.as_deref(), &nfs_state_dir)
         .await
     {
         anstream::eprintln!("⚠  Backend reclaim failed: {error:#}");

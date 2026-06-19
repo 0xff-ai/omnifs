@@ -94,6 +94,21 @@ pub(crate) async fn launch_runtime(
     Ok(())
 }
 
+/// Parse a `host:port` string into a `SocketAddr`, falling back to
+/// `127.0.0.1:DEFAULT_PORT` on any parse error.
+fn parse_control_addr(addr: &str) -> SocketAddr {
+    addr.parse()
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], omnifs_api::DEFAULT_PORT)))
+}
+
+/// Read the daemon control address from the environment (`OMNIFS_DAEMON_ADDR`),
+/// falling back to `127.0.0.1:DEFAULT_PORT` on any parse error. Both the
+/// spawned daemon (`--listen`) and the client (`DaemonClient::new`) use this
+/// so a per-test override moves them together.
+fn resolve_control_addr() -> SocketAddr {
+    parse_control_addr(&crate::inspector::daemon_addr())
+}
+
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
 /// converge any change since and to surface per-mount failures.
@@ -107,9 +122,7 @@ async fn launch_host_native(
 
     // Build the params and delegate spawn+wait to the backend abstraction so
     // the native path and Docker path share the same argument generator.
-    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
-        .parse()
-        .expect("static address is valid");
+    let addr = resolve_control_addr();
     let params = LaunchParams {
         config_dir: runtime_home.to_path_buf(),
         cache_dir: cache_dir.to_path_buf(),
@@ -149,9 +162,7 @@ fn write_native_launch_record(
     daemon_pid: u32,
     mount_point: Option<&Path>,
 ) {
-    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
-        .parse()
-        .expect("static address is valid");
+    let addr = resolve_control_addr();
     let params = LaunchParams {
         config_dir: config_dir.to_path_buf(),
         cache_dir: cache_dir.to_path_buf(),
@@ -396,5 +407,27 @@ fn write_docker_launch_record(
         Err(error) => {
             anstream::eprintln!("warning: could not build launch record: {error:#}");
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed address string must fall back to the default port rather
+    /// than panicking or propagating an error.
+    #[test]
+    fn parse_control_addr_falls_back_on_bad_input() {
+        let addr = parse_control_addr("not-a-valid-socket-addr!!!");
+        assert_eq!(addr.port(), omnifs_api::DEFAULT_PORT);
+        assert_eq!(addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+    }
+
+    /// A well-formed address string must be used as-is.
+    #[test]
+    fn parse_control_addr_parses_valid_input() {
+        let addr = parse_control_addr("127.0.0.1:19999");
+        assert_eq!(addr.port(), 19999);
+        assert_eq!(addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
     }
 }

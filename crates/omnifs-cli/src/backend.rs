@@ -103,16 +103,15 @@ impl Backend {
     /// `mount_point` is the mount to sweep if the daemon is already dead and
     /// left a stale mount behind. `nfs_state_dir` is where the non-Linux daemon
     /// records its mount-state files (derived from the caller's resolved paths,
-    /// so it honors `OMNIFS_HOME`/cache overrides). `force` triggers a forced
-    /// unmount on native after a normal unmount fails.
+    /// so it honors `OMNIFS_HOME`/cache overrides). The unmount is always forced,
+    /// since reclaim runs only after the daemon stopped managing its own mount.
     pub(crate) async fn reclaim(
         &self,
         mount_point: Option<&Path>,
         nfs_state_dir: &Path,
-        force: bool,
     ) -> Result<()> {
         match self {
-            Backend::Native => reclaim_native(mount_point, nfs_state_dir, force),
+            Backend::Native => reclaim_native(mount_point, nfs_state_dir),
             Backend::Docker { container_name, .. } => reclaim_docker(container_name).await,
         }
     }
@@ -167,10 +166,11 @@ pub(crate) async fn launch_native(params: &LaunchParams) -> Result<()> {
         .spawn()
         .with_context(|| format!("spawn omnifs daemon ({})", binary.display()))?;
 
-    // Poll readiness; fail fast if the child exits first.
+    // Poll readiness at a 100ms cadence (snappy startup) for up to 30s; fail
+    // fast if the child exits first.
     let child_pid = child.id();
     let client = DaemonClient::new();
-    for _ in 0..60 {
+    for _ in 0..300 {
         if let Some(status) = child.try_wait().context("poll daemon child status")? {
             let tail = read_log_tail(&log_path);
             anyhow::bail!("omnifs daemon exited before the mount became ready ({status})\n{tail}");
@@ -197,7 +197,7 @@ pub(crate) async fn launch_native(params: &LaunchParams) -> Result<()> {
                 return Ok(());
             }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let tail = read_log_tail(&log_path);
     let _ = child.kill().await;
@@ -224,11 +224,7 @@ fn read_log_tail(log_path: &Path) -> String {
 /// Sweep any stale mount left by a dead host-native daemon. On Linux the FUSE
 /// mount at `mount_point` is unmounted directly; on other platforms the NFS
 /// mount-state files under `nfs_state_dir` drive the sweep.
-pub(crate) fn reclaim_native(
-    mount_point: Option<&Path>,
-    nfs_state_dir: &Path,
-    force: bool,
-) -> Result<()> {
+pub(crate) fn reclaim_native(mount_point: Option<&Path>, nfs_state_dir: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let _ = nfs_state_dir;
@@ -241,7 +237,6 @@ pub(crate) fn reclaim_native(
         } else {
             anstream::println!("Nothing to tear down.");
         }
-        let _ = force;
         Ok(())
     }
 
@@ -251,7 +246,7 @@ pub(crate) fn reclaim_native(
         // (pid, mount point, version) live under `nfs_state_dir` and are what
         // drive an actual unmount. The caller derives `nfs_state_dir` from its
         // resolved paths, so it honors OMNIFS_HOME and cache-dir overrides.
-        let _ = (mount_point, force);
+        let _ = mount_point;
         sweep_nfs_state_dir(nfs_state_dir)
     }
 }

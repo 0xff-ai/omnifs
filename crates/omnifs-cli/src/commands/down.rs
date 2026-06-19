@@ -69,7 +69,7 @@ async fn teardown_daemon(paths: &crate::paths::Paths, force: bool) -> anyhow::Re
         }
         let backend = backend_from_launch_kind(status.launch, config_dir)?;
         backend
-            .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir, force)
+            .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
             .await?;
         LaunchRecord::remove(config_dir)?;
         return Ok(());
@@ -81,7 +81,7 @@ async fn teardown_daemon(paths: &crate::paths::Paths, force: bool) -> anyhow::Re
         anstream::println!("No live daemon found; sweeping from launch record…");
         let backend = record.into_backend()?;
         backend
-            .reclaim(mount_point.as_deref(), &nfs_state_dir, force)
+            .reclaim(mount_point.as_deref(), &nfs_state_dir)
             .await?;
         LaunchRecord::remove(config_dir)?;
         return Ok(());
@@ -121,28 +121,32 @@ async fn probe_live_daemon(
 }
 
 /// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
-/// shortly after answering shutdown), up to ~3s.
+/// shortly after answering shutdown), at a 100ms cadence for up to ~3s.
 fn wait_unmounted(mount_point: &Path, force: bool) -> anyhow::Result<()> {
-    for attempt in 0..12 {
-        if !omnifs_nfs::mount_is_active(mount_point) {
-            return Ok(());
-        }
-        if attempt + 1 < 12 {
-            std::thread::sleep(Duration::from_millis(250));
-        }
+    if poll_unmounted(mount_point) {
+        return Ok(());
     }
     if force {
         crate::host_teardown::force_unmount_host_native(mount_point);
-        for attempt in 0..12 {
-            if !omnifs_nfs::mount_is_active(mount_point) {
-                return Ok(());
-            }
-            if attempt + 1 < 12 {
-                std::thread::sleep(Duration::from_millis(250));
-            }
+        if poll_unmounted(mount_point) {
+            return Ok(());
         }
     }
     Err(StillMounted::inspect(mount_point, force).into())
+}
+
+/// Poll the OS mount table at a 100ms cadence for up to ~3s. Returns true once
+/// `mount_point` is no longer active.
+fn poll_unmounted(mount_point: &Path) -> bool {
+    for attempt in 0..30 {
+        if !omnifs_nfs::mount_is_active(mount_point) {
+            return true;
+        }
+        if attempt + 1 < 30 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    false
 }
 
 #[derive(Debug)]
