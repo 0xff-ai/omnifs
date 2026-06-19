@@ -26,6 +26,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
 - **Breaking:** The daemon loads its mount set from `mounts/*.json` on start and reconciles to that desired state, instead of the CLI pushing specs over the wire. (#141)
 - **Feature:** A new shutdown endpoint lets the daemon unmount its own filesystem, tear down providers, and exit gracefully. (#141)
+- **Fix:** Over NFS, the root directory now refreshes when a mount is added or removed, so clients see mounts appear and disappear immediately instead of caching a stale (sometimes empty) listing. (#142)
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
@@ -35,6 +36,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
 - **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
 - **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
+- **Improvement:** Released omnifs binaries now embed the provider and tool WASM and unpack it into the host on launch, so first run and upgrades install providers offline instead of downloading them from GitHub releases. (#142)
 
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
