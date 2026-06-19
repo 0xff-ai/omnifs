@@ -77,6 +77,7 @@ pub fn mount_blocking(
 ) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
+    sweep_stale_states(&options.state_dir);
     let signal_rx = ctrl_c_receiver(&rt);
     let export = Arc::new(Export::new(rt, Arc::clone(registry)));
     let server = start_server(export, options.bind, options.trace_path.clone())?;
@@ -642,6 +643,35 @@ fn write_state(
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(STATE_FILE_MODE))?;
     }
     Ok(StateFile { path })
+}
+
+fn sweep_stale_states(state_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(Some(state)) = read_mount_state_file(&path) else {
+            continue;
+        };
+        if !pid_alive(state.pid) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

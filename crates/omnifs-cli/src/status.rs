@@ -240,6 +240,10 @@ pub(crate) struct StatusJson {
 pub(crate) enum RuntimeJson {
     /// A daemon answered on the control API.
     Running {
+        version: String,
+        api_version: u32,
+        pid: u32,
+        executable: std::path::PathBuf,
         mount_point: std::path::PathBuf,
         config_dir: std::path::PathBuf,
         cache_dir: std::path::PathBuf,
@@ -322,6 +326,10 @@ impl StatusReport {
             self.runtime
                 .as_ref()
                 .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
+                    version: r.version.clone(),
+                    api_version: r.api_version,
+                    pid: r.pid,
+                    executable: r.executable.clone(),
                     mount_point: r.mount_point.clone(),
                     config_dir: r.config_dir.clone(),
                     cache_dir: r.cache_dir.clone(),

@@ -35,18 +35,9 @@ impl DaemonClient {
 
     /// Probe for a daemon and verify its control API version in one step.
     pub(crate) async fn probe(&self) -> Result<DaemonProbe> {
-        let Some(response) = self
-            .get_optional("/v1/version", "query daemon version")
-            .await?
-        else {
+        let Some(info) = self.version().await? else {
             return Ok(DaemonProbe::Unreachable);
         };
-        let info: VersionInfo = response
-            .error_for_status()
-            .context("daemon version request failed")?
-            .json()
-            .await
-            .context("parse daemon version")?;
         anyhow::ensure!(
             info.api_version == API_VERSION,
             "daemon speaks control API v{}, this CLI speaks v{API_VERSION}; \
@@ -55,6 +46,25 @@ impl DaemonClient {
             info.version,
         );
         Ok(DaemonProbe::Compatible(info))
+    }
+
+    /// Raw daemon version probe. This intentionally does not enforce control
+    /// API compatibility so launch can distinguish upgrade boundaries from
+    /// absence.
+    pub(crate) async fn version(&self) -> Result<Option<VersionInfo>> {
+        let Some(response) = self
+            .get_optional("/v1/version", "query daemon version")
+            .await?
+        else {
+            return Ok(None);
+        };
+        let info = response
+            .error_for_status()
+            .context("daemon version request failed")?
+            .json()
+            .await
+            .context("parse daemon version")?;
+        Ok(Some(info))
     }
 
     /// Verify the daemon is reachable and speaks this CLI's control API.

@@ -11,14 +11,14 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use omnifs_api::{
-    API_VERSION, DaemonStatus, FrontendInfo, MountFailure, MountInfo, ReadyInfo, ReconcileReport,
-    StopReport, VersionInfo,
+    API_VERSION, DaemonStatus, FrontendInfo, LaunchKind, MountFailure, MountInfo, ReadyInfo,
+    ReconcileReport, StopReport, VersionInfo,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
 use omnifs_inspector::serialize_record;
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
@@ -46,6 +46,7 @@ use crate::frontends::Frontends;
         ReadyInfo,
         DaemonStatus,
         FrontendInfo,
+        LaunchKind,
         MountInfo,
         MountFailure,
         ReconcileReport,
@@ -61,8 +62,12 @@ pub struct Daemon {
     root_symlinks: bool,
     /// Whether this daemon serves a host-native mount (preopens opened
     /// directly) versus a containerized one (preopens rewritten to bind paths).
-    /// Selects the materialization mode for `POST /v1/reconcile`.
+    /// Selects the materialization mode for `POST /v1/reconcile` and the
+    /// `LaunchKind` reported in status.
     host_native: bool,
+    /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
+    /// is visible with its reason instead of silently absent.
+    last_failed: std::sync::Mutex<Vec<MountFailure>>,
 }
 
 impl Daemon {
@@ -79,6 +84,7 @@ impl Daemon {
             frontends,
             root_symlinks,
             host_native,
+            last_failed: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -129,14 +135,28 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
 
         let dirs = self.registry.dirs();
+        let identity = version_info();
         DaemonStatus {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: identity.version,
+            api_version: identity.api_version,
+            pid: identity.pid,
+            executable: identity.executable,
             mount_point: self.frontends.mount_point().to_path_buf(),
             config_dir: dirs.config_dir.to_path_buf(),
             cache_dir: dirs.cache_dir.to_path_buf(),
             providers_dir: dirs.providers_dir.to_path_buf(),
             frontend: self.frontends.serving(),
+            launch: if self.host_native {
+                LaunchKind::HostNative
+            } else {
+                LaunchKind::Container
+            },
             mounts,
+            failed: self
+                .last_failed
+                .lock()
+                .map(|failed| failed.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -159,18 +179,24 @@ impl Daemon {
             self.frontends.invalidate_root_child(name);
             self.update_root_symlink(name, false);
         }
+        let failed: Vec<MountFailure> = outcome
+            .failed
+            .into_iter()
+            .map(|failure| MountFailure {
+                mount: failure.mount,
+                reason: failure.reason,
+            })
+            .collect();
+        // Remember the failures so `status` can show a dark mount and why,
+        // instead of it simply being absent from `mounts`.
+        if let Ok(mut last) = self.last_failed.lock() {
+            *last = failed.clone();
+        }
         ReconcileReport {
             added: outcome.added,
             updated: outcome.updated,
             removed: outcome.removed,
-            failed: outcome
-                .failed
-                .into_iter()
-                .map(|failure| MountFailure {
-                    mount: failure.mount,
-                    reason: failure.reason,
-                })
-                .collect(),
+            failed,
         }
     }
 
@@ -324,10 +350,20 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
     responses((status = 200, description = "daemon control API version", body = VersionInfo)),
 )]
 async fn version() -> Json<VersionInfo> {
-    Json(VersionInfo {
+    Json(version_info())
+}
+
+fn version_info() -> VersionInfo {
+    VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         api_version: API_VERSION,
-    })
+        pid: std::process::id(),
+        executable: current_executable(),
+    }
+}
+
+fn current_executable() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::new())
 }
 
 #[utoipa::path(

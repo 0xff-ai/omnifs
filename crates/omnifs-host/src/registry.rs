@@ -13,7 +13,7 @@ use omnifs_mount::mounts::{Catalog, Resolved, Spec, spec_paths_in};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -36,7 +36,7 @@ pub struct ProviderRegistry {
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Per-mount materialized fingerprint, used by [`Self::reconcile`] to detect
     /// a spec or provider-artifact change. Keyed by mount name.
-    fingerprints: parking_lot::RwLock<HashMap<String, u64>>,
+    fingerprints: parking_lot::RwLock<HashMap<String, MountFingerprint>>,
     /// Serializes reconcile passes so concurrent triggers cannot race the
     /// add/remove sequence.
     reconcile_lock: parking_lot::Mutex<()>,
@@ -239,84 +239,7 @@ impl ProviderRegistry {
         host_native: bool,
     ) -> ReconcileOutcome {
         let _guard = self.reconcile_lock.lock();
-        let mut outcome = ReconcileOutcome::default();
-
-        let catalog = Catalog::new(self.config_dir.join("mounts"), &self.providers_dir);
-        let paths = match spec_paths_in(catalog.mounts_dir()) {
-            Ok(paths) => paths,
-            Err(error) => {
-                outcome.failed.push(MountFailure {
-                    mount: catalog.mounts_dir().display().to_string(),
-                    reason: format!("scan mounts dir: {error}"),
-                });
-                return outcome;
-            },
-        };
-
-        let mut desired = HashSet::new();
-        for path in paths {
-            let spec = match Spec::from_file(&path) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    outcome.failed.push(MountFailure {
-                        mount: path.display().to_string(),
-                        reason: error.to_string(),
-                    });
-                    continue;
-                },
-            };
-            let materialized = match materialize(spec, &catalog, host_native) {
-                Ok(materialized) => materialized.spec,
-                Err(error) => {
-                    outcome.failed.push(MountFailure {
-                        mount: path.display().to_string(),
-                        reason: error.to_string(),
-                    });
-                    continue;
-                },
-            };
-            let mount = materialized.mount.clone();
-            desired.insert(mount.clone());
-
-            let wasm_path = self.dirs().provider_path(&materialized.provider);
-            let fingerprint = mount_fingerprint(&materialized, &wasm_path);
-            let running = self.instances.read().contains_key(&mount);
-            let unchanged = running && self.fingerprints.read().get(&mount) == Some(&fingerprint);
-            if unchanged {
-                continue;
-            }
-            if running {
-                let _ = self.remove_mount(&mount);
-            }
-            match self.add_mount(materialized, handle) {
-                Ok(_) => {
-                    self.fingerprints.write().insert(mount.clone(), fingerprint);
-                    if running {
-                        outcome.updated.push(mount);
-                    } else {
-                        outcome.added.push(mount);
-                    }
-                },
-                Err(error) => {
-                    self.fingerprints.write().remove(&mount);
-                    outcome.failed.push(MountFailure {
-                        mount,
-                        reason: error.to_string(),
-                    });
-                },
-            }
-        }
-
-        for mount in self.mounts() {
-            if !desired.contains(&mount) {
-                if self.remove_mount(&mount).is_ok() {
-                    outcome.removed.push(mount.clone());
-                }
-                self.fingerprints.write().remove(&mount);
-            }
-        }
-
-        outcome
+        ReconcilePass::new(self, handle, host_native).run()
     }
 
     fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
@@ -356,6 +279,173 @@ impl ProviderRegistry {
     }
 }
 
+struct ReconcilePass<'a> {
+    registry: &'a ProviderRegistry,
+    handle: &'a tokio::runtime::Handle,
+    host_native: bool,
+    catalog: Catalog,
+    desired: HashSet<String>,
+    outcome: ReconcileOutcome,
+    started: Instant,
+}
+
+impl<'a> ReconcilePass<'a> {
+    fn new(
+        registry: &'a ProviderRegistry,
+        handle: &'a tokio::runtime::Handle,
+        host_native: bool,
+    ) -> Self {
+        Self {
+            registry,
+            handle,
+            host_native,
+            catalog: Catalog::new(registry.config_dir.join("mounts"), &registry.providers_dir),
+            desired: HashSet::new(),
+            outcome: ReconcileOutcome::default(),
+            started: Instant::now(),
+        }
+    }
+
+    fn run(mut self) -> ReconcileOutcome {
+        let paths = match spec_paths_in(self.catalog.mounts_dir()) {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.outcome.failed.push(MountFailure {
+                    mount: self.catalog.mounts_dir().display().to_string(),
+                    reason: format!("scan mounts dir: {error}"),
+                });
+                return self.outcome;
+            },
+        };
+
+        for path in paths {
+            self.reconcile_path(&path);
+        }
+
+        self.remove_stale_mounts();
+        info!(
+            added = self.outcome.added.len(),
+            updated = self.outcome.updated.len(),
+            removed = self.outcome.removed.len(),
+            failed = self.outcome.failed.len(),
+            duration_ms = self.started.elapsed().as_millis(),
+            "reconcile completed"
+        );
+        self.outcome
+    }
+
+    fn reconcile_path(&mut self, path: &Path) {
+        let mount_started = Instant::now();
+        let Some(materialized) = self.materialized_spec(path) else {
+            return;
+        };
+        let mount = materialized.mount.clone();
+        self.desired.insert(mount.clone());
+
+        let wasm_path = self.registry.dirs().provider_path(&materialized.provider);
+        let fingerprint = mount_fingerprint(&materialized, &wasm_path);
+        let running = self.registry.instances.read().contains_key(&mount);
+        let prior_fingerprint = self.registry.fingerprints.read().get(&mount).copied();
+        let unchanged = running && prior_fingerprint == Some(fingerprint);
+        if unchanged {
+            debug!(
+                mount = mount.as_str(),
+                provider = materialized.provider.as_str(),
+                duration_ms = mount_started.elapsed().as_millis(),
+                "reconcile mount unchanged"
+            );
+            return;
+        }
+
+        let reason = prior_fingerprint.map_or("new", |prior| fingerprint.reason_since(prior));
+        if running {
+            let _ = self.registry.remove_mount(&mount);
+        }
+        match self.registry.add_mount(materialized, self.handle) {
+            Ok(_) => {
+                self.registry
+                    .fingerprints
+                    .write()
+                    .insert(mount.clone(), fingerprint);
+                if running {
+                    info!(
+                        mount = mount.as_str(),
+                        provider = %wasm_path.display(),
+                        reason,
+                        duration_ms = mount_started.elapsed().as_millis(),
+                        "reconcile updated mount"
+                    );
+                    self.outcome.updated.push(mount);
+                } else {
+                    info!(
+                        mount = mount.as_str(),
+                        provider = %wasm_path.display(),
+                        reason,
+                        duration_ms = mount_started.elapsed().as_millis(),
+                        "reconcile added mount"
+                    );
+                    self.outcome.added.push(mount);
+                }
+            },
+            Err(error) => {
+                self.registry.fingerprints.write().remove(&mount);
+                warn!(
+                    mount = mount.as_str(),
+                    provider = %wasm_path.display(),
+                    reason,
+                    duration_ms = mount_started.elapsed().as_millis(),
+                    error = %error,
+                    "reconcile failed to load mount"
+                );
+                self.outcome.failed.push(MountFailure {
+                    mount,
+                    reason: error.to_string(),
+                });
+            },
+        }
+    }
+
+    fn materialized_spec(&mut self, path: &Path) -> Option<Spec> {
+        let spec = match Spec::from_file(path) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.outcome.failed.push(MountFailure {
+                    mount: path.display().to_string(),
+                    reason: error.to_string(),
+                });
+                return None;
+            },
+        };
+        match materialize(spec, &self.catalog, self.host_native) {
+            Ok(materialized) => Some(materialized.spec),
+            Err(error) => {
+                self.outcome.failed.push(MountFailure {
+                    mount: path.display().to_string(),
+                    reason: error.to_string(),
+                });
+                None
+            },
+        }
+    }
+
+    fn remove_stale_mounts(&mut self) {
+        for mount in self.registry.mounts() {
+            if !self.desired.contains(&mount) {
+                let mount_started = Instant::now();
+                if self.registry.remove_mount(&mount).is_ok() {
+                    info!(
+                        mount = mount.as_str(),
+                        duration_ms = mount_started.elapsed().as_millis(),
+                        "reconcile removed mount"
+                    );
+                    self.outcome.removed.push(mount.clone());
+                }
+                self.registry.fingerprints.write().remove(&mount);
+            }
+        }
+    }
+}
+
 /// One mount that did not converge during [`ProviderRegistry::reconcile`].
 #[derive(Debug, Clone)]
 pub struct MountFailure {
@@ -374,16 +464,46 @@ pub struct ReconcileOutcome {
     pub failed: Vec<MountFailure>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MountFingerprint {
+    spec: u64,
+    artifact: u64,
+}
+
+impl MountFingerprint {
+    fn reason_since(self, prior: Self) -> &'static str {
+        match (self.spec != prior.spec, self.artifact != prior.artifact) {
+            (true, true) => "config+provider",
+            (true, false) => "config",
+            (false, true) => "provider",
+            (false, false) => "unchanged",
+        }
+    }
+}
+
 /// Fingerprint a materialized spec plus its provider artifact, so a reconcile
 /// detects both config edits and a swapped-out provider binary. The provider
 /// stamp uses file length and mtime rather than a content hash to keep the pass
 /// cheap; a rebuilt provider changes both.
-fn mount_fingerprint(spec: &Spec, wasm_path: &Path) -> u64 {
+fn mount_fingerprint(spec: &Spec, wasm_path: &Path) -> MountFingerprint {
+    MountFingerprint {
+        spec: spec_fingerprint(spec),
+        artifact: artifact_fingerprint(wasm_path),
+    }
+}
+
+fn spec_fingerprint(spec: &Spec) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(bytes) = serde_json::to_vec(spec) {
         bytes.hash(&mut hasher);
     }
+    hasher.finish()
+}
+
+fn artifact_fingerprint(wasm_path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(meta) = std::fs::metadata(wasm_path) {
         meta.len().hash(&mut hasher);
         if let Ok(modified) = meta.modified()

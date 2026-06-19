@@ -33,8 +33,11 @@ impl HostDaemon {
 
         let binary = std::env::current_exe().context("resolve the omnifs executable")?;
         let log_path = cache_dir.join("daemon.log");
-        let log = std::fs::File::create(&log_path)
-            .with_context(|| format!("create daemon log {}", log_path.display()))?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("open daemon log {}", log_path.display()))?;
         let log_err = log
             .try_clone()
             .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
@@ -49,6 +52,9 @@ impl HostDaemon {
             .arg(cache_dir)
             .arg("--listen")
             .arg(&listen)
+            // Native: open preopen directories directly. The container path runs
+            // in rewrite mode and omits this flag.
+            .arg("--host-native")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
@@ -62,7 +68,7 @@ impl HostDaemon {
 
         // Own process group so the daemon is not signalled when the CLI or its
         // shell exits. tokio's Child does not kill on drop, so `detach` simply
-        // forgets it; setsid is unnecessary because the CLI never signals its
+        // drops it; setsid is unnecessary because the CLI never signals its
         // own group and a new group already detaches the daemon from
         // CLI-targeted SIGINT/SIGTERM.
         #[cfg(unix)]
@@ -80,15 +86,30 @@ impl HostDaemon {
     /// Polls `GET /v1/ready` up to ~30s, failing fast if the child exits first
     /// and surfacing the tail of the daemon log either way.
     pub(crate) async fn wait_ready(&mut self) -> Result<()> {
+        let child_pid = self.child.id();
+        let client = DaemonClient::new();
         for _ in 0..60 {
-            if DaemonClient::new().ready().await {
-                return Ok(());
-            }
             if let Some(status) = self.child.try_wait().context("poll daemon child status")? {
                 anyhow::bail!(
                     "omnifs daemon exited before the mount became ready ({status})\n{}",
                     self.log_tail()
                 );
+            }
+            if client.ready().await {
+                if let Some(pid) = child_pid {
+                    if let Ok(status) = client.status().await {
+                        if status.pid == pid {
+                            return Ok(());
+                        }
+                        anyhow::bail!(
+                            "daemon readiness came from pid {}, not spawned pid {pid}; another omnifs daemon is already serving on the control port\n{}",
+                            status.pid,
+                            self.log_tail()
+                        );
+                    }
+                } else {
+                    return Ok(());
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -100,10 +121,11 @@ impl HostDaemon {
 
     /// Consume self and leave the daemon running after `omnifs up` returns.
     ///
-    /// `tokio::process::Child` does not kill on drop, so forgetting the handle
-    /// keeps the spawned daemon serving independently of the CLI process.
+    /// `kill_on_drop` is false (the default), so dropping the handle does not
+    /// signal the child; it keeps serving independently of the CLI process,
+    /// which exits moments later and reparents it to init.
     pub(crate) fn detach(self) {
-        std::mem::forget(self.child);
+        drop(self);
     }
 
     /// Best-effort terminate the daemon (used on the `up` error path).

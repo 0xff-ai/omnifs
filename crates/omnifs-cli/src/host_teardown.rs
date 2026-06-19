@@ -7,6 +7,7 @@
 
 #[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::path::PathBuf;
@@ -41,6 +42,75 @@ pub(crate) struct TeardownSummary {
     pub skipped: usize,
 }
 
+pub(crate) fn open_handle_summary(mount_point: &Path) -> Option<String> {
+    let output = Command::new("lsof")
+        .args(["-F", "pcfn", "--"])
+        .arg(mount_point)
+        .output();
+    match output {
+        Ok(output) if output.status.success() || !output.stdout.is_empty() => {
+            render_lsof_handles(&String::from_utf8_lossy(&output.stdout))
+        },
+        Ok(_) => None,
+        Err(error) => Some(format!(
+            "Could not inspect open mount handles with `lsof`: {error}"
+        )),
+    }
+}
+
+fn render_lsof_handles(fields: &str) -> Option<String> {
+    let mut processes: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut current = None;
+    let mut current_fd = None::<String>;
+
+    for line in fields.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let (kind, value) = line.split_at(1);
+        match kind {
+            "p" => {
+                processes.push((value.to_string(), "unknown".to_string(), Vec::new()));
+                current = Some(processes.len() - 1);
+                current_fd = None;
+            },
+            "c" => {
+                if let Some(index) = current {
+                    processes[index].1 = value.to_string();
+                }
+            },
+            "f" => {
+                current_fd = Some(value.to_string());
+            },
+            "n" => {
+                if let Some(index) = current {
+                    processes[index].2.push(format!(
+                        "{} {}",
+                        current_fd.as_deref().unwrap_or("?"),
+                        value
+                    ));
+                }
+            },
+            _ => {},
+        }
+    }
+
+    if processes.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("Open handles inside the mount:\n");
+    for (pid, command, handles) in processes {
+        let _ = write!(out, "  {command} pid {pid}");
+        if !handles.is_empty() {
+            out.push_str(": ");
+            out.push_str(&handles.join("; "));
+        }
+        out.push('\n');
+    }
+    Some(out.trim_end().to_string())
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bool> {
     if !omnifs_nfs::mount_is_active(mount_point) {
@@ -64,6 +134,16 @@ pub(crate) fn teardown_host_native_fuse(mount_point: &Path) -> anyhow::Result<bo
     Ok(true)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn force_unmount_host_native(mount_point: &Path) {
+    let _ = Command::new("fusermount")
+        .arg("-uz")
+        .arg(mount_point)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Tear down every host-native NFS mount recorded under `state_dir`.
 ///
 /// Best-effort and idempotent: an already-unmounted view, a dead daemon, or a
@@ -76,7 +156,7 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
     }
 
     let mut summary = TeardownSummary::default();
-    let mut seen_mount_points = HashSet::new();
+    let mut states = Vec::new();
     for entry in std::fs::read_dir(state_dir)? {
         let path = entry?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -99,7 +179,24 @@ pub(crate) fn teardown_host_native_nfs(state_dir: &Path) -> anyhow::Result<Teard
             summary.skipped += 1;
             continue;
         }
-        if seen_mount_points.insert(state.mount_point.clone()) {
+        states.push((path, state));
+    }
+
+    let live_mount_points = states
+        .iter()
+        .filter(|(_, state)| pid_alive(state.pid))
+        .map(|(_, state)| state.mount_point.clone())
+        .collect::<HashSet<_>>();
+    let mut seen_mount_points = HashSet::new();
+    for (path, state) in states {
+        if !pid_alive(state.pid) {
+            tear_down_orphan(
+                &path,
+                &state.mount_point,
+                live_mount_points.contains(&state.mount_point),
+                &mut summary,
+            );
+        } else if seen_mount_points.insert(state.mount_point.clone()) {
             tear_down_one(&path, &state.mount_point, state.pid, &mut summary);
         }
     }
@@ -116,16 +213,10 @@ fn read_state(path: &Path) -> anyhow::Result<NfsMountState> {
 /// Tear down one recorded mount and record the outcome in `summary`.
 #[cfg(not(target_os = "linux"))]
 fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut TeardownSummary) {
-    // A live daemon means a real running mount; a dead one means we are only
-    // sweeping the stale file it left behind.
-    let was_running = pid_alive(pid);
     // A live daemon self-exits once it sees the mount disappear, so a clean
-    // unmount suffices. A dead daemon leaves a stale mount whose NFS server is
-    // gone, where a clean unmount can hang: force it.
-    unmount(mount_point, !was_running);
-    if was_running {
-        signal_term(pid);
-    }
+    // unmount suffices.
+    unmount(mount_point, false);
+    signal_term(pid);
 
     if !mount_settled(mount_point) {
         // Still mounted: keep the state file so a later `down` retries.
@@ -135,11 +226,31 @@ fn tear_down_one(state_file: &Path, mount_point: &Path, pid: u32, summary: &mut 
     // Mount is gone. The daemon removes its own state file on clean exit;
     // remove it ourselves if it lingered or was orphaned.
     remove_state_file(state_file);
-    if was_running {
-        summary.unmounted += 1;
-    } else {
+    summary.unmounted += 1;
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tear_down_orphan(
+    state_file: &Path,
+    mount_point: &Path,
+    live_mount_exists: bool,
+    summary: &mut TeardownSummary,
+) {
+    if live_mount_exists {
+        remove_state_file(state_file);
         summary.swept_orphans += 1;
+        return;
     }
+
+    if omnifs_nfs::mount_is_active(mount_point) {
+        unmount(mount_point, true);
+        if !mount_settled(mount_point) {
+            summary.failed.push(mount_point.to_path_buf());
+            return;
+        }
+    }
+    remove_state_file(state_file);
+    summary.swept_orphans += 1;
 }
 
 /// Unmount the loopback view. `force` is used when the recording daemon is
@@ -161,6 +272,11 @@ fn unmount(mount_point: &Path, force: bool) {
         .status();
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn force_unmount_host_native(mount_point: &Path) {
+    unmount(mount_point, true);
+}
+
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn unmount(mount_point: &Path, force: bool) {
     let mut command = Command::new("umount");
@@ -172,6 +288,25 @@ fn unmount(mount_point: &Path, force: bool) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_lsof_handles;
+
+    #[test]
+    fn lsof_handle_summary_renders_each_process() {
+        let rendered = render_lsof_handles(
+            "p48817\ncfish\nfcwd\nn/Users/raul/omnifs/oura\nf3\nn/Users/raul/omnifs/oura\np48937\nccaffeinate\nfcwd\nn/Users/raul/omnifs/oura\n",
+        )
+        .expect("blockers render");
+
+        assert!(rendered.contains("Open handles inside the mount:"));
+        assert!(rendered.contains("fish pid 48817"));
+        assert!(rendered.contains("cwd /Users/raul/omnifs/oura"));
+        assert!(rendered.contains("3 /Users/raul/omnifs/oura"));
+        assert!(rendered.contains("caffeinate pid 48937"));
+    }
 }
 
 /// Best-effort SIGTERM so a live daemon exits promptly and releases the control

@@ -21,6 +21,11 @@ pub const DEFAULT_PORT: u16 = 7878;
 pub struct VersionInfo {
     pub version: String,
     pub api_version: u32,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub executable: PathBuf,
 }
 
 /// `GET /v1/ready`: 200 with `ready: true` once the filesystem is
@@ -36,6 +41,13 @@ pub struct ReadyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DaemonStatus {
     pub version: String,
+    #[serde(default)]
+    pub api_version: u32,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub executable: PathBuf,
     #[schema(value_type = String)]
     pub mount_point: PathBuf,
     #[schema(value_type = String)]
@@ -47,8 +59,31 @@ pub struct DaemonStatus {
     /// The serving filesystem frontend (FUSE today; the protocol stays
     /// frontend-agnostic for future NFSv4/FSKit modes), when one is up.
     pub frontend: Option<FrontendInfo>,
+    /// How this daemon was launched, so the CLI tears down and reports the right
+    /// backend without inferring it from configuration. A daemon old enough to
+    /// omit the field predates host-native and is read as a container.
+    #[serde(default)]
+    pub launch: LaunchKind,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
+    /// Mounts that did not converge at the last reconcile, with reasons. Empty
+    /// when every desired mount is serving; a dark mount appears here, not as a
+    /// silent absence from `mounts`.
+    #[serde(default)]
+    pub failed: Vec<MountFailure>,
+}
+
+/// How a daemon was launched. The CLI reads this (and the launch record) instead
+/// of inferring the backend from `[system].runtime`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchKind {
+    /// Daemon spawned as a host-native child process.
+    HostNative,
+    /// Daemon running inside a Docker container. The legacy interpretation for a
+    /// status payload that omits the field.
+    #[default]
+    Container,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

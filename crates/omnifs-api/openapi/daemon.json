@@ -216,11 +216,26 @@
           "mounts"
         ],
         "properties": {
+          "api_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
           "cache_dir": {
             "type": "string"
           },
           "config_dir": {
             "type": "string"
+          },
+          "executable": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MountFailure"
+            },
+            "description": "Mounts that did not converge at the last reconcile, with reasons. Empty\nwhen every desired mount is serving; a dark mount appears here, not as a\nsilent absence from `mounts`."
           },
           "frontend": {
             "oneOf": [
@@ -233,6 +248,10 @@
               }
             ]
           },
+          "launch": {
+            "$ref": "#/components/schemas/LaunchKind",
+            "description": "How this daemon was launched, so the CLI tears down and reports the right\nbackend without inferring it from configuration. A daemon old enough to\nomit the field predates host-native and is read as a container."
+          },
           "mount_point": {
             "type": "string"
           },
@@ -242,6 +261,11 @@
               "$ref": "#/components/schemas/MountInfo"
             },
             "description": "Provider mounts loaded in the registry."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           },
           "providers_dir": {
             "type": "string"
@@ -265,6 +289,14 @@
             "type": "string"
           }
         }
+      },
+      "LaunchKind": {
+        "type": "string",
+        "description": "How a daemon was launched. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
+        "enum": [
+          "host_native",
+          "container"
+        ]
       },
       "MountFailure": {
         "type": "object",
@@ -385,6 +417,14 @@
         ],
         "properties": {
           "api_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "executable": {
+            "type": "string"
+          },
+          "pid": {
             "type": "integer",
             "format": "int32",
             "minimum": 0

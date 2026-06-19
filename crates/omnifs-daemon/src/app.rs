@@ -47,6 +47,11 @@ pub struct DaemonArgs {
     /// meaningless when running host-native.
     #[arg(long)]
     pub root_symlinks: bool,
+    /// Serve a host-native mount: open preopen directories directly instead of
+    /// rewriting them to container bind paths. The native launcher sets this;
+    /// the container entrypoint does not (it runs in container/rewrite mode).
+    #[arg(long)]
+    pub host_native: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -151,11 +156,11 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
             frontends::Frontends::nfs(mount_point.clone(), Arc::clone(&registry), options)
         },
     };
-    // `--root-symlinks` is the container-launch marker, so its negation marks a
-    // host-native daemon: one that opens preopen directories directly rather
-    // than through container bind paths. A dedicated flag can replace this proxy
-    // when the container launch path also reconciles from `mounts/`.
-    let host_native = !args.root_symlinks;
+    // The native launcher passes `--host-native`; the container entrypoint does
+    // not. This selects the preopen materialization mode (host-direct versus
+    // container-rewritten) independently of `--root-symlinks`, which now means
+    // only "maintain `/<mount>` convenience symlinks."
+    let host_native = args.host_native;
     let daemon = Arc::new(server::Daemon::new(
         Arc::clone(&registry),
         sink,
@@ -186,6 +191,12 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         "reconciled mounts on start"
     );
 
+    // Arm signal-driven shutdown for the serving lifetime: a service `stop`, the
+    // macOS teardown's `kill -TERM`, or `docker stop` all run the same clean
+    // unmount the `POST /v1/shutdown` handler does, instead of hard-killing the
+    // process and stranding the mount.
+    install_signal_handler(&daemon, &rt);
+
     info!(
         frontend = ?frontend,
         mount_point = %daemon.mount_point().display(),
@@ -193,9 +204,48 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     );
     daemon.serve(&rt)?;
 
-    // `serve` returns once the frontend is unmounted (externally, or by the
-    // daemon's own shutdown path). Drop every provider here so teardown is
-    // symmetric across FUSE and NFS rather than living in one frontend crate.
+    // `serve` returns once the frontend is unmounted (externally, by a signal,
+    // or by the daemon's own shutdown path). Drop every provider here so
+    // teardown is symmetric across FUSE and NFS rather than living in one
+    // frontend crate.
     registry.shutdown_all();
     Ok(())
 }
+
+/// On `SIGTERM`/`SIGINT`, run the same self-unmount the control API's
+/// `POST /v1/shutdown` triggers. The unmount unblocks `serve`, which then drops
+/// providers and exits. Armed for the serving lifetime; a signal during the
+/// brief pre-serve startup window is not handled (the steady-state stop, service
+/// and teardown paths all signal a serving daemon).
+#[cfg(unix)]
+fn install_signal_handler(daemon: &Arc<server::Daemon>, rt: &Handle) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let daemon = Arc::clone(daemon);
+    rt.spawn(async move {
+        let (mut term, mut interrupt) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(term), Ok(interrupt)) => (term, interrupt),
+            (term, interrupt) => {
+                if let Err(error) = term {
+                    warn!(%error, "failed to install SIGTERM handler");
+                }
+                if let Err(error) = interrupt {
+                    warn!(%error, "failed to install SIGINT handler");
+                }
+                return;
+            },
+        };
+        let signal = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        info!(signal, "received shutdown signal; unmounting");
+        daemon.trigger_shutdown();
+    });
+}
+
+#[cfg(not(unix))]
+fn install_signal_handler(_daemon: &Arc<server::Daemon>, _rt: &Handle) {}

@@ -1,6 +1,7 @@
 //! `omnifs down` — daemon lifecycle: stop.
 
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
@@ -17,17 +18,23 @@ pub struct DownArgs {
     /// `omnifs`.
     #[arg(long)]
     pub container_name: Option<String>,
+    /// Force the host-native unmount if a clean shutdown leaves the mount busy.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         use crate::paths::PathOverrides;
 
-        let DownArgs { container_name } = self;
+        let DownArgs {
+            container_name,
+            force,
+        } = self;
         let (paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
 
         if config.runtime() == crate::config::Runtime::Native {
-            return teardown_native(&paths).await;
+            return teardown_native(&paths, force).await;
         }
 
         let container_name = RuntimeTarget::resolve_container_name(container_name, &config)?;
@@ -52,10 +59,10 @@ impl DownArgs {
 /// Stop a host-native daemon. The daemon owns the frontend handle, so the CLI
 /// asks it to unmount itself and waits for the mount to settle. Only a dead
 /// daemon falls back to the platform sweep (stale state, stuck mount).
-async fn teardown_native(paths: &crate::paths::Paths) -> anyhow::Result<()> {
+async fn teardown_native(paths: &crate::paths::Paths, force: bool) -> anyhow::Result<()> {
     match DaemonClient::new().shutdown().await? {
         Some(report) => {
-            wait_unmounted(&report.mount_point)?;
+            wait_unmounted(&report.mount_point, force)?;
             anstream::println!("✓ Unmounted {}", report.mount_point.display());
             Ok(())
         },
@@ -65,7 +72,7 @@ async fn teardown_native(paths: &crate::paths::Paths) -> anyhow::Result<()> {
 
 /// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
 /// shortly after answering shutdown), up to ~3s.
-fn wait_unmounted(mount_point: &Path) -> anyhow::Result<()> {
+fn wait_unmounted(mount_point: &Path, force: bool) -> anyhow::Result<()> {
     for attempt in 0..12 {
         if !omnifs_nfs::mount_is_active(mount_point) {
             return Ok(());
@@ -74,11 +81,66 @@ fn wait_unmounted(mount_point: &Path) -> anyhow::Result<()> {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
-    anyhow::bail!(
-        "{} is still mounted after shutdown; re-run `omnifs down`",
-        mount_point.display()
-    )
+    if force {
+        crate::host_teardown::force_unmount_host_native(mount_point);
+        for attempt in 0..12 {
+            if !omnifs_nfs::mount_is_active(mount_point) {
+                return Ok(());
+            }
+            if attempt + 1 < 12 {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+    Err(StillMounted::inspect(mount_point, force).into())
 }
+
+#[derive(Debug)]
+struct StillMounted {
+    mount_point: PathBuf,
+    forced: bool,
+    open_handles: Option<String>,
+}
+
+impl StillMounted {
+    fn inspect(mount_point: &Path, forced: bool) -> Self {
+        Self {
+            mount_point: mount_point.to_path_buf(),
+            forced,
+            open_handles: crate::host_teardown::open_handle_summary(mount_point),
+        }
+    }
+}
+
+impl fmt::Display for StillMounted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is still mounted; the daemon could not complete shutdown",
+            self.mount_point.display()
+        )?;
+        if let Some(handles) = &self.open_handles {
+            write!(f, "\n\n{handles}")?;
+        }
+        if self.forced {
+            write!(
+                f,
+                "\n\nForced unmount was attempted and the mount is still active."
+            )
+        } else {
+            write!(
+                f,
+                "\n\nClose those handles or `cd` them out of the mount, then re-run `omnifs down`."
+            )?;
+            write!(
+                f,
+                "\nUse `omnifs down --force` only if you intentionally want to break active handles."
+            )
+        }
+    }
+}
+
+impl std::error::Error for StillMounted {}
 
 /// Dead-daemon fallback: sweep a stale mount the daemon can no longer unmount
 /// itself.
@@ -114,12 +176,19 @@ fn teardown_native_nfs(state_dir: &std::path::Path) -> anyhow::Result<()> {
         );
     }
     if !summary.failed.is_empty() {
-        for path in &summary.failed {
-            anstream::eprintln!("warning: {} is still mounted", path.display());
+        if summary.failed.len() == 1 {
+            return Err(StillMounted::inspect(&summary.failed[0], false).into());
         }
+        let details = summary
+            .failed
+            .iter()
+            .map(|path| StillMounted::inspect(path, false).to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         anyhow::bail!(
-            "{} host-native mount(s) could not be unmounted; re-run `omnifs down`",
-            summary.failed.len()
+            "{} host-native mount(s) could not be unmounted\n\n{}",
+            summary.failed.len(),
+            details
         );
     }
     if summary.unmounted == 0 && summary.swept_orphans == 0 {
