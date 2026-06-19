@@ -304,7 +304,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-linux-arm64
@@ -495,7 +495,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     needs: cli-linux-arm64
     permissions:
       contents: read
@@ -600,7 +600,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: blacksmith-2vcpu-ubuntu-2204-arm
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     needs: [docker-arm64, cli-linux-arm64]
     timeout-minutes: 30
     permissions:
