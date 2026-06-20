@@ -7,8 +7,10 @@
 
 pub mod app;
 pub mod frontends;
+pub mod launch;
 #[cfg(target_os = "linux")]
 mod proc_mounts;
 pub mod server;
 
 pub use app::{DaemonArgs, FrontendKind, run};
+pub use launch::NativeLaunchConfig;
