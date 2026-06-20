@@ -20,6 +20,8 @@
 
 #![cfg(not(target_os = "wasi"))]
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -259,34 +261,32 @@ impl Fixture {
         omnifs_nfs::mount_is_active(&self.mount_point)
     }
 
-    /// Force-unmount the mount point. Best-effort and safe to call even when
-    /// nothing is mounted.
+    /// Force-unmount the mount point. Best-effort, non-blocking, and safe to call
+    /// even when nothing is mounted, so a `Drop` during a panicking test never
+    /// wedges the suite.
     ///
-    /// On macOS we always use `diskutil unmount force` via a child process so
-    /// that a stale NFS mount (server already dead) does not block the caller.
-    /// Calling `omnifs_nfs::unmount` directly on a stale NFS mount can block
-    /// the calling thread indefinitely on macOS.
+    /// On macOS this mirrors production teardown: `sudo -n umount -f` clears a
+    /// dead-server NFS mount instantly, where `diskutil unmount force` would block
+    /// in an uninterruptible NFS syscall. The path is resolved via the parent so
+    /// the dead mount itself is never stat-ed.
     fn force_unmount(&self) {
         #[cfg(target_os = "macos")]
         {
             if !omnifs_nfs::mount_is_active(&self.mount_point) {
                 return;
             }
-            // First try a graceful unmount via a child process (non-blocking
-            // for the caller even if diskutil blocks internally, because we
-            // use .output() which does wait — but diskutil should not hang on
-            // a stale mount, it returns promptly with a failure code that
-            // mount_settled then verifies).
-            let _ = Command::new("diskutil")
-                .args(["unmount", "force"])
-                .arg(&self.mount_point)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output();
-            // Give the OS a moment to settle.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while omnifs_nfs::mount_is_active(&self.mount_point) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
+            if let Some(canonical) = self
+                .mount_point
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .and_then(|parent| self.mount_point.file_name().map(|leaf| parent.join(leaf)))
+            {
+                let _ = Command::new("sudo")
+                    .args(["-n", "umount", "-f"])
+                    .arg(&canonical)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output();
             }
         }
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
