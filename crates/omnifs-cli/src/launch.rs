@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, VersionInfo};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
 use omnifs_creds::CredentialStore;
+use omnifs_home::Paths;
 
 use crate::backend::{Backend, LaunchParams};
 use crate::catalog::ProviderCatalog;
@@ -18,7 +19,7 @@ use crate::session::MountConfig;
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
     pub runtime: &'a RuntimeTarget,
-    pub runtime_home: &'a Path,
+    pub paths: &'a Paths,
     pub store: Box<dyn CredentialStore>,
     /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
     pub verb: &'static str,
@@ -29,8 +30,6 @@ pub(crate) struct LaunchSpec<'a> {
     /// Run the daemon host-native (spawn `omnifs daemon`) instead of
     /// launching a Docker container.
     pub host_native: bool,
-    /// Cache directory passed to the host-native daemon (also holds its log).
-    pub cache_dir: PathBuf,
 }
 
 /// Run the full materialize → connect → launch → wait → push sequence.
@@ -40,23 +39,22 @@ pub(crate) async fn launch_runtime(
 ) -> anyhow::Result<()> {
     let LaunchSpec {
         runtime,
-        runtime_home,
+        paths,
         store,
         verb,
         configs,
         mut extras,
         host_native,
-        cache_dir,
     } = spec;
 
-    std::fs::create_dir_all(runtime_home)
-        .with_context(|| format!("create runtime home {}", runtime_home.display()))?;
+    std::fs::create_dir_all(&paths.config_dir)
+        .with_context(|| format!("create runtime home {}", paths.config_dir.display()))?;
 
     // Host-native: the daemon loads and materializes mounts from `mounts/`
     // itself, so the CLI only spawns it and triggers a reconcile. No CLI-side
     // materialize-and-push on this path.
     if host_native {
-        return launch_host_native(runtime_home, &cache_dir, verb).await;
+        return launch_host_native(paths, verb).await;
     }
 
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
@@ -74,10 +72,10 @@ pub(crate) async fn launch_runtime(
     extras.binds = binds;
 
     let rt = Runtime::connect_ready(runtime, verb).await?;
-    rt.launch_container(runtime_home, extras).await?;
+    rt.launch_container(&paths.config_dir, extras).await?;
 
     if let Err(error) =
-        finish_docker_launch(&rt, runtime_home, runtime.container_name(), runtime.image()).await
+        finish_docker_launch(&rt, paths, runtime.container_name(), runtime.image()).await
     {
         if let Err(teardown) = rt.remove().await {
             anstream::eprintln!("also failed to remove the container: {teardown:#}");
@@ -106,20 +104,15 @@ fn resolve_control_addr() -> SocketAddr {
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
 /// converge any change since and to surface per-mount failures.
-async fn launch_host_native(
-    runtime_home: &Path,
-    cache_dir: &Path,
-    verb: &str,
-) -> anyhow::Result<()> {
-    reject_existing_host_daemon(runtime_home, cache_dir, verb).await?;
+async fn launch_host_native(paths: &Paths, verb: &str) -> anyhow::Result<()> {
+    reject_existing_host_daemon(paths, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
 
     // Build the params and delegate spawn+wait to the backend abstraction so
     // the native path and Docker path share the same argument generator.
     let addr = resolve_control_addr();
     let params = LaunchParams {
-        config_dir: runtime_home.to_path_buf(),
-        cache_dir: cache_dir.to_path_buf(),
+        paths: paths.clone(),
         control_addr: addr,
         mount_point: None, // the daemon resolves its default
         backend: Backend::Native,
@@ -139,77 +132,47 @@ async fn launch_host_native(
         anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
         let record_params = LaunchParams {
-            config_dir: runtime_home.to_path_buf(),
-            cache_dir: cache_dir.to_path_buf(),
+            paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
             backend: Backend::Native,
         };
-        write_launch_record(runtime_home, &record_params, Some(status.pid));
+        write_launch_record(&paths.config_dir, &record_params, Some(status.pid));
     }
     Ok(())
 }
 
-async fn reject_existing_host_daemon(
-    runtime_home: &Path,
-    cache_dir: &Path,
-    verb: &str,
-) -> anyhow::Result<()> {
+async fn reject_existing_host_daemon(paths: &Paths, verb: &str) -> anyhow::Result<()> {
     let client = DaemonClient::new();
-    let Some(version) = client.version().await? else {
+    let Some(status) = client.status_optional().await? else {
         return Ok(());
     };
 
-    let status = if version.api_major == API_MAJOR {
-        client.status().await.ok()
-    } else {
-        None
-    };
-
-    anyhow::bail!(
-        "{}",
-        ExistingDaemon::new(version, status, runtime_home, cache_dir, verb)
-    )
+    anyhow::bail!("{}", ExistingDaemon::new(status, paths, verb))
 }
 
 struct ExistingDaemon {
-    version: VersionInfo,
-    status: Option<DaemonStatus>,
-    runtime_home: PathBuf,
-    cache_dir: PathBuf,
+    status: DaemonStatus,
+    paths: Paths,
     verb: String,
 }
 
 impl ExistingDaemon {
-    fn new(
-        version: VersionInfo,
-        status: Option<DaemonStatus>,
-        runtime_home: &Path,
-        cache_dir: &Path,
-        verb: &str,
-    ) -> Self {
+    fn new(status: DaemonStatus, paths: &Paths, verb: &str) -> Self {
         Self {
-            version,
             status,
-            runtime_home: runtime_home.to_path_buf(),
-            cache_dir: cache_dir.to_path_buf(),
+            paths: paths.clone(),
             verb: verb.to_string(),
         }
     }
 
     fn daemon_executable(&self) -> &Path {
-        self.status
-            .as_ref()
-            .map(|status| status.executable.as_path())
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(self.version.executable.as_path())
+        self.status.executable.as_path()
     }
 
-    fn paths_match(&self) -> Option<bool> {
-        self.status.as_ref().map(|status| {
-            same_path(&status.config_dir, &self.runtime_home)
-                && same_path(&status.cache_dir, &self.cache_dir)
-        })
+    fn paths_match(&self) -> bool {
+        same_path(&self.status.config_dir, &self.paths.config_dir)
+            && same_path(&self.status.cache_dir, &self.paths.cache_dir)
     }
 
     fn executable_matches(&self) -> Option<bool> {
@@ -223,10 +186,10 @@ impl ExistingDaemon {
     }
 
     fn title(&self) -> &'static str {
-        if self.version.api_major != API_MAJOR || self.version.version != env!("CARGO_PKG_VERSION")
+        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
         {
             "A different omnifs daemon is already running"
-        } else if self.paths_match() == Some(false) {
+        } else if !self.paths_match() {
             "An omnifs daemon is already running for a different home"
         } else if self.executable_matches() == Some(false) {
             "A different omnifs daemon is already running"
@@ -242,10 +205,10 @@ impl std::fmt::Display for ExistingDaemon {
         writeln!(
             f,
             "  daemon  v{}  API {}.{}  pid {}  {}",
-            self.version.version,
-            self.version.api_major,
-            self.version.api_minor,
-            self.version.pid,
+            self.status.version,
+            self.status.api_major,
+            self.status.api_minor,
+            self.status.pid,
             display_path(self.daemon_executable())
         )?;
         writeln!(
@@ -256,15 +219,13 @@ impl std::fmt::Display for ExistingDaemon {
             API_MINOR,
             display_path(&std::env::current_exe().unwrap_or_else(|_| PathBuf::new()))
         )?;
-        if let Some(status) = &self.status {
-            writeln!(f)?;
-            writeln!(f, "  daemon config  {}", status.config_dir.display())?;
-            writeln!(f, "  this config    {}", self.runtime_home.display())?;
-            writeln!(f, "  daemon cache   {}", status.cache_dir.display())?;
-            writeln!(f, "  this cache     {}", self.cache_dir.display())?;
-        }
         writeln!(f)?;
-        if self.version.api_major != API_MAJOR || self.version.version != env!("CARGO_PKG_VERSION")
+        writeln!(f, "  daemon config  {}", self.status.config_dir.display())?;
+        writeln!(f, "  this config    {}", self.paths.config_dir.display())?;
+        writeln!(f, "  daemon cache   {}", self.status.cache_dir.display())?;
+        writeln!(f, "  this cache     {}", self.paths.cache_dir.display())?;
+        writeln!(f)?;
+        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
         {
             writeln!(
                 f,
@@ -321,7 +282,7 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
 /// any per-mount failure. No spec crosses the wire.
 async fn finish_docker_launch(
     rt: &Runtime,
-    runtime_home: &Path,
+    paths: &Paths,
     container_name: &crate::container_name::ContainerName,
     image: &crate::image_ref::ImageRef,
 ) -> anyhow::Result<()> {
@@ -336,8 +297,7 @@ async fn finish_docker_launch(
             .parse()
             .expect("static address is valid");
         let record_params = LaunchParams {
-            config_dir: runtime_home.to_path_buf(),
-            cache_dir: runtime_home.join("cache"),
+            paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
             backend: Backend::Docker {
@@ -345,7 +305,7 @@ async fn finish_docker_launch(
                 image: image.clone(),
             },
         };
-        write_launch_record(runtime_home, &record_params, None);
+        write_launch_record(&paths.config_dir, &record_params, None);
     }
     Ok(())
 }

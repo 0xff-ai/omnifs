@@ -1,8 +1,8 @@
 //! Backend abstraction for daemon launch and stop.
 //!
 //! `LaunchParams` is the single data model for launch intent: it holds the
-//! common parameters (config/cache directories, control address, mount point)
-//! and a `Backend` variant with the backend-specific details. `daemon_args`
+//! common parameters ([`Paths`], control address, mount point) and a `Backend`
+//! variant with the backend-specific details. `daemon_args` generates the
 //! generates the daemon's argument list from it so the native and Docker paths
 //! cannot diverge on which flags they pass.
 //!
@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use omnifs_home::Paths;
 
 use crate::container_name::ContainerName;
 use crate::image_ref::ImageRef;
@@ -32,8 +33,7 @@ pub(crate) struct DaemonArgv(pub Vec<String>);
 /// Backend-agnostic launch intent plus the chosen backend's specifics.
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchParams {
-    pub config_dir: PathBuf,
-    pub cache_dir: PathBuf,
+    pub paths: Paths,
     pub control_addr: SocketAddr,
     /// `None` lets the daemon resolve its platform default.
     pub mount_point: Option<PathBuf>,
@@ -47,9 +47,9 @@ impl LaunchParams {
         let mut args = vec![
             "daemon".to_string(),
             "--config-dir".to_string(),
-            self.config_dir.display().to_string(),
+            self.paths.config_dir.display().to_string(),
             "--cache-dir".to_string(),
-            self.cache_dir.display().to_string(),
+            self.paths.cache_dir.display().to_string(),
             "--listen".to_string(),
             self.control_addr.to_string(),
         ];
@@ -121,11 +121,11 @@ pub(crate) async fn launch_native(params: &LaunchParams) -> Result<()> {
 
     use crate::client::DaemonClient;
 
-    std::fs::create_dir_all(&params.cache_dir)
-        .with_context(|| format!("create cache dir {}", params.cache_dir.display()))?;
+    std::fs::create_dir_all(&params.paths.cache_dir)
+        .with_context(|| format!("create cache dir {}", params.paths.cache_dir.display()))?;
 
     let binary = std::env::current_exe().context("resolve the omnifs executable")?;
-    let log_path = params.cache_dir.join("daemon.log");
+    let log_path = params.paths.cache_dir.join("daemon.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

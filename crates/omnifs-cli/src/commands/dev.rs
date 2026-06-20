@@ -154,14 +154,13 @@ impl DevArgs {
         launch_runtime(
             LaunchSpec {
                 runtime,
-                runtime_home: &paths.config_dir,
+                paths,
                 store,
                 verb: "omnifs dev",
                 configs,
                 extras: ContainerExtras { binds },
                 // `omnifs dev` is always the Docker sandbox.
                 host_native: false,
-                cache_dir: paths.cache_dir.clone(),
             },
             ctx.catalog(),
         )

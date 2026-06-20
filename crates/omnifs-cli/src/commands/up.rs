@@ -65,13 +65,12 @@ impl UpArgs {
         launch_runtime(
             LaunchSpec {
                 runtime,
-                runtime_home: &paths.config_dir,
+                paths,
                 store,
                 verb: "omnifs up",
                 configs,
                 extras: ContainerExtras::default(),
                 host_native,
-                cache_dir: paths.cache_dir.clone(),
             },
             catalog,
         )
