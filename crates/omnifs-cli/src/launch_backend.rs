@@ -67,10 +67,18 @@ pub(crate) enum LaunchBackend {
 }
 
 impl LaunchBackend {
-    pub(crate) fn from_config(config: &Config, docker: DockerTarget) -> Self {
+    pub(crate) fn resolve(
+        config: &Config,
+        container_name: Option<String>,
+        image: Option<String>,
+    ) -> anyhow::Result<Self> {
         match config.backend() {
-            ConfiguredBackend::Native => Self::Native,
-            ConfiguredBackend::Docker => Self::Docker(docker),
+            ConfiguredBackend::Native => Ok(Self::Native),
+            ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::resolve(
+                container_name,
+                image,
+                config,
+            )?)),
         }
     }
 
@@ -91,6 +99,13 @@ impl LaunchBackend {
 
     pub(crate) fn is_docker(&self) -> bool {
         matches!(self, Self::Docker(_))
+    }
+
+    pub(crate) fn docker_target(&self) -> Option<&DockerTarget> {
+        match self {
+            Self::Docker(target) => Some(target),
+            Self::Native => None,
+        }
     }
 
     pub(crate) fn materialization_mode(&self) -> MaterializationMode {

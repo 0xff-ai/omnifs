@@ -3,11 +3,11 @@
 use clap::Args;
 use omnifs_creds::FileStore;
 
-use crate::app_context::AppContext;
 use crate::launch::{LaunchSpec, launch_runtime};
 use crate::launch_backend::LaunchBackend;
 use crate::runtime::ContainerExtras;
 use crate::session::GUEST_FUSE_MOUNT;
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
@@ -29,15 +29,16 @@ impl UpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         use crate::paths::PathOverrides;
 
-        let ctx = AppContext::resolve(PathOverrides::default(), self.container_name, self.image)?;
-        let paths = ctx.paths();
-        let docker_target = ctx.docker_target();
-        let backend = LaunchBackend::from_config(ctx.config(), docker_target.clone());
+        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let config = workspace.config()?;
+        let paths = workspace.paths();
+        let backend = LaunchBackend::resolve(&config, self.container_name, self.image)?;
         let backend_is_native = backend.is_native();
-        let catalog = ctx.catalog();
+        let docker_target = backend.docker_target().cloned();
+        let catalog = workspace.catalog();
 
         // Bail early before touching runtime state if there is nothing to mount.
-        let configs = ctx.workspace().mounts()?;
+        let configs = workspace.mounts()?;
         if configs.is_empty() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs init <provider>` to add one directly",
@@ -78,13 +79,13 @@ impl UpArgs {
 
         if backend_is_native {
             anstream::println!();
-            if let Ok(status) = crate::client::DaemonClient::new().status().await {
+            if let Ok(status) = workspace.daemon().status().await {
                 anstream::println!(
                     "Browse it directly: `{}`",
                     crate::style::bold(format!("ls {}", status.mount_point.display())),
                 );
             }
-        } else {
+        } else if let Some(docker_target) = docker_target {
             anstream::println!(
                 "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
                 docker_target.container_name()

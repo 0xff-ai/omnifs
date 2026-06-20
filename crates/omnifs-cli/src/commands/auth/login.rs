@@ -13,11 +13,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::shared::format_scopes;
-use crate::app_context::AppContext;
 use crate::auth::explain::{self, AuthMode};
 use crate::catalog::ProviderCatalog;
 use crate::paths::PathOverrides;
 use crate::style;
+use crate::workspace::Workspace;
 use omnifs_provider::SchemeGuidance;
 
 pub(super) async fn login(
@@ -124,20 +124,16 @@ pub(crate) async fn login_with_paths(
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<()> {
-    let ctx = AppContext::resolve(
-        PathOverrides {
-            config_dir: Some(config_dir),
-            ..Default::default()
-        },
-        None,
-        None,
-    )?;
-    let mut paths = ctx.paths().clone();
+    let workspace = Workspace::resolve(PathOverrides {
+        config_dir: Some(config_dir),
+        ..Default::default()
+    })?;
+    let mut paths = workspace.paths().clone();
     paths.credentials_file = credentials_file;
     let store = Box::new(FileStore::new(&paths.credentials_file));
-    let mounts = ctx.workspace().mounts()?;
+    let mounts = workspace.mounts()?;
     login(
-        ctx.catalog(),
+        workspace.catalog(),
         &mounts,
         store,
         mount,

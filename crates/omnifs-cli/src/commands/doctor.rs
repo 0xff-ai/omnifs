@@ -7,12 +7,12 @@ use std::path::Path;
 
 use omnifs_creds::FileStore;
 
-use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
+use crate::workspace::Workspace;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
@@ -29,9 +29,9 @@ pub(crate) enum DoctorVerdict {
 
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
-        let ctx = AppContext::resolve_default()?;
-        let mounts = ctx.workspace().mounts()?;
-        run(ctx.paths(), ctx.catalog(), mounts).await
+        let workspace = Workspace::resolve_default()?;
+        let mounts = workspace.mounts()?;
+        run(workspace.paths(), workspace.catalog(), mounts).await
     }
 }
 
@@ -177,11 +177,12 @@ async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
 
     // Use the default runtime target so that probe_image_cached checks the
     // same image omnifs up would pull.
-    let target = match crate::paths::resolve_with_config(PathOverrides::default())
-        .and_then(|(_, cfg)| DockerTarget::resolve(None, None, &cfg))
-    {
-        Ok(t) => t,
-        Err(e) => return (None, ProbeResult::Err(format!("resolve target: {e}"))),
+    let target = match Workspace::resolve(PathOverrides::default()).and_then(|workspace| {
+        let config = workspace.config()?;
+        DockerTarget::resolve(None, None, &config)
+    }) {
+        Ok(target) => target,
+        Err(error) => return (None, ProbeResult::Err(format!("resolve target: {error}"))),
     };
 
     match Runtime::probe_docker(&target).await {

@@ -17,7 +17,6 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 use omnifs_provider::ProviderManifest;
 
-use crate::app_context::AppContext;
 use crate::catalog;
 use crate::commands::{init, up};
 use crate::config::ConfiguredBackend;
@@ -25,6 +24,7 @@ use crate::error::WithHint;
 use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
 use crate::session::GUEST_FUSE_MOUNT;
+use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
@@ -56,15 +56,16 @@ impl SetupArgs {
             anyhow::bail!("omnifs does not yet run on this platform");
         }
 
-        let ctx = AppContext::resolve_default()?;
-        let paths = ctx.paths();
+        let workspace = Workspace::resolve_default()?;
+        let paths = workspace.paths();
+        let config = workspace.config()?;
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
         // Record the launch backend so `omnifs up`/`down` read it. Docker is
         // optional; native mode does not require a Docker daemon or image pull.
-        let backend = ctx.config().backend();
-        if ctx.config().system.runtime.is_none() {
+        let backend = config.backend();
+        if config.system.runtime.is_none() {
             let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
             file.set_system_backend(backend)?;
             file.save()?;
@@ -72,14 +73,15 @@ impl SetupArgs {
         let host_native = backend == ConfiguredBackend::Native;
 
         if !host_native {
-            let runtime = connect_runtime(os, ctx.docker_target()).await?;
+            let docker_target = DockerTarget::resolve(None, None, &config)?;
+            let runtime = connect_runtime(os, &docker_target).await?;
             runtime
-                .pull_image_with_progress(ctx.docker_target().image().as_str())
+                .pull_image_with_progress(docker_target.image().as_str())
                 .await?;
         }
 
-        let catalog = ctx.catalog();
-        let mounts = ctx.workspace().mounts()?;
+        let catalog = workspace.catalog();
+        let mounts = workspace.mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
@@ -128,7 +130,7 @@ impl SetupArgs {
                 "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
             );
         } else {
-            launch_via_up(ctx.config()).await?;
+            launch_via_up(&config).await?;
         }
         Ok(())
     }

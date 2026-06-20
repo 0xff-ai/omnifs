@@ -16,6 +16,7 @@ use crate::inspector::{
 };
 use crate::launch_backend::DockerTarget;
 use crate::paths::PathOverrides;
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InspectArgs {
@@ -84,7 +85,8 @@ impl InspectArgs {
     }
 
     fn resolve_container(&self) -> anyhow::Result<ContainerName> {
-        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
+        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let config = workspace.config()?;
         DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }
 }

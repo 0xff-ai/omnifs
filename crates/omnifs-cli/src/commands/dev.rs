@@ -16,14 +16,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::catalog::ProviderTemplate;
 use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
-use crate::launch_backend::LaunchBackend;
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::paths::{PathOverrides, Paths};
 use crate::runtime::ContainerExtras;
 use crate::session::{
@@ -97,16 +96,14 @@ impl DevArgs {
             build_image(workspace.path(), &image)?;
         }
 
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                config_dir: Some(dev_home.clone()),
-                ..PathOverrides::default()
-            },
-            Some(container_name.clone()),
-            Some(image),
-        )?;
-        let paths = ctx.paths();
-        let docker_target = ctx.docker_target();
+        let dev_workspace = crate::workspace::Workspace::resolve(PathOverrides {
+            config_dir: Some(dev_home.clone()),
+            ..PathOverrides::default()
+        })?;
+        let config = dev_workspace.config()?;
+        let paths = dev_workspace.paths();
+        let docker_target =
+            DockerTarget::resolve(Some(container_name.clone()), Some(image), &config)?;
 
         // Providers: export freshly from the workspace, or unpack the launcher
         // bundle when running a pre-built image (no workspace build).
@@ -122,7 +119,7 @@ impl DevArgs {
         // Provision each dev mount's credential from the host into the dev-home
         // store, then launch only the mounts we could provision (plus the ones
         // that need no auth). Same detect→validate→store path as `omnifs init`.
-        let templates = ctx.catalog().provider_templates()?;
+        let templates = dev_workspace.catalog().provider_templates()?;
         let mut configs =
             provision_dev_mounts(dev_mounts::configs()?, &templates, &paths.credentials_file)
                 .await?;
@@ -161,7 +158,7 @@ impl DevArgs {
                 configs,
                 extras: ContainerExtras { binds },
             },
-            ctx.catalog(),
+            dev_workspace.catalog(),
         )
         .await?;
 

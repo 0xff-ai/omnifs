@@ -2,8 +2,8 @@
 //!
 //! This crate is the single source of truth for the omnifs on-disk layout.
 //! Both the CLI and daemon depend on it; neither duplicates the resolution
-//! logic. The daemon never reads `config.toml`, so the two-pass
-//! `resolve_with_config` stays in the CLI.
+//! logic. Higher-level CLI factories layer config and daemon handles on top of
+//! this path-only layout.
 //!
 //! Resolution order (per directory):
 //!   1. Explicit override from `PathOverrides` (CLI flag)

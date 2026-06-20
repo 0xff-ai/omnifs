@@ -21,13 +21,13 @@ use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
 
-use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::launch_backend::LaunchBackend;
 use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
+use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
@@ -69,11 +69,10 @@ pub struct InitArgs {
 impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
-        let paths = ctx.paths();
+        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let paths = workspace.paths();
         let interactive = !self.no_input;
-        let catalog = ctx.catalog();
-        let workspace = ctx.workspace();
+        let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
@@ -215,8 +214,8 @@ impl InitArgs {
 
         let config = crate::session::MountConfig::from_parsed(spec, mount_path.clone())?;
         let store = FileStore::new(&paths.credentials_file);
-        let backend = LaunchBackend::from_config(ctx.config(), ctx.docker_target().clone());
-        match crate::live::add_mount(catalog, &store, config, &backend).await {
+        let backend = LaunchBackend::resolve(&workspace.config()?, None, None)?;
+        match crate::live::add_mount(workspace.daemon(), catalog, &store, config, &backend).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },

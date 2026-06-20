@@ -76,8 +76,8 @@ pub enum Commands {
     /// Print shell completions.
     Completions(commands::completions::CompletionsArgs),
 
-    /// Print version information. Use --detail for image / container /
-    /// store / provider count alongside the CLI version.
+    /// Print version information. Use --detail for daemon / store /
+    /// provider count alongside the CLI version.
     Version(commands::version::VersionArgs),
 
     /// Debug utilities. Hidden from `--help`.

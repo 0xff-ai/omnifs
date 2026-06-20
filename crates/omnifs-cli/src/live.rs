@@ -26,12 +26,12 @@ pub(crate) enum LiveApply {
 /// added to a running container, so it is reported as restart-required and the
 /// reconcile is left for the next `omnifs up`.
 pub(crate) async fn add_mount(
+    client: &DaemonClient,
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
     config: MountConfig,
     backend: &LaunchBackend,
 ) -> anyhow::Result<LiveApply> {
-    let client = DaemonClient::new();
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
@@ -54,8 +54,7 @@ pub(crate) async fn add_mount(
 
 /// Reconcile the running daemon after the caller has removed the mount's spec
 /// file. The daemon drops any mount no longer present in `mounts/`.
-pub(crate) async fn remove_mount() -> anyhow::Result<LiveApply> {
-    let client = DaemonClient::new();
+pub(crate) async fn remove_mount(client: &DaemonClient) -> anyhow::Result<LiveApply> {
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }

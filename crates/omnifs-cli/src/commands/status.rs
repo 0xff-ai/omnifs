@@ -1,11 +1,10 @@
 //! `omnifs status` verb handler.
 
-use crate::app_context::AppContext;
-use crate::catalog::ProviderCatalog;
 use crate::cli::OutputFormat;
-use crate::client::{DaemonClient, DaemonProbe};
-use crate::paths::{PathOverrides, Paths};
+use crate::client::DaemonProbe;
+use crate::paths::PathOverrides;
 use crate::status::collect_status;
+use crate::workspace::Workspace;
 use anyhow::Context as _;
 use clap::Args;
 use std::path::PathBuf;
@@ -28,27 +27,18 @@ impl StatusArgs {
             config_dir: self.config_dir.clone(),
             ..Default::default()
         };
-        // A malformed config.toml shouldn't crash `omnifs status`; fall back
-        // to pure flag + env + platform-default resolution so the user can
-        // still see what's broken.
-        let (paths, catalog, mounts) = match AppContext::resolve(overrides.clone(), None, None) {
-            Ok(ctx) => {
-                let mounts = ctx.workspace().mounts()?;
-                (ctx.paths().clone(), ctx.catalog().clone(), mounts)
-            },
-            Err(error) => {
-                anstream::eprintln!("warning: {error:#}");
-                let paths = Paths::resolve(overrides)?;
-                let catalog = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir);
-                (paths, catalog, Vec::new())
-            },
-        };
-        let client = DaemonClient::new();
-        let runtime = match client.probe().await? {
+        let workspace = Workspace::resolve(overrides)?;
+        let mounts = workspace.mounts()?;
+        let runtime = match workspace.daemon().probe().await? {
             DaemonProbe::Unreachable => None,
             DaemonProbe::Compatible(status) => Some(*status),
         };
-        let report = collect_status(&catalog, paths, runtime, mounts);
+        let report = collect_status(
+            workspace.catalog(),
+            workspace.paths().clone(),
+            runtime,
+            mounts,
+        );
         match OutputFormat::from(self.json) {
             OutputFormat::Json => {
                 let payload = report.to_json();

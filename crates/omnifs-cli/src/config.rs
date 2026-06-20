@@ -1,8 +1,8 @@
 //! Global `config.toml` loader. Lives at `paths.config_file`.
 //!
 //! Resolution order is: CLI flag > env var > config file > built-in default.
-//! Missing file is not an error; malformed file is. The Config is loaded
-//! once and threaded into commands that need it.
+//! Missing file is not an error; malformed file is. Commands load it from
+//! their resolved workspace when they need launch or Docker policy.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

@@ -12,11 +12,11 @@ use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::app_context::AppContext;
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
 use crate::cli::OutputFormat;
 use crate::paths::PathOverrides;
 use crate::session::MountConfig;
+use crate::workspace::Workspace;
 
 pub(crate) use login::login_with_paths;
 
@@ -76,13 +76,13 @@ pub enum AuthCommand {
 
 impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
-        let mut paths = ctx.paths().clone();
+        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let mut paths = workspace.paths().clone();
         if let Some(creds) = self.credentials_file.clone() {
             paths.credentials_file = creds;
         }
-        let catalog = ctx.catalog();
-        let mounts = ctx.workspace().mounts()?;
+        let catalog = workspace.catalog();
+        let mounts = workspace.mounts()?;
         let store = Box::new(FileStore::new(&paths.credentials_file));
         match self.command {
             // A static reference card; ignores the mount/credential context above.

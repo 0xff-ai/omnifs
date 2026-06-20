@@ -21,9 +21,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use omnifs_api::MountInfo;
 
-use crate::client::DaemonClient;
 use crate::launch_record::LaunchRecord;
-use crate::paths::{PathOverrides, Paths};
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -46,7 +45,8 @@ impl ShellArgs {
             );
         }
 
-        let paths = Paths::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve_default()?;
+        let paths = workspace.paths();
 
         // The run-state file is the source of truth for whether a daemon was
         // started and how (native vs container) plus its mount point — no live
@@ -63,7 +63,7 @@ impl ShellArgs {
         // A live status call, when the daemon answers, supplies the mount→provider
         // map for the prompt and the canonical mount point; if it does not, fall
         // back to the record and warn that the mount may be stale.
-        let live = DaemonClient::new().status().await.ok();
+        let live = workspace.daemon().status().await.ok();
         if live.is_none() {
             anstream::eprintln!(
                 "note: the daemon is not answering; its mount may be stale (try `omnifs up`)"

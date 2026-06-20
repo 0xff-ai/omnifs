@@ -3,7 +3,6 @@
 //! Provides commands to mount and unmount the virtual filesystem,
 //! as well as provider introspection utilities.
 
-mod app_context;
 mod auth;
 mod backend;
 mod capability;

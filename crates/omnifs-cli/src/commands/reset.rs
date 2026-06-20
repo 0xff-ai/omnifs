@@ -14,7 +14,6 @@ use std::path::Path;
 use anyhow::Context;
 use clap::Args;
 
-use crate::app_context::AppContext;
 use crate::catalog::MountRemovalTarget;
 use crate::client::DaemonClient;
 use crate::commands::mounts::delete_credentials;
@@ -22,6 +21,7 @@ use crate::credential_target::CredentialTarget;
 use crate::launch_backend::LaunchBackend;
 use crate::launch_record::{LaunchRecord, backend_from_daemon};
 use crate::paths::Paths;
+use crate::workspace::Workspace;
 use omnifs_creds::FileStore;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -40,9 +40,9 @@ impl ResetArgs {
             yes,
             keep_credentials,
         } = self;
-        let ctx = AppContext::resolve_default()?;
-        let paths = ctx.paths();
-        let targets = ctx.catalog().reset_removal_targets()?;
+        let workspace = Workspace::resolve_default()?;
+        let paths = workspace.paths();
+        let targets = workspace.catalog().reset_removal_targets()?;
 
         if targets.is_empty() {
             anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
@@ -63,7 +63,7 @@ impl ResetArgs {
         // Tear down the daemon first so a daemon writing files won't race the
         // credential or mount-config delete. Best-effort: a non-running daemon
         // or an absent launch record is not a reset failure.
-        teardown_daemon(paths).await;
+        teardown_daemon(workspace.daemon(), paths).await;
 
         let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
@@ -104,13 +104,12 @@ fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
 
 /// Best-effort daemon teardown using the same resolution order as `omnifs
 /// down`: probe the control port, fall back to the launch record.
-async fn teardown_daemon(paths: &crate::paths::Paths) {
+async fn teardown_daemon(client: &DaemonClient, paths: &crate::paths::Paths) {
     let config_dir = &paths.config_dir;
     let nfs_state_dir = paths.nfs_state_dir();
-    let client = DaemonClient::new();
 
     // Try live daemon first.
-    let backend = match resolve_backend(&client, config_dir).await {
+    let backend = match resolve_backend(client, config_dir).await {
         Ok(Some(backend)) => backend,
         Ok(None) => {
             anstream::println!("⚠  No running daemon found; skipping daemon teardown");

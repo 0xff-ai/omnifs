@@ -19,7 +19,7 @@ use clap::Args;
 
 use crate::client::DaemonClient;
 use crate::launch_record::{LaunchRecord, backend_from_daemon};
-use crate::paths::{PathOverrides, Paths};
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DownArgs {
@@ -31,9 +31,9 @@ pub struct DownArgs {
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let DownArgs { force } = self;
-        let paths = Paths::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve_default()?;
 
-        teardown_daemon(&paths, force).await?;
+        teardown_daemon(workspace.daemon(), workspace.paths(), force).await?;
 
         // A dev sandbox in a workspace checkout also brings up a local
         // Kubernetes cluster (via `omnifs dev`); tear it down so `omnifs down`
@@ -47,13 +47,16 @@ impl DownArgs {
 /// Stop the running daemon and reclaim its backend using the module's
 /// resolution order. The backend is identified from the live daemon or the
 /// launch record, never from `[system].runtime`.
-async fn teardown_daemon(paths: &crate::paths::Paths, force: bool) -> anyhow::Result<()> {
+async fn teardown_daemon(
+    client: &DaemonClient,
+    paths: &crate::paths::Paths,
+    force: bool,
+) -> anyhow::Result<()> {
     let config_dir = &paths.config_dir;
     let nfs_state_dir = paths.nfs_state_dir();
-    let client = DaemonClient::new();
 
     // Step 1: a live daemon answers; ask it to shut down, then reclaim.
-    if let Some(status) = probe_live_daemon(&client).await? {
+    if let Some(status) = probe_live_daemon(client).await? {
         anstream::println!("Stopping daemon (pid {})…", status.pid);
         match client.shutdown().await? {
             Some(report) => {
