@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
+use crate::app::FrontendKind;
+use crate::context::DaemonContext;
 #[cfg(target_os = "linux")]
 use crate::proc_mounts;
 
@@ -38,8 +40,31 @@ struct Nfs {
 }
 
 impl Frontends {
+    pub(crate) fn from_context(
+        context: &DaemonContext,
+        registry: Arc<ProviderRegistry>,
+    ) -> anyhow::Result<Self> {
+        match context.frontend() {
+            #[cfg(target_os = "linux")]
+            FrontendKind::Fuse => Ok(Self::fuse(
+                context.mount_point().to_path_buf(),
+                registry,
+                omnifs_fuse::new_notifier_handle(),
+            )),
+            #[cfg(not(target_os = "linux"))]
+            FrontendKind::Fuse => anyhow::bail!(
+                "the fuse frontend is only available on Linux; host-native uses the NFS loopback"
+            ),
+            FrontendKind::Nfs => Ok(Self::nfs(
+                context.mount_point().to_path_buf(),
+                registry,
+                context.nfs_mount_options(),
+            )),
+        }
+    }
+
     #[cfg(target_os = "linux")]
-    pub fn fuse(
+    fn fuse(
         mount_point: PathBuf,
         registry: Arc<ProviderRegistry>,
         notifier: NotifierHandle,
@@ -53,7 +78,7 @@ impl Frontends {
         }
     }
 
-    pub fn nfs(
+    fn nfs(
         mount_point: PathBuf,
         registry: Arc<ProviderRegistry>,
         options: NfsMountOptions,
@@ -64,14 +89,6 @@ impl Frontends {
                 registry,
                 options,
             }),
-        }
-    }
-
-    pub fn mount_point(&self) -> &Path {
-        match &self.primary {
-            #[cfg(target_os = "linux")]
-            Frontend::Fuse(frontend) => &frontend.mount_point,
-            Frontend::Nfs(frontend) => &frontend.mount_point,
         }
     }
 

@@ -113,6 +113,13 @@ impl DockerTarget {
         })
     }
 
+    pub(crate) fn from_config(config: &Config) -> anyhow::Result<Self> {
+        Ok(Self {
+            container_name: Self::container_name_from_config(config)?,
+            image: Self::image_from_config(config)?,
+        })
+    }
+
     pub(crate) fn resolve_container_name(
         container_name: Option<String>,
         config: &Config,
@@ -139,6 +146,19 @@ impl DockerTarget {
             .unwrap_or_else(|| IMAGE.to_string());
         Ok(ImageRef::new(image)?)
     }
+
+    fn container_name_from_config(config: &Config) -> anyhow::Result<ContainerName> {
+        let container_name = config
+            .container_name
+            .clone()
+            .unwrap_or_else(|| CONTAINER_NAME.to_string());
+        ContainerName::new(container_name)
+    }
+
+    fn image_from_config(config: &Config) -> anyhow::Result<ImageRef> {
+        let image = config.image.clone().unwrap_or_else(|| IMAGE.to_string());
+        Ok(ImageRef::new(image)?)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +168,13 @@ pub(crate) enum LaunchBackend {
 }
 
 impl LaunchBackend {
+    pub(crate) fn from_config(config: &Config) -> anyhow::Result<Self> {
+        match config.backend() {
+            ConfiguredBackend::Native => Ok(Self::Native),
+            ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::from_config(config)?)),
+        }
+    }
+
     pub(crate) fn resolve(
         config: &Config,
         container_name: Option<String>,
@@ -174,19 +201,8 @@ impl LaunchBackend {
         )?))
     }
 
-    pub(crate) fn is_native(&self) -> bool {
-        matches!(self, Self::Native)
-    }
-
     pub(crate) fn is_docker(&self) -> bool {
         matches!(self, Self::Docker(_))
-    }
-
-    pub(crate) fn docker_target(&self) -> Option<&DockerTarget> {
-        match self {
-            Self::Docker(target) => Some(target),
-            Self::Native => None,
-        }
     }
 
     pub(crate) fn materialization_mode(&self) -> MaterializationMode {
@@ -283,6 +299,32 @@ mod tests {
                     DockerTarget::resolve(None, Some("ghcr.io/example/cli:2.0.0".into()), &config)
                         .unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/cli:2.0.0");
+            },
+        );
+    }
+
+    #[test]
+    fn from_config_ignores_env_docker_target_overrides() {
+        with_env(
+            &[
+                (ENV_IMAGE, Some("ghcr.io/example/env:9.9.9")),
+                (ENV_CONTAINER_NAME, Some("omnifs-env")),
+            ],
+            || {
+                let config = Config {
+                    system: crate::config::ConfigSystem {
+                        runtime: Some(ConfiguredBackend::Docker),
+                        ..Default::default()
+                    },
+                    image: Some("ghcr.io/example/config:1.0.0".into()),
+                    container_name: Some("omnifs-config".into()),
+                };
+                let backend = LaunchBackend::from_config(&config).unwrap();
+                let LaunchBackend::Docker(target) = backend else {
+                    panic!("expected docker backend");
+                };
+                assert_eq!(target.image().as_str(), "ghcr.io/example/config:1.0.0");
+                assert_eq!(target.container_name().as_str(), "omnifs-config");
             },
         );
     }

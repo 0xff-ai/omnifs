@@ -11,15 +11,14 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use omnifs_api::{
-    API_MAJOR, API_MINOR, DaemonBackend, DaemonStatus, FrontendInfo, MountFailure, MountInfo,
-    ReadyInfo, ReconcileReport, StopReport,
+    DaemonBackend, DaemonStatus, FrontendInfo, MountFailure, MountInfo, ReadyInfo, ReconcileReport,
+    StopReport,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
 use omnifs_inspector::serialize_record;
-use omnifs_mount::materialize::MaterializationMode;
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
@@ -27,6 +26,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracing::{info, warn};
 use utoipa::OpenApi;
 
+use crate::context::DaemonContext;
 use crate::frontends::Frontends;
 
 #[derive(OpenApi)]
@@ -55,38 +55,33 @@ use crate::frontends::Frontends;
 struct ApiDoc;
 
 pub struct Daemon {
+    context: DaemonContext,
     registry: Arc<ProviderRegistry>,
     sink: Option<Arc<InspectorSink>>,
     frontends: Frontends,
-    root_symlinks: bool,
-    /// Backend serving this daemon. Selects the materialization mode for
-    /// `POST /v1/reconcile` and the backend reported in status.
-    backend: DaemonBackend,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
 }
 
 impl Daemon {
-    pub fn new(
+    pub(crate) fn new(
+        context: DaemonContext,
         registry: Arc<ProviderRegistry>,
         sink: Option<Arc<InspectorSink>>,
         frontends: Frontends,
-        root_symlinks: bool,
-        backend: DaemonBackend,
     ) -> Self {
         Self {
+            context,
             registry,
             sink,
             frontends,
-            root_symlinks,
-            backend,
             last_failed: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     pub fn mount_point(&self) -> &Path {
-        self.frontends.mount_point()
+        self.context.mount_point()
     }
 
     pub fn spawn_control(
@@ -111,17 +106,10 @@ impl Daemon {
         self.frontends.serve(rt)
     }
 
-    pub fn ready(&self) -> ReadyInfo {
-        ReadyInfo {
-            ready: self.frontends.serving().is_some(),
-        }
-    }
-
-    pub fn status(&self) -> DaemonStatus {
+    fn control_snapshot(&self) -> ControlSnapshot {
         let root_mount = self.registry.root_mount_name();
-        let mut mounts: Vec<MountInfo> = self
-            .registry
-            .runtime_entries()
+        let entries = self.registry.runtime_entries();
+        let mut mounts: Vec<MountInfo> = entries
             .into_iter()
             .map(|(mount, runtime)| MountInfo {
                 root_mount: root_mount.as_deref() == Some(mount.as_str()),
@@ -131,26 +119,15 @@ impl Daemon {
             .collect();
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
 
-        let dirs = self.registry.dirs();
-        DaemonStatus {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            api_major: API_MAJOR,
-            api_minor: API_MINOR,
-            pid: std::process::id(),
-            executable: current_executable(),
-            mount_point: self.frontends.mount_point().to_path_buf(),
-            config_dir: dirs.config_dir.to_path_buf(),
-            cache_dir: dirs.cache_dir.to_path_buf(),
-            providers_dir: dirs.providers_dir.to_path_buf(),
-            frontend: self.frontends.serving(),
-            backend: self.backend,
-            mounts,
-            failed: self
-                .last_failed
-                .lock()
-                .map(|failed| failed.clone())
-                .unwrap_or_default(),
-        }
+        let failed = self
+            .last_failed
+            .lock()
+            .map(|failed| failed.clone())
+            .unwrap_or_default();
+        let status = self
+            .context
+            .status(self.frontends.serving(), mounts, failed);
+        ControlSnapshot { status }
     }
 
     /// Converge the running mount set to `mounts/*.json`, synchronously. Runs
@@ -160,7 +137,9 @@ impl Daemon {
     /// a phantom directory. Callable directly from the blocking startup path; the
     /// `POST /v1/reconcile` handler wraps it in a blocking task.
     pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
-        let outcome = self.registry.reconcile(handle, self.materialization_mode());
+        let outcome = self
+            .registry
+            .reconcile(handle, self.context.materialization_mode());
         for name in &outcome.added {
             self.update_root_symlink(name, true);
         }
@@ -204,22 +183,6 @@ impl Daemon {
                 warn!(%join_error, "reconcile task failed");
                 ReconcileReport::default()
             })
-    }
-
-    fn materialization_mode(&self) -> MaterializationMode {
-        match self.backend {
-            DaemonBackend::Native => MaterializationMode::HostNative,
-            DaemonBackend::Docker => MaterializationMode::Docker,
-        }
-    }
-
-    /// Snapshot of what a shutdown will tear down, captured before unmounting.
-    pub fn stop_report(&self) -> StopReport {
-        StopReport {
-            frontend: self.frontends.serving(),
-            mount_point: self.frontends.mount_point().to_path_buf(),
-            providers_dropped: self.registry.runtime_entries().len(),
-        }
     }
 
     /// Unmount the frontend from a detached task so the HTTP response flushes
@@ -268,10 +231,10 @@ impl Daemon {
     /// Only entries that are symlinks into the mount point are ever removed,
     /// so a mount named `bin` or `lib` cannot clobber real root entries.
     fn update_root_symlink(&self, mount: &str, present: bool) {
-        if !self.root_symlinks {
+        if !self.context.root_symlinks() {
             return;
         }
-        let mount_point = self.frontends.mount_point();
+        let mount_point = self.context.mount_point();
         let link = std::path::Path::new("/").join(mount);
         let target = mount_point.join(mount);
         let ours =
@@ -313,6 +276,42 @@ impl Daemon {
     }
 }
 
+struct ControlSnapshot {
+    status: DaemonStatus,
+}
+
+impl ControlSnapshot {
+    fn ready(&self) -> ReadyInfo {
+        ReadyInfo {
+            ready: self.status.frontend.is_some(),
+        }
+    }
+
+    fn status(self) -> DaemonStatus {
+        self.status
+    }
+
+    fn mounts(self) -> Vec<MountInfo> {
+        self.status.mounts
+    }
+
+    fn mount(&self, name: &str) -> Option<MountInfo> {
+        self.status
+            .mounts
+            .iter()
+            .find(|mount| mount.mount == name)
+            .cloned()
+    }
+
+    fn stop_report(&self) -> StopReport {
+        StopReport {
+            frontend: self.status.frontend.clone(),
+            mount_point: self.status.mount_point.clone(),
+            providers_dropped: self.status.mounts.len(),
+        }
+    }
+}
+
 pub fn openapi() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
@@ -333,17 +332,13 @@ pub fn openapi_json() -> String {
     ),
 )]
 async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
-    let info = daemon.ready();
+    let info = daemon.control_snapshot().ready();
     let status = if info.ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(info)).into_response()
-}
-
-fn current_executable() -> PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::new())
 }
 
 #[utoipa::path(
@@ -353,7 +348,7 @@ fn current_executable() -> PathBuf {
     responses((status = 200, description = "daemon runtime facts", body = DaemonStatus)),
 )]
 async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
-    Json(daemon.status())
+    Json(daemon.control_snapshot().status())
 }
 
 #[utoipa::path(
@@ -363,7 +358,7 @@ async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
     responses((status = 200, description = "loaded provider mounts", body = [MountInfo])),
 )]
 async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> {
-    Json(daemon.status().mounts)
+    Json(daemon.control_snapshot().mounts())
 }
 
 #[utoipa::path(
@@ -380,7 +375,7 @@ async fn mount_inspect(
     State(daemon): State<Arc<Daemon>>,
     UrlPath(name): UrlPath<String>,
 ) -> Response {
-    match daemon.status().mounts.into_iter().find(|m| m.mount == name) {
+    match daemon.control_snapshot().mount(&name) {
         Some(info) => Json(info).into_response(),
         None => (StatusCode::NOT_FOUND, format!("mount `{name}` not found\n")).into_response(),
     }
@@ -407,7 +402,7 @@ async fn reconcile(State(daemon): State<Arc<Daemon>>) -> Json<ReconcileReport> {
     responses((status = 200, description = "what the daemon tore down before exiting", body = StopReport)),
 )]
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
-    let report = daemon.stop_report();
+    let report = daemon.control_snapshot().stop_report();
     daemon.trigger_shutdown();
     Json(report)
 }

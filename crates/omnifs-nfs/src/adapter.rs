@@ -1752,7 +1752,7 @@ impl ReadOnlyExport for Export {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_host::Dirs;
+    use omnifs_host::HostContext;
     use omnifs_host::cloner::GitCloner;
     use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
     use std::path::Path as StdPath;
@@ -1798,7 +1798,7 @@ mod tests {
         let credentials_file = config_dir.path().join("credentials.json");
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
-            Dirs::new(
+            HostContext::new(
                 cache_dir.path(),
                 config_dir.path(),
                 providers_dir.path(),

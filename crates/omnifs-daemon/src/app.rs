@@ -7,19 +7,16 @@
 //! `docs/design/daemon-cli-split.md`).
 
 use clap::{Args, ValueEnum};
-use omnifs_api::DaemonBackend;
-use omnifs_home::{Daemon as DaemonRole, Workspace};
-use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
 use omnifs_host::registry::ProviderRegistry;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-use crate::{frontends, server};
+use crate::{context::DaemonContext, frontends, server};
 
 /// Arguments for the `omnifs daemon` subcommand (the runtime daemon).
 #[derive(Args, Debug)]
@@ -60,12 +57,12 @@ impl FrontendKind {
     /// (macOS host-native). The daemon owns this choice; the CLI does not pass a
     /// frontend flag.
     #[cfg(target_os = "linux")]
-    fn platform_default() -> Self {
+    pub(crate) fn platform_default() -> Self {
         Self::Fuse
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn platform_default() -> Self {
+    pub(crate) fn platform_default() -> Self {
         Self::Nfs
     }
 }
@@ -115,48 +112,27 @@ fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>)
     }
 }
 
-/// Resolve the host-visible mount point the daemon serves at. The container
-/// entrypoint exports `OMNIFS_MOUNT_POINT`; host-native falls back to
-/// `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted tree lives
-/// at a normal user-owned location.
-fn resolve_mount_point() -> anyhow::Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("OMNIFS_MOUNT_POINT") {
-        return Ok(PathBuf::from(explicit));
-    }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
-    })?;
-    Ok(PathBuf::from(home).join("omnifs"))
-}
-
 /// Bring up the registry, control API, and filesystem frontend, then serve
 /// until unmounted. Blocks; expects to run on a tokio runtime (the caller
 /// owns runtime and tracing setup).
 pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
-    let workspace = Workspace::<DaemonRole>::resolve()?;
-    let frontend = FrontendKind::platform_default();
-    let mount_point = resolve_mount_point()?;
+    let context = DaemonContext::resolve(args)?;
+    context.prepare_startup_dirs()?;
 
-    std::fs::create_dir_all(&mount_point)?;
-    std::fs::create_dir_all(workspace.cache_dir())?;
+    let cloner = Arc::new(GitCloner::new(context.cache_dir().to_path_buf()));
 
-    let cloner = Arc::new(GitCloner::new(workspace.cache_dir().to_path_buf()));
-    let dirs = Dirs::new(
-        cloner.cache_dir(),
-        workspace.config_dir(),
-        workspace.providers_dir(),
-        workspace.credentials_file(),
-    );
+    let registry = {
+        let host_context = context.host_context();
+        info!(
+            mount_point = %context.mount_point().display(),
+            config = %host_context.config_dir().display(),
+            cache = %cloner.cache_dir().display(),
+            providers = %host_context.providers_dir().display(),
+            "starting daemon"
+        );
+        Arc::new(ProviderRegistry::new(host_context, Arc::clone(&cloner))?)
+    };
 
-    info!(
-        mount_point = %mount_point.display(),
-        config = %dirs.config_dir.display(),
-        cache = %cloner.cache_dir().display(),
-        providers = %dirs.providers_dir.display(),
-        "starting daemon"
-    );
-
-    let registry = Arc::new(ProviderRegistry::new(dirs, Arc::clone(&cloner))?);
     let rt = Handle::current();
     let sink = inspector::init_global_from_env();
     if let Some(sink) = &sink {
@@ -167,52 +143,15 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    let frontends = match frontend {
-        #[cfg(target_os = "linux")]
-        FrontendKind::Fuse => frontends::Frontends::fuse(
-            mount_point.clone(),
-            Arc::clone(&registry),
-            omnifs_fuse::new_notifier_handle(),
-        ),
-        #[cfg(not(target_os = "linux"))]
-        FrontendKind::Fuse => anyhow::bail!(
-            "the fuse frontend is only available on Linux; host-native uses the NFS loopback"
-        ),
-        FrontendKind::Nfs => {
-            let mut options = omnifs_nfs::NfsMountOptions::loopback(
-                args.nfs_state_dir
-                    .unwrap_or_else(|| workspace.nfs_state_dir()),
-            );
-            options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
-            options.trace_path = args.nfs_trace;
-            frontends::Frontends::nfs(mount_point.clone(), Arc::clone(&registry), options)
-        },
-    };
-    // The native launcher passes `--host-native`; the container entrypoint does
-    // not. This selects the preopen materialization mode (host-direct versus
-    // container-rewritten) independently of `--root-symlinks`, which now means
-    // only "maintain `/<mount>` convenience symlinks."
-    let backend = if args.host_native {
-        DaemonBackend::Native
-    } else {
-        DaemonBackend::Docker
-    };
+    let frontend = context.frontend();
+    let frontends = frontends::Frontends::from_context(&context, Arc::clone(&registry))?;
+    let listener = context.bind_control_listener()?;
     let daemon = Arc::new(server::Daemon::new(
+        context,
         Arc::clone(&registry),
         sink,
         frontends,
-        args.root_symlinks,
-        backend,
     ));
-    let listener = std::net::TcpListener::bind(args.listen).map_err(|error| {
-        anyhow::anyhow!(
-            "cannot bind control API listener on {}: {error}\n\
-             \n\
-             Likely cause: another omnifs daemon is already running on that port.\n\
-             Run `omnifs down` to stop it, then try again.",
-            args.listen
-        )
-    })?;
     daemon.spawn_control(listener, &rt)?;
 
     // Load desired state from `mounts/*.json` before serving, so the tree is

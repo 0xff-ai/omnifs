@@ -6,7 +6,7 @@
 
 use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
-use crate::{Artifact, BuildError, Dirs, Runtime, component_engine};
+use crate::{Artifact, BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
 use omnifs_mount::materialize::{MaterializationMode, materialize};
 use omnifs_mount::mounts::{Catalog, Resolved, Spec, spec_paths_in};
@@ -26,29 +26,21 @@ pub struct ProviderRegistry {
     extractor: Arc<ArchiveExtractorComponent>,
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
-    cache_dir: PathBuf,
-    config_dir: PathBuf,
-    providers_dir: PathBuf,
-    credentials_file: PathBuf,
-    instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
-    root_mount: parking_lot::RwLock<Option<String>>,
-    timer_shutdown: watch::Sender<bool>,
-    timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// Per-mount materialized fingerprint, used by [`Self::reconcile`] to detect
-    /// a spec or provider-artifact change. Keyed by mount name.
-    fingerprints: parking_lot::RwLock<HashMap<String, MountFingerprint>>,
-    /// Serializes reconcile passes so concurrent triggers cannot race the
-    /// add/remove sequence.
-    reconcile_lock: parking_lot::Mutex<()>,
+    context: HostContext,
+    mounts: MountSupervisor,
 }
 
 impl ProviderRegistry {
     /// Build an empty registry: engine, archive extractor, and cache handles
     /// are created once here and shared across every mount added later.
-    pub fn new(dirs: Dirs<'_>, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
+    pub fn new(
+        context: impl Into<HostContext>,
+        cloner: Arc<GitCloner>,
+    ) -> Result<Self, RegistryError> {
+        let context = context.into();
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
-        let wasm_cache = dirs.cache_dir.join("wasm");
+        let wasm_cache = context.wasm_cache_dir();
         let engine = component_engine(Some(&wasm_cache), |config| {
             if let Some(strategy) = crate::provider_compiler_strategy() {
                 config.strategy(strategy);
@@ -59,7 +51,7 @@ impl ProviderRegistry {
         // One extractor (engine + parsed component + linker pre) shared
         // across every mount; the per-call sandbox lives on a fresh
         // `wasmtime::Store`. Shares the same on-disk artifact cache.
-        let archive_tool_path = dirs.provider_path(ARCHIVE_TOOL_WASM);
+        let archive_tool_path = context.provider_path(ARCHIVE_TOOL_WASM);
         let extractor = Arc::new(
             ArchiveExtractorComponent::from_path(
                 &archive_tool_path,
@@ -73,25 +65,16 @@ impl ProviderRegistry {
         // database cleared + reopened on startup (Codex #5). Shared across all
         // provider runtimes; the object tier isolates mounts by keyspace, the
         // view tier by a path prefix.
-        let caches = Caches::open(dirs.cache_dir)
+        let caches = Caches::open(context.cache_dir())
             .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
 
-        let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             engine,
             extractor,
             caches,
             cloner,
-            cache_dir: dirs.cache_dir.to_path_buf(),
-            config_dir: dirs.config_dir.to_path_buf(),
-            providers_dir: dirs.providers_dir.to_path_buf(),
-            credentials_file: dirs.credentials_file.to_path_buf(),
-            instances: parking_lot::RwLock::new(HashMap::new()),
-            root_mount: parking_lot::RwLock::new(None),
-            timer_shutdown,
-            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
-            fingerprints: parking_lot::RwLock::new(HashMap::new()),
-            reconcile_lock: parking_lot::Mutex::new(()),
+            context,
+            mounts: MountSupervisor::new(),
         })
     }
 
@@ -102,6 +85,92 @@ impl ProviderRegistry {
         spec: Spec,
         handle: &tokio::runtime::Handle,
     ) -> Result<Arc<Runtime>, RegistryError> {
+        self.mounts.add_mount(self, spec, handle)
+    }
+
+    /// Stop and unregister a mount: abort its timer, shut the provider
+    /// down, and drop it from the instance map.
+    pub fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
+        self.mounts.remove_mount(mount)
+    }
+
+    /// Host context this registry resolves mounts against.
+    pub fn context(&self) -> &HostContext {
+        &self.context
+    }
+
+    pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
+        self.mounts.get(mount)
+    }
+
+    pub fn mounts(&self) -> Vec<String> {
+        self.mounts.mount_names()
+    }
+
+    pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
+        self.mounts.runtime_entries()
+    }
+
+    /// Returns the mount name of the root-mounted provider, if any.
+    pub fn root_mount_name(&self) -> Option<String> {
+        self.mounts.root_mount_name()
+    }
+
+    pub fn shutdown_all(&self) {
+        self.mounts.shutdown_all();
+    }
+
+    /// Converge the running mount set to the desired state under
+    /// `<config_dir>/mounts/*.json`.
+    ///
+    /// Desired specs are materialized (metadata, runtime capabilities, preopen
+    /// rewriting) and fingerprinted; a spec that is new is added, one whose
+    /// fingerprint changed is replaced, one that disappeared is removed, and one
+    /// that fails to materialize or instantiate is recorded in
+    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
+    /// host-direct preopens versus container-rewritten preopens.
+    pub fn reconcile(
+        &self,
+        handle: &tokio::runtime::Handle,
+        mode: MaterializationMode,
+    ) -> ReconcileOutcome {
+        let _guard = self.mounts.reconcile_guard();
+        ReconcilePass::new(self, handle, mode).run()
+    }
+}
+
+struct MountSupervisor {
+    instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
+    root_mount: parking_lot::RwLock<Option<String>>,
+    timer_shutdown: watch::Sender<bool>,
+    timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Per-mount materialized fingerprint, used by reconcile to detect a spec
+    /// or provider-artifact change. Keyed by mount name.
+    fingerprints: parking_lot::RwLock<HashMap<String, MountFingerprint>>,
+    /// Serializes reconcile passes so concurrent triggers cannot race the
+    /// add/remove sequence.
+    reconcile_lock: parking_lot::Mutex<()>,
+}
+
+impl MountSupervisor {
+    fn new() -> Self {
+        let (timer_shutdown, _) = watch::channel(false);
+        Self {
+            instances: parking_lot::RwLock::new(HashMap::new()),
+            root_mount: parking_lot::RwLock::new(None),
+            timer_shutdown,
+            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
+            fingerprints: parking_lot::RwLock::new(HashMap::new()),
+            reconcile_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    fn add_mount(
+        &self,
+        registry: &ProviderRegistry,
+        spec: Spec,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Arc<Runtime>, RegistryError> {
         omnifs_core::mount::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
@@ -109,13 +178,7 @@ impl ProviderRegistry {
             return Err(RegistryError::DuplicateMount(mount));
         }
 
-        let dirs = Dirs::new(
-            &self.cache_dir,
-            &self.config_dir,
-            &self.providers_dir,
-            &self.credentials_file,
-        );
-        let wasm_path = dirs.provider_path(&spec.provider);
+        let wasm_path = registry.context.provider_path(&spec.provider);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -127,13 +190,13 @@ impl ProviderRegistry {
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = Runtime::new(
-            &self.engine,
+            &registry.engine,
             &wasm_path,
             &resolved,
-            self.cloner.clone(),
-            dirs,
-            self.extractor.clone(),
-            &self.caches,
+            registry.cloner.clone(),
+            &registry.context,
+            registry.extractor.clone(),
+            &registry.caches,
         )
         .map_err(|error| registry_error(&mount, error))?;
         let runtime = Arc::new(runtime);
@@ -170,9 +233,7 @@ impl ProviderRegistry {
         Ok(runtime)
     }
 
-    /// Stop and unregister a mount: abort its timer, shut the provider
-    /// down, and drop it from the instance map.
-    pub fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
+    fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
         let Some(runtime) = self.instances.write().remove(mount) else {
             return Err(RegistryError::MountNotFound(mount.to_string()));
         };
@@ -192,25 +253,74 @@ impl ProviderRegistry {
         Ok(())
     }
 
-    /// The directories this registry resolves mounts against.
-    pub fn dirs(&self) -> Dirs<'_> {
-        Dirs::new(
-            &self.cache_dir,
-            &self.config_dir,
-            &self.providers_dir,
-            &self.credentials_file,
-        )
+    fn load_work(
+        &self,
+        registry: &ProviderRegistry,
+        handle: &tokio::runtime::Handle,
+        work: LoadWork,
+    ) -> LoadResult {
+        let LoadWork {
+            spec,
+            mount,
+            wasm_path,
+            fingerprint,
+            running,
+            reason,
+        } = work;
+        let started = Instant::now();
+        if running {
+            let _ = self.remove_mount(&mount);
+        }
+        match self.add_mount(registry, spec, handle) {
+            Ok(_) => {
+                self.fingerprints.write().insert(mount.clone(), fingerprint);
+                if running {
+                    info!(
+                        mount = mount.as_str(),
+                        provider = %wasm_path.display(),
+                        reason,
+                        duration_ms = started.elapsed().as_millis(),
+                        "reconcile updated mount"
+                    );
+                    LoadResult::Updated { mount }
+                } else {
+                    info!(
+                        mount = mount.as_str(),
+                        provider = %wasm_path.display(),
+                        reason,
+                        duration_ms = started.elapsed().as_millis(),
+                        "reconcile added mount"
+                    );
+                    LoadResult::Added { mount }
+                }
+            },
+            Err(error) => {
+                self.fingerprints.write().remove(&mount);
+                warn!(
+                    mount = mount.as_str(),
+                    provider = %wasm_path.display(),
+                    reason,
+                    duration_ms = started.elapsed().as_millis(),
+                    error = %error,
+                    "reconcile failed to load mount"
+                );
+                LoadResult::Failed {
+                    mount,
+                    reason: error.to_string(),
+                }
+            },
+        }
     }
 
-    pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
+    fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
         self.instances.read().get(mount).cloned()
     }
 
-    pub fn mounts(&self) -> Vec<String> {
+    fn mount_names(&self) -> Vec<String> {
         self.instances.read().keys().cloned().collect()
     }
 
-    pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
+    fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
         self.instances
             .read()
             .iter()
@@ -218,12 +328,23 @@ impl ProviderRegistry {
             .collect()
     }
 
-    /// Returns the mount name of the root-mounted provider, if any.
-    pub fn root_mount_name(&self) -> Option<String> {
+    fn root_mount_name(&self) -> Option<String> {
         self.root_mount.read().clone()
     }
 
-    pub fn shutdown_all(&self) {
+    fn is_running(&self, mount: &str) -> bool {
+        self.instances.read().contains_key(mount)
+    }
+
+    fn fingerprint(&self, mount: &str) -> Option<MountFingerprint> {
+        self.fingerprints.read().get(mount).copied()
+    }
+
+    fn remove_fingerprint(&self, mount: &str) {
+        self.fingerprints.write().remove(mount);
+    }
+
+    fn shutdown_all(&self) {
         let _ = self.timer_shutdown.send(true);
         for (_, task) in self.timer_tasks.lock().drain() {
             task.abort();
@@ -235,22 +356,8 @@ impl ProviderRegistry {
         }
     }
 
-    /// Converge the running mount set to the desired state under
-    /// `<config_dir>/mounts/*.json`.
-    ///
-    /// Desired specs are materialized (metadata, runtime capabilities, preopen
-    /// rewriting) and fingerprinted; a spec that is new is added, one whose
-    /// fingerprint changed is replaced, one that disappeared is removed, and one
-    /// that fails to materialize or instantiate is recorded in
-    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
-    /// host-direct preopens versus container-rewritten preopens.
-    pub fn reconcile(
-        &self,
-        handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
-    ) -> ReconcileOutcome {
-        let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, mode).run()
+    fn reconcile_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.reconcile_lock.lock()
     }
 
     fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
@@ -310,7 +417,10 @@ impl<'a> ReconcilePass<'a> {
             registry,
             handle,
             mode,
-            catalog: Catalog::new(registry.config_dir.join("mounts"), &registry.providers_dir),
+            catalog: Catalog::new(
+                registry.context.mounts_dir(),
+                registry.context.providers_dir(),
+            ),
             desired: HashSet::new(),
             outcome: ReconcileOutcome::default(),
             started: Instant::now(),
@@ -372,10 +482,10 @@ impl<'a> ReconcilePass<'a> {
             return None;
         }
 
-        let wasm_path = self.registry.dirs().provider_path(&materialized.provider);
+        let wasm_path = self.registry.context.provider_path(&materialized.provider);
         let fingerprint = mount_fingerprint(&materialized, &wasm_path);
-        let running = self.registry.instances.read().contains_key(&mount);
-        let prior_fingerprint = self.registry.fingerprints.read().get(&mount).copied();
+        let running = self.registry.mounts.is_running(&mount);
+        let prior_fingerprint = self.registry.mounts.fingerprint(&mount);
         if running && prior_fingerprint == Some(fingerprint) {
             debug!(
                 mount = mount.as_str(),
@@ -417,7 +527,7 @@ impl<'a> ReconcilePass<'a> {
         if work.len() <= 1 {
             return work
                 .into_iter()
-                .map(|item| load_one(registry, handle, item))
+                .map(|item| registry.mounts.load_work(registry, handle, item))
                 .collect();
         }
 
@@ -440,7 +550,7 @@ impl<'a> ReconcilePass<'a> {
                     scope.spawn(move || {
                         bucket
                             .into_iter()
-                            .map(|item| load_one(registry, handle, item))
+                            .map(|item| registry.mounts.load_work(registry, handle, item))
                             .collect::<Vec<_>>()
                     })
                 })
@@ -486,10 +596,10 @@ impl<'a> ReconcilePass<'a> {
     }
 
     fn remove_stale_mounts(&mut self) {
-        for mount in self.registry.mounts() {
+        for mount in self.registry.mounts.mount_names() {
             if !self.desired.contains(&mount) {
                 let mount_started = Instant::now();
-                if self.registry.remove_mount(&mount).is_ok() {
+                if self.registry.mounts.remove_mount(&mount).is_ok() {
                     info!(
                         mount = mount.as_str(),
                         duration_ms = mount_started.elapsed().as_millis(),
@@ -497,7 +607,7 @@ impl<'a> ReconcilePass<'a> {
                     );
                     self.outcome.removed.push(mount.clone());
                 }
-                self.registry.fingerprints.write().remove(&mount);
+                self.registry.mounts.remove_fingerprint(&mount);
             }
         }
     }
@@ -520,72 +630,6 @@ enum LoadResult {
     Added { mount: String },
     Updated { mount: String },
     Failed { mount: String, reason: String },
-}
-
-/// Compile, instantiate, and register one planned mount. Runs on a reconcile
-/// worker thread (see `load_in_parallel` for why those are scoped OS threads),
-/// so it touches only the registry's thread-safe surface
-/// (`add_mount`/`remove_mount` and the fingerprint lock) and returns its result
-/// rather than mutating the shared outcome.
-fn load_one(
-    registry: &ProviderRegistry,
-    handle: &tokio::runtime::Handle,
-    work: LoadWork,
-) -> LoadResult {
-    let LoadWork {
-        spec,
-        mount,
-        wasm_path,
-        fingerprint,
-        running,
-        reason,
-    } = work;
-    let started = Instant::now();
-    if running {
-        let _ = registry.remove_mount(&mount);
-    }
-    match registry.add_mount(spec, handle) {
-        Ok(_) => {
-            registry
-                .fingerprints
-                .write()
-                .insert(mount.clone(), fingerprint);
-            if running {
-                info!(
-                    mount = mount.as_str(),
-                    provider = %wasm_path.display(),
-                    reason,
-                    duration_ms = started.elapsed().as_millis(),
-                    "reconcile updated mount"
-                );
-                LoadResult::Updated { mount }
-            } else {
-                info!(
-                    mount = mount.as_str(),
-                    provider = %wasm_path.display(),
-                    reason,
-                    duration_ms = started.elapsed().as_millis(),
-                    "reconcile added mount"
-                );
-                LoadResult::Added { mount }
-            }
-        },
-        Err(error) => {
-            registry.fingerprints.write().remove(&mount);
-            warn!(
-                mount = mount.as_str(),
-                provider = %wasm_path.display(),
-                reason,
-                duration_ms = started.elapsed().as_millis(),
-                error = %error,
-                "reconcile failed to load mount"
-            );
-            LoadResult::Failed {
-                mount,
-                reason: error.to_string(),
-            }
-        },
-    }
 }
 
 /// One mount that did not converge during [`ProviderRegistry::reconcile`].
@@ -697,7 +741,7 @@ pub enum RegistryError {
 #[cfg(test)]
 mod tests {
     use super::{ProviderRegistry, RegistryError};
-    use crate::Dirs;
+    use crate::HostContext;
     use crate::cloner::GitCloner;
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
     use omnifs_mount::materialize::MaterializationMode;
@@ -758,7 +802,7 @@ mod tests {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
-            Dirs::new(
+            HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
                 providers_dir.path(),
@@ -840,7 +884,7 @@ mod tests {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
-            Dirs::new(
+            HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
                 providers_dir.path(),

@@ -525,8 +525,8 @@ impl Runtime {
                             anyhow::anyhow!(
                                 "image `{image_str}` was not found in the registry\n\n\
                                  This tag may not be published yet. Options:\n\
-                                 - Pass a specific image with `--image <image>` (e.g. a \
-                                   release tag or a channel tag)\n\
+                                 - Configure a specific runtime image in `config.toml` (for example \
+                                   a release tag or a channel tag)\n\
                                  - Run `omnifs dev` to build and launch the local sandbox\n\
                                  - Check https://ghcr.io/0xff-ai/omnifs for available tags"
                             )
@@ -628,15 +628,13 @@ fn check_launch_protocol(image: &str, label: Option<&str>) -> Result<()> {
         Some(EXPECTED_LAUNCH_PROTOCOL) => Ok(()),
         Some(other) => anyhow::bail!(
             "runtime image `{image}` uses launch protocol `{other}`, but this CLI expects \
-             `{EXPECTED_LAUNCH_PROTOCOL}`. Use a matching image for this worktree, for example \
-             `omnifs up --image omnifs:$(git rev-parse --short=12 HEAD)-dev`, or run `omnifs dev` \
-             to build and launch the local sandbox."
+             `{EXPECTED_LAUNCH_PROTOCOL}`. Configure a matching runtime image in `config.toml`, \
+             or run `omnifs dev` to build and launch the local sandbox."
         ),
         None => anyhow::bail!(
             "runtime image `{image}` does not declare `{LAUNCH_PROTOCOL_LABEL}`. It was likely \
-             built before the daemon control-API launcher. Use a matching image for this worktree, \
-             for example `omnifs up --image omnifs:$(git rev-parse --short=12 HEAD)-dev`, or run \
-             `omnifs dev` to build and launch the local sandbox."
+             built before the daemon control-API launcher. Configure a matching runtime image in \
+             `config.toml`, or run `omnifs dev` to build and launch the local sandbox."
         ),
     }
 }
@@ -721,7 +719,7 @@ mod tests {
             "msg should name missing label: {msg}"
         );
         assert!(
-            msg.contains("--image"),
+            msg.contains("config.toml"),
             "msg should tell users how to recover: {msg}"
         );
     }

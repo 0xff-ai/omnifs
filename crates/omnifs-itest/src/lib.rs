@@ -2,7 +2,7 @@ use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
-use omnifs_host::{BuildError, Dirs, Error, Op, Runtime, TestOp};
+use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
 use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
@@ -62,7 +62,7 @@ impl RuntimeHarness {
             &wasm_path,
             &resolved,
             cloner,
-            Dirs::new(
+            &HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
                 &provider_dir,

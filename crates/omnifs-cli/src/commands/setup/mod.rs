@@ -130,7 +130,7 @@ impl SetupArgs {
                 "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
             );
         } else {
-            launch_via_up(&config).await?;
+            launch_via_up().await?;
         }
         Ok(())
     }
@@ -369,13 +369,8 @@ async fn run_init_loop(
     out
 }
 
-async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
+async fn launch_via_up() -> anyhow::Result<()> {
     anstream::println!();
     anstream::println!("Launching omnifs ...");
-    up::UpArgs {
-        image: config.image.clone(),
-        container_name: config.container_name.clone(),
-    }
-    .run()
-    .await
+    up::UpArgs::default().run().await
 }

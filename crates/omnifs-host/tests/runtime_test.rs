@@ -6,7 +6,7 @@ use omnifs_core::path::Path;
 use omnifs_core::view::{DirentsPayload, FilePayload, LookupPayload};
 use omnifs_host::clock::now_millis;
 use omnifs_host::cloner::GitCloner;
-use omnifs_host::{Dirs, LookupOutcome, Runtime};
+use omnifs_host::{HostContext, LookupOutcome, Runtime};
 use omnifs_itest::{
     inline_content, make_engine, make_extractor, make_initialized_runtime, make_runtime,
     provider_wasm_path,
@@ -18,13 +18,13 @@ fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
 }
 
-fn test_dirs<'a>(
-    cache_dir: &'a std::path::Path,
-    config_dir: &'a std::path::Path,
-    providers_dir: &'a std::path::Path,
-    credentials_file: &'a std::path::Path,
-) -> Dirs<'a> {
-    Dirs::new(cache_dir, config_dir, providers_dir, credentials_file)
+fn test_context(
+    cache_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+    providers_dir: &std::path::Path,
+    credentials_file: &std::path::Path,
+) -> HostContext {
+    HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
 }
 
 #[tokio::test]
@@ -827,17 +827,24 @@ async fn test_cache_isolated_by_mount_name() {
     // Both runtimes share the same global Caches; mount isolation is via key prefix.
     let caches = Caches::open(cache_dir.path()).unwrap();
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+    let context_a = test_context(
+        cache_dir.path(),
+        &paths.config_dir,
+        config_dir.path(),
+        &paths.credentials_file,
+    );
+    let context_b = test_context(
+        cache_dir.path(),
+        &paths.config_dir,
+        config_dir.path(),
+        &paths.credentials_file,
+    );
     let runtime_a = Runtime::new(
         &engine,
         &wasm_path,
         &resolved_a,
         cloner.clone(),
-        test_dirs(
-            cache_dir.path(),
-            &paths.config_dir,
-            config_dir.path(),
-            &paths.credentials_file,
-        ),
+        &context_a,
         extractor.clone(),
         &caches,
     )
@@ -847,12 +854,7 @@ async fn test_cache_isolated_by_mount_name() {
         &wasm_path,
         &resolved_b,
         cloner,
-        test_dirs(
-            cache_dir.path(),
-            &paths.config_dir,
-            config_dir.path(),
-            &paths.credentials_file,
-        ),
+        &context_b,
         extractor,
         &caches,
     )

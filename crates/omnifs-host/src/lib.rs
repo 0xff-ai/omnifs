@@ -52,7 +52,7 @@ pub use instance::Instance;
 pub use manifest::Artifact;
 pub use materialize::{LookupEntry, LookupOutcome};
 pub use op::Op;
-pub use runtime::{BuildError, Dirs, Error, Namespace, Runtime, TestOp};
+pub use runtime::{BuildError, Error, HostContext, Namespace, Runtime, TestOp};
 pub use wasm::{component_engine, provider_compiler_strategy};
 
 #[doc(hidden)]

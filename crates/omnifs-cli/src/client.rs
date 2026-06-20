@@ -16,9 +16,55 @@ pub(crate) struct DaemonClient {
 }
 
 #[derive(Debug)]
-pub(crate) enum DaemonProbe {
-    Unreachable,
+pub(crate) enum DaemonControlState {
+    Absent,
+    Sick { reason: String },
+    Incompatible(Box<DaemonStatus>),
     Compatible(Box<DaemonStatus>),
+}
+
+impl DaemonControlState {
+    fn from_status(status: DaemonStatus) -> Self {
+        if status.api_major == API_MAJOR {
+            Self::Compatible(Box::new(status))
+        } else {
+            Self::Incompatible(Box::new(status))
+        }
+    }
+
+    fn warn_minor_skew(&self) {
+        let Self::Compatible(status) = self else {
+            return;
+        };
+        if status.api_minor != API_MINOR {
+            anstream::eprintln!(
+                "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
+                 proceeding (minor skew is non-breaking)",
+                status.api_major,
+                status.api_minor,
+            );
+        }
+    }
+
+    fn compatible_optional(self, base: &str) -> Result<Option<DaemonStatus>> {
+        match self {
+            Self::Compatible(status) => Ok(Some(*status)),
+            Self::Absent => Ok(None),
+            Self::Sick { reason } => Err(anyhow::anyhow!(
+                "daemon answered on the control port at {base}, but status could not be read: {reason}"
+            )),
+            Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
+        }
+    }
+
+    fn require_compatible(self, base: &str) -> Result<DaemonStatus> {
+        match self.compatible_optional(base)? {
+            Some(status) => Ok(status),
+            None => Err(anyhow::anyhow!(
+                "no daemon answered on the control port at {base}"
+            )),
+        }
+    }
 }
 
 impl DaemonClient {
@@ -34,40 +80,29 @@ impl DaemonClient {
         }
     }
 
-    /// Probe for a daemon and verify its control API version in one step.
+    /// Probe for a daemon and classify its control state in one step.
     ///
-    /// Returns `Unreachable` when no daemon answers. Returns `Compatible` when
-    /// the daemon's major matches ours (any minor). Refuses on major mismatch;
-    /// emits a one-line warning when the minor differs and the major matches.
-    pub(crate) async fn probe(&self) -> Result<DaemonProbe> {
-        let Some(status) = self.status_optional().await? else {
-            return Ok(DaemonProbe::Unreachable);
+    /// A compatible daemon has the same control API major. Minor skew is
+    /// reported as a note because it is additive. Incompatible and sick daemons
+    /// are returned as typed states so callers do not re-create probe policy.
+    pub(crate) async fn probe(&self) -> DaemonControlState {
+        let response = match self.get_optional("/v1/status", "query daemon status").await {
+            Ok(Some(response)) => response,
+            Ok(None) => return DaemonControlState::Absent,
+            Err(error) => {
+                return DaemonControlState::Sick {
+                    reason: format!("{error:#}"),
+                };
+            },
         };
-        if status.api_major != API_MAJOR {
-            let detail = if status.api_major == 0 {
-                "this daemon predates major/minor API versioning".to_string()
-            } else {
-                format!(
-                    "daemon speaks control API v{}.{}",
-                    status.api_major, status.api_minor
-                )
-            };
-            anyhow::bail!(
-                "{detail}; this CLI speaks v{API_MAJOR}.{API_MINOR} (daemon binary v{}). \
-                 Stop it with `omnifs down`, or upgrade the runtime image so the CLI and \
-                 daemon versions match, then rerun.",
-                status.version,
-            );
-        }
-        if status.api_minor != API_MINOR {
-            anstream::eprintln!(
-                "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
-                 proceeding (minor skew is non-breaking)",
-                status.api_major,
-                status.api_minor,
-            );
-        }
-        Ok(DaemonProbe::Compatible(Box::new(status)))
+        let state = match Self::parse_status(response).await {
+            Ok(status) => DaemonControlState::from_status(status),
+            Err(error) => DaemonControlState::Sick {
+                reason: format!("{error:#}"),
+            },
+        };
+        state.warn_minor_skew();
+        state
     }
 
     /// Raw daemon status probe. Connection absence is `None`; a reachable
@@ -84,22 +119,13 @@ impl DaemonClient {
 
     /// Verify the daemon is reachable and speaks this CLI's control API.
     pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
-        match self.probe().await? {
-            DaemonProbe::Compatible(status) => Ok(*status),
-            DaemonProbe::Unreachable => Err(anyhow::anyhow!(
-                "no daemon answered on the control port at {}",
-                self.base
-            )),
-        }
+        self.probe().await.require_compatible(&self.base)
     }
 
     /// Daemon status when a compatible daemon answers; `None` when no daemon
     /// answered on the control port.
     pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
-        match self.probe().await? {
-            DaemonProbe::Compatible(status) => Ok(Some(*status)),
-            DaemonProbe::Unreachable => Ok(None),
-        }
+        self.probe().await.compatible_optional(&self.base)
     }
 
     /// Daemon runtime facts from a reachable, compatible daemon.
@@ -188,6 +214,23 @@ impl DaemonClient {
     }
 }
 
+fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
+    let detail = if status.api_major == 0 {
+        "this daemon predates major/minor API versioning".to_string()
+    } else {
+        format!(
+            "daemon speaks control API v{}.{}",
+            status.api_major, status.api_minor
+        )
+    };
+    anyhow::anyhow!(
+        "{detail}; this CLI speaks v{API_MAJOR}.{API_MINOR} (daemon binary v{}). \
+         Stop it with `omnifs down`, or upgrade the runtime image so the CLI and \
+         daemon versions match, then rerun.",
+        status.version,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +291,11 @@ mod tests {
                 .unwrap(),
         };
 
-        let err = client.probe().await.unwrap_err();
+        let err = client
+            .probe()
+            .await
+            .require_compatible(&client.base)
+            .unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("control API"),
@@ -281,8 +328,8 @@ mod tests {
 
         // Minor skew: probe must succeed (return Compatible).
         assert!(matches!(
-            client.probe().await.unwrap(),
-            DaemonProbe::Compatible(_)
+            client.probe().await,
+            DaemonControlState::Compatible(_)
         ));
     }
 

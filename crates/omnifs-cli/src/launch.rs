@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
-use omnifs_creds::CredentialStore;
+use omnifs_creds::{CredentialStore, FileStore};
 use omnifs_home::WorkspaceLayout;
 
 use crate::backend::LaunchParams;
@@ -15,6 +15,72 @@ use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::launch_record::LaunchRecord;
 use crate::runtime::{ContainerExtras, Runtime};
 use crate::session::MountConfig;
+use crate::workspace::Workspace;
+
+/// Command-owned daemon launcher.
+///
+/// `Launcher` is the policy boundary for `omnifs up`: setup state, backend
+/// resolution, mount discovery, provider bundle installation, contract
+/// preflight, runtime launch, and user-facing next steps stay behind this
+/// interface instead of being reassembled by the command.
+pub(crate) struct Launcher<'a> {
+    workspace: &'a Workspace,
+    verb: &'static str,
+}
+
+impl<'a> Launcher<'a> {
+    pub(crate) fn new(workspace: &'a Workspace, verb: &'static str) -> Self {
+        Self { workspace, verb }
+    }
+
+    pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
+        let paths = self.workspace.layout();
+        let config = self.workspace.config()?;
+        if config.system.runtime.is_none() {
+            anyhow::bail!(
+                "`{}` requires setup to choose a daemon backend; run `omnifs setup` first",
+                self.verb
+            );
+        }
+        let backend = LaunchBackend::from_config(&config)?;
+
+        let configs = self.workspace.mounts()?;
+        if configs.is_empty() {
+            anyhow::bail!(
+                "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs init <provider>` to add one directly",
+                paths.mounts_dir.display()
+            );
+        }
+
+        crate::provider_bundle::install_embedded_bundle(&paths.providers_dir)?;
+
+        crate::contract_preflight::run_preflight(
+            &paths.mounts_dir,
+            &paths.providers_dir,
+            &configs,
+        )?;
+
+        anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
+        launch_runtime(
+            LaunchSpec {
+                backend,
+                paths,
+                store: Box::new(FileStore::new(&paths.credentials_file)),
+                verb: self.verb,
+                configs,
+                extras: ContainerExtras::default(),
+            },
+            self.workspace.catalog(),
+        )
+        .await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LaunchOutcome {
+    Native { mount_point: Option<PathBuf> },
+    Docker { target: DockerTarget },
+}
 
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
@@ -33,7 +99,7 @@ pub(crate) struct LaunchSpec<'a> {
 pub(crate) async fn launch_runtime(
     spec: LaunchSpec<'_>,
     catalog: &ProviderCatalog,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<LaunchOutcome> {
     let LaunchSpec {
         backend,
         paths,
@@ -72,14 +138,15 @@ pub(crate) async fn launch_runtime(
     let rt = Runtime::connect_ready(&target, verb).await?;
     rt.launch_container(&paths.config_dir, extras).await?;
 
-    if let Err(error) = finish_docker_launch(&rt, paths, &target).await {
-        if let Err(teardown) = rt.remove().await {
-            anstream::eprintln!("also failed to remove the container: {teardown:#}");
-        }
-        return Err(error);
+    match finish_docker_launch(&rt, paths, &target).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            if let Err(teardown) = rt.remove().await {
+                anstream::eprintln!("also failed to remove the container: {teardown:#}");
+            }
+            Err(error)
+        },
     }
-
-    Ok(())
 }
 
 /// Parse a `host:port` string into a `SocketAddr`, falling back to
@@ -100,7 +167,7 @@ fn resolve_control_addr() -> SocketAddr {
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
 /// converge any change since and to surface per-mount failures.
-async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
+async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<LaunchOutcome> {
     reject_existing_host_daemon(paths, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
 
@@ -124,7 +191,8 @@ async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Resu
     }
 
     // Read daemon status to get the mount point and PID for the launch record.
-    if let Ok(status) = client.status().await {
+    let status = client.status().await.ok();
+    if let Some(status) = &status {
         anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
         let record_params = LaunchParams {
@@ -135,7 +203,9 @@ async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Resu
         };
         write_launch_record(&paths.config_dir, &record_params, Some(status.pid));
     }
-    Ok(())
+    Ok(LaunchOutcome::Native {
+        mount_point: status.map(|status| status.mount_point),
+    })
 }
 
 async fn reject_existing_host_daemon(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
@@ -278,7 +348,7 @@ async fn finish_docker_launch(
     rt: &Runtime,
     paths: &WorkspaceLayout,
     target: &DockerTarget,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<LaunchOutcome> {
     rt.wait_for_daemon_ready().await?;
     let client = DaemonClient::new();
     client.require_compatible().await?;
@@ -297,7 +367,9 @@ async fn finish_docker_launch(
         };
         write_launch_record(&paths.config_dir, &record_params, None);
     }
-    Ok(())
+    Ok(LaunchOutcome::Docker {
+        target: target.clone(),
+    })
 }
 
 /// Build and persist the launch record at `<config_dir>/launch.json`.
