@@ -80,7 +80,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Run preflight checks
         run: |
@@ -107,7 +107,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-wasip2
 
@@ -162,7 +162,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -256,7 +256,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -317,7 +317,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -381,7 +381,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
         with:

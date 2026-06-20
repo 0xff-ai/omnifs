@@ -1,5 +1,5 @@
 [toolchain]
 # Keep in sync with .clippy.toml `msrv` and CI native release builds.
-channel = "1.91.0"
+channel = "1.95.0"
 components = ["clippy", "rust-analyzer", "rust-src", "rustfmt"]
 targets = ["wasm32-wasip2"]

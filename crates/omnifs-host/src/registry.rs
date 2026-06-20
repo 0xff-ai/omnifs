@@ -532,8 +532,7 @@ impl<'a> ReconcilePass<'a> {
         }
 
         let workers = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4)
+            .map_or(4, std::num::NonZero::get)
             .min(work.len());
 
         // Round-robin the work into one owned bucket per worker so each thread

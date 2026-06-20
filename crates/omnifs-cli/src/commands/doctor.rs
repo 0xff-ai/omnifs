@@ -227,9 +227,7 @@ async fn probe_image_cached(runtime: &Runtime) -> ProbeResult {
 }
 
 fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
-    let builtin_count = ProviderCatalog::builtin_manifests()
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let builtin_count = ProviderCatalog::builtin_manifests().map_or(0, |v| v.len());
     match catalog.provider_dir_status() {
         ProviderDirStatus::Missing if builtin_count > 0 => {
             ProbeResult::Ok(format!("{builtin_count} built-in, provider dir missing"))

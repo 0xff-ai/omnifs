@@ -16,7 +16,7 @@ pub fn extractor_world_path() -> &'static Path {
 }
 
 /// Generated bindings for the `omnifs:provider` package.
-#[allow(clippy::unsafe_derive_deserialize)]
+#[allow(clippy::same_length_and_capacity, clippy::unsafe_derive_deserialize)]
 pub mod provider {
     #[cfg(not(feature = "host-bindings"))]
     wit_bindgen::generate!({
@@ -162,6 +162,7 @@ pub mod provider {
 }
 
 /// Generated bindings for the `omnifs:tool-archive` package.
+#[allow(clippy::same_length_and_capacity)]
 pub mod extractor {
     #[cfg(not(feature = "host-bindings"))]
     wit_bindgen::generate!({

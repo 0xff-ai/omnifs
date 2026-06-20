@@ -27,9 +27,7 @@ pub fn detect() -> HostOs {
 }
 
 fn is_wsl() -> bool {
-    std::fs::read_to_string("/proc/version")
-        .map(|content| wsl_marker_present(&content))
-        .unwrap_or(false)
+    std::fs::read_to_string("/proc/version").is_ok_and(|content| wsl_marker_present(&content))
 }
 
 pub fn name(os: HostOs) -> &'static str {

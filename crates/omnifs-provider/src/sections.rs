@@ -83,11 +83,10 @@ pub fn read_provider_metadata_section(
                     offset += consumed;
                     match payload {
                         Payload::CustomSection(reader)
-                            if reader.name() == PROVIDER_METADATA_SECTION_NAME =>
+                            if reader.name() == PROVIDER_METADATA_SECTION_NAME
+                                && section.replace(reader.data().to_vec()).is_some() =>
                         {
-                            if section.replace(reader.data().to_vec()).is_some() {
-                                return Err(ProviderMetadataError::DuplicateSection);
-                            }
+                            return Err(ProviderMetadataError::DuplicateSection);
                         },
                         Payload::ModuleSection {
                             parser: sub,

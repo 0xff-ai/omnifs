@@ -42,7 +42,7 @@ pub(crate) const HTTP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::
 const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
 // Upper bound so a hostile Retry-After cannot overflow `Instant` or wedge the
 // window open indefinitely.
-const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3600);
+const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
 const PROVIDER_CACHE_SUBDIR: &str = "providers";
 const BLOB_CACHE_SUBDIR: &str = "blobs";
 const ARCHIVE_CACHE_SUBDIR: &str = "archives";

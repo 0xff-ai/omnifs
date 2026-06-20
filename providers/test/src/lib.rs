@@ -231,7 +231,7 @@ async fn item_comments(_cx: DirCx<State>, _key: ItemKey) -> Result<DirProjection
 #[omnifs_sdk::provider(
     metadata = "omnifs.provider.json",
     version = "0.1.0",
-    events(timer(Duration::from_secs(60), Self::on_tick))
+    events(timer(Duration::from_mins(1), Self::on_tick))
 )]
 impl TestProvider {
     type Config = Config;

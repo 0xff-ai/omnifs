@@ -199,10 +199,8 @@ impl App {
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Up => self.move_focus_cursor(-1),
             KeyCode::Down => self.move_focus_cursor(1),
-            KeyCode::Enter => {
-                if self.focus == PaneFocus::Tree {
-                    self.toggle_tree_cursor_collapse();
-                }
+            KeyCode::Enter if self.focus == PaneFocus::Tree => {
+                self.toggle_tree_cursor_collapse();
             },
             KeyCode::Char('j' | 'n') => self.select_next(),
             KeyCode::Char('k' | 'p') => self.select_prev(),
