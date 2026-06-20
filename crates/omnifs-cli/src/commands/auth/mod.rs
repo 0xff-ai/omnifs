@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 use crate::app_context::AppContext;
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
+use crate::cli::OutputFormat;
 use crate::paths::PathOverrides;
-use crate::presentation::OutputFormat;
 use crate::session::MountConfig;
 
 pub(crate) use login::login_with_paths;

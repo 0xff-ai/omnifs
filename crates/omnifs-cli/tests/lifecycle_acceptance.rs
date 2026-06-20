@@ -48,8 +48,7 @@ fn nfs_serial_lock() -> TcpListener {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// No-auth mount spec for the test provider. Serves `test/hello/message`.
-const TEST_MOUNT_SPEC: &str =
-    r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
 
 /// A broken spec: references a provider file that does not exist.
 const BROKEN_MOUNT_SPEC: &str =
@@ -193,9 +192,7 @@ impl Fixture {
     fn up_and_wait(&mut self) -> Option<()> {
         let wasm_dir = release_wasm_dir();
         if !wasm_dir.join("test_provider.wasm").exists() {
-            eprintln!(
-                "skip: test_provider.wasm missing (run `just providers-build`)"
-            );
+            eprintln!("skip: test_provider.wasm missing (run `just providers-build`)");
             return None;
         }
         if !platform_can_mount() {
@@ -253,9 +250,7 @@ impl Fixture {
             && let Some(pid) = val["daemon_pid"].as_u64()
         {
             // SIGKILL so it cannot clean up voluntarily.
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
     }
 
@@ -308,9 +303,7 @@ impl Fixture {
             let _ = Command::new("fusermount")
                 .args([OsStr::new("-uz"), self.mount_point.as_os_str()])
                 .output();
-            let _ = Command::new("umount")
-                .arg(&self.mount_point)
-                .output();
+            let _ = Command::new("umount").arg(&self.mount_point).output();
         }
     }
 }
@@ -319,9 +312,7 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         // Kill any daemon we know about.
         if let Some(pid) = self.daemon_pid {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
         // Also try the launch.json in case we didn't capture the PID yet.
         self.kill_daemon_from_launch_json();
@@ -461,9 +452,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         .as_array()
         .expect("runtime.mounts must be an array");
     assert!(
-        mounts
-            .iter()
-            .any(|m| m.as_str().unwrap_or("") == "test"),
+        mounts.iter().any(|m| m.as_str().unwrap_or("") == "test"),
         "runtime.mounts must include 'test'; got: {mounts:?}"
     );
 
@@ -473,9 +462,8 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         .args(["-fs", &format!("{base}/v1/status")])
         .output()
         .expect("curl /v1/status");
-    let status_json: serde_json::Value =
-        serde_json::from_slice(&status_resp.stdout)
-            .expect("daemon /v1/status must return valid JSON");
+    let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)
+        .expect("daemon /v1/status must return valid JSON");
     assert_eq!(
         status_json["launch"].as_str().unwrap_or(""),
         "host_native",
@@ -651,8 +639,8 @@ fn scenario_8_failed_mount_surfaced() {
 
     // `test/hello/message` is still readable.
     let message_path = fixture.mount_point.join("test/hello/message");
-    let content =
-        std::fs::read(&message_path).expect("test/hello/message must be readable even with a broken peer");
+    let content = std::fs::read(&message_path)
+        .expect("test/hello/message must be readable even with a broken peer");
     assert_eq!(
         content, b"Hello, world!",
         "test/hello/message content mismatch after partial failure"
@@ -689,9 +677,7 @@ fn scenario_8_failed_mount_surfaced() {
         .iter()
         .find(|m| m["mount"].as_str().unwrap_or("") == "broken")
         .unwrap_or_else(|| {
-            panic!(
-                "failed_mounts must include an entry for 'broken'; got: {failed_mounts:?}"
-            )
+            panic!("failed_mounts must include an entry for 'broken'; got: {failed_mounts:?}")
         });
     let reason = broken["reason"].as_str().unwrap_or("");
     assert!(

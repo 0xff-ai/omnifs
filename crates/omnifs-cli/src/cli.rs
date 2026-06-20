@@ -91,6 +91,20 @@ pub enum Commands {
     Daemon(omnifs_daemon::DaemonArgs),
 }
 
+/// Human (`Text`) vs machine (`Json`) output selection, shared by commands that
+/// support `--json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
+    Text,
+    Json,
+}
+
+impl From<bool> for OutputFormat {
+    fn from(json: bool) -> Self {
+        if json { Self::Json } else { Self::Text }
+    }
+}
+
 impl Commands {
     pub async fn run(self) -> anyhow::Result<()> {
         match self {

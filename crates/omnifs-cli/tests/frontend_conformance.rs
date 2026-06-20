@@ -51,8 +51,7 @@ fn curl(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-const TEST_MOUNT_SPEC: &str =
-    r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
 
 /// What platform-default frontend the daemon will use on this OS.
 #[cfg(target_os = "linux")]
@@ -193,8 +192,7 @@ fn start() -> Option<Daemon> {
     // Write the mount spec before spawning so the daemon reconciles it on start.
     let mounts_dir = home.path().join("mounts");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-    std::fs::write(mounts_dir.join("test.json"), TEST_MOUNT_SPEC)
-        .expect("write test mount spec");
+    std::fs::write(mounts_dir.join("test.json"), TEST_MOUNT_SPEC).expect("write test mount spec");
 
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");

@@ -262,7 +262,8 @@ impl MountCommand {
                 OsString::from(export_source()),
                 mount_point.as_os_str().to_owned(),
             ],
-            failure_context: "mount_nfs via sudo -n; run sudo -v and retry",
+            failure_context: "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
+                              an `Invalid argument` above means an unsupported mount option)",
         }
     }
 

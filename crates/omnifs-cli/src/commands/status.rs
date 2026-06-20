@@ -2,9 +2,9 @@
 
 use crate::app_context::AppContext;
 use crate::catalog::ProviderCatalog;
+use crate::cli::OutputFormat;
 use crate::client::{DaemonClient, DaemonProbe};
 use crate::paths::{PathOverrides, Paths};
-use crate::presentation::OutputFormat;
 use crate::status::collect_status;
 use anyhow::Context as _;
 use clap::Args;
