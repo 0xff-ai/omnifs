@@ -25,6 +25,7 @@ use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
+use crate::launch_backend::LaunchBackend;
 use crate::paths::{PathOverrides, Paths};
 use crate::token_source::TokenSource;
 pub(crate) use auth_import::AuthImportDecision;
@@ -214,8 +215,8 @@ impl InitArgs {
 
         let config = crate::session::MountConfig::from_parsed(spec, mount_path.clone())?;
         let store = FileStore::new(&paths.credentials_file);
-        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
-        match crate::live::add_mount(catalog, &store, config, host_native).await {
+        let backend = LaunchBackend::from_config(ctx.config(), ctx.docker_target().clone());
+        match crate::live::add_mount(catalog, &store, config, &backend).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },

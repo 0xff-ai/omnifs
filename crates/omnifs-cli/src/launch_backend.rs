@@ -1,23 +1,34 @@
-use crate::config::Config;
+use omnifs_mount::materialize::MaterializationMode;
+
+use crate::config::{Config, ConfiguredBackend};
 use crate::container_name::ContainerName;
 use crate::image_ref::ImageRef;
 use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE, env_string};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeTarget {
+pub(crate) struct DockerTarget {
     container_name: ContainerName,
     image: ImageRef,
 }
 
-impl RuntimeTarget {
+impl DockerTarget {
+    pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
+        Ok(Self {
+            container_name: ContainerName::new(container_name)?,
+            image: ImageRef::new(image)?,
+        })
+    }
+
     pub(crate) fn resolve(
         container_name: Option<String>,
         image: Option<String>,
         config: &Config,
     ) -> anyhow::Result<Self> {
+        let container_name = Self::resolve_container_name(container_name, config)?;
+        let image = Self::resolve_image(image, config)?;
         Ok(Self {
-            container_name: Self::resolve_container_name(container_name, config)?,
-            image: Self::resolve_image(image, config)?,
+            container_name,
+            image,
         })
     }
 
@@ -46,6 +57,47 @@ impl RuntimeTarget {
             .or_else(|| config.image.clone())
             .unwrap_or_else(|| IMAGE.to_string());
         Ok(ImageRef::new(image)?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchBackend {
+    Native,
+    Docker(DockerTarget),
+}
+
+impl LaunchBackend {
+    pub(crate) fn from_config(config: &Config, docker: DockerTarget) -> Self {
+        match config.backend() {
+            ConfiguredBackend::Native => Self::Native,
+            ConfiguredBackend::Docker => Self::Docker(docker),
+        }
+    }
+
+    pub(crate) fn docker(docker: DockerTarget) -> Self {
+        Self::Docker(docker)
+    }
+
+    pub(crate) fn default_docker() -> anyhow::Result<Self> {
+        Ok(Self::Docker(DockerTarget::new(
+            CONTAINER_NAME.to_string(),
+            IMAGE.to_string(),
+        )?))
+    }
+
+    pub(crate) fn is_native(&self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    pub(crate) fn is_docker(&self) -> bool {
+        matches!(self, Self::Docker(_))
+    }
+
+    pub(crate) fn materialization_mode(&self) -> MaterializationMode {
+        match self {
+            Self::Native => MaterializationMode::HostNative,
+            Self::Docker(_) => MaterializationMode::Docker,
+        }
     }
 }
 
@@ -96,7 +148,7 @@ mod tests {
                 image: Some("ghcr.io/example/custom:1.2.3".into()),
                 ..Default::default()
             };
-            let target = RuntimeTarget::resolve(None, None, &config).unwrap();
+            let target = DockerTarget::resolve(None, None, &config).unwrap();
             assert_eq!(target.image().as_str(), "ghcr.io/example/custom:1.2.3");
         });
     }
@@ -113,7 +165,7 @@ mod tests {
                     image: Some("ghcr.io/example/config:1.0.0".into()),
                     ..Default::default()
                 };
-                let target = RuntimeTarget::resolve(None, None, &config).unwrap();
+                let target = DockerTarget::resolve(None, None, &config).unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/env:9.9.9");
             },
         );
@@ -132,7 +184,7 @@ mod tests {
                     ..Default::default()
                 };
                 let target =
-                    RuntimeTarget::resolve(None, Some("ghcr.io/example/cli:2.0.0".into()), &config)
+                    DockerTarget::resolve(None, Some("ghcr.io/example/cli:2.0.0".into()), &config)
                         .unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/cli:2.0.0");
             },
@@ -148,7 +200,7 @@ mod tests {
                     container_name: Some("omnifs-config".into()),
                     ..Default::default()
                 };
-                let container_name = RuntimeTarget::resolve_container_name(None, &config).unwrap();
+                let container_name = DockerTarget::resolve_container_name(None, &config).unwrap();
                 assert_eq!(container_name.as_str(), "omnifs-env");
             },
         );
@@ -164,7 +216,7 @@ mod tests {
                     ..Default::default()
                 };
                 let container_name =
-                    RuntimeTarget::resolve_container_name(Some("omnifs-cli".into()), &config)
+                    DockerTarget::resolve_container_name(Some("omnifs-cli".into()), &config)
                         .unwrap();
                 assert_eq!(container_name.as_str(), "omnifs-cli");
             },

@@ -46,7 +46,7 @@ impl StatusArgs {
         let client = DaemonClient::new();
         let runtime = match client.probe().await? {
             DaemonProbe::Unreachable => None,
-            DaemonProbe::Compatible(_) => Some(client.status().await?),
+            DaemonProbe::Compatible(status) => Some(status),
         };
         let report = collect_status(&catalog, paths, runtime, mounts);
         match OutputFormat::from(self.json) {

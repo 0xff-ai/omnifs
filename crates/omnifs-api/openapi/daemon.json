@@ -182,28 +182,18 @@
           }
         }
       }
-    },
-    "/v1/version": {
-      "get": {
-        "tags": [],
-        "operationId": "version",
-        "responses": {
-          "200": {
-            "description": "daemon control API version",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VersionInfo"
-                }
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {
     "schemas": {
+      "DaemonBackend": {
+        "type": "string",
+        "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
+        "enum": [
+          "native",
+          "docker"
+        ]
+      },
       "DaemonStatus": {
         "type": "object",
         "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
@@ -227,6 +217,10 @@
             "format": "int32",
             "description": "Control API minor version. Additive change; CLI warns and proceeds.",
             "minimum": 0
+          },
+          "backend": {
+            "$ref": "#/components/schemas/DaemonBackend",
+            "description": "Backend serving this daemon, so the CLI tears down and reports the right\nbackend without inferring it from configuration. A daemon old enough to\nomit the field predates host-native and is read as Docker."
           },
           "cache_dir": {
             "type": "string"
@@ -254,10 +248,6 @@
                 "description": "The serving filesystem frontend (FUSE today; the protocol stays\nfrontend-agnostic for future NFSv4/FSKit modes), when one is up."
               }
             ]
-          },
-          "launch": {
-            "$ref": "#/components/schemas/LaunchKind",
-            "description": "How this daemon was launched, so the CLI tears down and reports the right\nbackend without inferring it from configuration. A daemon old enough to\nomit the field predates host-native and is read as a container."
           },
           "mount_point": {
             "type": "string"
@@ -296,14 +286,6 @@
             "type": "string"
           }
         }
-      },
-      "LaunchKind": {
-        "type": "string",
-        "description": "How a daemon was launched. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
-        "enum": [
-          "host_native",
-          "container"
-        ]
       },
       "MountFailure": {
         "type": "object",
@@ -412,38 +394,6 @@
           "providers_dropped": {
             "type": "integer",
             "minimum": 0
-          }
-        }
-      },
-      "VersionInfo": {
-        "type": "object",
-        "description": "`GET /v1/version`",
-        "required": [
-          "version"
-        ],
-        "properties": {
-          "api_major": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Control API major version. Incompatible change when this differs.\nDefaulted on decode so this endpoint stays parseable across versions\n(the one endpoint that must, since it is how skew is detected): a daemon\npredating major/minor versioning decodes to major 0 and is flagged\nincompatible rather than crashing the probe.",
-            "minimum": 0
-          },
-          "api_minor": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Control API minor version. Additive change; CLI warns and proceeds.",
-            "minimum": 0
-          },
-          "executable": {
-            "type": "string"
-          },
-          "pid": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "version": {
-            "type": "string"
           }
         }
       }

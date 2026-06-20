@@ -8,17 +8,17 @@ use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
 use omnifs_creds::CredentialStore;
 use omnifs_home::Paths;
 
-use crate::backend::{Backend, LaunchParams};
+use crate::backend::LaunchParams;
 use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::launch_record::LaunchRecord;
 use crate::runtime::{ContainerExtras, Runtime};
-use crate::runtime_target::RuntimeTarget;
 use crate::session::MountConfig;
 
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
-    pub runtime: &'a RuntimeTarget,
+    pub backend: LaunchBackend,
     pub paths: &'a Paths,
     pub store: Box<dyn CredentialStore>,
     /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
@@ -27,9 +27,6 @@ pub(crate) struct LaunchSpec<'a> {
     pub configs: Vec<MountConfig>,
     /// Extra binds layered on top of materialized preopens.
     pub extras: ContainerExtras,
-    /// Run the daemon host-native (spawn `omnifs daemon`) instead of
-    /// launching a Docker container.
-    pub host_native: bool,
 }
 
 /// Run the full materialize → connect → launch → wait → push sequence.
@@ -38,13 +35,12 @@ pub(crate) async fn launch_runtime(
     catalog: &ProviderCatalog,
 ) -> anyhow::Result<()> {
     let LaunchSpec {
-        runtime,
+        backend,
         paths,
         store,
         verb,
         configs,
         mut extras,
-        host_native,
     } = spec;
 
     std::fs::create_dir_all(&paths.config_dir)
@@ -53,16 +49,18 @@ pub(crate) async fn launch_runtime(
     // Host-native: the daemon loads and materializes mounts from `mounts/`
     // itself, so the CLI only spawns it and triggers a reconcile. No CLI-side
     // materialize-and-push on this path.
-    if host_native {
-        return launch_host_native(paths, verb).await;
-    }
+    let materialization_mode = backend.materialization_mode();
+    let target = match backend {
+        LaunchBackend::Native => return launch_host_native(paths, verb).await,
+        LaunchBackend::Docker(target) => target,
+    };
 
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
     let mut preopen_binds = Vec::new();
     for config in &configs {
         // Docker needs preopen binds present before `docker create`; the spec
         // itself is not pushed, only read to derive the binds.
-        let binds = config.materialize(catalog, store.as_ref(), host_native)?;
+        let binds = config.materialize(catalog, store.as_ref(), materialization_mode)?;
         preopen_binds.extend(binds);
     }
 
@@ -71,12 +69,10 @@ pub(crate) async fn launch_runtime(
     binds.append(&mut extras.binds);
     extras.binds = binds;
 
-    let rt = Runtime::connect_ready(runtime, verb).await?;
+    let rt = Runtime::connect_ready(&target, verb).await?;
     rt.launch_container(&paths.config_dir, extras).await?;
 
-    if let Err(error) =
-        finish_docker_launch(&rt, paths, runtime.container_name(), runtime.image()).await
-    {
+    if let Err(error) = finish_docker_launch(&rt, paths, &target).await {
         if let Err(teardown) = rt.remove().await {
             anstream::eprintln!("also failed to remove the container: {teardown:#}");
         }
@@ -115,7 +111,7 @@ async fn launch_host_native(paths: &Paths, verb: &str) -> anyhow::Result<()> {
         paths: paths.clone(),
         control_addr: addr,
         mount_point: None, // the daemon resolves its default
-        backend: Backend::Native,
+        backend: LaunchBackend::Native,
     };
     crate::backend::launch_native(&params).await?;
 
@@ -135,7 +131,7 @@ async fn launch_host_native(paths: &Paths, verb: &str) -> anyhow::Result<()> {
             paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
-            backend: Backend::Native,
+            backend: LaunchBackend::Native,
         };
         write_launch_record(&paths.config_dir, &record_params, Some(status.pid));
     }
@@ -186,8 +182,7 @@ impl ExistingDaemon {
     }
 
     fn title(&self) -> &'static str {
-        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
-        {
+        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION") {
             "A different omnifs daemon is already running"
         } else if !self.paths_match() {
             "An omnifs daemon is already running for a different home"
@@ -225,8 +220,7 @@ impl std::fmt::Display for ExistingDaemon {
         writeln!(f, "  daemon cache   {}", self.status.cache_dir.display())?;
         writeln!(f, "  this cache     {}", self.paths.cache_dir.display())?;
         writeln!(f)?;
-        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
-        {
+        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION") {
             writeln!(
                 f,
                 "This looks like an upgrade boundary. Stop the running daemon, then rerun `{}`:",
@@ -283,8 +277,7 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
 async fn finish_docker_launch(
     rt: &Runtime,
     paths: &Paths,
-    container_name: &crate::container_name::ContainerName,
-    image: &crate::image_ref::ImageRef,
+    target: &DockerTarget,
 ) -> anyhow::Result<()> {
     rt.wait_for_daemon_ready().await?;
     let client = DaemonClient::new();
@@ -300,10 +293,7 @@ async fn finish_docker_launch(
             paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
-            backend: Backend::Docker {
-                container_name: container_name.clone(),
-                image: image.clone(),
-            },
+            backend: LaunchBackend::docker(target.clone()),
         };
         write_launch_record(&paths.config_dir, &record_params, None);
     }

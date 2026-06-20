@@ -5,6 +5,7 @@ use omnifs_creds::FileStore;
 
 use crate::app_context::AppContext;
 use crate::launch::{LaunchSpec, launch_runtime};
+use crate::launch_backend::LaunchBackend;
 use crate::runtime::ContainerExtras;
 use crate::session::GUEST_FUSE_MOUNT;
 
@@ -30,7 +31,9 @@ impl UpArgs {
 
         let ctx = AppContext::resolve(PathOverrides::default(), self.container_name, self.image)?;
         let paths = ctx.paths();
-        let runtime = ctx.runtime();
+        let docker_target = ctx.docker_target();
+        let backend = LaunchBackend::from_config(ctx.config(), docker_target.clone());
+        let backend_is_native = backend.is_native();
         let catalog = ctx.catalog();
 
         // Bail early before touching runtime state if there is nothing to mount.
@@ -50,8 +53,6 @@ impl UpArgs {
         // The runtime backend is a machine property recorded by `omnifs setup`;
         // `up` reads it. Host-native serves a host mount; Docker serves FUSE
         // inside the container.
-        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
-
         // Contract pre-flight: classify any provider contract changes and
         // auto-migrate additive-only ones before the daemon sees the specs.
         // Breaking changes and capability/auth deltas are hard errors here.
@@ -64,19 +65,18 @@ impl UpArgs {
         anstream::println!("Using mount configs from {}", mounts_dir.display());
         launch_runtime(
             LaunchSpec {
-                runtime,
+                backend,
                 paths,
                 store,
                 verb: "omnifs up",
                 configs,
                 extras: ContainerExtras::default(),
-                host_native,
             },
             catalog,
         )
         .await?;
 
-        if host_native {
+        if backend_is_native {
             anstream::println!();
             if let Ok(status) = crate::client::DaemonClient::new().status().await {
                 anstream::println!(
@@ -87,7 +87,7 @@ impl UpArgs {
         } else {
             anstream::println!(
                 "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
-                runtime.container_name()
+                docker_target.container_name()
             );
             anstream::println!();
             anstream::println!(

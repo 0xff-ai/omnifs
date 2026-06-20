@@ -171,14 +171,14 @@ pub async fn run(
 }
 
 async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
+    use crate::launch_backend::DockerTarget;
     use crate::paths::PathOverrides;
     use crate::runtime::DockerProbeOutcome;
-    use crate::runtime_target::RuntimeTarget;
 
     // Use the default runtime target so that probe_image_cached checks the
     // same image omnifs up would pull.
     let target = match crate::paths::resolve_with_config(PathOverrides::default())
-        .and_then(|(_, cfg)| RuntimeTarget::resolve(None, None, &cfg))
+        .and_then(|(_, cfg)| DockerTarget::resolve(None, None, &cfg))
     {
         Ok(t) => t,
         Err(e) => return (None, ProbeResult::Err(format!("resolve target: {e}"))),

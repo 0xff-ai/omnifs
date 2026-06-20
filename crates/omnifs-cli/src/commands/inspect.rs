@@ -14,8 +14,8 @@ use crate::inspector::{
     AttachOutcome, ConnectionMode, EventsClient, SourceKind, daemon_addr, format_record, run_plain,
     run_tui,
 };
+use crate::launch_backend::DockerTarget;
 use crate::paths::PathOverrides;
-use crate::runtime_target::RuntimeTarget;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InspectArgs {
@@ -85,7 +85,7 @@ impl InspectArgs {
 
     fn resolve_container(&self) -> anyhow::Result<ContainerName> {
         let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
-        RuntimeTarget::resolve_container_name(self.container_name.clone(), &config)
+        DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }
 }
 

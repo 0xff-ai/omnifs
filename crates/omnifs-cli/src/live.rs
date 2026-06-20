@@ -6,6 +6,7 @@
 
 use crate::catalog::ProviderCatalog;
 use crate::client::{DaemonClient, DaemonProbe};
+use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
 
@@ -28,14 +29,14 @@ pub(crate) async fn add_mount(
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
     config: MountConfig,
-    host_native: bool,
+    backend: &LaunchBackend,
 ) -> anyhow::Result<LiveApply> {
     let client = DaemonClient::new();
     if matches!(client.probe().await?, DaemonProbe::Unreachable) {
         return Ok(LiveApply::NotRunning);
     }
-    if !host_native {
-        let binds = config.materialize(catalog, store, host_native)?;
+    if backend.is_docker() {
+        let binds = config.materialize(catalog, store, backend.materialization_mode())?;
         if !binds.is_empty() {
             return Ok(LiveApply::RestartRequired("it needs new host binds"));
         }

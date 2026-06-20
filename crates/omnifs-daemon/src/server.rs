@@ -1,4 +1,4 @@
-//! Control API server: `/v1/{ready,version,status,mounts,reconcile,shutdown,events}`.
+//! Control API server: `/v1/{ready,status,mounts,reconcile,shutdown,events}`.
 //!
 //! Serves daemon runtime facts, mount reconciliation and shutdown, and the
 //! inspector event stream over HTTP on the control listener. See
@@ -11,12 +11,13 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use omnifs_api::{
-    API_MAJOR, API_MINOR, DaemonStatus, FrontendInfo, LaunchKind, MountFailure, MountInfo,
-    ReadyInfo, ReconcileReport, StopReport, VersionInfo,
+    API_MAJOR, API_MINOR, DaemonBackend, DaemonStatus, FrontendInfo, MountFailure, MountInfo,
+    ReadyInfo, ReconcileReport, StopReport,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
 use omnifs_inspector::serialize_record;
+use omnifs_mount::materialize::MaterializationMode;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +34,6 @@ use crate::frontends::Frontends;
     info(title = "omnifs daemon control API", version = env!("CARGO_PKG_VERSION")),
     paths(
         ready,
-        version,
         status,
         mounts_list,
         mount_inspect,
@@ -42,11 +42,10 @@ use crate::frontends::Frontends;
         events
     ),
     components(schemas(
-        VersionInfo,
         ReadyInfo,
         DaemonStatus,
         FrontendInfo,
-        LaunchKind,
+        DaemonBackend,
         MountInfo,
         MountFailure,
         ReconcileReport,
@@ -60,11 +59,9 @@ pub struct Daemon {
     sink: Option<Arc<InspectorSink>>,
     frontends: Frontends,
     root_symlinks: bool,
-    /// Whether this daemon serves a host-native mount (preopens opened
-    /// directly) versus a containerized one (preopens rewritten to bind paths).
-    /// Selects the materialization mode for `POST /v1/reconcile` and the
-    /// `LaunchKind` reported in status.
-    host_native: bool,
+    /// Backend serving this daemon. Selects the materialization mode for
+    /// `POST /v1/reconcile` and the backend reported in status.
+    backend: DaemonBackend,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
@@ -76,14 +73,14 @@ impl Daemon {
         sink: Option<Arc<InspectorSink>>,
         frontends: Frontends,
         root_symlinks: bool,
-        host_native: bool,
+        backend: DaemonBackend,
     ) -> Self {
         Self {
             registry,
             sink,
             frontends,
             root_symlinks,
-            host_native,
+            backend,
             last_failed: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -135,23 +132,18 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
 
         let dirs = self.registry.dirs();
-        let identity = version_info();
         DaemonStatus {
-            version: identity.version,
-            api_major: identity.api_major,
-            api_minor: identity.api_minor,
-            pid: identity.pid,
-            executable: identity.executable,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            api_major: API_MAJOR,
+            api_minor: API_MINOR,
+            pid: std::process::id(),
+            executable: current_executable(),
             mount_point: self.frontends.mount_point().to_path_buf(),
             config_dir: dirs.config_dir.to_path_buf(),
             cache_dir: dirs.cache_dir.to_path_buf(),
             providers_dir: dirs.providers_dir.to_path_buf(),
             frontend: self.frontends.serving(),
-            launch: if self.host_native {
-                LaunchKind::HostNative
-            } else {
-                LaunchKind::Container
-            },
+            backend: self.backend,
             mounts,
             failed: self
                 .last_failed
@@ -168,7 +160,7 @@ impl Daemon {
     /// a phantom directory. Callable directly from the blocking startup path; the
     /// `POST /v1/reconcile` handler wraps it in a blocking task.
     pub fn reconcile_blocking(&self, handle: &tokio::runtime::Handle) -> ReconcileReport {
-        let outcome = self.registry.reconcile(handle, self.host_native);
+        let outcome = self.registry.reconcile(handle, self.materialization_mode());
         for name in &outcome.added {
             self.update_root_symlink(name, true);
         }
@@ -212,6 +204,13 @@ impl Daemon {
                 warn!(%join_error, "reconcile task failed");
                 ReconcileReport::default()
             })
+    }
+
+    fn materialization_mode(&self) -> MaterializationMode {
+        match self.backend {
+            DaemonBackend::Native => MaterializationMode::HostNative,
+            DaemonBackend::Docker => MaterializationMode::Docker,
+        }
     }
 
     /// Snapshot of what a shutdown will tear down, captured before unmounting.
@@ -304,7 +303,6 @@ impl Daemon {
     fn router(state: Arc<Self>) -> Router {
         Router::new()
             .route("/v1/ready", get(ready))
-            .route("/v1/version", get(version))
             .route("/v1/status", get(status))
             .route("/v1/mounts", get(mounts_list))
             .route("/v1/mounts/{name}", get(mount_inspect))
@@ -342,26 +340,6 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(info)).into_response()
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/version",
-    operation_id = "version",
-    responses((status = 200, description = "daemon control API version", body = VersionInfo)),
-)]
-async fn version() -> Json<VersionInfo> {
-    Json(version_info())
-}
-
-fn version_info() -> VersionInfo {
-    VersionInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        api_major: API_MAJOR,
-        api_minor: API_MINOR,
-        pid: std::process::id(),
-        executable: current_executable(),
-    }
 }
 
 fn current_executable() -> PathBuf {

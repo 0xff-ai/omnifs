@@ -16,7 +16,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::container_name::ContainerName;
 use crate::error::WithHint;
 use crate::image_ref::ImageRef;
-use crate::runtime_target::RuntimeTarget;
+use crate::launch_backend::DockerTarget;
 use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
 use omnifs_home::OMNIFS_HOME_ENV;
 
@@ -126,7 +126,7 @@ impl Runtime {
         })
     }
 
-    pub(crate) fn connect_for(target: &RuntimeTarget) -> Result<Self> {
+    pub(crate) fn connect_for(target: &DockerTarget) -> Result<Self> {
         Ok(Self {
             docker: connect_docker_client()?,
             container_name: target.container_name().clone(),
@@ -135,7 +135,7 @@ impl Runtime {
     }
 
     pub(crate) async fn connect_ready(
-        target: &RuntimeTarget,
+        target: &DockerTarget,
         command: &'static str,
     ) -> Result<Self> {
         anstream::println!("Connecting to Docker");
@@ -158,7 +158,7 @@ impl Runtime {
     /// Probe Docker daemon reachability without requiring a pre-connected client.
     /// Used by `omnifs doctor` so the probe result carries a typed outcome and
     /// the resulting `Runtime` can be reused for image inspection.
-    pub(crate) async fn probe_docker(target: &RuntimeTarget) -> DockerProbeOutcome {
+    pub(crate) async fn probe_docker(target: &DockerTarget) -> DockerProbeOutcome {
         let runtime = match Self::connect_for(target) {
             Ok(r) => r,
             Err(e) => {

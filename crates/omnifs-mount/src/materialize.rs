@@ -37,6 +37,18 @@ pub struct Materialized {
     pub preopen_binds: Vec<PreopenBind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationMode {
+    HostNative,
+    Docker,
+}
+
+impl MaterializationMode {
+    fn opens_host_paths(self) -> bool {
+        matches!(self, Self::HostNative)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
     #[error("apply provider metadata: {0}")]
@@ -68,10 +80,10 @@ pub enum MaterializeError {
 
 /// Materialize `spec` against `catalog`.
 ///
-/// When `host_native` is true the daemon opens preopen directories directly, so
-/// host paths are canonicalized in place and no binds are returned; otherwise
-/// each user preopen is rewritten to a container path and its host bind is
-/// collected for the launcher.
+/// In [`MaterializationMode::HostNative`] the daemon opens preopen directories
+/// directly, so host paths are canonicalized in place and no binds are
+/// returned. In [`MaterializationMode::Docker`] each user preopen is rewritten
+/// to a container path and its host bind is collected for the launcher.
 ///
 /// When the spec carries a `contract` block, the live provider contract is
 /// derived and compared against it. A mismatch is a hard error: the daemon
@@ -82,7 +94,7 @@ pub enum MaterializeError {
 pub fn materialize(
     mut spec: Spec,
     catalog: &Catalog,
-    host_native: bool,
+    mode: MaterializationMode,
 ) -> Result<Materialized, MaterializeError> {
     // Count user-authored preopens before metadata application, which may add
     // manifest-declared preopens that must not be rewritten to container paths.
@@ -120,7 +132,7 @@ pub fn materialize(
         .map_err(MaterializeError::Metadata)?;
     spec.materialize_runtime_capabilities()
         .map_err(MaterializeError::Capabilities)?;
-    let preopen_binds = rewrite_preopens(&mut spec, user_preopen_count, host_native)?;
+    let preopen_binds = rewrite_preopens(&mut spec, user_preopen_count, mode)?;
 
     Ok(Materialized {
         spec,
@@ -131,7 +143,7 @@ pub fn materialize(
 fn rewrite_preopens(
     spec: &mut Spec,
     user_preopen_count: usize,
-    host_native: bool,
+    mode: MaterializationMode,
 ) -> Result<Vec<PreopenBind>, MaterializeError> {
     if user_preopen_count == 0 {
         return Ok(Vec::new());
@@ -158,7 +170,7 @@ fn rewrite_preopens(
                 host_path.display().to_string(),
             ));
         }
-        if host_native {
+        if mode.opens_host_paths() {
             // The daemon opens the real host directory directly through
             // wasmtime, so the spec keeps the canonical host path.
             preopen.host = host_path.display().to_string();
@@ -205,7 +217,12 @@ mod tests {
         ))
         .unwrap();
 
-        let out = materialize(spec, &builtin_catalog(tmp.path()), false).unwrap();
+        let out = materialize(
+            spec,
+            &builtin_catalog(tmp.path()),
+            MaterializationMode::Docker,
+        )
+        .unwrap();
 
         assert_eq!(
             out.preopen_binds,
@@ -239,7 +256,12 @@ mod tests {
         ))
         .unwrap();
 
-        let out = materialize(spec, &builtin_catalog(tmp.path()), true).unwrap();
+        let out = materialize(
+            spec,
+            &builtin_catalog(tmp.path()),
+            MaterializationMode::HostNative,
+        )
+        .unwrap();
 
         assert!(out.preopen_binds.is_empty());
         let preopen = &out.spec.capabilities.unwrap().preopened_paths.unwrap()[0];
@@ -258,7 +280,12 @@ mod tests {
         )
         .unwrap();
 
-        let out = materialize(spec, &builtin_catalog(tmp.path()), false).unwrap();
+        let out = materialize(
+            spec,
+            &builtin_catalog(tmp.path()),
+            MaterializationMode::Docker,
+        )
+        .unwrap();
 
         assert_eq!(
             out.spec.capabilities.unwrap().unix_sockets,

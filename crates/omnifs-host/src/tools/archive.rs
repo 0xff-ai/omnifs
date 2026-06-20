@@ -136,24 +136,35 @@ pub struct ArchiveExtractorComponent {
 
 impl ArchiveExtractorComponent {
     /// Compile and pre-instantiate the extractor component from the
-    /// repo-local target path used by tests and local development.
+    /// repo-local target path used by tests and local development. Uncached:
+    /// callers that want the shared on-disk artifact cache use `from_path`.
     pub fn new(limits: ExtractorLimits) -> Result<Self, ExtractError> {
-        Self::from_path(default_archive_tool_path(), limits)
+        Self::from_path(default_archive_tool_path(), limits, None)
     }
 
     /// Compile and pre-instantiate the extractor component from a WASM file.
+    /// `cache_dir` is the shared wasm artifact cache (`<cache>/wasm`), or `None`
+    /// to compile uncached.
     pub fn from_path(
         path: impl AsRef<Path>,
         limits: ExtractorLimits,
+        cache_dir: Option<&Path>,
     ) -> Result<Self, ExtractError> {
         let path = path.as_ref();
         let wasm = std::fs::read(path)
             .map_err(|e| ExtractError::Io(format!("read {}: {e}", path.display())))?;
-        Self::from_bytes(&wasm, limits)
+        Self::from_bytes(&wasm, limits, cache_dir)
     }
 
-    fn from_bytes(wasm_bytes: &[u8], limits: ExtractorLimits) -> Result<Self, ExtractError> {
-        let engine = wasm::component_engine(|config| {
+    fn from_bytes(
+        wasm_bytes: &[u8],
+        limits: ExtractorLimits,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, ExtractError> {
+        // Always Cranelift: fuel metering is incompatible with the Winch
+        // baseline compiler, and the extractor's decompression work wants the
+        // optimizing backend regardless of the provider strategy override.
+        let engine = wasm::component_engine(cache_dir, |config| {
             config.consume_fuel(true);
         })
         .map_err(|e| ExtractError::Internal(format!("engine init: {e}")))?;

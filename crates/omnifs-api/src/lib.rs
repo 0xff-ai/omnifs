@@ -20,27 +20,6 @@ pub const API_MINOR: u16 = 0;
 /// both binaries default to it so `omnifs` finds `omnifsd` with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
 
-/// `GET /v1/version`
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct VersionInfo {
-    pub version: String,
-    /// Control API major version. Incompatible change when this differs.
-    /// Defaulted on decode so this endpoint stays parseable across versions
-    /// (the one endpoint that must, since it is how skew is detected): a daemon
-    /// predating major/minor versioning decodes to major 0 and is flagged
-    /// incompatible rather than crashing the probe.
-    #[serde(default)]
-    pub api_major: u16,
-    /// Control API minor version. Additive change; CLI warns and proceeds.
-    #[serde(default)]
-    pub api_minor: u16,
-    #[serde(default)]
-    pub pid: u32,
-    #[serde(default)]
-    #[schema(value_type = String)]
-    pub executable: PathBuf,
-}
-
 /// `GET /v1/ready`: 200 with `ready: true` once the filesystem is
 /// serving; 503 with `ready: false` while starting up.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -76,11 +55,11 @@ pub struct DaemonStatus {
     /// The serving filesystem frontend (FUSE today; the protocol stays
     /// frontend-agnostic for future NFSv4/FSKit modes), when one is up.
     pub frontend: Option<FrontendInfo>,
-    /// How this daemon was launched, so the CLI tears down and reports the right
+    /// Backend serving this daemon, so the CLI tears down and reports the right
     /// backend without inferring it from configuration. A daemon old enough to
-    /// omit the field predates host-native and is read as a container.
-    #[serde(default)]
-    pub launch: LaunchKind,
+    /// omit the field predates host-native and is read as Docker.
+    #[serde(default, alias = "launch")]
+    pub backend: DaemonBackend,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// Mounts that did not converge at the last reconcile, with reasons. Empty
@@ -90,17 +69,19 @@ pub struct DaemonStatus {
     pub failed: Vec<MountFailure>,
 }
 
-/// How a daemon was launched. The CLI reads this (and the launch record) instead
+/// Backend serving a daemon. The CLI reads this (and the launch record) instead
 /// of inferring the backend from `[system].runtime`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchKind {
+#[serde(rename_all = "lowercase")]
+pub enum DaemonBackend {
     /// Daemon spawned as a host-native child process.
-    HostNative,
-    /// Daemon running inside a Docker container. The legacy interpretation for a
-    /// status payload that omits the field.
+    #[serde(alias = "host_native")]
+    Native,
+    /// Daemon running inside a Docker container. The legacy interpretation for
+    /// a status payload that omits the field.
     #[default]
-    Container,
+    #[serde(alias = "container")]
+    Docker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

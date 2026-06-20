@@ -8,6 +8,7 @@
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
+use omnifs_mount::materialize::MaterializationMode;
 use omnifs_mount::mounts::Spec;
 use omnifs_provider::PreopenMode;
 use std::fs;
@@ -54,28 +55,25 @@ impl MountConfig {
     }
 
     /// Compute the host binds the Docker runtime needs for this mount's user
-    /// preopens, validating host-managed credentials along the way. When
-    /// `host_native` is true the daemon opens preopen directories directly, so
-    /// no binds are emitted; when false each user preopen is rewritten to a
-    /// container path and the corresponding `host:container:mode` strings are
-    /// returned for `docker create`. The resolved spec is not returned: the
-    /// daemon reads it from `mounts/` itself, so nothing is pushed.
+    /// preopens, validating host-managed credentials along the way. Host-native
+    /// materialization emits no binds because the daemon opens preopen
+    /// directories directly; Docker materialization rewrites each user preopen
+    /// to a container path and returns `host:container:mode` strings for
+    /// `docker create`. The resolved spec is not returned: the daemon reads it
+    /// from `mounts/` itself, so nothing is pushed.
     pub(crate) fn materialize(
         &self,
         catalog: &ProviderCatalog,
         store: &dyn CredentialStore,
-        host_native: bool,
+        mode: MaterializationMode,
     ) -> anyhow::Result<Vec<String>> {
         // Materialize once through the shared materializer (metadata, runtime
         // capabilities, preopen rewriting); the daemon reconciles with the same
         // function. The resolved spec is not returned: the daemon reads it from
         // `mounts/`, so nothing is pushed; only the Docker preopen binds are.
-        let materialized = omnifs_mount::materialize::materialize(
-            self.config.clone(),
-            catalog.inner(),
-            host_native,
-        )
-        .with_context(|| format!("materialize mount {}", self.source.display()))?;
+        let materialized =
+            omnifs_mount::materialize::materialize(self.config.clone(), catalog.inner(), mode)
+                .with_context(|| format!("materialize mount {}", self.source.display()))?;
 
         // Validate host-managed credentials against the materialized spec before
         // the daemon ever tries to load it, for a clear early CLI error.
@@ -227,7 +225,9 @@ mod tests {
         let catalog = test_catalog(tmp.path());
         // Validation accepts the present host-managed token; no preopens, so no
         // container binds.
-        let binds = config.materialize(&catalog, &store, false).unwrap();
+        let binds = config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
         assert!(binds.is_empty());
     }
 
@@ -264,7 +264,9 @@ mod tests {
         let catalog = test_catalog(tmp.path());
         // A token_env credential is host-unmanaged, so validation requires no
         // stored credential.
-        config.materialize(&catalog, &store, false).unwrap();
+        config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
     }
 
     #[test]
@@ -297,7 +299,9 @@ mod tests {
         .unwrap();
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
     }
 
     #[test]
@@ -328,7 +332,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
     }
 
     #[test]
@@ -351,7 +357,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
     }
 
     #[test]
@@ -382,7 +390,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, false).unwrap();
+        let binds = config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
 
         assert_eq!(
             binds,
@@ -423,7 +433,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, true).unwrap();
+        let binds = config
+            .materialize(&catalog, &store, MaterializationMode::HostNative)
+            .unwrap();
         assert!(
             binds.is_empty(),
             "host-native preopens are opened directly and emit no binds"
@@ -448,7 +460,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, false).unwrap();
+        let binds = config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap();
         assert!(
             binds.is_empty(),
             "manifest preopens are already container paths"
@@ -476,7 +490,9 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = config.materialize(&catalog, &store, false).unwrap_err();
+        let err = config
+            .materialize(&catalog, &store, MaterializationMode::Docker)
+            .unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("no stored credential"),

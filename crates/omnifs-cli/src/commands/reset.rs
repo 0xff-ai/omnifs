@@ -15,12 +15,12 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::app_context::AppContext;
-use crate::backend::Backend;
 use crate::catalog::MountRemovalTarget;
 use crate::client::DaemonClient;
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
-use crate::launch_record::{LaunchRecord, backend_from_launch_kind};
+use crate::launch_backend::LaunchBackend;
+use crate::launch_record::{LaunchRecord, backend_from_daemon};
 use crate::paths::Paths;
 use omnifs_creds::FileStore;
 
@@ -153,10 +153,10 @@ async fn teardown_daemon(paths: &crate::paths::Paths) {
 async fn resolve_backend(
     client: &DaemonClient,
     config_dir: &Path,
-) -> anyhow::Result<Option<Backend>> {
+) -> anyhow::Result<Option<LaunchBackend>> {
     // Probe the live daemon; on any error fall through to the launch record.
     if let Ok(status) = client.status().await {
-        let backend = backend_from_launch_kind(status.launch, config_dir)?;
+        let backend = backend_from_daemon(status.backend, config_dir)?;
         return Ok(Some(backend));
     }
 

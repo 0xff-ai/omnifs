@@ -23,6 +23,7 @@ use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
+use crate::launch_backend::LaunchBackend;
 use crate::paths::{PathOverrides, Paths};
 use crate::runtime::ContainerExtras;
 use crate::session::{
@@ -105,7 +106,7 @@ impl DevArgs {
             Some(image),
         )?;
         let paths = ctx.paths();
-        let runtime = ctx.runtime();
+        let docker_target = ctx.docker_target();
 
         // Providers: export freshly from the workspace, or unpack the launcher
         // bundle when running a pre-built image (no workspace build).
@@ -153,14 +154,12 @@ impl DevArgs {
         let store = Box::new(FileStore::new(&paths.credentials_file));
         launch_runtime(
             LaunchSpec {
-                runtime,
+                backend: LaunchBackend::docker(docker_target.clone()),
                 paths,
                 store,
                 verb: "omnifs dev",
                 configs,
                 extras: ContainerExtras { binds },
-                // `omnifs dev` is always the Docker sandbox.
-                host_native: false,
             },
             ctx.catalog(),
         )
@@ -168,7 +167,7 @@ impl DevArgs {
 
         anstream::println!(
             "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
-            runtime.container_name()
+            docker_target.container_name()
         );
         anstream::println!();
         anstream::println!("Attach a shell with: omnifs shell");

@@ -456,7 +456,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "runtime.mounts must include 'test'; got: {mounts:?}"
     );
 
-    // Verify launch kind is host_native via the daemon status API directly.
+    // Verify backend is native via the daemon status API directly.
     let base = format!("http://{}", fixture.daemon_addr);
     let status_resp = Command::new("curl")
         .args(["-fs", &format!("{base}/v1/status")])
@@ -465,10 +465,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let status_json: serde_json::Value = serde_json::from_slice(&status_resp.stdout)
         .expect("daemon /v1/status must return valid JSON");
     assert_eq!(
-        status_json["launch"].as_str().unwrap_or(""),
-        "host_native",
-        "daemon launch kind must be 'host_native'; got: {:?}",
-        status_json["launch"]
+        status_json["backend"].as_str().unwrap_or(""),
+        "native",
+        "daemon backend must be 'native'; got: {:?}",
+        status_json["backend"]
     );
 
     // ── Scenario 5: up while already running ─────────────────────────────────
@@ -582,7 +582,7 @@ fn scenario_7_dead_daemon_record_fallback() {
     // not actually mounted. No control listener answers the fixture's port, so
     // `down` takes the record-fallback path.
     let record = format!(
-        r#"{{"version":1,"runtime":"native","control_addr":"{}","mount_point":"{}","daemon_pid":2000000,"started_at":"2026-01-01T00:00:00Z"}}"#,
+        r#"{{"version":1,"backend":"native","daemon_pid":2000000,"control_addr":"{}","mount_point":"{}","started_at":"2026-01-01T00:00:00Z"}}"#,
         fixture.daemon_addr,
         fixture.mount_point.display(),
     );

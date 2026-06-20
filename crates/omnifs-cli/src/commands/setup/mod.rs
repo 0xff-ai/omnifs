@@ -20,9 +20,10 @@ use omnifs_provider::ProviderManifest;
 use crate::app_context::AppContext;
 use crate::catalog;
 use crate::commands::{init, up};
+use crate::config::ConfiguredBackend;
 use crate::error::WithHint;
+use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
 use crate::session::GUEST_FUSE_MOUNT;
 
 use self::host_os::HostOs;
@@ -62,18 +63,18 @@ impl SetupArgs {
 
         // Record the launch backend so `omnifs up`/`down` read it. Docker is
         // optional; native mode does not require a Docker daemon or image pull.
-        let runtime = ctx.config().runtime();
+        let backend = ctx.config().backend();
         if ctx.config().system.runtime.is_none() {
             let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
-            file.set_system_runtime(runtime)?;
+            file.set_system_backend(backend)?;
             file.save()?;
         }
-        let host_native = runtime == crate::config::Runtime::Native;
+        let host_native = backend == ConfiguredBackend::Native;
 
         if !host_native {
-            let runtime = connect_runtime(os, ctx.runtime()).await?;
+            let runtime = connect_runtime(os, ctx.docker_target()).await?;
             runtime
-                .pull_image_with_progress(ctx.runtime().image().as_str())
+                .pull_image_with_progress(ctx.docker_target().image().as_str())
                 .await?;
         }
 
@@ -157,7 +158,7 @@ fn print_explainer(os: HostOs) {
     anstream::println!();
 }
 
-async fn connect_runtime(os: HostOs, target: &RuntimeTarget) -> anyhow::Result<Runtime> {
+async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Runtime> {
     let runtime = Runtime::connect_for(target).context("connect to Docker daemon")?;
     runtime
         .ping()

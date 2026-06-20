@@ -1,12 +1,12 @@
 //! Backend abstraction for daemon launch and stop.
 //!
 //! `LaunchParams` is the single data model for launch intent: it holds the
-//! common parameters ([`Paths`], control address, mount point) and a `Backend`
-//! variant with the backend-specific details. Native spawn builds typed
+//! common parameters ([`Paths`], control address, mount point) and a
+//! [`LaunchBackend`] variant with the backend-specific details. Native spawn builds typed
 //! [`omnifs_daemon::DaemonArgs`] from the daemon crate so flag knowledge stays
 //! next to the daemon argument surface.
 //!
-//! `Backend::reclaim` tears down the backend-specific resources after the
+//! `LaunchBackend::reclaim` tears down the backend-specific resources after the
 //! control-API shutdown has been attempted. Callers (down.rs, reset.rs) never
 //! branch on native-vs-docker; they go through this interface.
 
@@ -19,7 +19,7 @@ use omnifs_daemon::{DaemonArgs, NativeLaunchConfig};
 use omnifs_home::Paths;
 
 use crate::container_name::ContainerName;
-use crate::image_ref::ImageRef;
+use crate::launch_backend::LaunchBackend;
 
 /// Backend-agnostic launch intent plus the chosen backend's specifics.
 #[derive(Debug, Clone)]
@@ -29,22 +29,10 @@ pub(crate) struct LaunchParams {
     /// Recorded in `launch.json` after the daemon is ready; not passed on argv
     /// (the daemon resolves mount point from `OMNIFS_MOUNT_POINT` or `$HOME/omnifs`).
     pub mount_point: Option<PathBuf>,
-    pub backend: Backend,
+    pub backend: LaunchBackend,
 }
 
-/// The daemon backend: two possible launch mechanisms, closed enum.
-#[derive(Debug, Clone)]
-pub(crate) enum Backend {
-    /// Daemon spawned as a host-native child process.
-    Native,
-    /// Daemon running inside a Docker container.
-    Docker {
-        container_name: ContainerName,
-        image: ImageRef,
-    },
-}
-
-impl Backend {
+impl LaunchBackend {
     /// Reclaim backend-specific resources after a graceful control-API shutdown
     /// has been attempted. For native: sweep any stale mount. For Docker: stop
     /// and remove the container.
@@ -66,8 +54,8 @@ impl Backend {
         nfs_state_dir: &Path,
     ) -> Result<()> {
         match self {
-            Backend::Native => reclaim_native(mount_point, nfs_state_dir),
-            Backend::Docker { container_name, .. } => reclaim_docker(container_name).await,
+            LaunchBackend::Native => reclaim_native(mount_point, nfs_state_dir),
+            LaunchBackend::Docker(target) => reclaim_docker(target.container_name()).await,
         }
     }
 }

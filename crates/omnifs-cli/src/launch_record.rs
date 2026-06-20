@@ -11,12 +11,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use omnifs_api::LaunchKind;
+use omnifs_api::DaemonBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{Backend, LaunchParams};
-use crate::container_name::ContainerName;
-use crate::image_ref::ImageRef;
+use crate::backend::LaunchParams;
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 
 /// Schema version this CLI understands. A bump here means the CLI writing the
 /// record knows something the current CLI does not; the current CLI reports
@@ -28,54 +27,55 @@ const RECORD_VERSION: u32 = 1;
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct LaunchRecord {
     version: u32,
-    runtime: RuntimeKind,
+    #[serde(flatten)]
+    backend: RecordedBackend,
     control_addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     mount_point: Option<PathBuf>,
-    /// Native only; `null` for Docker.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    daemon_pid: Option<u32>,
-    /// Docker only; `null` for native.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    container_name: Option<String>,
-    /// Docker only; `null` for native.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image: Option<String>,
     started_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RuntimeKind {
-    Native,
-    Docker,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+enum RecordedBackend {
+    Native {
+        daemon_pid: u32,
+    },
+    Docker {
+        container_name: String,
+        image: String,
+    },
+}
+
+impl RecordedBackend {
+    fn mode_label(&self) -> &'static str {
+        match self {
+            Self::Native { .. } => "native",
+            Self::Docker { .. } => "container",
+        }
+    }
 }
 
 impl LaunchRecord {
     /// Build a record from launch params. `daemon_pid` is the PID of the
     /// spawned daemon on the native path; pass `None` for Docker.
     pub(crate) fn new(params: &LaunchParams, daemon_pid: Option<u32>) -> Result<Self> {
-        let runtime = match &params.backend {
-            Backend::Native => RuntimeKind::Native,
-            Backend::Docker { .. } => RuntimeKind::Docker,
-        };
-        let container_name = match &params.backend {
-            Backend::Docker { container_name, .. } => Some(container_name.as_str().to_string()),
-            Backend::Native => None,
-        };
-        let image = match &params.backend {
-            Backend::Docker { image, .. } => Some(image.as_str().to_string()),
-            Backend::Native => None,
+        let backend = match &params.backend {
+            LaunchBackend::Native => RecordedBackend::Native {
+                daemon_pid: daemon_pid
+                    .ok_or_else(|| anyhow::anyhow!("native launch record requires daemon_pid"))?,
+            },
+            LaunchBackend::Docker(target) => RecordedBackend::Docker {
+                container_name: target.container_name().as_str().to_string(),
+                image: target.image().as_str().to_string(),
+            },
         };
         let started_at = now_rfc3339()?;
         Ok(Self {
             version: RECORD_VERSION,
-            runtime,
+            backend,
             control_addr: params.control_addr.to_string(),
             mount_point: params.mount_point.clone(),
-            daemon_pid,
-            container_name,
-            image,
             started_at,
         })
     }
@@ -143,34 +143,26 @@ impl LaunchRecord {
     /// Human label for the backend the daemon was launched with, read straight
     /// from the run-state file so callers learn the mode without probing.
     pub(crate) fn mode_label(&self) -> &'static str {
-        match self.runtime {
-            RuntimeKind::Native => "native",
-            RuntimeKind::Docker => "container",
-        }
+        self.backend.mode_label()
     }
 
-    /// Reconstruct the `Backend` variant from the record so `down`/`reset` can
-    /// dispatch through `Backend::reclaim` without naming native or Docker.
-    pub(crate) fn into_backend(self) -> Result<Backend> {
-        match self.runtime {
-            RuntimeKind::Native => Ok(Backend::Native),
-            RuntimeKind::Docker => {
-                let name = self.container_name.ok_or_else(|| {
-                    anyhow::anyhow!("launch record is Docker but missing container_name")
-                })?;
-                let image = self
-                    .image
-                    .ok_or_else(|| anyhow::anyhow!("launch record is Docker but missing image"))?;
-                Ok(Backend::Docker {
-                    container_name: ContainerName::new(name)?,
-                    image: ImageRef::new(image)?,
-                })
-            },
+    /// Reconstruct the backend variant from the record so `down`/`reset` can
+    /// dispatch through `LaunchBackend::reclaim` without naming native or Docker.
+    pub(crate) fn into_backend(self) -> Result<LaunchBackend> {
+        match self.backend {
+            RecordedBackend::Native { .. } => Ok(LaunchBackend::Native),
+            RecordedBackend::Docker {
+                container_name,
+                image,
+            } => Ok(LaunchBackend::docker(DockerTarget::new(
+                container_name,
+                image,
+            )?)),
         }
     }
 }
 
-/// Reconstruct the `Backend` from a daemon's `LaunchKind` plus the launch
+/// Reconstruct the backend from a daemon's status backend plus the launch
 /// record, so `down`/`reset` dispatch teardown without naming native or Docker.
 ///
 /// A host-native daemon needs no record. A container daemon reads the record for
@@ -178,10 +170,13 @@ impl LaunchRecord {
 /// falls back to the default container name (with a warning), so a corrupt
 /// record never strands a running container after the daemon has already been
 /// asked to shut down.
-pub(crate) fn backend_from_launch_kind(launch: LaunchKind, config_dir: &Path) -> Result<Backend> {
-    match launch {
-        LaunchKind::HostNative => Ok(Backend::Native),
-        LaunchKind::Container => {
+pub(crate) fn backend_from_daemon(
+    backend: DaemonBackend,
+    config_dir: &Path,
+) -> Result<LaunchBackend> {
+    match backend {
+        DaemonBackend::Native => Ok(LaunchBackend::Native),
+        DaemonBackend::Docker => {
             match LaunchRecord::read(config_dir)
                 .and_then(|record| record.map(LaunchRecord::into_backend).transpose())
             {
@@ -200,11 +195,8 @@ pub(crate) fn backend_from_launch_kind(launch: LaunchKind, config_dir: &Path) ->
     }
 }
 
-fn default_docker_backend() -> Result<Backend> {
-    Ok(Backend::Docker {
-        container_name: ContainerName::new(crate::session::CONTAINER_NAME)?,
-        image: ImageRef::new(crate::session::IMAGE)?,
-    })
+fn default_docker_backend() -> Result<LaunchBackend> {
+    LaunchBackend::default_docker()
 }
 
 fn record_path(config_dir: &Path) -> PathBuf {

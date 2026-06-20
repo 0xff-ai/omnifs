@@ -36,7 +36,7 @@ Two standing constraints shape everything below:
 
 Flags: `--mount-point`, `--config-dir`, `--cache-dir`, `--listen <addr>` (a `SocketAddr`, TCP loopback only today), `--root-symlinks` (container-image nicety: maintain `/github → /omnifs/github` links as mounts come and go; off by default, passed by the entrypoint, meaningless and absent in native mode).
 
-**`crates/omnifs-api`** (new, library): serde DTOs shared by CLI and daemon — `DaemonStatus`/`VersionInfo`/`ReadyInfo` and (phase 3) the mount-create request body. No business logic. The CLI's `StatusJson` stays in the CLI: it is the *merged* host+daemon presentation for `omnifs status --json`, not a wire type the daemon ever sees.
+**`crates/omnifs-api`** (new, library): serde DTOs shared by CLI and daemon: `DaemonStatus`/`ReadyInfo` plus reconcile and shutdown reports. `DaemonStatus` is the single daemon compatibility and runtime-status probe, carrying the daemon version, control API version, PID, executable, frontend, directories, and mounts. No business logic. The CLI's `StatusJson` stays in the CLI: it is the *merged* host+daemon presentation for `omnifs status --json`, not a wire type the daemon ever sees.
 
 **`crates/omnifs-cli`**: drops `omnifs-host` and `omnifs-fuse` (and with them wasmtime and fuser). Keeps bollard. The daemon lifecycle sits behind a small backend seam — launch, terminate, control endpoint, runtime-home path — with Docker as the only implementation now and a native spawn backend later. Keep the seam exactly that small; it is not a plugin system.
 
@@ -62,8 +62,7 @@ All endpoints under `/v1`, JSON bodies. The API carries **no secret values in ei
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/ready` | Readiness gate for `omnifs up` (replaces exec-probing `/omnifs`). |
-| `GET /v1/version` | Daemon semver + API version; CLI compatibility check. |
-| `GET /v1/status` | Typed status payload (replaces `docker exec omnifs omnifs status` and `runtime_state.json`); active mounts are surfaced here via `DaemonStatus.mounts`. |
+| `GET /v1/status` | Compatibility and typed status probe (replaces `GET /v1/version`, `docker exec omnifs omnifs status`, and `runtime_state.json`); active mounts are surfaced here via `DaemonStatus.mounts`. |
 | `POST /v1/mounts` | Create a mount from a resolved spec. Host-managed credential references are `scheme` plus optional `account`, resolved against `credentials.json`. |
 | `DELETE /v1/mounts/{name}` | Remove a mount live. |
 | `GET /v1/events` | Inspector stream: chunked newline-framed JSON records, the existing `omnifs-inspector` wire format. Replaces the raw TCP listener. |
@@ -114,7 +113,7 @@ Guardrails:
 
 ## Versioning and compatibility
 
-The image label handshake (`ai.0xff.omnifs.min-launcher-version`) stays as the pre-start gate against old CLIs launching new images. Post-start, `GET /v1/version` returns `{ version, apiVersion }`; the CLI refuses to manage a daemon with an incompatible `apiVersion`. CLI and image ship as a version-coupled pair per release (same unprefixed semver), so these checks guard accidental skew, not supported divergence — which is also why no compatibility shims are kept for the deleted surfaces.
+The image label handshake (`ai.0xff.omnifs.min-launcher-version`) stays as the pre-start gate against old CLIs launching new images. Post-start, `GET /v1/status` returns `DaemonStatus`, including `version`, `api_major`, `api_minor`, `pid`, and `executable`; the CLI refuses to manage a daemon with an incompatible API major and warns on minor skew. `/v1/version` is gone, so the status payload is the compatibility check and the runtime fact snapshot. CLI and image ship as a version-coupled pair per release (same unprefixed semver), so these checks guard accidental skew, not supported divergence, which is also why no compatibility shims are kept for the deleted surfaces.
 
 ## Packaging and release ramifications
 

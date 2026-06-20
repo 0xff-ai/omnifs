@@ -2,13 +2,13 @@
 //!
 //! Resolution order:
 //!   1. Probe the control port: if a live daemon answers, trust
-//!      `DaemonStatus.launch` to identify the backend.
+//!      `DaemonStatus.backend` to identify the backend.
 //!   2. Fall back to the launch record: if the daemon is dead, the record
 //!      says what was started.
 //!   3. If neither applies, nothing is running.
 //!
 //! The backend is never inferred from `[system].runtime`. `down` is
-//! backend-transparent: it dispatches through `Backend::reclaim` without
+//! backend-transparent: it dispatches through `LaunchBackend::reclaim` without
 //! naming Docker or native.
 
 use std::fmt;
@@ -18,7 +18,7 @@ use std::time::Duration;
 use clap::Args;
 
 use crate::client::DaemonClient;
-use crate::launch_record::{LaunchRecord, backend_from_launch_kind};
+use crate::launch_record::{LaunchRecord, backend_from_daemon};
 use crate::paths::{PathOverrides, Paths};
 
 #[derive(Args, Debug, Clone, Default)]
@@ -66,7 +66,7 @@ async fn teardown_daemon(paths: &crate::paths::Paths, force: bool) -> anyhow::Re
                 anstream::println!("Daemon exited before shutdown completed; sweeping…");
             },
         }
-        let backend = backend_from_launch_kind(status.launch, config_dir)?;
+        let backend = backend_from_daemon(status.backend, config_dir)?;
         backend
             .reclaim(Some(status.mount_point.as_path()), &nfs_state_dir)
             .await?;
@@ -110,12 +110,9 @@ fn teardown_dev_cluster() {
 async fn probe_live_daemon(
     client: &DaemonClient,
 ) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
-    match client.version().await {
-        Ok(Some(_)) => match client.status().await {
-            Ok(status) => Ok(Some(status)),
-            Err(_) => Ok(None),
-        },
-        Ok(None) | Err(_) => Ok(None),
+    match client.status_optional().await {
+        Ok(status) => Ok(status),
+        Err(_) => Ok(None),
     }
 }
 

@@ -27,23 +27,24 @@ impl VersionArgs {
 
         let ctx = AppContext::resolve_default()?;
         let cli = env!("CARGO_PKG_VERSION");
-        let container = describe_container(ctx.runtime().container_name().as_str()).await;
+        let docker_target = ctx.docker_target();
+        let container = describe_container(docker_target.container_name().as_str()).await;
         let image = match container.image {
             Some(image) => ImageRef::new(image)?,
-            None => ctx.runtime().image().clone(),
+            None => docker_target.image().clone(),
         };
         let image_location = describe_image_location(&image).await;
         let provider_status = provider_dir_summary(ctx.catalog());
 
         anstream::println!("CLI:        omnifs {cli}");
         anstream::println!("Image:      {image} ({image_location})");
-        if image != *ctx.runtime().image() {
-            anstream::println!("Configured: {}", ctx.runtime().image());
+        if image != *docker_target.image() {
+            anstream::println!("Configured: {}", docker_target.image());
         }
         anstream::println!(
             "Container:  {} (`{}`)",
             container.state,
-            ctx.runtime().container_name()
+            docker_target.container_name()
         );
         anstream::println!(
             "Store:      file ({})",

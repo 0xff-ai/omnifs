@@ -8,7 +8,7 @@ use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::{Artifact, BuildError, Dirs, Runtime, component_engine};
 use omnifs_cache::Caches;
-use omnifs_mount::materialize::materialize;
+use omnifs_mount::materialize::{MaterializationMode, materialize};
 use omnifs_mount::mounts::{Catalog, Resolved, Spec, spec_paths_in};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -242,15 +242,15 @@ impl ProviderRegistry {
     /// rewriting) and fingerprinted; a spec that is new is added, one whose
     /// fingerprint changed is replaced, one that disappeared is removed, and one
     /// that fails to materialize or instantiate is recorded in
-    /// [`ReconcileOutcome::failed`] without aborting the pass. `host_native`
-    /// selects host-direct preopens (true) versus container-rewritten preopens.
+    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
+    /// host-direct preopens versus container-rewritten preopens.
     pub fn reconcile(
         &self,
         handle: &tokio::runtime::Handle,
-        host_native: bool,
+        mode: MaterializationMode,
     ) -> ReconcileOutcome {
         let _guard = self.reconcile_lock.lock();
-        ReconcilePass::new(self, handle, host_native).run()
+        ReconcilePass::new(self, handle, mode).run()
     }
 
     fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
@@ -293,7 +293,7 @@ impl ProviderRegistry {
 struct ReconcilePass<'a> {
     registry: &'a ProviderRegistry,
     handle: &'a tokio::runtime::Handle,
-    host_native: bool,
+    mode: MaterializationMode,
     catalog: Catalog,
     desired: HashSet<String>,
     outcome: ReconcileOutcome,
@@ -304,12 +304,12 @@ impl<'a> ReconcilePass<'a> {
     fn new(
         registry: &'a ProviderRegistry,
         handle: &'a tokio::runtime::Handle,
-        host_native: bool,
+        mode: MaterializationMode,
     ) -> Self {
         Self {
             registry,
             handle,
-            host_native,
+            mode,
             catalog: Catalog::new(registry.config_dir.join("mounts"), &registry.providers_dir),
             desired: HashSet::new(),
             outcome: ReconcileOutcome::default(),
@@ -473,7 +473,7 @@ impl<'a> ReconcilePass<'a> {
                 return None;
             },
         };
-        match materialize(spec, &self.catalog, self.host_native) {
+        match materialize(spec, &self.catalog, self.mode) {
             Ok(materialized) => Some(materialized.spec),
             Err(error) => {
                 self.outcome.failed.push(MountFailure {

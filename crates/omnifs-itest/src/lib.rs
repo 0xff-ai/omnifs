@@ -200,9 +200,20 @@ impl TestOpExt for TestOp<'_> {
 
 pub fn make_extractor() -> Arc<ArchiveExtractorComponent> {
     Arc::new(
-        ArchiveExtractorComponent::from_path(provider_wasm_path(ARCHIVE_TOOL_WASM), DEFAULT_LIMITS)
-            .expect("build extractor"),
+        ArchiveExtractorComponent::from_path(
+            provider_wasm_path(ARCHIVE_TOOL_WASM),
+            DEFAULT_LIMITS,
+            Some(&itest_wasm_cache_dir()),
+        )
+        .expect("build extractor"),
     )
+}
+
+/// Stable on-disk wasm artifact cache shared across test processes. nextest
+/// runs a process per test, so without a fixed directory every process would
+/// recompile providers from scratch; a workspace-local dir keeps them warm.
+fn itest_wasm_cache_dir() -> PathBuf {
+    workspace_root().join("target").join("wasm-cache")
 }
 
 /// Borrow the inline payload of a `ReadFileResult`, panicking if the
@@ -290,7 +301,10 @@ fn ensure_providers_built() {
 pub fn make_engine() -> wasmtime::Engine {
     static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
     ENGINE
-        .get_or_init(|| omnifs_host::component_engine(|_| {}).expect("build provider engine"))
+        .get_or_init(|| {
+            omnifs_host::component_engine(Some(&itest_wasm_cache_dir()), |_| {})
+                .expect("build provider engine")
+        })
         .clone()
 }
 

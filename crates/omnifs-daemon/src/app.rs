@@ -7,6 +7,7 @@
 //! `docs/design/daemon-cli-split.md`).
 
 use clap::{Args, ValueEnum};
+use omnifs_api::DaemonBackend;
 use omnifs_home::{PathOverrides, Paths};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
@@ -224,13 +225,17 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     // not. This selects the preopen materialization mode (host-direct versus
     // container-rewritten) independently of `--root-symlinks`, which now means
     // only "maintain `/<mount>` convenience symlinks."
-    let host_native = args.host_native;
+    let backend = if args.host_native {
+        DaemonBackend::Native
+    } else {
+        DaemonBackend::Docker
+    };
     let daemon = Arc::new(server::Daemon::new(
         Arc::clone(&registry),
         sink,
         frontends,
         args.root_symlinks,
-        host_native,
+        backend,
     ));
     let listener = std::net::TcpListener::bind(args.listen).map_err(|error| {
         anyhow::anyhow!(
@@ -244,9 +249,9 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     daemon.spawn_control(listener, &rt)?;
 
     // Load desired state from `mounts/*.json` before serving, so the tree is
-    // populated when the frontend comes up. Both the host-native and the
-    // containerized launch reconcile here; the host_native flag carried on the
-    // daemon selects host-direct versus container-rewritten preopens.
+    // populated when the frontend comes up. Both the native and Docker launch
+    // paths reconcile here; the daemon backend selects host-direct versus
+    // container-rewritten preopens.
     let report = daemon.reconcile_blocking(&rt);
     for failure in &report.failed {
         warn!(mount = %failure.mount, reason = %failure.reason, "mount did not converge");
