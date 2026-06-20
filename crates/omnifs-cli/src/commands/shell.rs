@@ -1,46 +1,314 @@
-//! `omnifs shell` — open a shell in the running container.
+//! `omnifs shell` — drop into a subshell tuned for exploring the projected tree.
+//!
+//! Launches the user's `$SHELL` as a child process pointed at an omnifs-owned rc
+//! (zsh via `ZDOTDIR`, bash via `--rcfile`). That rc inherits the user's own
+//! config, then takes over the prompt with one computed only from `$PWD` and a
+//! mount→provider map handed in at launch. The point is to stop the user's
+//! prompt framework (starship, powerlevel10k, …) from re-scanning the cwd on
+//! every render: that scan is a filesystem probe, and on a lazy projection each
+//! probe is a provider round-trip. Because it is a child process, `exit` returns
+//! the user exactly where they were with nothing to undo; their real dotfiles
+//! are never touched.
+//!
+//! Backend-transparent: the daemon's mode and mount point come from the run-
+//! state file `omnifs up` writes (`<config_dir>/launch.json`), and the mount is
+//! host-visible under either backend, so there is nothing to branch on.
 
-use anyhow::Context;
-use clap::Args;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::runtime_target::RuntimeTarget;
+use anyhow::{Context, Result};
+use clap::Args;
+use omnifs_api::MountInfo;
+
+use crate::client::DaemonClient;
+use crate::launch_record::LaunchRecord;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
-    /// Container name.
-    ///
-    /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
-    /// `omnifs`.
+    /// Start a clean shell that does not source your shell rc files.
     #[arg(long)]
-    pub container_name: Option<String>,
-    /// Optional command to run instead of the default `/bin/zsh`.
+    pub hermetic: bool,
+    /// Shell to launch (defaults to `$SHELL`).
+    #[arg(long)]
+    pub shell: Option<String>,
+    /// Run a command in the mount context instead of an interactive shell.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
 }
 
 impl ShellArgs {
-    pub fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> Result<()> {
         use crate::paths::PathOverrides;
-        use std::io::IsTerminal as _;
 
-        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
-        let container_name = RuntimeTarget::resolve_container_name(self.container_name, &config)?;
-        let mut cmd = Command::new("docker");
-        cmd.arg("exec").arg("-i");
-        if std::io::stdin().is_terminal() {
-            cmd.arg("-t");
+        if std::env::var_os("OMNIFS_IN_SHELL").is_some() {
+            anstream::eprintln!(
+                "note: already inside an omnifs shell; opening a nested one (exit twice to return)"
+            );
         }
-        cmd.arg(container_name.as_str());
-        if self.command.is_empty() {
-            cmd.arg("/bin/zsh");
-        } else {
-            cmd.args(&self.command);
+
+        let (paths, _config) = crate::paths::resolve_with_config(PathOverrides::default())?;
+
+        // The run-state file is the source of truth for whether a daemon was
+        // started and how (native vs container) plus its mount point — no live
+        // daemon required to discover the mode.
+        let record = LaunchRecord::read(&paths.config_dir)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no omnifs run-state file in {}; start the daemon with `omnifs up`, \
+                 then `omnifs shell`",
+                paths.config_dir.display()
+            )
+        })?;
+        let mode = record.mode_label();
+
+        // A live status call, when the daemon answers, supplies the mount→provider
+        // map for the prompt and the canonical mount point; if it does not, fall
+        // back to the record and warn that the mount may be stale.
+        let live = DaemonClient::new().status().await.ok();
+        if live.is_none() {
+            anstream::eprintln!(
+                "note: the daemon is not answering; its mount may be stale (try `omnifs up`)"
+            );
         }
-        let status = cmd.status().context("spawn `docker exec`")?;
-        if !status.success() {
-            anyhow::bail!("docker exec exited with {status}");
+        let mount_point = live
+            .as_ref()
+            .map(|status| status.mount_point.clone())
+            .or_else(|| record.mount_point().map(Path::to_path_buf))
+            .ok_or_else(|| {
+                anyhow::anyhow!("run-state file has no mount point; rerun `omnifs up`")
+            })?;
+        let mounts = live.map(|status| status.mounts).unwrap_or_default();
+
+        // A one-shot command runs directly in the mount context; no rc or prompt
+        // tuning is needed for a non-interactive invocation.
+        if !self.command.is_empty() {
+            let mut cmd = Command::new(&self.command[0]);
+            cmd.args(&self.command[1..]);
+            apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
+            set_cwd_to_mount(&mut cmd, &mount_point);
+            return spawn_and_propagate(cmd, format!("run `{}`", self.command[0]));
         }
-        Ok(())
+
+        let shell = resolve_shell(self.shell.as_deref());
+        let shell_dir = paths.cache_dir.join("shell");
+        let mut cmd = Command::new(&shell);
+        match ShellKind::detect(&shell) {
+            ShellKind::Zsh => {
+                let zdotdir = shell_dir.join("zsh");
+                std::fs::create_dir_all(&zdotdir)
+                    .with_context(|| format!("create {}", zdotdir.display()))?;
+                std::fs::write(zdotdir.join(".zshenv"), ZSH_ZSHENV)?;
+                std::fs::write(zdotdir.join(".zshrc"), ZSH_ZSHRC)?;
+                cmd.arg("-i");
+                cmd.env("ZDOTDIR", &zdotdir);
+                cmd.env("OMNIFS_PREV_ZDOTDIR", prev_zdotdir());
+            },
+            ShellKind::Bash => {
+                std::fs::create_dir_all(&shell_dir)
+                    .with_context(|| format!("create {}", shell_dir.display()))?;
+                let rcfile = shell_dir.join("omnifs.bashrc");
+                std::fs::write(&rcfile, BASH_RC)?;
+                cmd.arg("--rcfile").arg(&rcfile).arg("-i");
+            },
+            ShellKind::Other => {
+                // No rc lever for this shell: give it the omnifs context and the
+                // mount as cwd, but leave its prompt alone.
+            },
+        }
+        apply_context_env(&mut cmd, &mount_point, &mounts, self.hermetic);
+        set_cwd_to_mount(&mut cmd, &mount_point);
+
+        anstream::println!(
+            "omnifs shell ({mode}) at {} (type `exit` to leave)",
+            mount_point.display()
+        );
+        spawn_and_propagate(cmd, "launch omnifs shell".to_string())
+    }
+}
+
+/// Which rc lever, if any, omnifs can use to inject its prompt.
+enum ShellKind {
+    Zsh,
+    Bash,
+    Other,
+}
+
+impl ShellKind {
+    fn detect(shell: &Path) -> Self {
+        match shell.file_name().and_then(|name| name.to_str()) {
+            Some(name) if name.contains("zsh") => Self::Zsh,
+            Some(name) if name.contains("bash") => Self::Bash,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn resolve_shell(override_shell: Option<&str>) -> PathBuf {
+    if let Some(shell) = override_shell {
+        return PathBuf::from(shell);
+    }
+    std::env::var_os("SHELL").map_or_else(|| PathBuf::from("/bin/sh"), PathBuf::from)
+}
+
+/// The user's real `ZDOTDIR` (or `$HOME`), so the omnifs zsh rc can source their
+/// config back in after we redirect `ZDOTDIR` at our own dir.
+fn prev_zdotdir() -> PathBuf {
+    std::env::var_os("ZDOTDIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_default()
+}
+
+fn apply_context_env(cmd: &mut Command, mount_point: &Path, mounts: &[MountInfo], hermetic: bool) {
+    cmd.env("OMNIFS_IN_SHELL", "1");
+    cmd.env("OMNIFS_MOUNT_POINT", mount_point);
+    cmd.env("OMNIFS_MOUNTS", mounts_env(mounts));
+    if hermetic {
+        cmd.env("OMNIFS_HERMETIC", "1");
+    }
+}
+
+/// `mount=provider;mount=provider` for the rc to parse into its prompt map. Mount
+/// names and provider ids are validated identifiers, so neither carries `;`/`=`.
+fn mounts_env(mounts: &[MountInfo]) -> String {
+    mounts
+        .iter()
+        .map(|m| format!("{}={}", m.mount, m.provider_id))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn set_cwd_to_mount(cmd: &mut Command, mount_point: &Path) {
+    if mount_point.is_dir() {
+        cmd.current_dir(mount_point);
+    }
+}
+
+/// Hand the terminal to `cmd` and forward its exit code. A clean (0) or
+/// signal-terminated exit returns `Ok`; a non-zero exit becomes this process's
+/// exit code so one-shot commands stay scriptable.
+fn spawn_and_propagate(mut cmd: Command, context: String) -> Result<()> {
+    let status = cmd.status().with_context(|| context)?;
+    match status.code() {
+        Some(0) | None => Ok(()),
+        Some(code) => std::process::exit(code),
+    }
+}
+
+const ZSH_ZSHENV: &str = r#"# omnifs shell: inherit the user's zshenv (PATH, etc.) before anything else.
+[[ -z "$OMNIFS_HERMETIC" && -r "${OMNIFS_PREV_ZDOTDIR:-$HOME}/.zshenv" ]] && \
+  source "${OMNIFS_PREV_ZDOTDIR:-$HOME}/.zshenv"
+"#;
+
+const ZSH_ZSHRC: &str = r#"# omnifs shell: inherit the user's zsh config, then take over the prompt.
+
+if [[ -z "$OMNIFS_HERMETIC" && -r "${OMNIFS_PREV_ZDOTDIR:-$HOME}/.zshrc" ]]; then
+  source "${OMNIFS_PREV_ZDOTDIR:-$HOME}/.zshrc"
+fi
+
+# A user prompt framework (starship, powerlevel10k, ...) re-scans the cwd every
+# render; on a lazy projection each scan is a provider round-trip. Drop inherited
+# prompt hooks and build a prompt from $PWD plus the mount->provider map passed
+# in via OMNIFS_MOUNTS.
+autoload -Uz add-zsh-hook
+precmd_functions=()
+(( ${+functions[precmd]} )) && unfunction precmd
+
+typeset -gA _omnifs_providers
+() {
+  local pair
+  for pair in ${(s.;.)OMNIFS_MOUNTS}; do
+    [[ -n "$pair" ]] && _omnifs_providers[${pair%%=*}]="${pair#*=}"
+  done
+}
+
+_omnifs_precmd() {
+  local seg=omnifs
+  if [[ "$PWD/" == "${OMNIFS_MOUNT_POINT}"/* ]]; then
+    local rel=${PWD#$OMNIFS_MOUNT_POINT}; rel=${rel#/}
+    local mount=${rel%%/*}
+    if [[ -n "$mount" ]]; then
+      seg=$mount
+      local provider=${_omnifs_providers[$mount]}
+      [[ -n "$provider" && "$provider" != "$mount" ]] && seg="$mount ($provider)"
+    fi
+  fi
+  _OMNIFS_SEG=$seg
+}
+add-zsh-hook precmd _omnifs_precmd
+
+setopt PROMPT_SUBST
+PROMPT='%F{magenta}omnifs:${_OMNIFS_SEG}%f %F{blue}%~%f %# '
+"#;
+
+const BASH_RC: &str = r#"# omnifs shell: inherit the user's bash config, then take over the prompt.
+
+if [[ -z "$OMNIFS_HERMETIC" && -r "$HOME/.bashrc" ]]; then
+  source "$HOME/.bashrc"
+fi
+
+# Replace any inherited PROMPT_COMMAND (starship, etc.) so the prompt is built
+# only from $PWD plus the mount->provider map passed in via OMNIFS_MOUNTS, never
+# from a per-render filesystem scan.
+declare -A _omnifs_providers
+IFS=';' read -ra _omnifs_pairs <<< "$OMNIFS_MOUNTS"
+for _omnifs_pair in "${_omnifs_pairs[@]}"; do
+  [[ -n "$_omnifs_pair" ]] && _omnifs_providers["${_omnifs_pair%%=*}"]="${_omnifs_pair#*=}"
+done
+
+_omnifs_prompt() {
+  local seg=omnifs
+  case "$PWD/" in
+    "$OMNIFS_MOUNT_POINT"/*)
+      local rel=${PWD#$OMNIFS_MOUNT_POINT}; rel=${rel#/}
+      local mount=${rel%%/*}
+      if [[ -n "$mount" ]]; then
+        seg=$mount
+        local provider=${_omnifs_providers[$mount]}
+        [[ -n "$provider" && "$provider" != "$mount" ]] && seg="$mount ($provider)"
+      fi
+      ;;
+  esac
+  PS1="\[\e[35m\]omnifs:${seg}\[\e[0m\] \[\e[34m\]\w\[\e[0m\] \$ "
+}
+PROMPT_COMMAND=_omnifs_prompt
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omnifs_api::MountInfo;
+
+    #[test]
+    fn detects_shell_lever_from_path() {
+        assert!(matches!(ShellKind::detect(Path::new("/bin/zsh")), ShellKind::Zsh));
+        assert!(matches!(
+            ShellKind::detect(Path::new("/usr/local/bin/bash")),
+            ShellKind::Bash
+        ));
+        // No rc lever wired for these yet; they degrade to env + cwd.
+        assert!(matches!(
+            ShellKind::detect(Path::new("/opt/homebrew/bin/fish")),
+            ShellKind::Other
+        ));
+        assert!(matches!(ShellKind::detect(Path::new("/bin/sh")), ShellKind::Other));
+    }
+
+    #[test]
+    fn serializes_mount_provider_pairs_for_the_rc() {
+        let mounts = vec![
+            MountInfo {
+                mount: "github".into(),
+                provider_id: "github".into(),
+                root_mount: false,
+            },
+            MountInfo {
+                mount: "db".into(),
+                provider_id: "sqlite".into(),
+                root_mount: false,
+            },
+        ];
+        // The rc splits on ';' and '=' to build its prompt map.
+        assert_eq!(mounts_env(&mounts), "github=github;db=sqlite");
     }
 }

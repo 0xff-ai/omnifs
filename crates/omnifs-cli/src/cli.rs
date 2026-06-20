@@ -47,7 +47,8 @@ pub enum Commands {
     Logs(commands::logs::LogsArgs),
     /// Inspector stream: FUSE, provider, and callout JSONL events.
     Inspect(commands::inspect::InspectArgs),
-    /// Open an interactive shell inside the running container.
+    /// Open an omnifs-aware shell for exploring the projected tree. The daemon
+    /// mode and mount point come from the run-state file `omnifs up` wrote.
     Shell(commands::shell::ShellArgs),
 
     /// First-run wizard: detect OS, explain Docker, pick several providers,
@@ -121,7 +122,7 @@ impl Commands {
             Self::Down(args) => args.run().await,
             Self::Logs(args) => args.run().await,
             Self::Inspect(args) => args.run().await,
-            Self::Shell(args) => args.run(),
+            Self::Shell(args) => args.run().await,
             Self::Mounts(args) => args.run().await,
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {

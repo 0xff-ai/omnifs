@@ -31,7 +31,7 @@ omnifs shell
 
 `omnifs setup` is interactive. It pulls the Docker image and walks you through provider selection and auth.
 
-`omnifs shell` opens a shell against the running container. Inside the container, the filesystem is mounted at `/omnifs`, with convenience symlinks for every mount at the root, such as `/github`, `/dns`, and `/arxiv`.
+`omnifs shell` opens an omnifs-aware shell for exploring the mounted tree. It keeps your shell customizations but installs a fast prompt that shows your current mount and provider and never stalls on the lazy filesystem.
 
 ---
 
