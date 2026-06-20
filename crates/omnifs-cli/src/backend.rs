@@ -81,11 +81,6 @@ pub(crate) enum Backend {
     Docker {
         container_name: ContainerName,
         image: ImageRef,
-        /// Extra host:container bind mounts layered on top of the canonical
-        /// runtime wiring (credentials, preopens, dev fixtures, …). Stored for
-        /// launch-record completeness; not needed during reclaim.
-        #[allow(dead_code)]
-        extra_binds: Vec<String>,
     },
 }
 

@@ -140,6 +140,15 @@ impl LaunchRecord {
         self.mount_point.as_deref()
     }
 
+    /// Human label for the backend the daemon was launched with, read straight
+    /// from the run-state file so callers learn the mode without probing.
+    pub(crate) fn mode_label(&self) -> &'static str {
+        match self.runtime {
+            RuntimeKind::Native => "native",
+            RuntimeKind::Docker => "container",
+        }
+    }
+
     /// Reconstruct the `Backend` variant from the record so `down`/`reset` can
     /// dispatch through `Backend::reclaim` without naming native or Docker.
     pub(crate) fn into_backend(self) -> Result<Backend> {
@@ -155,7 +164,6 @@ impl LaunchRecord {
                 Ok(Backend::Docker {
                     container_name: ContainerName::new(name)?,
                     image: ImageRef::new(image)?,
-                    extra_binds: Vec::new(), // not needed for stop
                 })
             },
         }
@@ -196,7 +204,6 @@ fn default_docker_backend() -> Result<Backend> {
     Ok(Backend::Docker {
         container_name: ContainerName::new(crate::session::CONTAINER_NAME)?,
         image: ImageRef::new(crate::session::IMAGE)?,
-        extra_binds: Vec::new(),
     })
 }
 

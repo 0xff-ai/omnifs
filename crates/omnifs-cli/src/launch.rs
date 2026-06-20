@@ -76,14 +76,8 @@ pub(crate) async fn launch_runtime(
     let rt = Runtime::connect_ready(runtime, verb).await?;
     rt.launch_container(runtime_home, extras).await?;
 
-    if let Err(error) = finish_docker_launch(
-        &rt,
-        runtime_home,
-        runtime.container_name(),
-        runtime.image(),
-        &[],
-    )
-    .await
+    if let Err(error) =
+        finish_docker_launch(&rt, runtime_home, runtime.container_name(), runtime.image()).await
     {
         if let Err(teardown) = rt.remove().await {
             anstream::eprintln!("also failed to remove the container: {teardown:#}");
@@ -144,42 +138,16 @@ async fn launch_host_native(
     if let Ok(status) = client.status().await {
         anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
-        write_native_launch_record(
-            runtime_home,
-            cache_dir,
-            status.pid,
-            Some(&status.mount_point),
-        );
+        let record_params = LaunchParams {
+            config_dir: runtime_home.to_path_buf(),
+            cache_dir: cache_dir.to_path_buf(),
+            control_addr: addr,
+            mount_point: Some(status.mount_point.clone()),
+            backend: Backend::Native,
+        };
+        write_launch_record(runtime_home, &record_params, Some(status.pid));
     }
     Ok(())
-}
-
-/// Write the launch record for a native daemon. Best-effort: a failure here
-/// is logged but does not abort the launch, since the daemon is already up.
-fn write_native_launch_record(
-    config_dir: &Path,
-    cache_dir: &Path,
-    daemon_pid: u32,
-    mount_point: Option<&Path>,
-) {
-    let addr = resolve_control_addr();
-    let params = LaunchParams {
-        config_dir: config_dir.to_path_buf(),
-        cache_dir: cache_dir.to_path_buf(),
-        control_addr: addr,
-        mount_point: mount_point.map(Path::to_path_buf),
-        backend: Backend::Native,
-    };
-    match LaunchRecord::new(&params, Some(daemon_pid)) {
-        Ok(record) => {
-            if let Err(error) = record.write(config_dir) {
-                anstream::eprintln!("warning: could not write launch record: {error:#}");
-            }
-        },
-        Err(error) => {
-            anstream::eprintln!("warning: could not build launch record: {error:#}");
-        },
-    }
 }
 
 async fn reject_existing_host_daemon(
@@ -356,7 +324,6 @@ async fn finish_docker_launch(
     runtime_home: &Path,
     container_name: &crate::container_name::ContainerName,
     image: &crate::image_ref::ImageRef,
-    extra_binds: &[String],
 ) -> anyhow::Result<()> {
     rt.wait_for_daemon_ready().await?;
     let client = DaemonClient::new();
@@ -365,40 +332,29 @@ async fn finish_docker_launch(
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
-        write_docker_launch_record(
-            runtime_home,
-            container_name,
-            image,
-            extra_binds,
-            Some(&status.mount_point),
-        );
+        let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
+            .parse()
+            .expect("static address is valid");
+        let record_params = LaunchParams {
+            config_dir: runtime_home.to_path_buf(),
+            cache_dir: runtime_home.join("cache"),
+            control_addr: addr,
+            mount_point: Some(status.mount_point.clone()),
+            backend: Backend::Docker {
+                container_name: container_name.clone(),
+                image: image.clone(),
+            },
+        };
+        write_launch_record(runtime_home, &record_params, None);
     }
     Ok(())
 }
 
-/// Write the launch record for a Docker daemon. Best-effort.
-fn write_docker_launch_record(
-    config_dir: &Path,
-    container_name: &crate::container_name::ContainerName,
-    image: &crate::image_ref::ImageRef,
-    extra_binds: &[String],
-    mount_point: Option<&Path>,
-) {
-    let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
-        .parse()
-        .expect("static address is valid");
-    let params = LaunchParams {
-        config_dir: config_dir.to_path_buf(),
-        cache_dir: config_dir.join("cache"),
-        control_addr: addr,
-        mount_point: mount_point.map(Path::to_path_buf),
-        backend: Backend::Docker {
-            container_name: container_name.clone(),
-            image: image.clone(),
-            extra_binds: extra_binds.to_vec(),
-        },
-    };
-    match LaunchRecord::new(&params, None) {
+/// Build and persist the launch record at `<config_dir>/launch.json`.
+/// Best-effort: a failure here is logged but does not abort the launch, since
+/// the daemon is already serving.
+fn write_launch_record(config_dir: &Path, params: &LaunchParams, daemon_pid: Option<u32>) {
+    match LaunchRecord::new(params, daemon_pid) {
         Ok(record) => {
             if let Err(error) = record.write(config_dir) {
                 anstream::eprintln!("warning: could not write launch record: {error:#}");
