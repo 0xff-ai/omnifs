@@ -61,13 +61,13 @@ All endpoints under `/v1`, JSON bodies. The API carries **no secret values in ei
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/ready` | Readiness gate for `omnifs up` (replaces exec-probing `/omnifs`). |
-| `GET /v1/status` | Compatibility and typed status probe (replaces `GET /v1/version`, `docker exec omnifs omnifs status`, and `runtime_state.json`); active mounts are surfaced here via `DaemonStatus.mounts`. |
+| `GET /v1/ready` | Readiness gate for `omnifs up` (replaces exec-probing `/omnifs`); this is a projection of `DaemonStatus.health`, not a separate status model. |
+| `GET /v1/status` | Compatibility and typed status probe (replaces `GET /v1/version`, `docker exec omnifs omnifs status`, and `runtime_state.json`); active mounts are surfaced via `DaemonStatus.mounts`, and daemon-owned subsystem health is surfaced via `DaemonStatus.health`. |
 | `POST /v1/mounts` | Create a mount from a resolved spec. Host-managed credential references are `scheme` plus optional `account`, resolved against `credentials.json`. |
 | `DELETE /v1/mounts/{name}` | Remove a mount live. |
 | `GET /v1/events` | Inspector stream: chunked newline-framed JSON records, the existing `omnifs-inspector` wire format. Replaces the raw TCP listener. |
 
-`runtime_state.json` is deleted once `status` is API-backed. `omnifs status` on the host queries the daemon endpoint when one is running and falls back to its config-only offline view otherwise; inside the container the shipped CLI hits the local listener.
+`runtime_state.json` is deleted once `status` is API-backed. `omnifs status` on the host queries the daemon endpoint when one is running and falls back to its config-only offline view otherwise; inside the container the shipped CLI hits the local listener. The CLI formats daemon health, but it does not infer frontend, registry, or reconcile health from raw fields.
 
 ## Mount lifecycle after the split
 
@@ -113,7 +113,7 @@ Guardrails:
 
 ## Versioning and compatibility
 
-The image label handshake (`ai.0xff.omnifs.min-launcher-version`) stays as the pre-start gate against old CLIs launching new images. Post-start, `GET /v1/status` returns `DaemonStatus`, including `version`, `api_major`, `api_minor`, `pid`, and `executable`; the CLI refuses to manage a daemon with an incompatible API major and warns on minor skew. `/v1/version` is gone, so the status payload is the compatibility check and the runtime fact snapshot. CLI and image ship as a version-coupled pair per release (same unprefixed semver), so these checks guard accidental skew, not supported divergence, which is also why no compatibility shims are kept for the deleted surfaces.
+The image label handshake (`ai.0xff.omnifs.min-launcher-version`) stays as the pre-start gate against old CLIs launching new images. Post-start, `GET /v1/status` returns `DaemonStatus`, including `version`, `api_major`, `api_minor`, `pid`, `executable`, and daemon subsystem `health`; the CLI refuses to manage a daemon with an incompatible API major and warns on minor skew. `/v1/version` is gone, so the status payload is the compatibility check and the runtime fact snapshot. CLI and image ship as a version-coupled pair per release (same unprefixed semver), so these checks guard accidental skew, not supported divergence, which is also why no compatibility shims are kept for the deleted surfaces.
 
 ## Packaging and release ramifications
 

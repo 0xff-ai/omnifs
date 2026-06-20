@@ -2,7 +2,8 @@
 
 use crate::app::{DaemonArgs, FrontendKind};
 use omnifs_api::{
-    API_MAJOR, API_MINOR, DaemonBackend, DaemonStatus, FrontendInfo, MountFailure, MountInfo,
+    API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
+    HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
 use omnifs_home::{Daemon as DaemonRole, Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
@@ -128,6 +129,7 @@ impl DaemonContext {
         mounts: Vec<MountInfo>,
         failed: Vec<MountFailure>,
     ) -> DaemonStatus {
+        let health = self.health(frontend.as_ref(), &mounts, &failed);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             api_major: API_MAJOR,
@@ -142,8 +144,67 @@ impl DaemonContext {
             backend: self.backend,
             mounts,
             failed,
+            health,
         }
     }
+
+    fn health(
+        &self,
+        frontend: Option<&FrontendInfo>,
+        mounts: &[MountInfo],
+        failed: &[MountFailure],
+    ) -> DaemonHealth {
+        DaemonHealth::new(vec![
+            SubsystemHealth::new(
+                DaemonSubsystem::Control,
+                HealthState::Healthy,
+                format!("control API serving on {}", self.listen),
+            ),
+            SubsystemHealth::new(
+                DaemonSubsystem::Backend,
+                HealthState::Healthy,
+                match self.backend {
+                    DaemonBackend::Native => "native daemon",
+                    DaemonBackend::Docker => "docker container",
+                },
+            ),
+            self.frontend_health(frontend),
+            mount_health(mounts, failed),
+        ])
+    }
+
+    fn frontend_health(&self, frontend: Option<&FrontendInfo>) -> SubsystemHealth {
+        match frontend {
+            Some(frontend) => SubsystemHealth::new(
+                DaemonSubsystem::Frontend,
+                HealthState::Healthy,
+                format!(
+                    "{} serving at {}",
+                    frontend.fs_type,
+                    self.mount_point.display()
+                ),
+            ),
+            None => SubsystemHealth::new(
+                DaemonSubsystem::Frontend,
+                HealthState::Starting,
+                format!("not serving at {}", self.mount_point.display()),
+            ),
+        }
+    }
+}
+
+fn mount_health(mounts: &[MountInfo], failed: &[MountFailure]) -> SubsystemHealth {
+    let state = match (mounts.is_empty(), failed.is_empty()) {
+        (_, true) => HealthState::Healthy,
+        (false, false) => HealthState::Degraded,
+        (true, false) => HealthState::Unhealthy,
+    };
+    let message = if failed.is_empty() {
+        format!("{} mount(s) loaded", mounts.len())
+    } else {
+        format!("{} mount(s) loaded, {} failed", mounts.len(), failed.len())
+    };
+    SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)
 }
 
 impl ProcessInfo {

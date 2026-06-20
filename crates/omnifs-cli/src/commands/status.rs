@@ -8,7 +8,7 @@ use clap::Args;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct StatusArgs {
-    /// Reveal provider runtime detail.
+    /// Reveal configured provider detail.
     #[arg(long = "detail")]
     pub detail: bool,
     /// Emit machine-readable JSON.

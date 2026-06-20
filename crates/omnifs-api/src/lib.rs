@@ -14,7 +14,7 @@ pub const API_MAJOR: u16 = 1;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 0;
+pub const API_MINOR: u16 = 1;
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds `omnifsd` with zero config.
@@ -67,6 +67,105 @@ pub struct DaemonStatus {
     /// silent absence from `mounts`.
     #[serde(default)]
     pub failed: Vec<MountFailure>,
+    /// Daemon-owned health for runtime subsystems. CLI status renders these
+    /// entries instead of reconstructing daemon health from raw fields.
+    #[serde(default)]
+    pub health: DaemonHealth,
+}
+
+impl DaemonStatus {
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        self.health
+            .frontend_ready()
+            .unwrap_or_else(|| self.frontend.is_some())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct DaemonHealth {
+    pub subsystems: Vec<SubsystemHealth>,
+}
+
+impl DaemonHealth {
+    #[must_use]
+    pub fn new(subsystems: Vec<SubsystemHealth>) -> Self {
+        Self { subsystems }
+    }
+
+    #[must_use]
+    pub fn subsystem(&self, subsystem: DaemonSubsystem) -> Option<&SubsystemHealth> {
+        self.subsystems
+            .iter()
+            .find(|entry| entry.subsystem == subsystem)
+    }
+
+    #[must_use]
+    pub fn frontend_ready(&self) -> Option<bool> {
+        self.subsystem(DaemonSubsystem::Frontend)
+            .map(|entry| entry.state == HealthState::Healthy)
+    }
+
+    #[must_use]
+    pub fn overall_state(&self) -> HealthState {
+        if self
+            .subsystems
+            .iter()
+            .any(|entry| entry.state == HealthState::Unhealthy)
+        {
+            HealthState::Unhealthy
+        } else if self
+            .subsystems
+            .iter()
+            .any(|entry| entry.state == HealthState::Degraded)
+        {
+            HealthState::Degraded
+        } else if self
+            .subsystems
+            .iter()
+            .any(|entry| entry.state == HealthState::Starting)
+        {
+            HealthState::Starting
+        } else {
+            HealthState::Healthy
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SubsystemHealth {
+    pub subsystem: DaemonSubsystem,
+    pub state: HealthState,
+    pub message: String,
+}
+
+impl SubsystemHealth {
+    #[must_use]
+    pub fn new(subsystem: DaemonSubsystem, state: HealthState, message: impl Into<String>) -> Self {
+        Self {
+            subsystem,
+            state,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonSubsystem {
+    Control,
+    Backend,
+    Frontend,
+    Mounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Starting,
+    Healthy,
+    Degraded,
+    Unhealthy,
 }
 
 /// Backend serving a daemon. The CLI reads this (and the launch record) instead

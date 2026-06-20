@@ -11,8 +11,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use omnifs_api::{
-    DaemonBackend, DaemonStatus, FrontendInfo, MountFailure, MountInfo, ReadyInfo, ReconcileReport,
-    StopReport,
+    DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
+    MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
@@ -44,6 +44,10 @@ use crate::frontends::Frontends;
     components(schemas(
         ReadyInfo,
         DaemonStatus,
+        DaemonHealth,
+        SubsystemHealth,
+        DaemonSubsystem,
+        HealthState,
         FrontendInfo,
         DaemonBackend,
         MountInfo,
@@ -283,7 +287,7 @@ struct ControlSnapshot {
 impl ControlSnapshot {
     fn ready(&self) -> ReadyInfo {
         ReadyInfo {
-            ready: self.status.frontend.is_some(),
+            ready: self.status.ready(),
         }
     }
 

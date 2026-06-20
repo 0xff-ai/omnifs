@@ -194,6 +194,20 @@
           "docker"
         ]
       },
+      "DaemonHealth": {
+        "type": "object",
+        "required": [
+          "subsystems"
+        ],
+        "properties": {
+          "subsystems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubsystemHealth"
+            }
+          }
+        }
+      },
       "DaemonStatus": {
         "type": "object",
         "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
@@ -249,6 +263,10 @@
               }
             ]
           },
+          "health": {
+            "$ref": "#/components/schemas/DaemonHealth",
+            "description": "Daemon-owned health for runtime subsystems. CLI status renders these\nentries instead of reconstructing daemon health from raw fields."
+          },
           "mount_point": {
             "type": "string"
           },
@@ -272,6 +290,15 @@
           }
         }
       },
+      "DaemonSubsystem": {
+        "type": "string",
+        "enum": [
+          "control",
+          "backend",
+          "frontend",
+          "mounts"
+        ]
+      },
       "FrontendInfo": {
         "type": "object",
         "required": [
@@ -286,6 +313,15 @@
             "type": "string"
           }
         }
+      },
+      "HealthState": {
+        "type": "string",
+        "enum": [
+          "starting",
+          "healthy",
+          "degraded",
+          "unhealthy"
+        ]
       },
       "MountFailure": {
         "type": "object",
@@ -394,6 +430,25 @@
           "providers_dropped": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "SubsystemHealth": {
+        "type": "object",
+        "required": [
+          "subsystem",
+          "state",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HealthState"
+          },
+          "subsystem": {
+            "$ref": "#/components/schemas/DaemonSubsystem"
           }
         }
       }

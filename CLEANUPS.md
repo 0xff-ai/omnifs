@@ -52,12 +52,28 @@ Remaining work from the second slice:
   browse/read materialization are not split yet.
 - Item 18 is untouched.
 
+Third slice completed in `refactor(daemon): report subsystem health in status`:
+
+- Item 13: `/v1/ready` now projects from daemon-reported frontend health
+  instead of checking `frontend.is_some()` separately.
+- Item 14: `DaemonStatus` now carries daemon-owned subsystem health for the
+  control API, backend, frontend, and mounts. CLI status and launch output
+  render those health entries instead of deriving runtime summaries from raw
+  daemon fields.
+
+Remaining work from the third slice:
+
+- Item 5 is only partly addressed. CLI status now renders daemon health, but
+  its wider host/config/auth JSON view is still assembled in `status.rs`.
+- Item 4 remains partly open: `Workspace` is the session factory, but status
+  still threads configured mount data into a command-level report.
+
 ## Next batch
 
 The next parallel batch should be:
 
-1. **Status snapshot lane:** items 5, 10, 13, and 14. Collapse CLI/daemon
-   status shaping around a single snapshot/readiness model.
+1. **Status snapshot lane:** item 5. Collapse the remaining CLI status
+   host/config/auth shaping around a command-facing snapshot.
 2. **Workspace/session lane:** item 4. Continue moving command-owned config,
    catalog, daemon client, and mount paths behind `Workspace`.
 3. **Materialization lane:** items 17 and 18. Split effect/read

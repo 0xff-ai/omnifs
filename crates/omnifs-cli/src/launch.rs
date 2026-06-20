@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
 use omnifs_creds::{CredentialStore, FileStore};
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
@@ -232,8 +232,7 @@ async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Resu
     // Read daemon status to get the mount point and PID for the launch record.
     let status = client.status().await.ok();
     if let Some(status) = &status {
-        anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
-        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        report_launch_status(status);
         let record_params = LaunchParams {
             paths: paths.clone(),
             control_addr: addr,
@@ -394,7 +393,7 @@ async fn finish_docker_launch(
     let report = client.reconcile().await?;
     report_reconcile_failures(&report);
     if let Ok(status) = client.status().await {
-        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
+        report_launch_status(&status);
         let addr: SocketAddr = format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT)
             .parse()
             .expect("static address is valid");
@@ -424,6 +423,20 @@ fn write_launch_record(config_dir: &Path, params: &LaunchParams, daemon_pid: Opt
         Err(error) => {
             anstream::eprintln!("warning: could not build launch record: {error:#}");
         },
+    }
+}
+
+fn report_launch_status(status: &DaemonStatus) {
+    if let Some(frontend) = status.health.subsystem(DaemonSubsystem::Frontend) {
+        anstream::println!("✓ {}", frontend.message);
+    } else {
+        anstream::println!("✓ Mount is serving at {}", status.mount_point.display());
+    }
+
+    if let Some(mounts) = status.health.subsystem(DaemonSubsystem::Mounts) {
+        anstream::println!("✓ {}", mounts.message);
+    } else {
+        anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
     }
 }
 
