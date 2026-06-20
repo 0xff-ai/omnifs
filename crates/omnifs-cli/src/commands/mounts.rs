@@ -8,8 +8,6 @@ use omnifs_creds::{CredentialStore, FileStore};
 use std::io::Write as _;
 use std::path::Path;
 
-use crate::catalog::ProviderCatalog;
-use crate::client::DaemonClient;
 use crate::credential_target::CredentialTarget;
 use crate::paths::Paths;
 use crate::session::MountConfig;
@@ -50,19 +48,7 @@ impl MountsArgs {
                 keep_credentials,
             } => {
                 let workspace = Workspace::resolve()?;
-                let paths = workspace.paths();
-                let catalog = workspace.catalog();
-                let mounts = workspace.mounts()?;
-                rm(
-                    workspace.daemon(),
-                    paths,
-                    catalog,
-                    &mounts,
-                    &name,
-                    force,
-                    keep_credentials,
-                )
-                .await
+                rm(&workspace, &name, force, keep_credentials).await
             },
         }
     }
@@ -102,21 +88,21 @@ fn ls() -> anyhow::Result<()> {
 }
 
 pub async fn rm(
-    daemon: &DaemonClient,
-    paths: &Paths,
-    catalog: &ProviderCatalog,
-    mounts: &[MountConfig],
+    workspace: &Workspace,
     name: &str,
     force: bool,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
+    let paths = workspace.paths();
+    let catalog = workspace.catalog();
+    let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
     let mount = mounts
         .iter()
         .find(|m| m.name == name)
-        .ok_or_else(|| missing_mount_error(paths, mounts, name.as_str()).unwrap_err())?;
+        .ok_or_else(|| missing_mount_error(paths, &mounts, name.as_str()).unwrap_err())?;
     let config_path = mount.source.clone();
     let config = mount.config.clone();
     let resolved = catalog
@@ -141,11 +127,11 @@ pub async fn rm(
         .with_context(|| format!("remove {}", config_path.display()))?;
     anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
 
-    match crate::live::remove_mount(daemon).await {
-        Ok(crate::live::LiveApply::Applied) => {
+    match workspace.daemon().reconcile_if_running().await {
+        Ok(Some(_)) => {
             anstream::println!("✓ Unloaded from the running daemon");
         },
-        Ok(_) => {},
+        Ok(None) => {},
         Err(error) => {
             anstream::eprintln!(
                 "Mount config removed, but unloading it from the running daemon failed: {error:#}"
@@ -253,28 +239,12 @@ mod tests {
         paths
     }
 
-    fn catalog_for(paths: &Paths) -> ProviderCatalog {
-        ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
-    }
-
     #[tokio::test]
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let catalog = catalog_for(&paths);
-        let workspace = Workspace::new(paths.clone());
-        let mounts = workspace.mounts().unwrap();
-        let err = rm(
-            workspace.daemon(),
-            &paths,
-            &catalog,
-            &mounts,
-            "../leak",
-            true,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let workspace = Workspace::new(paths);
+        let err = rm(&workspace, "../leak", true, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
     #[test]

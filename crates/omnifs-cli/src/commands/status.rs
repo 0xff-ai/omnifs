@@ -1,7 +1,6 @@
 //! `omnifs status` verb handler.
 
 use crate::cli::OutputFormat;
-use crate::client::DaemonProbe;
 use crate::status::collect_status;
 use crate::workspace::Workspace;
 use anyhow::Context as _;
@@ -21,10 +20,7 @@ impl StatusArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
-        let runtime = match workspace.daemon().probe().await? {
-            DaemonProbe::Unreachable => None,
-            DaemonProbe::Compatible(status) => Some(*status),
-        };
+        let runtime = workspace.daemon().compatible_status_optional().await?;
         let report = collect_status(
             workspace.catalog(),
             workspace.paths().clone(),

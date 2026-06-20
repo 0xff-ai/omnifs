@@ -14,6 +14,7 @@ pub mod config;
 mod container_name;
 mod contract_preflight;
 mod credential_target;
+mod daemon_teardown;
 mod dev_mounts;
 mod dev_support;
 mod error;

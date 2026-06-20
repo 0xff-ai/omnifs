@@ -42,9 +42,9 @@ The persona pick (solo dev in a terminal) and the surface shape (flat verbs, hid
 
 ### Paths
 
-A single `paths` module resolves every directory the CLI uses from one source. Resolution per directory: explicit CLI flag, then `OMNIFS_HOME` (fans out into all subdirs), then the default `~/.omnifs/{config.toml,credentials.json,mounts,providers,cache}` layout. The default is uniform across macOS and Linux; users who want a relocated layout set one root instead of coordinating multiple directory-specific aliases.
+A single `paths` module resolves every directory the CLI uses from one source. Resolution is `OMNIFS_HOME`, then the default `~/.omnifs/{config.toml,credentials.json,mounts,providers,cache}` layout. The default is uniform across macOS and Linux; users who want a relocated layout set one workspace root instead of coordinating directory-specific aliases.
 
-The resolved `credentials_file` is threaded through every site that opens the credential store. The host store, the `auth login` write path, and the `omnifs up` read path must point at the same file or `auth login` and `omnifs up` will silently disagree.
+The resolved `credentials_file` is threaded through every site that opens the credential store. The host store, the `auth login` write path, and the `omnifs up` read path must point at the same file or `auth login` and `omnifs up` will silently disagree. It is not independently overrideable; an alternate credential store means an alternate `OMNIFS_HOME`.
 
 A `Paths::display` helper home-relativizes (`~/.omnifs/mounts`) for every user-visible path; it falls back to the full path when the home prefix cannot be cleanly stripped.
 

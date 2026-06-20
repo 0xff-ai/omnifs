@@ -5,7 +5,7 @@
 //! gracefully: no running daemon means config-only, exactly as before.
 
 use crate::catalog::ProviderCatalog;
-use crate::client::{DaemonClient, DaemonProbe};
+use crate::client::DaemonClient;
 use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
@@ -32,7 +32,7 @@ pub(crate) async fn add_mount(
     config: MountConfig,
     backend: &LaunchBackend,
 ) -> anyhow::Result<LiveApply> {
-    if matches!(client.probe().await?, DaemonProbe::Unreachable) {
+    if client.compatible_status_optional().await?.is_none() {
         return Ok(LiveApply::NotRunning);
     }
     if backend.is_docker() {
@@ -49,15 +49,5 @@ pub(crate) async fn add_mount(
     {
         anyhow::bail!("mount `{}` did not load: {}", config.name, failure.reason);
     }
-    Ok(LiveApply::Applied)
-}
-
-/// Reconcile the running daemon after the caller has removed the mount's spec
-/// file. The daemon drops any mount no longer present in `mounts/`.
-pub(crate) async fn remove_mount(client: &DaemonClient) -> anyhow::Result<LiveApply> {
-    if matches!(client.probe().await?, DaemonProbe::Unreachable) {
-        return Ok(LiveApply::NotRunning);
-    }
-    client.reconcile().await?;
     Ok(LiveApply::Applied)
 }

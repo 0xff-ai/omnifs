@@ -93,6 +93,15 @@ impl DaemonClient {
         }
     }
 
+    /// Daemon status when a compatible daemon answers; `None` when no daemon
+    /// answered on the control port.
+    pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
+        match self.probe().await? {
+            DaemonProbe::Compatible(status) => Ok(Some(*status)),
+            DaemonProbe::Unreachable => Ok(None),
+        }
+    }
+
     /// Daemon runtime facts from a reachable, compatible daemon.
     pub(crate) async fn status(&self) -> Result<DaemonStatus> {
         self.status_optional().await?.ok_or_else(|| {
@@ -133,6 +142,14 @@ impl DaemonClient {
             .error_for_status()
             .context("daemon reconcile request failed")?;
         response.json().await.context("parse reconcile report")
+    }
+
+    /// Reconcile only when a compatible daemon is running.
+    pub(crate) async fn reconcile_if_running(&self) -> Result<Option<ReconcileReport>> {
+        if self.compatible_status_optional().await?.is_none() {
+            return Ok(None);
+        }
+        self.reconcile().await.map(Some)
     }
 
     /// Ask the daemon to unmount its frontend and exit, returning what it tore

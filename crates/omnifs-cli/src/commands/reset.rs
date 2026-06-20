@@ -9,17 +9,14 @@
 //! record, never branches on `[system].runtime`.
 
 use std::fs;
-use std::path::Path;
 
 use anyhow::Context;
 use clap::Args;
 
 use crate::catalog::MountRemovalTarget;
-use crate::client::DaemonClient;
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
-use crate::launch_backend::LaunchBackend;
-use crate::launch_record::{LaunchRecord, backend_from_daemon};
+use crate::daemon_teardown::DaemonTeardown;
 use crate::paths::Paths;
 use crate::workspace::Workspace;
 use omnifs_creds::FileStore;
@@ -63,7 +60,9 @@ impl ResetArgs {
         // Tear down the daemon first so a daemon writing files won't race the
         // credential or mount-config delete. Best-effort: a non-running daemon
         // or an absent launch record is not a reset failure.
-        teardown_daemon(workspace.daemon(), paths).await;
+        DaemonTeardown::new(workspace.daemon(), paths)
+            .reset_best_effort()
+            .await;
 
         let store = FileStore::new(&paths.credentials_file);
         for target in &targets {
@@ -100,69 +99,4 @@ fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
         }
     }
     anstream::println!("  • stop the running daemon (if any)");
-}
-
-/// Best-effort daemon teardown using the same resolution order as `omnifs
-/// down`: probe the control port, fall back to the launch record.
-async fn teardown_daemon(client: &DaemonClient, paths: &crate::paths::Paths) {
-    let config_dir = &paths.config_dir;
-    let nfs_state_dir = paths.nfs_state_dir();
-
-    // Try live daemon first.
-    let backend = match resolve_backend(client, config_dir).await {
-        Ok(Some(backend)) => backend,
-        Ok(None) => {
-            anstream::println!("⚠  No running daemon found; skipping daemon teardown");
-            return;
-        },
-        Err(error) => {
-            anstream::eprintln!("⚠  Could not identify daemon backend: {error:#}");
-            return;
-        },
-    };
-
-    // Graceful shutdown first.
-    let mount_point = match client.shutdown().await {
-        Ok(Some(report)) => {
-            anstream::println!("✓ Daemon stopped");
-            Some(report.mount_point)
-        },
-        Ok(None) => {
-            anstream::println!("No daemon answered shutdown; sweeping…");
-            None
-        },
-        Err(error) => {
-            anstream::eprintln!("⚠  Daemon shutdown call failed: {error:#}");
-            None
-        },
-    };
-
-    // Backend-specific reclaim.
-    if let Err(error) = backend
-        .reclaim(mount_point.as_deref(), &nfs_state_dir)
-        .await
-    {
-        anstream::eprintln!("⚠  Backend reclaim failed: {error:#}");
-    }
-
-    let _ = LaunchRecord::remove(config_dir);
-}
-
-/// Identify the backend from the live daemon or the launch record.
-async fn resolve_backend(
-    client: &DaemonClient,
-    config_dir: &Path,
-) -> anyhow::Result<Option<LaunchBackend>> {
-    // Probe the live daemon; on any error fall through to the launch record.
-    if let Ok(status) = client.status().await {
-        let backend = backend_from_daemon(status.backend, config_dir)?;
-        return Ok(Some(backend));
-    }
-
-    // Fall back to launch record.
-    if let Some(record) = LaunchRecord::read(config_dir)? {
-        return Ok(Some(record.into_backend()?));
-    }
-
-    Ok(None)
 }

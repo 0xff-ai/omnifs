@@ -10,7 +10,6 @@ use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
 use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
 use crate::cli::OutputFormat;
@@ -21,9 +20,6 @@ pub(crate) use login::login_with_workspace;
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthArgs {
-    /// Override the credential file path.
-    #[arg(long)]
-    pub credentials_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: AuthCommand,
 }
@@ -75,20 +71,19 @@ pub enum AuthCommand {
 
 impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let workspace = Workspace::resolve()?;
-        let mut paths = workspace.paths().clone();
-        if let Some(creds) = self.credentials_file.clone() {
-            paths.credentials_file = creds;
+        let command = self.command;
+        if let AuthCommand::Modes = &command {
+            crate::auth::explain::render_modes_catalog();
+            return Ok(());
         }
+
+        let workspace = Workspace::resolve()?;
+        let paths = workspace.paths();
         let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
         let store = Box::new(FileStore::new(&paths.credentials_file));
-        match self.command {
-            // A static reference card; ignores the mount/credential context above.
-            AuthCommand::Modes => {
-                crate::auth::explain::render_modes_catalog();
-                Ok(())
-            },
+        match command {
+            AuthCommand::Modes => unreachable!("handled before workspace resolution"),
             AuthCommand::Explain { target, json } => run_explain(catalog, &mounts, &target, json),
             AuthCommand::Login {
                 mount,
