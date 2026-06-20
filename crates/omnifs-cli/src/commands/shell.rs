@@ -23,6 +23,7 @@ use omnifs_api::MountInfo;
 
 use crate::client::DaemonClient;
 use crate::launch_record::LaunchRecord;
+use crate::paths::{PathOverrides, Paths};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {
@@ -39,15 +40,13 @@ pub struct ShellArgs {
 
 impl ShellArgs {
     pub async fn run(self) -> Result<()> {
-        use crate::paths::PathOverrides;
-
         if std::env::var_os("OMNIFS_IN_SHELL").is_some() {
             anstream::eprintln!(
                 "note: already inside an omnifs shell; opening a nested one (exit twice to return)"
             );
         }
 
-        let (paths, _config) = crate::paths::resolve_with_config(PathOverrides::default())?;
+        let paths = Paths::resolve(PathOverrides::default())?;
 
         // The run-state file is the source of truth for whether a daemon was
         // started and how (native vs container) plus its mount point — no live
@@ -281,7 +280,10 @@ mod tests {
 
     #[test]
     fn detects_shell_lever_from_path() {
-        assert!(matches!(ShellKind::detect(Path::new("/bin/zsh")), ShellKind::Zsh));
+        assert!(matches!(
+            ShellKind::detect(Path::new("/bin/zsh")),
+            ShellKind::Zsh
+        ));
         assert!(matches!(
             ShellKind::detect(Path::new("/usr/local/bin/bash")),
             ShellKind::Bash
@@ -291,7 +293,10 @@ mod tests {
             ShellKind::detect(Path::new("/opt/homebrew/bin/fish")),
             ShellKind::Other
         ));
-        assert!(matches!(ShellKind::detect(Path::new("/bin/sh")), ShellKind::Other));
+        assert!(matches!(
+            ShellKind::detect(Path::new("/bin/sh")),
+            ShellKind::Other
+        ));
     }
 
     #[test]

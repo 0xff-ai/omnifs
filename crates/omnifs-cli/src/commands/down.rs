@@ -19,6 +19,7 @@ use clap::Args;
 
 use crate::client::DaemonClient;
 use crate::launch_record::{LaunchRecord, backend_from_launch_kind};
+use crate::paths::{PathOverrides, Paths};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DownArgs {
@@ -29,10 +30,8 @@ pub struct DownArgs {
 
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::PathOverrides;
-
         let DownArgs { force } = self;
-        let (paths, _config) = crate::paths::resolve_with_config(PathOverrides::default())?;
+        let paths = Paths::resolve(PathOverrides::default())?;
 
         teardown_daemon(&paths, force).await?;
 
