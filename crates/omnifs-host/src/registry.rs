@@ -700,6 +700,7 @@ mod tests {
     use crate::Dirs;
     use crate::cloner::GitCloner;
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
+    use omnifs_mount::materialize::MaterializationMode;
     use omnifs_mount::mounts::Spec;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -849,7 +850,10 @@ mod tests {
         )
         .expect("registry init");
 
-        let outcome = registry.reconcile(&tokio::runtime::Handle::current(), true);
+        let outcome = registry.reconcile(
+            &tokio::runtime::Handle::current(),
+            MaterializationMode::Docker,
+        );
 
         // The drifted mount is refused, not served, and the failure names the
         // contract mismatch so it is actionable in `omnifs status`.

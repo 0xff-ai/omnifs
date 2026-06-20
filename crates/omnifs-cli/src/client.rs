@@ -18,7 +18,7 @@ pub(crate) struct DaemonClient {
 #[derive(Debug)]
 pub(crate) enum DaemonProbe {
     Unreachable,
-    Compatible(DaemonStatus),
+    Compatible(Box<DaemonStatus>),
 }
 
 impl DaemonClient {
@@ -67,7 +67,7 @@ impl DaemonClient {
                 status.api_minor,
             );
         }
-        Ok(DaemonProbe::Compatible(status))
+        Ok(DaemonProbe::Compatible(Box::new(status)))
     }
 
     /// Raw daemon status probe. Connection absence is `None`; a reachable
@@ -85,7 +85,7 @@ impl DaemonClient {
     /// Verify the daemon is reachable and speaks this CLI's control API.
     pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
         match self.probe().await? {
-            DaemonProbe::Compatible(status) => Ok(status),
+            DaemonProbe::Compatible(status) => Ok(*status),
             DaemonProbe::Unreachable => Err(anyhow::anyhow!(
                 "no daemon answered on the control port at {}",
                 self.base

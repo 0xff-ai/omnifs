@@ -85,16 +85,16 @@ impl DaemonArgs {
     /// token as the first element.
     pub fn to_argv(&self) -> Vec<String> {
         let mut args = vec!["daemon".to_string()];
-        push_option_path(&mut args, "--config-dir", &self.config_dir);
-        push_option_path(&mut args, "--cache-dir", &self.cache_dir);
+        push_option_path(&mut args, "--config-dir", self.config_dir.as_ref());
+        push_option_path(&mut args, "--cache-dir", self.cache_dir.as_ref());
         args.push("--listen".to_string());
         args.push(self.listen.to_string());
         if self.nfs_port != 0 {
             args.push("--nfs-port".to_string());
             args.push(self.nfs_port.to_string());
         }
-        push_option_path(&mut args, "--nfs-state-dir", &self.nfs_state_dir);
-        push_option_path(&mut args, "--nfs-trace", &self.nfs_trace);
+        push_option_path(&mut args, "--nfs-state-dir", self.nfs_state_dir.as_ref());
+        push_option_path(&mut args, "--nfs-trace", self.nfs_trace.as_ref());
         if self.root_symlinks {
             args.push("--root-symlinks".to_string());
         }
@@ -105,42 +105,10 @@ impl DaemonArgs {
     }
 }
 
-fn push_option_path(args: &mut Vec<String>, flag: &str, value: &Option<PathBuf>) {
+fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>) {
     if let Some(path) = value {
         args.push(flag.to_string());
         args.push(path.display().to_string());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn to_argv_native_launch_emits_expected_flags() {
-        let args = DaemonArgs {
-            config_dir: Some("/cfg".into()),
-            cache_dir: Some("/cache".into()),
-            listen: "127.0.0.1:7711".parse().expect("valid address"),
-            host_native: true,
-            nfs_port: 0,
-            nfs_state_dir: None,
-            nfs_trace: None,
-            root_symlinks: false,
-        };
-        assert_eq!(
-            args.to_argv(),
-            vec![
-                "daemon".to_string(),
-                "--config-dir".to_string(),
-                "/cfg".to_string(),
-                "--cache-dir".to_string(),
-                "/cache".to_string(),
-                "--listen".to_string(),
-                "127.0.0.1:7711".to_string(),
-                "--host-native".to_string(),
-            ]
-        );
     }
 }
 
@@ -322,3 +290,35 @@ fn install_signal_handler(daemon: &Arc<server::Daemon>, rt: &Handle) {
 
 #[cfg(not(unix))]
 fn install_signal_handler(_daemon: &Arc<server::Daemon>, _rt: &Handle) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_argv_native_launch_emits_expected_flags() {
+        let args = DaemonArgs {
+            config_dir: Some("/cfg".into()),
+            cache_dir: Some("/cache".into()),
+            listen: "127.0.0.1:7711".parse().expect("valid address"),
+            host_native: true,
+            nfs_port: 0,
+            nfs_state_dir: None,
+            nfs_trace: None,
+            root_symlinks: false,
+        };
+        assert_eq!(
+            args.to_argv(),
+            vec![
+                "daemon".to_string(),
+                "--config-dir".to_string(),
+                "/cfg".to_string(),
+                "--cache-dir".to_string(),
+                "/cache".to_string(),
+                "--listen".to_string(),
+                "127.0.0.1:7711".to_string(),
+                "--host-native".to_string(),
+            ]
+        );
+    }
+}
