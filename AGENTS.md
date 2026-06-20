@@ -23,7 +23,7 @@ The load-bearing terms, disambiguated. Fuller definitions live in `docs/design/a
 
 Sections are tiered by how hard they bind and how they change. Read the tier before treating a line as a wall.
 
-- **Invariants.** Two of them, below. A change that breaks one is wrong; if a task seems to require it, stop and surface it. Security gets no alpha pass.
+- **Invariants.** Three of them, below. A change that breaks one is wrong; if a task seems to require it, stop and surface it. Security gets no alpha pass.
 - **Gated decisions.** Allowed, but never silent. Surface the tradeoff and get sign-off in the same change.
 - **Direction.** Where the architecture is heading. Strong, but not a wall: `omnifs` is early alpha and breakage is expected, so build with the grain and heed the "don't deepen" notes, while a deliberate, called-out departure is fine.
 - **Current shape.** Today's architecture. The baseline to understand and compare against, not a constraint to preserve; expect it to churn.
@@ -49,6 +49,10 @@ The projected tree must behave like real files for the standard Linux toolbox, j
 - search and traverse: `grep -r`, `rg`, `find` (incl. `-name`/`-size`/`-type`), `fd`
 - stat: `ls -l`/`-h`, `du -sh`, `wc`, `stat`
 - copy and archive: `cp`, `mv`, `tar c/x/t`, `rsync`; compare and hash: `diff`, `cmp`, `*sum`; inspect: `jq`, `yq`, `xmllint`; editors: `vim`, `nano` (mmap editors best-effort)
+
+### Objective fidelity
+
+If a task specifies a technology, library, or architecture, never substitute an alternative when blocked. Report the blocker, stop, and wait for approval. Completing with a substituted approach without explicit sign-off is forbidden.
 
 ## Gated decisions
 
