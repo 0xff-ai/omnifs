@@ -20,9 +20,7 @@ pub struct LogsArgs {
 
 impl LogsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::PathOverrides;
-
-        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve()?;
         let config = workspace.config()?;
         let target = DockerTarget::resolve(self.container_name, None, &config)?;
         let runtime = Runtime::connect_ready(&target, "omnifs logs").await?;

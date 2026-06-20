@@ -25,7 +25,7 @@ use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::launch_backend::LaunchBackend;
-use crate::paths::{PathOverrides, Paths};
+use crate::paths::Paths;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
@@ -69,7 +69,7 @@ pub struct InitArgs {
 impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve()?;
         let paths = workspace.paths();
         let interactive = !self.no_input;
         let catalog = workspace.catalog();
@@ -161,9 +161,8 @@ impl InitArgs {
                 .await?;
             } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
-                auth::login_with_paths(
-                    paths.config_dir.clone(),
-                    paths.credentials_file.clone(),
+                auth::login_with_workspace(
+                    &workspace,
                     mount_name.as_str(),
                     auth.account.as_deref(),
                     self.no_browser,

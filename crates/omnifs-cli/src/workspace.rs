@@ -5,12 +5,13 @@
 //! catalog, daemon client, and configured mounts.
 
 use anyhow::Context as _;
-use omnifs_home::{PathOverrides, Paths};
+use omnifs_home::Paths;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
 use crate::config::Config;
+use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 
 /// Resolved local omnifs home for one CLI command.
@@ -21,12 +22,8 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    pub(crate) fn resolve_default() -> anyhow::Result<Self> {
-        Self::resolve(PathOverrides::default())
-    }
-
-    pub(crate) fn resolve(overrides: PathOverrides) -> anyhow::Result<Self> {
-        let paths = Paths::resolve(overrides)?;
+    pub(crate) fn resolve() -> anyhow::Result<Self> {
+        let paths = Paths::resolve()?;
         Ok(Self::new(paths))
     }
 
@@ -56,6 +53,20 @@ impl Workspace {
         &self.daemon
     }
 
+    pub(crate) fn launch_backend(
+        &self,
+        container_name: Option<String>,
+        image: Option<String>,
+    ) -> anyhow::Result<LaunchBackend> {
+        let config = self.config()?;
+        if config.system.runtime.is_none() {
+            anyhow::bail!(
+                "`omnifs up` requires setup to choose a daemon backend; run `omnifs setup` first"
+            );
+        }
+        LaunchBackend::resolve(&config, container_name, image)
+    }
+
     /// The single mount-enumeration funnel used by every command.
     ///
     /// Reads one `Spec` per JSON file in the `mounts/` directory and returns
@@ -76,4 +87,34 @@ impl Workspace {
 pub(crate) fn per_file_mount_paths(mounts_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     omnifs_mount::mounts::spec_paths_in(mounts_dir)
         .with_context(|| format!("read mount config directory {}", mounts_dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_backend_requires_setup_runtime_choice() {
+        let tmp = tempfile::tempdir().expect("temp workspace");
+        let workspace = Workspace::new(Paths::under_root(tmp.path()));
+
+        let error = workspace.launch_backend(None, None).unwrap_err();
+
+        assert!(format!("{error:#}").contains("requires setup"));
+    }
+
+    #[test]
+    fn launch_backend_uses_recorded_runtime_choice() {
+        let tmp = tempfile::tempdir().expect("temp workspace");
+        let paths = Paths::under_root(tmp.path());
+        std::fs::write(&paths.config_file, "[system]\nruntime = \"native\"\n")
+            .expect("write config");
+        let workspace = Workspace::new(paths);
+
+        let backend = workspace
+            .launch_backend(None, None)
+            .expect("recorded runtime choice");
+
+        assert!(backend.is_native());
+    }
 }

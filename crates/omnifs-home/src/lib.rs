@@ -5,10 +5,9 @@
 //! logic. Higher-level CLI factories layer config and daemon handles on top of
 //! this path-only layout.
 //!
-//! Resolution order (per directory):
-//!   1. Explicit override from `PathOverrides` (CLI flag)
-//!   2. `OMNIFS_HOME` (fans out: all dirs under `$OMNIFS_HOME`)
-//!   3. Default: `$HOME/.omnifs/{...}`
+//! Resolution order:
+//!   1. `OMNIFS_HOME`
+//!   2. Default: `$HOME/.omnifs`
 
 use std::path::{Path, PathBuf};
 
@@ -28,13 +27,6 @@ pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
 pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
-
-/// Explicit (CLI flag) relocations for individual directories.
-#[derive(Debug, Clone, Default)]
-pub struct PathOverrides {
-    pub config_dir: Option<PathBuf>,
-    pub cache_dir: Option<PathBuf>,
-}
 
 /// The fully resolved omnifs directory layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -63,35 +55,15 @@ impl std::fmt::Display for ResolveError {
 impl std::error::Error for ResolveError {}
 
 impl Paths {
-    /// Resolve paths from overrides, env, `OMNIFS_HOME`, then the
-    /// `$HOME/.omnifs` default.
-    ///
-    /// Resolution order per directory:
-    ///   1. `overrides` field (CLI flag)
-    ///   2. `OMNIFS_HOME`
-    ///   3. Default root (`$HOME/.omnifs`)
-    pub fn resolve(overrides: PathOverrides) -> Result<Self, ResolveError> {
+    /// Resolve paths from env, `OMNIFS_HOME`, then the `$HOME/.omnifs` default.
+    pub fn resolve() -> Result<Self, ResolveError> {
         let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
         let default_root =
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
 
-        let config_dir = overrides
-            .config_dir
-            .or_else(|| omnifs_home.clone())
-            .or_else(|| default_root.clone())
-            .ok_or(ResolveError)?;
+        let root = omnifs_home.or(default_root).ok_or(ResolveError)?;
 
-        // Start from the canonical flat layout under config_dir, then let
-        // per-purpose overrides and env vars relocate individual dirs.
-        let mut paths = Self::under_root(&config_dir);
-
-        paths.cache_dir = overrides
-            .cache_dir
-            .or_else(|| omnifs_home.as_ref().map(|h| h.join(CACHE_SUBDIR)))
-            .or_else(|| default_root.map(|root| root.join(CACHE_SUBDIR)))
-            .ok_or(ResolveError)?;
-
-        Ok(paths)
+        Ok(Self::under_root(&root))
     }
 
     /// Assemble the canonical flat layout under a single `root`.

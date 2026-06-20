@@ -31,7 +31,7 @@ pub struct DownArgs {
 impl DownArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let DownArgs { force } = self;
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
 
         teardown_daemon(workspace.daemon(), workspace.paths(), force).await?;
 

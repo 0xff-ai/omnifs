@@ -45,7 +45,7 @@ impl ShellArgs {
             );
         }
 
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
         let paths = workspace.paths();
 
         // The run-state file is the source of truth for whether a daemon was

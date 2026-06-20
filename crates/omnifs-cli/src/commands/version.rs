@@ -21,7 +21,7 @@ impl VersionArgs {
             return Ok(());
         }
 
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
         let cli = env!("CARGO_PKG_VERSION");
         let daemon = workspace.daemon().status_optional().await?;
         let provider_status = provider_dir_summary(workspace.catalog());

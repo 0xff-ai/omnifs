@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use omnifs_daemon::{DaemonArgs, NativeLaunchConfig};
+use omnifs_daemon::DaemonArgs;
 use omnifs_home::Paths;
 
 use crate::container_name::ContainerName;
@@ -83,10 +83,7 @@ pub(crate) async fn launch_native(params: &LaunchParams) -> Result<()> {
         .try_clone()
         .with_context(|| format!("clone daemon log handle {}", log_path.display()))?;
 
-    let daemon_args = DaemonArgs::from(NativeLaunchConfig {
-        paths: params.paths.clone(),
-        listen: params.control_addr,
-    });
+    let daemon_args = DaemonArgs::host_native(params.control_addr);
     let argv = daemon_args.to_argv();
     let mut command = Command::new(&binary);
     for arg in &argv {

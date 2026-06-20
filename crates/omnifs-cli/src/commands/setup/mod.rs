@@ -56,7 +56,7 @@ impl SetupArgs {
             anyhow::bail!("omnifs does not yet run on this platform");
         }
 
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
         let paths = workspace.paths();
         let config = workspace.config()?;
         fs::create_dir_all(&paths.mounts_dir)

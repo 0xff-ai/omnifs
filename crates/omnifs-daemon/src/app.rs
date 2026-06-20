@@ -8,7 +8,7 @@
 
 use clap::{Args, ValueEnum};
 use omnifs_api::DaemonBackend;
-use omnifs_home::{PathOverrides, Paths};
+use omnifs_home::Paths;
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
@@ -33,12 +33,6 @@ pub struct DaemonArgs {
     /// Optional NFS trace log.
     #[arg(long)]
     pub nfs_trace: Option<PathBuf>,
-    /// Config directory. Defaults through omnifs home resolution.
-    #[arg(long)]
-    pub config_dir: Option<PathBuf>,
-    /// Cache directory. Defaults through omnifs home resolution.
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
     /// Control API listen address. The container entrypoint passes
     /// `0.0.0.0` so Docker can publish the port on the host loopback.
     #[arg(long, default_value_t = default_listen())]
@@ -81,12 +75,21 @@ fn default_listen() -> SocketAddr {
 }
 
 impl DaemonArgs {
+    pub fn host_native(listen: SocketAddr) -> Self {
+        Self {
+            listen,
+            host_native: true,
+            nfs_port: 0,
+            nfs_state_dir: None,
+            nfs_trace: None,
+            root_symlinks: false,
+        }
+    }
+
     /// Serialize to argv for `omnifs daemon …`. Includes the `daemon` subcommand
     /// token as the first element.
     pub fn to_argv(&self) -> Vec<String> {
         let mut args = vec!["daemon".to_string()];
-        push_option_path(&mut args, "--config-dir", self.config_dir.as_ref());
-        push_option_path(&mut args, "--cache-dir", self.cache_dir.as_ref());
         args.push("--listen".to_string());
         args.push(self.listen.to_string());
         if self.nfs_port != 0 {
@@ -130,10 +133,7 @@ fn resolve_mount_point() -> anyhow::Result<PathBuf> {
 /// until unmounted. Blocks; expects to run on a tokio runtime (the caller
 /// owns runtime and tracing setup).
 pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
-    let paths = Paths::resolve(PathOverrides {
-        config_dir: args.config_dir,
-        cache_dir: args.cache_dir,
-    })?;
+    let paths = Paths::resolve()?;
     let frontend = FrontendKind::platform_default();
     let mount_point = resolve_mount_point()?;
 
@@ -184,8 +184,6 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
             );
             options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
             options.trace_path = args.nfs_trace;
-            options.config_dir = Some(paths.config_dir.clone());
-            options.cache_dir = Some(paths.cache_dir.clone());
             frontends::Frontends::nfs(mount_point.clone(), Arc::clone(&registry), options)
         },
     };
@@ -298,8 +296,6 @@ mod tests {
     #[test]
     fn to_argv_native_launch_emits_expected_flags() {
         let args = DaemonArgs {
-            config_dir: Some("/cfg".into()),
-            cache_dir: Some("/cache".into()),
             listen: "127.0.0.1:7711".parse().expect("valid address"),
             host_native: true,
             nfs_port: 0,
@@ -311,10 +307,6 @@ mod tests {
             args.to_argv(),
             vec![
                 "daemon".to_string(),
-                "--config-dir".to_string(),
-                "/cfg".to_string(),
-                "--cache-dir".to_string(),
-                "/cache".to_string(),
                 "--listen".to_string(),
                 "127.0.0.1:7711".to_string(),
                 "--host-native".to_string(),

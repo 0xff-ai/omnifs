@@ -14,11 +14,10 @@ use std::path::PathBuf;
 
 use crate::catalog::{ProviderCatalog, ProviderTemplate};
 use crate::cli::OutputFormat;
-use crate::paths::PathOverrides;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
 
-pub(crate) use login::login_with_paths;
+pub(crate) use login::login_with_workspace;
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthArgs {
@@ -76,7 +75,7 @@ pub enum AuthCommand {
 
 impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve()?;
         let mut paths = workspace.paths().clone();
         if let Some(creds) = self.credentials_file.clone() {
             paths.credentials_file = creds;

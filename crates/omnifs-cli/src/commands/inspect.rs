@@ -15,7 +15,6 @@ use crate::inspector::{
     run_tui,
 };
 use crate::launch_backend::DockerTarget;
-use crate::paths::PathOverrides;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -85,7 +84,7 @@ impl InspectArgs {
     }
 
     fn resolve_container(&self) -> anyhow::Result<ContainerName> {
-        let workspace = Workspace::resolve(PathOverrides::default())?;
+        let workspace = Workspace::resolve()?;
         let config = workspace.config()?;
         DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }

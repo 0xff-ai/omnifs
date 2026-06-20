@@ -40,7 +40,7 @@ impl ResetArgs {
             yes,
             keep_credentials,
         } = self;
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
         let paths = workspace.paths();
         let targets = workspace.catalog().reset_removal_targets()?;
 

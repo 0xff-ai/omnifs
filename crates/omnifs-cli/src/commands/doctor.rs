@@ -29,7 +29,7 @@ pub(crate) enum DoctorVerdict {
 
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
-        let workspace = Workspace::resolve_default()?;
+        let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
         run(workspace.paths(), workspace.catalog(), mounts).await
     }
@@ -172,12 +172,11 @@ pub async fn run(
 
 async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
     use crate::launch_backend::DockerTarget;
-    use crate::paths::PathOverrides;
     use crate::runtime::DockerProbeOutcome;
 
     // Use the default runtime target so that probe_image_cached checks the
     // same image omnifs up would pull.
-    let target = match Workspace::resolve(PathOverrides::default()).and_then(|workspace| {
+    let target = match Workspace::resolve().and_then(|workspace| {
         let config = workspace.config()?;
         DockerTarget::resolve(None, None, &config)
     }) {

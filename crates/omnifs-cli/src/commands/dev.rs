@@ -23,7 +23,7 @@ use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
 use crate::launch_backend::{DockerTarget, LaunchBackend};
-use crate::paths::{PathOverrides, Paths};
+use crate::paths::Paths;
 use crate::runtime::ContainerExtras;
 use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, MountConfig, env_string, set_private_dir,
@@ -55,9 +55,7 @@ impl DevArgs {
         // Dedicated dev home under the standard omnifs home. Credentials and
         // fixtures live here, never in the repo checkout (no credential-via-git
         // leak) and never mixed into the user's real `~/.omnifs`.
-        let dev_home = Paths::resolve(PathOverrides::default())?
-            .config_dir
-            .join("dev");
+        let dev_home = Paths::resolve()?.config_dir.join("dev");
         let db_dir = dev_home.join("db");
         let db_path = db_dir.join("test.db");
 
@@ -96,10 +94,7 @@ impl DevArgs {
             build_image(workspace.path(), &image)?;
         }
 
-        let dev_workspace = crate::workspace::Workspace::resolve(PathOverrides {
-            config_dir: Some(dev_home.clone()),
-            ..PathOverrides::default()
-        })?;
+        let dev_workspace = crate::workspace::Workspace::new(Paths::under_root(&dev_home));
         let config = dev_workspace.config()?;
         let paths = dev_workspace.paths();
         let docker_target =

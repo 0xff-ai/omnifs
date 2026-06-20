@@ -8,14 +8,12 @@ use omnifs_auth::{
 use omnifs_creds::{CredentialStore, FileStore};
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use super::shared::format_scopes;
 use crate::auth::explain::{self, AuthMode};
 use crate::catalog::ProviderCatalog;
-use crate::paths::PathOverrides;
 use crate::style;
 use crate::workspace::Workspace;
 use omnifs_provider::SchemeGuidance;
@@ -116,21 +114,14 @@ pub(super) async fn login(
     Ok(())
 }
 
-pub(crate) async fn login_with_paths(
-    config_dir: PathBuf,
-    credentials_file: PathBuf,
+pub(crate) async fn login_with_workspace(
+    workspace: &Workspace,
     mount: &str,
     account: Option<&str>,
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<()> {
-    let workspace = Workspace::resolve(PathOverrides {
-        config_dir: Some(config_dir),
-        ..Default::default()
-    })?;
-    let mut paths = workspace.paths().clone();
-    paths.credentials_file = credentials_file;
-    let store = Box::new(FileStore::new(&paths.credentials_file));
+    let store = Box::new(FileStore::new(&workspace.paths().credentials_file));
     let mounts = workspace.mounts()?;
     login(
         workspace.catalog(),

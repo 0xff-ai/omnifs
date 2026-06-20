@@ -49,7 +49,7 @@ impl MountsArgs {
                 force,
                 keep_credentials,
             } => {
-                let workspace = Workspace::resolve_default()?;
+                let workspace = Workspace::resolve()?;
                 let paths = workspace.paths();
                 let catalog = workspace.catalog();
                 let mounts = workspace.mounts()?;
@@ -69,7 +69,7 @@ impl MountsArgs {
 }
 
 fn ls() -> anyhow::Result<()> {
-    let workspace = Workspace::resolve_default()?;
+    let workspace = Workspace::resolve()?;
     let paths = workspace.paths();
     let mounts = workspace.mounts()?;
     if mounts.is_empty() {

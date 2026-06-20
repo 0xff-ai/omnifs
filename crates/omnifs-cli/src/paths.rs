@@ -5,4 +5,4 @@
 //! config, catalogs, mount enumeration, and daemon clients live in
 //! `crate::workspace`.
 
-pub use omnifs_home::{PathOverrides, Paths, ResolveError};
+pub use omnifs_home::{Paths, ResolveError};
