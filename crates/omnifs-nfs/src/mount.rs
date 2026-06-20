@@ -501,7 +501,15 @@ fn mount_table_contains(entries: &[MountTableEntry], mount_point: &Path) -> bool
 }
 
 fn canonical_mount_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // Resolve symlinks (e.g. /var -> /private/var) via the PARENT and rejoin the
+    // leaf, never stat-ing the path itself: a stat on a dead-server NFS mount
+    // hangs uninterruptibly, which would wedge every `mount_is_active` check
+    // during teardown of a crashed daemon.
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(leaf)) => std::fs::canonicalize(parent)
+            .map_or_else(|_| path.to_path_buf(), |parent| parent.join(leaf)),
+        _ => path.to_path_buf(),
+    }
 }
 
 fn normalize_mount_path(path: &Path) -> PathBuf {

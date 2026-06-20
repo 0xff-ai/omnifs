@@ -267,6 +267,37 @@ fn tear_down_orphan(
 /// signal is whether the mount survives (see `mount_settled`), not its exit text.
 #[cfg(target_os = "macos")]
 fn unmount(mount_point: &Path, force: bool) {
+    // A root forced unmount clears a dead-server NFS mount instantly without
+    // contacting the (vanished) server, where `diskutil unmount force` blocks in
+    // an uninterruptible NFS syscall. omnifs already mounts via `sudo -n
+    // mount_nfs`, so `sudo -n umount -f` stays within that trust model. The mount
+    // is recorded by its symlinked path (e.g. /var/...), but the kernel mount
+    // table holds the resolved path (/private/var/...), so resolve symlinks
+    // first or `umount` reports "not currently mounted". Resolve via the PARENT
+    // and rejoin the leaf, never stat-ing the mount point itself: a stat on a
+    // dead-server NFS mount hangs as badly as the unmount we are trying to avoid.
+    if force
+        && let Some(canonical) = mount_point
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| mount_point.file_name().map(|leaf| parent.join(leaf)))
+    {
+        let cleared = Command::new("sudo")
+            .args(["-n", "umount", "-f"])
+            .arg(&canonical)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if cleared {
+            return;
+        }
+    }
+
+    // Fallback (sudo timestamp expired, or a non-force call): bound `diskutil` so
+    // a dead-server mount it cannot clear never hangs `omnifs down`; the kernel
+    // clears such a mount on its own NFS timeout.
     let mut command = Command::new("diskutil");
     command.arg("unmount");
     if force {
@@ -276,11 +307,6 @@ fn unmount(mount_point: &Path, force: bool) {
         .arg(mount_point)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // `diskutil` blocks indefinitely trying to reach a dead NFS server (a
-    // crashed daemon), so cap the wait: `omnifs down` must return promptly
-    // rather than hang. A dead-server mount diskutil cannot clear without root
-    // then surfaces through `mount_settled` as still mounted, and the kernel
-    // clears it on its own NFS timeout.
     run_bounded(command, Duration::from_secs(5));
 }
 
