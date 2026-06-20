@@ -121,7 +121,7 @@ pub(crate) async fn login_with_workspace(
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<()> {
-    let store = Box::new(FileStore::new(&workspace.paths().credentials_file));
+    let store = Box::new(FileStore::new(&workspace.layout().credentials_file));
     let mounts = workspace.mounts()?;
     login(
         workspace.catalog(),

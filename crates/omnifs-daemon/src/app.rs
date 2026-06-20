@@ -8,7 +8,7 @@
 
 use clap::{Args, ValueEnum};
 use omnifs_api::DaemonBackend;
-use omnifs_home::Paths;
+use omnifs_home::{Daemon as DaemonRole, Workspace};
 use omnifs_host::Dirs;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::inspector;
@@ -133,19 +133,19 @@ fn resolve_mount_point() -> anyhow::Result<PathBuf> {
 /// until unmounted. Blocks; expects to run on a tokio runtime (the caller
 /// owns runtime and tracing setup).
 pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
-    let paths = Paths::resolve()?;
+    let workspace = Workspace::<DaemonRole>::resolve()?;
     let frontend = FrontendKind::platform_default();
     let mount_point = resolve_mount_point()?;
 
     std::fs::create_dir_all(&mount_point)?;
-    std::fs::create_dir_all(&paths.cache_dir)?;
+    std::fs::create_dir_all(workspace.cache_dir())?;
 
-    let cloner = Arc::new(GitCloner::new(paths.cache_dir.clone()));
+    let cloner = Arc::new(GitCloner::new(workspace.cache_dir().to_path_buf()));
     let dirs = Dirs::new(
         cloner.cache_dir(),
-        &paths.config_dir,
-        &paths.providers_dir,
-        &paths.credentials_file,
+        workspace.config_dir(),
+        workspace.providers_dir(),
+        workspace.credentials_file(),
     );
 
     info!(
@@ -180,7 +180,8 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
         ),
         FrontendKind::Nfs => {
             let mut options = omnifs_nfs::NfsMountOptions::loopback(
-                args.nfs_state_dir.unwrap_or_else(|| paths.nfs_state_dir()),
+                args.nfs_state_dir
+                    .unwrap_or_else(|| workspace.nfs_state_dir()),
             );
             options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), args.nfs_port);
             options.trace_path = args.nfs_trace;

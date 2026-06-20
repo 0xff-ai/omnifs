@@ -4,8 +4,8 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
-use crate::paths::Paths;
 use crate::workspace::Workspace;
+use omnifs_home::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct VersionArgs {
@@ -41,34 +41,34 @@ impl VersionArgs {
         }
         anstream::println!(
             "Store:      file ({})",
-            Paths::display(&workspace.paths().credentials_file)
+            WorkspaceLayout::display(&workspace.layout().credentials_file)
         );
         anstream::println!("Providers:  {provider_status}");
         anstream::println!();
         anstream::println!("Paths:");
         anstream::println!(
             "  config:       {}",
-            Paths::display(&workspace.paths().config_dir)
+            WorkspaceLayout::display(&workspace.layout().config_dir)
         );
         anstream::println!(
             "  cache:        {}",
-            Paths::display(&workspace.paths().cache_dir)
+            WorkspaceLayout::display(&workspace.layout().cache_dir)
         );
         anstream::println!(
             "  mounts:       {}",
-            Paths::display(&workspace.paths().mounts_dir)
+            WorkspaceLayout::display(&workspace.layout().mounts_dir)
         );
         anstream::println!(
             "  providers:    {}",
-            Paths::display(&workspace.paths().providers_dir)
+            WorkspaceLayout::display(&workspace.layout().providers_dir)
         );
         anstream::println!(
             "  credentials:  {}",
-            Paths::display(&workspace.paths().credentials_file)
+            WorkspaceLayout::display(&workspace.layout().credentials_file)
         );
         anstream::println!(
             "  config file:  {}",
-            Paths::display(&workspace.paths().config_file)
+            WorkspaceLayout::display(&workspace.layout().config_file)
         );
         Ok(())
     }

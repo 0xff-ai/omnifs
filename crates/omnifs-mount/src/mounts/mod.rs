@@ -266,6 +266,14 @@ impl Catalog {
     }
 
     #[must_use]
+    pub fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
+        Self {
+            mounts_dir: PathBuf::new(),
+            providers_dir: providers_dir.as_ref().to_path_buf(),
+        }
+    }
+
+    #[must_use]
     pub fn mounts_dir(&self) -> &Path {
         &self.mounts_dir
     }

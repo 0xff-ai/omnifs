@@ -9,9 +9,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use crate::credential_target::CredentialTarget;
-use crate::paths::Paths;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
+use omnifs_home::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -56,7 +56,7 @@ impl MountsArgs {
 
 fn ls() -> anyhow::Result<()> {
     let workspace = Workspace::resolve()?;
-    let paths = workspace.paths();
+    let layout = workspace.layout();
     let mounts = workspace.mounts()?;
     if mounts.is_empty() {
         anstream::println!(
@@ -64,7 +64,7 @@ fn ls() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let store = FileStore::new(&paths.credentials_file);
+    let store = FileStore::new(&layout.credentials_file);
     for mount in &mounts {
         let name = crate::style::bold(mount.name.as_str());
         match workspace
@@ -93,16 +93,15 @@ pub async fn rm(
     force: bool,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
-    let paths = workspace.paths();
+    let layout = workspace.layout();
     let catalog = workspace.catalog();
     let mounts = workspace.mounts()?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
-    let mount = mounts
-        .iter()
-        .find(|m| m.name == name)
-        .ok_or_else(|| missing_mount_error(paths, &mounts, name.as_str()).unwrap_err())?;
+    let mount = mounts.iter().find(|m| m.name == name).ok_or_else(|| {
+        missing_mount_error(&layout.config_file, &mounts, name.as_str()).unwrap_err()
+    })?;
     let config_path = mount.source.clone();
     let config = mount.config.clone();
     let resolved = catalog
@@ -112,7 +111,6 @@ pub async fn rm(
 
     if !force {
         confirm(
-            paths,
             name.as_str(),
             &config_path,
             &credential_target,
@@ -120,12 +118,15 @@ pub async fn rm(
         )?;
     }
 
-    let store = FileStore::new(&paths.credentials_file);
+    let store = FileStore::new(&layout.credentials_file);
     delete_credentials(&store, &credential_target, keep_credentials, name.as_str())?;
 
     std::fs::remove_file(&config_path)
         .with_context(|| format!("remove {}", config_path.display()))?;
-    anstream::println!("Removed mount `{name}` ({})", Paths::display(&config_path));
+    anstream::println!(
+        "Removed mount `{name}` ({})",
+        WorkspaceLayout::display(&config_path)
+    );
 
     match workspace.daemon().reconcile_if_running().await {
         Ok(Some(_)) => {
@@ -158,14 +159,13 @@ fn short_provider_name(provider: &str) -> String {
 }
 
 fn confirm(
-    paths: &Paths,
     name: &str,
     config_path: &Path,
     target: &CredentialTarget,
     keep_credentials: bool,
 ) -> anyhow::Result<()> {
     anstream::println!("Remove mount `{name}`? This will:");
-    anstream::println!("  • delete {}", Paths::display(config_path));
+    anstream::println!("  • delete {}", WorkspaceLayout::display(config_path));
     match target {
         CredentialTarget::Internal(_) if !keep_credentials => {
             for key in target.keys() {
@@ -182,7 +182,6 @@ fn confirm(
         },
         CredentialTarget::None => {},
     }
-    let _ = paths;
     anstream::print!("Continue? [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
@@ -208,11 +207,15 @@ pub(crate) fn delete_credentials(
     target.delete_from(store, name)
 }
 
-fn missing_mount_error(paths: &Paths, mounts: &[MountConfig], name: &str) -> anyhow::Result<()> {
+fn missing_mount_error(
+    config_file: &Path,
+    mounts: &[MountConfig],
+    name: &str,
+) -> anyhow::Result<()> {
     let suggestion = crate::mount_report::closest_mount_name(mounts, name);
     let mut message = format!(
         "no mount config named `{name}` in {}",
-        Paths::display(&paths.config_file)
+        WorkspaceLayout::display(config_file)
     );
     if let Some(suggestion) = suggestion {
         let _ = std::fmt::Write::write_fmt(
@@ -233,7 +236,7 @@ mod tests {
     use tempfile::TempDir;
     use time::OffsetDateTime;
 
-    fn fixture_paths(root: &Path) -> Paths {
+    fn fixture_paths(root: &Path) -> WorkspaceLayout {
         let paths = base_fixture_paths(root);
         std::fs::create_dir_all(&paths.mounts_dir).unwrap();
         paths
@@ -243,7 +246,7 @@ mod tests {
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let workspace = Workspace::new(paths);
+        let workspace = Workspace::from_layout(paths);
         let err = rm(&workspace, "../leak", true, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }

@@ -28,9 +28,7 @@ impl DownArgs {
         let DownArgs { force } = self;
         let workspace = Workspace::resolve()?;
 
-        DaemonTeardown::new(workspace.daemon(), workspace.paths())
-            .down(force)
-            .await?;
+        DaemonTeardown::new(&workspace).down(force).await?;
 
         // A dev sandbox in a workspace checkout also brings up a local
         // Kubernetes cluster (via `omnifs dev`); tear it down so `omnifs down`

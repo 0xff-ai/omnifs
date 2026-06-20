@@ -13,13 +13,12 @@ use std::fs;
 use anyhow::Context;
 use clap::Args;
 
-use crate::catalog::MountRemovalTarget;
 use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
-use crate::paths::Paths;
-use crate::workspace::Workspace;
+use crate::workspace::{MountRemovalTarget, Workspace};
 use omnifs_creds::FileStore;
+use omnifs_home::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {
@@ -38,11 +37,11 @@ impl ResetArgs {
             keep_credentials,
         } = self;
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
-        let targets = workspace.catalog().reset_removal_targets()?;
+        let layout = workspace.layout();
+        let targets = workspace.reset_removal_targets()?;
 
         if targets.is_empty() {
-            anstream::println!("No mount configs found in {}.", paths.mounts_dir.display());
+            anstream::println!("No mount configs found in {}.", layout.mounts_dir.display());
         }
         print_preview(&targets, keep_credentials);
 
@@ -60,11 +59,9 @@ impl ResetArgs {
         // Tear down the daemon first so a daemon writing files won't race the
         // credential or mount-config delete. Best-effort: a non-running daemon
         // or an absent launch record is not a reset failure.
-        DaemonTeardown::new(workspace.daemon(), paths)
-            .reset_best_effort()
-            .await;
+        DaemonTeardown::new(&workspace).reset_best_effort().await;
 
-        let store = FileStore::new(&paths.credentials_file);
+        let store = FileStore::new(&layout.credentials_file);
         for target in &targets {
             delete_credentials(&store, &target.credential, keep_credentials, &target.name)?;
             fs::remove_file(&target.path)
@@ -82,7 +79,7 @@ impl ResetArgs {
 fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
     anstream::println!("This will:");
     for target in targets {
-        anstream::println!("  • delete {}", Paths::display(&target.path));
+        anstream::println!("  • delete {}", WorkspaceLayout::display(&target.path));
         match &target.credential {
             CredentialTarget::Internal(_) if !keep_credentials => {
                 for key in target.credential.keys() {

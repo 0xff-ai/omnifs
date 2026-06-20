@@ -9,12 +9,11 @@ use anyhow::Context;
 use clap::Args;
 use omnifs_inspector::parse_record_line;
 
-use crate::container_name::ContainerName;
 use crate::inspector::{
     AttachOutcome, ConnectionMode, EventsClient, SourceKind, daemon_addr, format_record, run_plain,
     run_tui,
 };
-use crate::launch_backend::DockerTarget;
+use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]

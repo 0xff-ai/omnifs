@@ -1,7 +1,7 @@
 //! Backend abstraction for daemon launch and stop.
 //!
 //! `LaunchParams` is the single data model for launch intent: it holds the
-//! common parameters ([`Paths`], control address, mount point) and a
+//! common parameters ([`WorkspaceLayout`], control address, mount point) and a
 //! [`LaunchBackend`] variant with the backend-specific details. Native spawn builds typed
 //! [`omnifs_daemon::DaemonArgs`] from the daemon crate so flag knowledge stays
 //! next to the daemon argument surface.
@@ -16,15 +16,14 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use omnifs_daemon::DaemonArgs;
-use omnifs_home::Paths;
+use omnifs_home::WorkspaceLayout;
 
-use crate::container_name::ContainerName;
-use crate::launch_backend::LaunchBackend;
+use crate::launch_backend::{ContainerName, LaunchBackend};
 
 /// Backend-agnostic launch intent plus the chosen backend's specifics.
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchParams {
-    pub paths: Paths,
+    pub paths: WorkspaceLayout,
     pub control_addr: SocketAddr,
     /// Recorded in `launch.json` after the daemon is ready; not passed on argv
     /// (the daemon resolves mount point from `OMNIFS_MOUNT_POINT` or `$HOME/omnifs`).

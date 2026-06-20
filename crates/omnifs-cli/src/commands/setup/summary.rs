@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
-use crate::paths::Paths;
+use omnifs_home::WorkspaceLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitResult {
@@ -15,7 +15,7 @@ pub struct InitResult {
 }
 
 pub struct SetupSummary<'a> {
-    paths: &'a Paths,
+    paths: &'a WorkspaceLayout,
     mount_label: &'a str,
     mount_root: &'a str,
     browse_hint: &'a str,
@@ -25,7 +25,7 @@ pub struct SetupSummary<'a> {
 
 impl<'a> SetupSummary<'a> {
     pub fn new(
-        paths: &'a Paths,
+        paths: &'a WorkspaceLayout,
         mount_label: &'a str,
         mount_root: &'a str,
         browse_hint: &'a str,

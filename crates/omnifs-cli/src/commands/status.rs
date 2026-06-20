@@ -23,7 +23,7 @@ impl StatusArgs {
         let runtime = workspace.daemon().compatible_status_optional().await?;
         let report = collect_status(
             workspace.catalog(),
-            workspace.paths().clone(),
+            workspace.layout().clone(),
             runtime,
             mounts,
         );

@@ -4,8 +4,9 @@ use comfy_table::{Cell, ContentArrangement, Table, presets};
 use omnifs_creds::{FileStore, Refreshability};
 use std::fmt::Write as _;
 
-use crate::{catalog::ProviderCatalog, paths::Paths};
+use crate::catalog::ProviderCatalog;
 use omnifs_api::DaemonStatus;
+use omnifs_home::WorkspaceLayout;
 
 pub(crate) use crate::auth::AuthReadiness;
 use crate::auth::AuthTerminalKind;
@@ -13,7 +14,7 @@ pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, 
 
 #[derive(Debug, Clone)]
 pub(crate) struct StatusReport {
-    pub(crate) paths: Paths,
+    pub(crate) paths: WorkspaceLayout,
     /// Daemon runtime facts from the control API; `None` when no daemon
     /// answered on the control port.
     pub(crate) runtime: Option<DaemonStatus>,
@@ -23,7 +24,7 @@ pub(crate) struct StatusReport {
 
 pub(crate) fn collect_status(
     catalog: &ProviderCatalog,
-    paths: Paths,
+    paths: WorkspaceLayout,
     runtime: Option<DaemonStatus>,
     mounts: Vec<crate::session::MountConfig>,
 ) -> StatusReport {
@@ -77,7 +78,7 @@ impl StatusReport {
         table.add_row(vec![
             Cell::new("  cache"),
             Cell::new("│"),
-            Cell::new(Paths::display(&self.paths.cache_dir)),
+            Cell::new(WorkspaceLayout::display(&self.paths.cache_dir)),
         ]);
         let _ = writeln!(out, "{table}");
 
@@ -133,7 +134,7 @@ impl StatusReport {
 fn format_mount(report: &StatusReport) -> String {
     match &report.runtime {
         Some(runtime) => {
-            let mp = Paths::display(&runtime.mount_point);
+            let mp = WorkspaceLayout::display(&runtime.mount_point);
             match &runtime.frontend {
                 Some(frontend) => format!("{mp} ({})", frontend.fs_type),
                 None => format!("{mp} (not mounted)"),
@@ -249,7 +250,7 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
-    pub paths: Paths,
+    pub paths: WorkspaceLayout,
     pub mounts: Vec<MountStatusJson>,
     pub providers: Vec<ProviderStatusJson>,
 }

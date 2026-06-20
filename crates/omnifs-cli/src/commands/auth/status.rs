@@ -8,12 +8,12 @@ use super::shared::{format_rfc3339, format_scopes};
 use crate::auth::explain::AuthMode;
 use crate::auth::{MountAuth, credential_notices};
 use crate::catalog::ProviderCatalog;
-use crate::paths::Paths;
 use crate::session::MountConfig;
+use omnifs_home::WorkspaceLayout;
 use omnifs_provider::ProviderAuthManifest;
 
 pub(super) fn status(
-    paths: &Paths,
+    layout: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
@@ -21,7 +21,7 @@ pub(super) fn status(
     let rows = AuthStatus::new(catalog, store).load(mounts)?;
     anstream::println!("backend: {}", store.backend_label());
     if rows.is_empty() {
-        anstream::println!("no mount configs found in {}", paths.config_file.display());
+        anstream::println!("no mount configs found in {}", layout.config_file.display());
         return Ok(());
     }
     for row in rows {
@@ -60,7 +60,6 @@ struct AuthEntryJson {
 }
 
 pub(super) fn status_json(
-    _paths: &Paths,
     catalog: &ProviderCatalog,
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,

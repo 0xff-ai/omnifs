@@ -734,7 +734,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::Paths::under_root(config_dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -801,7 +801,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::Paths::under_root(config_dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
 
         // `ProviderRegistry::new` builds the archive extractor from this WASM,
         // so it must be present. The drifted mount itself uses the built-in db

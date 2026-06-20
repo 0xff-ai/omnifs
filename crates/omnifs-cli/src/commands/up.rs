@@ -4,6 +4,7 @@ use clap::Args;
 use omnifs_creds::FileStore;
 
 use crate::launch::{LaunchSpec, launch_runtime};
+use crate::launch_backend::LaunchBackend;
 use crate::runtime::ContainerExtras;
 use crate::session::GUEST_FUSE_MOUNT;
 use crate::workspace::Workspace;
@@ -27,8 +28,14 @@ pub struct UpArgs {
 impl UpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
-        let backend = workspace.launch_backend(self.container_name, self.image)?;
+        let paths = workspace.layout();
+        let config = workspace.config()?;
+        if config.system.runtime.is_none() {
+            anyhow::bail!(
+                "`omnifs up` requires setup to choose a daemon backend; run `omnifs setup` first"
+            );
+        }
+        let backend = LaunchBackend::resolve(&config, self.container_name, self.image)?;
         let backend_is_native = backend.is_native();
         let docker_target = backend.docker_target().cloned();
         let catalog = workspace.catalog();

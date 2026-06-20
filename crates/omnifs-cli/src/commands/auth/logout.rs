@@ -4,10 +4,8 @@ use omnifs_auth::{OAuthClient, RevokeOutcome};
 use omnifs_creds::CredentialStore;
 
 use crate::catalog::ProviderCatalog;
-use crate::paths::Paths;
 
 pub(super) async fn logout(
-    _paths: &Paths,
     catalog: &ProviderCatalog,
     mounts: &[crate::session::MountConfig],
     store: &dyn CredentialStore,

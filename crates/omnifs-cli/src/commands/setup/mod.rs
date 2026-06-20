@@ -57,7 +57,7 @@ impl SetupArgs {
         }
 
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
+        let paths = workspace.layout();
         let config = workspace.config()?;
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
@@ -98,7 +98,7 @@ impl SetupArgs {
             let home = std::env::var_os("HOME")
                 .ok_or_else(|| anyhow::anyhow!("cannot resolve host mount point: set HOME"))?;
             let mount_point = std::path::PathBuf::from(home).join("omnifs");
-            let mount_root = crate::paths::Paths::display(&mount_point);
+            let mount_root = omnifs_home::WorkspaceLayout::display(&mount_point);
             (
                 "Host mount",
                 mount_root.clone(),

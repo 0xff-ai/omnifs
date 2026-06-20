@@ -5,4 +5,3 @@
 pub mod config;
 #[doc(hidden)]
 pub mod inspector;
-pub mod paths;

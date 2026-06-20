@@ -46,7 +46,7 @@ impl ShellArgs {
         }
 
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
+        let paths = workspace.layout();
 
         // The run-state file is the source of truth for whether a daemon was
         // started and how (native vs container) plus its mount point — no live

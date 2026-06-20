@@ -1,9 +1,90 @@
+use std::fmt;
+
 use omnifs_mount::materialize::MaterializationMode;
+use thiserror::Error;
 
 use crate::config::{Config, ConfiguredBackend};
-use crate::container_name::ContainerName;
-use crate::image_ref::ImageRef;
 use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE, env_string};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ContainerName(String);
+
+impl ContainerName {
+    pub(crate) fn new(name: impl Into<String>) -> anyhow::Result<Self> {
+        let name = name.into();
+        validate_container_name(&name)?;
+        Ok(Self(name))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContainerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for ContainerName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+fn validate_container_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("container name must not be empty");
+    }
+    if name.len() > 64 {
+        anyhow::bail!("container name must be at most 64 characters");
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("container name must not be empty");
+    };
+    if !first.is_ascii_alphanumeric() {
+        anyhow::bail!("container name must start with an ASCII letter or digit");
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        anyhow::bail!("container name may only contain ASCII letters, digits, _, ., and -");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageRef(String);
+
+impl ImageRef {
+    pub(crate) fn new(image: impl Into<String>) -> Result<Self, ImageRefError> {
+        let image = image.into();
+        if image.trim().is_empty() {
+            return Err(ImageRefError);
+        }
+        Ok(Self(image))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ImageRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for ImageRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("image reference must not be empty")]
+pub(crate) struct ImageRefError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerTarget {

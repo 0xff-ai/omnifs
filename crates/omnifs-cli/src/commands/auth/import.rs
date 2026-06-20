@@ -8,11 +8,9 @@ use time::OffsetDateTime;
 
 use super::shared::format_rfc3339;
 use crate::catalog::ProviderCatalog;
-use crate::paths::Paths;
 use crate::session::MountConfig;
 
 pub(super) async fn refresh(
-    _paths: &Paths,
     catalog: &ProviderCatalog,
     mounts: &[MountConfig],
     store: Box<dyn CredentialStore>,
@@ -41,7 +39,6 @@ pub(super) async fn refresh(
 }
 
 pub(super) fn scopes(
-    _paths: &Paths,
     catalog: &ProviderCatalog,
     mounts: &[MountConfig],
     store: &dyn CredentialStore,

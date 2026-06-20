@@ -4,31 +4,30 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::client::DaemonClient;
 use crate::launch_backend::LaunchBackend;
 use crate::launch_record::{LaunchRecord, backend_from_daemon};
-use crate::paths::Paths;
+use crate::workspace::Workspace;
 
 pub(crate) struct DaemonTeardown<'a> {
-    client: &'a DaemonClient,
-    paths: &'a Paths,
+    workspace: &'a Workspace,
 }
 
 impl<'a> DaemonTeardown<'a> {
-    pub(crate) fn new(client: &'a DaemonClient, paths: &'a Paths) -> Self {
-        Self { client, paths }
+    pub(crate) fn new(workspace: &'a Workspace) -> Self {
+        Self { workspace }
     }
 
     /// Stop the daemon and reclaim its backend. The backend is identified from
     /// the live daemon or launch record, never from `[system].runtime`.
     pub(crate) async fn down(&self, force: bool) -> anyhow::Result<()> {
-        let config_dir = &self.paths.config_dir;
-        let nfs_state_dir = self.paths.nfs_state_dir();
+        let layout = self.workspace.layout();
+        let config_dir = &layout.config_dir;
+        let nfs_state_dir = layout.nfs_state_dir();
 
         // Step 1: a live daemon answers; ask it to shut down, then reclaim.
         if let Some(status) = self.live_status_for_sweep().await? {
             anstream::println!("Stopping daemon (pid {})...", status.pid);
-            match self.client.shutdown().await? {
+            match self.workspace.daemon().shutdown().await? {
                 Some(report) => {
                     wait_unmounted(&report.mount_point, force)?;
                     anstream::println!("✓ Unmounted {}", report.mount_point.display());
@@ -66,8 +65,9 @@ impl<'a> DaemonTeardown<'a> {
 
     /// Best-effort daemon teardown for `omnifs reset`.
     pub(crate) async fn reset_best_effort(&self) {
-        let config_dir = &self.paths.config_dir;
-        let nfs_state_dir = self.paths.nfs_state_dir();
+        let layout = self.workspace.layout();
+        let config_dir = &layout.config_dir;
+        let nfs_state_dir = layout.nfs_state_dir();
 
         let backend = match self.backend_from_live_or_record().await {
             Ok(Some(backend)) => backend,
@@ -81,7 +81,7 @@ impl<'a> DaemonTeardown<'a> {
             },
         };
 
-        let mount_point = match self.client.shutdown().await {
+        let mount_point = match self.workspace.daemon().shutdown().await {
             Ok(Some(report)) => {
                 anstream::println!("✓ Daemon stopped");
                 Some(report.mount_point)
@@ -110,7 +110,7 @@ impl<'a> DaemonTeardown<'a> {
     /// "not reachable" so a sick-but-present daemon falls through to the
     /// launch-record sweep instead of failing `omnifs down` hard.
     async fn live_status_for_sweep(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
-        match self.client.status_optional().await {
+        match self.workspace.daemon().status_optional().await {
             Ok(status) => Ok(status),
             Err(_) => Ok(None),
         }
@@ -118,8 +118,8 @@ impl<'a> DaemonTeardown<'a> {
 
     /// Identify the backend from the live daemon or the launch record.
     async fn backend_from_live_or_record(&self) -> anyhow::Result<Option<LaunchBackend>> {
-        let config_dir = &self.paths.config_dir;
-        if let Ok(status) = self.client.status().await {
+        let config_dir = &self.workspace.layout().config_dir;
+        if let Ok(status) = self.workspace.daemon().status().await {
             let backend = backend_from_daemon(status.backend, config_dir)?;
             return Ok(Some(backend));
         }

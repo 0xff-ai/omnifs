@@ -14,7 +14,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{credential_target::CredentialTarget, session::MountConfig};
+use crate::session::MountConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderCatalog {
@@ -23,69 +23,16 @@ pub(crate) struct ProviderCatalog {
 }
 
 impl ProviderCatalog {
-    pub(crate) fn for_dirs(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
-        let mounts_dir = mounts_dir.as_ref();
+    pub(crate) fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
         let providers_dir = providers_dir.as_ref();
         Self {
-            mounts: MountCatalog::new(mounts_dir, providers_dir),
+            mounts: MountCatalog::for_providers(providers_dir),
             providers_dir: providers_dir.to_path_buf(),
         }
     }
 
     pub(crate) fn builtin_manifests() -> anyhow::Result<Vec<ProviderManifest>> {
         Ok(MountCatalog::builtin_manifests()?)
-    }
-
-    /// Build removal targets tolerantly, for use by `omnifs reset`.
-    ///
-    /// Enumerates the per-file spec paths directly and tolerates unparsable
-    /// files: a broken JSON file still produces a removal target with
-    /// `CredentialTarget::None` so reset can nuke broken state.
-    pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
-        use omnifs_mount::mounts::Spec as MountSpec;
-
-        let mut targets = Vec::new();
-
-        // Per-file specs — enumerate paths, parse tolerantly.
-        let paths = crate::workspace::per_file_mount_paths(self.mounts.mounts_dir())?;
-        for path in paths {
-            let Some(name) = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let credential = match MountSpec::from_file(&path) {
-                Ok(spec) => match self.resolve_mount_spec(spec, false) {
-                    Ok(resolved) => CredentialTarget::for_mount(&resolved),
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            %error,
-                            "unresolvable mount config; will remove the file but cannot drop credentials"
-                        );
-                        CredentialTarget::None
-                    },
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "unparsable mount config; will remove the file but cannot drop credentials"
-                    );
-                    CredentialTarget::None
-                },
-            };
-            targets.push(MountRemovalTarget {
-                name,
-                path,
-                credential,
-            });
-        }
-
-        targets.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(targets)
     }
 
     /// The underlying mount catalog, for callers that drive the shared
@@ -239,13 +186,6 @@ pub(crate) fn mount_exists(mounts: &[MountConfig], name: &MountName) -> bool {
     mounts.iter().any(|m| &m.name == name)
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MountRemovalTarget {
-    pub(crate) name: String,
-    pub(crate) path: PathBuf,
-    pub(crate) credential: CredentialTarget,
-}
-
 #[derive(Debug)]
 pub(crate) enum ProviderDirStatus {
     Missing,
@@ -311,7 +251,7 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = ProviderCatalog::for_dirs(tmp.path().join("mounts"), &providers_dir);
+        let catalog = ProviderCatalog::for_providers(&providers_dir);
         let templates = catalog
             .provider_templates()
             .expect("a broken disk provider must not fail catalog enumeration");

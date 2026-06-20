@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
 use omnifs_creds::CredentialStore;
-use omnifs_home::Paths;
+use omnifs_home::WorkspaceLayout;
 
 use crate::backend::LaunchParams;
 use crate::catalog::ProviderCatalog;
@@ -19,7 +19,7 @@ use crate::session::MountConfig;
 /// Everything a caller must supply to run the full launch sequence.
 pub(crate) struct LaunchSpec<'a> {
     pub backend: LaunchBackend,
-    pub paths: &'a Paths,
+    pub paths: &'a WorkspaceLayout,
     pub store: Box<dyn CredentialStore>,
     /// Command name shown in Docker-readiness diagnostics, e.g. `"omnifs up"`.
     pub verb: &'static str,
@@ -100,7 +100,7 @@ fn resolve_control_addr() -> SocketAddr {
 /// Spawn a detached host-native daemon and wait for it to serve. The daemon
 /// reconciles `mounts/` on start; the CLI triggers one more reconcile to
 /// converge any change since and to surface per-mount failures.
-async fn launch_host_native(paths: &Paths, verb: &str) -> anyhow::Result<()> {
+async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
     reject_existing_host_daemon(paths, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
 
@@ -138,7 +138,7 @@ async fn launch_host_native(paths: &Paths, verb: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn reject_existing_host_daemon(paths: &Paths, verb: &str) -> anyhow::Result<()> {
+async fn reject_existing_host_daemon(paths: &WorkspaceLayout, verb: &str) -> anyhow::Result<()> {
     let client = DaemonClient::new();
     let Some(status) = client.status_optional().await? else {
         return Ok(());
@@ -149,12 +149,12 @@ async fn reject_existing_host_daemon(paths: &Paths, verb: &str) -> anyhow::Resul
 
 struct ExistingDaemon {
     status: DaemonStatus,
-    paths: Paths,
+    paths: WorkspaceLayout,
     verb: String,
 }
 
 impl ExistingDaemon {
-    fn new(status: DaemonStatus, paths: &Paths, verb: &str) -> Self {
+    fn new(status: DaemonStatus, paths: &WorkspaceLayout, verb: &str) -> Self {
         Self {
             status,
             paths: paths.clone(),
@@ -276,7 +276,7 @@ fn report_reconcile_failures(report: &omnifs_api::ReconcileReport) {
 /// any per-mount failure. No spec crosses the wire.
 async fn finish_docker_launch(
     rt: &Runtime,
-    paths: &Paths,
+    paths: &WorkspaceLayout,
     target: &DockerTarget,
 ) -> anyhow::Result<()> {
     rt.wait_for_daemon_ready().await?;

@@ -45,7 +45,7 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
-        let paths = omnifs_home::Paths::under_root(config_dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
         let provider_dir = provider_artifact_dir();
         let catalog = omnifs_mount::mounts::Catalog::new(&paths.mounts_dir, &provider_dir);
         let resolved = catalog

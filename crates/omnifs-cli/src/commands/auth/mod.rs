@@ -78,10 +78,10 @@ impl AuthArgs {
         }
 
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
+        let layout = workspace.layout();
         let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
-        let store = Box::new(FileStore::new(&paths.credentials_file));
+        let store = Box::new(FileStore::new(&layout.credentials_file));
         match command {
             AuthCommand::Modes => unreachable!("handled before workspace resolution"),
             AuthCommand::Explain { target, json } => run_explain(catalog, &mounts, &target, json),
@@ -91,26 +91,17 @@ impl AuthArgs {
                 scopes,
             } => login::login(catalog, &mounts, store, &mount, None, no_browser, &scopes).await,
             AuthCommand::Logout { mount, revoke } => {
-                logout::logout(
-                    &paths,
-                    catalog,
-                    &mounts,
-                    store.as_ref(),
-                    &mount,
-                    None,
-                    revoke,
-                )
-                .await
+                logout::logout(catalog, &mounts, store.as_ref(), &mount, None, revoke).await
             },
             AuthCommand::Status { json } => match OutputFormat::from(json) {
-                OutputFormat::Json => status::status_json(&paths, catalog, mounts, store.as_ref()),
-                OutputFormat::Text => status::status(&paths, catalog, mounts, store.as_ref()),
+                OutputFormat::Json => status::status_json(catalog, mounts, store.as_ref()),
+                OutputFormat::Text => status::status(layout, catalog, mounts, store.as_ref()),
             },
             AuthCommand::Refresh { mount } => {
-                import::refresh(&paths, catalog, &mounts, store, &mount, None).await
+                import::refresh(catalog, &mounts, store, &mount, None).await
             },
             AuthCommand::Scopes { mount } => {
-                import::scopes(&paths, catalog, &mounts, store.as_ref(), &mount, None)
+                import::scopes(catalog, &mounts, store.as_ref(), &mount, None)
             },
             AuthCommand::Import {
                 mount,

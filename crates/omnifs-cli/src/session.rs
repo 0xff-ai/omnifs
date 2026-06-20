@@ -190,14 +190,14 @@ mod tests {
     }
 
     fn test_catalog(root: &Path) -> ProviderCatalog {
-        let paths = omnifs_home::Paths::under_root(root);
-        ProviderCatalog::for_dirs(paths.mounts_dir, paths.providers_dir)
+        let paths = omnifs_home::WorkspaceLayout::under_root(root);
+        ProviderCatalog::for_providers(paths.providers_dir)
     }
 
     #[test]
     fn materialize_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn materialize_validates_oauth_credentials() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
 
         let store = MemoryStore::new();
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn materialize_applies_provider_metadata_before_credential_validation() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn materialize_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),

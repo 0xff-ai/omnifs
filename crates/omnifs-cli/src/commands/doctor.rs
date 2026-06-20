@@ -9,10 +9,10 @@ use omnifs_creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
-use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
+use omnifs_home::WorkspaceLayout;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
@@ -31,7 +31,7 @@ impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
-        run(workspace.paths(), workspace.catalog(), mounts).await
+        run(workspace.layout(), workspace.catalog(), mounts).await
     }
 }
 
@@ -112,7 +112,7 @@ impl DoctorReport {
 }
 
 pub async fn run(
-    paths: &Paths,
+    paths: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> anyhow::Result<DoctorVerdict> {
@@ -246,7 +246,7 @@ fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
     }
 }
 
-fn probe_credential_store(paths: &Paths) -> ProbeResult {
+fn probe_credential_store(paths: &WorkspaceLayout) -> ProbeResult {
     let Some(parent) = paths.credentials_file.parent() else {
         return ProbeResult::Err(format!(
             "credential file has no parent: {}",
@@ -254,11 +254,14 @@ fn probe_credential_store(paths: &Paths) -> ProbeResult {
         ));
     };
     if parent.exists() {
-        ProbeResult::Ok(format!("file {}", Paths::display(&paths.credentials_file)))
+        ProbeResult::Ok(format!(
+            "file {}",
+            WorkspaceLayout::display(&paths.credentials_file)
+        ))
     } else {
         ProbeResult::Warn(format!(
             "credential directory will be created on first write: {}",
-            Paths::display(parent)
+            WorkspaceLayout::display(parent)
         ))
     }
 }
@@ -266,20 +269,20 @@ fn probe_credential_store(paths: &Paths) -> ProbeResult {
 fn probe_ssh_agent() -> ProbeResult {
     match std::env::var_os("SSH_AUTH_SOCK") {
         Some(sock) if Path::new(&sock).exists() => {
-            ProbeResult::Ok(Paths::display(Path::new(&sock)))
+            ProbeResult::Ok(WorkspaceLayout::display(Path::new(&sock)))
         },
         Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
         None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
     }
 }
 
-fn probe_config_file(paths: &Paths) -> ProbeResult {
+fn probe_config_file(paths: &WorkspaceLayout) -> ProbeResult {
     if paths.config_file.exists() {
-        ProbeResult::Ok(Paths::display(&paths.config_file))
+        ProbeResult::Ok(WorkspaceLayout::display(&paths.config_file))
     } else {
         ProbeResult::Ok(format!(
             "(default; {} absent)",
-            Paths::display(&paths.config_file)
+            WorkspaceLayout::display(&paths.config_file)
         ))
     }
 }
@@ -293,7 +296,7 @@ fn probe_result_from_summary(summary: AuthProbeSummary) -> ProbeResult {
 }
 
 fn probe_mount_configs(
-    paths: &Paths,
+    paths: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {

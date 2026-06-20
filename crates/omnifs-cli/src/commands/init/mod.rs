@@ -25,12 +25,12 @@ use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::launch_backend::LaunchBackend;
-use crate::paths::Paths;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
+use omnifs_home::WorkspaceLayout;
 use provider_selection::ProviderSelection;
 use token_validation::StaticTokenValidator;
 
@@ -70,7 +70,7 @@ impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
-        let paths = workspace.paths();
+        let paths = workspace.layout();
         let interactive = !self.no_input;
         let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
@@ -147,7 +147,7 @@ impl InitArgs {
         let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
         mount_file.write_to(&mount_path)?;
         let spec = mount_file.into_spec()?;
-        anstream::println!("✓ Wrote {}", Paths::display(&mount_path));
+        anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn load_provider_templates_reads_metadata_from_wasm() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
@@ -654,7 +654,7 @@ mod tests {
         .unwrap();
         std::fs::write(paths.providers_dir.join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
 
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
@@ -669,8 +669,8 @@ mod tests {
     #[test]
     fn load_provider_templates_includes_builtins_without_provider_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn load_provider_templates_prefers_disk_metadata_over_builtin_by_id() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.id = "github".to_string();
@@ -704,7 +704,7 @@ mod tests {
         )
         .unwrap();
 
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 

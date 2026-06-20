@@ -13,10 +13,8 @@ use bollard::query_parameters::{
 use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::container_name::ContainerName;
 use crate::error::WithHint;
-use crate::image_ref::ImageRef;
-use crate::launch_backend::DockerTarget;
+use crate::launch_backend::{ContainerName, DockerTarget, ImageRef};
 use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
 use omnifs_home::OMNIFS_HOME_ENV;
 
@@ -804,7 +802,7 @@ mod tests {
     #[test]
     fn launch_spec_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
