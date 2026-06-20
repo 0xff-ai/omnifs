@@ -1,24 +1,24 @@
-use crate::catalog::{ProviderTemplate, mount_exists};
+use crate::catalog::{ProviderTemplate, ProviderTemplates, mount_exists};
 use crate::session::MountConfig;
 use anyhow::anyhow;
 use omnifs_core::MountName;
-use std::collections::BTreeMap;
 
 pub(super) struct ProviderSelection<'a> {
     mounts: &'a [MountConfig],
-    templates: &'a BTreeMap<String, ProviderTemplate>,
+    templates: &'a ProviderTemplates,
 }
 
 impl<'a> ProviderSelection<'a> {
-    pub(super) fn new(
-        mounts: &'a [MountConfig],
-        templates: &'a BTreeMap<String, ProviderTemplate>,
-    ) -> Self {
+    pub(super) fn new(mounts: &'a [MountConfig], templates: &'a ProviderTemplates) -> Self {
         Self { mounts, templates }
     }
 
     pub(super) fn provider_names(&self) -> Vec<String> {
-        let mut providers: Vec<&ProviderTemplate> = self.templates.values().collect();
+        let mut providers: Vec<&ProviderTemplate> = self
+            .templates
+            .iter()
+            .map(|(_, template)| template)
+            .collect();
         providers
             .sort_by_key(|template| (template.source.sort_key(), template.manifest.id.as_str()));
         providers
@@ -37,7 +37,7 @@ impl<'a> ProviderSelection<'a> {
         let provider = self.resolve_provider(provider_arg, interactive)?;
         let template = self
             .templates
-            .get(&provider)
+            .by_id(&provider)
             .ok_or_else(|| anyhow!("provider `{provider}` not found"))?;
 
         let proposed =

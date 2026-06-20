@@ -6,6 +6,7 @@
 
 use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
+use crate::launch::DockerMountMaterializer;
 use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
@@ -36,8 +37,8 @@ pub(crate) async fn add_mount(
         return Ok(LiveApply::NotRunning);
     }
     if backend.is_docker() {
-        let binds = config.materialize(catalog, store, backend.materialization_mode())?;
-        if !binds.is_empty() {
+        let mount = DockerMountMaterializer::new(catalog, store).materialize(&config)?;
+        if !mount.preopen_binds().is_empty() {
             return Ok(LiveApply::RestartRequired("it needs new host binds"));
         }
     }

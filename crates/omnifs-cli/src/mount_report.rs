@@ -5,9 +5,8 @@ use omnifs_creds::CredentialStore;
 use std::path::PathBuf;
 
 use crate::auth::AuthReadiness;
-use crate::catalog::{ProviderCatalog, ProviderTemplate};
+use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderReadyStatus {
@@ -56,37 +55,6 @@ impl ProviderCatalog {
             .find(|m| &m.name == name)
             .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
         self.resolve_mount_spec(mount.config.clone(), true)
-    }
-
-    pub(crate) fn configured_mounts_by_provider(
-        &self,
-        mounts: &[MountConfig],
-        templates: &BTreeMap<String, ProviderTemplate>,
-    ) -> BTreeMap<String, String> {
-        let mut by_provider: BTreeMap<String, String> = BTreeMap::new();
-        for configured in mounts {
-            let mount = match self.resolve_mount_spec(configured.config.clone(), true) {
-                Ok(mount) => mount,
-                Err(error) => {
-                    tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
-                    continue;
-                },
-            };
-            let mount_name = &mount.spec.mount;
-            let provider_id = &mount.provider_id;
-            if templates.contains_key(provider_id) {
-                by_provider.insert(provider_id.to_owned(), mount_name.clone());
-                continue;
-            }
-            let provider_file = &mount.spec.provider;
-            if let Some((id, _)) = templates
-                .iter()
-                .find(|(_, tmpl)| tmpl.manifest.provider == provider_file.as_str())
-            {
-                by_provider.insert(id.clone(), mount_name.clone());
-            }
-        }
-        by_provider
     }
 
     pub(crate) fn scan_provider_configs(

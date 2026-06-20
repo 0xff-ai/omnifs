@@ -29,12 +29,75 @@ pub struct PreopenBind {
     pub mode: PreopenMode,
 }
 
-/// A materialized mount: the runtime-ready spec plus the container binds it
-/// needs. `preopen_binds` is empty when materialized for the host.
+impl PreopenBind {
+    #[must_use]
+    pub fn docker_bind_spec(&self) -> String {
+        let mode = match self.mode {
+            PreopenMode::Ro => "ro",
+            PreopenMode::Rw => "rw",
+        };
+        format!("{}:{}:{}", self.host.display(), self.container, mode)
+    }
+}
+
+/// Container bind mounts derived from user-authored preopens.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerPreopenBinds {
+    binds: Vec<PreopenBind>,
+}
+
+impl ContainerPreopenBinds {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.binds.is_empty()
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[PreopenBind] {
+        &self.binds
+    }
+
+    #[must_use]
+    pub fn into_docker_bind_specs(self) -> Vec<String> {
+        self.binds
+            .into_iter()
+            .map(|bind| bind.docker_bind_spec())
+            .collect()
+    }
+
+    fn push(&mut self, bind: PreopenBind) {
+        self.binds.push(bind);
+    }
+}
+
+/// A materialized mount: the runtime-ready spec plus any container preopen
+/// binds required before Docker creates the daemon container.
 #[derive(Debug, Clone)]
-pub struct Materialized {
-    pub spec: Spec,
-    pub preopen_binds: Vec<PreopenBind>,
+pub struct MaterializedMount {
+    spec: Spec,
+    preopen_binds: ContainerPreopenBinds,
+}
+
+impl MaterializedMount {
+    #[must_use]
+    pub fn spec(&self) -> &Spec {
+        &self.spec
+    }
+
+    #[must_use]
+    pub fn into_spec(self) -> Spec {
+        self.spec
+    }
+
+    #[must_use]
+    pub fn preopen_binds(&self) -> &ContainerPreopenBinds {
+        &self.preopen_binds
+    }
+
+    #[must_use]
+    pub fn into_preopen_binds(self) -> ContainerPreopenBinds {
+        self.preopen_binds
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +158,7 @@ pub fn materialize(
     mut spec: Spec,
     catalog: &Catalog,
     mode: MaterializationMode,
-) -> Result<Materialized, MaterializeError> {
+) -> Result<MaterializedMount, MaterializeError> {
     // Count user-authored preopens before metadata application, which may add
     // manifest-declared preopens that must not be rewritten to container paths.
     let user_preopen_count = spec
@@ -134,7 +197,7 @@ pub fn materialize(
         .map_err(MaterializeError::Capabilities)?;
     let preopen_binds = rewrite_preopens(&mut spec, user_preopen_count, mode)?;
 
-    Ok(Materialized {
+    Ok(MaterializedMount {
         spec,
         preopen_binds,
     })
@@ -144,9 +207,9 @@ fn rewrite_preopens(
     spec: &mut Spec,
     user_preopen_count: usize,
     mode: MaterializationMode,
-) -> Result<Vec<PreopenBind>, MaterializeError> {
+) -> Result<ContainerPreopenBinds, MaterializeError> {
     if user_preopen_count == 0 {
-        return Ok(Vec::new());
+        return Ok(ContainerPreopenBinds::default());
     }
     let mount = spec.mount.clone();
     let Some(preopens) = spec
@@ -154,10 +217,10 @@ fn rewrite_preopens(
         .as_mut()
         .and_then(|capabilities| capabilities.preopened_paths.as_mut())
     else {
-        return Ok(Vec::new());
+        return Ok(ContainerPreopenBinds::default());
     };
 
-    let mut binds = Vec::new();
+    let mut binds = ContainerPreopenBinds::default();
     for (index, preopen) in preopens.iter_mut().take(user_preopen_count).enumerate() {
         let host_path = Path::new(&preopen.host).canonicalize().map_err(|source| {
             MaterializeError::PreopenPath {
@@ -225,14 +288,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            out.preopen_binds,
-            vec![PreopenBind {
+            out.preopen_binds().as_slice(),
+            &[PreopenBind {
                 host: canonical,
                 container: format!("{GUEST_PREOPENS_DIR}/db/0"),
                 mode: PreopenMode::Ro,
             }]
         );
-        let preopen = &out.spec.capabilities.unwrap().preopened_paths.unwrap()[0];
+        let preopen = &out
+            .spec()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .preopened_paths
+            .as_ref()
+            .unwrap()[0];
         assert_eq!(preopen.host, format!("{GUEST_PREOPENS_DIR}/db/0"));
         assert_eq!(preopen.guest, "/data");
     }
@@ -263,8 +333,15 @@ mod tests {
         )
         .unwrap();
 
-        assert!(out.preopen_binds.is_empty());
-        let preopen = &out.spec.capabilities.unwrap().preopened_paths.unwrap()[0];
+        assert!(out.preopen_binds().is_empty());
+        let preopen = &out
+            .spec()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .preopened_paths
+            .as_ref()
+            .unwrap()[0];
         assert_eq!(preopen.host, canonical.display().to_string());
     }
 
@@ -288,9 +365,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            out.spec.capabilities.unwrap().unix_sockets,
+            out.spec()
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .unix_sockets
+                .clone(),
             Some(vec!["/var/run/docker.sock".to_string()])
         );
-        assert!(out.preopen_binds.is_empty());
+        assert!(out.preopen_binds().is_empty());
     }
 }

@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus};
 use omnifs_creds::{CredentialStore, FileStore};
 use omnifs_home::WorkspaceLayout;
+use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
 
 use crate::backend::LaunchParams;
 use crate::catalog::ProviderCatalog;
@@ -95,6 +96,56 @@ pub(crate) struct LaunchSpec<'a> {
     pub extras: ContainerExtras,
 }
 
+/// Docker-specific mount materialization for launch-time container binds.
+///
+/// The daemon still reads specs from `mounts/` and reconciles them itself. This
+/// materializer exists only for the container invariant Docker imposes: host
+/// preopen directories must be known before `docker create`, while credential
+/// failures should still surface before the daemon starts.
+pub(crate) struct DockerMountMaterializer<'a> {
+    catalog: &'a ProviderCatalog,
+    store: &'a dyn CredentialStore,
+}
+
+impl<'a> DockerMountMaterializer<'a> {
+    pub(crate) fn new(catalog: &'a ProviderCatalog, store: &'a dyn CredentialStore) -> Self {
+        Self { catalog, store }
+    }
+
+    pub(crate) fn materialize(&self, config: &MountConfig) -> anyhow::Result<MaterializedMount> {
+        let materialized = materialize::materialize(
+            config.config.clone(),
+            self.catalog.inner(),
+            MaterializationMode::Docker,
+        )
+        .with_context(|| format!("materialize mount {}", config.source.display()))?;
+
+        let resolved = self
+            .catalog
+            .resolve_mount_spec(materialized.spec().clone(), false)
+            .with_context(|| format!("resolve mount config for {}", config.source.display()))?;
+        let mount_auth = self
+            .catalog
+            .resolve_mount_auth_tolerating_manifest_errors(resolved);
+        config.validate_host_managed_credentials(&mount_auth, self.store)?;
+
+        Ok(materialized)
+    }
+
+    fn materialize_bind_specs<'configs>(
+        &self,
+        configs: impl IntoIterator<Item = &'configs MountConfig>,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(configs
+            .into_iter()
+            .map(|config| self.materialize(config))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flat_map(|mount| mount.into_preopen_binds().into_docker_bind_specs())
+            .collect())
+    }
+}
+
 /// Run the full materialize → connect → launch → wait → push sequence.
 pub(crate) async fn launch_runtime(
     spec: LaunchSpec<'_>,
@@ -112,28 +163,16 @@ pub(crate) async fn launch_runtime(
     std::fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create runtime home {}", paths.config_dir.display()))?;
 
-    // Host-native: the daemon loads and materializes mounts from `mounts/`
-    // itself, so the CLI only spawns it and triggers a reconcile. No CLI-side
-    // materialize-and-push on this path.
-    let materialization_mode = backend.materialization_mode();
     let target = match backend {
         LaunchBackend::Native => return launch_host_native(paths, verb).await,
         LaunchBackend::Docker(target) => target,
     };
 
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
-    let mut preopen_binds = Vec::new();
-    for config in &configs {
-        // Docker needs preopen binds present before `docker create`; the spec
-        // itself is not pushed, only read to derive the binds.
-        let binds = config.materialize(catalog, store.as_ref(), materialization_mode)?;
-        preopen_binds.extend(binds);
-    }
-
-    // Materialized preopen binds come first; caller extras append after.
-    let mut binds = preopen_binds;
-    binds.append(&mut extras.binds);
-    extras.binds = binds;
+    let preopen_binds =
+        DockerMountMaterializer::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
+    let extra_binds = std::mem::take(&mut extras.binds);
+    extras.binds = preopen_binds.into_iter().chain(extra_binds).collect();
 
     let rt = Runtime::connect_ready(&target, verb).await?;
     rt.launch_container(&paths.config_dir, extras).await?;

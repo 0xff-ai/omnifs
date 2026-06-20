@@ -1,6 +1,5 @@
 use std::fmt;
 
-use omnifs_mount::materialize::MaterializationMode;
 use thiserror::Error;
 
 use crate::config::{Config, ConfiguredBackend};
@@ -203,13 +202,6 @@ impl LaunchBackend {
 
     pub(crate) fn is_docker(&self) -> bool {
         matches!(self, Self::Docker(_))
-    }
-
-    pub(crate) fn materialization_mode(&self) -> MaterializationMode {
-        match self {
-            Self::Native => MaterializationMode::HostNative,
-            Self::Docker(_) => MaterializationMode::Docker,
-        }
     }
 }
 

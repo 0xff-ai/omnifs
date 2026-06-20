@@ -584,7 +584,7 @@ impl<'a> ReconcilePass<'a> {
             },
         };
         match materialize(spec, &self.catalog, self.mode) {
-            Ok(materialized) => Some(materialized.spec),
+            Ok(materialized) => Some(materialized.into_spec()),
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
                     mount: path.display().to_string(),

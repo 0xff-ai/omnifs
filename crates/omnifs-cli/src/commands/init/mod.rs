@@ -88,7 +88,7 @@ impl InitArgs {
         )?;
 
         let template = templates
-            .get(&provider_name)
+            .by_id(&provider_name)
             .ok_or_else(|| {
                 anyhow!(
                     "provider `{provider_name}` not found; available: {}",
@@ -658,10 +658,11 @@ mod tests {
             .provider_templates()
             .unwrap();
 
-        assert!(templates.contains_key("github"));
-        assert_eq!(templates["linear"].manifest.default_mount, "linear-dev");
+        assert!(templates.by_id("github").is_some());
+        let linear = templates.by_id("linear").unwrap();
+        assert_eq!(linear.manifest.default_mount, "linear-dev");
         assert_eq!(
-            templates["linear"].source,
+            linear.source,
             ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_linear.wasm"))
         );
     }
@@ -674,15 +675,11 @@ mod tests {
             .provider_templates()
             .unwrap();
 
-        assert_eq!(
-            templates["github"].manifest.provider,
-            "omnifs_provider_github.wasm"
-        );
-        assert_eq!(
-            templates["linear"].manifest.provider,
-            "omnifs_provider_linear.wasm"
-        );
-        assert_eq!(templates["github"].source, ProviderSource::Builtin);
+        let github = templates.by_id("github").unwrap();
+        let linear = templates.by_id("linear").unwrap();
+        assert_eq!(github.manifest.provider, "omnifs_provider_github.wasm");
+        assert_eq!(linear.manifest.provider, "omnifs_provider_linear.wasm");
+        assert_eq!(github.source, ProviderSource::Builtin);
     }
 
     #[test]
@@ -708,9 +705,10 @@ mod tests {
             .provider_templates()
             .unwrap();
 
-        assert_eq!(templates["github"].manifest.default_mount, "github-dev");
+        let github = templates.by_id("github").unwrap();
+        assert_eq!(github.manifest.default_mount, "github-dev");
         assert_eq!(
-            templates["github"].source,
+            github.source,
             ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_github.wasm"))
         );
     }

@@ -11,13 +11,12 @@
 use anyhow::Context;
 use clap::Args;
 use omnifs_creds::FileStore;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use crate::auth::AuthSelection;
-use crate::catalog::ProviderTemplate;
+use crate::catalog::ProviderTemplates;
 use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
@@ -175,16 +174,13 @@ impl DevArgs {
 /// that needs no auth (the `SQLite` fixture) is always kept.
 async fn provision_dev_mounts(
     configs: Vec<MountConfig>,
-    templates: &BTreeMap<String, ProviderTemplate>,
+    templates: &ProviderTemplates,
     credentials_file: &Path,
 ) -> anyhow::Result<Vec<MountConfig>> {
     let mut ready = Vec::new();
     for config in configs {
         let provider_file = config.config.provider.clone();
-        let Some((provider_id, template)) = templates
-            .iter()
-            .find(|(_, template)| template.manifest.provider == provider_file)
-        else {
+        let Some((provider_id, template)) = templates.by_provider_file(&provider_file) else {
             anstream::eprintln!(
                 "  ! mount `{}` references unknown provider `{provider_file}`; skipping",
                 config.name

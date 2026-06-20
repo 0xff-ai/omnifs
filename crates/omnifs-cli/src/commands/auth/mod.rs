@@ -9,9 +9,8 @@ mod status;
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
 use omnifs_provider::ProviderManifest;
-use std::collections::BTreeMap;
 
-use crate::catalog::{ProviderCatalog, ProviderTemplate};
+use crate::catalog::{ProviderCatalog, ProviderTemplates};
 use crate::cli::OutputFormat;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
@@ -156,25 +155,22 @@ fn run_explain(
 /// Resolve an `auth explain` target, which may be a provider id or a configured
 /// mount name, to the owning provider manifest.
 fn resolve_target_manifest<'a>(
-    templates: &'a BTreeMap<String, ProviderTemplate>,
+    templates: &'a ProviderTemplates,
     mounts: &[MountConfig],
     target: &str,
 ) -> anyhow::Result<&'a ProviderManifest> {
-    if let Some(template) = templates.get(target) {
+    if let Some(template) = templates.by_id(target) {
         return Ok(&template.manifest);
     }
     if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target) {
         let provider_ref = &mount.config.provider;
-        if let Some(template) = templates
-            .values()
-            .find(|t| t.manifest.id == *provider_ref || t.manifest.provider == *provider_ref)
-        {
+        if let Some((_, template)) = templates.by_reference(provider_ref) {
             return Ok(&template.manifest);
         }
     }
     anyhow::bail!(
         "no provider or mount named `{target}`; known providers: {}",
-        templates.keys().cloned().collect::<Vec<_>>().join(", ")
+        templates.ids().collect::<Vec<_>>().join(", ")
     )
 }
 

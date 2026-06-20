@@ -36,18 +36,33 @@ Remaining work in those items:
   still lives in `registry.rs`; the next slice should decide whether planning
   also belongs behind the supervisor interface.
 
+Second slice completed in `refactor(cli): index provider templates and type materialized mounts`:
+
+- Item 3: Docker preopen materialization no longer lives on `MountConfig`.
+  Launch owns the Docker bind-adaptation path and the shared mount
+  materializer returns typed preopen binds.
+- Item 8: provider template discovery now returns a `ProviderTemplates` index
+  with provider-id, provider-file, reference, and configured-mount lookup
+  methods instead of repeated lookup loops in commands.
+
+Remaining work from the second slice:
+
+- Item 17 is only started: `MaterializedMount` and `ContainerPreopenBinds`
+  make materialization outputs typed, but effect materialization and
+  browse/read materialization are not split yet.
+- Item 18 is untouched.
+
 ## Next batch
 
 The next parallel batch should be:
 
 1. **Status snapshot lane:** items 5, 10, 13, and 14. Collapse CLI/daemon
    status shaping around a single snapshot/readiness model.
-2. **Provider catalog lane:** items 4 and 8. Deepen `Workspace`/`ProviderCatalog`
-   so provider templates become an indexed catalog surface instead of repeated
-   lookup helpers.
-3. **Materialization lane:** items 3, 17, and 18. Move Docker preopen policy
-   toward typed materialized mounts and split effect/read materialization before
-   touching the archive extractor.
+2. **Workspace/session lane:** item 4. Continue moving command-owned config,
+   catalog, daemon client, and mount paths behind `Workspace`.
+3. **Materialization lane:** items 17 and 18. Split effect/read
+   materialization and introduce object path indexing before touching the
+   archive extractor.
 
 ## Start here
 
