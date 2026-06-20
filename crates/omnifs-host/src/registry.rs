@@ -46,16 +46,27 @@ impl ProviderRegistry {
     /// Build an empty registry: engine, archive extractor, and cache handles
     /// are created once here and shared across every mount added later.
     pub fn new(dirs: Dirs<'_>, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
-        let engine = component_engine(|_| {})
-            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
+        // Compiled component artifacts live with the rest of the host's state,
+        // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
+        let wasm_cache = dirs.cache_dir.join("wasm");
+        let engine = component_engine(Some(&wasm_cache), |config| {
+            if let Some(strategy) = crate::provider_compiler_strategy() {
+                config.strategy(strategy);
+            }
+        })
+        .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
         // One extractor (engine + parsed component + linker pre) shared
         // across every mount; the per-call sandbox lives on a fresh
-        // `wasmtime::Store`.
+        // `wasmtime::Store`. Shares the same on-disk artifact cache.
         let archive_tool_path = dirs.provider_path(ARCHIVE_TOOL_WASM);
         let extractor = Arc::new(
-            ArchiveExtractorComponent::from_path(&archive_tool_path, DEFAULT_LIMITS)
-                .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
+            ArchiveExtractorComponent::from_path(
+                &archive_tool_path,
+                DEFAULT_LIMITS,
+                Some(&wasm_cache),
+            )
+            .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
         );
 
         // Global cache handles: a durable object database and a disposable view
@@ -318,8 +329,19 @@ impl<'a> ReconcilePass<'a> {
             },
         };
 
-        for path in paths {
-            self.reconcile_path(&path);
+        // Phase 1 (serial, cheap): materialize, fingerprint, and decide. Settles
+        // unchanged mounts and materialize/duplicate failures here; only the
+        // compile-heavy loads carry into phase 2.
+        let mut work = Vec::new();
+        for path in &paths {
+            if let Some(item) = self.plan_path(path) {
+                work.push(item);
+            }
+        }
+
+        // Phase 2 (parallel): compile + instantiate the planned mounts.
+        for result in self.load_in_parallel(work) {
+            self.record_load(result);
         }
 
         self.remove_stale_mounts();
@@ -334,73 +356,108 @@ impl<'a> ReconcilePass<'a> {
         self.outcome
     }
 
-    fn reconcile_path(&mut self, path: &Path) {
-        let mount_started = Instant::now();
-        let Some(materialized) = self.materialized_spec(path) else {
-            return;
-        };
+    /// Decide what a spec path needs. Records unchanged mounts and
+    /// materialize/duplicate failures into the outcome directly; returns a
+    /// `LoadWork` only for mounts that must be (re)compiled.
+    fn plan_path(&mut self, path: &Path) -> Option<LoadWork> {
+        let materialized = self.materialized_spec(path)?;
         let mount = materialized.mount.clone();
-        self.desired.insert(mount.clone());
+        // Distinct mount names are required: two specs claiming one name would
+        // race in the parallel load, and it is a misconfiguration regardless.
+        if !self.desired.insert(mount.clone()) {
+            self.outcome.failed.push(MountFailure {
+                mount,
+                reason: format!("duplicate mount name from {}", path.display()),
+            });
+            return None;
+        }
 
         let wasm_path = self.registry.dirs().provider_path(&materialized.provider);
         let fingerprint = mount_fingerprint(&materialized, &wasm_path);
         let running = self.registry.instances.read().contains_key(&mount);
         let prior_fingerprint = self.registry.fingerprints.read().get(&mount).copied();
-        let unchanged = running && prior_fingerprint == Some(fingerprint);
-        if unchanged {
+        if running && prior_fingerprint == Some(fingerprint) {
             debug!(
                 mount = mount.as_str(),
                 provider = materialized.provider.as_str(),
-                duration_ms = mount_started.elapsed().as_millis(),
                 "reconcile mount unchanged"
             );
-            return;
+            return None;
         }
 
         let reason = prior_fingerprint.map_or("new", |prior| fingerprint.reason_since(prior));
-        if running {
-            let _ = self.registry.remove_mount(&mount);
+        Some(LoadWork {
+            spec: materialized,
+            mount,
+            wasm_path,
+            fingerprint,
+            running,
+            reason,
+        })
+    }
+
+    /// Compile and register the planned mounts. Compilation dominates reconcile
+    /// wall-time (a cold Cranelift compile is seconds per provider), and the
+    /// loads are independent across distinct mount names (`plan_path` enforces
+    /// that), so they run on a pool of worker threads bounded by the core count.
+    /// Empty and single-item work skips the thread setup.
+    ///
+    /// Uses [`std::thread::scope`], not tokio tasks or the blocking pool: the
+    /// work is CPU-bound WASM compile plus synchronous WASI init, not async I/O.
+    /// Scoped OS threads carry no tokio handle, so `without_tokio_handle` in
+    /// [`crate::instance`] runs instantiation inline rather than spawning an
+    /// escape thread per mount. Tokio blocking-pool threads do have a handle and
+    /// would regress bulk reconcile to O(mounts) extra threads. The async
+    /// boundary already sits at the daemon, which wraps the full reconcile in
+    /// `spawn_blocking` (`omnifs-daemon` `server.rs`). Revisit if/when the WASI
+    /// path moves to `add_to_linker_async`.
+    fn load_in_parallel(&self, work: Vec<LoadWork>) -> Vec<LoadResult> {
+        let registry = self.registry;
+        let handle = self.handle;
+        if work.len() <= 1 {
+            return work
+                .into_iter()
+                .map(|item| load_one(registry, handle, item))
+                .collect();
         }
-        match self.registry.add_mount(materialized, self.handle) {
-            Ok(_) => {
-                self.registry
-                    .fingerprints
-                    .write()
-                    .insert(mount.clone(), fingerprint);
-                if running {
-                    info!(
-                        mount = mount.as_str(),
-                        provider = %wasm_path.display(),
-                        reason,
-                        duration_ms = mount_started.elapsed().as_millis(),
-                        "reconcile updated mount"
-                    );
-                    self.outcome.updated.push(mount);
-                } else {
-                    info!(
-                        mount = mount.as_str(),
-                        provider = %wasm_path.display(),
-                        reason,
-                        duration_ms = mount_started.elapsed().as_millis(),
-                        "reconcile added mount"
-                    );
-                    self.outcome.added.push(mount);
-                }
-            },
-            Err(error) => {
-                self.registry.fingerprints.write().remove(&mount);
-                warn!(
-                    mount = mount.as_str(),
-                    provider = %wasm_path.display(),
-                    reason,
-                    duration_ms = mount_started.elapsed().as_millis(),
-                    error = %error,
-                    "reconcile failed to load mount"
-                );
-                self.outcome.failed.push(MountFailure {
-                    mount,
-                    reason: error.to_string(),
-                });
+
+        let workers = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4)
+            .min(work.len());
+
+        // Round-robin the work into one owned bucket per worker so each thread
+        // drains its own bucket with no shared mutable state.
+        let mut buckets: Vec<Vec<LoadWork>> = (0..workers).map(|_| Vec::new()).collect();
+        for (i, item) in work.into_iter().enumerate() {
+            buckets[i % workers].push(item);
+        }
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = buckets
+                .into_iter()
+                .map(|bucket| {
+                    scope.spawn(move || {
+                        bucket
+                            .into_iter()
+                            .map(|item| load_one(registry, handle, item))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("reconcile worker thread panicked"))
+                .collect()
+        })
+    }
+
+    fn record_load(&mut self, result: LoadResult) {
+        match result {
+            LoadResult::Added { mount } => self.outcome.added.push(mount),
+            LoadResult::Updated { mount } => self.outcome.updated.push(mount),
+            LoadResult::Failed { mount, reason } => {
+                self.outcome.failed.push(MountFailure { mount, reason });
             },
         }
     }
@@ -443,6 +500,91 @@ impl<'a> ReconcilePass<'a> {
                 self.registry.fingerprints.write().remove(&mount);
             }
         }
+    }
+}
+
+/// A planned mount that needs (re)compilation, produced by `plan_path`.
+struct LoadWork {
+    spec: Spec,
+    mount: String,
+    wasm_path: PathBuf,
+    fingerprint: MountFingerprint,
+    /// Whether a prior instance is being replaced (update) versus a fresh add.
+    running: bool,
+    reason: &'static str,
+}
+
+/// The outcome of loading one [`LoadWork`], folded back into the reconcile
+/// outcome by `record_load`.
+enum LoadResult {
+    Added { mount: String },
+    Updated { mount: String },
+    Failed { mount: String, reason: String },
+}
+
+/// Compile, instantiate, and register one planned mount. Runs on a reconcile
+/// worker thread (see `load_in_parallel` for why those are scoped OS threads),
+/// so it touches only the registry's thread-safe surface
+/// (`add_mount`/`remove_mount` and the fingerprint lock) and returns its result
+/// rather than mutating the shared outcome.
+fn load_one(
+    registry: &ProviderRegistry,
+    handle: &tokio::runtime::Handle,
+    work: LoadWork,
+) -> LoadResult {
+    let LoadWork {
+        spec,
+        mount,
+        wasm_path,
+        fingerprint,
+        running,
+        reason,
+    } = work;
+    let started = Instant::now();
+    if running {
+        let _ = registry.remove_mount(&mount);
+    }
+    match registry.add_mount(spec, handle) {
+        Ok(_) => {
+            registry
+                .fingerprints
+                .write()
+                .insert(mount.clone(), fingerprint);
+            if running {
+                info!(
+                    mount = mount.as_str(),
+                    provider = %wasm_path.display(),
+                    reason,
+                    duration_ms = started.elapsed().as_millis(),
+                    "reconcile updated mount"
+                );
+                LoadResult::Updated { mount }
+            } else {
+                info!(
+                    mount = mount.as_str(),
+                    provider = %wasm_path.display(),
+                    reason,
+                    duration_ms = started.elapsed().as_millis(),
+                    "reconcile added mount"
+                );
+                LoadResult::Added { mount }
+            }
+        },
+        Err(error) => {
+            registry.fingerprints.write().remove(&mount);
+            warn!(
+                mount = mount.as_str(),
+                provider = %wasm_path.display(),
+                reason,
+                duration_ms = started.elapsed().as_millis(),
+                error = %error,
+                "reconcile failed to load mount"
+            );
+            LoadResult::Failed {
+                mount,
+                reason: error.to_string(),
+            }
+        },
     }
 }
 
@@ -645,5 +787,91 @@ mod tests {
             Ok(_) => panic!("expected invalid provider config to be rejected"),
         }
         assert!(registry.mounts().is_empty());
+    }
+
+    /// The daemon contract backstop (PLAN.md slice 4): a mount whose stamped
+    /// contract does not match the live provider contract is refused at
+    /// reconcile and surfaces as a `MountFailure`, so the daemon never serves a
+    /// contract the spec was not written against. Guards the "daemon refuses a
+    /// hand-edited drifted spec" guarantee, the one slice-4 outcome no other
+    /// test exercises.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_refuses_contract_drifted_mount() {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_home::Paths::under_root(config_dir.path());
+
+        // `ProviderRegistry::new` builds the archive extractor from this WASM,
+        // so it must be present. The drifted mount itself uses the built-in db
+        // provider manifest and is rejected before its WASM is ever loaded.
+        let archive_tool_wasm = archive_tool_wasm_path();
+        assert!(
+            archive_tool_wasm.exists(),
+            "archive tool missing at {}. Run `just providers-build` first.",
+            archive_tool_wasm.display()
+        );
+        std::fs::copy(
+            &archive_tool_wasm,
+            providers_dir.path().join(ARCHIVE_TOOL_WASM),
+        )
+        .expect("copy archive tool");
+
+        // A db mount whose stamped contract carries a config field the live
+        // built-in manifest does not, so the two contract hashes cannot match.
+        let mounts_dir = paths.config_dir.join("mounts");
+        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
+        std::fs::write(
+            mounts_dir.join("db.json"),
+            r#"{
+                "provider": "omnifs_provider_db.wasm",
+                "mount": "db",
+                "config": {"database_type": "sqlite", "path": "/data/chinook.sqlite"},
+                "contract": {
+                    "config_fields": [{"name": "__drift_probe__", "required": true}],
+                    "capabilities": [],
+                    "auth_scheme": "__drift_probe_auth__",
+                    "provider_version": "0.0.0-drift"
+                }
+            }"#,
+        )
+        .expect("write drifted spec");
+
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let registry = ProviderRegistry::new(
+            Dirs::new(
+                cache_dir.path(),
+                &paths.config_dir,
+                providers_dir.path(),
+                &paths.credentials_file,
+            ),
+            cloner,
+        )
+        .expect("registry init");
+
+        let outcome = registry.reconcile(&tokio::runtime::Handle::current(), true);
+
+        // The drifted mount is refused, not served, and the failure names the
+        // contract mismatch so it is actionable in `omnifs status`.
+        assert!(
+            registry.mounts().is_empty(),
+            "a contract-drifted mount must not be served"
+        );
+        assert!(outcome.added.is_empty(), "no mount should have been added");
+        let failure = outcome
+            .failed
+            .iter()
+            .find(|failure| failure.reason.contains("contract mismatch"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a contract-mismatch failure, got: {:?}",
+                    outcome.failed
+                )
+            });
+        assert!(
+            failure.reason.contains("mount `db`"),
+            "failure should name the drifted mount, got: {}",
+            failure.reason
+        );
     }
 }
