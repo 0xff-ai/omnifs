@@ -1,0 +1,4 @@
+{
+  "provider": "dns",
+  "mount": "dns"
+}
