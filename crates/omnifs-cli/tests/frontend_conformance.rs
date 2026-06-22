@@ -56,8 +56,7 @@ fn curl(args: &[&str]) -> bool {
     Command::new("curl")
         .args(args)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// What platform-default frontend the daemon will use on this OS.

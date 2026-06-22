@@ -1,4 +1,4 @@
-# Toolchain policy: keep MSRV aligned with rust-toolchain.toml (1.91.0).
+# Toolchain policy: keep MSRV aligned with rust-toolchain.toml (1.95.0).
 # CI npm builds and local `rustup` both use the pinned channel rather than
 # `stable`, so clippy's MSRV-aware lints match what contributors actually run.
-msrv = "1.91.0"
+msrv = "1.95.0"

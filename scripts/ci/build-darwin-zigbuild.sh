@@ -8,11 +8,11 @@ cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 package="${OMNIFS_PACKAGE:-omnifs-cli}"
 bin="${OMNIFS_BIN:-omnifs}"
 
-# The container ships rustc 1.93.0 but rust-toolchain.toml pins 1.91.0, so
-# cargo auto-installs 1.91.0 + apple-darwin std libs into RUSTUP_HOME on first
-# run. Persist that across CI runs via $root/.cache/darwin-rustup (cached by
-# the cli-cross actions/cache step), distinct from the container's
-# pre-installed /usr/local/rustup so we never shadow the image's toolchain.
+# rust-toolchain.toml pins the exact Rust release, so cargo auto-installs that
+# toolchain plus apple-darwin std libs into RUSTUP_HOME on first run. Persist
+# that across CI runs via $root/.cache/darwin-rustup (cached by the cli-cross
+# actions/cache step), distinct from the container's pre-installed
+# /usr/local/rustup so we never shadow the image's toolchain.
 rustup_home="${DARWIN_RUSTUP_HOME:-$root/.cache/darwin-rustup}"
 
 image="$(version_pin cargo_zigbuild_container)"

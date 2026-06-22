@@ -180,8 +180,7 @@ const NEGATIVES_SOFT_CAP: usize = 4096;
 fn now_millis_for_gc() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Process-global cache handles. Opened once at startup; shared via `Arc`.

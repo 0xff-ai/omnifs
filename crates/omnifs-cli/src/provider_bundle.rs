@@ -119,7 +119,19 @@ fn install_artifact(
 ) -> anyhow::Result<()> {
     if name == ARCHIVE_TOOL_WASM {
         let target = providers_dir.join(name);
-        std::fs::write(&target, bytes).with_context(|| format!("write {}", target.display()))?;
+        if target.is_file() && std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
+            return Ok(());
+        }
+        let mut temp = target.clone();
+        temp.set_file_name(format!("{name}.tmp-{}", std::process::id()));
+        std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        std::fs::rename(&temp, &target).with_context(|| {
+            format!(
+                "move provider bundle file {} to {}",
+                temp.display(),
+                target.display()
+            )
+        })?;
         return Ok(());
     }
 

@@ -288,8 +288,7 @@ fn unmount(mount_point: &Path, force: bool) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .is_ok_and(|status| status.success());
         if cleared {
             return;
         }
@@ -377,8 +376,7 @@ fn pid_alive(pid: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
 
 /// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon

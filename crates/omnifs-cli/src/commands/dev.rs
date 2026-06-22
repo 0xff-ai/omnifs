@@ -312,7 +312,7 @@ fn write_dev_mounts(mounts_dir: &Path, configs: &[MountConfig]) -> anyhow::Resul
 
 async fn ensure_db_fixture(db_dir: &Path, db_path: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(db_dir).with_context(|| format!("create {}", db_dir.display()))?;
-    if fs::metadata(db_path).map(|m| m.len() > 0).unwrap_or(false) {
+    if fs::metadata(db_path).is_ok_and(|m| m.len() > 0) {
         return Ok(());
     }
     anstream::println!("Downloading Chinook DB fixture → {}", db_path.display());

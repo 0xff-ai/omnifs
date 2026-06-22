@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+const BLOB_FETCH_TIMEOUT: Duration = Duration::from_mins(2);
 
 const DEFAULT_MAX_FETCH_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_MAX_READ_BLOB_BYTES: u64 = 16 * 1024 * 1024;

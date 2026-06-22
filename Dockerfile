@@ -1,6 +1,6 @@
 # syntax=docker.io/docker/dockerfile:1.12-labs
 
-FROM rust:1.91.0-bookworm AS toolchain
+FROM rust:1.95.0-bookworm AS toolchain
 
 COPY rust-toolchain.toml .
 RUN apt-get update \
