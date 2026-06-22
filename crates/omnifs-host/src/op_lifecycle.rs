@@ -26,7 +26,7 @@ impl Runtime {
         let id = self.operation_ids.allocate();
         let trace_id = fuse_trace.or_else(inspector::current_trace_id);
         let live_op = trace_id.and_then(|t| {
-            InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_id, t)
+            InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_name, t)
         });
         let mut resume_round = 0u32;
         let mut step = self.instance.start_op(&op, id)?;

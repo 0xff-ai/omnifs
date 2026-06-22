@@ -8,7 +8,7 @@ use crate::archive::ArchiveExecutor;
 use crate::auth::{AuthManager, credential_store_for_file};
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
-use crate::capability::{CapabilityChecker, CapabilityGrants};
+use crate::capability::CapabilityChecker;
 use crate::cloner::GitCloner;
 use crate::git;
 use crate::http::HttpStack;
@@ -22,10 +22,12 @@ use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
+use omnifs_caps::Grant;
+use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::ProviderConfig;
-use omnifs_mount::mounts::Resolved;
+use omnifs_mount::mounts::{ProviderStore, Resolved};
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -104,13 +106,16 @@ impl HostContext {
         self.cache_dir.join("wasm")
     }
 
-    pub(crate) fn provider_path(&self, provider: &str) -> PathBuf {
-        let provider = PathBuf::from(provider);
-        if provider.is_absolute() {
-            provider
-        } else {
-            self.providers_dir.join(provider)
-        }
+    /// `by-hash/<hex>.wasm` for a pinned provider id: the serving path the
+    /// daemon loads. Identity is the content hash, never a filename.
+    pub(crate) fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
+        ProviderStore::new(&self.providers_dir).by_hash_path(id)
+    }
+
+    /// Host-internal tools (the archive extractor) live flat in `providers_dir`,
+    /// not in the content-addressed `by-hash/` store.
+    pub(crate) fn archive_tool_path(&self, file: &str) -> PathBuf {
+        self.providers_dir.join(file)
     }
 }
 
@@ -134,7 +139,7 @@ pub struct Runtime {
     pub(crate) instance: Instance,
     initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
-    pub(crate) provider_id: String,
+    pub(crate) provider_name: String,
     pub(crate) operation_ids: OperationIds,
     pub(crate) http: Arc<HttpStack>,
     pub(crate) git: git::GitExecutor,
@@ -280,8 +285,8 @@ impl Runtime {
         &self.mount_name
     }
 
-    pub fn provider_id(&self) -> &str {
-        &self.provider_id
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
     }
 
     pub fn namespace(&self) -> Namespace<'_> {
@@ -303,20 +308,36 @@ impl Runtime {
             .spec
             .capabilities
             .as_ref()
-            .and_then(|c| c.preopened_paths.as_deref())
-            .unwrap_or(&[]);
+            .and_then(|c| c.preopened_paths.as_ref())
+            .map_or(&[][..], Grant::literal);
+        // Load the pinned artifact's manifest once: capability/config-schema
+        // validation and auth both read it, and enforcement rests on this
+        // pinned manifest, never on a spec-stamped snapshot.
+        let manifest = Artifact::load(wasm_path)
+            .and_then(|artifact| artifact.metadata())
+            .map_err(BuildError::InvalidConfig)?;
+
         let instance = Instance::new(engine, wasm_path, config_bytes, preopens)?;
 
-        validate_instance_config(config.spec.provider_config_schema(), config, mount_name)?;
+        // `schemars::Schema::as_value` is the method clippy would name here, but
+        // schemars is not a direct dependency, so the closure stays.
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        let config_schema = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.config_schema.as_ref())
+            .map(|schema| schema.as_value());
+        validate_instance_config(config_schema, config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
-        let grants = CapabilityGrants::from_config(config, &initialize_result.capabilities);
-        let capability = Arc::new(CapabilityChecker::new(grants));
+        let capability = Arc::new(CapabilityChecker::from_config(
+            config,
+            &initialize_result.capabilities,
+        ));
 
-        let auth_manifest = Artifact::load(wasm_path)
-            .and_then(|artifact| artifact.auth_manifest())
-            .map_err(BuildError::InvalidConfig)?;
+        let auth_manifest = manifest
+            .as_ref()
+            .and_then(omnifs_provider::ProviderManifest::wasm_auth_manifest);
         let auth = if config.spec.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
@@ -325,7 +346,7 @@ impl Runtime {
                 AuthManager::from_configs_manifest_store_with_store(
                     &config.spec.auth,
                     auth_manifest.as_ref(),
-                    &config.provider_id,
+                    &config.provider_name,
                     store,
                 )
                 .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
@@ -353,7 +374,7 @@ impl Runtime {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
-            provider_id: config.provider_id.clone(),
+            provider_name: config.provider_name.clone(),
             operation_ids: OperationIds::new(),
             http,
             git,

@@ -97,22 +97,40 @@ impl FileAttrsCache {
     /// erase the real size after a `cat`.
     ///
     /// True only when `self` carries a learned `Exact` size, `incoming` is
-    /// silent about size (no `Exact` of its own), and the two share a content
-    /// identity: same byte source and version token. Stability is otherwise
-    /// ignored, because directory listings project a kind-derived placeholder
-    /// stability rather than the file's real one; only `Live` is rejected
-    /// outright (a live file is never durably size-learned, so the `Exact`
-    /// guard already excludes it, but the explicit check states the intent).
+    /// silent about size (no `Exact` of its own), the file is not `Live`, and
+    /// `incoming` does not prove the content changed (see the version rule
+    /// below). Stability is otherwise ignored, because directory listings
+    /// project a kind-derived placeholder stability rather than the file's real
+    /// one; only `Live` is rejected outright (a live file is never durably
+    /// size-learned, so the `Exact` guard already excludes it, but the explicit
+    /// check states the intent).
+    ///
+    /// Byte source is deliberately NOT compared: it is a promise-vs-fulfillment
+    /// field, not a content identity. A listing dirent declares the promise
+    /// (`Deferred`, or `Canonical` for an object representation) while a read
+    /// fulfills it (`Inline`/`Blob`/`Canonical`), so the two legitimately
+    /// differ for the same file.
+    ///
+    /// Version rule: a learned size is dropped only when `incoming` carries a
+    /// DIFFERENT explicit version token, which is the sole proof that the
+    /// content changed. An `incoming` with no version token does not prove a
+    /// change: object representation leaves are listed through a static
+    /// placeholder (`FileProj::listing_shape`, version-less and `Stable`) that
+    /// knows nothing about the loaded object's real `Dynamic` version, so
+    /// requiring token equality clobbered the learned size of every
+    /// representation on the next lookup.
     ///
     /// Keeping `self`'s attributes is safe even for dynamic files: the next
-    /// complete read re-learns the size from the bytes it returns, so a stale
+    /// complete read re-learns the size from the bytes it returns (and a
+    /// changed upstream yields a new version that does drop it), so a stale
     /// value never reaches a read check.
     pub fn keeps_learned_size_over(&self, incoming: &FileAttrsCache) -> bool {
+        let version_proves_change =
+            incoming.version_token.is_some() && incoming.version_token != self.version_token;
         matches!(self.size, FileSize::Exact(_))
             && !matches!(incoming.size, FileSize::Exact(_))
             && !matches!(self.stability, Stability::Live)
-            && self.bytes == incoming.bytes
-            && self.version_token == incoming.version_token
+            && !version_proves_change
     }
 
     #[must_use]
@@ -430,6 +448,37 @@ mod tests {
         let decoded = DirentsPayload::deserialize(&dirents_bytes).unwrap();
         assert_eq!(decoded.entries.len(), 1);
         assert!(decoded.entries[0].meta.is_file());
+    }
+
+    // Regression: an object representation (`repo.json`) is read-answered as a
+    // learned `Exact`, `Dynamic`, etag-versioned attr, but every later listing
+    // re-applies the static `FileProj::listing_shape` placeholder: `Unknown`
+    // size, `Stable`, NO version, `Deferred(Full)`. The learned exact size must
+    // survive that placeholder; otherwise `stat` reports the `1` sentinel even
+    // after a `cat`. Only a DIFFERENT explicit version drops it.
+    #[test]
+    fn learned_size_survives_versionless_listing_placeholder() {
+        let learned = FileAttrsCache {
+            size: FileSize::Exact(6815),
+            bytes: ByteSource::Deferred(ReadMode::Full),
+            stability: Stability::Dynamic,
+            version_token: Some("etag-1".to_string()),
+        };
+        // The real listing placeholder: version-less, Stable, Unknown size.
+        let placeholder = FileAttrsCache {
+            size: FileSize::Unknown,
+            bytes: ByteSource::Deferred(ReadMode::Full),
+            stability: Stability::Stable,
+            version_token: None,
+        };
+        assert!(learned.keeps_learned_size_over(&placeholder));
+
+        // A DIFFERENT explicit version proves new content and drops the size.
+        let newer = FileAttrsCache {
+            version_token: Some("etag-2".to_string()),
+            ..placeholder
+        };
+        assert!(!learned.keeps_learned_size_over(&newer));
     }
 
     #[test]

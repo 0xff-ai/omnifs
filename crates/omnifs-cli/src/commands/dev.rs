@@ -3,7 +3,7 @@
 //! Brings up the full local integration sandbox: builds the canonical omnifs
 //! image from the workspace (or runs a pre-built one with `--image`), provisions
 //! credentials for the built-in dev mounts from the contributor's host (`gh`
-//! CLI, provider env vars) into a dedicated dev home under `~/.omnifs/dev`,
+//! CLI, provider env vars) into a dedicated dev home at `~/.omnifs-dev`,
 //! exposes the Docker socket and a Chinook `SQLite` fixture, and starts the
 //! container. Nothing is written into the source checkout, so a stray `git add`
 //! can never leak a token. Contributors-only; requires a source checkout.
@@ -12,13 +12,13 @@ use anyhow::Context;
 use clap::Args;
 use omnifs_creds::FileStore;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::auth::AuthSelection;
 use crate::catalog::ProviderTemplates;
 use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
-use crate::dev_mounts;
+use crate::dev_mounts::{self, DevMountSeed};
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
 use crate::launch_backend::{DockerTarget, LaunchBackend};
@@ -54,7 +54,7 @@ impl DevArgs {
         // Dedicated dev home under the standard omnifs home. Credentials and
         // fixtures live here, never in the repo checkout (no credential-via-git
         // leak) and never mixed into the user's real `~/.omnifs`.
-        let dev_home = WorkspaceLayout::resolve()?.config_dir.join("dev");
+        let dev_home = crate::dev_support::dev_home_root()?;
         let db_dir = dev_home.join("db");
         let db_path = db_dir.join("test.db");
 
@@ -103,7 +103,7 @@ impl DevArgs {
         // Providers: export freshly from the workspace, or unpack the launcher
         // bundle when running a pre-built image (no workspace build).
         if self.image.is_some() {
-            crate::provider_bundle::install_embedded_bundle(&paths.providers_dir)?;
+            crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
         } else {
             crate::provider_bundle::install_workspace_bundle(
                 workspace.path(),
@@ -116,8 +116,7 @@ impl DevArgs {
         // that need no auth). Same detect→validate→store path as `omnifs init`.
         let templates = dev_workspace.catalog().provider_templates()?;
         let mut configs =
-            provision_dev_mounts(dev_mounts::configs()?, &templates, &paths.credentials_file)
-                .await?;
+            provision_dev_mounts(dev_mounts::seeds()?, &templates, &paths.credentials_file).await?;
 
         let mut binds = vec![format!("{}:{GUEST_DB_DIR}:ro", db_dir.display())];
 
@@ -126,9 +125,22 @@ impl DevArgs {
         // the reason rather than failing the command.
         if let Some(cluster_task) = cluster_task {
             match cluster_task.await {
-                Ok(Ok((socket_bind, mount))) => {
-                    binds.push(socket_bind);
-                    configs.push(mount);
+                Ok(Ok((socket_bind, seed))) => match seed.pin(&templates) {
+                    Some(spec) => match MountConfig::from_parsed(
+                        spec,
+                        PathBuf::from("dev cluster testenv mount"),
+                    ) {
+                        Ok(config) => {
+                            binds.push(socket_bind);
+                            configs.push(config);
+                        },
+                        Err(error) => anstream::eprintln!(
+                            "warning: dev Kubernetes mount was invalid; mounting without it: {error:#}"
+                        ),
+                    },
+                    None => anstream::eprintln!(
+                        "warning: kubernetes provider is not installed; mounting without the dev cluster"
+                    ),
                 },
                 Ok(Err(error)) => {
                     anstream::eprintln!(
@@ -173,20 +185,28 @@ impl DevArgs {
 /// is dropped with a warning rather than aborting the whole sandbox; a mount
 /// that needs no auth (the `SQLite` fixture) is always kept.
 async fn provision_dev_mounts(
-    configs: Vec<MountConfig>,
+    seeds: Vec<(String, DevMountSeed)>,
     templates: &ProviderTemplates,
     credentials_file: &Path,
 ) -> anyhow::Result<Vec<MountConfig>> {
     let mut ready = Vec::new();
-    for config in configs {
-        let provider_file = config.config.provider.clone();
-        let Some((provider_id, template)) = templates.by_provider_file(&provider_file) else {
+    for (filename, seed) in seeds {
+        let provider_name = seed.provider.as_str().to_owned();
+        let Some(template) = templates.by_id(&provider_name) else {
             anstream::eprintln!(
-                "  ! mount `{}` references unknown provider `{provider_file}`; skipping",
-                config.name
+                "  ! dev mount `{}` references uninstalled provider `{provider_name}`; skipping",
+                seed.mount
             );
             continue;
         };
+        // by_id matched, so pin against the same templates succeeds.
+        let Some(spec) = seed.pin(templates) else {
+            continue;
+        };
+        let config = MountConfig::from_parsed(
+            spec,
+            PathBuf::from(format!("embedded dev mount {filename}")),
+        )?;
 
         let default_auth = AuthSelection::from_provider_default(&template.manifest);
         if default_auth.is_none() {
@@ -200,7 +220,7 @@ async fn provision_dev_mounts(
         let outcome = AuthImportDecision::new(
             default_auth,
             template.auth_manifest.as_ref(),
-            provider_id,
+            &provider_name,
             true,
             true,
         )
@@ -221,7 +241,7 @@ async fn provision_dev_mounts(
             ready.push(config);
         } else {
             anstream::eprintln!(
-                "  ! no host credential found for `{provider_id}`; skipping its dev mount (authenticate it and rerun `omnifs dev`)"
+                "  ! no host credential found for `{provider_name}`; skipping its dev mount (authenticate it and rerun `omnifs dev`)"
             );
         }
     }

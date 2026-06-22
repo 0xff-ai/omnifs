@@ -351,7 +351,8 @@
             "type": "string"
           },
           "provider_id": {
-            "type": "string"
+            "type": "string",
+            "description": "Provider NAME slug. Field name kept as `provider_id` for wire stability; rename deferred to an `API_MAJOR` bump."
           },
           "root_mount": {
             "type": "boolean"

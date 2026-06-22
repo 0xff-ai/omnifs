@@ -220,10 +220,10 @@ mod tests {
     use time::OffsetDateTime;
 
     fn resolved_mount(json: &str) -> Resolved {
-        Spec::parse(json)
-            .unwrap()
-            .into_resolved("github", None)
-            .unwrap()
+        let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+        value["provider"] = crate::test_support::provider_ref_value("github");
+        let spec: Spec = serde_json::from_value(value).unwrap();
+        spec.into_resolved(None).unwrap()
     }
 
     #[test]

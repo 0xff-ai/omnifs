@@ -11,7 +11,7 @@ pub(crate) struct ImportOutcome {
 pub(crate) struct AuthImportDecision<'a> {
     default_auth: Option<AuthSelection>,
     auth_manifest: Option<&'a AuthManifest>,
-    provider_id: &'a str,
+    provider_name: &'a str,
     interactive: bool,
     yes: bool,
 }
@@ -20,14 +20,14 @@ impl<'a> AuthImportDecision<'a> {
     pub(crate) fn new(
         default_auth: Option<AuthSelection>,
         auth_manifest: Option<&'a AuthManifest>,
-        provider_id: &'a str,
+        provider_name: &'a str,
         interactive: bool,
         yes: bool,
     ) -> Self {
         Self {
             default_auth,
             auth_manifest,
-            provider_id,
+            provider_name,
             interactive,
             yes,
         }
@@ -46,7 +46,7 @@ impl<'a> AuthImportDecision<'a> {
                 token: None,
             });
         }
-        let detected = detect::detect(self.provider_id);
+        let detected = detect::detect(self.provider_name);
         if detected.is_empty() {
             return Ok(ImportOutcome {
                 auth: self.default_auth,
@@ -61,10 +61,10 @@ impl<'a> AuthImportDecision<'a> {
         };
 
         let auth_manifest = self.auth_manifest;
-        let provider_id = self.provider_id;
+        let provider_name = self.provider_name;
         let default_auth = self.default_auth.expect("checked default auth presence");
         Ok(ImportOutcome {
-            auth: Some(default_auth.promote_imported_static(auth_manifest, provider_id)?),
+            auth: Some(default_auth.promote_imported_static(auth_manifest, provider_name)?),
             token: Some(token),
         })
     }

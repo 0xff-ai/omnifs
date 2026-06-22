@@ -273,9 +273,15 @@ fn read_manifest_facts(
             format!("invalid provider manifest {}: {error}", path.display()),
         )
     })?;
-    manifest.contract = Some(omnifs_provider::ContractEvidence::current(env!(
+    // `env!` here captures the *sdk-macros* crate version at the time this macro
+    // was compiled, which is correctly `BuildEvidence.sdk`.
+    manifest.build_evidence = Some(omnifs_provider::BuildEvidence::current(env!(
         "CARGO_PKG_VERSION"
     )));
+    // `std::env::var` reads the cargo-set env at *expansion* time, i.e. the
+    // version of the provider crate currently being compiled. Do not switch this
+    // to `env!`: that would capture sdk-macros' version instead.
+    manifest.version = std::env::var("CARGO_PKG_VERSION").ok();
     let name = manifest.id.clone();
     let description = manifest.display_name.clone();
     let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {

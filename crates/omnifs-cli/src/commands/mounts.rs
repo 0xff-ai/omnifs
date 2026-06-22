@@ -72,10 +72,7 @@ fn ls() -> anyhow::Result<()> {
             .resolve_mount_spec(mount.config.clone(), false)
         {
             Ok(resolved) => {
-                let provider = resolved.spec.provider_id().map_or_else(
-                    || short_provider_name(&resolved.spec.provider),
-                    str::to_owned,
-                );
+                let provider = resolved.provider_name.clone();
                 let auth = crate::auth::AuthReadiness::from_config(&resolved, &store)
                     .terminal_row()
                     .summary;
@@ -140,22 +137,6 @@ pub async fn rm(
         },
     }
     Ok(())
-}
-
-/// Best-effort short provider name from a wasm filename when no provider id is
-/// resolved: `omnifs_provider_arxiv.wasm` -> `arxiv`.
-fn short_provider_name(provider: &str) -> String {
-    Path::new(provider)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map_or_else(
-            || provider.to_owned(),
-            |stem| {
-                stem.strip_prefix("omnifs_provider_")
-                    .unwrap_or(stem)
-                    .to_owned()
-            },
-        )
 }
 
 fn confirm(

@@ -120,13 +120,14 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
-    use omnifs_mount::mounts::Spec;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
     use crate::catalog::ProviderCatalog;
     use crate::launch::DockerMountMaterializer;
-    use crate::test_support::wasm_with_provider_metadata;
+    use crate::test_support::{
+        install_fixture_provider, provider_ref_value, spec_with_provider, spec_with_reference,
+    };
 
     fn sample_entry(value: &str) -> CredentialEntry {
         CredentialEntry::static_token(
@@ -156,11 +157,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_github.wasm"),
-            wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
-        )
-        .unwrap();
+        let reference = install_fixture_provider(&paths.providers_dir, "github");
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "pat", "default").unwrap();
@@ -168,14 +165,10 @@ mod tests {
 
         let config = MountConfig {
             name: MountName::try_from("github").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_github.wasm",
-                    "mount": "github",
-                    "auth": {"type":"static-token","scheme":"pat"}
-                }"#,
-            )
-            .unwrap(),
+            config: spec_with_reference(
+                &reference,
+                r#"{ "mount": "github", "auth": {"type":"static-token","scheme":"pat"} }"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
 
@@ -192,11 +185,11 @@ mod tests {
     fn from_path_rejects_invalid_mount_name() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("bad.json");
-        fs::write(
-            &path,
-            r#"{"provider":"p.wasm","mount":"../../../tmp/poison"}"#,
-        )
-        .unwrap();
+        let spec = serde_json::json!({
+            "provider": provider_ref_value("p"),
+            "mount": "../../../tmp/poison"
+        });
+        fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
 
         let err = MountConfig::from_path(&path).unwrap_err();
         let chain = format!("{err:#}");
@@ -212,10 +205,10 @@ mod tests {
         let store = MemoryStore::new();
         let config = MountConfig {
             name: MountName::try_from("dns").unwrap(),
-            config: Spec::parse(
-                r#"{"provider":"p.wasm","mount":"dns","auth":{"type":"static-token","scheme":"pat","token_env":"FOO"}}"#,
-            )
-            .unwrap(),
+            config: spec_with_provider(
+                "dns",
+                r#"{"mount":"dns","auth":{"type":"static-token","scheme":"pat","token_env":"FOO"}}"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
@@ -231,6 +224,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
+        let reference = install_fixture_provider(&paths.providers_dir, "github");
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -238,22 +232,12 @@ mod tests {
 
         let config = MountConfig {
             name: MountName::try_from("github").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_github.wasm",
-                    "mount": "github",
-                    "auth": {"type":"oauth","scheme":"device","clientId":"client-id"}
-                }"#,
-            )
-            .unwrap(),
+            config: spec_with_reference(
+                &reference,
+                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
-
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_github.wasm"),
-            wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
-        )
-        .unwrap();
 
         let catalog = test_catalog(tmp.path());
         DockerMountMaterializer::new(&catalog, &store)
@@ -266,11 +250,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_github.wasm"),
-            wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
-        )
-        .unwrap();
+        let reference = install_fixture_provider(&paths.providers_dir, "github");
 
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -278,38 +258,7 @@ mod tests {
 
         let config = MountConfig {
             name: MountName::try_from("github").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_github.wasm",
-                    "mount": "github"
-                }"#,
-            )
-            .unwrap(),
-            source: PathBuf::from("/dev/null"),
-        };
-
-        let catalog = test_catalog(tmp.path());
-        DockerMountMaterializer::new(&catalog, &store)
-            .materialize(&config)
-            .unwrap();
-    }
-
-    #[test]
-    fn materialize_uses_builtin_metadata_without_host_wasm() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new();
-        let key = CredentialId::new("github", "device", "default").unwrap();
-        store.put(&key, &sample_oauth_entry("gho-access")).unwrap();
-
-        let config = MountConfig {
-            name: MountName::try_from("github").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_github.wasm",
-                    "mount": "github"
-                }"#,
-            )
-            .unwrap(),
+            config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
             source: PathBuf::from("/dev/null"),
         };
 
@@ -329,9 +278,10 @@ mod tests {
         let store = MemoryStore::new();
         let config = MountConfig {
             name: MountName::try_from("db").unwrap(),
-            config: Spec::parse(&format!(
-                r#"{{
-                    "provider": "omnifs_provider_db.wasm",
+            config: spec_with_provider(
+                "db",
+                &format!(
+                    r#"{{
                     "mount": "db",
                     "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
                     "capabilities": {{
@@ -340,9 +290,9 @@ mod tests {
                         ]
                     }}
                 }}"#,
-                db_dir.display()
-            ))
-            .unwrap(),
+                    db_dir.display()
+                ),
+            ),
             source: PathBuf::from("/dev/null"),
         };
 
@@ -370,14 +320,10 @@ mod tests {
         let store = MemoryStore::new();
         let config = MountConfig {
             name: MountName::try_from("db").unwrap(),
-            config: Spec::parse(
-                r#"{
-                    "provider": "omnifs_provider_db.wasm",
-                    "mount": "db",
-                    "config": {"database_type": "sqlite", "path": "/data/test.db"}
-                }"#,
-            )
-            .unwrap(),
+            config: spec_with_provider(
+                "db",
+                r#"{ "mount": "db", "config": {"database_type": "sqlite", "path": "/data/test.db"} }"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
 
@@ -396,19 +342,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_github.wasm"),
-            wasm_with_provider_metadata("github", "omnifs_provider_github.wasm"),
-        )
-        .unwrap();
+        let reference = install_fixture_provider(&paths.providers_dir, "github");
 
         let store = MemoryStore::new();
         let config = MountConfig {
             name: MountName::try_from("ghost").unwrap(),
-            config: Spec::parse(
-                r#"{"provider":"omnifs_provider_github.wasm","mount":"ghost","auth":{"type":"static-token","scheme":"pat"}}"#,
-            )
-            .unwrap(),
+            config: spec_with_reference(
+                &reference,
+                r#"{ "mount": "ghost", "auth": {"type":"static-token","scheme":"pat"} }"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());

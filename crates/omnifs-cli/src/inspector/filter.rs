@@ -30,7 +30,7 @@ impl ViewFilter {
             operation.mount,
             operation.path,
             operation.fuse_op,
-            operation.provider_id.as_deref().unwrap_or(""),
+            operation.provider_name.as_deref().unwrap_or(""),
             operation.outcome
         )
         .to_ascii_lowercase();

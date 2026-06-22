@@ -137,7 +137,7 @@ impl InitArgs {
 
         let mount_file = MountFile::new(
             &mount_name,
-            &template.manifest,
+            &template.reference,
             effective_auth.as_ref(),
             &self.scopes,
             generated,
@@ -335,11 +335,12 @@ mod tests {
     use super::config_generation::{GeneratedMountConfig, MountConfigGenerator};
     use super::{AuthImportDecision, MountFile};
     use crate::auth::AuthSelection;
-    use crate::catalog::{ProviderCatalog, ProviderSource};
-    use omnifs_core::MountName;
+    use crate::catalog::ProviderCatalog;
+    use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
+    use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_mount::mounts::ProviderStore;
     use omnifs_provider::{
-        AuthManifest, AuthScheme, InitHint, InitInput, PreopenMode, PreopenStrategy, PreopenedPath,
-        ProviderCapabilities, ProviderManifest,
+        AuthManifest, AuthScheme, InitHint, InitInput, PreopenStrategy, ProviderManifest,
     };
     use serde_json::Value;
     use tempfile::TempDir;
@@ -369,7 +370,14 @@ mod tests {
             generated.config,
             Some(serde_json::json!({"endpoint": "unix:///var/run/docker.sock"})),
         );
-        assert!(generated.capabilities.is_none());
+        // `init` seeds the spec's grants from the manifest's needs, so a mount
+        // carries explicit grants the materialize-time check can satisfy.
+        let capabilities = generated.capabilities.expect("grants seeded from needs");
+        assert_eq!(
+            capabilities.domains,
+            Some(Grant::Literal(vec!["api.linear.app".to_string()])),
+        );
+        assert_eq!(capabilities.max_memory_mb, Some(128));
     }
 
     #[test]
@@ -428,11 +436,11 @@ mod tests {
         let expected_host = tmp.path().canonicalize().unwrap().display().to_string();
         assert_eq!(
             capabilities.preopened_paths,
-            Some(vec![PreopenedPath {
+            Some(Grant::Literal(vec![PreopenedPath {
                 host: expected_host,
                 guest: "/data".to_string(),
                 mode: PreopenMode::Ro,
-            }]),
+            }])),
         );
         assert_eq!(capabilities.max_memory_mb, Some(128));
     }
@@ -469,11 +477,58 @@ mod tests {
         assert_eq!(config["path"], "/data/chinook.db");
         assert_eq!(
             capabilities.preopened_paths,
-            Some(vec![PreopenedPath {
+            Some(Grant::Literal(vec![PreopenedPath {
                 host: expected_host,
                 guest: "/data".to_string(),
                 mode: PreopenMode::Ro,
-            }]),
+            }])),
+        );
+        assert_eq!(capabilities.max_memory_mb, Some(128));
+    }
+
+    /// Regression: a Replace hint must succeed when capabilities were already
+    /// seeded from the manifest's needs (the real `generate()` flow), not only
+    /// when they start as `None`. A manifest that declares any need (e.g. a
+    /// memory limit) plus a Replace host-file hint previously aborted `omnifs
+    /// init` on the very first field because the seed tripped the one-Replace
+    /// guard.
+    #[test]
+    fn host_file_hint_replace_succeeds_with_preseeded_capabilities() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("db");
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("chinook.db");
+        std::fs::write(&db, "").unwrap();
+        let manifest = provider_manifest();
+        let mut config = serde_json::json!({"path": "/data/test.db"});
+        // generate() seeds grants from the manifest's needs before prompting.
+        let mut capabilities = Some(manifest.provider_capabilities());
+
+        MountConfigGenerator::new(&manifest)
+            .apply_host_file_hint(
+                "path",
+                &InitHint {
+                    input: Some(InitInput::HostFile),
+                    guest_dir: Some("/data".to_string()),
+                    preopen_mode: PreopenMode::Ro,
+                    preopen_strategy: PreopenStrategy::Replace,
+                },
+                &db,
+                &mut config,
+                &mut capabilities,
+            )
+            .unwrap();
+
+        let capabilities = capabilities.unwrap();
+        let expected_host = dir.canonicalize().unwrap().display().to_string();
+        assert_eq!(config["path"], "/data/chinook.db");
+        assert_eq!(
+            capabilities.preopened_paths,
+            Some(Grant::Literal(vec![PreopenedPath {
+                host: expected_host,
+                guest: "/data".to_string(),
+                mode: PreopenMode::Ro,
+            }])),
         );
         assert_eq!(capabilities.max_memory_mb, Some(128));
     }
@@ -508,7 +563,7 @@ mod tests {
             .preopened_paths
             .as_ref()
             .unwrap();
-        assert_eq!(preopens.len(), 1);
+        assert_eq!(preopens.literal().len(), 1);
         assert_eq!(config["path"], "/data/first.db");
 
         let err = generator
@@ -524,23 +579,22 @@ mod tests {
 
     #[test]
     fn mount_file_includes_generated_config_and_capabilities() {
-        let manifest = provider_manifest();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("db.json");
 
         MountFile::new(
             &MountName::try_from("db").unwrap(),
-            &manifest,
+            &provider_ref("db"),
             None,
             &[],
             GeneratedMountConfig {
                 config: Some(serde_json::json!({"path": "/data/chinook.db"})),
                 capabilities: Some(ProviderCapabilities {
-                    preopened_paths: Some(vec![PreopenedPath {
+                    preopened_paths: Some(Grant::Literal(vec![PreopenedPath {
                         host: "/host/db".to_string(),
                         guest: "/data".to_string(),
                         mode: PreopenMode::Ro,
-                    }]),
+                    }])),
                     ..ProviderCapabilities::default()
                 }),
             },
@@ -637,80 +691,63 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn provider_ref(name: &str) -> ProviderRef {
+        ProviderRef {
+            id: ProviderId::from_wasm_bytes(name.as_bytes()),
+            meta: ProviderMeta {
+                name: ProviderName::new(name).unwrap(),
+                version: None,
+            },
+        }
+    }
+
+    /// Templates are drawn from the latest installed artifact in the
+    /// content-addressed store: install one and assert it surfaces with its
+    /// embedded manifest and a pinnable reference.
     #[test]
-    fn load_provider_templates_reads_metadata_from_wasm() {
+    fn load_provider_templates_reads_installed_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
+
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_linear.wasm"),
-            wasm_with_custom_section(
-                omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
-                &serde_json::to_vec(&manifest).unwrap(),
-            ),
-        )
-        .unwrap();
-        std::fs::write(paths.providers_dir.join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        let wasm = wasm_with_custom_section(
+            omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
+            &serde_json::to_vec(&manifest).unwrap(),
+        );
+        let id = ProviderId::from_wasm_bytes(&wasm);
+        let store = ProviderStore::new(&paths.providers_dir);
+        store.put_if_absent(&id, &wasm).unwrap();
+        store
+            .install(
+                id,
+                ProviderMeta {
+                    name: ProviderName::new("linear").unwrap(),
+                    version: None,
+                },
+                "omnifs_provider_linear.wasm".into(),
+            )
+            .unwrap();
 
         let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
-        assert!(templates.by_id("github").is_some());
-        let linear = templates.by_id("linear").unwrap();
+        let linear = templates.by_id("linear").expect("linear template");
         assert_eq!(linear.manifest.default_mount, "linear-dev");
-        assert_eq!(
-            linear.source,
-            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_linear.wasm"))
-        );
+        assert_eq!(linear.reference.id, id);
+        assert_eq!(linear.reference.meta.name.as_str(), "linear");
     }
 
+    /// An empty store yields no templates: there is no built-in fallback set.
     #[test]
-    fn load_provider_templates_includes_builtins_without_provider_dir() {
+    fn load_provider_templates_empty_without_installed_providers() {
         let dir = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
         let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
-
-        let github = templates.by_id("github").unwrap();
-        let linear = templates.by_id("linear").unwrap();
-        assert_eq!(github.manifest.provider, "omnifs_provider_github.wasm");
-        assert_eq!(linear.manifest.provider, "omnifs_provider_linear.wasm");
-        assert_eq!(github.source, ProviderSource::Builtin);
-    }
-
-    #[test]
-    fn load_provider_templates_prefers_disk_metadata_over_builtin_by_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let mut manifest = provider_manifest();
-        manifest.id = "github".to_string();
-        manifest.display_name = "GitHub dev".to_string();
-        manifest.provider = "omnifs_provider_github.wasm".to_string();
-        manifest.default_mount = "github-dev".to_string();
-        std::fs::write(
-            paths.providers_dir.join("omnifs_provider_github.wasm"),
-            wasm_with_custom_section(
-                omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
-                &serde_json::to_vec(&manifest).unwrap(),
-            ),
-        )
-        .unwrap();
-
-        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
-            .provider_templates()
-            .unwrap();
-
-        let github = templates.by_id("github").unwrap();
-        assert_eq!(github.manifest.default_mount, "github-dev");
-        assert_eq!(
-            github.source,
-            ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_github.wasm"))
-        );
+        assert!(templates.is_empty());
     }
 
     fn provider_manifest() -> ProviderManifest {
@@ -730,14 +767,15 @@ mod tests {
             display_name: "Linear".to_string(),
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
-            contract: None,
+            version: None,
+            build_evidence: None,
             capabilities: vec![
-                omnifs_provider::CapabilityEntry::Domain {
+                omnifs_caps::Need::Domain {
                     value: "api.linear.app".to_string(),
                     why: "api calls".to_string(),
                     dynamic: false,
                 },
-                omnifs_provider::CapabilityEntry::MemoryMb {
+                omnifs_caps::Need::MemoryMb {
                     value: 128,
                     why: "in-memory caching".to_string(),
                     dynamic: false,

@@ -40,6 +40,67 @@ pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_home::WorkspaceLay
     omnifs_home::WorkspaceLayout::under_root(root)
 }
 
+/// A `ProviderRef` JSON value pinned to a placeholder id, for building mount
+/// spec fixtures whose serving path is never resolved.
+#[cfg(test)]
+pub(crate) fn provider_ref_value(name: &str) -> serde_json::Value {
+    use omnifs_core::ProviderId;
+    serde_json::json!({
+        "id": ProviderId::from_wasm_bytes(name.as_bytes()).to_string(),
+        "meta": { "name": name }
+    })
+}
+
+/// Build a mount `Spec` from a JSON `body` (with no `provider` field) plus a
+/// placeholder `ProviderRef` named `name`.
+#[cfg(test)]
+pub(crate) fn spec_with_provider(name: &str, body: &str) -> omnifs_mount::mounts::Spec {
+    let mut value: serde_json::Value = serde_json::from_str(body).expect("parse test spec body");
+    value["provider"] = provider_ref_value(name);
+    serde_json::from_value(value).expect("build test spec")
+}
+
+/// Build a mount `Spec` from a JSON `body` (no `provider` field) plus an
+/// explicit `reference`, for tests that first install a fixture provider.
+#[cfg(test)]
+pub(crate) fn spec_with_reference(
+    reference: &omnifs_core::ProviderRef,
+    body: &str,
+) -> omnifs_mount::mounts::Spec {
+    let mut value: serde_json::Value = serde_json::from_str(body).expect("parse test spec body");
+    value["provider"] = serde_json::to_value(reference).expect("serialize provider ref");
+    serde_json::from_value(value).expect("build test spec")
+}
+
+/// Install a fake provider (built by [`wasm_with_provider_metadata`]) into the
+/// content-addressed store under `providers_dir`, returning its pinned
+/// reference. The catalog resolves the embedded manifest from the by-hash
+/// artifact, so auth/config resolution works exactly as in production.
+#[cfg(test)]
+pub(crate) fn install_fixture_provider(
+    providers_dir: &std::path::Path,
+    name: &str,
+) -> omnifs_core::ProviderRef {
+    use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_mount::mounts::ProviderStore;
+
+    let file = format!("omnifs_provider_{name}.wasm");
+    let bytes = wasm_with_provider_metadata(name, &file);
+    let id = ProviderId::from_wasm_bytes(&bytes);
+    let store = ProviderStore::new(providers_dir);
+    store
+        .put_if_absent(&id, &bytes)
+        .expect("put fixture provider");
+    let meta = ProviderMeta {
+        name: ProviderName::new(name).unwrap(),
+        version: None,
+    };
+    store
+        .install(id, meta.clone(), file)
+        .expect("install fixture provider");
+    ProviderRef { id, meta }
+}
+
 #[cfg(test)]
 pub(crate) fn wasm_with_provider_metadata(id: &str, provider: &str) -> Vec<u8> {
     let metadata = serde_json::json!({

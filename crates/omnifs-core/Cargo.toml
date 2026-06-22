@@ -10,11 +10,14 @@ categories = ["filesystem", "development-tools"]
 keywords = ["omnifs", "filesystem", "protocol"]
 
 [dependencies]
+blake3 = { workspace = true }
+hex = { workspace = true }
 strum = { workspace = true }
 mime = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

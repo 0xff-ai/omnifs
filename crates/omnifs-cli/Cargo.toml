@@ -18,6 +18,7 @@ name = "omnifs_cli"
 path = "src/lib.rs"
 
 [dependencies]
+omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-daemon = { workspace = true }
 omnifs-nfs = { workspace = true }

@@ -154,7 +154,7 @@ impl FromStr for OwnerName {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         // GitHub owners are case-insensitive; normalize once here so
         // /Octocat/.. and /octocat/.. collapse to one LogicalId capture.
-        is_safe_segment(s)
+        is_safe_owner(s)
             .then(|| Self(s.to_ascii_lowercase()))
             .ok_or(())
     }
@@ -197,16 +197,25 @@ pub(crate) struct User {
     pub(crate) login: String,
 }
 
-/// Validates that a path segment is a safe GitHub owner, repo, or
-/// numeric ID. GitHub permits leading dots in repo names (`.github`
-/// is the canonical per-org community-config repo), so we only block
-/// the two path-traversal cases.
+/// Validates that a path segment is a safe GitHub repo or numeric ID.
+/// GitHub permits leading dots in repo names (`.github` is the canonical
+/// per-org community-config repo), so we only block the two path-traversal
+/// cases.
 pub fn is_safe_segment(s: &str) -> bool {
     if s.is_empty() || s == "." || s == ".." {
         return false;
     }
     s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+/// Validates that a path segment is a safe GitHub owner (user or org).
+/// Unlike repos, owners never start with a dot, so rejecting leading-dot
+/// names keeps the `{owner}` capture from binding the host's mount-root
+/// ignore files (`.gitignore`/`.ignore`/`.rgignore`) as phantom owner
+/// directories, which would shadow them and defeat the ignore mechanism.
+pub fn is_safe_owner(s: &str) -> bool {
+    !s.starts_with('.') && is_safe_segment(s)
 }
 
 #[derive(Debug, Deserialize)]

@@ -4,9 +4,10 @@ use super::status::status;
 use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
-use omnifs_core::CredentialId;
+use omnifs_core::{CredentialId, ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_creds::{CredentialStore, MemoryStore};
 use omnifs_home::WorkspaceLayout;
+use omnifs_mount::mounts::ProviderStore;
 use omnifs_provider::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -19,16 +20,16 @@ fn mounts_for(paths: &WorkspaceLayout) -> Vec<MountConfig> {
 fn static_token_import_stores_typed_entry() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
+    let reference = install_provider(&paths, None);
     write_mount(
         &paths,
         "github",
+        &reference,
         r#"{
-                "provider":"github.wasm",
                 "mount":"github",
                 "auth":{"type":"static-token","scheme":"pat"}
             }"#,
     );
-    write_provider(&paths, None);
     let store = MemoryStore::new();
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
@@ -60,12 +61,13 @@ fn static_token_import_stores_typed_entry() {
 fn status_does_not_require_store_listing() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
+    let reference = install_provider(&paths, None);
     write_mount(
         &paths,
         "github",
-        r#"{"provider":"github.wasm","mount":"github","auth":{"type":"static-token","scheme":"pat"}}"#,
+        &reference,
+        r#"{"mount":"github","auth":{"type":"static-token","scheme":"pat"}}"#,
     );
-    write_provider(&paths, None);
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
     status(
@@ -81,11 +83,6 @@ fn status_does_not_require_store_listing() {
 fn schemes_reads_manifest_from_provider() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
-    write_mount(
-        &paths,
-        "github",
-        r#"{"provider":"github.wasm","mount":"github","auth":{"type":"static-token"}}"#,
-    );
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::StaticToken(StaticTokenScheme {
             key: "pat".to_owned(),
@@ -97,7 +94,13 @@ fn schemes_reads_manifest_from_provider() {
             validation: None,
         })],
     };
-    write_provider(&paths, Some(&manifest));
+    let reference = install_provider(&paths, Some(&manifest));
+    write_mount(
+        &paths,
+        "github",
+        &reference,
+        r#"{"mount":"github","auth":{"type":"static-token"}}"#,
+    );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
@@ -111,20 +114,36 @@ fn schemes_reads_manifest_from_provider() {
 }
 
 #[test]
-fn oauth_request_uses_builtin_github_manifest_without_provider_file() {
+fn oauth_request_reads_device_flow_from_installed_provider() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
+    let manifest = AuthManifest {
+        schemes: vec![AuthScheme::Oauth(OauthScheme {
+            key: "device".to_owned(),
+            display_name: "GitHub".to_owned(),
+            authorization_endpoint: "https://github.com/login/device".to_owned(),
+            token_endpoint: "https://github.com/login/oauth/access_token".to_owned(),
+            revocation_endpoint: None,
+            default_client_id: Some("Ov23licogxMDzS47s9sF".to_owned()),
+            default_scopes: vec![],
+            flow: OAuthFlow::DeviceCode(omnifs_provider::DeviceCodeConfig {
+                device_authorization_endpoint: "https://github.com/login/device/code".to_owned(),
+            }),
+            token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
+            refresh_token_rotates: false,
+            extra_authorize_params: vec![],
+            extra_token_params: vec![],
+            inject_domains: vec!["api.github.com".to_owned()],
+            inject_header_name: None,
+            inject_value_prefix: "Bearer ".to_owned(),
+        })],
+    };
+    let reference = install_provider(&paths, Some(&manifest));
     write_mount(
         &paths,
         "github",
-        r#"{
-                "provider":"omnifs_provider_github.wasm",
-                "mount":"github",
-                "auth":{
-                    "type":"oauth",
-                    "scheme":"device"
-                }
-            }"#,
+        &reference,
+        r#"{"mount":"github","auth":{"type":"oauth","scheme":"device"}}"#,
     );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
@@ -132,7 +151,7 @@ fn oauth_request_uses_builtin_github_manifest_without_provider_file() {
     let mount = catalog.load_mount_auth(&mounts, "github").unwrap();
     let (request, target) = mount.oauth_request(None, &[]).unwrap();
 
-    assert_eq!(target.primary_key().unwrap().provider_id(), "github");
+    assert_eq!(target.primary_key().unwrap().provider_name(), "github");
     assert_eq!(request.scheme().key, "device");
     assert_eq!(
         request.scheme().default_client_id.as_deref(),
@@ -146,20 +165,6 @@ fn oauth_request_uses_builtin_github_manifest_without_provider_file() {
 fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
-    write_mount(
-        &paths,
-        "example",
-        r#"{
-                "provider":"github.wasm",
-                "mount":"example",
-                "auth":{
-                    "type":"oauth",
-                    "scheme":"oauth",
-                    "clientId":"byo-client",
-                    "scopes":["read","write"]
-                }
-            }"#,
-    );
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::Oauth(OauthScheme {
             key: "oauth".to_owned(),
@@ -181,7 +186,21 @@ fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
             inject_value_prefix: "Bearer ".to_owned(),
         })],
     };
-    write_provider(&paths, Some(&manifest));
+    let reference = install_provider(&paths, Some(&manifest));
+    write_mount(
+        &paths,
+        "example",
+        &reference,
+        r#"{
+                "mount":"example",
+                "auth":{
+                    "type":"oauth",
+                    "scheme":"oauth",
+                    "clientId":"byo-client",
+                    "scopes":["read","write"]
+                }
+            }"#,
+    );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
@@ -199,18 +218,6 @@ fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
 fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
-    write_mount(
-        &paths,
-        "example",
-        r#"{
-                "provider":"github.wasm",
-                "mount":"example",
-                "auth":{
-                    "type":"oauth",
-                    "scheme":"oauth"
-                }
-            }"#,
-    );
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::Oauth(OauthScheme {
             key: "oauth".to_owned(),
@@ -232,7 +239,19 @@ fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
             inject_value_prefix: "Bearer ".to_owned(),
         })],
     };
-    write_provider(&paths, Some(&manifest));
+    let reference = install_provider(&paths, Some(&manifest));
+    write_mount(
+        &paths,
+        "example",
+        &reference,
+        r#"{
+                "mount":"example",
+                "auth":{
+                    "type":"oauth",
+                    "scheme":"oauth"
+                }
+            }"#,
+    );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
@@ -251,19 +270,6 @@ fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
 fn oauth_request_cli_scopes_override_config_scopes() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
-    write_mount(
-        &paths,
-        "example",
-        r#"{
-                "provider":"github.wasm",
-                "mount":"example",
-                "auth":{
-                    "type":"oauth",
-                    "scheme":"oauth",
-                    "scopes":["read"]
-                }
-            }"#,
-    );
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::Oauth(OauthScheme {
             key: "oauth".to_owned(),
@@ -285,7 +291,20 @@ fn oauth_request_cli_scopes_override_config_scopes() {
             inject_value_prefix: "Bearer ".to_owned(),
         })],
     };
-    write_provider(&paths, Some(&manifest));
+    let reference = install_provider(&paths, Some(&manifest));
+    write_mount(
+        &paths,
+        "example",
+        &reference,
+        r#"{
+                "mount":"example",
+                "auth":{
+                    "type":"oauth",
+                    "scheme":"oauth",
+                    "scopes":["read"]
+                }
+            }"#,
+    );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
@@ -299,18 +318,6 @@ fn oauth_request_cli_scopes_override_config_scopes() {
 fn oauth_request_uses_provider_metadata_id_for_credential_id() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = fixture_paths(tmp.path());
-    write_mount(
-        &paths,
-        "example",
-        r#"{
-                "provider":"github.wasm",
-                "mount":"example",
-                "auth":{
-                    "type":"oauth",
-                    "scheme":"oauth"
-                }
-            }"#,
-    );
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::Oauth(OauthScheme {
             key: "oauth".to_owned(),
@@ -332,14 +339,26 @@ fn oauth_request_uses_provider_metadata_id_for_credential_id() {
             inject_value_prefix: "Bearer ".to_owned(),
         })],
     };
-    write_provider_with_metadata(&paths, Some(&manifest), "github-real");
+    let reference = install_provider_named(&paths, Some(&manifest), "github-real");
+    write_mount(
+        &paths,
+        "example",
+        &reference,
+        r#"{
+                "mount":"example",
+                "auth":{
+                    "type":"oauth",
+                    "scheme":"oauth"
+                }
+            }"#,
+    );
 
     let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
     let mounts = mounts_for(&paths);
     let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
     let (_request, target) = mount.oauth_request(None, &[]).unwrap();
 
-    assert_eq!(target.primary_key().unwrap().provider_id(), "github-real");
+    assert_eq!(target.primary_key().unwrap().provider_name(), "github-real");
 }
 
 #[test]
@@ -356,23 +375,33 @@ fn fixture_paths(root: &Path) -> WorkspaceLayout {
     paths
 }
 
-fn write_mount(paths: &WorkspaceLayout, name: &str, json: &str) {
-    std::fs::write(paths.mounts_dir.join(format!("{name}.json")), json).unwrap();
+/// Write a mount spec pinning `reference`. `json` is the body (its `provider`
+/// field, if any, is overwritten with the pinned reference).
+fn write_mount(paths: &WorkspaceLayout, name: &str, reference: &ProviderRef, json: &str) {
+    let mut value: serde_json::Value = serde_json::from_str(json).expect("parse mount json");
+    value["provider"] = serde_json::to_value(reference).expect("serialize provider ref");
+    std::fs::write(
+        paths.mounts_dir.join(format!("{name}.json")),
+        serde_json::to_string(&value).unwrap(),
+    )
+    .unwrap();
 }
 
-fn write_provider(paths: &WorkspaceLayout, manifest: Option<&AuthManifest>) {
-    write_provider_with_metadata(paths, manifest, "github");
+fn install_provider(paths: &WorkspaceLayout, manifest: Option<&AuthManifest>) -> ProviderRef {
+    install_provider_named(paths, manifest, "github")
 }
 
-fn write_provider_with_metadata(
+/// Install a fixture provider named `id` (with an optional auth manifest) into
+/// the content-addressed store and return its pinned reference.
+fn install_provider_named(
     paths: &WorkspaceLayout,
     manifest: Option<&AuthManifest>,
     id: &str,
-) {
+) -> ProviderRef {
     let mut metadata = serde_json::json!({
         "id": id,
         "displayName": id,
-        "provider": "github.wasm",
+        "provider": format!("omnifs_provider_{id}.wasm"),
         "defaultMount": "github",
         "capabilities": []
     });
@@ -391,7 +420,25 @@ fn write_provider_with_metadata(
     wasm.push(0);
     push_uleb(section.len(), &mut wasm);
     wasm.extend(section);
-    std::fs::write(paths.providers_dir.join("github.wasm"), wasm).unwrap();
+
+    let provider_id = ProviderId::from_wasm_bytes(&wasm);
+    let store = ProviderStore::new(&paths.providers_dir);
+    store.put_if_absent(&provider_id, &wasm).unwrap();
+    let meta = ProviderMeta {
+        name: ProviderName::new(id).unwrap(),
+        version: None,
+    };
+    store
+        .install(
+            provider_id,
+            meta.clone(),
+            format!("omnifs_provider_{id}.wasm"),
+        )
+        .unwrap();
+    ProviderRef {
+        id: provider_id,
+        meta,
+    }
 }
 
 fn auth_block_json(manifest: &AuthManifest) -> serde_json::Value {

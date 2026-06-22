@@ -8,14 +8,14 @@
 use crate::browse::{Entry as BrowseEntry, List, Listing, Lookup};
 use crate::captures::Captures;
 use crate::error::Result;
-use crate::file_attrs::FileProj;
+use crate::file_attrs::{FileProj, ReadMode, Size};
 use crate::object::ObjectShape;
 use crate::projection::{DirOutcome, DirProjection};
 use omnifs_core::ContentType;
 use omnifs_core::path::Path;
 
 use super::super::handlers::{DirEntry, FileEntry, TreeRefEntry};
-use super::super::object::{ObjectEntry, ObjectReadTarget};
+use super::super::object::{ObjectEntry, ObjectReadTarget, SourceLeafAttrs};
 use super::super::pattern::best_match;
 use super::super::projection::merge_entries;
 use super::super::register::Router;
@@ -276,11 +276,26 @@ impl<S> Shape<'_, S> {
     /// An object anchor's listing: the precomputed leaf names merged over
     /// the static entries (leaves win collisions), always complete because
     /// an anchor's children are statically declared.
-    pub(super) fn object_dir_listing(&self, entry: &ObjectEntry<S>, anchor_abs: &Path) -> Listing {
+    ///
+    /// `source` carries the loaded canonical's exact attrs; the verbatim source
+    /// representation leaf is stamped with them so a cold `ls -l` reports its
+    /// real size. Rendered leaves stay size-unknown (their length needs a
+    /// render) and lookups remain placeholder until a listing or read fills in.
+    pub(super) fn object_dir_listing(
+        &self,
+        entry: &ObjectEntry<S>,
+        anchor_abs: &Path,
+        source: Option<&SourceLeafAttrs>,
+    ) -> Listing {
         let static_entries = self.static_entries_for_parent(anchor_abs);
+        let source_leaf_name = format!("{}.{}", entry.source_stem, entry.source_ext);
         let object_entries = entry.leaves.iter().map(|leaf| {
             if leaf.is_dir {
                 BrowseEntry::dir(&leaf.name)
+            } else if leaf.name == source_leaf_name
+                && let Some(source) = source
+            {
+                BrowseEntry::file(&leaf.name, source_leaf_shape(source))
             } else {
                 BrowseEntry::file(&leaf.name, FileProj::listing_shape())
             }
@@ -339,6 +354,17 @@ impl<S> ObjectEntry<S> {
             }
         }
         None
+    }
+}
+
+/// Listing shape for the verbatim source representation leaf: a full-deferred
+/// entry whose exact size and version are already known from the loaded
+/// canonical bytes, so a cold `ls -l` reports the real size.
+fn source_leaf_shape(source: &SourceLeafAttrs) -> FileProj {
+    let shape = FileProj::deferred(Size::Exact(source.len), ReadMode::Full, source.stability);
+    match &source.validator {
+        Some(validator) => shape.with_version(validator.clone()),
+        None => shape,
     }
 }
 

@@ -192,6 +192,7 @@ pub struct FrontendInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MountInfo {
     pub mount: String,
+    /// Provider NAME slug. Field name kept as `provider_id` for wire stability; rename deferred to an `API_MAJOR` bump.
     pub provider_id: String,
     pub root_mount: bool,
 }

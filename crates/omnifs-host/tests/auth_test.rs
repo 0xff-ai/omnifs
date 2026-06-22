@@ -1,10 +1,11 @@
 #![allow(unsafe_code)]
 
+use omnifs_caps::Allowlist;
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
 use omnifs_host::auth::{AuthManager, RefreshOutcome};
 use omnifs_host::blob::{BlobCache, BlobExecutor, BlobLimits};
-use omnifs_host::capability::{CapabilityChecker, CapabilityGrants};
+use omnifs_host::capability::CapabilityChecker;
 use omnifs_host::http::HttpStack;
 use omnifs_mount::{
     Auth as AuthConfig, OAuth as OAuthMountConfig, StaticToken as StaticTokenConfig,
@@ -306,7 +307,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
             .is_empty()
     );
 
-    let capability = Arc::new(CapabilityChecker::new(CapabilityGrants {
+    let capability = Arc::new(CapabilityChecker::new(Allowlist {
         domains: vec!["api.github.com".to_string()],
         git_repos: Vec::new(),
         max_memory_mb: 64,
@@ -341,7 +342,7 @@ async fn oauth_401_refreshes_and_retries_once() {
 
     let stack = HttpStack::with_https_client(
         auth,
-        Arc::new(CapabilityChecker::new(CapabilityGrants {
+        Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
             max_memory_mb: 64,
@@ -412,7 +413,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
 
     let stack = Arc::new(HttpStack::with_https_client(
         auth,
-        Arc::new(CapabilityChecker::new(CapabilityGrants {
+        Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
             max_memory_mb: 64,
@@ -459,7 +460,7 @@ async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
 
     let stack = HttpStack::with_https_client(
         auth,
-        Arc::new(CapabilityChecker::new(CapabilityGrants {
+        Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
             max_memory_mb: 64,

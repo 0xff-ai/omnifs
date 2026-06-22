@@ -11,7 +11,6 @@ mod cli;
 mod client;
 mod commands;
 pub mod config;
-mod contract_preflight;
 mod credential_target;
 mod daemon_teardown;
 mod dev_mounts;
@@ -33,6 +32,7 @@ mod status;
 mod style;
 mod test_support;
 mod token_source;
+mod upgrade;
 mod workspace;
 
 use clap::Parser;

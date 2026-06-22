@@ -10,16 +10,16 @@ omnifs projects external services (GitHub, DNS, arXiv, Docker, Linear, a SQL dat
 
 The load-bearing decision is where object reasoning lives.
 
-- The **host** knows only paths, bytes, content types, and file attributes, plus opaque caching and the FUSE frontend. It reads a path and gets bytes. It never requests an Object, never parses one, never renders one, and never derives a path-to-object mapping.
-- The **provider SDK** (guest side) owns all object reasoning: identity, canonical assembly, rendering into representations, versioning, preload, and revalidation. It hands the host bytes.
+- The **host** knows only paths, bytes, tree structure, content types, and file attributes, plus opaque caching and the FUSE frontend. It reads a path and gets bytes. It never requests an Object, never parses one, never renders one, and never derives a path-to-object mapping.
+- The **provider SDK** (guest side) owns all upstream specific reasoning, whether object-shaped or path-shaped: identity, canonical assembly, rendering into representations, versioning, preload, and revalidation. It hands the host bytes, attributes, and policies.
 
 Everything else follows from this. The WIT read interface is byte-level; the host caches are opaque byte stores; the host learns the path-to-id relationship only from provider-emitted effects, never by inspecting a path or a payload. Where the SDK needs the host to do something object-adjacent (store a canonical, echo a content type), it emits an effect the host stores and replays byte-for-byte without interpreting it.
 
-## 2. The object model
+## 2. Provider SDK: porcelain and plumbing
 
-Two path kinds exist, and the host cannot tell them apart (it sees only file attributes and which byte op it invokes):
+Two main flavors exist, and they can coexist in the code for a single provider. The host is agnostic, they are purely SDK concepts. The Object flavour is sugar on top of the 
 
-- **Object** (a promotion). Content with a single canonical model rendered into one or more content-typed Representations. Reach for it when content renders to multiple representations, the same entity is reachable at multiple paths, or you want object-level revalidation. Object is not the default; it is earned.
+- **Object flavour**. Provider binds entities (objects) to paths. Content with a single canonical model rendered into one or more content-typed Representations. Reach for it when content renders to multiple representations, the same entity is reachable at multiple paths, or you want object-level revalidation. Object is not the default; it is earned.
 - **Structural file** (the default). A single-format file served as direct bytes under the file-attributes contract, with no canonical model behind it. `Stability::Live` content (live logs, `tail -f`, direct IO) can never be an Object: a canonical model is a finite snapshot and a Version cannot be honest for a moving target.
 
 Identity is two-layer, and the layering is the security boundary: `LogicalId = (Object::kind(), normalized non-Facet captures)` is computed in the provider; `ObjectId = (mount, LogicalId)` is formed by the host. Mount-prefixing every object/view/reverse/negative/tombstone key is what stops two GitHub mounts with different credentials from sharing private canonical bytes for the same `owner/repo/number`. The WIT carries `logical-id { kind, captures }`; the host resolves a path to an id by exact map lookup, never a prefix probe (`crates/omnifs-cache/src/object.rs`).
@@ -30,7 +30,7 @@ A route Facet (`Facet<T>`) is route context excluded from identity, so several p
 
 The host owns storage as plain bytes. It owns no semantics. There are exactly three caches, named by role (full design: `object-cache-primary.md`).
 
-- **Object cache** (durable fjall database): the durable primary. Canonical upstream bytes keyed by logical id, in a per-mount keyspace so the key carries no mount prefix. This inverts the prior model where a durable browse/view tier was primary and the canonical store was in-memory (`crates/omnifs-cache/src/object.rs`).
+- **Object cache** (durable fjall database): the durable primary. Canonical upstream bytes keyed by logical id, in a per-mount keyspace so the key carries no mount prefix.
 - **View cache** (disposable fjall database): derived and disposable. It is deleted and recreated unconditionally on every startup, so stale rendered bytes can never survive a restart to disagree with the durable object cache (`crates/omnifs-cache/src/view.rs`; opened in `lib.rs`). It holds the rendered representations and dirents shell tools read, recomputed from the object cache with no upstream refetch.
 - **Blob cache**: large binary served by handle; its bytes never cross to the provider (section 7).
 
@@ -95,7 +95,7 @@ Explicit non-goal: do not migrate to `tracing::instrument` / `tracing-subscriber
 
 ## 10. Credentials and auth
 
-Providers are untrusted WASM and never hold tokens. The host attaches credentials after the callout crosses the WASM boundary, and owns auth, caching, and rate limits; provider capabilities are declared in `omnifs.provider.json` (embedded as `omnifs.provider-metadata.v1`). Capabilities come from the manifest, not from runtime `RequestedCapabilities`: the host reads `domains` / `max_memory_mb` from the manifest; only `needs_git`, additive `unix_sockets`, and `refresh_interval_secs` come from runtime caps.
+Providers are untrusted WASM and never hold tokens. The host attaches credentials after the callout crosses the WASM boundary, and owns auth, caching, and rate limits. A provider manifest (`omnifs.provider.json`, embedded as `omnifs.provider-metadata.v1`) declares only what the provider *needs* (`caps::Need`); the manifest is never a runtime grant source. `omnifs init` seeds the mount spec's `capabilities` block of explicit *grants* (`caps::Grants`) from those needs (`Grants::from_needs`), and the spec then owns them. The runtime grant authority is the resolved spec: the host turns its grants into the enforcement allowlist (`CapabilityChecker::from_config`, resolving dynamic markers like a unix socket from the mount endpoint). At provider start the daemon enforces the **required-capabilities** invariant: the spec's grants must satisfy every capability the manifest declares the provider needs. `materialize` rejects an under-granting spec via `Grants::satisfies` (`MaterializeError::MissingCapabilities`), so a provider is never silently denied a callout it declared, the mount fails fast instead. **Over-granting** is the open direction: nothing enforces `spec grants ⊆ manifest needs`, so a hand-authored or hand-edited spec may grant a provider more reach (extra domains, git repos, unix sockets, filesystem preopens, or auth schemes) than its pinned manifest declares; the over-grant check is deliberately deferred to a later slice (`docs/future/provider-contract-versioning.md`). The byte boundary still holds (a provider cannot exceed what the spec grants), but the spec, not the provider's own declaration, is what bounds it.
 
 The production credential backend is the file store at `~/.omnifs/credentials.json`; the daemon reads and writes the same file through the writable `OMNIFS_HOME` bind. The only public wire form is `CredentialId::storage_key()` = `provider:scheme:account` (`crates/omnifs-core/src/auth.rs`); `CredentialEntry`'s secret is private, read via `access_token()`. Refresh coalescing is in-process (an `async_singleflight::Group` keyed by the storage key); `FileStore` uses a sidecar `.lock` (`fs2` flock) for the read-modify-write of `credentials.json`. There is no cross-process refresh protocol. Full design: `host-auth.md`.
 
@@ -128,4 +128,4 @@ The past decisions that still govern the system today, condensed (each lives in 
 - The fence is runtime-only and resets on restart (section 3).
 - Listing honesty: exhaustive only when enumerated, cap becomes open, never a fake cursor (section 6).
 - Object is an optional promotion; structural files are first-class and the default; Live is always structural and ranged (sections 2, 8).
-- Capabilities come from the provider manifest, not runtime caps (section 10); providers never hold tokens (section 10).
+- The manifest declares only what a provider needs; `omnifs init` seeds the spec's grants from those needs, and the resolved spec, not the manifest, is the runtime grant authority. The daemon enforces a required-capabilities invariant at provider start (the spec's grants must satisfy the manifest's declared needs); the over-grant check is deliberately deferred (section 10). Providers never hold tokens (section 10).

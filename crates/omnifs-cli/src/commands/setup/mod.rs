@@ -230,8 +230,8 @@ fn resolve_selection(
 /// fixture file). Listed at the bottom of the setup picker and unchecked by
 /// default so a fresh `omnifs setup` keeps moving without hitting prompts the
 /// user can't satisfy from ambient context.
-fn default_off(provider_id: &str) -> bool {
-    matches!(provider_id, "db" | "linear")
+fn default_off(provider_name: &str) -> bool {
+    matches!(provider_name, "db" | "linear")
 }
 
 /// One-row summary shown inside the multi-select.
@@ -308,31 +308,31 @@ async fn run_init_loop(
     templates: &ProviderTemplates,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
-    for provider_id in selected {
-        let Some(template) = templates.by_id(provider_id) else {
+    for provider_name in selected {
+        let Some(template) = templates.by_id(provider_name) else {
             out.push(InitResult {
-                provider_id: provider_id.clone(),
-                mount_name: provider_id.clone(),
-                outcome: Err(format!("provider `{provider_id}` not found")),
+                provider_name: provider_name.clone(),
+                mount_name: provider_name.clone(),
+                outcome: Err(format!("provider `{provider_name}` not found")),
             });
             continue;
         };
         let mount_name = template.manifest.default_mount.clone();
 
         anstream::println!();
-        anstream::println!("{}", crate::style::bold(format!("--- {provider_id} ---")));
+        anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
         init::print_capability_justifications(&template.manifest);
         anstream::println!();
 
         if !args.yes {
-            let proceed = inquire::Confirm::new(&format!("Configure `{provider_id}`?"))
+            let proceed = inquire::Confirm::new(&format!("Configure `{provider_name}`?"))
                 .with_default(true)
                 .prompt();
             match proceed {
                 Ok(true) => {},
                 Ok(false) => {
                     out.push(InitResult {
-                        provider_id: provider_id.clone(),
+                        provider_name: provider_name.clone(),
                         mount_name,
                         outcome: Err("skipped by user".into()),
                     });
@@ -340,7 +340,7 @@ async fn run_init_loop(
                 },
                 Err(error) => {
                     out.push(InitResult {
-                        provider_id: provider_id.clone(),
+                        provider_name: provider_name.clone(),
                         mount_name,
                         outcome: Err(format!("confirm prompt: {error}")),
                     });
@@ -350,7 +350,7 @@ async fn run_init_loop(
         }
 
         let init_args = init::InitArgs {
-            provider: Some(provider_id.clone()),
+            provider: Some(provider_name.clone()),
             as_name: None,
             no_input: false,
             yes: args.yes,
@@ -362,7 +362,7 @@ async fn run_init_loop(
         };
         let outcome = init_args.run().await.map_err(|e| e.to_string());
         out.push(InitResult {
-            provider_id: provider_id.clone(),
+            provider_name: provider_name.clone(),
             mount_name,
             outcome,
         });

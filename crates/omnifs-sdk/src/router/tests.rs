@@ -358,11 +358,11 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
     let mut list = (mounted.entry.list)(&cx, caps, "/items/42".to_string());
     let waker = Waker::noop();
     let mut ctx = Context::from_waker(waker);
-    let effects = match list.as_mut().poll(&mut ctx) {
+    let listing = match list.as_mut().poll(&mut ctx) {
         Poll::Ready(result) => result.unwrap(),
         Poll::Pending => panic!("object listing should complete without callouts"),
     };
-    let mut fs: Vec<_> = effects.into_wit().fs;
+    let mut fs: Vec<_> = listing.effects.into_wit().fs;
     fs.sort_by(|a, b| a.path.cmp(&b.path));
 
     let projected: Vec<_> = fs

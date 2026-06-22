@@ -72,7 +72,7 @@ impl ProviderCatalog {
                     providers.push(ProviderConfigStatus::Ready(ProviderReadyStatus {
                         config_path,
                         mount: config.spec.mount,
-                        provider: config.spec.provider,
+                        provider: config.provider_name.clone(),
                         provider_present,
                         metadata_available,
                         root_mount: config.spec.root_mount,
@@ -82,13 +82,13 @@ impl ProviderCatalog {
                             .capabilities
                             .as_ref()
                             .and_then(|caps| caps.domains.as_ref())
-                            .map_or(0, Vec::len),
+                            .map_or(0, |grant| grant.literal().len()),
                         git_repo_count: config
                             .spec
                             .capabilities
                             .as_ref()
                             .and_then(|caps| caps.git_repos.as_ref())
-                            .map_or(0, Vec::len),
+                            .map_or(0, |grant| grant.literal().len()),
                         max_memory_mb: config.spec.capabilities.and_then(|caps| caps.max_memory_mb),
                     }));
                 },
@@ -134,7 +134,7 @@ impl ProviderCatalog {
         Ok(UserMountReadyStatus {
             config_path: config_path.clone(),
             mount: config.spec.mount,
-            provider: config.spec.provider,
+            provider: config.provider_name.clone(),
             provider_present,
             metadata_available,
             auth,

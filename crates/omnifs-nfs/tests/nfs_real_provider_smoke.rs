@@ -1,4 +1,6 @@
+use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_host::registry::ProviderRegistry;
+use omnifs_mount::mounts::ProviderStore;
 use omnifs_nfs::{Export, ReadOnlyExport};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -303,8 +305,39 @@ fn read_path(export: &Export, path: &[&str]) -> Vec<u8> {
 }
 
 fn copy_provider(providers_dir: &Path, wasm: &str) {
-    std::fs::copy(provider_wasm_path(wasm), providers_dir.join(wasm))
-        .unwrap_or_else(|error| panic!("copy provider {wasm}: {error}"));
+    // The archive tool stays flat; providers go into the by-hash store.
+    if wasm == "omnifs_tool_archive.wasm" {
+        std::fs::copy(provider_wasm_path(wasm), providers_dir.join(wasm))
+            .unwrap_or_else(|error| panic!("copy archive tool {wasm}: {error}"));
+        return;
+    }
+    let bytes = std::fs::read(provider_wasm_path(wasm))
+        .unwrap_or_else(|error| panic!("read provider {wasm}: {error}"));
+    let reference = provider_reference(wasm);
+    let store = ProviderStore::new(providers_dir);
+    store
+        .put_if_absent(&reference.id, &bytes)
+        .unwrap_or_else(|error| panic!("store provider {wasm}: {error}"));
+    store
+        .install(reference.id, reference.meta, wasm.to_string())
+        .unwrap_or_else(|error| panic!("index provider {wasm}: {error}"));
+}
+
+/// The pinned reference for a built provider wasm, named from its file stem.
+fn provider_reference(wasm: &str) -> ProviderRef {
+    let bytes = std::fs::read(provider_wasm_path(wasm))
+        .unwrap_or_else(|error| panic!("read provider {wasm}: {error}"));
+    let name = wasm
+        .strip_prefix("omnifs_provider_")
+        .and_then(|stem| stem.strip_suffix(".wasm"))
+        .unwrap_or(wasm);
+    ProviderRef {
+        id: ProviderId::from_wasm_bytes(&bytes),
+        meta: ProviderMeta {
+            name: ProviderName::new(name).unwrap(),
+            version: None,
+        },
+    }
 }
 
 fn provider_wasm_path(plugin_name: &str) -> PathBuf {
@@ -327,8 +360,21 @@ fn provider_wasm_path(plugin_name: &str) -> PathBuf {
 }
 
 fn write_mount(mounts_dir: &Path, name: &str, json: &str) {
-    std::fs::write(mounts_dir.join(format!("{name}.json")), json)
-        .unwrap_or_else(|error| panic!("write mount {name}: {error}"));
+    // Rewrite the `provider` filename in the spec body to the pinned reference
+    // for the installed artifact.
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).unwrap_or_else(|error| panic!("parse mount {name}: {error}"));
+    let wasm = value["provider"]
+        .as_str()
+        .unwrap_or_else(|| panic!("mount {name} has no provider filename"))
+        .to_string();
+    value["provider"] = serde_json::to_value(provider_reference(&wasm))
+        .unwrap_or_else(|error| panic!("serialize provider ref for {name}: {error}"));
+    std::fs::write(
+        mounts_dir.join(format!("{name}.json")),
+        serde_json::to_string(&value).unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("write mount {name}: {error}"));
 }
 
 fn gh_token() -> String {

@@ -13,4 +13,6 @@ pub use auth::{
 pub use content_type::ContentType;
 pub use mount::{Name as MountName, NameError as MountNameError};
 pub use path::{ParseError, Path, Segment};
-pub use provider::Id as ProviderId;
+pub use provider::{
+    ProviderId, ProviderIdHexError, ProviderMeta, ProviderName, ProviderRef, ProviderVersion,
+};

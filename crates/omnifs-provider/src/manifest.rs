@@ -6,8 +6,8 @@ use crate::auth_wire::{
     TokenEndpointAuthMethod, TokenValidation,
 };
 use crate::config::ConfigSchema;
-use crate::runtime_grants::{PreopenedPath, ProviderCapabilities};
 use crate::sections::{ProviderMetadataError, is_hostname_only, validate_provider_manifest};
+use omnifs_caps::{Grants, Need};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -23,28 +23,32 @@ pub struct ProviderManifest {
     /// Filename of the provider WASM component.
     pub provider: String,
     pub default_mount: String,
+    /// Provider crate version (`CARGO_PKG_VERSION`), stamped by the `#[provider]`
+    /// macro. Informational catalog/UI context, never identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contract: Option<ContractEvidence>,
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_evidence: Option<BuildEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<CapabilityEntry>,
+    pub capabilities: Vec<Need>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<schemars::Schema>,
 }
 
-/// The contract a built provider component was compiled against: the
-/// `omnifs:provider` WIT package version and the SDK version. The `#[provider]`
-/// macro stamps this into the embedded manifest so the host can later detect a
-/// provider built against an incompatible contract.
+/// Build provenance for a compiled provider component: the `omnifs:provider`
+/// WIT package version and the SDK version it was built against. The
+/// `#[provider]` macro stamps this into the embedded manifest so the host can
+/// later detect a provider built against an incompatible contract.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ContractEvidence {
+pub struct BuildEvidence {
     pub wit: String,
     pub sdk: String,
 }
 
-impl ContractEvidence {
+impl BuildEvidence {
     #[must_use]
     pub fn current(sdk_version: impl Into<String>) -> Self {
         Self {
@@ -54,84 +58,9 @@ impl ContractEvidence {
     }
 
     fn validate(&self) -> Result<(), ProviderMetadataError> {
-        validate_non_empty("contract.wit", &self.wit)?;
-        validate_non_empty("contract.sdk", &self.sdk)?;
+        validate_non_empty("buildEvidence.wit", &self.wit)?;
+        validate_non_empty("buildEvidence.sdk", &self.sdk)?;
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum CapabilityEntry {
-    Domain {
-        value: String,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    GitRepo {
-        value: String,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    UnixSocket {
-        value: String,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    PreopenedPath {
-        value: PreopenedPath,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    MemoryMb {
-        value: u32,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    FetchBlobBytes {
-        value: u64,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    ReadBlobBytes {
-        value: u64,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-}
-
-impl CapabilityEntry {
-    #[must_use]
-    pub fn why(&self) -> &str {
-        match self {
-            Self::Domain { why, .. }
-            | Self::GitRepo { why, .. }
-            | Self::UnixSocket { why, .. }
-            | Self::PreopenedPath { why, .. }
-            | Self::MemoryMb { why, .. }
-            | Self::FetchBlobBytes { why, .. }
-            | Self::ReadBlobBytes { why, .. } => why,
-        }
-    }
-
-    #[must_use]
-    pub fn is_dynamic(&self) -> bool {
-        match self {
-            Self::Domain { dynamic, .. }
-            | Self::GitRepo { dynamic, .. }
-            | Self::UnixSocket { dynamic, .. }
-            | Self::PreopenedPath { dynamic, .. }
-            | Self::MemoryMb { dynamic, .. }
-            | Self::FetchBlobBytes { dynamic, .. }
-            | Self::ReadBlobBytes { dynamic, .. } => *dynamic,
-        }
     }
 }
 
@@ -552,15 +481,29 @@ impl ProviderManifest {
     }
 
     fn validate(&self) -> Result<(), ProviderMetadataError> {
-        validate_non_empty("id", &self.id)?;
+        // `id` is the provider name slug; reject anything the name newtype would
+        // reject so `ProviderMeta` conversion never fails past this parse boundary.
+        omnifs_core::provider::ProviderName::new(self.id.as_str())
+            .map_err(|error| ProviderMetadataError::Validation(error.to_string()))?;
         validate_non_empty("displayName", &self.display_name)?;
         validate_non_empty("provider", &self.provider)?;
         validate_non_empty("defaultMount", &self.default_mount)?;
-        if let Some(contract) = &self.contract {
-            contract.validate()?;
+        if let Some(build_evidence) = &self.build_evidence {
+            build_evidence.validate()?;
         }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
+            // Only unix sockets resolve a dynamic value (from the mount
+            // endpoint) at runtime; a dynamic grant of any other kind would pass
+            // the start-time check yet resolve to an empty allowlist, denying the
+            // provider at its first callout. Reject it at the manifest boundary.
+            if entry.is_dynamic() && !matches!(entry, Need::UnixSocket { .. }) {
+                return Err(ProviderMetadataError::Validation(
+                    "only unixSocket capabilities may declare `dynamic: true`; \
+                     a non-socket dynamic capability cannot be resolved at runtime"
+                        .to_string(),
+                ));
+            }
         }
         if let Some(auth) = &self.auth {
             auth.validate()?;
@@ -574,37 +517,12 @@ impl ProviderManifest {
         Ok(())
     }
 
+    /// The capabilities this provider declares it needs, lowered into a grant
+    /// set. Used by `omnifs init` to seed a mount's explicit grants; never used
+    /// to grant at runtime (the spec is the grant authority).
     #[must_use]
-    pub fn provider_capabilities(&self) -> ProviderCapabilities {
-        let mut caps = ProviderCapabilities::default();
-        for entry in &self.capabilities {
-            match entry {
-                CapabilityEntry::Domain { value, .. } => caps
-                    .domains
-                    .get_or_insert_with(Vec::new)
-                    .push(value.clone()),
-                CapabilityEntry::GitRepo { value, .. } => caps
-                    .git_repos
-                    .get_or_insert_with(Vec::new)
-                    .push(value.clone()),
-                CapabilityEntry::UnixSocket { value, .. } => caps
-                    .unix_sockets
-                    .get_or_insert_with(Vec::new)
-                    .push(value.clone()),
-                CapabilityEntry::PreopenedPath { value, .. } => caps
-                    .preopened_paths
-                    .get_or_insert_with(Vec::new)
-                    .push(value.clone()),
-                CapabilityEntry::MemoryMb { value, .. } => caps.max_memory_mb = Some(*value),
-                CapabilityEntry::FetchBlobBytes { value, .. } => {
-                    caps.max_fetch_blob_bytes = Some(*value);
-                },
-                CapabilityEntry::ReadBlobBytes { value, .. } => {
-                    caps.max_read_blob_bytes = Some(*value);
-                },
-            }
-        }
-        caps
+    pub fn provider_capabilities(&self) -> Grants {
+        Grants::from_needs(&self.capabilities)
     }
 }
 
@@ -761,23 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_entry_dynamic_round_trips() {
-        let omitted: CapabilityEntry = serde_json::from_str(
-            r#"{"kind":"domain","value":"api.example.com","why":"fetch data"}"#,
-        )
-        .unwrap();
-        assert!(!omitted.is_dynamic());
-
-        let explicit: CapabilityEntry = serde_json::from_str(
-            r#"{"kind":"unixSocket","value":"configured socket","dynamic":true,"why":"connect"}"#,
-        )
-        .unwrap();
-        assert!(explicit.is_dynamic());
-        let encoded = serde_json::to_value(&explicit).unwrap();
-        assert_eq!(encoded["dynamic"], true);
-    }
-
-    #[test]
     fn checked_in_provider_manifest_matches_generated() {
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("schema/omnifs.provider.schema.json");
@@ -823,14 +724,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_manifest_contract_evidence_round_trips() {
+    fn provider_manifest_build_evidence_round_trips() {
         let manifest = ProviderManifest::from_bytes(
             br#"{
                 "id": "demo",
                 "displayName": "Demo",
                 "provider": "demo.wasm",
                 "defaultMount": "demo",
-                "contract": {
+                "buildEvidence": {
                     "wit": "omnifs:provider@0.4.0",
                     "sdk": "0.2.1"
                 }
@@ -839,11 +740,61 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            manifest.contract,
-            Some(ContractEvidence {
+            manifest.build_evidence,
+            Some(BuildEvidence {
                 wit: "omnifs:provider@0.4.0".to_string(),
                 sdk: "0.2.1".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn provider_manifest_version_round_trips_and_is_optional() {
+        // Version-less JSON parses under deny_unknown_fields (serde default).
+        let bare = ProviderManifest::from_bytes(
+            br#"{
+                "id": "demo",
+                "displayName": "Demo",
+                "provider": "demo.wasm",
+                "defaultMount": "demo"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(bare.version, None);
+        // A `version` omitted from the struct is omitted from the wire.
+        let reencoded = serde_json::to_value(&bare).unwrap();
+        assert!(reencoded.get("version").is_none());
+
+        // A stamped version round-trips through the wire field `version`.
+        let stamped = ProviderManifest::from_bytes(
+            br#"{
+                "id": "demo",
+                "displayName": "Demo",
+                "provider": "demo.wasm",
+                "defaultMount": "demo",
+                "version": "0.3.1"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(stamped.version.as_deref(), Some("0.3.1"));
+        let reencoded = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(reencoded["version"], "0.3.1");
+    }
+
+    #[test]
+    fn provider_manifest_rejects_non_slug_id() {
+        let error = ProviderManifest::from_bytes(
+            br#"{
+                "id": "bad id!",
+                "displayName": "Bad",
+                "provider": "bad.wasm",
+                "defaultMount": "bad"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ProviderMetadataError::Validation(message) if message.contains("bad id!")),
+            "unexpected error: {error}"
         );
     }
 

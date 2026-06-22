@@ -153,6 +153,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,6 +335,20 @@ name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+
+[[package]]
+name = "blake3"
+version = "1.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
+]
 
 [[package]]
 name = "block-buffer"
@@ -729,6 +755,12 @@ dependencies = [
  "unicode-width 0.2.0",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "core-foundation"
@@ -3726,6 +3758,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-caps"
+version = "0.2.1"
+dependencies = [
+ "hex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "utoipa",
+]
+
+[[package]]
 name = "omnifs-cli"
 version = "0.2.1"
 dependencies = [
@@ -3742,6 +3787,7 @@ dependencies = [
  "inquire",
  "omnifs-api",
  "omnifs-auth",
+ "omnifs-caps",
  "omnifs-core",
  "omnifs-creds",
  "omnifs-daemon",
@@ -3774,12 +3820,15 @@ dependencies = [
 name = "omnifs-core"
 version = "0.2.1"
 dependencies = [
+ "blake3",
+ "hex",
  "mime",
  "postcard",
  "serde",
  "serde_json",
  "strum 0.27.2",
  "thiserror 2.0.18",
+ "utoipa",
 ]
 
 [[package]]
@@ -3872,6 +3921,7 @@ dependencies = [
  "moka",
  "omnifs-auth",
  "omnifs-cache",
+ "omnifs-caps",
  "omnifs-core",
  "omnifs-creds",
  "omnifs-home",
@@ -3929,6 +3979,7 @@ dependencies = [
  "omnifs-home",
  "omnifs-host",
  "omnifs-mount",
+ "omnifs-provider",
  "omnifs-tree",
  "omnifs-wit",
  "rusqlite",
@@ -3944,12 +3995,12 @@ name = "omnifs-mount"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "hex",
+ "fs2",
+ "omnifs-caps",
  "omnifs-core",
  "omnifs-provider",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "utoipa",
@@ -3983,6 +4034,7 @@ dependencies = [
  "hex",
  "indexmap",
  "jsonschema",
+ "omnifs-caps",
  "omnifs-core",
  "schemars",
  "serde",

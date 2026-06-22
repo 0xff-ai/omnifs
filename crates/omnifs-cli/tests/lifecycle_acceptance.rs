@@ -49,14 +49,44 @@ fn nfs_serial_lock() -> TcpListener {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// No-auth mount spec for the test provider. Serves `test/hello/message`.
-const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
-
-/// A broken spec: references a provider file that does not exist.
-const BROKEN_MOUNT_SPEC: &str =
-    r#"{"provider":"does_not_exist.wasm","mount":"broken","capabilities":{"domains":[]}}"#;
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// No-auth mount spec for the test provider, pinning `id`. Serves
+/// `test/hello/message`.
+fn test_mount_spec(id: &omnifs_core::ProviderId) -> String {
+    format!(
+        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
+    )
+}
+
+/// A broken spec: pins a content id with no installed by-hash artifact.
+fn broken_mount_spec() -> String {
+    let bogus = "0".repeat(64);
+    format!(
+        r#"{{"provider":{{"id":"{bogus}","meta":{{"name":"broken"}}}},"mount":"broken","capabilities":{{"domains":[]}}}}"#
+    )
+}
+
+/// Install the test provider into the by-hash store under `providers_dir` and
+/// return its content id.
+fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
+    let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
+        .expect("read test provider wasm");
+    let id = omnifs_core::ProviderId::from_wasm_bytes(&bytes);
+    let store = omnifs_mount::mounts::ProviderStore::new(providers_dir);
+    store.put_if_absent(&id, &bytes).expect("put test provider");
+    store
+        .install(
+            id,
+            omnifs_core::ProviderMeta {
+                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+                version: None,
+            },
+            "test_provider.wasm".into(),
+        )
+        .expect("install test provider");
+    id
+}
 
 /// `target/wasm32-wasip2/release`, where provider wasm lives.
 fn release_wasm_dir() -> PathBuf {
@@ -114,6 +144,8 @@ struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
     daemon_addr: String,
+    /// Content id of the test provider installed into the by-hash store.
+    test_provider_id: omnifs_core::ProviderId,
     /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
     /// than the daemon subcommand directly.
     daemon_pid: Option<u32>,
@@ -139,6 +171,9 @@ impl Fixture {
                     .expect("copy wasm");
             }
         }
+        // The daemon serves by content id, so the test provider must be in the
+        // by-hash store (the flat copy above only satisfies the archive tool).
+        let test_provider_id = install_test_provider(&providers_dir);
 
         let mounts_dir = home.path().join("mounts");
         std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
@@ -153,6 +188,7 @@ impl Fixture {
             home,
             mount_point,
             daemon_addr,
+            test_provider_id,
             daemon_pid: None,
         }
     }
@@ -171,13 +207,16 @@ impl Fixture {
 
     /// Write the test mount spec (`test.json`) into `<home>/mounts/`.
     fn write_test_spec(&self) {
-        std::fs::write(self.mounts_dir().join("test.json"), TEST_MOUNT_SPEC)
-            .expect("write test mount spec");
+        std::fs::write(
+            self.mounts_dir().join("test.json"),
+            test_mount_spec(&self.test_provider_id),
+        )
+        .expect("write test mount spec");
     }
 
     /// Write a broken mount spec (`broken.json`) into `<home>/mounts/`.
     fn write_broken_spec(&self) {
-        std::fs::write(self.mounts_dir().join("broken.json"), BROKEN_MOUNT_SPEC)
+        std::fs::write(self.mounts_dir().join("broken.json"), broken_mount_spec())
             .expect("write broken mount spec");
     }
 

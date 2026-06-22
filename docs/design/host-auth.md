@@ -291,7 +291,7 @@ The auth layer reads from resolved mounts, not from raw mount JSON. The mount co
 - Provider-contract types (`ProviderManifest`, manifest parsing, `AuthScheme`) live in `omnifs_provider`.
 - `resolve_mount_spec(spec, require_metadata)` covers strict load versus the best-effort delete and reset paths.
 - `CredentialTarget` and runtime payload materialization operate on `Resolved`, not on raw mount JSON plus a late `apply_metadata` pass.
-- Host-managed credentials require `provider_id`, always present on `Resolved`, plus `auth.scheme` and an optional `auth.account`.
+- Host-managed credentials require `provider_name`, always present on `Resolved`, plus `auth.scheme` and an optional `auth.account`.
 - Static mounts may still use `token_env` or `token_file` for external, user-managed secrets. Host-managed credential state does not move into mount JSON.
 
 ## PKCE auth-code flow (loopback redirect)
@@ -330,7 +330,9 @@ pub trait CredentialStore: Send + Sync {
 // The store key is `omnifs_core::CredentialId`, built from
 // `CredentialId::new(provider_id, scheme, account)`. Its only public wire
 // form is `storage_key()` = `provider:scheme:account`. The parts:
-//   provider_id: stable provider identity, see open question 1
+//   provider_name: provider name slug; credentials key on the name, not the
+//                content `ProviderId` hash (the credentials.json wire key and
+//                `CredentialId::new` parameter stay `provider_id`). See open question 1.
 //   scheme:      OauthScheme.key or StaticTokenScheme.key
 //   account:     user-chosen handle, opaque to the host
 
@@ -462,7 +464,7 @@ Git clone is a separate credential path from the HTTP auth engine above; it ride
 - Remote format is `git@github.com:<owner>/<repo>.git`.
 - Auth comes from the forwarded `SSH_AUTH_SOCK`. Do not mount host private keys into the container.
 
-The contributor sandbox reuses the same credential-store path as the normal user, isolated in a dedicated dev home. `omnifs dev` resolves `~/.omnifs/dev` as the runtime home, then for each built-in dev mount runs the same detect→validate→store flow as `omnifs init` (`commands::init::run_static_token_init` via `AuthImportDecision`): it imports a host credential (`gh auth token`, or a provider env var such as `LINEAR_API_KEY`) into `~/.omnifs/dev/credentials.json` and the embedded `providers/*/dev-mount.json` references it by `(provider, scheme, account)` like any user mount. Nothing is written into the source checkout, and a mount whose credential cannot be sourced is skipped rather than aborting the sandbox. The dev home is bind-mounted at `/root/.omnifs`, so the daemon reads the same store the CLI wrote. The normal user path (`omnifs init` plus `omnifs up`) uses `~/.omnifs/credentials.json` the same way.
+The contributor sandbox reuses the same credential-store path as the normal user, isolated in a dedicated dev home. `omnifs dev` resolves `~/.omnifs-dev` as the runtime home, then for each built-in dev mount runs the same detect→validate→store flow as `omnifs init` (`commands::init::run_static_token_init` via `AuthImportDecision`): it imports a host credential (`gh auth token`, or a provider env var such as `LINEAR_API_KEY`) into `~/.omnifs-dev/credentials.json` and the embedded `providers/*/dev-mount.json` references it by `(provider, scheme, account)` like any user mount. Nothing is written into the source checkout, and a mount whose credential cannot be sourced is skipped rather than aborting the sandbox. The dev home is bind-mounted at `/root/.omnifs`, so the daemon reads the same store the CLI wrote. The normal user path (`omnifs init` plus `omnifs up`) uses `~/.omnifs/credentials.json` the same way.
 
 Container startup requires:
 

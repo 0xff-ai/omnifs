@@ -60,10 +60,10 @@ impl<S> Router<S> {
 
         if let Some(route) = shape.object_route(&abs) {
             if route.entry.shape == ObjectShape::Dir {
-                let effects = (route.entry.list)(cx, route.captures, path.to_string()).await?;
+                let out = (route.entry.list)(cx, route.captures, path.to_string()).await?;
                 let listing = shape
-                    .object_dir_listing(route.entry, &abs)
-                    .with_effects(effects);
+                    .object_dir_listing(route.entry, &abs, out.source.as_ref())
+                    .with_effects(out.effects);
                 return Ok(List::entries(listing));
             }
             return Err(ProviderError::not_a_directory(format!("{path} is a file")));

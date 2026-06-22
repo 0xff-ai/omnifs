@@ -111,7 +111,7 @@ pub struct Operation {
     pub fuse_op: String,
     pub mount: String,
     pub path: String,
-    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
     pub provider_method: Option<String>,
     pub provider_ops: Vec<u64>,
     pub stages: Vec<Stage>,
@@ -130,7 +130,7 @@ impl Operation {
             fuse_op: fuse_op.to_string(),
             mount,
             path,
-            provider_id: None,
+            provider_name: None,
             provider_method: None,
             provider_ops: Vec::new(),
             stages: vec![Stage::in_flight(StageKind::Fuse(fuse_op.to_string()), "")],
@@ -401,7 +401,7 @@ impl TraceReducer {
         path: &str,
     ) {
         if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.provider_id = Some(provider.to_string());
+            operation.provider_name = Some(provider.to_string());
             operation.provider_method = Some(method.to_string());
             if !operation.provider_ops.contains(&operation_id) {
                 operation.provider_ops.push(operation_id);
@@ -722,7 +722,7 @@ mod tests {
         );
         assert_eq!(op.status, OperationStatus::Ok);
         assert_eq!(op.fuse_elapsed_us, Some(3_000));
-        assert_eq!(op.provider_id.as_deref(), Some("github"));
+        assert_eq!(op.provider_name.as_deref(), Some("github"));
         assert!(op.stages.iter().all(|stage| !stage.in_flight));
     }
 
