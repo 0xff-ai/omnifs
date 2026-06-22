@@ -9,11 +9,10 @@ use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
 use omnifs_mount::mounts::Spec;
-use omnifs_provider::PreopenMode;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{auth::MountAuth, catalog::ProviderCatalog, error::WithHint};
+use crate::{auth::MountAuth, error::WithHint};
 
 pub(crate) const CONTAINER_NAME: &str = "omnifs";
 pub(crate) const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
@@ -53,53 +52,7 @@ impl MountConfig {
         })
     }
 
-    /// Compute the host binds the Docker runtime needs for this mount's user
-    /// preopens, validating host-managed credentials along the way. When
-    /// `host_native` is true the daemon opens preopen directories directly, so
-    /// no binds are emitted; when false each user preopen is rewritten to a
-    /// container path and the corresponding `host:container:mode` strings are
-    /// returned for `docker create`. The resolved spec is not returned: the
-    /// daemon reads it from `mounts/` itself, so nothing is pushed.
-    pub(crate) fn materialize(
-        &self,
-        catalog: &ProviderCatalog,
-        store: &dyn CredentialStore,
-        host_native: bool,
-    ) -> anyhow::Result<Vec<String>> {
-        // Materialize once through the shared materializer (metadata, runtime
-        // capabilities, preopen rewriting); the daemon reconciles with the same
-        // function. The resolved spec is not returned: the daemon reads it from
-        // `mounts/`, so nothing is pushed; only the Docker preopen binds are.
-        let materialized = omnifs_mount::materialize::materialize(
-            self.config.clone(),
-            catalog.inner(),
-            host_native,
-        )
-        .with_context(|| format!("materialize mount {}", self.source.display()))?;
-
-        // Validate host-managed credentials against the materialized spec before
-        // the daemon ever tries to load it, for a clear early CLI error.
-        let resolved = catalog
-            .resolve_mount_spec(materialized.spec, false)
-            .with_context(|| format!("resolve mount config for {}", self.source.display()))?;
-        let mount_auth = catalog.resolve_mount_auth_tolerating_manifest_errors(resolved);
-        self.validate_host_managed_credentials(&mount_auth, store)?;
-
-        let binds = materialized
-            .preopen_binds
-            .into_iter()
-            .map(|bind| {
-                let mode = match bind.mode {
-                    PreopenMode::Ro => "ro",
-                    PreopenMode::Rw => "rw",
-                };
-                format!("{}:{}:{}", bind.host.display(), bind.container, mode)
-            })
-            .collect();
-        Ok(binds)
-    }
-
-    fn validate_host_managed_credentials(
+    pub(crate) fn validate_host_managed_credentials(
         &self,
         mount_auth: &MountAuth,
         store: &dyn CredentialStore,
@@ -171,6 +124,8 @@ mod tests {
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
+    use crate::catalog::ProviderCatalog;
+    use crate::launch::DockerMountMaterializer;
     use crate::test_support::wasm_with_provider_metadata;
 
     fn sample_entry(value: &str) -> CredentialEntry {
@@ -192,14 +147,14 @@ mod tests {
     }
 
     fn test_catalog(root: &Path) -> ProviderCatalog {
-        let paths = omnifs_home::Paths::under_root(root);
-        ProviderCatalog::for_dirs(paths.mounts_dir, paths.providers_dir)
+        let paths = omnifs_home::WorkspaceLayout::under_root(root);
+        ProviderCatalog::for_providers(paths.providers_dir)
     }
 
     #[test]
     fn materialize_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),
@@ -227,8 +182,10 @@ mod tests {
         let catalog = test_catalog(tmp.path());
         // Validation accepts the present host-managed token; no preopens, so no
         // container binds.
-        let binds = config.materialize(&catalog, &store, false).unwrap();
-        assert!(binds.is_empty());
+        let mount = DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
+        assert!(mount.preopen_binds().is_empty());
     }
 
     #[test]
@@ -264,13 +221,15 @@ mod tests {
         let catalog = test_catalog(tmp.path());
         // A token_env credential is host-unmanaged, so validation requires no
         // stored credential.
-        config.materialize(&catalog, &store, false).unwrap();
+        DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
     }
 
     #[test]
     fn materialize_validates_oauth_credentials() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
 
         let store = MemoryStore::new();
@@ -297,13 +256,15 @@ mod tests {
         .unwrap();
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
     }
 
     #[test]
     fn materialize_applies_provider_metadata_before_credential_validation() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),
@@ -328,7 +289,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
     }
 
     #[test]
@@ -351,7 +314,9 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        config.materialize(&catalog, &store, false).unwrap();
+        DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
     }
 
     #[test]
@@ -382,7 +347,11 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, false).unwrap();
+        let binds = DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap()
+            .into_preopen_binds()
+            .into_docker_bind_specs();
 
         assert_eq!(
             binds,
@@ -392,41 +361,6 @@ mod tests {
                 omnifs_mount::materialize::GUEST_PREOPENS_DIR,
             )],
             "the CLI formats the container preopen bind for docker create"
-        );
-    }
-
-    #[test]
-    fn materialize_host_native_keeps_canonical_host_and_no_binds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db_dir = tmp.path().join("db");
-        fs::create_dir_all(&db_dir).unwrap();
-        fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
-
-        let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("db").unwrap(),
-            config: Spec::parse(&format!(
-                r#"{{
-                    "provider": "omnifs_provider_db.wasm",
-                    "mount": "db",
-                    "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
-                    "capabilities": {{
-                        "preopened_paths": [
-                            {{"host": "{}", "guest": "/data", "mode": "ro"}}
-                        ]
-                    }}
-                }}"#,
-                db_dir.display()
-            ))
-            .unwrap(),
-            source: PathBuf::from("/dev/null"),
-        };
-
-        let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, true).unwrap();
-        assert!(
-            binds.is_empty(),
-            "host-native preopens are opened directly and emit no binds"
         );
     }
 
@@ -448,9 +382,11 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = config.materialize(&catalog, &store, false).unwrap();
+        let mount = DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap();
         assert!(
-            binds.is_empty(),
+            mount.preopen_binds().is_empty(),
             "manifest preopens are already container paths"
         );
     }
@@ -458,7 +394,7 @@ mod tests {
     #[test]
     fn materialize_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(tmp.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         std::fs::write(
             paths.providers_dir.join("omnifs_provider_github.wasm"),
@@ -476,7 +412,9 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = config.materialize(&catalog, &store, false).unwrap_err();
+        let err = DockerMountMaterializer::new(&catalog, &store)
+            .materialize(&config)
+            .unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("no stored credential"),

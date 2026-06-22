@@ -47,7 +47,8 @@ pub enum Commands {
     Logs(commands::logs::LogsArgs),
     /// Inspector stream: FUSE, provider, and callout JSONL events.
     Inspect(commands::inspect::InspectArgs),
-    /// Open an interactive shell inside the running container.
+    /// Open an omnifs-aware shell for exploring the projected tree. The daemon
+    /// mode and mount point come from the run-state file `omnifs up` wrote.
     Shell(commands::shell::ShellArgs),
 
     /// First-run wizard: detect OS, explain Docker, pick several providers,
@@ -75,8 +76,8 @@ pub enum Commands {
     /// Print shell completions.
     Completions(commands::completions::CompletionsArgs),
 
-    /// Print version information. Use --detail for image / container /
-    /// store / provider count alongside the CLI version.
+    /// Print version information. Use --detail for daemon / store /
+    /// provider count alongside the CLI version.
     Version(commands::version::VersionArgs),
 
     /// Debug utilities. Hidden from `--help`.
@@ -89,6 +90,20 @@ pub enum Commands {
     /// control API; this is the same binary, not a separate entrypoint.
     #[command(hide = true)]
     Daemon(omnifs_daemon::DaemonArgs),
+}
+
+/// Human (`Text`) vs machine (`Json`) output selection, shared by commands that
+/// support `--json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
+    Text,
+    Json,
+}
+
+impl From<bool> for OutputFormat {
+    fn from(json: bool) -> Self {
+        if json { Self::Json } else { Self::Text }
+    }
 }
 
 impl Commands {
@@ -107,7 +122,7 @@ impl Commands {
             Self::Down(args) => args.run().await,
             Self::Logs(args) => args.run().await,
             Self::Inspect(args) => args.run().await,
-            Self::Shell(args) => args.run(),
+            Self::Shell(args) => args.run().await,
             Self::Mounts(args) => args.run().await,
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {

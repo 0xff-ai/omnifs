@@ -6,6 +6,7 @@
 //! binary; the daemon entrypoint is [`run`].
 
 pub mod app;
+mod context;
 pub mod frontends;
 #[cfg(target_os = "linux")]
 mod proc_mounts;

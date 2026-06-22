@@ -1,9 +1,10 @@
 //! Shared discovery for configured mounts and provider templates.
 //!
-//! `ProviderCatalog` owns `Spec`-to-`Resolved` resolution and provider
-//! template discovery. Mount enumeration (per-file specs from the `mounts/`
-//! directory) lives in `Workspace::mounts()`; methods here that need the
-//! list accept it as a parameter.
+//! `ProviderCatalog` owns `Spec`-to-`Resolved` resolution. `ProviderTemplates`
+//! owns the indexed provider-template surface derived from built-in manifests
+//! and provider wasm metadata. Mount enumeration (per-file specs from the
+//! `mounts/` directory) lives in `Workspace::mounts()`; catalog surfaces that
+//! need the list accept it as a parameter.
 
 use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
@@ -14,7 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{credential_target::CredentialTarget, session::MountConfig};
+use crate::session::MountConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderCatalog {
@@ -23,69 +24,16 @@ pub(crate) struct ProviderCatalog {
 }
 
 impl ProviderCatalog {
-    pub(crate) fn for_dirs(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
-        let mounts_dir = mounts_dir.as_ref();
+    pub(crate) fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
         let providers_dir = providers_dir.as_ref();
         Self {
-            mounts: MountCatalog::new(mounts_dir, providers_dir),
+            mounts: MountCatalog::for_providers(providers_dir),
             providers_dir: providers_dir.to_path_buf(),
         }
     }
 
     pub(crate) fn builtin_manifests() -> anyhow::Result<Vec<ProviderManifest>> {
         Ok(MountCatalog::builtin_manifests()?)
-    }
-
-    /// Build removal targets tolerantly, for use by `omnifs reset`.
-    ///
-    /// Enumerates the per-file spec paths directly and tolerates unparsable
-    /// files: a broken JSON file still produces a removal target with
-    /// `CredentialTarget::None` so reset can nuke broken state.
-    pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
-        use omnifs_mount::mounts::Spec as MountSpec;
-
-        let mut targets = Vec::new();
-
-        // Per-file specs — enumerate paths, parse tolerantly.
-        let paths = crate::workspace::per_file_mount_paths(self.mounts.mounts_dir())?;
-        for path in paths {
-            let Some(name) = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let credential = match MountSpec::from_file(&path) {
-                Ok(spec) => match self.resolve_mount_spec(spec, false) {
-                    Ok(resolved) => CredentialTarget::for_mount(&resolved),
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            %error,
-                            "unresolvable mount config; will remove the file but cannot drop credentials"
-                        );
-                        CredentialTarget::None
-                    },
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "unparsable mount config; will remove the file but cannot drop credentials"
-                    );
-                    CredentialTarget::None
-                },
-            };
-            targets.push(MountRemovalTarget {
-                name,
-                path,
-                credential,
-            });
-        }
-
-        targets.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(targets)
     }
 
     /// The underlying mount catalog, for callers that drive the shared
@@ -125,7 +73,7 @@ impl ProviderCatalog {
             .map_err(Into::into)
     }
 
-    pub(crate) fn provider_templates(&self) -> anyhow::Result<BTreeMap<String, ProviderTemplate>> {
+    pub(crate) fn provider_templates(&self) -> anyhow::Result<ProviderTemplates> {
         let mut templates = BTreeMap::new();
         for manifest in MountCatalog::builtin_manifests()? {
             let auth_manifest = manifest.wasm_auth_manifest();
@@ -141,7 +89,9 @@ impl ProviderCatalog {
 
         let read = match fs::read_dir(&self.providers_dir) {
             Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(templates),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ProviderTemplates::new(templates));
+            },
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("read {}", self.providers_dir.display()));
@@ -206,7 +156,7 @@ impl ProviderCatalog {
                 },
             );
         }
-        Ok(templates)
+        Ok(ProviderTemplates::new(templates))
     }
 
     pub(crate) fn provider_dir_status(&self) -> ProviderDirStatus {
@@ -234,16 +184,93 @@ impl ProviderCatalog {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderTemplates {
+    by_id: BTreeMap<String, ProviderTemplate>,
+    by_provider_file: BTreeMap<String, String>,
+}
+
+impl ProviderTemplates {
+    fn new(by_id: BTreeMap<String, ProviderTemplate>) -> Self {
+        let mut by_provider_file = BTreeMap::new();
+        for (id, template) in &by_id {
+            by_provider_file
+                .entry(template.manifest.provider.clone())
+                .or_insert_with(|| id.clone());
+        }
+        Self {
+            by_id,
+            by_provider_file,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    pub(crate) fn by_id(&self, id: &str) -> Option<&ProviderTemplate> {
+        self.by_id.get(id)
+    }
+
+    pub(crate) fn by_provider_file(
+        &self,
+        provider_file: &str,
+    ) -> Option<(&str, &ProviderTemplate)> {
+        let id = self.by_provider_file.get(provider_file)?;
+        self.by_id_entry(id)
+    }
+
+    pub(crate) fn by_reference(&self, provider_ref: &str) -> Option<(&str, &ProviderTemplate)> {
+        self.by_id_entry(provider_ref)
+            .or_else(|| self.by_provider_file(provider_ref))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &ProviderTemplate)> + '_ {
+        self.by_id
+            .iter()
+            .map(|(id, template)| (id.as_str(), template))
+    }
+
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> + '_ {
+        self.by_id.keys().map(String::as_str)
+    }
+
+    pub(crate) fn configured_mounts(
+        &self,
+        catalog: &ProviderCatalog,
+        mounts: &[MountConfig],
+    ) -> BTreeMap<String, String> {
+        let mut by_provider = BTreeMap::new();
+        for configured in mounts {
+            let mount = match catalog.resolve_mount_spec(configured.config.clone(), true) {
+                Ok(mount) => mount,
+                Err(error) => {
+                    tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
+                    continue;
+                },
+            };
+            if let Some((id, _)) = self.by_resolved_mount(&mount) {
+                by_provider.insert(id.to_owned(), mount.spec.mount);
+            }
+        }
+        by_provider
+    }
+
+    fn by_id_entry(&self, id: &str) -> Option<(&str, &ProviderTemplate)> {
+        self.by_id
+            .get_key_value(id)
+            .map(|(id, template)| (id.as_str(), template))
+    }
+
+    fn by_resolved_mount(&self, mount: &Resolved) -> Option<(&str, &ProviderTemplate)> {
+        self.by_id_entry(&mount.provider_id)
+            .or_else(|| self.by_provider_file(&mount.spec.provider))
+    }
+}
+
 /// Returns `true` when a mount with `name` appears in `mounts`.
 pub(crate) fn mount_exists(mounts: &[MountConfig], name: &MountName) -> bool {
     mounts.iter().any(|m| &m.name == name)
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct MountRemovalTarget {
-    pub(crate) name: String,
-    pub(crate) path: PathBuf,
-    pub(crate) credential: CredentialTarget,
 }
 
 #[derive(Debug)]
@@ -311,17 +338,23 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = ProviderCatalog::for_dirs(tmp.path().join("mounts"), &providers_dir);
+        let catalog = ProviderCatalog::for_providers(&providers_dir);
         let templates = catalog
             .provider_templates()
             .expect("a broken disk provider must not fail catalog enumeration");
 
         assert!(
             matches!(
-                templates.get("demo").map(|t| &t.source),
+                templates.by_id("demo").map(|t| &t.source),
                 Some(ProviderSource::Disk(_))
             ),
             "the valid disk provider should load despite the broken sibling"
+        );
+        assert_eq!(
+            templates
+                .by_provider_file("omnifs_provider_demo.wasm")
+                .map(|(id, _)| id),
+            Some("demo")
         );
     }
 }

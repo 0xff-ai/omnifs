@@ -23,6 +23,7 @@ use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
 use omnifs_core::path::Path;
+use omnifs_home::WorkspaceLayout;
 use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Resolved;
 use omnifs_wit::provider::types as wit_types;
@@ -46,37 +47,82 @@ const PROVIDER_CACHE_SUBDIR: &str = "providers";
 const BLOB_CACHE_SUBDIR: &str = "blobs";
 const ARCHIVE_CACHE_SUBDIR: &str = "archives";
 
-/// Host directories needed to build one provider runtime.
-#[derive(Clone, Copy)]
-pub struct Dirs<'a> {
-    pub cache_dir: &'a StdPath,
-    pub config_dir: &'a StdPath,
-    pub providers_dir: &'a StdPath,
-    pub credentials_file: &'a StdPath,
+/// Host-owned filesystem context for provider runtime and mount lifecycle.
+#[derive(Clone, Debug)]
+pub struct HostContext {
+    cache_dir: PathBuf,
+    config_dir: PathBuf,
+    providers_dir: PathBuf,
+    credentials_file: PathBuf,
 }
 
-impl<'a> Dirs<'a> {
+impl HostContext {
     pub fn new(
-        cache_dir: &'a StdPath,
-        config_dir: &'a StdPath,
-        providers_dir: &'a StdPath,
-        credentials_file: &'a StdPath,
+        cache_dir: impl AsRef<StdPath>,
+        config_dir: impl AsRef<StdPath>,
+        providers_dir: impl AsRef<StdPath>,
+        credentials_file: impl AsRef<StdPath>,
     ) -> Self {
         Self {
-            cache_dir,
-            config_dir,
-            providers_dir,
-            credentials_file,
+            cache_dir: cache_dir.as_ref().to_path_buf(),
+            config_dir: config_dir.as_ref().to_path_buf(),
+            providers_dir: providers_dir.as_ref().to_path_buf(),
+            credentials_file: credentials_file.as_ref().to_path_buf(),
         }
     }
 
-    pub fn provider_path(&self, provider: &str) -> PathBuf {
+    pub fn from_layout(layout: &WorkspaceLayout) -> Self {
+        Self::new(
+            &layout.cache_dir,
+            &layout.config_dir,
+            &layout.providers_dir,
+            &layout.credentials_file,
+        )
+    }
+
+    pub fn cache_dir(&self) -> &StdPath {
+        &self.cache_dir
+    }
+
+    pub fn config_dir(&self) -> &StdPath {
+        &self.config_dir
+    }
+
+    pub fn providers_dir(&self) -> &StdPath {
+        &self.providers_dir
+    }
+
+    pub fn credentials_file(&self) -> &StdPath {
+        &self.credentials_file
+    }
+
+    pub(crate) fn mounts_dir(&self) -> PathBuf {
+        self.config_dir.join(omnifs_home::MOUNTS_SUBDIR)
+    }
+
+    pub(crate) fn wasm_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("wasm")
+    }
+
+    pub(crate) fn provider_path(&self, provider: &str) -> PathBuf {
         let provider = PathBuf::from(provider);
         if provider.is_absolute() {
             provider
         } else {
             self.providers_dir.join(provider)
         }
+    }
+}
+
+impl From<WorkspaceLayout> for HostContext {
+    fn from(layout: WorkspaceLayout) -> Self {
+        Self::from_layout(&layout)
+    }
+}
+
+impl From<&WorkspaceLayout> for HostContext {
+    fn from(layout: &WorkspaceLayout) -> Self {
+        Self::from_layout(layout)
     }
 }
 
@@ -247,7 +293,7 @@ impl Runtime {
         wasm_path: &StdPath,
         config: &Resolved,
         cloner: Arc<GitCloner>,
-        dirs: Dirs<'_>,
+        context: &HostContext,
         extractor: Arc<ArchiveExtractorComponent>,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
@@ -274,7 +320,7 @@ impl Runtime {
         let auth = if config.spec.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
-            let store = credential_store_for_file(dirs.credentials_file);
+            let store = credential_store_for_file(context.credentials_file());
             Arc::new(
                 AuthManager::from_configs_manifest_store_with_store(
                     &config.spec.auth,
@@ -289,7 +335,7 @@ impl Runtime {
         let trees = Arc::new(TreeRefs::new());
         let git = git::GitExecutor::new(cloner, capability.clone(), trees.clone());
 
-        let cache_dirs = CacheDirs::prepare(dirs.cache_dir, mount_name)?;
+        let cache_dirs = CacheDirs::prepare(context.cache_dir(), mount_name)?;
         let blob_cache = Arc::new(BlobCache::new(cache_dirs.blob));
         let archive = Arc::new(ArchiveExecutor::new(
             blob_cache.clone(),

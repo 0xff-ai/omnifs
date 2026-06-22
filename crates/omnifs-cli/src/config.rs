@@ -1,8 +1,8 @@
 //! Global `config.toml` loader. Lives at `paths.config_file`.
 //!
 //! Resolution order is: CLI flag > env var > config file > built-in default.
-//! Missing file is not an error; malformed file is. The Config is loaded
-//! once and threaded into commands that need it.
+//! Missing file is not an error; malformed file is. Commands load it from
+//! their resolved workspace when they need launch or Docker policy.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -25,14 +25,14 @@ pub struct ConfigSystem {
     pub image: Option<String>,
     /// Daemon launch backend, recorded by `omnifs setup`. Unset falls back to
     /// the platform default (host-native).
-    pub runtime: Option<Runtime>,
+    pub runtime: Option<ConfiguredBackend>,
 }
 
 /// Daemon launch backend. `omnifs setup` records the choice; `omnifs up`
 /// reads it and starts the daemon that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Runtime {
+pub enum ConfiguredBackend {
     /// Daemon runs inside a Docker container; the CLI owns the container
     /// lifecycle.
     Docker,
@@ -40,7 +40,7 @@ pub enum Runtime {
     Native,
 }
 
-impl Runtime {
+impl ConfiguredBackend {
     /// Default when `setup` has recorded nothing: host-native everywhere.
     /// Docker remains an optional backend selected explicitly in config.
     pub fn platform_default() -> Self {
@@ -75,10 +75,10 @@ impl Config {
 
     /// Daemon launch backend: the recorded `[system].runtime`, or the platform
     /// default when `setup` has not chosen one.
-    pub fn runtime(&self) -> Runtime {
+    pub fn backend(&self) -> ConfiguredBackend {
         self.system
             .runtime
-            .unwrap_or_else(Runtime::platform_default)
+            .unwrap_or_else(ConfiguredBackend::platform_default)
     }
 }
 
@@ -104,7 +104,7 @@ impl ConfigFile {
 
     /// Set `[system].runtime`, preserving the rest of the config. `omnifs setup`
     /// records the launch backend here so `omnifs up` reads it.
-    pub fn set_system_runtime(&mut self, runtime: Runtime) -> Result<()> {
+    pub fn set_system_backend(&mut self, backend: ConfiguredBackend) -> Result<()> {
         let root = self
             .doc
             .as_table_mut()
@@ -115,7 +115,7 @@ impl ConfigFile {
         let system = system.as_table_mut().ok_or_else(|| {
             anyhow::anyhow!("{} has a non-table [system] value", self.path.display())
         })?;
-        let value = toml::Value::try_from(runtime).context("serialize runtime as TOML")?;
+        let value = toml::Value::try_from(backend).context("serialize backend as TOML")?;
         system.insert("runtime".to_string(), value);
         Ok(())
     }
@@ -161,14 +161,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         let mut file = ConfigFile::load(&path).unwrap();
-        file.set_system_runtime(Runtime::Native).unwrap();
+        file.set_system_backend(ConfiguredBackend::Native).unwrap();
         file.save().unwrap();
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("runtime = \"native\""), "got:\n{raw}");
 
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.system.runtime, Some(Runtime::Native));
-        assert_eq!(config.runtime(), Runtime::Native);
+        assert_eq!(config.system.runtime, Some(ConfiguredBackend::Native));
+        assert_eq!(config.backend(), ConfiguredBackend::Native);
     }
 }

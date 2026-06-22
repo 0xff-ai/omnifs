@@ -74,7 +74,7 @@ impl Builtins {
         &self.manifests
     }
 
-    fn manifest_for_spec(&self, config: &Spec) -> Option<&ProviderManifest> {
+    pub(crate) fn manifest_for_spec(&self, config: &Spec) -> Option<&ProviderManifest> {
         if let Some(provider_id) = config.provider_id()
             && let Some(manifest) = self.by_id(provider_id)
         {

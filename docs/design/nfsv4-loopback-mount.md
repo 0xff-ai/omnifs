@@ -31,7 +31,9 @@ to:
 - Read-only namespace projection over the provider runtime and host caches.
 - Loopback-only server binding.
 
-The daemon starts this frontend through `omnifsd --frontend nfs`. Daemon
+The daemon selects this frontend automatically as the non-Linux platform default
+(the `omnifs daemon` subcommand; there is no `--frontend` flag or separate
+`omnifsd` binary). Daemon
 dispatch loads the provider registry, starts provider timers, constructs one
 `omnifs_nfs::Export`, starts one loopback NFS server, writes mount state, mounts
 the local client, blocks until the mount exits, then shuts providers down.

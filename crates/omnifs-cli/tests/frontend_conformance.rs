@@ -1,17 +1,21 @@
 //! Frontend conformance: the projected tree must behave like real files for the
-//! standard toolbox, through *each* frontend (FUSE and NFS), not just one.
+//! standard toolbox, through the platform-default frontend (FUSE on Linux, NFS
+//! elsewhere).
 //!
-//! This launches the real daemon (`omnifs daemon`) against a hermetic `OMNIFS_HOME` with
-//! only the canned `test-provider` mounted, then runs one frontend-agnostic
-//! matrix (`run_matrix`) over the mount using the actual shell toolbox. The
-//! frontend is the only parameter; the assertions are shared. Migrated from the
-//! former `tests/smoke/frontend-test-provider.sh` and `nfs-macos-probes.sh`.
+//! This launches the real daemon (`omnifs daemon`) against a hermetic
+//! `OMNIFS_HOME` with only the canned `test-provider` mounted, then runs one
+//! frontend-agnostic matrix (`run_matrix`) over the mount using the actual
+//! shell toolbox. The daemon picks its own platform-default frontend; no
+//! `--frontend` flag is accepted or needed.
 //!
-//! Mounting requires capabilities the host may lack (a FUSE device, privilege
-//! for an NFS loopback mount, pre-built provider wasm). When the mount can't be
-//! brought up the test *skips* (prints why and returns) rather than failing, so
-//! it never reds CI on an under-provisioned runner; it asserts only once a real
-//! mount is live. CI runs it on a frontend-capable runner to exercise it for real.
+//! The mount spec is written to `<OMNIFS_HOME>/mounts/test.json` before the
+//! daemon starts; the daemon reconciles from `mounts/` on startup, so no
+//! `POST /v1/mounts` is needed. `OMNIFS_HOME`, `OMNIFS_MOUNT_POINT`, and
+//! `OMNIFS_DAEMON_ADDR` are all set to hermetic per-test values so the test
+//! never touches the user's real home directory or port 7878.
+//!
+//! Skip (not fail) only when the platform genuinely cannot mount. A daemon
+//! that exits because it rejected a CLI argument is a real failure and panics.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -39,6 +43,15 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn omnifs_bin() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_omnifs")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
+        .map_or_else(
+            || PathBuf::from(env!("CARGO_BIN_EXE_omnifs")),
+            PathBuf::from,
+        )
+}
+
 fn curl(args: &[&str]) -> bool {
     Command::new("curl")
         .args(args)
@@ -47,12 +60,39 @@ fn curl(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// A running `omnifsd` with the test-provider mounted, torn down on drop.
+const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+
+/// What platform-default frontend the daemon will use on this OS.
+#[cfg(target_os = "linux")]
+const PLATFORM_FRONTEND: &str = "fuse";
+#[cfg(not(target_os = "linux"))]
+const PLATFORM_FRONTEND: &str = "nfs";
+
+/// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
+/// mounts. Below the OS ephemeral range, so it never collides with `free_port`.
+const NFS_LOCK_PORT: u16 = 48761;
+
+/// Acquire the cross-process NFS serialization lock, returning the bound socket
+/// as the guard. nextest runs each integration-test binary as its own process,
+/// so an in-process mutex cannot serialize the lifecycle and conformance suites
+/// against each other; a fixed bound port does, and the OS frees it the instant
+/// the holder exits, so a killed test never wedges the next one.
+fn nfs_serial_lock() -> std::net::TcpListener {
+    loop {
+        match std::net::TcpListener::bind(("127.0.0.1", NFS_LOCK_PORT)) {
+            Ok(listener) => return listener,
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// A running `omnifs daemon` with the test-provider mounted, torn down on drop.
 struct Daemon {
     child: Child,
-    frontend: String,
     mount_point: PathBuf,
     _home: tempfile::TempDir,
+    /// Cross-process NFS serialization lock, held for the test's lifetime.
+    _nfs_lock: std::net::TcpListener,
 }
 
 impl Drop for Daemon {
@@ -66,7 +106,8 @@ impl Drop for Daemon {
 impl Daemon {
     fn detach_mount(&self) {
         let mp = self.mount_point.as_os_str();
-        if self.frontend == "nfs" {
+        #[cfg(not(target_os = "linux"))]
+        {
             if omnifs_nfs::mount_is_active(&self.mount_point) {
                 let _ = omnifs_nfs::unmount(&self.mount_point);
             }
@@ -74,30 +115,73 @@ impl Daemon {
             while omnifs_nfs::mount_is_active(&self.mount_point) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
             }
-        } else {
+        }
+        #[cfg(target_os = "linux")]
+        {
             let _ = Command::new("fusermount")
                 .args([OsStr::new("-u"), mp])
                 .status();
             let _ = Command::new("umount").arg(mp).status();
         }
+        let _ = mp; // suppress unused warning on some configurations
     }
 }
 
-const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+/// Live-mount acceptance tests are opt-in: they spawn a real daemon and mount a
+/// real filesystem, slow and noisy on a developer machine. A plain
+/// `cargo nextest` skips them; set `OMNIFS_ACCEPTANCE_LIVE=1` to run them
+/// (serialized across binaries via the `serial-nfs` nextest group).
+fn live_acceptance_enabled() -> bool {
+    std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_some()
+}
 
-/// Bring up `omnifsd --frontend <frontend>` with only the test-provider mounted.
-/// Returns `None` (skip) when the mount can't be established on this host.
-#[allow(clippy::too_many_lines)] // linear end-to-end frontend bring-up
-fn start(frontend: &str) -> Option<Daemon> {
+/// Returns `true` if this platform has the capability to bring up a mount.
+///
+/// On Linux, FUSE requires a `/dev/fuse` device. On macOS, NFS loopback is
+/// always available (the kernel supports it without root). Checking the device
+/// is cheap and avoids a timeout-skip when /dev/fuse is simply absent.
+fn platform_can_mount() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/dev/fuse").exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Bring up `omnifs daemon` (platform-default frontend) with only the
+/// test-provider mounted. The spec is written to `mounts/` before spawning so
+/// the daemon reconciles it on startup.
+///
+/// Returns `None` (skip) only when the platform genuinely cannot mount.
+/// Panics if the daemon exits due to a CLI parse error or similar hard failure
+/// (that is a real test failure, not a skip).
+#[allow(clippy::too_many_lines)] // linear end-to-end daemon bring-up
+fn start() -> Option<Daemon> {
+    if !live_acceptance_enabled() {
+        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
+        return None;
+    }
     let wasm_dir = release_wasm_dir();
     let test_wasm = wasm_dir.join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip {frontend}: {} missing (run `just providers-build`)",
+            "skip: {} missing (run `just providers-build`)",
             test_wasm.display()
         );
         return None;
     }
+
+    if !platform_can_mount() {
+        eprintln!("skip: platform cannot mount (no /dev/fuse)");
+        return None;
+    }
+
+    // Hold the cross-process NFS lock for the whole test, so this binary's mount
+    // never races the lifecycle suite's mounts in a parallel nextest run.
+    let nfs_lock = nfs_serial_lock();
 
     let home = tempfile::tempdir().expect("home tempdir");
     let providers = home.path().join("providers");
@@ -114,47 +198,69 @@ fn start(frontend: &str) -> Option<Daemon> {
         }
     }
 
+    // Write the mount spec before spawning so the daemon reconciles it on start.
+    let mounts_dir = home.path().join("mounts");
+    std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
+    std::fs::write(mounts_dir.join("test.json"), TEST_MOUNT_SPEC).expect("write test mount spec");
+
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");
-    let port = free_port();
-    let base = format!("http://127.0.0.1:{port}");
 
-    let child = Command::new(env!("CARGO_BIN_EXE_omnifs"))
-        .args([
-            "daemon",
-            "--frontend",
-            frontend,
-            "--mount-point",
-            mount_point.to_str().unwrap(),
-            "--listen",
-            &format!("127.0.0.1:{port}"),
-        ])
+    let port = free_port();
+    let listen_addr = format!("127.0.0.1:{port}");
+    let base = format!("http://{listen_addr}");
+
+    // The daemon picks the platform-default frontend automatically; no
+    // --frontend flag. Mount point comes from OMNIFS_MOUNT_POINT; config and
+    // providers come from OMNIFS_HOME. --host-native opens preopens directly.
+    let child = Command::new(omnifs_bin())
+        .args(["daemon", "--listen", &listen_addr, "--host-native"])
         .env("OMNIFS_HOME", home.path())
+        .env("OMNIFS_MOUNT_POINT", &mount_point)
+        .env("OMNIFS_DAEMON_ADDR", &listen_addr)
         .env("RUST_LOG", "warn")
         .spawn();
     let child = match child {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("skip {frontend}: spawn omnifsd failed: {error}");
+            eprintln!("skip: spawn omnifs daemon failed: {error}");
             return None;
         },
     };
 
     let mut daemon = Daemon {
         child,
-        frontend: frontend.to_string(),
         mount_point: mount_point.clone(),
         _home: home,
+        _nfs_lock: nfs_lock,
     };
 
-    // Wait for the control API, bailing out (skip) the instant omnifsd exits —
-    // e.g. a frontend that can't mount on this host fails fast rather than
-    // making us poll a dead port for the full timeout.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Wait for the control API. If the daemon exits before becoming ready,
+    // distinguish between an exit due to a hard failure (CLI parse error,
+    // missing arg, bind error) and a mount setup failure. Hard exits (non-zero,
+    // from a bad CLI parse or bind collision) are panics because they indicate
+    // a regression in the test or in the daemon argument surface.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let ready = loop {
-        if let Ok(Some(status)) = daemon.child.try_wait() {
-            eprintln!("skip {frontend}: omnifsd exited before ready ({status})");
-            return None;
+        match daemon.child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    // A daemon that exits cleanly before ready is unexpected but
+                    // not a hard CLI failure; treat as a skip.
+                    eprintln!("skip: daemon exited cleanly before the control API was ready");
+                    return None;
+                }
+                // Non-zero exit before serving: this is a hard failure. Panic
+                // so the test is red, not silently skipped.
+                panic!(
+                    "omnifs daemon exited with {status} before the control API became ready on \
+                     {listen_addr} — this is a CLI or startup error, not a skip. \
+                     Check that the daemon accepts the args passed in this test \
+                     and that `{listen_addr}` was not already in use."
+                );
+            },
+            Ok(None) => {},
+            Err(error) => panic!("poll daemon child status: {error}"),
         }
         if curl(&["-fs", "-o", "/dev/null", &format!("{base}/v1/ready")]) {
             break true;
@@ -164,43 +270,36 @@ fn start(frontend: &str) -> Option<Daemon> {
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    if !ready {
-        eprintln!("skip {frontend}: control API never became ready");
-        return None;
-    }
+    // Timed out waiting for the control API. On a platform that should be able
+    // to mount (we checked above), this is a real failure, not a skip.
+    assert!(
+        ready,
+        "omnifs daemon control API never became ready on {listen_addr} after 30s; \
+         the daemon is alive but not serving. Check the daemon log."
+    );
 
-    // Push the test-provider mount.
-    if !curl(&[
-        "-fsS",
-        "-o",
-        "/dev/null",
-        "-X",
-        "POST",
-        &format!("{base}/v1/mounts"),
-        "-H",
-        "content-type: application/json",
-        "-d",
-        TEST_MOUNT_SPEC,
-    ]) {
-        eprintln!("skip {frontend}: mount push failed");
-        return None;
-    }
-
-    // Wait for the mount to serve the projected tree, bailing if omnifsd exits
-    // (a frontend whose mount fails only once it starts serving).
+    // Wait for the mount to serve the projected tree, bailing if the daemon exits.
     let message = mount_point.join("test/hello/message");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if message.is_file() {
             return Some(daemon);
         }
-        if let Ok(Some(status)) = daemon.child.try_wait() {
-            eprintln!("skip {frontend}: omnifsd exited before mounting ({status})");
-            return None;
+        match daemon.child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "skip {PLATFORM_FRONTEND}: daemon exited ({status}) before the mount was \
+                     active — the platform frontend could not serve"
+                );
+                return None;
+            },
+            Ok(None) => {},
+            Err(error) => panic!("poll daemon child status: {error}"),
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "skip {frontend}: {} never appeared (not mountable here)",
+                "skip {PLATFORM_FRONTEND}: {} never appeared within 30s — \
+                 the mount could not come up on this platform",
                 message.display()
             );
             return None;
@@ -220,7 +319,7 @@ fn file_size(path: &Path) -> u64 {
 }
 
 /// The frontend-agnostic toolbox/read-semantics matrix over the test-provider
-/// tree, driven through the real shell tools so it exercises the kernel↔frontend
+/// tree, driven through the real shell tools so it exercises the kernel-frontend
 /// boundary, not just the host op layer.
 fn run_matrix(root: &Path) {
     let hello = root.join("hello");
@@ -278,8 +377,8 @@ fn run_matrix(root: &Path) {
 }
 
 /// macOS-NFS-specific checks: the read-only mount must not let the OS
-/// materialize `.DS_Store`/`AppleDouble` sidecars, and repeated stat/listing must
-/// not perturb a file's reported attributes. Migrated from `nfs-macos-probes.sh`.
+/// materialize `.DS_Store`/`AppleDouble` sidecars, and repeated stat/listing
+/// must not perturb a file's reported attributes. Migrated from `nfs-macos-probes.sh`.
 #[cfg(target_os = "macos")]
 fn macos_nfs_probes(root: &Path, sample: &Path) {
     let dir = sample.parent().unwrap();
@@ -306,13 +405,7 @@ fn macos_nfs_probes(root: &Path, sample: &Path) {
 }
 
 #[test]
-fn fuse_frontend_serves_the_real_toolbox() {
-    let Some(daemon) = start("fuse") else { return };
-    run_matrix(&daemon.mount_point.join("test"));
-}
-
-#[test]
-fn nfs_frontend_serves_the_real_toolbox() {
-    let Some(daemon) = start("nfs") else { return };
+fn platform_default_frontend_serves_the_real_toolbox() {
+    let Some(daemon) = start() else { return };
     run_matrix(&daemon.mount_point.join("test"));
 }

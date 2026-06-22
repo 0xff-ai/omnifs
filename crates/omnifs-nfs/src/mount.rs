@@ -28,8 +28,6 @@ pub struct NfsMountOptions {
     pub bind: SocketAddr,
     pub trace_path: Option<PathBuf>,
     pub state_dir: PathBuf,
-    pub config_dir: Option<PathBuf>,
-    pub cache_dir: Option<PathBuf>,
 }
 
 impl NfsMountOptions {
@@ -38,8 +36,6 @@ impl NfsMountOptions {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             trace_path: None,
             state_dir,
-            config_dir: None,
-            cache_dir: None,
         }
     }
 }
@@ -48,8 +44,6 @@ impl NfsMountOptions {
 pub struct NfsMountState {
     pub version: u8,
     pub mount_point: PathBuf,
-    pub config_dir: Option<PathBuf>,
-    pub cache_dir: Option<PathBuf>,
     pub addr: String,
     pub pid: u32,
 }
@@ -57,12 +51,10 @@ pub struct NfsMountState {
 impl NfsMountState {
     const VERSION: u8 = 1;
 
-    fn current(mount_point: &Path, addr: SocketAddr, options: &NfsMountOptions) -> Self {
+    fn current(mount_point: &Path, addr: SocketAddr) -> Self {
         Self {
             version: Self::VERSION,
             mount_point: mount_point.to_path_buf(),
-            config_dir: options.config_dir.clone(),
-            cache_dir: options.cache_dir.clone(),
             addr: addr.to_string(),
             pid: std::process::id(),
         }
@@ -77,6 +69,7 @@ pub fn mount_blocking(
 ) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
+    sweep_stale_states(&options.state_dir);
     let signal_rx = ctrl_c_receiver(&rt);
     let export = Arc::new(Export::new(rt, Arc::clone(registry)));
     let server = start_server(export, options.bind, options.trace_path.clone())?;
@@ -261,7 +254,8 @@ impl MountCommand {
                 OsString::from(export_source()),
                 mount_point.as_os_str().to_owned(),
             ],
-            failure_context: "mount_nfs via sudo -n; run sudo -v and retry",
+            failure_context: "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
+                              an `Invalid argument` above means an unsupported mount option)",
         }
     }
 
@@ -500,7 +494,15 @@ fn mount_table_contains(entries: &[MountTableEntry], mount_point: &Path) -> bool
 }
 
 fn canonical_mount_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // Resolve symlinks (e.g. /var -> /private/var) via the PARENT and rejoin the
+    // leaf, never stat-ing the path itself: a stat on a dead-server NFS mount
+    // hangs uninterruptibly, which would wedge every `mount_is_active` check
+    // during teardown of a crashed daemon.
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(leaf)) => std::fs::canonicalize(parent)
+            .map_or_else(|_| path.to_path_buf(), |parent| parent.join(leaf)),
+        _ => path.to_path_buf(),
+    }
 }
 
 fn normalize_mount_path(path: &Path) -> PathBuf {
@@ -632,7 +634,7 @@ fn write_state(
         file_options.mode(STATE_FILE_MODE);
     }
     let mut file = file_options.open(&path)?;
-    let state = NfsMountState::current(mount_point, addr, mount_options);
+    let state = NfsMountState::current(mount_point, addr);
     serde_json::to_writer_pretty(&mut file, &state)
         .map_err(|error| NfsFrontendError::State(error.to_string()))?;
     writeln!(file)?;
@@ -642,6 +644,35 @@ fn write_state(
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(STATE_FILE_MODE))?;
     }
     Ok(StateFile { path })
+}
+
+fn sweep_stale_states(state_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(Some(state)) = read_mount_state_file(&path) else {
+            continue;
+        };
+        if !pid_alive(state.pid) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -775,9 +806,7 @@ mod tests {
     fn state_file_is_json_and_removed_on_drop() {
         let temp = tempfile::tempdir().expect("tempdir");
         ensure_private_state_dir(temp.path()).expect("state dir");
-        let mut options = NfsMountOptions::loopback(temp.path().to_path_buf());
-        options.config_dir = Some(PathBuf::from("/etc/omnifs"));
-        options.cache_dir = Some(PathBuf::from("/var/cache/omnifs"));
+        let options = NfsMountOptions::loopback(temp.path().to_path_buf());
         let guard = write_state(
             Path::new("/mnt/omnifs"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
@@ -790,18 +819,11 @@ mod tests {
 
         assert_eq!(state["version"], 1);
         assert_eq!(state["mount_point"], "/mnt/omnifs");
-        assert_eq!(state["config_dir"], "/etc/omnifs");
-        assert_eq!(state["cache_dir"], "/var/cache/omnifs");
         assert_eq!(state["addr"], "127.0.0.1:2049");
         assert!(state["pid"].as_u64().is_some());
         let states = read_mount_states(temp.path()).expect("mount states");
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].mount_point, PathBuf::from("/mnt/omnifs"));
-        assert_eq!(states[0].config_dir, Some(PathBuf::from("/etc/omnifs")));
-        assert_eq!(
-            states[0].cache_dir,
-            Some(PathBuf::from("/var/cache/omnifs"))
-        );
 
         drop(guard);
         assert!(!path.exists());

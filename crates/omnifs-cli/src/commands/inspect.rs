@@ -9,13 +9,12 @@ use anyhow::Context;
 use clap::Args;
 use omnifs_inspector::parse_record_line;
 
-use crate::container_name::ContainerName;
 use crate::inspector::{
     AttachOutcome, ConnectionMode, EventsClient, SourceKind, daemon_addr, format_record, run_plain,
     run_tui,
 };
-use crate::paths::PathOverrides;
-use crate::runtime_target::RuntimeTarget;
+use crate::launch_backend::{ContainerName, DockerTarget};
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InspectArgs {
@@ -84,8 +83,9 @@ impl InspectArgs {
     }
 
     fn resolve_container(&self) -> anyhow::Result<ContainerName> {
-        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
-        RuntimeTarget::resolve_container_name(self.container_name.clone(), &config)
+        let workspace = Workspace::resolve()?;
+        let config = workspace.config()?;
+        DockerTarget::resolve_container_name(self.container_name.clone(), &config)
     }
 }
 

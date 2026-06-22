@@ -171,7 +171,7 @@ ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
 FROM runtime-base AS runtime
 
-# Launcher↔image version handshake. The launcher inspects this label
+# Launcher↔image version handshake. The launcher inspects these labels
 # before `docker create` and refuses to start the container if it is
 # older than the value here — catches the footgun where a
 # contributor's `omnifs` on PATH (e.g. an old npm-installed release)
@@ -179,6 +179,11 @@ FROM runtime-base AS runtime
 # wires new capabilities (ports, env vars, mounts) the old launcher
 # doesn't know about. `omnifs dev` and CI both pass the workspace
 # `CARGO_PKG_VERSION` as the build arg.
+#
+# OMNIFS_LAUNCH_PROTOCOL is set to `daemon-control-v<API_MAJOR>` and must
+# match the `EXPECTED_LAUNCH_PROTOCOL` constant in `crates/omnifs-cli/src/runtime.rs`.
+# Both are derived from the same API major version; when API_MAJOR bumps, update
+# this arg default and the constant together.
 ARG OMNIFS_MIN_LAUNCHER_VERSION=unknown
 ARG OMNIFS_LAUNCH_PROTOCOL=daemon-control-v1
 LABEL ai.0xff.omnifs.min-launcher-version=${OMNIFS_MIN_LAUNCHER_VERSION}

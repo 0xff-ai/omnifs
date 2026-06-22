@@ -1,91 +1,38 @@
-//! `omnifs up` — daemon lifecycle: start.
+//! `omnifs up`: daemon lifecycle start.
 
 use clap::Args;
-use omnifs_creds::FileStore;
 
-use crate::app_context::AppContext;
-use crate::launch::{LaunchSpec, launch_runtime};
-use crate::runtime::ContainerExtras;
+use crate::launch::{LaunchOutcome, Launcher};
 use crate::session::GUEST_FUSE_MOUNT;
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct UpArgs {
-    /// Container image to run.
-    ///
-    /// Defaults to `OMNIFS_IMAGE`, then configured image, then the
-    /// version-matched runtime image.
-    #[arg(long)]
-    pub image: Option<String>,
-    /// Container name.
-    ///
-    /// Defaults to `OMNIFS_CONTAINER_NAME`, then configured session name, then
-    /// `omnifs`.
-    #[arg(long)]
-    pub container_name: Option<String>,
-}
+pub struct UpArgs {}
 
 impl UpArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::PathOverrides;
-
-        let ctx = AppContext::resolve(PathOverrides::default(), self.container_name, self.image)?;
-        let paths = ctx.paths();
-        let runtime = ctx.runtime();
-        let catalog = ctx.catalog();
-
-        // Bail early before touching runtime state if there is nothing to mount.
-        let configs = ctx.workspace().mounts()?;
-        if configs.is_empty() {
-            anyhow::bail!(
-                "no mount configs found in {}; run `omnifs setup` for guided onboarding, or `omnifs init <provider>` to add one directly",
-                paths.mounts_dir.display()
-            );
-        }
-
-        let mounts_dir = paths.mounts_dir.clone();
-        let store = Box::new(FileStore::new(&paths.credentials_file));
-
-        crate::provider_bundle::install_embedded_bundle(&paths.providers_dir)?;
-
-        // The runtime backend is a machine property recorded by `omnifs setup`;
-        // `up` reads it. Host-native serves a host mount; Docker serves FUSE
-        // inside the container.
-        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
-
-        anstream::println!("Using mount configs from {}", mounts_dir.display());
-        launch_runtime(
-            LaunchSpec {
-                runtime,
-                runtime_home: &paths.config_dir,
-                store,
-                verb: "omnifs up",
-                configs,
-                extras: ContainerExtras::default(),
-                host_native,
-                cache_dir: paths.cache_dir.clone(),
+        let workspace = Workspace::resolve()?;
+        match Launcher::new(&workspace, "omnifs up").launch().await? {
+            LaunchOutcome::Native { mount_point } => {
+                anstream::println!();
+                if let Some(mount_point) = mount_point {
+                    anstream::println!(
+                        "Browse it directly: `{}`",
+                        crate::style::bold(format!("ls {}", mount_point.display())),
+                    );
+                }
             },
-            catalog,
-        )
-        .await?;
-
-        if host_native {
-            anstream::println!();
-            if let Ok(status) = crate::client::DaemonClient::new().status().await {
+            LaunchOutcome::Docker { target } => {
                 anstream::println!(
-                    "Browse it directly: `{}`",
-                    crate::style::bold(format!("ls {}", status.mount_point.display())),
+                    "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
+                    target.container_name()
                 );
-            }
-        } else {
-            anstream::println!(
-                "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
-                runtime.container_name()
-            );
-            anstream::println!();
-            anstream::println!(
-                "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
-                crate::style::bold("omnifs shell"),
-            );
+                anstream::println!();
+                anstream::println!(
+                    "Run `{}` to open a shell inside the container and browse {GUEST_FUSE_MOUNT}.",
+                    crate::style::bold("omnifs shell"),
+                );
+            },
         }
         Ok(())
     }

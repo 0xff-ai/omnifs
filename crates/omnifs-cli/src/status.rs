@@ -4,8 +4,9 @@ use comfy_table::{Cell, ContentArrangement, Table, presets};
 use omnifs_creds::{FileStore, Refreshability};
 use std::fmt::Write as _;
 
-use crate::{catalog::ProviderCatalog, paths::Paths};
-use omnifs_api::DaemonStatus;
+use crate::catalog::ProviderCatalog;
+use omnifs_api::{DaemonHealth, DaemonStatus, DaemonSubsystem, HealthState, SubsystemHealth};
+use omnifs_home::WorkspaceLayout;
 
 pub(crate) use crate::auth::AuthReadiness;
 use crate::auth::AuthTerminalKind;
@@ -13,7 +14,7 @@ pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, 
 
 #[derive(Debug, Clone)]
 pub(crate) struct StatusReport {
-    pub(crate) paths: Paths,
+    pub(crate) paths: WorkspaceLayout,
     /// Daemon runtime facts from the control API; `None` when no daemon
     /// answered on the control port.
     pub(crate) runtime: Option<DaemonStatus>,
@@ -23,7 +24,7 @@ pub(crate) struct StatusReport {
 
 pub(crate) fn collect_status(
     catalog: &ProviderCatalog,
-    paths: Paths,
+    paths: WorkspaceLayout,
     runtime: Option<DaemonStatus>,
     mounts: Vec<crate::session::MountConfig>,
 ) -> StatusReport {
@@ -54,20 +55,7 @@ impl StatusReport {
         table.add_row(vec![
             Cell::new("  runtime"),
             Cell::new("│"),
-            Cell::new(match &self.runtime {
-                Some(runtime) if runtime.mounts.is_empty() => "running (no mounts loaded)".into(),
-                Some(runtime) => format!(
-                    "running ({} loaded: {})",
-                    runtime.mounts.len(),
-                    runtime
-                        .mounts
-                        .iter()
-                        .map(|mount| mount.mount.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                None => "not running".into(),
-            }),
+            Cell::new(format_runtime(self.runtime.as_ref())),
         ]);
         table.add_row(vec![
             Cell::new("  mount"),
@@ -77,11 +65,36 @@ impl StatusReport {
         table.add_row(vec![
             Cell::new("  cache"),
             Cell::new("│"),
-            Cell::new(Paths::display(&self.paths.cache_dir)),
+            Cell::new(WorkspaceLayout::display(&self.paths.cache_dir)),
         ]);
         let _ = writeln!(out, "{table}");
-        let _ = writeln!(out);
 
+        if let Some(runtime) = &self.runtime
+            && !runtime.health.subsystems.is_empty()
+        {
+            write_daemon_health(&mut out, &runtime.health);
+        }
+
+        // Surface mounts that did not converge at the last reconcile. A dark
+        // mount is visible here with its failure reason, not silently absent
+        // from the mounts list below.
+        if let Some(runtime) = &self.runtime
+            && !runtime.failed.is_empty()
+        {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Failed mounts ({}):", runtime.failed.len());
+            for failure in &runtime.failed {
+                let _ = writeln!(
+                    out,
+                    "  {}  {:<14} {}",
+                    crate::style::error("●"),
+                    failure.mount,
+                    failure.reason
+                );
+            }
+        }
+
+        let _ = writeln!(out);
         let _ = writeln!(out, "Mounts ({})", self.user_mounts.len());
         if self.user_mounts.is_empty() {
             let _ = writeln!(
@@ -97,13 +110,13 @@ impl StatusReport {
 
         if detail {
             let _ = writeln!(out);
-            write_runtime_providers(&mut out, &self.providers);
+            write_configured_providers(&mut out, &self.providers);
         } else if !self.providers.is_empty() {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
                 "{}",
-                crate::style::dim("(use --detail for provider runtime detail)")
+                crate::style::dim("(use --detail for configured provider detail)")
             );
         }
 
@@ -111,16 +124,76 @@ impl StatusReport {
     }
 }
 
+fn format_runtime(runtime: Option<&DaemonStatus>) -> String {
+    let Some(runtime) = runtime else {
+        return "not running".into();
+    };
+    if runtime.health.subsystems.is_empty() {
+        return "running".into();
+    }
+    format!(
+        "running ({})",
+        health_state_label(runtime.health.overall_state())
+    )
+}
+
 fn format_mount(report: &StatusReport) -> String {
     match &report.runtime {
+        Some(runtime) if !runtime.health.subsystems.is_empty() => runtime
+            .health
+            .subsystem(DaemonSubsystem::Frontend)
+            .map_or_else(
+                || WorkspaceLayout::display(&runtime.mount_point),
+                |frontend| frontend.message.clone(),
+            ),
         Some(runtime) => {
-            let mp = Paths::display(&runtime.mount_point);
+            let mp = WorkspaceLayout::display(&runtime.mount_point);
             match &runtime.frontend {
                 Some(frontend) => format!("{mp} ({})", frontend.fs_type),
                 None => format!("{mp} (not mounted)"),
             }
         },
         None => "—".to_string(),
+    }
+}
+
+fn write_daemon_health(out: &mut String, health: &DaemonHealth) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Daemon health");
+    for subsystem in &health.subsystems {
+        write_health_row(out, subsystem);
+    }
+}
+
+fn write_health_row(out: &mut String, subsystem: &SubsystemHealth) {
+    let glyph = match subsystem.state {
+        HealthState::Healthy => crate::style::success("●"),
+        HealthState::Starting | HealthState::Degraded => crate::style::warn("●"),
+        HealthState::Unhealthy => crate::style::error("●"),
+    };
+    let _ = writeln!(
+        out,
+        "  {glyph}  {:<10} {}",
+        daemon_subsystem_label(subsystem.subsystem),
+        subsystem.message
+    );
+}
+
+fn daemon_subsystem_label(subsystem: DaemonSubsystem) -> &'static str {
+    match subsystem {
+        DaemonSubsystem::Control => "control",
+        DaemonSubsystem::Backend => "backend",
+        DaemonSubsystem::Frontend => "frontend",
+        DaemonSubsystem::Mounts => "mounts",
+    }
+}
+
+fn health_state_label(state: HealthState) -> &'static str {
+    match state {
+        HealthState::Starting => "starting",
+        HealthState::Healthy => "healthy",
+        HealthState::Degraded => "degraded",
+        HealthState::Unhealthy => "unhealthy",
     }
 }
 
@@ -151,7 +224,7 @@ pub(crate) fn write_mount_row(out: &mut String, mount: &UserMountStatus) {
     }
 }
 
-pub(crate) fn write_runtime_providers(out: &mut String, providers: &[ProviderConfigStatus]) {
+pub(crate) fn write_configured_providers(out: &mut String, providers: &[ProviderConfigStatus]) {
     let ready_count = providers
         .iter()
         .filter(|provider| {
@@ -167,7 +240,7 @@ pub(crate) fn write_runtime_providers(out: &mut String, providers: &[ProviderCon
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "providers: {} configured, {} ready",
+        "configured providers: {} configured, {} ready",
         providers.len(),
         ready_count
     );
@@ -230,7 +303,7 @@ pub(crate) struct StatusJson {
     pub version: String,
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
-    pub paths: Paths,
+    pub paths: WorkspaceLayout,
     pub mounts: Vec<MountStatusJson>,
     pub providers: Vec<ProviderStatusJson>,
 }
@@ -240,13 +313,28 @@ pub(crate) struct StatusJson {
 pub(crate) enum RuntimeJson {
     /// A daemon answered on the control API.
     Running {
+        version: String,
+        api_major: u16,
+        api_minor: u16,
+        pid: u32,
+        executable: std::path::PathBuf,
         mount_point: std::path::PathBuf,
         config_dir: std::path::PathBuf,
         cache_dir: std::path::PathBuf,
+        health: DaemonHealth,
         /// Mount names loaded in the daemon's registry.
         mounts: Vec<String>,
+        /// Mounts that did not converge at the last reconcile. Empty when every
+        /// desired mount is serving; a dark mount appears here with its reason.
+        failed_mounts: Vec<FailedMountJson>,
     },
     NotRunning,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FailedMountJson {
+    pub mount: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -322,10 +410,24 @@ impl StatusReport {
             self.runtime
                 .as_ref()
                 .map_or(RuntimeJson::NotRunning, |r| RuntimeJson::Running {
+                    version: r.version.clone(),
+                    api_major: r.api_major,
+                    api_minor: r.api_minor,
+                    pid: r.pid,
+                    executable: r.executable.clone(),
                     mount_point: r.mount_point.clone(),
                     config_dir: r.config_dir.clone(),
                     cache_dir: r.cache_dir.clone(),
+                    health: r.health.clone(),
                     mounts: r.mounts.iter().map(|mount| mount.mount.clone()).collect(),
+                    failed_mounts: r
+                        .failed
+                        .iter()
+                        .map(|f| FailedMountJson {
+                            mount: f.mount.clone(),
+                            reason: f.reason.clone(),
+                        })
+                        .collect(),
                 });
         StatusJson {
             version: env!("CARGO_PKG_VERSION").to_string(),

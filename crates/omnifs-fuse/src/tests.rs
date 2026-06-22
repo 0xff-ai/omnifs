@@ -11,7 +11,7 @@ use fuser::Errno;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta};
-use omnifs_host::Dirs;
+use omnifs_host::HostContext;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::pagination;
 use omnifs_host::path_key::PathKey;
@@ -85,7 +85,7 @@ fn build_harness() -> FuseHarness {
 fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
-    let paths = omnifs_home::Paths::under_root(config_dir.path());
+    let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
     for wasm in ["test_provider.wasm", ARCHIVE_TOOL_WASM] {
         let src = wasm_artifact_path(wasm);
@@ -109,7 +109,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
 
     let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
     let registry = ProviderRegistry::new(
-        Dirs::new(
+        HostContext::new(
             cache_dir.path(),
             &paths.config_dir,
             providers_dir.path(),

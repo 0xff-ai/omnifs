@@ -2,7 +2,7 @@ use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
-use omnifs_host::{BuildError, Dirs, Error, Op, Runtime, TestOp};
+use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
 use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
@@ -45,7 +45,7 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
-        let paths = omnifs_home::Paths::under_root(config_dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
         let provider_dir = provider_artifact_dir();
         let catalog = omnifs_mount::mounts::Catalog::new(&paths.mounts_dir, &provider_dir);
         let resolved = catalog
@@ -62,7 +62,7 @@ impl RuntimeHarness {
             &wasm_path,
             &resolved,
             cloner,
-            Dirs::new(
+            &HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
                 &provider_dir,
@@ -200,9 +200,20 @@ impl TestOpExt for TestOp<'_> {
 
 pub fn make_extractor() -> Arc<ArchiveExtractorComponent> {
     Arc::new(
-        ArchiveExtractorComponent::from_path(provider_wasm_path(ARCHIVE_TOOL_WASM), DEFAULT_LIMITS)
-            .expect("build extractor"),
+        ArchiveExtractorComponent::from_path(
+            provider_wasm_path(ARCHIVE_TOOL_WASM),
+            DEFAULT_LIMITS,
+            Some(&itest_wasm_cache_dir()),
+        )
+        .expect("build extractor"),
     )
+}
+
+/// Stable on-disk wasm artifact cache shared across test processes. nextest
+/// runs a process per test, so without a fixed directory every process would
+/// recompile providers from scratch; a workspace-local dir keeps them warm.
+fn itest_wasm_cache_dir() -> PathBuf {
+    workspace_root().join("target").join("wasm-cache")
 }
 
 /// Borrow the inline payload of a `ReadFileResult`, panicking if the
@@ -290,7 +301,10 @@ fn ensure_providers_built() {
 pub fn make_engine() -> wasmtime::Engine {
     static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
     ENGINE
-        .get_or_init(|| omnifs_host::component_engine(|_| {}).expect("build provider engine"))
+        .get_or_init(|| {
+            omnifs_host::component_engine(Some(&itest_wasm_cache_dir()), |_| {})
+                .expect("build provider engine")
+        })
         .clone()
 }
 

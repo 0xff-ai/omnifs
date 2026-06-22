@@ -8,7 +8,7 @@ The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-
 
 ```bash
 omnifs dev          # build dev image, materialize fixtures, launch container
-omnifs shell        # attach a zsh shell
+omnifs shell        # omnifs-aware shell for exploring the tree
 omnifs logs -f      # follow container output
 omnifs status       # inspect mounts, providers, auth state
 omnifs down         # stop and remove the container

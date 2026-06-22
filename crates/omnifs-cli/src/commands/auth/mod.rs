@@ -9,22 +9,16 @@ mod status;
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
 use omnifs_provider::ProviderManifest;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use crate::app_context::AppContext;
-use crate::catalog::{ProviderCatalog, ProviderTemplate};
-use crate::paths::PathOverrides;
-use crate::presentation::OutputFormat;
+use crate::catalog::{ProviderCatalog, ProviderTemplates};
+use crate::cli::OutputFormat;
 use crate::session::MountConfig;
+use crate::workspace::Workspace;
 
-pub(crate) use login::login_with_paths;
+pub(crate) use login::login_with_workspace;
 
 #[derive(Debug, Clone, Args)]
 pub struct AuthArgs {
-    /// Override the credential file path.
-    #[arg(long)]
-    pub credentials_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: AuthCommand,
 }
@@ -76,20 +70,19 @@ pub enum AuthCommand {
 
 impl AuthArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
-        let mut paths = ctx.paths().clone();
-        if let Some(creds) = self.credentials_file.clone() {
-            paths.credentials_file = creds;
+        let command = self.command;
+        if let AuthCommand::Modes = &command {
+            crate::auth::explain::render_modes_catalog();
+            return Ok(());
         }
-        let catalog = ctx.catalog();
-        let mounts = ctx.workspace().mounts()?;
-        let store = Box::new(FileStore::new(&paths.credentials_file));
-        match self.command {
-            // A static reference card; ignores the mount/credential context above.
-            AuthCommand::Modes => {
-                crate::auth::explain::render_modes_catalog();
-                Ok(())
-            },
+
+        let workspace = Workspace::resolve()?;
+        let layout = workspace.layout();
+        let catalog = workspace.catalog();
+        let mounts = workspace.mounts()?;
+        let store = Box::new(FileStore::new(&layout.credentials_file));
+        match command {
+            AuthCommand::Modes => unreachable!("handled before workspace resolution"),
             AuthCommand::Explain { target, json } => run_explain(catalog, &mounts, &target, json),
             AuthCommand::Login {
                 mount,
@@ -97,26 +90,17 @@ impl AuthArgs {
                 scopes,
             } => login::login(catalog, &mounts, store, &mount, None, no_browser, &scopes).await,
             AuthCommand::Logout { mount, revoke } => {
-                logout::logout(
-                    &paths,
-                    catalog,
-                    &mounts,
-                    store.as_ref(),
-                    &mount,
-                    None,
-                    revoke,
-                )
-                .await
+                logout::logout(catalog, &mounts, store.as_ref(), &mount, None, revoke).await
             },
             AuthCommand::Status { json } => match OutputFormat::from(json) {
-                OutputFormat::Json => status::status_json(&paths, catalog, mounts, store.as_ref()),
-                OutputFormat::Text => status::status(&paths, catalog, mounts, store.as_ref()),
+                OutputFormat::Json => status::status_json(catalog, mounts, store.as_ref()),
+                OutputFormat::Text => status::status(layout, catalog, mounts, store.as_ref()),
             },
             AuthCommand::Refresh { mount } => {
-                import::refresh(&paths, catalog, &mounts, store, &mount, None).await
+                import::refresh(catalog, &mounts, store, &mount, None).await
             },
             AuthCommand::Scopes { mount } => {
-                import::scopes(&paths, catalog, &mounts, store.as_ref(), &mount, None)
+                import::scopes(catalog, &mounts, store.as_ref(), &mount, None)
             },
             AuthCommand::Import {
                 mount,
@@ -171,25 +155,22 @@ fn run_explain(
 /// Resolve an `auth explain` target, which may be a provider id or a configured
 /// mount name, to the owning provider manifest.
 fn resolve_target_manifest<'a>(
-    templates: &'a BTreeMap<String, ProviderTemplate>,
+    templates: &'a ProviderTemplates,
     mounts: &[MountConfig],
     target: &str,
 ) -> anyhow::Result<&'a ProviderManifest> {
-    if let Some(template) = templates.get(target) {
+    if let Some(template) = templates.by_id(target) {
         return Ok(&template.manifest);
     }
     if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target) {
         let provider_ref = &mount.config.provider;
-        if let Some(template) = templates
-            .values()
-            .find(|t| t.manifest.id == *provider_ref || t.manifest.provider == *provider_ref)
-        {
+        if let Some((_, template)) = templates.by_reference(provider_ref) {
             return Ok(&template.manifest);
         }
     }
     anyhow::bail!(
         "no provider or mount named `{target}`; known providers: {}",
-        templates.keys().cloned().collect::<Vec<_>>().join(", ")
+        templates.ids().collect::<Vec<_>>().join(", ")
     )
 }
 

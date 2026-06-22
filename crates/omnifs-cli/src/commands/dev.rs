@@ -11,23 +11,22 @@
 use anyhow::Context;
 use clap::Args;
 use omnifs_creds::FileStore;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
-use crate::catalog::ProviderTemplate;
+use crate::catalog::ProviderTemplates;
 use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_mounts;
 use crate::dev_support::{DevImageTag, WorkspaceRoot};
 use crate::launch::{LaunchSpec, launch_runtime};
-use crate::paths::{PathOverrides, Paths};
+use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::runtime::ContainerExtras;
 use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, MountConfig, env_string, set_private_dir,
 };
+use omnifs_home::WorkspaceLayout;
 
 const CHINOOK_URL: &str = "https://raw.githubusercontent.com/lerocha/chinook-database/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite";
 const GUEST_DB_DIR: &str = "/data";
@@ -55,9 +54,7 @@ impl DevArgs {
         // Dedicated dev home under the standard omnifs home. Credentials and
         // fixtures live here, never in the repo checkout (no credential-via-git
         // leak) and never mixed into the user's real `~/.omnifs`.
-        let dev_home = Paths::resolve(PathOverrides::default())?
-            .config_dir
-            .join("dev");
+        let dev_home = WorkspaceLayout::resolve()?.config_dir.join("dev");
         let db_dir = dev_home.join("db");
         let db_path = db_dir.join("test.db");
 
@@ -96,16 +93,12 @@ impl DevArgs {
             build_image(workspace.path(), &image)?;
         }
 
-        let ctx = AppContext::resolve(
-            PathOverrides {
-                config_dir: Some(dev_home.clone()),
-                ..PathOverrides::default()
-            },
-            Some(container_name.clone()),
-            Some(image),
-        )?;
-        let paths = ctx.paths();
-        let runtime = ctx.runtime();
+        let dev_workspace =
+            crate::workspace::Workspace::from_layout(WorkspaceLayout::under_root(&dev_home));
+        let config = dev_workspace.config()?;
+        let paths = dev_workspace.layout();
+        let docker_target =
+            DockerTarget::resolve(Some(container_name.clone()), Some(image), &config)?;
 
         // Providers: export freshly from the workspace, or unpack the launcher
         // bundle when running a pre-built image (no workspace build).
@@ -121,7 +114,7 @@ impl DevArgs {
         // Provision each dev mount's credential from the host into the dev-home
         // store, then launch only the mounts we could provision (plus the ones
         // that need no auth). Same detect→validate→store path as `omnifs init`.
-        let templates = ctx.catalog().provider_templates()?;
+        let templates = dev_workspace.catalog().provider_templates()?;
         let mut configs =
             provision_dev_mounts(dev_mounts::configs()?, &templates, &paths.credentials_file)
                 .await?;
@@ -153,23 +146,20 @@ impl DevArgs {
         let store = Box::new(FileStore::new(&paths.credentials_file));
         launch_runtime(
             LaunchSpec {
-                runtime,
-                runtime_home: &paths.config_dir,
+                backend: LaunchBackend::docker(docker_target.clone()),
+                paths,
                 store,
                 verb: "omnifs dev",
                 configs,
                 extras: ContainerExtras { binds },
-                // `omnifs dev` is always the Docker sandbox.
-                host_native: false,
-                cache_dir: paths.cache_dir.clone(),
             },
-            ctx.catalog(),
+            dev_workspace.catalog(),
         )
         .await?;
 
         anstream::println!(
             "✓ {GUEST_FUSE_MOUNT} is mounted inside `{}`",
-            runtime.container_name()
+            docker_target.container_name()
         );
         anstream::println!();
         anstream::println!("Attach a shell with: omnifs shell");
@@ -184,16 +174,13 @@ impl DevArgs {
 /// that needs no auth (the `SQLite` fixture) is always kept.
 async fn provision_dev_mounts(
     configs: Vec<MountConfig>,
-    templates: &BTreeMap<String, ProviderTemplate>,
+    templates: &ProviderTemplates,
     credentials_file: &Path,
 ) -> anyhow::Result<Vec<MountConfig>> {
     let mut ready = Vec::new();
     for config in configs {
         let provider_file = config.config.provider.clone();
-        let Some((provider_id, template)) = templates
-            .iter()
-            .find(|(_, template)| template.manifest.provider == provider_file)
-        else {
+        let Some((provider_id, template)) = templates.by_provider_file(&provider_file) else {
             anstream::eprintln!(
                 "  ! mount `{}` references unknown provider `{provider_file}`; skipping",
                 config.name

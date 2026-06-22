@@ -17,13 +17,14 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 use omnifs_provider::ProviderManifest;
 
-use crate::app_context::AppContext;
-use crate::catalog;
+use crate::catalog::{ProviderTemplate, ProviderTemplates};
 use crate::commands::{init, up};
+use crate::config::ConfiguredBackend;
 use crate::error::WithHint;
+use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
 use crate::session::GUEST_FUSE_MOUNT;
+use crate::workspace::Workspace;
 
 use self::host_os::HostOs;
 use self::summary::InitResult;
@@ -55,42 +56,49 @@ impl SetupArgs {
             anyhow::bail!("omnifs does not yet run on this platform");
         }
 
-        let ctx = AppContext::resolve_default()?;
-        let paths = ctx.paths();
+        let workspace = Workspace::resolve()?;
+        let paths = workspace.layout();
+        let config = workspace.config()?;
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
         // Record the launch backend so `omnifs up`/`down` read it. Docker is
         // optional; native mode does not require a Docker daemon or image pull.
-        let runtime = ctx.config().runtime();
-        if ctx.config().system.runtime.is_none() {
+        let backend = config.backend();
+        if config.system.runtime.is_none() {
             let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
-            file.set_system_runtime(runtime)?;
+            file.set_system_backend(backend)?;
             file.save()?;
         }
-        let host_native = runtime == crate::config::Runtime::Native;
+        let host_native = backend == ConfiguredBackend::Native;
 
         if !host_native {
-            let runtime = connect_runtime(os, ctx.runtime()).await?;
+            let docker_target = DockerTarget::resolve(None, None, &config)?;
+            let runtime = connect_runtime(os, &docker_target).await?;
             runtime
-                .pull_image_with_progress(ctx.runtime().image().as_str())
+                .pull_image_with_progress(docker_target.image().as_str())
                 .await?;
         }
 
-        let catalog = ctx.catalog();
-        let mounts = ctx.workspace().mounts()?;
+        let catalog = workspace.catalog();
+        let mounts = workspace.mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = catalog.configured_mounts_by_provider(&mounts, &templates);
+        let configured = templates.configured_mounts(catalog, &mounts);
 
         let selected = resolve_selection(&self, &templates, &configured)?;
         let results = run_init_loop(&selected, &self, &templates).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
-            let mount_point = crate::paths::default_host_mount_point()?;
-            let mount_root = crate::paths::Paths::display(&mount_point);
+            // The daemon resolves its own mount point; we preview the expected
+            // default here for the setup summary (HOME/omnifs, same logic as
+            // the daemon's `resolve_mount_point` default).
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve host mount point: set HOME"))?;
+            let mount_point = std::path::PathBuf::from(home).join("omnifs");
+            let mount_root = omnifs_home::WorkspaceLayout::display(&mount_point);
             (
                 "Host mount",
                 mount_root.clone(),
@@ -122,7 +130,7 @@ impl SetupArgs {
                 "\nNo mounts to launch. Add one with `omnifs mounts add <provider>`, then run `omnifs up`."
             );
         } else {
-            launch_via_up(ctx.config()).await?;
+            launch_via_up().await?;
         }
         Ok(())
     }
@@ -152,7 +160,7 @@ fn print_explainer(os: HostOs) {
     anstream::println!();
 }
 
-async fn connect_runtime(os: HostOs, target: &RuntimeTarget) -> anyhow::Result<Runtime> {
+async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Runtime> {
     let runtime = Runtime::connect_for(target).context("connect to Docker daemon")?;
     runtime
         .ping()
@@ -166,7 +174,7 @@ async fn connect_runtime(os: HostOs, target: &RuntimeTarget) -> anyhow::Result<R
 /// otherwise an interactive `inquire::MultiSelect` over unconfigured providers.
 fn resolve_selection(
     args: &SetupArgs,
-    templates: &BTreeMap<String, catalog::ProviderTemplate>,
+    templates: &ProviderTemplates,
     configured: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<String>> {
     if !args.providers.is_empty() {
@@ -181,8 +189,9 @@ fn resolve_selection(
         anstream::println!();
     }
 
-    let mut selectable: Vec<&catalog::ProviderTemplate> = templates
-        .values()
+    let mut selectable: Vec<&ProviderTemplate> = templates
+        .iter()
+        .map(|(_, tmpl)| tmpl)
         .filter(|tmpl| !configured.contains_key(&tmpl.manifest.id))
         .collect();
     if selectable.is_empty() {
@@ -270,15 +279,15 @@ impl fmt::Display for ProviderOption {
 
 fn validate_preselected(
     requested: &[String],
-    templates: &BTreeMap<String, catalog::ProviderTemplate>,
+    templates: &ProviderTemplates,
     configured: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<String>> {
     let mut out = Vec::new();
     for id in requested {
-        if !templates.contains_key(id) {
+        if templates.by_id(id).is_none() {
             anyhow::bail!(
                 "provider `{id}` is not available; known: {}",
-                templates.keys().cloned().collect::<Vec<_>>().join(", ")
+                templates.ids().collect::<Vec<_>>().join(", ")
             );
         }
         if configured.contains_key(id) {
@@ -296,11 +305,11 @@ fn validate_preselected(
 async fn run_init_loop(
     selected: &[String],
     args: &SetupArgs,
-    templates: &BTreeMap<String, catalog::ProviderTemplate>,
+    templates: &ProviderTemplates,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
     for provider_id in selected {
-        let Some(template) = templates.get(provider_id) else {
+        let Some(template) = templates.by_id(provider_id) else {
             out.push(InitResult {
                 provider_id: provider_id.clone(),
                 mount_name: provider_id.clone(),
@@ -361,13 +370,8 @@ async fn run_init_loop(
     out
 }
 
-async fn launch_via_up(config: &crate::config::Config) -> anyhow::Result<()> {
+async fn launch_via_up() -> anyhow::Result<()> {
     anstream::println!();
     anstream::println!("Launching omnifs ...");
-    up::UpArgs {
-        image: config.image.clone(),
-        container_name: config.container_name.clone(),
-    }
-    .run()
-    .await
+    up::UpArgs::default().run().await
 }

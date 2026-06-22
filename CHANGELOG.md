@@ -37,6 +37,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
 - **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
 - **Improvement:** Released omnifs binaries now embed the provider and tool WASM and unpack it into the host on launch, so first run and upgrades install providers offline instead of downloading them from GitHub releases. (#142)
+- **Feature:** The CLI is now a thin client that always communicates with the daemon over its control API; commands like `down`, `status`, and `reset` no longer guess whether the daemon is native or Docker, making behavior consistent across runtimes. (#143)
+- **Fix:** A crashed daemon no longer hangs the `down` command; teardown now resolves quickly on both Linux and macOS by avoiding dead mounts. (#143)
 
 ### Caching & performance
 - **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.

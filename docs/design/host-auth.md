@@ -411,7 +411,7 @@ A provider manifest supplies only what is specific to it: which token to create 
 
 ## CLI surface
 
-`omnifs auth` is a subcommand group. Every subcommand is provider-agnostic; the CLI reads metadata from the daemon and runs the generic engine.
+`omnifs auth` is a subcommand group. Every subcommand is provider-agnostic; the CLI reads provider auth manifests from the workspace catalog, reads credentials from the workspace store, and runs the generic engine.
 
 | Command | Description |
 |---|---|

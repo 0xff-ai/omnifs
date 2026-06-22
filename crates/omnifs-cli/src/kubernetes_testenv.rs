@@ -67,6 +67,11 @@ pub(crate) fn up(workspace: &Path, sock_dir: &Path) -> anyhow::Result<(String, M
 
 /// Tear down the dev cluster stack. Best-effort and idempotent: a no-op when
 /// the workspace has no compose file or nothing is running.
+///
+/// Called from `omnifs dev` on failure and, workspace-gated, from `omnifs down`
+/// so a contributor's full stop also tears down the dev cluster. Outside a
+/// workspace checkout there is no cluster, so production `down` never reaches
+/// the compose command.
 pub(crate) fn down(workspace: &Path) -> anyhow::Result<()> {
     let compose = compose_file(workspace);
     if !compose.is_file() {

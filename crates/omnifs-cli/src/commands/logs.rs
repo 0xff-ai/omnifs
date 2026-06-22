@@ -2,8 +2,9 @@
 
 use clap::Args;
 
+use crate::launch_backend::DockerTarget;
 use crate::runtime::Runtime;
-use crate::runtime_target::RuntimeTarget;
+use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LogsArgs {
@@ -19,10 +20,9 @@ pub struct LogsArgs {
 
 impl LogsArgs {
     pub async fn run(self) -> anyhow::Result<()> {
-        use crate::paths::PathOverrides;
-
-        let (_paths, config) = crate::paths::resolve_with_config(PathOverrides::default())?;
-        let target = RuntimeTarget::resolve(self.container_name, None, &config)?;
+        let workspace = Workspace::resolve()?;
+        let config = workspace.config()?;
+        let target = DockerTarget::resolve(self.container_name, None, &config)?;
         let runtime = Runtime::connect_ready(&target, "omnifs logs").await?;
         let container_name = target.container_name().clone();
 

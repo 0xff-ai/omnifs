@@ -5,7 +5,7 @@
 //! `host:port` for non-default setups.
 
 use anyhow::{Context as _, Result};
-use omnifs_api::{API_VERSION, DaemonStatus, ReconcileReport, StopReport, VersionInfo};
+use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, ReconcileReport, StopReport};
 use std::time::Duration;
 
 use crate::inspector::daemon_addr;
@@ -15,9 +15,56 @@ pub(crate) struct DaemonClient {
     http: reqwest::Client,
 }
 
-pub(crate) enum DaemonProbe {
-    Unreachable,
-    Compatible(VersionInfo),
+#[derive(Debug)]
+pub(crate) enum DaemonControlState {
+    Absent,
+    Sick { reason: String },
+    Incompatible(Box<DaemonStatus>),
+    Compatible(Box<DaemonStatus>),
+}
+
+impl DaemonControlState {
+    fn from_status(status: DaemonStatus) -> Self {
+        if status.api_major == API_MAJOR {
+            Self::Compatible(Box::new(status))
+        } else {
+            Self::Incompatible(Box::new(status))
+        }
+    }
+
+    fn warn_minor_skew(&self) {
+        let Self::Compatible(status) = self else {
+            return;
+        };
+        if status.api_minor != API_MINOR {
+            anstream::eprintln!(
+                "note: daemon API minor v{}.{}, CLI expects v{API_MAJOR}.{API_MINOR}; \
+                 proceeding (minor skew is non-breaking)",
+                status.api_major,
+                status.api_minor,
+            );
+        }
+    }
+
+    fn compatible_optional(self, base: &str) -> Result<Option<DaemonStatus>> {
+        match self {
+            Self::Compatible(status) => Ok(Some(*status)),
+            Self::Absent => Ok(None),
+            Self::Sick { reason } => Err(anyhow::anyhow!(
+                "daemon answered on the control port at {base}, but status could not be read: {reason}"
+            )),
+            Self::Incompatible(status) => Err(incompatible_daemon_error(&status)),
+        }
+    }
+
+    fn require_compatible(self, base: &str) -> Result<DaemonStatus> {
+        match self.compatible_optional(base)? {
+            Some(status) => Ok(status),
+            None => Err(anyhow::anyhow!(
+                "no daemon answered on the control port at {base}"
+            )),
+        }
+    }
 }
 
 impl DaemonClient {
@@ -33,50 +80,59 @@ impl DaemonClient {
         }
     }
 
-    /// Probe for a daemon and verify its control API version in one step.
-    pub(crate) async fn probe(&self) -> Result<DaemonProbe> {
+    /// Probe for a daemon and classify its control state in one step.
+    ///
+    /// A compatible daemon has the same control API major. Minor skew is
+    /// reported as a note because it is additive. Incompatible and sick daemons
+    /// are returned as typed states so callers do not re-create probe policy.
+    pub(crate) async fn probe(&self) -> DaemonControlState {
+        let response = match self.get_optional("/v1/status", "query daemon status").await {
+            Ok(Some(response)) => response,
+            Ok(None) => return DaemonControlState::Absent,
+            Err(error) => {
+                return DaemonControlState::Sick {
+                    reason: format!("{error:#}"),
+                };
+            },
+        };
+        let state = match Self::parse_status(response).await {
+            Ok(status) => DaemonControlState::from_status(status),
+            Err(error) => DaemonControlState::Sick {
+                reason: format!("{error:#}"),
+            },
+        };
+        state.warn_minor_skew();
+        state
+    }
+
+    /// Raw daemon status probe. Connection absence is `None`; a reachable
+    /// daemon's HTTP status and JSON errors are propagated.
+    pub(crate) async fn status_optional(&self) -> Result<Option<DaemonStatus>> {
         let Some(response) = self
-            .get_optional("/v1/version", "query daemon version")
+            .get_optional("/v1/status", "query daemon status")
             .await?
         else {
-            return Ok(DaemonProbe::Unreachable);
+            return Ok(None);
         };
-        let info: VersionInfo = response
-            .error_for_status()
-            .context("daemon version request failed")?
-            .json()
-            .await
-            .context("parse daemon version")?;
-        anyhow::ensure!(
-            info.api_version == API_VERSION,
-            "daemon speaks control API v{}, this CLI speaks v{API_VERSION}; \
-             upgrade so the CLI and runtime image versions match (daemon v{})",
-            info.api_version,
-            info.version,
-        );
-        Ok(DaemonProbe::Compatible(info))
+        Self::parse_status(response).await.map(Some)
     }
 
     /// Verify the daemon is reachable and speaks this CLI's control API.
-    pub(crate) async fn require_compatible(&self) -> Result<VersionInfo> {
-        match self.probe().await? {
-            DaemonProbe::Compatible(info) => Ok(info),
-            DaemonProbe::Unreachable => Err(anyhow::anyhow!(
-                "no daemon answered on the control port at {}",
-                self.base
-            )),
-        }
+    pub(crate) async fn require_compatible(&self) -> Result<DaemonStatus> {
+        self.probe().await.require_compatible(&self.base)
+    }
+
+    /// Daemon status when a compatible daemon answers; `None` when no daemon
+    /// answered on the control port.
+    pub(crate) async fn compatible_status_optional(&self) -> Result<Option<DaemonStatus>> {
+        self.probe().await.compatible_optional(&self.base)
     }
 
     /// Daemon runtime facts from a reachable, compatible daemon.
     pub(crate) async fn status(&self) -> Result<DaemonStatus> {
-        let response = self
-            .get_optional("/v1/status", "query daemon status")
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("no daemon answered on the control port at {}", self.base)
-            })?;
-        Self::parse_status(response).await
+        self.status_optional().await?.ok_or_else(|| {
+            anyhow::anyhow!("no daemon answered on the control port at {}", self.base)
+        })
     }
 
     async fn get_optional(
@@ -112,6 +168,14 @@ impl DaemonClient {
             .error_for_status()
             .context("daemon reconcile request failed")?;
         response.json().await.context("parse reconcile report")
+    }
+
+    /// Reconcile only when a compatible daemon is running.
+    pub(crate) async fn reconcile_if_running(&self) -> Result<Option<ReconcileReport>> {
+        if self.compatible_status_optional().await?.is_none() {
+            return Ok(None);
+        }
+        self.reconcile().await.map(Some)
     }
 
     /// Ask the daemon to unmount its frontend and exit, returning what it tore
@@ -150,6 +214,23 @@ impl DaemonClient {
     }
 }
 
+fn incompatible_daemon_error(status: &DaemonStatus) -> anyhow::Error {
+    let detail = if status.api_major == 0 {
+        "this daemon predates major/minor API versioning".to_string()
+    } else {
+        format!(
+            "daemon speaks control API v{}.{}",
+            status.api_major, status.api_minor
+        )
+    };
+    anyhow::anyhow!(
+        "{detail}; this CLI speaks v{API_MAJOR}.{API_MINOR} (daemon binary v{}). \
+         Stop it with `omnifs down`, or upgrade the runtime image so the CLI and \
+         daemon versions match, then rerun.",
+        status.version,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,26 +238,20 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn status_propagates_reachable_status_errors() {
+    async fn status_optional_propagates_reachable_status_errors() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0; 1024];
-                let read = stream.read(&mut request).await.unwrap();
-                let request = String::from_utf8_lossy(&request[..read]);
-                let response = if request.starts_with("GET /v1/version ") {
-                    json_response(&format!(
-                        r#"{{"version":"test-daemon","api_version":{API_VERSION}}}"#
-                    ))
-                } else if request.starts_with("GET /v1/status ") {
-                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_string()
-                } else {
-                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_string()
-                };
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            let response = if request.starts_with("GET /v1/status ") {
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_string()
+            } else {
+                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_string()
+            };
+            stream.write_all(response.as_bytes()).await.unwrap();
         });
 
         let client = DaemonClient {
@@ -188,13 +263,74 @@ mod tests {
                 .unwrap(),
         };
 
-        assert!(matches!(
-            client.probe().await.unwrap(),
-            DaemonProbe::Compatible(_)
-        ));
-        let error = client.status().await.unwrap_err();
+        let error = client.status_optional().await.unwrap_err();
         assert!(format!("{error:#}").contains("daemon status request failed"));
         server.await.unwrap();
+    }
+
+    /// A daemon reporting a different major must be refused.
+    #[tokio::test]
+    async fn probe_refuses_on_major_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            let _ = String::from_utf8_lossy(&request[..read]);
+            let response = json_response(&status_body("old-daemon", API_MAJOR + 1, 0));
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient {
+            base: format!("http://{addr}"),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(500))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+
+        let err = client
+            .probe()
+            .await
+            .require_compatible(&client.base)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("control API"),
+            "error should mention control API mismatch: {msg}"
+        );
+    }
+
+    /// A daemon reporting the same major but a different minor must proceed (with a warning).
+    #[tokio::test]
+    async fn probe_proceeds_on_minor_skew() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            let _ = String::from_utf8_lossy(&request[..read]);
+            let response = json_response(&status_body("newer-daemon", API_MAJOR, API_MINOR + 1));
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = DaemonClient {
+            base: format!("http://{addr}"),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(500))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+
+        // Minor skew: probe must succeed (return Compatible).
+        assert!(matches!(
+            client.probe().await,
+            DaemonControlState::Compatible(_)
+        ));
     }
 
     fn json_response(body: &str) -> String {
@@ -202,6 +338,22 @@ mod tests {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
             body.len(),
             body
+        )
+    }
+
+    fn status_body(version: &str, api_major: u16, api_minor: u16) -> String {
+        format!(
+            r#"{{
+                "version":"{version}",
+                "api_major":{api_major},
+                "api_minor":{api_minor},
+                "mount_point":"/tmp/omnifs",
+                "config_dir":"/tmp/omnifs-home",
+                "cache_dir":"/tmp/omnifs-home/cache",
+                "providers_dir":"/tmp/omnifs-home/providers",
+                "frontend":null,
+                "mounts":[]
+            }}"#
         )
     }
 }

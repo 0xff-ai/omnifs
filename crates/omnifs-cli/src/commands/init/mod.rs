@@ -21,15 +21,16 @@ use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
 
-use crate::app_context::AppContext;
 use crate::auth::AuthSelection;
 use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
-use crate::paths::{PathOverrides, Paths};
+use crate::launch_backend::LaunchBackend;
 use crate::token_source::TokenSource;
+use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
+use omnifs_home::WorkspaceLayout;
 use provider_selection::ProviderSelection;
 use token_validation::StaticTokenValidator;
 
@@ -68,11 +69,10 @@ pub struct InitArgs {
 impl InitArgs {
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let ctx = AppContext::resolve(PathOverrides::default(), None, None)?;
-        let paths = ctx.paths();
+        let workspace = Workspace::resolve()?;
+        let paths = workspace.layout();
         let interactive = !self.no_input;
-        let catalog = ctx.catalog();
-        let workspace = ctx.workspace();
+        let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
         let templates = catalog.provider_templates()?;
         if templates.is_empty() {
@@ -88,7 +88,7 @@ impl InitArgs {
         )?;
 
         let template = templates
-            .get(&provider_name)
+            .by_id(&provider_name)
             .ok_or_else(|| {
                 anyhow!(
                     "provider `{provider_name}` not found; available: {}",
@@ -147,7 +147,7 @@ impl InitArgs {
         let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
         mount_file.write_to(&mount_path)?;
         let spec = mount_file.into_spec()?;
-        anstream::println!("✓ Wrote {}", Paths::display(&mount_path));
+        anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
 
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
@@ -161,9 +161,8 @@ impl InitArgs {
                 .await?;
             } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
-                auth::login_with_paths(
-                    paths.config_dir.clone(),
-                    paths.credentials_file.clone(),
+                auth::login_with_workspace(
+                    &workspace,
                     mount_name.as_str(),
                     auth.account.as_deref(),
                     self.no_browser,
@@ -214,8 +213,8 @@ impl InitArgs {
 
         let config = crate::session::MountConfig::from_parsed(spec, mount_path.clone())?;
         let store = FileStore::new(&paths.credentials_file);
-        let host_native = ctx.config().runtime() == crate::config::Runtime::Native;
-        match crate::live::add_mount(catalog, &store, config, host_native).await {
+        let backend = LaunchBackend::resolve(&workspace.config()?, None, None)?;
+        match crate::live::add_mount(workspace.daemon(), catalog, &store, config, &backend).await {
             Ok(crate::live::LiveApply::Applied) => {
                 anstream::println!("✓ Loaded into the running daemon");
             },
@@ -641,7 +640,7 @@ mod tests {
     #[test]
     fn load_provider_templates_reads_metadata_from_wasm() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
@@ -655,14 +654,15 @@ mod tests {
         .unwrap();
         std::fs::write(paths.providers_dir.join("ignored.wasm"), b"\0asm\x01\0\0\0").unwrap();
 
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
-        assert!(templates.contains_key("github"));
-        assert_eq!(templates["linear"].manifest.default_mount, "linear-dev");
+        assert!(templates.by_id("github").is_some());
+        let linear = templates.by_id("linear").unwrap();
+        assert_eq!(linear.manifest.default_mount, "linear-dev");
         assert_eq!(
-            templates["linear"].source,
+            linear.source,
             ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_linear.wasm"))
         );
     }
@@ -670,26 +670,22 @@ mod tests {
     #[test]
     fn load_provider_templates_includes_builtins_without_provider_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
-        assert_eq!(
-            templates["github"].manifest.provider,
-            "omnifs_provider_github.wasm"
-        );
-        assert_eq!(
-            templates["linear"].manifest.provider,
-            "omnifs_provider_linear.wasm"
-        );
-        assert_eq!(templates["github"].source, ProviderSource::Builtin);
+        let github = templates.by_id("github").unwrap();
+        let linear = templates.by_id("linear").unwrap();
+        assert_eq!(github.manifest.provider, "omnifs_provider_github.wasm");
+        assert_eq!(linear.manifest.provider, "omnifs_provider_linear.wasm");
+        assert_eq!(github.source, ProviderSource::Builtin);
     }
 
     #[test]
     fn load_provider_templates_prefers_disk_metadata_over_builtin_by_id() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::Paths::under_root(dir.path());
+        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let mut manifest = provider_manifest();
         manifest.id = "github".to_string();
@@ -705,13 +701,14 @@ mod tests {
         )
         .unwrap();
 
-        let templates = ProviderCatalog::for_dirs(&paths.mounts_dir, &paths.providers_dir)
+        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
             .provider_templates()
             .unwrap();
 
-        assert_eq!(templates["github"].manifest.default_mount, "github-dev");
+        let github = templates.by_id("github").unwrap();
+        assert_eq!(github.manifest.default_mount, "github-dev");
         assert_eq!(
-            templates["github"].source,
+            github.source,
             ProviderSource::Disk(paths.providers_dir.join("omnifs_provider_github.wasm"))
         );
     }

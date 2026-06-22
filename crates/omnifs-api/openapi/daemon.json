@@ -182,28 +182,32 @@
           }
         }
       }
-    },
-    "/v1/version": {
-      "get": {
-        "tags": [],
-        "operationId": "version",
-        "responses": {
-          "200": {
-            "description": "daemon control API version",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VersionInfo"
-                }
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {
     "schemas": {
+      "DaemonBackend": {
+        "type": "string",
+        "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
+        "enum": [
+          "native",
+          "docker"
+        ]
+      },
+      "DaemonHealth": {
+        "type": "object",
+        "required": [
+          "subsystems"
+        ],
+        "properties": {
+          "subsystems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubsystemHealth"
+            }
+          }
+        }
+      },
       "DaemonStatus": {
         "type": "object",
         "description": "`GET /v1/status`: the daemon's runtime facts. Host-side state (mount\nconfigs, credential readiness) is the CLI's contribution to the merged\nstatus view; it never comes from the daemon.",
@@ -216,11 +220,37 @@
           "mounts"
         ],
         "properties": {
+          "api_major": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Control API major version. Incompatible change when this differs.",
+            "minimum": 0
+          },
+          "api_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Control API minor version. Additive change; CLI warns and proceeds.",
+            "minimum": 0
+          },
+          "backend": {
+            "$ref": "#/components/schemas/DaemonBackend",
+            "description": "Backend serving this daemon, so the CLI tears down and reports the right\nbackend without inferring it from configuration. A daemon old enough to\nomit the field predates host-native and is read as Docker."
+          },
           "cache_dir": {
             "type": "string"
           },
           "config_dir": {
             "type": "string"
+          },
+          "executable": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MountFailure"
+            },
+            "description": "Mounts that did not converge at the last reconcile, with reasons. Empty\nwhen every desired mount is serving; a dark mount appears here, not as a\nsilent absence from `mounts`."
           },
           "frontend": {
             "oneOf": [
@@ -233,6 +263,10 @@
               }
             ]
           },
+          "health": {
+            "$ref": "#/components/schemas/DaemonHealth",
+            "description": "Daemon-owned health for runtime subsystems. CLI status renders these\nentries instead of reconstructing daemon health from raw fields."
+          },
           "mount_point": {
             "type": "string"
           },
@@ -243,6 +277,11 @@
             },
             "description": "Provider mounts loaded in the registry."
           },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
           "providers_dir": {
             "type": "string"
           },
@@ -250,6 +289,15 @@
             "type": "string"
           }
         }
+      },
+      "DaemonSubsystem": {
+        "type": "string",
+        "enum": [
+          "control",
+          "backend",
+          "frontend",
+          "mounts"
+        ]
       },
       "FrontendInfo": {
         "type": "object",
@@ -265,6 +313,15 @@
             "type": "string"
           }
         }
+      },
+      "HealthState": {
+        "type": "string",
+        "enum": [
+          "starting",
+          "healthy",
+          "degraded",
+          "unhealthy"
+        ]
       },
       "MountFailure": {
         "type": "object",
@@ -376,21 +433,22 @@
           }
         }
       },
-      "VersionInfo": {
+      "SubsystemHealth": {
         "type": "object",
-        "description": "`GET /v1/version`",
         "required": [
-          "version",
-          "api_version"
+          "subsystem",
+          "state",
+          "message"
         ],
         "properties": {
-          "api_version": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "version": {
+          "message": {
             "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HealthState"
+          },
+          "subsystem": {
+            "$ref": "#/components/schemas/DaemonSubsystem"
           }
         }
       }

@@ -2,14 +2,14 @@
 //!
 //! This crate is the single source of truth for the omnifs on-disk layout.
 //! Both the CLI and daemon depend on it; neither duplicates the resolution
-//! logic. The daemon never reads `config.toml`, so the two-pass
-//! `resolve_with_config` stays in the CLI.
+//! logic. Higher-level CLI factories layer config and daemon handles on top of
+//! this path-only layout.
 //!
-//! Resolution order (per directory):
-//!   1. Explicit override from `PathOverrides` (CLI flag)
-//!   2. `OMNIFS_HOME` (fans out: all dirs under `$OMNIFS_HOME`)
-//!   3. Default: `$HOME/.omnifs/{...}`
+//! Resolution order:
+//!   1. `OMNIFS_HOME`
+//!   2. Default: `$HOME/.omnifs`
 
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -29,16 +29,28 @@ pub const CACHE_SUBDIR: &str = "cache";
 pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 
-/// Explicit (CLI flag) relocations for individual directories.
-#[derive(Debug, Clone, Default)]
-pub struct PathOverrides {
-    pub config_dir: Option<PathBuf>,
-    pub cache_dir: Option<PathBuf>,
+/// Role marker for code that only needs the shared workspace layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shared;
+
+/// Role marker for daemon-side workspace use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Daemon;
+
+/// Role marker for CLI-side workspace use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cli;
+
+/// A resolved omnifs workspace, parameterized by the capability set using it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace<Role = Shared> {
+    layout: WorkspaceLayout,
+    _role: PhantomData<Role>,
 }
 
 /// The fully resolved omnifs directory layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Paths {
+pub struct WorkspaceLayout {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
     /// Staging directory holding one JSON file per mount.
@@ -62,36 +74,16 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-impl Paths {
-    /// Resolve paths from overrides, env, `OMNIFS_HOME`, then the
-    /// `$HOME/.omnifs` default.
-    ///
-    /// Resolution order per directory:
-    ///   1. `overrides` field (CLI flag)
-    ///   2. `OMNIFS_HOME`
-    ///   3. Default root (`$HOME/.omnifs`)
-    pub fn resolve(overrides: PathOverrides) -> Result<Self, ResolveError> {
+impl WorkspaceLayout {
+    /// Resolve paths from env, `OMNIFS_HOME`, then the `$HOME/.omnifs` default.
+    pub fn resolve() -> Result<Self, ResolveError> {
         let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
         let default_root =
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
 
-        let config_dir = overrides
-            .config_dir
-            .or_else(|| omnifs_home.clone())
-            .or_else(|| default_root.clone())
-            .ok_or(ResolveError)?;
+        let root = omnifs_home.or(default_root).ok_or(ResolveError)?;
 
-        // Start from the canonical flat layout under config_dir, then let
-        // per-purpose overrides and env vars relocate individual dirs.
-        let mut paths = Self::under_root(&config_dir);
-
-        paths.cache_dir = overrides
-            .cache_dir
-            .or_else(|| omnifs_home.as_ref().map(|h| h.join(CACHE_SUBDIR)))
-            .or_else(|| default_root.map(|root| root.join(CACHE_SUBDIR)))
-            .ok_or(ResolveError)?;
-
-        Ok(paths)
+        Ok(Self::under_root(&root))
     }
 
     /// Assemble the canonical flat layout under a single `root`.
@@ -101,7 +93,7 @@ impl Paths {
     /// this so they always stay in sync.
     pub fn under_root(root: &Path) -> Self {
         let config_dir = root.to_path_buf();
-        Paths {
+        WorkspaceLayout {
             config_file: config_dir.join(CONFIG_FILE),
             credentials_file: config_dir.join(CREDENTIALS_FILE),
             mounts_dir: config_dir.join(MOUNTS_SUBDIR),
@@ -120,6 +112,19 @@ impl Paths {
         self.cache_dir.join(NFS_STATE_SUBDIR)
     }
 
+    pub fn provider_path(&self, provider: &str) -> PathBuf {
+        let provider = PathBuf::from(provider);
+        if provider.is_absolute() {
+            provider
+        } else {
+            self.providers_dir.join(provider)
+        }
+    }
+
+    pub fn wasm_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("wasm")
+    }
+
     /// Home-relativize a path for display (e.g. `~/.omnifs/config.toml`).
     /// Falls back to the full path if HOME is unset or stripping fails.
     pub fn display(path: &Path) -> String {
@@ -130,5 +135,66 @@ impl Paths {
             }
         }
         path.display().to_string()
+    }
+}
+
+impl<Role> Workspace<Role> {
+    /// Resolve a role-specific workspace from env, `OMNIFS_HOME`, then the
+    /// `$HOME/.omnifs` default.
+    pub fn resolve() -> Result<Self, ResolveError> {
+        Ok(Self::from_layout(WorkspaceLayout::resolve()?))
+    }
+
+    /// Assemble a role-specific workspace under a single root.
+    pub fn under_root(root: &Path) -> Self {
+        Self::from_layout(WorkspaceLayout::under_root(root))
+    }
+
+    /// Wrap an already-resolved layout.
+    pub fn from_layout(layout: WorkspaceLayout) -> Self {
+        Self {
+            layout,
+            _role: PhantomData,
+        }
+    }
+
+    pub fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    pub fn into_layout(self) -> WorkspaceLayout {
+        self.layout
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.layout.config_dir
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.layout.cache_dir
+    }
+
+    pub fn mounts_dir(&self) -> &Path {
+        &self.layout.mounts_dir
+    }
+
+    pub fn providers_dir(&self) -> &Path {
+        &self.layout.providers_dir
+    }
+
+    pub fn credentials_file(&self) -> &Path {
+        &self.layout.credentials_file
+    }
+
+    pub fn config_file(&self) -> &Path {
+        &self.layout.config_file
+    }
+
+    pub fn nfs_state_dir(&self) -> PathBuf {
+        self.layout.nfs_state_dir()
+    }
+
+    pub fn display_path(&self, path: &Path) -> String {
+        WorkspaceLayout::display(path)
     }
 }

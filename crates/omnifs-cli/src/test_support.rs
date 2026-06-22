@@ -32,12 +32,12 @@ impl CredentialStore for NonListingStore {
     }
 }
 
-/// Build a `Paths` rooted at `root` with the standard subdirectory layout
+/// Build a workspace layout rooted at `root` with the standard subdirectory layout
 /// our test fixtures use. Directories are not created; callers that need
 /// `mounts_dir` or `providers_dir` to exist should mkdir them explicitly.
 #[cfg(test)]
-pub(crate) fn fixture_paths(root: &std::path::Path) -> crate::paths::Paths {
-    crate::paths::Paths::under_root(root)
+pub(crate) fn fixture_paths(root: &std::path::Path) -> omnifs_home::WorkspaceLayout {
+    omnifs_home::WorkspaceLayout::under_root(root)
 }
 
 #[cfg(test)]

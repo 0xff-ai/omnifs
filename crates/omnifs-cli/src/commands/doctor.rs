@@ -7,12 +7,12 @@ use std::path::Path;
 
 use omnifs_creds::FileStore;
 
-use crate::app_context::AppContext;
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
-use crate::paths::Paths;
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
+use crate::workspace::Workspace;
+use omnifs_home::WorkspaceLayout;
 
 const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
@@ -29,9 +29,9 @@ pub(crate) enum DoctorVerdict {
 
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
-        let ctx = AppContext::resolve_default()?;
-        let mounts = ctx.workspace().mounts()?;
-        run(ctx.paths(), ctx.catalog(), mounts).await
+        let workspace = Workspace::resolve()?;
+        let mounts = workspace.mounts()?;
+        run(workspace.layout(), workspace.catalog(), mounts).await
     }
 }
 
@@ -112,7 +112,7 @@ impl DoctorReport {
 }
 
 pub async fn run(
-    paths: &Paths,
+    paths: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> anyhow::Result<DoctorVerdict> {
@@ -171,17 +171,17 @@ pub async fn run(
 }
 
 async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
-    use crate::paths::PathOverrides;
+    use crate::launch_backend::DockerTarget;
     use crate::runtime::DockerProbeOutcome;
-    use crate::runtime_target::RuntimeTarget;
 
     // Use the default runtime target so that probe_image_cached checks the
     // same image omnifs up would pull.
-    let target = match crate::paths::resolve_with_config(PathOverrides::default())
-        .and_then(|(_, cfg)| RuntimeTarget::resolve(None, None, &cfg))
-    {
-        Ok(t) => t,
-        Err(e) => return (None, ProbeResult::Err(format!("resolve target: {e}"))),
+    let target = match Workspace::resolve().and_then(|workspace| {
+        let config = workspace.config()?;
+        DockerTarget::resolve(None, None, &config)
+    }) {
+        Ok(target) => target,
+        Err(error) => return (None, ProbeResult::Err(format!("resolve target: {error}"))),
     };
 
     match Runtime::probe_docker(&target).await {
@@ -246,7 +246,7 @@ fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
     }
 }
 
-fn probe_credential_store(paths: &Paths) -> ProbeResult {
+fn probe_credential_store(paths: &WorkspaceLayout) -> ProbeResult {
     let Some(parent) = paths.credentials_file.parent() else {
         return ProbeResult::Err(format!(
             "credential file has no parent: {}",
@@ -254,11 +254,14 @@ fn probe_credential_store(paths: &Paths) -> ProbeResult {
         ));
     };
     if parent.exists() {
-        ProbeResult::Ok(format!("file {}", Paths::display(&paths.credentials_file)))
+        ProbeResult::Ok(format!(
+            "file {}",
+            WorkspaceLayout::display(&paths.credentials_file)
+        ))
     } else {
         ProbeResult::Warn(format!(
             "credential directory will be created on first write: {}",
-            Paths::display(parent)
+            WorkspaceLayout::display(parent)
         ))
     }
 }
@@ -266,20 +269,20 @@ fn probe_credential_store(paths: &Paths) -> ProbeResult {
 fn probe_ssh_agent() -> ProbeResult {
     match std::env::var_os("SSH_AUTH_SOCK") {
         Some(sock) if Path::new(&sock).exists() => {
-            ProbeResult::Ok(Paths::display(Path::new(&sock)))
+            ProbeResult::Ok(WorkspaceLayout::display(Path::new(&sock)))
         },
         Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
         None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
     }
 }
 
-fn probe_config_file(paths: &Paths) -> ProbeResult {
+fn probe_config_file(paths: &WorkspaceLayout) -> ProbeResult {
     if paths.config_file.exists() {
-        ProbeResult::Ok(Paths::display(&paths.config_file))
+        ProbeResult::Ok(WorkspaceLayout::display(&paths.config_file))
     } else {
         ProbeResult::Ok(format!(
             "(default; {} absent)",
-            Paths::display(&paths.config_file)
+            WorkspaceLayout::display(&paths.config_file)
         ))
     }
 }
@@ -293,7 +296,7 @@ fn probe_result_from_summary(summary: AuthProbeSummary) -> ProbeResult {
 }
 
 fn probe_mount_configs(
-    paths: &Paths,
+    paths: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {

@@ -14,7 +14,7 @@ use omnifs_core::{IdError, ProviderId, mount};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{Auth, OAuth, ProviderConfig, StaticToken};
+use crate::{Auth, Contract, OAuth, ProviderConfig, StaticToken};
 use omnifs_provider::{
     AuthManifest, ProviderAuthManifest, ProviderCapabilities, ProviderManifest,
     UnixSocketEndpointError,
@@ -45,6 +45,15 @@ pub struct Spec {
     pub capabilities: Option<ProviderCapabilities>,
     #[serde(rename = "config")]
     pub config_raw: Option<ProviderConfig>,
+    /// Provider contract snapshot stamped at `omnifs init` time.
+    ///
+    /// Records the config fields, capabilities, and auth scheme the spec was
+    /// built against, so `omnifs up` can classify and route a contract delta
+    /// after a provider upgrade. Absent on specs written before contract
+    /// versioning was introduced; those specs skip the pre-flight and run
+    /// straight to reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<Contract>,
 }
 
 /// Runtime-ready provider mount.
@@ -76,6 +85,15 @@ impl Spec {
         self.config_raw
             .as_ref()
             .map_or_else(|| b"{}".to_vec(), ProviderConfig::to_bytes)
+    }
+
+    /// Stamp a contract block derived from `manifest` into this spec.
+    ///
+    /// Called by `omnifs init` after the mount file is written, so the spec
+    /// carries the contract it was built against. Also used by the `omnifs up`
+    /// pre-flight when it re-stamps after auto-migrating an additive change.
+    pub fn stamp_contract(&mut self, manifest: &ProviderManifest) {
+        self.contract = Some(Contract::from_manifest(manifest));
     }
 
     #[must_use]
@@ -248,6 +266,14 @@ impl Catalog {
     }
 
     #[must_use]
+    pub fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
+        Self {
+            mounts_dir: PathBuf::new(),
+            providers_dir: providers_dir.as_ref().to_path_buf(),
+        }
+    }
+
+    #[must_use]
     pub fn mounts_dir(&self) -> &Path {
         &self.mounts_dir
     }
@@ -298,6 +324,47 @@ impl Catalog {
             return Ok(true);
         }
         Builtins::embedded()?.apply_metadata_to(config)
+    }
+
+    /// Derive the live `Contract` for the provider named in `spec`, using the
+    /// disk-side provider manifest when available and falling back to the
+    /// embedded built-in index. Returns `None` when neither a disk manifest
+    /// nor a built-in entry exists for the provider.
+    pub fn live_contract_for(&self, spec: &Spec) -> Result<Option<Contract>, Error> {
+        use crate::Contract;
+        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&spec.provider)? {
+            return Ok(Some(Contract::from_manifest(&manifest)));
+        }
+        let Ok(builtins) = Builtins::embedded() else {
+            return Ok(None);
+        };
+        let Some(manifest) = builtins.manifest_for_spec(spec) else {
+            return Ok(None);
+        };
+        Ok(Some(Contract::from_manifest(manifest)))
+    }
+
+    /// Config-field default values from the live provider manifest, keyed by
+    /// field name. The additive-migration pre-flight uses these to fill new
+    /// optional fields into a spec; the contract block records required-ness,
+    /// not values, so the defaults must come from the manifest. Same disk-then-
+    /// embedded resolution as `live_contract_for`; an absent provider yields an
+    /// empty map.
+    pub fn live_field_defaults(
+        &self,
+        spec: &Spec,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, Error> {
+        use crate::contract::config_field_defaults;
+        if let Some((_path, manifest)) = self.load_disk_provider_manifest(&spec.provider)? {
+            return Ok(config_field_defaults(&manifest));
+        }
+        let Ok(builtins) = Builtins::embedded() else {
+            return Ok(std::collections::HashMap::new());
+        };
+        Ok(builtins
+            .manifest_for_spec(spec)
+            .map(config_field_defaults)
+            .unwrap_or_default())
     }
 
     pub fn auth_manifest_for(&self, config: &Resolved) -> Result<Option<AuthManifest>, Error> {

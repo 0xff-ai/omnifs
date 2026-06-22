@@ -5,7 +5,9 @@
 //! gracefully: no running daemon means config-only, exactly as before.
 
 use crate::catalog::ProviderCatalog;
-use crate::client::{DaemonClient, DaemonProbe};
+use crate::client::DaemonClient;
+use crate::launch::DockerMountMaterializer;
+use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
 
@@ -25,18 +27,18 @@ pub(crate) enum LiveApply {
 /// added to a running container, so it is reported as restart-required and the
 /// reconcile is left for the next `omnifs up`.
 pub(crate) async fn add_mount(
+    client: &DaemonClient,
     catalog: &ProviderCatalog,
     store: &dyn CredentialStore,
     config: MountConfig,
-    host_native: bool,
+    backend: &LaunchBackend,
 ) -> anyhow::Result<LiveApply> {
-    let client = DaemonClient::new();
-    if matches!(client.probe().await?, DaemonProbe::Unreachable) {
+    if client.compatible_status_optional().await?.is_none() {
         return Ok(LiveApply::NotRunning);
     }
-    if !host_native {
-        let binds = config.materialize(catalog, store, host_native)?;
-        if !binds.is_empty() {
+    if backend.is_docker() {
+        let mount = DockerMountMaterializer::new(catalog, store).materialize(&config)?;
+        if !mount.preopen_binds().is_empty() {
             return Ok(LiveApply::RestartRequired("it needs new host binds"));
         }
     }
@@ -48,16 +50,5 @@ pub(crate) async fn add_mount(
     {
         anyhow::bail!("mount `{}` did not load: {}", config.name, failure.reason);
     }
-    Ok(LiveApply::Applied)
-}
-
-/// Reconcile the running daemon after the caller has removed the mount's spec
-/// file. The daemon drops any mount no longer present in `mounts/`.
-pub(crate) async fn remove_mount() -> anyhow::Result<LiveApply> {
-    let client = DaemonClient::new();
-    if matches!(client.probe().await?, DaemonProbe::Unreachable) {
-        return Ok(LiveApply::NotRunning);
-    }
-    client.reconcile().await?;
     Ok(LiveApply::Applied)
 }
