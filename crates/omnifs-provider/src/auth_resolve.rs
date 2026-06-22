@@ -122,61 +122,57 @@ mod tests {
     }
 
     #[test]
-    fn resolve_static_scheme_with_explicit_key() {
-        let manifest = AuthManifest {
-            schemes: vec![static_scheme("pat"), static_scheme("api-key")],
-        };
-        let scheme = manifest.resolve_static_scheme(Some("api-key")).unwrap();
-        assert_eq!(scheme.key, "api-key");
-    }
-
-    #[test]
-    fn resolve_oauth_scheme_with_explicit_key() {
-        let manifest = AuthManifest {
-            schemes: vec![oauth_scheme("oauth"), oauth_scheme("enterprise")],
-        };
-        let scheme = manifest.resolve_oauth_scheme(Some("enterprise")).unwrap();
-        assert_eq!(scheme.key, "enterprise");
-    }
-
-    #[test]
-    fn resolve_static_scheme_missing_key_uses_single_unambiguous_scheme() {
-        let manifest = AuthManifest {
-            schemes: vec![static_scheme("pat")],
-        };
-        let scheme = manifest.resolve_static_scheme(None).unwrap();
-        assert_eq!(scheme.key, "pat");
-    }
-
-    #[test]
-    fn resolve_oauth_scheme_missing_key_uses_single_unambiguous_scheme() {
-        let manifest = AuthManifest {
-            schemes: vec![oauth_scheme("oauth")],
-        };
-        let scheme = manifest.resolve_oauth_scheme(None).unwrap();
-        assert_eq!(scheme.key, "oauth");
-    }
-
-    #[test]
-    fn resolve_static_scheme_missing_key_is_ambiguous_with_multiple_schemes() {
-        let manifest = AuthManifest {
+    fn resolve_static_scheme_key_selection() {
+        let multi = AuthManifest {
             schemes: vec![static_scheme("pat"), static_scheme("api-key")],
         };
         assert_eq!(
-            manifest.resolve_static_scheme(None),
+            multi.resolve_static_scheme(Some("api-key")).unwrap().key,
+            "api-key"
+        );
+        assert_eq!(
+            multi.resolve_static_scheme(None),
             Err(SchemeResolveError::Ambiguous { kind: STATIC_KIND })
         );
+        assert_eq!(
+            multi.resolve_static_scheme(Some("missing")),
+            Err(SchemeResolveError::NotFound {
+                kind: STATIC_KIND,
+                key: "missing".to_string(),
+            })
+        );
+
+        let single = AuthManifest {
+            schemes: vec![static_scheme("pat")],
+        };
+        assert_eq!(single.resolve_static_scheme(None).unwrap().key, "pat");
     }
 
     #[test]
-    fn resolve_oauth_scheme_missing_key_is_ambiguous_with_multiple_schemes() {
-        let manifest = AuthManifest {
+    fn resolve_oauth_scheme_key_selection() {
+        let multi = AuthManifest {
             schemes: vec![oauth_scheme("oauth"), oauth_scheme("enterprise")],
         };
         assert_eq!(
-            manifest.resolve_oauth_scheme(None),
+            multi.resolve_oauth_scheme(Some("enterprise")).unwrap().key,
+            "enterprise"
+        );
+        assert_eq!(
+            multi.resolve_oauth_scheme(None),
             Err(SchemeResolveError::Ambiguous { kind: OAUTH_KIND })
         );
+        assert_eq!(
+            multi.resolve_oauth_scheme(Some("missing")),
+            Err(SchemeResolveError::NotFound {
+                kind: OAUTH_KIND,
+                key: "missing".to_string(),
+            })
+        );
+
+        let single = AuthManifest {
+            schemes: vec![oauth_scheme("oauth")],
+        };
+        assert_eq!(single.resolve_oauth_scheme(None).unwrap().key, "oauth");
     }
 
     #[test]
@@ -196,34 +192,6 @@ mod tests {
         assert_eq!(
             manifest.resolve_oauth_scheme(None),
             Err(SchemeResolveError::NoSchemes { kind: OAUTH_KIND })
-        );
-    }
-
-    #[test]
-    fn resolve_static_scheme_reports_wrong_key() {
-        let manifest = AuthManifest {
-            schemes: vec![static_scheme("pat")],
-        };
-        assert_eq!(
-            manifest.resolve_static_scheme(Some("missing")),
-            Err(SchemeResolveError::NotFound {
-                kind: STATIC_KIND,
-                key: "missing".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_oauth_scheme_reports_wrong_key() {
-        let manifest = AuthManifest {
-            schemes: vec![oauth_scheme("oauth")],
-        };
-        assert_eq!(
-            manifest.resolve_oauth_scheme(Some("missing")),
-            Err(SchemeResolveError::NotFound {
-                kind: OAUTH_KIND,
-                key: "missing".to_string(),
-            })
         );
     }
 

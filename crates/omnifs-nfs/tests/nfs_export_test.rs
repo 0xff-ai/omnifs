@@ -270,33 +270,26 @@ fn omnifs_export_root_mount_projects_provider_at_volume_root() {
 }
 
 #[test]
-fn omnifs_export_reads_ranged_files_through_open_state() {
+fn omnifs_export_ranged_read_contract() {
     let harness = test_export();
     let export = &harness.export;
     let hello = hello_dir(export);
+
     let ranged = export.lookup(hello, "ranged").expect("ranged lookup");
     assert_eq!(export.attr(ranged).expect("ranged attr").size, 26);
-
     let opened = export.open_state(7, ranged, 1, 1).expect("ranged open");
     let chunk = export
         .read_state(opened.stateid, 2, 4)
         .expect("ranged chunk");
     assert_eq!(chunk.data, b"cdef".to_vec());
     assert!(!chunk.eof);
-
     let eof = export
         .read_state(opened.stateid, 26, 8)
         .expect("ranged eof");
     assert_eq!(eof.data, Vec::<u8>::new());
     assert!(eof.eof);
     export.close_state(opened.stateid).expect("ranged close");
-}
 
-#[test]
-fn omnifs_export_opens_large_exact_ranged_files_without_full_materialization() {
-    let harness = test_export();
-    let export = &harness.export;
-    let hello = hello_dir(export);
     let large = export
         .lookup(hello, "large-ranged")
         .expect("large ranged lookup");
@@ -304,7 +297,6 @@ fn omnifs_export_opens_large_exact_ranged_files_without_full_materialization() {
         export.attr(large).expect("large ranged attr").size,
         OLD_OPEN_MATERIALIZE_LIMIT_BYTES + 1
     );
-
     let opened = export
         .open_state(7, large, 1, 1)
         .expect("large ranged open");
@@ -322,27 +314,20 @@ fn omnifs_export_opens_large_exact_ranged_files_without_full_materialization() {
     export
         .close_state(opened.stateid)
         .expect("large ranged close");
-}
 
-#[test]
-fn omnifs_export_learns_unknown_ranged_size_on_eof() {
-    let harness = test_export();
-    let export = &harness.export;
-    let hello = hello_dir(export);
-    let ranged = export
+    let unknown = export
         .lookup(hello, "unknown-ranged")
         .expect("unknown ranged lookup");
-    assert_eq!(export.attr(ranged).expect("pre-open attr").size, 1);
-
+    assert_eq!(export.attr(unknown).expect("pre-open attr").size, 1);
     let opened = export
-        .open_state(7, ranged, 1, 1)
+        .open_state(7, unknown, 1, 1)
         .expect("unknown ranged open");
     let tail = export
         .read_state(opened.stateid, 8, 32)
         .expect("unknown ranged tail");
     assert_eq!(tail.data, b"size\n".to_vec());
     assert!(tail.eof);
-    assert_eq!(export.attr(ranged).expect("learned attr").size, 13);
+    assert_eq!(export.attr(unknown).expect("learned attr").size, 13);
     export
         .close_state(opened.stateid)
         .expect("unknown ranged close");

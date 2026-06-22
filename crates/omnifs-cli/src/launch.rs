@@ -440,20 +440,14 @@ fn report_launch_status(status: &DaemonStatus) {
 mod tests {
     use super::*;
 
-    /// A malformed address string must fall back to the default port rather
-    /// than panicking or propagating an error.
     #[test]
-    fn parse_control_addr_falls_back_on_bad_input() {
-        let addr = parse_control_addr("not-a-valid-socket-addr!!!");
-        assert_eq!(addr.port(), omnifs_api::DEFAULT_PORT);
-        assert_eq!(addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
-    }
+    fn parse_control_addr_handles_input() {
+        let bad = super::parse_control_addr("not-a-valid-socket-addr!!!");
+        assert_eq!(bad.port(), omnifs_api::DEFAULT_PORT);
+        assert_eq!(bad.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
 
-    /// A well-formed address string must be used as-is.
-    #[test]
-    fn parse_control_addr_parses_valid_input() {
-        let addr = parse_control_addr("127.0.0.1:19999");
-        assert_eq!(addr.port(), 19999);
-        assert_eq!(addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+        let good = super::parse_control_addr("127.0.0.1:19999");
+        assert_eq!(good.port(), 19999);
+        assert_eq!(good.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
     }
 }

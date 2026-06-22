@@ -257,25 +257,16 @@ mod dynamic_socket_tests {
     }
 
     #[test]
-    fn dynamic_socket_with_resolvable_endpoint_passes() {
-        let spec = dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock"));
-        assert!(check_dynamic_socket(&spec).is_ok());
-    }
-
-    #[test]
-    fn dynamic_socket_without_endpoint_fails_fast() {
-        let spec = dynamic_socket_spec(None);
+    fn dynamic_socket_validation_errors() {
+        assert!(
+            check_dynamic_socket(&dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock"))).is_ok()
+        );
         assert!(matches!(
-            check_dynamic_socket(&spec),
+            check_dynamic_socket(&dynamic_socket_spec(None)),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
-    }
-
-    #[test]
-    fn dynamic_socket_with_non_unix_endpoint_fails_fast() {
-        let spec = dynamic_socket_spec(Some("https://example.com"));
         assert!(matches!(
-            check_dynamic_socket(&spec),
+            check_dynamic_socket(&dynamic_socket_spec(Some("https://example.com"))),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
     }

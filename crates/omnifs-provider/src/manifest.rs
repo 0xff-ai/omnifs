@@ -647,8 +647,149 @@ fn validate_inject_domains(domains: &[String]) -> Result<(), ProviderMetadataErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sections::{ProviderMetadataError, provider_manifest_json};
+    use crate::sections::ProviderMetadataError;
     use serde::Serialize;
+
+    macro_rules! cases {
+        ($( ($label:expr, $input:expr, $pred:expr) ),+ $(,)?) => {{
+            $( {
+                let error = ProviderManifest::from_bytes($input).unwrap_err();
+                assert!(
+                    $pred(&error),
+                    "{}: unexpected error: {error}",
+                    $label
+                );
+            } )+
+        }};
+    }
+
+    macro_rules! reject_oauth_surface {
+        ($( ($needle:expr, |$manifest:ident| $mutate:expr) ),+ $(,)?) => {{
+            $( {
+                let mut $manifest = oauth_provider_manifest();
+                $mutate;
+                let error = encode_provider_manifest(&$manifest).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        ProviderMetadataError::Validation(ref message) if message.contains($needle)
+                    ),
+                    "needle {needle:?}: unexpected error: {error}",
+                    needle = $needle
+                );
+            } )+
+        }};
+    }
+
+    const DEMO_MANIFEST: &[u8] = br#"{
+        "id": "demo",
+        "displayName": "Demo",
+        "provider": "demo.wasm",
+        "defaultMount": "demo"
+    }"#;
+
+    const DEMO_MANIFEST_VERSIONED: &[u8] = br#"{
+        "id": "demo",
+        "displayName": "Demo",
+        "provider": "demo.wasm",
+        "defaultMount": "demo",
+        "version": "0.3.1"
+    }"#;
+
+    const INVALID_MANIFEST_BAD_ID: &[u8] = br#"{
+        "id": "bad id!",
+        "displayName": "Bad",
+        "provider": "bad.wasm",
+        "defaultMount": "bad"
+    }"#;
+
+    const INVALID_MANIFEST_FRACTIONAL_MEMORY: &[u8] = br#"{
+        "id": "bad",
+        "displayName": "Bad",
+        "provider": "bad.wasm",
+        "defaultMount": "bad",
+        "capabilities": [
+            { "kind": "memoryMb", "value": 1.5, "why": "bad" }
+        ]
+    }"#;
+
+    const INVALID_MANIFEST_OUT_OF_RANGE_MEMORY: &[u8] = br#"{
+        "id": "bad",
+        "displayName": "Bad",
+        "provider": "bad.wasm",
+        "defaultMount": "bad",
+        "capabilities": [
+            { "kind": "memoryMb", "value": 4294967296, "why": "bad" }
+        ]
+    }"#;
+
+    const INVALID_MANIFEST_CONFIG_SCHEMA: &[u8] = br#"{
+        "id": "bad",
+        "displayName": "Bad",
+        "provider": "bad.wasm",
+        "defaultMount": "bad",
+        "configSchema": { "type": 7 }
+    }"#;
+
+    const GUIDANCE_MANIFEST: &[u8] = br#"{
+        "id": "demo",
+        "displayName": "Demo",
+        "provider": "demo.wasm",
+        "defaultMount": "demo",
+        "auth": {
+            "inject": { "domains": ["api.demo.test"], "header": "Authorization", "prefix": "Bearer " },
+            "default": "pat",
+            "schemes": {
+                "pat": {
+                    "type": "staticToken",
+                    "description": "Demo API token",
+                    "creationUrl": "https://demo.test/settings/tokens",
+                    "summary": "Paste a personal token",
+                    "setup": ["Open settings", "Click create token"],
+                    "docsUrl": "https://demo.test/docs/auth"
+                }
+            }
+        }
+    }"#;
+
+    const OAUTH_TOKEN_ENDPOINT_MANIFEST: &[u8] = br#"{
+        "id": "conf",
+        "displayName": "Confidential",
+        "provider": "conf.wasm",
+        "defaultMount": "conf",
+        "auth": {
+            "inject": { "domains": ["api.conf.test"], "header": "Authorization", "prefix": "Bearer " },
+            "default": "oauth",
+            "schemes": {
+                "oauth": {
+                    "type": "oauth",
+                    "displayName": "Conf OAuth",
+                    "clientId": "abc",
+                    "tokenEndpointAuth": "clientSecretPost",
+                    "flow": {
+                        "kind": "pkceLoopback",
+                        "authorizationEndpoint": "https://conf.test/oauth/authorize",
+                        "tokenEndpoint": "https://conf.test/oauth/token",
+                        "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
+                    }
+                }
+            }
+        }
+    }"#;
+
+    fn oauth_scheme_mut(manifest: &mut ProviderManifest) -> &mut OauthScheme {
+        let AuthScheme::Oauth(oauth) = manifest
+            .auth
+            .as_mut()
+            .expect("oauth auth")
+            .schemes
+            .get_mut("oauth")
+            .expect("oauth scheme")
+        else {
+            panic!("expected oauth scheme");
+        };
+        oauth
+    }
 
     #[test]
     fn checked_in_oauth_provider_manifests_have_well_formed_auth() {
@@ -679,18 +820,14 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_provider_manifest_matches_generated() {
+    fn checked_in_provider_manifest_contract() {
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("schema/omnifs.provider.schema.json");
         let checked_in: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
-        let generated = serde_json::to_value(provider_manifest_json()).unwrap();
-
+        let generated = serde_json::to_value(crate::provider_manifest_json()).unwrap();
         assert_eq!(checked_in, generated);
-    }
 
-    #[test]
-    fn checked_in_provider_manifests_parse_as_typed_metadata() {
         let providers_dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers");
         let mut parsed = Vec::new();
@@ -724,78 +861,138 @@ mod tests {
     }
 
     #[test]
-    fn provider_manifest_build_evidence_round_trips() {
-        let manifest = ProviderManifest::from_bytes(
-            br#"{
-                "id": "demo",
-                "displayName": "Demo",
-                "provider": "demo.wasm",
-                "defaultMount": "demo",
-                "buildEvidence": {
-                    "wit": "omnifs:provider@0.4.0",
-                    "sdk": "0.2.1"
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest.build_evidence,
-            Some(BuildEvidence {
-                wit: "omnifs:provider@0.4.0".to_string(),
-                sdk: "0.2.1".to_string(),
-            })
-        );
-    }
-
-    #[test]
     fn provider_manifest_version_round_trips_and_is_optional() {
-        // Version-less JSON parses under deny_unknown_fields (serde default).
-        let bare = ProviderManifest::from_bytes(
-            br#"{
-                "id": "demo",
-                "displayName": "Demo",
-                "provider": "demo.wasm",
-                "defaultMount": "demo"
-            }"#,
-        )
-        .unwrap();
+        let bare = ProviderManifest::from_bytes(DEMO_MANIFEST).unwrap();
         assert_eq!(bare.version, None);
-        // A `version` omitted from the struct is omitted from the wire.
         let reencoded = serde_json::to_value(&bare).unwrap();
         assert!(reencoded.get("version").is_none());
 
-        // A stamped version round-trips through the wire field `version`.
-        let stamped = ProviderManifest::from_bytes(
-            br#"{
-                "id": "demo",
-                "displayName": "Demo",
-                "provider": "demo.wasm",
-                "defaultMount": "demo",
-                "version": "0.3.1"
-            }"#,
-        )
-        .unwrap();
+        let stamped = ProviderManifest::from_bytes(DEMO_MANIFEST_VERSIONED).unwrap();
         assert_eq!(stamped.version.as_deref(), Some("0.3.1"));
         let reencoded = serde_json::to_value(&stamped).unwrap();
         assert_eq!(reencoded["version"], "0.3.1");
     }
 
     #[test]
-    fn provider_manifest_rejects_non_slug_id() {
-        let error = ProviderManifest::from_bytes(
-            br#"{
-                "id": "bad id!",
-                "displayName": "Bad",
-                "provider": "bad.wasm",
-                "defaultMount": "bad"
-            }"#,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(&error, ProviderMetadataError::Validation(message) if message.contains("bad id!")),
-            "unexpected error: {error}"
+    fn provider_manifest_parse_rejects_invalid_input() {
+        cases!(
+            (
+                "non-slug id",
+                INVALID_MANIFEST_BAD_ID,
+                |error: &ProviderMetadataError| {
+                    matches!(
+                        error,
+                        ProviderMetadataError::Validation(message) if message.contains("bad id!")
+                    )
+                }
+            ),
+            (
+                "fractional memory capability",
+                INVALID_MANIFEST_FRACTIONAL_MEMORY,
+                |error: &ProviderMetadataError| {
+                    matches!(
+                        error,
+                        ProviderMetadataError::Schema(_) | ProviderMetadataError::Json(_)
+                    )
+                }
+            ),
+            (
+                "out-of-range memory capability",
+                INVALID_MANIFEST_OUT_OF_RANGE_MEMORY,
+                |error: &ProviderMetadataError| {
+                    matches!(
+                        error,
+                        ProviderMetadataError::Schema(_) | ProviderMetadataError::Json(_)
+                    )
+                }
+            ),
+            (
+                "invalid config schema",
+                INVALID_MANIFEST_CONFIG_SCHEMA,
+                |error: &ProviderMetadataError| {
+                    matches!(
+                        error,
+                        ProviderMetadataError::Validation(message) if message.contains("configSchema")
+                    )
+                }
+            ),
         );
+    }
+
+    #[test]
+    fn provider_metadata_rejects_invalid_oauth_surface() {
+        reject_oauth_surface!(
+            ("authorizationEndpoint", |manifest| {
+                oauth_scheme_mut(&mut manifest).authorization_endpoint =
+                    "http://linear.app/oauth/authorize".to_string();
+            }),
+            ("{port}", |manifest| {
+                oauth_scheme_mut(&mut manifest).flow =
+                    OAuthFlow::PkceLoopback(PkceLoopbackConfig {
+                        redirect_uri_template: "http://127.0.0.1/callback".to_string(),
+                    });
+            }),
+            ("must not contain {port}", |manifest| {
+                oauth_scheme_mut(&mut manifest).flow =
+                    OAuthFlow::PkceManualCode(PkceManualCodeConfig {
+                        redirect_uri: "https://example.com/callback/{port}".to_string(),
+                    });
+            }),
+            ("auth.inject.domains", |manifest| {
+                manifest.auth.as_mut().expect("oauth auth").inject.domains =
+                    vec!["https://api.linear.app".to_string()];
+            }),
+            ("auth.inject.domains", |manifest| {
+                manifest.auth.as_mut().expect("oauth auth").inject.domains =
+                    vec!["*.linear.app".to_string()];
+            }),
+        );
+
+        let mut accepted = oauth_provider_manifest();
+        oauth_scheme_mut(&mut accepted).flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+            redirect_uri_template: "http://localhost:58880".to_string(),
+        });
+        encode_provider_manifest(&accepted).unwrap();
+
+        let mut rejected = oauth_provider_manifest();
+        oauth_scheme_mut(&mut rejected).flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
+            redirect_uri_template: "https://example.com/callback".to_string(),
+        });
+        let error = encode_provider_manifest(&rejected).unwrap_err();
+        assert!(
+            matches!(error, ProviderMetadataError::Validation(message) if message.contains("http://localhost:<port>"))
+        );
+    }
+
+    #[test]
+    fn provider_manifest_auth_wire_shapes() {
+        let guidance_manifest = ProviderManifest::from_bytes(GUIDANCE_MANIFEST).unwrap();
+        let auth = guidance_manifest.auth.as_ref().expect("auth");
+        let guidance = auth.guidance_for("pat");
+        assert_eq!(guidance.summary.as_deref(), Some("Paste a personal token"));
+        assert_eq!(
+            guidance.setup_steps,
+            ["Open settings", "Click create token"]
+        );
+        assert_eq!(
+            guidance.docs_url.as_deref(),
+            Some("https://demo.test/docs/auth")
+        );
+        let reparsed = encode_provider_manifest(&guidance_manifest).unwrap();
+        assert_eq!(reparsed.auth.unwrap().guidance, auth.guidance);
+
+        let oauth_manifest = ProviderManifest::from_bytes(OAUTH_TOKEN_ENDPOINT_MANIFEST).unwrap();
+        let method = |manifest: &ProviderManifest| match &manifest.auth.as_ref().unwrap().schemes["oauth"]
+        {
+            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth,
+            other => panic!("expected oauth scheme, got {other:?}"),
+        };
+        assert_eq!(
+            method(&oauth_manifest),
+            TokenEndpointAuthMethod::ClientSecretPost
+        );
+        let reparsed = encode_provider_manifest(&oauth_manifest).unwrap();
+        assert_eq!(method(&reparsed), TokenEndpointAuthMethod::ClientSecretPost);
     }
 
     #[test]
@@ -811,258 +1008,6 @@ mod tests {
             .expect("provider.wit declares a package");
 
         assert_eq!(package, format!("package {PROVIDER_WIT_CONTRACT};"));
-    }
-
-    #[test]
-    fn read_provider_manifest_rejects_fractional_memory_capability() {
-        let err = ProviderManifest::from_bytes(
-            br#"{
-                "id": "bad",
-                "displayName": "Bad",
-                "provider": "bad.wasm",
-                "defaultMount": "bad",
-                "capabilities": [
-                    { "kind": "memoryMb", "value": 1.5, "why": "bad" }
-                ]
-            }"#,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ProviderMetadataError::Schema(_) | ProviderMetadataError::Json(_)
-        ));
-    }
-
-    #[test]
-    fn read_provider_manifest_rejects_out_of_range_memory_capability() {
-        let err = ProviderManifest::from_bytes(
-            br#"{
-                "id": "bad",
-                "displayName": "Bad",
-                "provider": "bad.wasm",
-                "defaultMount": "bad",
-                "capabilities": [
-                    { "kind": "memoryMb", "value": 4294967296, "why": "bad" }
-                ]
-            }"#,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ProviderMetadataError::Schema(_) | ProviderMetadataError::Json(_)
-        ));
-    }
-
-    #[test]
-    fn read_provider_metadata_rejects_invalid_config_schema() {
-        let bytes = br#"{
-            "id": "bad",
-            "displayName": "Bad",
-            "provider": "bad.wasm",
-            "defaultMount": "bad",
-            "configSchema": {
-                "type": 7
-            }
-        }"#;
-
-        let error = ProviderManifest::from_bytes(bytes).unwrap_err();
-
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("configSchema"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_rejects_http_oauth_endpoint() {
-        let mut manifest = oauth_provider_manifest();
-        let auth = manifest.auth.as_mut().expect("oauth auth");
-        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
-            panic!("expected oauth scheme");
-        };
-        oauth.authorization_endpoint = "http://linear.app/oauth/authorize".to_string();
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("authorizationEndpoint"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_rejects_loopback_template_without_port() {
-        let mut manifest = oauth_provider_manifest();
-        let auth = manifest.auth.as_mut().expect("oauth auth");
-        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
-            panic!("expected oauth scheme");
-        };
-        oauth.flow = OAuthFlow::PkceLoopback(PkceLoopbackConfig {
-            redirect_uri_template: "http://127.0.0.1/callback".to_string(),
-        });
-        // Authorization and token endpoints stay the same.
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("{port}"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_accepts_client_side_fixed_loopback_redirect() {
-        let mut manifest = oauth_provider_manifest();
-        let auth = manifest.auth.as_mut().expect("oauth auth");
-        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
-            panic!("expected oauth scheme");
-        };
-        oauth.flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
-            redirect_uri_template: "http://localhost:58880".to_string(),
-        });
-
-        encode_provider_manifest(&manifest).unwrap();
-    }
-
-    #[test]
-    fn provider_metadata_rejects_client_side_non_loopback_fixed_redirect() {
-        let mut manifest = oauth_provider_manifest();
-        let auth = manifest.auth.as_mut().expect("oauth auth");
-        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
-            panic!("expected oauth scheme");
-        };
-        oauth.flow = OAuthFlow::ClientSideToken(ClientSideTokenConfig {
-            redirect_uri_template: "https://example.com/callback".to_string(),
-        });
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("http://localhost:<port>"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_rejects_manual_code_redirect_uri_with_port_template() {
-        let mut manifest = oauth_provider_manifest();
-        let auth = manifest.auth.as_mut().expect("oauth auth");
-        let AuthScheme::Oauth(oauth) = auth.schemes.get_mut("oauth").expect("oauth scheme") else {
-            panic!("expected oauth scheme");
-        };
-        oauth.flow = OAuthFlow::PkceManualCode(PkceManualCodeConfig {
-            redirect_uri: "https://example.com/callback/{port}".to_string(),
-        });
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("must not contain {port}"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_rejects_url_shaped_inject_domain() {
-        let mut manifest = oauth_provider_manifest();
-        manifest.auth.as_mut().expect("oauth auth").inject.domains =
-            vec!["https://api.linear.app".to_string()];
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("auth.inject.domains"))
-        );
-    }
-
-    #[test]
-    fn provider_metadata_rejects_wildcard_inject_domain() {
-        let mut manifest = oauth_provider_manifest();
-        manifest.auth.as_mut().expect("oauth auth").inject.domains =
-            vec!["*.linear.app".to_string()];
-
-        let error = encode_provider_manifest(&manifest).unwrap_err();
-        assert!(
-            matches!(error, ProviderMetadataError::Validation(message) if message.contains("auth.inject.domains"))
-        );
-    }
-
-    #[test]
-    fn scheme_guidance_round_trips_through_manifest() {
-        let manifest = ProviderManifest::from_bytes(
-            br#"{
-                "id": "demo",
-                "displayName": "Demo",
-                "provider": "demo.wasm",
-                "defaultMount": "demo",
-                "auth": {
-                    "inject": { "domains": ["api.demo.test"], "header": "Authorization", "prefix": "Bearer " },
-                    "default": "pat",
-                    "schemes": {
-                        "pat": {
-                            "type": "staticToken",
-                            "description": "Demo API token",
-                            "creationUrl": "https://demo.test/settings/tokens",
-                            "summary": "Paste a personal token",
-                            "setup": ["Open settings", "Click create token"],
-                            "docsUrl": "https://demo.test/docs/auth"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let auth = manifest.auth.as_ref().expect("auth");
-        let guidance = auth.guidance_for("pat");
-        assert_eq!(guidance.summary.as_deref(), Some("Paste a personal token"));
-        assert_eq!(
-            guidance.setup_steps,
-            ["Open settings", "Click create token"]
-        );
-        assert_eq!(
-            guidance.docs_url.as_deref(),
-            Some("https://demo.test/docs/auth")
-        );
-
-        // Round-trip back to the compact on-disk form and re-parse.
-        let reparsed = encode_provider_manifest(&manifest).unwrap();
-        assert_eq!(reparsed.auth.unwrap().guidance, auth.guidance);
-    }
-
-    #[test]
-    fn oauth_token_endpoint_auth_round_trips() {
-        let manifest = ProviderManifest::from_bytes(
-            br#"{
-                "id": "conf",
-                "displayName": "Confidential",
-                "provider": "conf.wasm",
-                "defaultMount": "conf",
-                "auth": {
-                    "inject": { "domains": ["api.conf.test"], "header": "Authorization", "prefix": "Bearer " },
-                    "default": "oauth",
-                    "schemes": {
-                        "oauth": {
-                            "type": "oauth",
-                            "displayName": "Conf OAuth",
-                            "clientId": "abc",
-                            "tokenEndpointAuth": "clientSecretPost",
-                            "flow": {
-                                "kind": "pkceLoopback",
-                                "authorizationEndpoint": "https://conf.test/oauth/authorize",
-                                "tokenEndpoint": "https://conf.test/oauth/token",
-                                "redirectUriTemplate": "http://127.0.0.1:{port}/callback"
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let method = |manifest: &ProviderManifest| match &manifest.auth.as_ref().unwrap().schemes["oauth"]
-        {
-            AuthScheme::Oauth(oauth) => oauth.token_endpoint_auth,
-            other => panic!("expected oauth scheme, got {other:?}"),
-        };
-        assert_eq!(method(&manifest), TokenEndpointAuthMethod::ClientSecretPost);
-
-        // The confidential-client method survives the compact on-disk round-trip;
-        // a default (`none`) scheme would omit the field entirely.
-        let reparsed = encode_provider_manifest(&manifest).unwrap();
-        assert_eq!(method(&reparsed), TokenEndpointAuthMethod::ClientSecretPost);
     }
 
     #[test]

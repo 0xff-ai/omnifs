@@ -201,31 +201,12 @@ fn emit_plain_line(line: &str, mut record: Option<&mut std::fs::File>) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_inspector::{InspectorEvent, InspectorRecord};
     use std::fs;
     use std::io::{Read, Seek};
     use tempfile::NamedTempFile;
 
     #[test]
-    fn replay_plain_reads_jsonl_file() {
-        let file = NamedTempFile::new().expect("tempfile");
-        let record = InspectorRecord::new(
-            "t",
-            1,
-            1,
-            InspectorEvent::FuseStart {
-                op: "lookup".into(),
-                mount: "dns".into(),
-                path: "/x".into(),
-            },
-        );
-        let json = serde_json::to_string(&record).expect("json");
-        fs::write(file.path(), format!("{json}\n")).expect("write");
-        run_plain(SourceKind::Replay(file.path().to_path_buf())).expect("replay");
-    }
-
-    #[test]
-    fn record_appends_while_emitting() {
+    fn plain_jsonl_io() {
         let mut capture = NamedTempFile::new().expect("tempfile");
         let json = r#"{"v":1,"ts":"t","mono_us":1,"seq":0,"trace_id":1,"event":{"type":"fuse.start","op":"read","mount":"m","path":"/"}}"#;
         emit_plain_line(json, Some(capture.as_file_mut())).expect("emit");
@@ -236,5 +217,20 @@ mod tests {
             .read_to_string(&mut contents)
             .expect("read");
         assert!(contents.contains("fuse.start"));
+
+        let replay_file = NamedTempFile::new().expect("tempfile");
+        let record = omnifs_inspector::InspectorRecord::new(
+            "t",
+            1,
+            1,
+            omnifs_inspector::InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "dns".into(),
+                path: "/x".into(),
+            },
+        );
+        let line = serde_json::to_string(&record).expect("json");
+        fs::write(replay_file.path(), format!("{line}\n")).expect("write");
+        run_plain(SourceKind::Replay(replay_file.path().to_path_buf())).expect("replay");
     }
 }

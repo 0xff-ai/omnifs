@@ -228,53 +228,47 @@ mod tests {
     }
 
     #[test]
-    fn acquire_returns_leader_when_slot_free() {
+    fn acquire_coalescing() {
         let inflight = InFlight::new();
-        let outcome = inflight.acquire(&pk("/a/b"));
-        assert!(matches!(outcome, Acquired::Leader { .. }));
-    }
+        assert!(matches!(
+            inflight.acquire(&pk("/a/b")),
+            Acquired::Leader { .. }
+        ));
 
-    #[test]
-    fn acquire_returns_exact_match_when_same_path_in_flight() {
         let inflight = InFlight::new();
         let _leader = inflight.acquire(&pk("/a/b"));
-        let second = inflight.acquire(&pk("/a/b"));
-        assert!(matches!(second, Acquired::ExactMatch { .. }));
-    }
+        assert!(matches!(
+            inflight.acquire(&pk("/a/b")),
+            Acquired::ExactMatch { .. }
+        ));
 
-    #[test]
-    fn acquire_returns_ancestor_wait_when_parent_in_flight() {
         let inflight = InFlight::new();
         let _leader = inflight.acquire(&pk("/a"));
-        let descendant = inflight.acquire(&pk("/a/b/c"));
-        assert!(matches!(descendant, Acquired::AncestorWait { .. }));
-    }
+        assert!(matches!(
+            inflight.acquire(&pk("/a/b/c")),
+            Acquired::AncestorWait { .. }
+        ));
 
-    #[test]
-    fn acquire_treats_siblings_as_independent() {
         let inflight = InFlight::new();
         let _first = inflight.acquire(&pk("/a/b"));
-        let sibling = inflight.acquire(&pk("/a/c"));
-        assert!(matches!(sibling, Acquired::Leader { .. }));
-    }
+        assert!(matches!(
+            inflight.acquire(&pk("/a/c")),
+            Acquired::Leader { .. }
+        ));
 
-    #[test]
-    fn acquire_coalesces_distinct_paths_under_same_object() {
-        // Two paths that alias one object share a single in-flight op.
         let inflight = InFlight::new();
         let _leader = inflight.acquire(&obj(b"issue:42"));
-        let second = inflight.acquire(&obj(b"issue:42"));
-        assert!(matches!(second, Acquired::ExactMatch { .. }));
-    }
+        assert!(matches!(
+            inflight.acquire(&obj(b"issue:42")),
+            Acquired::ExactMatch { .. }
+        ));
 
-    #[test]
-    fn acquire_object_keys_have_no_ancestor_relationship() {
-        // Objects coalesce by exact identity only; a byte-prefix is not an
-        // ancestor, so distinct objects never wait on each other.
         let inflight = InFlight::new();
         let _leader = inflight.acquire(&obj(b"issue:4"));
-        let other = inflight.acquire(&obj(b"issue:42"));
-        assert!(matches!(other, Acquired::Leader { .. }));
+        assert!(matches!(
+            inflight.acquire(&obj(b"issue:42")),
+            Acquired::Leader { .. }
+        ));
     }
 
     #[tokio::test]

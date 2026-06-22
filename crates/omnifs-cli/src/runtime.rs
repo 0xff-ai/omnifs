@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn image_compat_accepts_matching_protocol_and_version() {
+    fn launch_image_compat() {
         check_image_compat(
             "0.2.1",
             Some("0.2.1"),
@@ -747,26 +747,20 @@ mod tests {
             "omnifs:local-dev",
         )
         .expect("matching protocol and version should pass");
-    }
-
-    #[test]
-    fn missing_label_is_allowed_with_warning() {
         check_launcher_compat("0.2.0-dev.1", None).expect("missing label should be permissive");
     }
 
     #[test]
-    fn unknown_sentinel_is_allowed() {
-        check_launcher_compat("0.2.0-dev.1", Some("unknown")).expect("unknown is permissive");
-    }
-
-    #[test]
-    fn equal_versions_pass() {
-        check_launcher_compat("0.2.0-dev.1", Some("0.2.0-dev.1")).expect("equal versions pass");
-    }
-
-    #[test]
-    fn launcher_newer_than_label_passes() {
-        check_launcher_compat("0.3.0", Some("0.2.0-dev.1")).expect("newer launcher is fine");
+    fn launcher_version_compat() {
+        for (launcher, label) in [
+            ("0.2.0-dev.1", Some("unknown")),
+            ("0.2.0-dev.1", Some("0.2.0-dev.1")),
+            ("0.3.0", Some("0.2.0-dev.1")),
+            ("0.2.0-dev.1", Some("not-semver")),
+        ] {
+            check_launcher_compat(launcher, label)
+                .unwrap_or_else(|error| panic!("launcher={launcher} label={label:?}: {error}"));
+        }
     }
 
     #[test]
@@ -786,12 +780,6 @@ mod tests {
             msg.contains("cargo install") || msg.contains("npm"),
             "msg should hint at remediation: {msg}"
         );
-    }
-
-    #[test]
-    fn unparseable_label_is_permissive() {
-        check_launcher_compat("0.2.0-dev.1", Some("not-semver"))
-            .expect("garbage label should not block launch");
     }
 
     /// Verify that `ContainerLaunchSpec::from_runtime_home` assembles the spec

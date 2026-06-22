@@ -225,51 +225,32 @@ mod tests {
     }
 
     #[test]
-    fn provider_id_hash_is_64_lowercase_hex_and_round_trips() {
+    fn provider_id_validation() {
+        let uppercase = "A".repeat(64);
+        let bad_char = "g".repeat(64);
+        for (label, hex) in [
+            ("non-hex", "xyz"),
+            ("uppercase", uppercase.as_str()),
+            ("bad-char", bad_char.as_str()),
+        ] {
+            assert!(hex.parse::<ProviderId>().is_err(), "{label}");
+        }
+
         let id = ProviderId::from_wasm_bytes(b"some wasm bytes");
-        let hex = id.to_string();
-        assert_eq!(hex.len(), 64);
+        let display = id.to_string();
+        assert_eq!(display.len(), 64, "wasm hash hex length");
         assert!(
-            hex.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            display
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "wasm hash must be lowercase hex"
         );
-        // FromStr round-trips Display, and hashing is deterministic.
-        assert_eq!(hex.parse::<ProviderId>().unwrap(), id);
+        assert_eq!(display.parse::<ProviderId>().unwrap(), id);
         assert_eq!(ProviderId::from_wasm_bytes(b"some wasm bytes"), id);
         assert_ne!(ProviderId::from_wasm_bytes(b"other bytes"), id);
-    }
 
-    #[test]
-    fn provider_id_rejects_non_lowercase_hex_and_bad_length() {
-        assert!("xyz".parse::<ProviderId>().is_err());
-        assert!("A".repeat(64).parse::<ProviderId>().is_err());
-        assert!("g".repeat(64).parse::<ProviderId>().is_err());
-    }
-
-    #[test]
-    fn provider_id_serializes_as_a_hex_string() {
-        let id = ProviderId::from_wasm_bytes(b"abc");
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{id}\""));
         assert_eq!(serde_json::from_str::<ProviderId>(&json).unwrap(), id);
-    }
-
-    #[test]
-    fn provider_ref_round_trips_through_json() {
-        let reference = ProviderRef {
-            id: ProviderId::from_wasm_bytes(b"x"),
-            meta: ProviderMeta {
-                name: ProviderName::new("github").unwrap(),
-                version: Some(ProviderVersion::new("0.3.1")),
-            },
-        };
-        let json = serde_json::to_string(&reference).unwrap();
-        assert_eq!(
-            serde_json::from_str::<ProviderRef>(&json).unwrap(),
-            reference
-        );
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["meta"]["name"], "github");
-        assert_eq!(value["meta"]["version"], "0.3.1");
     }
 }

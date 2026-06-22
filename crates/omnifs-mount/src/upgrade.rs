@@ -315,7 +315,6 @@ mod tests {
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
     }
 
-    /// Build a manifest with the given `capabilities` array and no config schema.
     fn manifest_with_caps(capabilities: serde_json::Value) -> ProviderManifest {
         let json = serde_json::json!({
             "id": "demo",
@@ -327,20 +326,74 @@ mod tests {
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
     }
 
-    /// Flipping a need between static and dynamic changes how its value resolves,
-    /// so it must route to re-consent (CapabilityOrAuth), not be seen as
-    /// identical.
     #[test]
-    fn flipping_a_need_to_dynamic_requires_reconsent() {
-        let old = manifest_with_caps(serde_json::json!([
+    fn capability_upgrade_diff() {
+        let docker_sock = serde_json::json!([
             {"kind": "unixSocket", "value": "/var/run/docker.sock", "why": "docker", "dynamic": false}
-        ]));
-        let new = manifest_with_caps(serde_json::json!([
+        ]);
+        let docker_sock_dynamic = serde_json::json!([
             {"kind": "unixSocket", "value": "/var/run/docker.sock", "why": "docker", "dynamic": true}
-        ]));
+        ]);
+
+        for (label, old_caps, new_caps) in [
+            ("static to dynamic", &docker_sock, &docker_sock_dynamic),
+            ("dynamic to static", &docker_sock_dynamic, &docker_sock),
+        ] {
+            let old = manifest_with_caps(old_caps.clone());
+            let new = manifest_with_caps(new_caps.clone());
+            assert!(
+                matches!(
+                    UpgradePlan::diff(&old, &new),
+                    UpgradePlan::CapabilityOrAuth { .. }
+                ),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_schema_upgrade_diff() {
+        let base_props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
+        let base = manifest(base_props.clone(), &["endpoint"]);
+
+        let with_optional = manifest(
+            serde_json::json!({
+                "endpoint": { "type": "string", "default": "x" },
+                "timeout_secs": { "type": "integer", "default": 30 }
+            }),
+            &["endpoint"],
+        );
+        match UpgradePlan::diff(&base, &with_optional) {
+            UpgradePlan::AdditiveConfig { added } => {
+                assert_eq!(added.len(), 1);
+                assert_eq!(added[0].name, "timeout_secs");
+                assert_eq!(added[0].default, Some(serde_json::json!(30)));
+            },
+            other => panic!("expected AdditiveConfig, got {other:?}"),
+        }
+
+        let with_required = manifest(
+            serde_json::json!({
+                "endpoint": { "type": "string", "default": "x" },
+                "api_key": { "type": "string" }
+            }),
+            &["endpoint", "api_key"],
+        );
         assert!(matches!(
-            UpgradePlan::diff(&old, &new),
-            UpgradePlan::CapabilityOrAuth { .. }
+            UpgradePlan::diff(&base, &with_required),
+            UpgradePlan::BreakingConfig { .. }
+        ));
+
+        let with_required_default = manifest(
+            serde_json::json!({
+                "endpoint": { "type": "string", "default": "x" },
+                "region": { "type": "string", "default": "us-east-1" }
+            }),
+            &["endpoint", "region"],
+        );
+        assert!(matches!(
+            UpgradePlan::diff(&base, &with_required_default),
+            UpgradePlan::BreakingConfig { .. }
         ));
     }
 
@@ -350,69 +403,6 @@ mod tests {
         let m = manifest(props.clone(), &["endpoint"]);
         let m2 = manifest(props, &["endpoint"]);
         assert_eq!(UpgradePlan::diff(&m, &m2), UpgradePlan::Identical);
-    }
-
-    #[test]
-    fn new_optional_field_is_additive_and_carries_its_default() {
-        let old = manifest(
-            serde_json::json!({ "endpoint": { "type": "string", "default": "x" } }),
-            &["endpoint"],
-        );
-        let new = manifest(
-            serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "timeout_secs": { "type": "integer", "default": 30 }
-            }),
-            &["endpoint"],
-        );
-        match UpgradePlan::diff(&old, &new) {
-            UpgradePlan::AdditiveConfig { added } => {
-                assert_eq!(added.len(), 1);
-                assert_eq!(added[0].name, "timeout_secs");
-                assert_eq!(added[0].default, Some(serde_json::json!(30)));
-            },
-            other => panic!("expected AdditiveConfig, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn new_required_field_is_breaking() {
-        let old = manifest(
-            serde_json::json!({ "endpoint": { "type": "string", "default": "x" } }),
-            &["endpoint"],
-        );
-        let new = manifest(
-            serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "api_key": { "type": "string" }
-            }),
-            &["endpoint", "api_key"],
-        );
-        assert!(matches!(
-            UpgradePlan::diff(&old, &new),
-            UpgradePlan::BreakingConfig { .. }
-        ));
-    }
-
-    /// A newly added required field is breaking even when it carries a default;
-    /// required-ness comes from the schema's `required` array, not default-absence.
-    #[test]
-    fn new_required_field_with_default_is_breaking() {
-        let old = manifest(
-            serde_json::json!({ "endpoint": { "type": "string", "default": "x" } }),
-            &["endpoint"],
-        );
-        let new = manifest(
-            serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "region": { "type": "string", "default": "us-east-1" }
-            }),
-            &["endpoint", "region"],
-        );
-        assert!(matches!(
-            UpgradePlan::diff(&old, &new),
-            UpgradePlan::BreakingConfig { .. }
-        ));
     }
 
     #[test]

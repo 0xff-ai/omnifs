@@ -153,11 +153,11 @@ mod tests {
         assert_eq!(config.image.as_deref(), Some("ghcr.io/example/omnifs:test"));
     }
 
-    // Guards the on-disk `[system].runtime` token: `setup` writes it and `up`
-    // reads it, so a rename of the serialized form would silently break the
-    // runtime selection across a CLI upgrade.
     #[test]
-    fn runtime_round_trips_through_config_file() {
+    fn config_file_round_trips() {
+        // Guards the on-disk `[system].runtime` token: `setup` writes it and `up`
+        // reads it, so a rename of the serialized form would silently break the
+        // runtime selection across a CLI upgrade.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         let mut file = ConfigFile::load(&path).unwrap();

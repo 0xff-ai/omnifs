@@ -603,34 +603,27 @@ mod tests {
     }
 
     #[test]
-    fn rehydrate_skips_blob_with_malformed_metadata() {
+    fn rehydrate_skips_blobs_without_valid_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("blob-cache");
-        let cache_key = "pkg-1.0/foo.bin";
-        let blob_path = cache_root.join(cache_key);
-        let metadata_path = cache_root
+
+        let malformed_key = "pkg-1.0/foo.bin";
+        let malformed_blob = cache_root.join(malformed_key);
+        let malformed_meta = cache_root
             .join(BLOB_META_DIR)
-            .join(format!("{cache_key}.json"));
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
-        std::fs::write(&blob_path, b"hello world").unwrap();
-        std::fs::write(&metadata_path, b"{not json").unwrap();
+            .join(format!("{malformed_key}.json"));
+        std::fs::create_dir_all(malformed_blob.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(malformed_meta.parent().unwrap()).unwrap();
+        std::fs::write(&malformed_blob, b"hello world").unwrap();
+        std::fs::write(&malformed_meta, b"{not json").unwrap();
+
+        let missing_key = "old/path.bin";
+        let missing_blob = cache_root.join(missing_key);
+        std::fs::create_dir_all(missing_blob.parent().unwrap()).unwrap();
+        std::fs::write(&missing_blob, b"stale").unwrap();
 
         let cache = BlobCache::new(cache_root);
-        assert!(cache.lookup_by_key(cache_key).is_none());
-    }
-
-    #[test]
-    fn rehydrate_skips_blob_with_missing_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("blob-cache");
-        let cache_key = "old/path.bin";
-        let blob_path = cache_root.join(cache_key);
-        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
-        std::fs::write(&blob_path, b"stale").unwrap();
-
-        let cache = BlobCache::new(cache_root);
-
-        assert!(cache.lookup_by_key(cache_key).is_none());
+        assert!(cache.lookup_by_key(malformed_key).is_none());
+        assert!(cache.lookup_by_key(missing_key).is_none());
     }
 }

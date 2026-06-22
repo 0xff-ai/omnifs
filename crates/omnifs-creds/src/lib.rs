@@ -339,7 +339,7 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn oauth_refreshability_serializes_and_legacy_entries_infer_it() {
+    fn credential_refreshability_wire_shapes() {
         let entry = CredentialEntry::oauth(
             SecretString::from("access".to_owned()),
             Some(SecretString::from("refresh".to_owned())),
@@ -348,47 +348,47 @@ mod tests {
             vec![],
             OffsetDateTime::UNIX_EPOCH,
         );
-        let encoded = serde_json::to_value(&entry).unwrap();
-        assert_eq!(encoded["refreshability"], "refreshable");
-
-        let legacy_refreshable: CredentialEntry = serde_json::from_str(
-            r#"{
-                "kind": "oauth",
-                "access_token": "access",
-                "refresh_token": "refresh",
-                "expires_at": null,
-                "token_type": "bearer",
-                "stored_at": "1970-01-01T00:00:00Z",
-                "last_validated": null,
-                "scopes": [],
-                "upstream_identity": null,
-                "extras": {}
-            }"#,
-        )
-        .unwrap();
         assert_eq!(
-            legacy_refreshable.refreshability(),
-            Refreshability::Refreshable
+            serde_json::to_value(&entry).unwrap()["refreshability"],
+            "refreshable"
         );
 
-        let legacy_not_refreshable: CredentialEntry = serde_json::from_str(
-            r#"{
-                "kind": "oauth",
-                "access_token": "access",
-                "refresh_token": null,
-                "expires_at": null,
-                "token_type": "bearer",
-                "stored_at": "1970-01-01T00:00:00Z",
-                "last_validated": null,
-                "scopes": [],
-                "upstream_identity": null,
-                "extras": {}
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(
-            legacy_not_refreshable.refreshability(),
-            Refreshability::NotRefreshable
-        );
+        for (label, json, expected) in [
+            (
+                "legacy with refresh token",
+                r#"{
+                    "kind": "oauth",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_at": null,
+                    "token_type": "bearer",
+                    "stored_at": "1970-01-01T00:00:00Z",
+                    "last_validated": null,
+                    "scopes": [],
+                    "upstream_identity": null,
+                    "extras": {}
+                }"#,
+                Refreshability::Refreshable,
+            ),
+            (
+                "legacy without refresh token",
+                r#"{
+                    "kind": "oauth",
+                    "access_token": "access",
+                    "refresh_token": null,
+                    "expires_at": null,
+                    "token_type": "bearer",
+                    "stored_at": "1970-01-01T00:00:00Z",
+                    "last_validated": null,
+                    "scopes": [],
+                    "upstream_identity": null,
+                    "extras": {}
+                }"#,
+                Refreshability::NotRefreshable,
+            ),
+        ] {
+            let entry: CredentialEntry = serde_json::from_str(json).unwrap();
+            assert_eq!(entry.refreshability(), expected, "{label}");
+        }
     }
 }

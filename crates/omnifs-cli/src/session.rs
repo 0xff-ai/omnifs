@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_validates_oauth_credentials() {
+    fn materialize_oauth_mount_configs() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
@@ -230,7 +230,9 @@ mod tests {
         let key = CredentialId::new("github", "device", "default").unwrap();
         store.put(&key, &sample_oauth_entry("gho-access")).unwrap();
 
-        let config = MountConfig {
+        let catalog = test_catalog(tmp.path());
+
+        let with_scheme = MountConfig {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
@@ -238,33 +240,17 @@ mod tests {
             ),
             source: PathBuf::from("/dev/null"),
         };
-
-        let catalog = test_catalog(tmp.path());
         DockerMountMaterializer::new(&catalog, &store)
-            .materialize(&config)
+            .materialize(&with_scheme)
             .unwrap();
-    }
 
-    #[test]
-    fn materialize_applies_provider_metadata_before_credential_validation() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
-        std::fs::create_dir_all(&paths.providers_dir).unwrap();
-        let reference = install_fixture_provider(&paths.providers_dir, "github");
-
-        let store = MemoryStore::new();
-        let key = CredentialId::new("github", "device", "default").unwrap();
-        store.put(&key, &sample_oauth_entry("gho-access")).unwrap();
-
-        let config = MountConfig {
+        let metadata_only = MountConfig {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
             source: PathBuf::from("/dev/null"),
         };
-
-        let catalog = test_catalog(tmp.path());
         DockerMountMaterializer::new(&catalog, &store)
-            .materialize(&config)
+            .materialize(&metadata_only)
             .unwrap();
     }
 

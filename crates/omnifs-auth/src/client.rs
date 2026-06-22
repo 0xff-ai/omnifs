@@ -868,46 +868,41 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_pending_promotes_github_style_200_error_to_400() {
-        let body = br#"{"error":"authorization_pending","error_description":"..."}"#.to_vec();
-        let response = http::Response::builder()
+    fn rewrite_pending_status_handling() {
+        let pending_body =
+            br#"{"error":"authorization_pending","error_description":"..."}"#.to_vec();
+        let pending = http::Response::builder()
             .status(http::StatusCode::OK)
             .header(
                 http::header::CONTENT_TYPE,
                 "application/json; charset=utf-8",
             )
-            .body(body.clone())
+            .body(pending_body.clone())
             .unwrap();
-        let rewritten = rewrite_pending_to_error_status(response);
+        let rewritten = rewrite_pending_to_error_status(pending);
         assert_eq!(rewritten.status(), http::StatusCode::BAD_REQUEST);
-        assert_eq!(rewritten.body(), &body);
-    }
+        assert_eq!(rewritten.body(), &pending_body);
 
-    #[test]
-    fn rewrite_pending_leaves_successful_token_response_alone() {
-        let body = br#"{"access_token":"x","token_type":"bearer"}"#.to_vec();
-        let response = http::Response::builder()
+        let token_body = br#"{"access_token":"x","token_type":"bearer"}"#.to_vec();
+        let token = http::Response::builder()
             .status(http::StatusCode::OK)
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(body.clone())
+            .body(token_body.clone())
             .unwrap();
-        let rewritten = rewrite_pending_to_error_status(response);
+        let rewritten = rewrite_pending_to_error_status(token);
         assert_eq!(rewritten.status(), http::StatusCode::OK);
-        assert_eq!(rewritten.body(), &body);
-    }
+        assert_eq!(rewritten.body(), &token_body);
 
-    #[test]
-    fn rewrite_pending_leaves_non_json_responses_alone() {
-        let body = b"error=authorization_pending".to_vec();
-        let response = http::Response::builder()
+        let form_body = b"error=authorization_pending".to_vec();
+        let form = http::Response::builder()
             .status(http::StatusCode::OK)
             .header(
                 http::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
             )
-            .body(body.clone())
+            .body(form_body.clone())
             .unwrap();
-        let rewritten = rewrite_pending_to_error_status(response);
+        let rewritten = rewrite_pending_to_error_status(form);
         assert_eq!(rewritten.status(), http::StatusCode::OK);
     }
 

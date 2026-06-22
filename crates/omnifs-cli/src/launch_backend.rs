@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_uses_config_image_when_env_unset() {
+    fn docker_image_resolution_precedence() {
         with_env(&[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, None)], || {
             let config = Config {
                 image: Some("ghcr.io/example/custom:1.2.3".into()),
@@ -255,10 +255,7 @@ mod tests {
             let target = DockerTarget::resolve(None, None, &config).unwrap();
             assert_eq!(target.image().as_str(), "ghcr.io/example/custom:1.2.3");
         });
-    }
 
-    #[test]
-    fn resolve_prefers_env_image_over_config() {
         with_env(
             &[
                 (ENV_IMAGE, Some("ghcr.io/example/env:9.9.9")),
@@ -271,22 +268,7 @@ mod tests {
                 };
                 let target = DockerTarget::resolve(None, None, &config).unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/env:9.9.9");
-            },
-        );
-    }
 
-    #[test]
-    fn resolve_prefers_explicit_image_over_env_and_config() {
-        with_env(
-            &[
-                (ENV_IMAGE, Some("ghcr.io/example/env:9.9.9")),
-                (ENV_CONTAINER_NAME, None),
-            ],
-            || {
-                let config = Config {
-                    image: Some("ghcr.io/example/config:1.0.0".into()),
-                    ..Default::default()
-                };
                 let target =
                     DockerTarget::resolve(None, Some("ghcr.io/example/cli:2.0.0".into()), &config)
                         .unwrap();
@@ -322,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_container_name_prefers_env_over_config() {
+    fn docker_container_name_resolution_precedence() {
         with_env(
             &[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, Some("omnifs-env"))],
             || {
@@ -332,19 +314,7 @@ mod tests {
                 };
                 let container_name = DockerTarget::resolve_container_name(None, &config).unwrap();
                 assert_eq!(container_name.as_str(), "omnifs-env");
-            },
-        );
-    }
 
-    #[test]
-    fn resolve_container_name_prefers_explicit_over_env_and_config() {
-        with_env(
-            &[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, Some("omnifs-env"))],
-            || {
-                let config = Config {
-                    container_name: Some("omnifs-config".into()),
-                    ..Default::default()
-                };
                 let container_name =
                     DockerTarget::resolve_container_name(Some("omnifs-cli".into()), &config)
                         .unwrap();

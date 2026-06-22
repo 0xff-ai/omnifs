@@ -363,37 +363,40 @@ mod tests {
     }
 
     #[test]
-    fn limit_max_entries_trips_too_many_entries() {
+    fn archive_limit_enforcement() {
         let bytes = synthesize_targz();
-        let limits = ExtractorLimits {
-            max_entries: 1,
-            ..DEFAULT_LIMITS
-        };
-        let (_dest, result) = run_extract(&bytes, ArchiveFormat::TarGz, Some("pkg-1.0/"), limits);
+
+        let (_dest, result) = run_extract(
+            &bytes,
+            ArchiveFormat::TarGz,
+            Some("pkg-1.0/"),
+            ExtractorLimits {
+                max_entries: 1,
+                ..DEFAULT_LIMITS
+            },
+        );
         assert!(matches!(result, Err(ExtractError::TooManyEntries)));
-    }
 
-    #[test]
-    fn limit_max_file_size_trips_file_too_large() {
-        let bytes = synthesize_targz();
-        let limits = ExtractorLimits {
-            max_file_size: 4,
-            ..DEFAULT_LIMITS
-        };
-        let (_dest, result) = run_extract(&bytes, ArchiveFormat::TarGz, Some("pkg-1.0/"), limits);
+        let (_dest, result) = run_extract(
+            &bytes,
+            ArchiveFormat::TarGz,
+            Some("pkg-1.0/"),
+            ExtractorLimits {
+                max_file_size: 4,
+                ..DEFAULT_LIMITS
+            },
+        );
         assert!(matches!(result, Err(ExtractError::FileTooLarge(_))));
-    }
 
-    #[test]
-    fn limit_max_total_bytes_trips_total_too_large() {
-        let bytes = synthesize_targz();
-        // Both files together are ~70 bytes; cap at 30 to trip the
-        // running total mid-extract.
-        let limits = ExtractorLimits {
-            max_total_bytes: 30,
-            ..DEFAULT_LIMITS
-        };
-        let (_dest, result) = run_extract(&bytes, ArchiveFormat::TarGz, Some("pkg-1.0/"), limits);
+        let (_dest, result) = run_extract(
+            &bytes,
+            ArchiveFormat::TarGz,
+            Some("pkg-1.0/"),
+            ExtractorLimits {
+                max_total_bytes: 30,
+                ..DEFAULT_LIMITS
+            },
+        );
         assert!(matches!(
             result,
             Err(ExtractError::TotalTooLarge | ExtractError::FileTooLarge(_))
