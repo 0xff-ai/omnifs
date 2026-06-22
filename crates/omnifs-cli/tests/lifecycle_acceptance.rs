@@ -84,6 +84,15 @@ fn live_acceptance_enabled() -> bool {
     std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_some()
 }
 
+fn omnifs_bin() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_omnifs")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
+        .map_or_else(
+            || PathBuf::from(env!("CARGO_BIN_EXE_omnifs")),
+            PathBuf::from,
+        )
+}
+
 /// Return `true` if the platform can serve a mount. On Linux, FUSE requires
 /// `/dev/fuse`. On macOS, NFS loopback is always available without root.
 fn platform_can_mount() -> bool {
@@ -174,7 +183,7 @@ impl Fixture {
 
     /// Run a CLI subcommand with the hermetic env. Returns the captured output.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_omnifs"))
+        Command::new(omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env("OMNIFS_MOUNT_POINT", &self.mount_point)

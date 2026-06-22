@@ -43,6 +43,15 @@ fn free_port() -> u16 {
         .port()
 }
 
+fn omnifs_bin() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_omnifs")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
+        .map_or_else(
+            || PathBuf::from(env!("CARGO_BIN_EXE_omnifs")),
+            PathBuf::from,
+        )
+}
+
 fn curl(args: &[&str]) -> bool {
     Command::new("curl")
         .args(args)
@@ -204,7 +213,7 @@ fn start() -> Option<Daemon> {
     // The daemon picks the platform-default frontend automatically; no
     // --frontend flag. Mount point comes from OMNIFS_MOUNT_POINT; config and
     // providers come from OMNIFS_HOME. --host-native opens preopens directly.
-    let child = Command::new(env!("CARGO_BIN_EXE_omnifs"))
+    let child = Command::new(omnifs_bin())
         .args(["daemon", "--listen", &listen_addr, "--host-native"])
         .env("OMNIFS_HOME", home.path())
         .env("OMNIFS_MOUNT_POINT", &mount_point)
