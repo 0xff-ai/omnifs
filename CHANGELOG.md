@@ -27,6 +27,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Breaking:** The daemon loads its mount set from `mounts/*.json` on start and reconciles to that desired state, instead of the CLI pushing specs over the wire. (#141)
 - **Feature:** A new shutdown endpoint lets the daemon unmount its own filesystem, tear down providers, and exit gracefully. (#141)
 - **Fix:** Over NFS, the root directory now refreshes when a mount is added or removed, so clients see mounts appear and disappear immediately instead of caching a stale (sometimes empty) listing. (#142)
+- **Feature:** A provider's manifest declares the capabilities it needs; a mount grants a subset, and the host checks the grant covers the need at provider start. (#145)
+- **Feature:** A mount references its provider by the hash of its WASM bytes, so a projection always runs the exact artifact it was authored against. (#145)
 
 ### CLI & workflow
 - **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
