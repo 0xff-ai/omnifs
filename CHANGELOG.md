@@ -13,6 +13,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** Kubernetes provider unit tests have been ported to host-driven integration tests, exercising the provider through the same code path as real consumers. (#127)
 - **Breaking:** The stability levels are renamed: `Immutable`/`Mutable`/`Volatile` are now `stable`/`dynamic`/`live`, freeing the old words for a future write model. (#132)
 - **Breaking:** Every object must now declare its stability (`o.stable()`, `o.dynamic()`, `o.live()`, or a key-dependent closure); there is no default. Omitting it is a build error, which prevents pinned identities from being silently treated as `dynamic` and given needless cache TTLs and eviction. (#132)
+- **Improvement:** When browsing a listing, many files are now served directly from the data already fetched, so reads don't need to refetch from upstream. (#146)
 
 ### Runtime & mounts
 - **Feature:** The daemon can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
