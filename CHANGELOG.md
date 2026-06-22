@@ -47,6 +47,9 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** Object cache keys are now stored without the mount prefix, as each mount gets its own dedicated storage area. (#140)
 - **Security:** Path segments now reject control characters, making the internal delimiter used in view cache keys safe from accidental collisions. (#140)
 
+### Internal & maintenance
+- **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
+
 ## [0.2.1] - 2026-06-08
 
 ### Fixed

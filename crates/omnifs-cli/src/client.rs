@@ -161,7 +161,7 @@ impl DaemonClient {
         let response = self
             .http
             .post(format!("{}/v1/reconcile", self.base))
-            .timeout(Duration::from_secs(180))
+            .timeout(Duration::from_mins(3))
             .send()
             .await
             .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?

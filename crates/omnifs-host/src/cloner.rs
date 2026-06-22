@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
-const CLONE_TIMEOUT: Duration = Duration::from_secs(120);
+const CLONE_TIMEOUT: Duration = Duration::from_mins(2);
 const STDERR_MAX_BYTES: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]

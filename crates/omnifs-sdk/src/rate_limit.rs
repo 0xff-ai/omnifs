@@ -32,7 +32,7 @@ const DEFAULT_COOLDOWN: Duration = Duration::from_secs(5);
 // `Retry-After` large enough to overflow `Instant::now() + cooldown` (which
 // would panic the guest) or wedge the breaker open indefinitely. One hour is
 // well past any real backoff for a filesystem.
-const MAX_COOLDOWN: Duration = Duration::from_secs(3600);
+const MAX_COOLDOWN: Duration = Duration::from_hours(1);
 
 type BreakerMap = HashMap<String, Instant, BuildHasherDefault<DefaultHasher>>;
 

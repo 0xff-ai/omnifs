@@ -485,7 +485,7 @@ fn credential_entry_from_token(
 ) -> CredentialEntry {
     let now = OffsetDateTime::now_utc();
     let expires_at = token.expires_in().map(|expires_in| {
-        let skew = Duration::from_secs(60);
+        let skew = Duration::from_mins(1);
         let effective = expires_in.checked_sub(skew).unwrap_or(expires_in);
         now + effective
     });

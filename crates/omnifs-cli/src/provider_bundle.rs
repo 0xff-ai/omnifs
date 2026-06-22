@@ -149,11 +149,7 @@ fn expected_files() -> anyhow::Result<BTreeSet<String>> {
 
 fn write_if_changed(providers_dir: &Path, file: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let target = providers_dir.join(file);
-    if target.is_file()
-        && std::fs::read(&target)
-            .map(|existing| existing == bytes)
-            .unwrap_or(false)
-    {
+    if target.is_file() && std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
         return Ok(());
     }
 
