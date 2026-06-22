@@ -40,26 +40,23 @@ struct Nfs {
 }
 
 impl Frontends {
-    pub(crate) fn from_context(
-        context: &DaemonContext,
-        registry: Arc<ProviderRegistry>,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn from_context(context: &DaemonContext, registry: Arc<ProviderRegistry>) -> Self {
         match context.frontend() {
             #[cfg(target_os = "linux")]
-            FrontendKind::Fuse => Ok(Self::fuse(
+            FrontendKind::Fuse => Self::fuse(
                 context.mount_point().to_path_buf(),
                 registry,
                 omnifs_fuse::new_notifier_handle(),
-            )),
-            #[cfg(not(target_os = "linux"))]
-            FrontendKind::Fuse => anyhow::bail!(
-                "the fuse frontend is only available on Linux; host-native uses the NFS loopback"
             ),
-            FrontendKind::Nfs => Ok(Self::nfs(
+            #[cfg(not(target_os = "linux"))]
+            FrontendKind::Fuse => {
+                unreachable!("DaemonContext resolves the NFS frontend on non-Linux hosts")
+            },
+            FrontendKind::Nfs => Self::nfs(
                 context.mount_point().to_path_buf(),
                 registry,
                 context.nfs_mount_options(),
-            )),
+            ),
         }
     }
 
