@@ -110,7 +110,7 @@ fn assert_projected_dir(op: &omnifs_host::TestOp<'_>, path: &str) {
     );
 }
 
-fn assert_projected_lazy_file(op: &omnifs_host::TestOp<'_>, path: &str) {
+fn assert_projected_deferred_file_with_exact_size(op: &omnifs_host::TestOp<'_>, path: &str) {
     let write = op
         .effects()
         .unwrap()
@@ -124,7 +124,7 @@ fn assert_projected_lazy_file(op: &omnifs_host::TestOp<'_>, path: &str) {
     };
     assert_eq!(file.attrs.stability, Stability::Dynamic);
     assert_eq!(file.attrs.version_token.as_deref(), Some("\"v1\""));
-    assert!(matches!(file.attrs.size, FileSize::Unknown));
+    assert!(matches!(file.attrs.size, FileSize::Exact(_)));
     assert!(matches!(file.bytes, ByteSource::Deferred(ReadMode::Full)));
 }
 
@@ -222,11 +222,11 @@ fn day_file_reads_one_month_date_range_and_stores_neighbor_days() {
     );
 
     assert_projected_dir(&op, "/2026-01-14");
-    assert_projected_lazy_file(&op, "/2026-01-14/daily_sleep.json");
+    assert_projected_deferred_file_with_exact_size(&op, "/2026-01-14/daily_sleep.json");
     assert_projected_dir(&op, "/2026-01-15");
-    assert_projected_lazy_file(&op, "/2026-01-15/daily_sleep.json");
+    assert_projected_deferred_file_with_exact_size(&op, "/2026-01-15/daily_sleep.json");
     assert_projected_dir(&op, "/2026-01-30");
-    assert_projected_lazy_file(&op, "/2026-01-30/daily_sleep.json");
+    assert_projected_deferred_file_with_exact_size(&op, "/2026-01-30/daily_sleep.json");
     assert_eq!(
         op.effects()
             .unwrap()
