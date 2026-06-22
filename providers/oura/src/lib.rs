@@ -231,8 +231,14 @@ impl DailyCollectionKey {
         format!("/{}", self.day)
     }
 
-    fn project_lazy_entry(self, effects: &mut Effects, validator: Option<Validator>) -> Result<()> {
-        let mut file = FileProj::deferred(Size::Unknown, ReadMode::Full, Stability::Dynamic);
+    fn project_entry(
+        self,
+        effects: &mut Effects,
+        size: Size,
+        validator: Option<Validator>,
+    ) -> Result<()> {
+        let mut file = FileProj::deferred(size, ReadMode::Full, Stability::Dynamic)
+            .with_content_type(ContentType::Json);
         if let Some(validator) = validator {
             file = file.with_version(validator);
         }
@@ -309,19 +315,23 @@ impl RangeResponse {
     fn load(self, requested: DailyCollectionKey) -> Result<Load<DailyCollection>> {
         let mut grouping = self.group_by_day();
         let mut effects = Effects::new();
-        let mut requested_value = None;
+        let mut requested_load = None;
+        // Each day's canonical bytes are materialized here anyway (to store the
+        // non-requested days), so project the directory entry with its exact
+        // size rather than Size::Unknown: the listing reports honest sizes cold.
         for day in self.range.start().through(*self.range.end()) {
             let key = DailyCollectionKey {
                 day,
                 collection: self.collection,
             };
-            key.project_lazy_entry(&mut effects, self.validator.clone())?;
             let value = grouping.take(day);
+            let canonical = self.canonical(&value)?;
+            let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
+            key.project_entry(&mut effects, size, self.validator.clone())?;
             if day == requested.day {
-                requested_value = Some(value);
+                requested_load = Some((value, canonical));
                 continue;
             }
-            let canonical = self.canonical(&value)?;
             effects.canonical_store(
                 &key.anchor(),
                 canonical.validator.clone(),
@@ -329,8 +339,13 @@ impl RangeResponse {
                 vec![key.path()],
             );
         }
-        let value = requested_value.unwrap_or_else(|| grouping.take(requested.day));
-        let canonical = self.canonical(&value)?;
+        let (value, canonical) = if let Some(pair) = requested_load {
+            pair
+        } else {
+            let value = grouping.take(requested.day);
+            let canonical = self.canonical(&value)?;
+            (value, canonical)
+        };
         Ok(Load::fresh_with_effects(
             DailyCollection(value),
             canonical,

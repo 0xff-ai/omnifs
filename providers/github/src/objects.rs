@@ -54,6 +54,10 @@ impl ItemData {
         Ok(FileContent::new(body.to_owned()).with_content_type(ContentType::Markdown))
     }
 
+    fn body_bytes(&self) -> Vec<u8> {
+        self.body.as_deref().unwrap_or("").as_bytes().to_vec()
+    }
+
     pub(crate) fn markdown(&self) -> Vec<u8> {
         let user = self.user.as_ref().map_or("", |u| u.login.as_str());
         let body = self.body.as_deref().unwrap_or("");
@@ -64,17 +68,24 @@ impl ItemData {
         .into_bytes()
     }
 
-    pub(crate) fn listed_dir(&self, include_pull_files: bool) -> Result<DirProjection> {
-        let body = FileProjection::deferred(Size::Unknown)
-            .full()
-            .dynamic()
-            .content_type(ContentType::Markdown)
-            .build();
-        let item_md = FileProjection::deferred(Size::Unknown)
-            .full()
-            .dynamic()
-            .content_type(ContentType::Markdown)
-            .build();
+    /// Project an issue/PR directory whose listing fetch already holds the full
+    /// row. `title`/`state`/`user` are tiny and always inline. `body` and
+    /// `item.md` derive entirely from the row via the same code the object's
+    /// `body` field and Markdown render use, so they inline when they fit the
+    /// per-file cap and the shared aggregate `budget` (which the cap enforces
+    /// across the whole listing); otherwise they fall back to a deferred read.
+    /// `item.json` is always deferred: its canonical is the raw single-item API
+    /// body, which the lossy [`ItemData`] cannot reproduce byte-for-byte.
+    pub(crate) fn listed_dir(
+        &self,
+        include_pull_files: bool,
+        budget: &mut usize,
+    ) -> Result<DirProjection> {
+        let login_len = self.user.as_ref().map_or(0, |u| u.login.len());
+        *budget = budget.saturating_sub(self.title.len() + self.state.len() + login_len);
+
+        let body = inline_or_deferred_markdown(self.body_bytes(), budget);
+        let item_md = inline_or_deferred_markdown(self.markdown(), budget);
         let item_json = FileProjection::deferred(Size::Unknown)
             .full()
             .stable()
@@ -103,6 +114,25 @@ impl ItemData {
         }
 
         Ok(projection)
+    }
+}
+
+/// Inline `bytes` as a Markdown preload when they fit the per-file inline cap
+/// and the shared aggregate budget (decrementing it); otherwise a deferred
+/// Markdown leaf the object render fills on read.
+fn inline_or_deferred_markdown(bytes: Vec<u8>, budget: &mut usize) -> FileProjection {
+    if bytes.len() <= MAX_PROJECTED_BYTES && bytes.len() <= *budget {
+        *budget -= bytes.len();
+        FileProjection::inline(bytes)
+            .dynamic()
+            .content_type(ContentType::Markdown)
+            .build()
+    } else {
+        FileProjection::deferred(Size::Unknown)
+            .full()
+            .dynamic()
+            .content_type(ContentType::Markdown)
+            .build()
     }
 }
 
