@@ -203,9 +203,16 @@ impl ListPage {
         } else {
             DirProjection::open(entries)
         };
+        // One aggregate eager budget across the whole listing: the host rejects
+        // a terminal response whose inline preloads exceed it, so per-item body
+        // inlining draws down a shared pool rather than each item assuming the
+        // full cap.
+        let mut budget = MAX_EAGER_RESPONSE_BYTES;
         for item in visible_items {
-            projection =
-                projection.preload_dir(route.anchor(item.number), route.listed_item_dir(item)?);
+            projection = projection.preload_dir(
+                route.anchor(item.number),
+                route.listed_item_dir(item, &mut budget)?,
+            );
         }
         Ok(projection)
     }
@@ -269,8 +276,8 @@ impl ItemListRoute {
         }
     }
 
-    fn listed_item_dir(&self, item: &ItemData) -> Result<DirProjection> {
-        item.listed_dir(matches!(self, Self::Pulls(_)))
+    fn listed_item_dir(&self, item: &ItemData, budget: &mut usize) -> Result<DirProjection> {
+        item.listed_dir(matches!(self, Self::Pulls(_)), budget)
     }
 }
 
@@ -454,11 +461,36 @@ async fn comments_dir(
         .await?;
     let base = (u64::from(page) - 1) * COMMENT_PAGE_SIZE;
     let entries = (1..=comments.len() as u64).map(|idx| Entry::file((base + idx).to_string()));
-    if (comments.len() as u64) < COMMENT_PAGE_SIZE {
-        Ok(DirProjection::exhaustive(entries))
+    let mut projection = if (comments.len() as u64) < COMMENT_PAGE_SIZE {
+        DirProjection::exhaustive(entries)
     } else {
-        Ok(DirProjection::paged(entries, Cursor::Page(page + 1)))
+        DirProjection::paged(entries, Cursor::Page(page + 1))
+    };
+    // The page fetch already holds every comment body, so preload each file
+    // (byte-identical to comment_read) instead of forcing a per-read refetch.
+    // Bodies vary in size: inline within the per-file cap and the shared
+    // aggregate budget; comments that don't fit fall back to comment_read.
+    let mut budget = MAX_EAGER_RESPONSE_BYTES;
+    for (offset, comment) in comments.iter().enumerate() {
+        let bytes = comment_bytes(comment);
+        if bytes.len() > MAX_PROJECTED_BYTES || bytes.len() > budget {
+            continue;
+        }
+        budget -= bytes.len();
+        let idx = base + offset as u64 + 1;
+        projection = projection.preload_file(
+            idx.to_string(),
+            FileProjection::inline(bytes).dynamic().build(),
+        );
     }
+    Ok(projection)
+}
+
+/// The rendered bytes for one comment leaf, shared by the listing preload and
+/// the on-demand read so both paths are byte-identical.
+fn comment_bytes(comment: &CommentRecord) -> Vec<u8> {
+    let body = comment.body.as_deref().unwrap_or("");
+    format!("{}:\n{body}\n", comment.user.login).into_bytes()
 }
 
 async fn comment_read(
@@ -481,12 +513,9 @@ async fn comment_read(
     let comment = comments
         .get(offset)
         .ok_or_else(|| ProviderError::not_found("comment not found"))?;
-    let body = comment.body.as_deref().unwrap_or("");
-    Ok(
-        FileProjection::body(format!("{}:\n{body}\n", comment.user.login).into_bytes())
-            .dynamic()
-            .build(),
-    )
+    Ok(FileProjection::body(comment_bytes(comment))
+        .dynamic()
+        .build())
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {

@@ -309,17 +309,17 @@ async fn service_containers(cx: DirCx, key: ProjectServiceKey) -> Result<DirProj
 
 async fn system_info(cx: Cx) -> Result<FileProjection> {
     let info: SystemInfo = fetch_json(&cx, "/info", &[]).await?;
-    Ok(snapshot_body(pretty_json(&info)?))
+    Ok(snapshot_json(pretty_json(&info)?))
 }
 
 async fn system_version(cx: Cx) -> Result<FileProjection> {
     let version: SystemVersion = fetch_json(&cx, "/version", &[]).await?;
-    Ok(snapshot_body(pretty_json(&version)?))
+    Ok(snapshot_json(pretty_json(&version)?))
 }
 
 async fn system_df(cx: Cx) -> Result<FileProjection> {
     let usage: SystemDataUsageResponse = fetch_json(&cx, "/system/df", &[]).await?;
-    Ok(snapshot_body(pretty_json(&usage)?))
+    Ok(snapshot_json(pretty_json(&usage)?))
 }
 
 async fn system_ping(cx: Cx) -> Result<FileProjection> {
@@ -332,7 +332,7 @@ async fn system_ping(cx: Cx) -> Result<FileProjection> {
 
 async fn containers_listing(cx: Cx) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
-    Ok(snapshot_body(pretty_json(&summaries)?))
+    Ok(snapshot_json(pretty_json(&summaries)?))
 }
 
 async fn by_name(cx: DirCx) -> Result<DirProjection> {
@@ -396,7 +396,7 @@ where
 async fn compose_listing(cx: Cx) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
     let listing = ComposeListing::from(&summaries);
-    Ok(snapshot_body(pretty_json(&listing)?))
+    Ok(snapshot_json(pretty_json(&listing)?))
 }
 
 async fn container_dir(_cx: DirCx, _key: ContainerKey) -> Result<DirProjection> {
@@ -408,28 +408,67 @@ async fn container_dir(_cx: DirCx, _key: ContainerKey) -> Result<DirProjection> 
 }
 
 async fn container_inspect(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
-    let bytes = fetch_bytes(&cx, &format!("/containers/{}/json", key.reference), &[]).await?;
-    Ok(snapshot_body(bytes))
+    let (bytes, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(bytes)
+        .dynamic()
+        .content_type(ContentType::Json)
+        .preload_file("state", state_leaf(&container))
+        .preload_file("summary.txt", summary_leaf(&container))
+        .build())
 }
 
 async fn container_state(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
-    let container = fetch_container(&cx, &key.reference).await?;
-    Ok(snapshot_body(container.state_bytes()))
+    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(container.state_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .preload_file("summary.txt", summary_leaf(&container))
+        .build())
 }
 
 async fn container_summary(cx: Cx, key: ContainerKey) -> Result<FileProjection> {
-    let container = fetch_container(&cx, &key.reference).await?;
-    Ok(snapshot_body(container.summary_bytes()))
-}
-
-async fn fetch_container(cx: &Cx, reference: &ContainerRef) -> Result<Container> {
-    fetch_json(cx, &format!("/containers/{reference}/json"), &[])
-        .await
-        .map(Container)
+    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(container.summary_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .preload_file("state", state_leaf(&container))
+        .build())
 }
 
 fn snapshot_body(bytes: Vec<u8>) -> FileProjection {
     FileProjection::body(bytes).dynamic().build()
+}
+
+fn snapshot_json(bytes: Vec<u8>) -> FileProjection {
+    FileProjection::body(bytes)
+        .dynamic()
+        .content_type(ContentType::Json)
+        .build()
+}
+
+// `state` and `summary.txt` are derived from the same container inspect and are
+// tiny, so whichever container-file read fetched the inspect preloads the other
+// two as siblings. `inspect.json` is never preloaded: it can exceed the 64 KiB
+// inline cap, and its own read is a raw passthrough anyway.
+fn state_leaf(container: &Container) -> FileProjection {
+    FileProjection::inline(container.state_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
+}
+
+fn summary_leaf(container: &Container) -> FileProjection {
+    FileProjection::inline(container.summary_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
+}
+
+async fn fetch_inspect(cx: &Cx, reference: &ContainerRef) -> Result<(Vec<u8>, Container)> {
+    let bytes = fetch_bytes(cx, &format!("/containers/{reference}/json"), &[]).await?;
+    let inspect: ContainerInspectResponse = serde_json::from_slice(&bytes)
+        .map_err(|error| ProviderError::internal(format!("docker inspect parse error: {error}")))?;
+    Ok((bytes, Container(inspect)))
 }
 
 pub(crate) async fn list_containers(cx: &Cx) -> Result<Vec<ContainerSummary>> {
