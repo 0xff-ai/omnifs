@@ -157,7 +157,7 @@ run_smoke_demo() {
     [[ -d ${repo_root}/issues ]]
 
     cd "${repo_root}"
-    ls
+    command ls -1 issues pulls actions
 
     cd "${repo_root}/issues/open"
     ls

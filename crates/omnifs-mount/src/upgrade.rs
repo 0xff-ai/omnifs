@@ -298,7 +298,7 @@ mod tests {
 
     /// Build a manifest with the given config-schema properties and `required`
     /// array, for diff classification tests.
-    fn manifest(config_props: serde_json::Value, required: &[&str]) -> ProviderManifest {
+    fn manifest(config_props: &serde_json::Value, required: &[&str]) -> ProviderManifest {
         let json = serde_json::json!({
             "id": "demo",
             "displayName": "Demo",
@@ -315,7 +315,7 @@ mod tests {
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
     }
 
-    fn manifest_with_caps(capabilities: serde_json::Value) -> ProviderManifest {
+    fn manifest_with_caps(capabilities: &serde_json::Value) -> ProviderManifest {
         let json = serde_json::json!({
             "id": "demo",
             "displayName": "Demo",
@@ -339,8 +339,8 @@ mod tests {
             ("static to dynamic", &docker_sock, &docker_sock_dynamic),
             ("dynamic to static", &docker_sock_dynamic, &docker_sock),
         ] {
-            let old = manifest_with_caps(old_caps.clone());
-            let new = manifest_with_caps(new_caps.clone());
+            let old = manifest_with_caps(old_caps);
+            let new = manifest_with_caps(new_caps);
             assert!(
                 matches!(
                     UpgradePlan::diff(&old, &new),
@@ -354,15 +354,13 @@ mod tests {
     #[test]
     fn config_schema_upgrade_diff() {
         let base_props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
-        let base = manifest(base_props.clone(), &["endpoint"]);
+        let base = manifest(&base_props, &["endpoint"]);
 
-        let with_optional = manifest(
-            serde_json::json!({
+        let optional_props = serde_json::json!({
                 "endpoint": { "type": "string", "default": "x" },
                 "timeout_secs": { "type": "integer", "default": 30 }
-            }),
-            &["endpoint"],
-        );
+        });
+        let with_optional = manifest(&optional_props, &["endpoint"]);
         match UpgradePlan::diff(&base, &with_optional) {
             UpgradePlan::AdditiveConfig { added } => {
                 assert_eq!(added.len(), 1);
@@ -372,25 +370,21 @@ mod tests {
             other => panic!("expected AdditiveConfig, got {other:?}"),
         }
 
-        let with_required = manifest(
-            serde_json::json!({
+        let required_props = serde_json::json!({
                 "endpoint": { "type": "string", "default": "x" },
                 "api_key": { "type": "string" }
-            }),
-            &["endpoint", "api_key"],
-        );
+        });
+        let with_required = manifest(&required_props, &["endpoint", "api_key"]);
         assert!(matches!(
             UpgradePlan::diff(&base, &with_required),
             UpgradePlan::BreakingConfig { .. }
         ));
 
-        let with_required_default = manifest(
-            serde_json::json!({
+        let required_default_props = serde_json::json!({
                 "endpoint": { "type": "string", "default": "x" },
                 "region": { "type": "string", "default": "us-east-1" }
-            }),
-            &["endpoint", "region"],
-        );
+        });
+        let with_required_default = manifest(&required_default_props, &["endpoint", "region"]);
         assert!(matches!(
             UpgradePlan::diff(&base, &with_required_default),
             UpgradePlan::BreakingConfig { .. }
@@ -400,24 +394,20 @@ mod tests {
     #[test]
     fn identical_manifests_are_identical() {
         let props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
-        let m = manifest(props.clone(), &["endpoint"]);
-        let m2 = manifest(props, &["endpoint"]);
+        let m = manifest(&props, &["endpoint"]);
+        let m2 = manifest(&props, &["endpoint"]);
         assert_eq!(UpgradePlan::diff(&m, &m2), UpgradePlan::Identical);
     }
 
     #[test]
     fn removed_field_is_breaking() {
-        let old = manifest(
-            serde_json::json!({
+        let old_props = serde_json::json!({
                 "endpoint": { "type": "string", "default": "x" },
                 "timeout_secs": { "type": "integer", "default": 30 }
-            }),
-            &["endpoint"],
-        );
-        let new = manifest(
-            serde_json::json!({ "endpoint": { "type": "string", "default": "x" } }),
-            &["endpoint"],
-        );
+        });
+        let old = manifest(&old_props, &["endpoint"]);
+        let new_props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
+        let new = manifest(&new_props, &["endpoint"]);
         assert!(matches!(
             UpgradePlan::diff(&old, &new),
             UpgradePlan::BreakingConfig { .. }

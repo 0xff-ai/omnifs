@@ -438,8 +438,6 @@ fn report_launch_status(status: &DaemonStatus) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn parse_control_addr_handles_input() {
         let bad = super::parse_control_addr("not-a-valid-socket-addr!!!");
