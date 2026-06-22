@@ -12,7 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, bail};
 
-use crate::session::MountConfig;
+use crate::dev_mounts::DevMountSeed;
 
 /// Compose project name, so teardown can find the stack without the file.
 const PROJECT: &str = "omnifs-devcluster";
@@ -37,9 +37,9 @@ fn compose_cmd(compose: &Path) -> Command {
 }
 
 /// Bring up the k3s + proxy stack and wait until it is healthy. Returns the
-/// socket bind to layer onto the omnifs container and the kubernetes mount to
-/// inject into the daemon.
-pub(crate) fn up(workspace: &Path, sock_dir: &Path) -> anyhow::Result<(String, MountConfig)> {
+/// socket bind to layer onto the omnifs container and the kubernetes dev-mount
+/// seed for the caller to pin against the installed providers.
+pub(crate) fn up(workspace: &Path, sock_dir: &Path) -> anyhow::Result<(String, DevMountSeed)> {
     let compose = compose_file(workspace);
     if !compose.is_file() {
         bail!(
@@ -61,8 +61,12 @@ pub(crate) fn up(workspace: &Path, sock_dir: &Path) -> anyhow::Result<(String, M
     }
     anstream::println!("✓ Dev cluster ready");
 
-    let mount = MountConfig::from_path(&testenv_dir(workspace).join("dev-mount.json"))?;
-    Ok((format!("{}:{GUEST_SOCK_DIR}", sock_dir.display()), mount))
+    let seed_path = testenv_dir(workspace).join("dev-mount.json");
+    let seed_json = std::fs::read_to_string(&seed_path)
+        .with_context(|| format!("read dev cluster mount {}", seed_path.display()))?;
+    let seed = DevMountSeed::parse(&seed_json)
+        .with_context(|| format!("parse dev cluster mount {}", seed_path.display()))?;
+    Ok((format!("{}:{GUEST_SOCK_DIR}", sock_dir.display()), seed))
 }
 
 /// Tear down the dev cluster stack. Best-effort and idempotent: a no-op when

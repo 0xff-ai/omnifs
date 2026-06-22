@@ -1,17 +1,19 @@
 use super::config_generation::GeneratedMountConfig;
 use crate::auth::AuthSelection;
 use anyhow::Context;
-use omnifs_core::{AuthKind, MountName};
+use omnifs_caps::Grants;
+use omnifs_core::{AuthKind, MountName, ProviderRef};
+use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
-use omnifs_mount::{Contract, ProviderConfig};
-use omnifs_provider::{ProviderCapabilities, ProviderManifest};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
 pub(super) struct MountFile<'a> {
     mount_name: &'a MountName,
-    manifest: &'a ProviderManifest,
+    /// The pinned provider reference written into the mount spec, taken from the
+    /// latest installed artifact for this provider.
+    reference: &'a ProviderRef,
     auth: Option<&'a AuthSelection>,
     scopes: &'a [String],
     generated: GeneratedMountConfig,
@@ -20,14 +22,14 @@ pub(super) struct MountFile<'a> {
 impl<'a> MountFile<'a> {
     pub(super) fn new(
         mount_name: &'a MountName,
-        manifest: &'a ProviderManifest,
+        reference: &'a ProviderRef,
         auth: Option<&'a AuthSelection>,
         scopes: &'a [String],
         generated: GeneratedMountConfig,
     ) -> Self {
         Self {
             mount_name,
-            manifest,
+            reference,
             auth,
             scopes,
             generated,
@@ -49,7 +51,7 @@ impl<'a> MountFile<'a> {
 
     fn serializable(&self) -> SerializableMountFile<'_> {
         SerializableMountFile {
-            provider: &self.manifest.provider,
+            provider: self.reference,
             mount: self.mount_name.as_str(),
             auth: self.auth.map(|auth| MountAuthEntry {
                 auth_type: auth.auth_type,
@@ -63,7 +65,6 @@ impl<'a> MountFile<'a> {
                 .config
                 .as_ref()
                 .map(|value| ProviderConfig::from_value(value.clone())),
-            contract: Some(Contract::from_manifest(self.manifest)),
         }
     }
 }
@@ -75,18 +76,14 @@ impl<'a> MountFile<'a> {
 /// `serde_json`'s `preserve_order` feature.
 #[derive(Serialize)]
 struct SerializableMountFile<'a> {
-    provider: &'a str,
+    provider: &'a ProviderRef,
     mount: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth: Option<MountAuthEntry<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    capabilities: Option<ProviderCapabilities>,
+    capabilities: Option<Grants>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<ProviderConfig>,
-    /// Provider contract snapshot stamped at init time. Absent for providers
-    /// with no manifest (unknown providers); always present for built-in providers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    contract: Option<Contract>,
 }
 
 #[derive(Serialize)]

@@ -68,7 +68,7 @@ struct StaticTokenStrategy {
 }
 
 struct AuthStoreContext {
-    provider_id: String,
+    provider_name: String,
     store: Arc<dyn CredentialStore>,
     oauth_http: reqwest_oauth2::Client,
 }
@@ -160,12 +160,12 @@ impl AuthManager {
     pub fn from_configs_manifest_store_with_http(
         configs: &[Auth],
         manifest: Option<&AuthManifest>,
-        provider_id: impl Into<String>,
+        provider_name: impl Into<String>,
         store: Arc<dyn CredentialStore>,
         oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
         let context = AuthStoreContext {
-            provider_id: provider_id.into(),
+            provider_name: provider_name.into(),
             store,
             oauth_http,
         };
@@ -175,7 +175,7 @@ impl AuthManager {
     pub fn from_configs_manifest_store_with_store(
         configs: &[Auth],
         manifest: Option<&AuthManifest>,
-        provider_id: impl Into<String>,
+        provider_name: impl Into<String>,
         store: Arc<dyn CredentialStore>,
     ) -> Result<Self, AuthError> {
         let oauth_http = reqwest_oauth2::ClientBuilder::new()
@@ -185,7 +185,7 @@ impl AuthManager {
         Self::from_configs_manifest_store_with_http(
             configs,
             manifest,
-            provider_id,
+            provider_name,
             store,
             oauth_http,
         )
@@ -207,7 +207,7 @@ impl AuthManager {
                 let strategy = OAuth2PkceStrategy::from_manifest_config(
                     config,
                     manifest,
-                    context.provider_id.as_str(),
+                    context.provider_name.as_str(),
                     Arc::clone(&context.store),
                     context.oauth_http.clone(),
                 )?;
@@ -317,7 +317,7 @@ impl StaticTokenStrategy {
             .account
             .clone()
             .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string());
-        let credential_id = CredentialId::new(&context.provider_id, scheme, account)
+        let credential_id = CredentialId::new(&context.provider_name, scheme, account)
             .map_err(|e| AuthError::CredentialId(e.to_string()))?;
         Ok(context
             .store
@@ -357,7 +357,7 @@ impl OAuth2PkceStrategy {
     fn from_manifest_config(
         config: &OAuth,
         manifest: Option<&AuthManifest>,
-        provider_id: &str,
+        provider_name: &str,
         store: Arc<dyn CredentialStore>,
         oauth_http: reqwest_oauth2::Client,
     ) -> Result<Self, AuthError> {
@@ -370,7 +370,7 @@ impl OAuth2PkceStrategy {
             .account
             .clone()
             .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string());
-        let credential_id = CredentialId::new(provider_id, &scheme.key, account)
+        let credential_id = CredentialId::new(provider_name, &scheme.key, account)
             .map_err(|e| AuthError::CredentialId(e.to_string()))?;
         let current = store.get(&credential_id)?;
         let request = oauth_request_from_config(Some(config), scheme)?;

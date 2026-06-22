@@ -5,9 +5,8 @@ use omnifs_core::path::Path;
 use omnifs_core::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
-use omnifs_mount::mounts::Spec;
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};
-use support::{root_mounted_test_export, test_export, test_export_with_mount};
+use support::{root_mounted_test_export, test_export, test_export_with_mount, test_provider_spec};
 use tokio::runtime::Builder;
 
 const OLD_OPEN_MATERIALIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -144,11 +143,7 @@ fn mount_enumeration_root_change_tracks_loaded_mounts() {
 
     harness
         .registry
-        .add_mount(
-            Spec::parse(r#"{"provider":"test_provider.wasm","mount":"other"}"#)
-                .expect("second mount spec"),
-            harness.runtime.handle(),
-        )
+        .add_mount(test_provider_spec("other"), harness.runtime.handle())
         .expect("load second test mount");
 
     let after = export.attr(root).expect("root attr after mount add").change;

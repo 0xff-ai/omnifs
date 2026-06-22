@@ -10,10 +10,14 @@
 //! the user exactly where they were with nothing to undo; their real dotfiles
 //! are never touched.
 //!
-//! Backend-transparent: the daemon's mode and mount point come from the run-
-//! state file `omnifs up` writes (`<config_dir>/launch.json`), and the mount is
-//! host-visible under either backend, so there is nothing to branch on.
+//! Backend-aware: the daemon's mode and mount point come from the run-state
+//! file `omnifs up`/`omnifs dev` write (`<config_dir>/launch.json`). The host-
+//! native backend's mount is host-visible, so the subshell above runs on the
+//! host pointed at it. The Docker backend's mount lives inside the container at
+//! the guest mount path and is invisible on the host, so there `omnifs shell`
+//! execs into the running container instead.
 
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,6 +26,7 @@ use clap::Args;
 use omnifs_api::MountInfo;
 
 use crate::launch_record::LaunchRecord;
+use crate::session::GUEST_FUSE_MOUNT;
 use crate::workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -58,6 +63,13 @@ impl ShellArgs {
                 paths.config_dir.display()
             )
         })?;
+        // The Docker backend's mount lives inside the container, not on the
+        // host, so a host subshell can never see it; exec into the container.
+        // The host-native backend falls through to the host subshell below.
+        if let Some(container) = record.container_name() {
+            return self.exec_in_container(container);
+        }
+
         let mode = record.mode_label();
 
         // A live status call, when the daemon answers, supplies the mount→provider
@@ -122,6 +134,29 @@ impl ShellArgs {
             mount_point.display()
         );
         spawn_and_propagate(cmd, "launch omnifs shell".to_string())
+    }
+
+    /// Attach to the Docker-backend daemon by `docker exec`'ing into its
+    /// container, landing in the projected tree. The container ships its own
+    /// omnifs-tuned zsh rc, so no host rc plumbing applies here; `--shell`
+    /// overrides the default and a trailing command runs non-interactively.
+    fn exec_in_container(&self, container: &str) -> Result<()> {
+        let mut cmd = Command::new("docker");
+        cmd.arg("exec").arg("-i");
+        if std::io::stdin().is_terminal() {
+            cmd.arg("-t");
+        }
+        cmd.arg("-w").arg(GUEST_FUSE_MOUNT);
+        cmd.arg(container);
+        if self.command.is_empty() {
+            cmd.arg(self.shell.as_deref().unwrap_or("/bin/zsh"));
+            anstream::println!(
+                "omnifs shell (container) at {GUEST_FUSE_MOUNT} (type `exit` to leave)"
+            );
+        } else {
+            cmd.args(&self.command);
+        }
+        spawn_and_propagate(cmd, format!("open shell in container `{container}`"))
     }
 }
 

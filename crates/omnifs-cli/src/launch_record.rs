@@ -140,6 +140,16 @@ impl LaunchRecord {
         self.mount_point.as_deref()
     }
 
+    /// The container name when the daemon runs under the Docker backend, whose
+    /// mount lives inside the container and is not host-visible. `None` for the
+    /// host-native backend, whose mount point is reachable directly.
+    pub(crate) fn container_name(&self) -> Option<&str> {
+        match &self.backend {
+            RecordedBackend::Docker { container_name, .. } => Some(container_name),
+            RecordedBackend::Native { .. } => None,
+        }
+    }
+
     /// Human label for the backend the daemon was launched with, read straight
     /// from the run-state file so callers learn the mode without probing.
     pub(crate) fn mode_label(&self) -> &'static str {

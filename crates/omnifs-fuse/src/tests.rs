@@ -87,19 +87,42 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let config_dir = tempfile::tempdir().expect("config dir");
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
-    for wasm in ["test_provider.wasm", ARCHIVE_TOOL_WASM] {
-        let src = wasm_artifact_path(wasm);
-        assert!(
-            src.exists(),
-            "{wasm} missing at {}. Run `just providers-build` first.",
-            src.display()
-        );
-        std::fs::copy(&src, providers_dir.path().join(wasm)).expect("copy wasm");
-    }
+    // The archive tool stays flat; the test provider goes into the by-hash store.
+    let archive_src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
+    assert!(
+        archive_src.exists(),
+        "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers-build` first.",
+        archive_src.display()
+    );
+    std::fs::copy(&archive_src, providers_dir.path().join(ARCHIVE_TOOL_WASM))
+        .expect("copy archive tool");
+
+    let test_src = wasm_artifact_path("test_provider.wasm");
+    assert!(
+        test_src.exists(),
+        "test_provider.wasm missing at {}. Run `just providers-build` first.",
+        test_src.display()
+    );
+    let test_bytes = std::fs::read(&test_src).expect("read test provider");
+    let id = omnifs_core::ProviderId::from_wasm_bytes(&test_bytes);
+    let store = omnifs_mount::mounts::ProviderStore::new(providers_dir.path());
+    store
+        .put_if_absent(&id, &test_bytes)
+        .expect("put test provider");
+    store
+        .install(
+            id,
+            omnifs_core::ProviderMeta {
+                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+                version: None,
+            },
+            "test_provider.wasm".into(),
+        )
+        .expect("install test provider");
 
     let mount_config = format!(
         r#"{{
-                "provider": "test_provider.wasm",
+                "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
                 "mount": "test",
                 "root_mount": true,
                 "capabilities": {{ "domains": ["httpbin.org"] }},

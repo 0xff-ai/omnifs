@@ -117,7 +117,7 @@ impl Daemon {
             .into_iter()
             .map(|(mount, runtime)| MountInfo {
                 root_mount: root_mount.as_deref() == Some(mount.as_str()),
-                provider_id: runtime.provider_id().to_string(),
+                provider_id: runtime.provider_name().to_string(),
                 mount,
             })
             .collect();

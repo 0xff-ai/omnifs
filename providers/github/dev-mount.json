@@ -1,5 +1,5 @@
 {
-  "provider": "omnifs_provider_github.wasm",
+  "provider": "github",
   "mount": "github",
   "auth": {
     "type": "static-token",

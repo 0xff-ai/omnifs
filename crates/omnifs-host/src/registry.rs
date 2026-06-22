@@ -51,7 +51,7 @@ impl ProviderRegistry {
         // One extractor (engine + parsed component + linker pre) shared
         // across every mount; the per-call sandbox lives on a fresh
         // `wasmtime::Store`. Shares the same on-disk artifact cache.
-        let archive_tool_path = context.provider_path(ARCHIVE_TOOL_WASM);
+        let archive_tool_path = context.archive_tool_path(ARCHIVE_TOOL_WASM);
         let extractor = Arc::new(
             ArchiveExtractorComponent::from_path(
                 &archive_tool_path,
@@ -144,8 +144,10 @@ struct MountSupervisor {
     root_mount: parking_lot::RwLock<Option<String>>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// Per-mount materialized fingerprint, used by reconcile to detect a spec
-    /// or provider-artifact change. Keyed by mount name.
+    /// Per-mount materialized spec fingerprint, used by reconcile to detect a
+    /// spec change. The pinned `ProviderRef` is part of the spec, so an artifact
+    /// swap shows up as a spec change without re-hashing the WASM. Keyed by
+    /// mount name.
     fingerprints: parking_lot::RwLock<HashMap<String, MountFingerprint>>,
     /// Serializes reconcile passes so concurrent triggers cannot race the
     /// add/remove sequence.
@@ -178,7 +180,7 @@ impl MountSupervisor {
             return Err(RegistryError::DuplicateMount(mount));
         }
 
-        let wasm_path = registry.context.provider_path(&spec.provider);
+        let wasm_path = registry.context.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -482,14 +484,17 @@ impl<'a> ReconcilePass<'a> {
             return None;
         }
 
-        let wasm_path = self.registry.context.provider_path(&materialized.provider);
-        let fingerprint = mount_fingerprint(&materialized, &wasm_path);
+        let wasm_path = self
+            .registry
+            .context
+            .provider_path_by_id(&materialized.provider.id);
+        let fingerprint = mount_fingerprint(&materialized);
         let running = self.registry.mounts.is_running(&mount);
         let prior_fingerprint = self.registry.mounts.fingerprint(&mount);
         if running && prior_fingerprint == Some(fingerprint) {
             debug!(
                 mount = mount.as_str(),
-                provider = materialized.provider.as_str(),
+                provider = materialized.provider.meta.name.as_str(),
                 "reconcile mount unchanged"
             );
             return None;
@@ -652,28 +657,25 @@ pub struct ReconcileOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MountFingerprint {
     spec: u64,
-    artifact: u64,
 }
 
 impl MountFingerprint {
     fn reason_since(self, prior: Self) -> &'static str {
-        match (self.spec != prior.spec, self.artifact != prior.artifact) {
-            (true, true) => "config+provider",
-            (true, false) => "config",
-            (false, true) => "provider",
-            (false, false) => "unchanged",
+        if self.spec == prior.spec {
+            "unchanged"
+        } else {
+            "config"
         }
     }
 }
 
-/// Fingerprint a materialized spec plus its provider artifact, so a reconcile
-/// detects both config edits and a swapped-out provider binary. The provider
-/// stamp uses file length and mtime rather than a content hash to keep the pass
-/// cheap; a rebuilt provider changes both.
-fn mount_fingerprint(spec: &Spec, wasm_path: &Path) -> MountFingerprint {
+/// Fingerprint a materialized spec. The spec carries the pinned `ProviderRef`
+/// (content id + meta), so the spec hash already captures artifact identity: a
+/// swapped-out provider is a new id, hence a new spec hash. No file read or
+/// re-hash of the WASM is needed on reconcile.
+fn mount_fingerprint(spec: &Spec) -> MountFingerprint {
     MountFingerprint {
         spec: spec_fingerprint(spec),
-        artifact: artifact_fingerprint(wasm_path),
     }
 }
 
@@ -682,20 +684,6 @@ fn spec_fingerprint(spec: &Spec) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(bytes) = serde_json::to_vec(spec) {
         bytes.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn artifact_fingerprint(wasm_path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if let Ok(meta) = std::fs::metadata(wasm_path) {
-        meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified()
-            && let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            since_epoch.as_nanos().hash(&mut hasher);
-        }
     }
     hasher.finish()
 }
@@ -710,16 +698,11 @@ fn registry_error(mount: &str, error: BuildError) -> RegistryError {
 }
 
 fn resolve_mount_for_wasm(wasm_path: &Path, config: Spec) -> Result<Resolved, BuildError> {
-    let fallback_provider_id = wasm_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(&config.mount)
-        .to_string();
     let metadata = Artifact::load(wasm_path)
         .and_then(|artifact| artifact.metadata())
         .map_err(BuildError::InvalidConfig)?;
     config
-        .into_resolved(fallback_provider_id, metadata.as_ref())
+        .into_resolved(metadata.as_ref())
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))
 }
 
@@ -743,10 +726,33 @@ mod tests {
     use crate::HostContext;
     use crate::cloner::GitCloner;
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
+    use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
     use omnifs_mount::materialize::MaterializationMode;
-    use omnifs_mount::mounts::Spec;
+    use omnifs_mount::mounts::{ProviderStore, Spec};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    /// Lay `src` WASM into a by-hash store under `providers_dir` and return a
+    /// `Spec` (built from `body`, which omits `provider`) pinned to the content
+    /// id. Mirrors how the CLI pins a `ProviderRef` after installing an artifact.
+    fn pin_spec(providers_dir: &Path, src: &Path, name: &str, mut body: serde_json::Value) -> Spec {
+        let bytes = std::fs::read(src).expect("read provider wasm");
+        let id = ProviderId::from_wasm_bytes(&bytes);
+        let store = ProviderStore::new(providers_dir);
+        store.put_if_absent(&id, &bytes).expect("put provider");
+        store
+            .install(
+                id,
+                ProviderMeta {
+                    name: ProviderName::new(name).unwrap(),
+                    version: None,
+                },
+                format!("{name}.wasm"),
+            )
+            .expect("install provider");
+        body["provider"] = serde_json::json!({ "id": id.to_string(), "meta": { "name": name } });
+        serde_json::from_value(body).expect("build pinned spec")
+    }
 
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -785,8 +791,6 @@ mod tests {
             "test provider missing at {}. Run `just providers-build` first.",
             base_wasm.display()
         );
-        std::fs::copy(&base_wasm, providers_dir.path().join("test_provider.wasm"))
-            .expect("copy test provider");
         let archive_tool_wasm = archive_tool_wasm_path();
         assert!(
             archive_tool_wasm.exists(),
@@ -811,16 +815,14 @@ mod tests {
         )
         .expect("registry init");
 
-        let spec = Spec::parse(
-            r#"{
-                "provider": "test_provider.wasm",
-                "mount": "test",
-                "config": {
-                    "unexpected": true
-                }
-            }"#,
-        )
-        .expect("parse spec");
+        // Pin the test provider into the by-hash store, then mount it with an
+        // out-of-schema config field the provider's configSchema forbids.
+        let spec = pin_spec(
+            providers_dir.path(),
+            &base_wasm,
+            "test-provider",
+            serde_json::json!({ "mount": "test", "config": { "unexpected": true } }),
+        );
 
         match registry.add_mount(spec, &tokio::runtime::Handle::current()) {
             Err(RegistryError::ConfigError(message)) => {
@@ -833,22 +835,18 @@ mod tests {
         assert!(registry.mounts().is_empty());
     }
 
-    /// The daemon contract backstop (PLAN.md slice 4): a mount whose stamped
-    /// contract does not match the live provider contract is refused at
-    /// reconcile and surfaces as a `MountFailure`, so the daemon never serves a
-    /// contract the spec was not written against. Guards the "daemon refuses a
-    /// hand-edited drifted spec" guarantee, the one slice-4 outcome no other
-    /// test exercises.
+    /// The daemon serve-time backstop: a mount pinning a `ProviderId` whose
+    /// artifact is not retained in the by-hash store is refused at reconcile and
+    /// surfaces as a `MountFailure`, never served. Guards "the daemon never
+    /// serves a provider it cannot resolve by content id."
     #[tokio::test(flavor = "multi_thread")]
-    async fn reconcile_refuses_contract_drifted_mount() {
+    async fn reconcile_refuses_mount_with_missing_artifact() {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
         let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
 
-        // `ProviderRegistry::new` builds the archive extractor from this WASM,
-        // so it must be present. The drifted mount itself uses the built-in db
-        // provider manifest and is rejected before its WASM is ever loaded.
+        // `ProviderRegistry::new` builds the archive extractor from this WASM.
         let archive_tool_wasm = archive_tool_wasm_path();
         assert!(
             archive_tool_wasm.exists(),
@@ -861,25 +859,21 @@ mod tests {
         )
         .expect("copy archive tool");
 
-        // A db mount whose stamped contract carries a config field the live
-        // built-in manifest does not, so the two contract hashes cannot match.
+        // A mount pinning a content id with no matching by-hash artifact.
         let mounts_dir = paths.config_dir.join("mounts");
         std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
+        let missing_id = "a".repeat(64);
         std::fs::write(
             mounts_dir.join("db.json"),
-            r#"{
-                "provider": "omnifs_provider_db.wasm",
+            format!(
+                r#"{{
+                "provider": {{ "id": "{missing_id}", "meta": {{ "name": "db" }} }},
                 "mount": "db",
-                "config": {"database_type": "sqlite", "path": "/data/chinook.sqlite"},
-                "contract": {
-                    "config_fields": [{"name": "__drift_probe__", "required": true}],
-                    "capabilities": [],
-                    "auth_scheme": "__drift_probe_auth__",
-                    "provider_version": "0.0.0-drift"
-                }
-            }"#,
+                "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}}
+            }}"#
+            ),
         )
-        .expect("write drifted spec");
+        .expect("write spec");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(
@@ -898,26 +892,24 @@ mod tests {
             MaterializationMode::Docker,
         );
 
-        // The drifted mount is refused, not served, and the failure names the
-        // contract mismatch so it is actionable in `omnifs status`.
         assert!(
             registry.mounts().is_empty(),
-            "a contract-drifted mount must not be served"
+            "a mount with a missing artifact must not be served"
         );
         assert!(outcome.added.is_empty(), "no mount should have been added");
         let failure = outcome
             .failed
             .iter()
-            .find(|failure| failure.reason.contains("contract mismatch"))
+            .find(|failure| failure.mount == "db")
             .unwrap_or_else(|| {
                 panic!(
-                    "expected a contract-mismatch failure, got: {:?}",
+                    "expected a failure for mount `db`, got: {:?}",
                     outcome.failed
                 )
             });
         assert!(
-            failure.reason.contains("mount `db`"),
-            "failure should name the drifted mount, got: {}",
+            failure.reason.contains("provider not found"),
+            "failure should report the missing artifact, got: {}",
             failure.reason
         );
     }

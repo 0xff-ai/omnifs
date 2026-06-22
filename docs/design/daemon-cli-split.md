@@ -40,7 +40,7 @@ Flags: `--listen <addr>` (a `SocketAddr`, TCP loopback only today), `--root-syml
 
 **`crates/omnifs-cli`**: drops `omnifs-host` and `omnifs-fuse` (and with them wasmtime and fuser). Keeps bollard. The daemon lifecycle sits behind a small backend seam — launch, terminate, control endpoint, runtime-home path — with Docker as the only implementation now and a native spawn backend later. Keep the seam exactly that small; it is not a plugin system.
 
-**Crate boundary move**: the CLI's only remaining `omnifs-host` imports are `mounts::{Spec, Resolved, Catalog}` + builtins, the config validator, and the oauth-request builder. The `mounts` module depends only on `omnifs-core` and the provider contract (verified), so it moves into `omnifs-mount`; the config validator (`validate_config`) lands in `omnifs-provider` and the oauth-request builder in `omnifs-auth`, each at the layer of its consumers. Call sites are fixed in the same change; `omnifs-host` does not re-export the moved items.
+**Crate boundary move**: the CLI's only remaining `omnifs-host` imports are `mounts::{Spec, Resolved, Catalog}`, the config validator, and the oauth-request builder. The `mounts` module depends only on `omnifs-core` and the provider contract (verified), so it moves into `omnifs-mount`; the config validator (`validate_config`) lands in `omnifs-provider` and the oauth-request builder in `omnifs-auth`, each at the layer of its consumers. Call sites are fixed in the same change; `omnifs-host` does not re-export the moved items.
 
 ## Daemon topology and startup
 

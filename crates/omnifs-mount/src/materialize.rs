@@ -2,19 +2,19 @@
 //!
 //! Shared by the CLI (to compute Docker preopen binds before `docker create`)
 //! and the daemon (to reconcile `mounts/*.json` into the registry). The steps,
-//! in order: apply provider metadata so manifest-declared capabilities are
-//! present before anything reads them, grant runtime capabilities derived from
-//! config (the configured unix socket), then rewrite user preopens. On the host
-//! the preopen host path is canonicalized in place and no binds are emitted; for
-//! a container each user preopen is rewritten to a stable guest path under
-//! [`GUEST_PREOPENS_DIR`] and the corresponding host bind is returned for the
-//! launcher to pass to `docker create`.
+//! in order: apply provider metadata (auth scheme and config defaults) into any
+//! field the user left unset, check that the spec's capability grants satisfy
+//! the manifest's declared needs, then rewrite preopens. On the host the preopen
+//! host path is canonicalized in place and no binds are emitted; for a container
+//! each preopen is rewritten to a stable guest path under [`GUEST_PREOPENS_DIR`]
+//! and the corresponding host bind is returned for the launcher to pass to
+//! `docker create`.
 
 use std::path::{Path, PathBuf};
 
-use omnifs_provider::PreopenMode;
+use omnifs_caps::{Grant, PreopenMode};
 
-use crate::mounts::{Catalog, Error as MountError, RuntimeCapabilitiesError, Spec};
+use crate::mounts::{Catalog, Error as MountError, Spec};
 
 /// Guest directory each container preopen is rewritten under, as
 /// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
@@ -116,8 +116,6 @@ impl MaterializationMode {
 pub enum MaterializeError {
     #[error("apply provider metadata: {0}")]
     Metadata(#[source] MountError),
-    #[error("grant runtime capabilities: {0}")]
-    Capabilities(#[source] RuntimeCapabilitiesError),
     #[error("canonicalize preopen `{path}`: {source}")]
     PreopenPath {
         path: String,
@@ -126,19 +124,29 @@ pub enum MaterializeError {
     },
     #[error("preopen `{0}` is not a directory")]
     PreopenNotDir(String),
-    /// The spec's stamped contract block does not match the live provider
-    /// contract, indicating the spec was not updated through `omnifs up`
-    /// after a provider upgrade. The daemon refuses to serve a mount whose
-    /// contract the spec was not written against.
+    /// The mount spec grants fewer capabilities than the pinned provider's
+    /// manifest declares it needs, so the provider would be denied a declared
+    /// callout at its first request. The daemon refuses to start an
+    /// under-granted mount.
     #[error(
-        "contract mismatch for mount `{mount}`: spec stamped against contract {spec_hash}, \
-         live provider contract is {live_hash}; run `omnifs up` to reconcile"
+        "mount `{mount}` under-grants provider `{provider}`: the spec is missing \
+         manifest-required {missing}; re-run `omnifs init {provider} --as {mount}` \
+         or add the capability to the mount spec"
     )]
-    ContractMismatch {
+    MissingCapabilities {
         mount: String,
-        spec_hash: String,
-        live_hash: String,
+        provider: String,
+        missing: String,
     },
+    /// A dynamic unix-socket grant whose `endpoint` config does not resolve to a
+    /// socket path. The runtime allowlist would be empty, so the provider would
+    /// be denied at its first callout; the daemon refuses to start the mount and
+    /// points at the endpoint config instead.
+    #[error(
+        "mount `{mount}` has a dynamic unix-socket grant that does not resolve: \
+         {detail}; fix the mount's `endpoint`"
+    )]
+    UnresolvedDynamicSocket { mount: String, detail: String },
 }
 
 /// Materialize `spec` against `catalog`.
@@ -147,55 +155,41 @@ pub enum MaterializeError {
 /// directly, so host paths are canonicalized in place and no binds are
 /// returned. In [`MaterializationMode::Docker`] each user preopen is rewritten
 /// to a container path and its host bind is collected for the launcher.
-///
-/// When the spec carries a `contract` block, the live provider contract is
-/// derived and compared against it. A mismatch is a hard error: the daemon
-/// backstop guarantees it never serves a mount whose contract the spec was not
-/// written against. The CLI clears mismatches before reconcile through the
-/// `omnifs up` pre-flight; a mismatch here means the spec drifted behind the
-/// CLI's back (for example by a hand-edit or an out-of-band provider swap).
 pub fn materialize(
     mut spec: Spec,
     catalog: &Catalog,
     mode: MaterializationMode,
 ) -> Result<MaterializedMount, MaterializeError> {
-    // Count user-authored preopens before metadata application, which may add
-    // manifest-declared preopens that must not be rewritten to container paths.
-    let user_preopen_count = spec
-        .capabilities
-        .as_ref()
-        .and_then(|capabilities| capabilities.preopened_paths.as_ref())
-        .map_or(0, Vec::len);
-
-    // Backstop: when the spec carries a contract block, verify it matches the
-    // live provider contract before proceeding. This runs before
-    // `apply_metadata` so the spec's provider field is still in its authored
-    // form (not yet mutated by metadata application).
-    if let Some(stamped) = &spec.contract {
-        let live = catalog
-            .live_contract_for(&spec)
-            .map_err(MaterializeError::Metadata)?;
-        if let Some(live) = live {
-            let spec_hash = stamped.hash();
-            let live_hash = live.hash();
-            if spec_hash != live_hash {
-                return Err(MaterializeError::ContractMismatch {
-                    mount: spec.mount.clone(),
-                    spec_hash,
-                    live_hash,
-                });
-            }
+    // Required-capabilities check: the spec's grants must satisfy every
+    // capability the pinned manifest declares the provider needs, so an
+    // under-granted mount fails here rather than at the provider's first denied
+    // callout. Over-granting beyond the manifest is allowed; the over-grant
+    // check is deliberately not enforced (docs/future/provider-contract-versioning.md).
+    if let Some(needs) = catalog
+        .apply_metadata_and_needs(&mut spec)
+        .map_err(MaterializeError::Metadata)?
+    {
+        let missing = spec
+            .capabilities
+            .clone()
+            .unwrap_or_default()
+            .satisfies(&needs);
+        if !missing.is_empty() {
+            return Err(MaterializeError::MissingCapabilities {
+                mount: spec.mount.clone(),
+                provider: spec.provider.meta.name.to_string(),
+                missing: missing
+                    .iter()
+                    .map(|cap| format!("{} `{}`", cap.kind, cap.value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
         }
-        // When no live manifest is found (unknown provider), skip the check
-        // and let the rest of the pipeline decide whether to proceed or fail.
     }
 
-    catalog
-        .apply_metadata(&mut spec)
-        .map_err(MaterializeError::Metadata)?;
-    spec.materialize_runtime_capabilities()
-        .map_err(MaterializeError::Capabilities)?;
-    let preopen_binds = rewrite_preopens(&mut spec, user_preopen_count, mode)?;
+    check_dynamic_socket(&spec)?;
+
+    let preopen_binds = rewrite_preopens(&mut spec, mode)?;
 
     Ok(MaterializedMount {
         spec,
@@ -203,16 +197,96 @@ pub fn materialize(
     })
 }
 
+/// Verify that a dynamic unix-socket grant resolves from the mount's `endpoint`
+/// config. A dynamic grant passes the required-capabilities check (a dynamic
+/// grant satisfies a dynamic need), but the runtime allowlist is built by
+/// resolving the endpoint; if it does not resolve, the provider is silently
+/// denied at its first callout. Resolving here turns that into a clear,
+/// fixable mount-start error. Unix sockets are the only dynamic capability
+/// (enforced at manifest validation), so this is the only kind to resolve.
+fn check_dynamic_socket(spec: &Spec) -> Result<(), MaterializeError> {
+    let is_dynamic = spec
+        .capabilities
+        .as_ref()
+        .and_then(|caps| caps.unix_sockets.as_ref())
+        .is_some_and(|grant| matches!(grant, Grant::Dynamic(_)));
+    if !is_dynamic {
+        return Ok(());
+    }
+    let endpoint = spec
+        .config_raw
+        .as_ref()
+        .and_then(|config| config.as_value().get("endpoint"))
+        .and_then(serde_json::Value::as_str);
+    let detail = match endpoint {
+        None => "no `endpoint` config is set".to_string(),
+        Some(endpoint) => match omnifs_caps::endpoint_socket(endpoint) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => format!("endpoint `{endpoint}` is not a unix socket"),
+            Err(error) => error.to_string(),
+        },
+    };
+    Err(MaterializeError::UnresolvedDynamicSocket {
+        mount: spec.mount.clone(),
+        detail,
+    })
+}
+
+#[cfg(test)]
+mod dynamic_socket_tests {
+    use super::*;
+    use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+
+    fn dynamic_socket_spec(endpoint: Option<&str>) -> Spec {
+        let provider = ProviderRef {
+            id: ProviderId::from_wasm_bytes(b"k8s"),
+            meta: ProviderMeta {
+                name: ProviderName::new("k8s").unwrap(),
+                version: None,
+            },
+        };
+        let mut value = serde_json::json!({
+            "provider": provider,
+            "mount": "k8s",
+            "capabilities": { "unix_sockets": { "dynamic": true } },
+        });
+        if let Some(endpoint) = endpoint {
+            value["config"] = serde_json::json!({ "endpoint": endpoint });
+        }
+        serde_json::from_value(value).expect("spec parses")
+    }
+
+    #[test]
+    fn dynamic_socket_with_resolvable_endpoint_passes() {
+        let spec = dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock"));
+        assert!(check_dynamic_socket(&spec).is_ok());
+    }
+
+    #[test]
+    fn dynamic_socket_without_endpoint_fails_fast() {
+        let spec = dynamic_socket_spec(None);
+        assert!(matches!(
+            check_dynamic_socket(&spec),
+            Err(MaterializeError::UnresolvedDynamicSocket { .. })
+        ));
+    }
+
+    #[test]
+    fn dynamic_socket_with_non_unix_endpoint_fails_fast() {
+        let spec = dynamic_socket_spec(Some("https://example.com"));
+        assert!(matches!(
+            check_dynamic_socket(&spec),
+            Err(MaterializeError::UnresolvedDynamicSocket { .. })
+        ));
+    }
+}
+
 fn rewrite_preopens(
     spec: &mut Spec,
-    user_preopen_count: usize,
     mode: MaterializationMode,
 ) -> Result<ContainerPreopenBinds, MaterializeError> {
-    if user_preopen_count == 0 {
-        return Ok(ContainerPreopenBinds::default());
-    }
     let mount = spec.mount.clone();
-    let Some(preopens) = spec
+    let Some(Grant::Literal(preopens)) = spec
         .capabilities
         .as_mut()
         .and_then(|capabilities| capabilities.preopened_paths.as_mut())
@@ -221,7 +295,7 @@ fn rewrite_preopens(
     };
 
     let mut binds = ContainerPreopenBinds::default();
-    for (index, preopen) in preopens.iter_mut().take(user_preopen_count).enumerate() {
+    for (index, preopen) in preopens.iter_mut().enumerate() {
         let host_path = Path::new(&preopen.host).canonicalize().map_err(|source| {
             MaterializeError::PreopenPath {
                 path: preopen.host.clone(),
@@ -255,8 +329,23 @@ mod tests {
     use super::*;
     use crate::mounts::Spec;
 
-    /// Build a catalog over empty dirs so `apply_metadata` falls back to the
-    /// built-in provider manifests (db, docker, ...).
+    /// A valid-but-unresolvable 64-hex provider id. These tests exercise preopen
+    /// rewriting and runtime-capability grants, none of which resolve the
+    /// artifact, so the spec only needs to parse.
+    const DUMMY_PROVIDER_ID: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// Build a `Spec` from a JSON `body` (no `provider` field) plus a pinned
+    /// `ProviderRef` named `name` with a dummy id.
+    fn spec_with_provider(name: &str, body: &str) -> Spec {
+        let mut value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["provider"] =
+            serde_json::json!({ "id": DUMMY_PROVIDER_ID, "meta": { "name": name } });
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// A catalog over empty dirs. `apply_metadata` finds no retained artifact and
+    /// returns `Ok(false)`, leaving the user-authored spec fields as-is.
     fn builtin_catalog(root: &std::path::Path) -> Catalog {
         Catalog::new(root.join("mounts"), root.join("providers"))
     }
@@ -267,18 +356,19 @@ mod tests {
         let db_dir = tmp.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         let canonical = db_dir.canonicalize().unwrap();
-        let spec = Spec::parse(&format!(
-            r#"{{
-                "provider": "omnifs_provider_db.wasm",
+        let spec = spec_with_provider(
+            "db",
+            &format!(
+                r#"{{
                 "mount": "db",
                 "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
                 "capabilities": {{
                     "preopened_paths": [{{"host": "{}", "guest": "/data", "mode": "ro"}}]
                 }}
             }}"#,
-            db_dir.display()
-        ))
-        .unwrap();
+                db_dir.display()
+            ),
+        );
 
         let out = materialize(
             spec,
@@ -302,7 +392,8 @@ mod tests {
             .unwrap()
             .preopened_paths
             .as_ref()
-            .unwrap()[0];
+            .unwrap()
+            .literal()[0];
         assert_eq!(preopen.host, format!("{GUEST_PREOPENS_DIR}/db/0"));
         assert_eq!(preopen.guest, "/data");
     }
@@ -313,18 +404,19 @@ mod tests {
         let db_dir = tmp.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         let canonical = db_dir.canonicalize().unwrap();
-        let spec = Spec::parse(&format!(
-            r#"{{
-                "provider": "omnifs_provider_db.wasm",
+        let spec = spec_with_provider(
+            "db",
+            &format!(
+                r#"{{
                 "mount": "db",
                 "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
                 "capabilities": {{
                     "preopened_paths": [{{"host": "{}", "guest": "/data", "mode": "ro"}}]
                 }}
             }}"#,
-            db_dir.display()
-        ))
-        .unwrap();
+                db_dir.display()
+            ),
+        );
 
         let out = materialize(
             spec,
@@ -341,38 +433,8 @@ mod tests {
             .unwrap()
             .preopened_paths
             .as_ref()
-            .unwrap()[0];
+            .unwrap()
+            .literal()[0];
         assert_eq!(preopen.host, canonical.display().to_string());
-    }
-
-    #[test]
-    fn grants_configured_unix_socket_from_endpoint() {
-        let tmp = tempfile::tempdir().unwrap();
-        let spec = Spec::parse(
-            r#"{
-                "provider": "omnifs_provider_docker.wasm",
-                "mount": "docker",
-                "config": {"endpoint": "unix:///var/run/docker.sock"}
-            }"#,
-        )
-        .unwrap();
-
-        let out = materialize(
-            spec,
-            &builtin_catalog(tmp.path()),
-            MaterializationMode::Docker,
-        )
-        .unwrap();
-
-        assert_eq!(
-            out.spec()
-                .capabilities
-                .as_ref()
-                .unwrap()
-                .unix_sockets
-                .clone(),
-            Some(vec!["/var/run/docker.sock".to_string()])
-        );
-        assert!(out.preopen_binds().is_empty());
     }
 }

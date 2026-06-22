@@ -1,69 +1,8 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ProviderManifest",
-  "type": "object",
-  "properties": {
-    "auth": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/AuthBlock"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "capabilities": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/CapabilityEntry"
-      }
-    },
-    "configSchema": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Schema"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "contract": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ContractEvidence"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "defaultMount": {
-      "type": "string"
-    },
-    "displayName": {
-      "type": "string"
-    },
-    "id": {
-      "type": "string"
-    },
-    "provider": {
-      "description": "Filename of the provider WASM component.",
-      "type": "string"
-    }
-  },
-  "additionalProperties": false,
-  "required": [
-    "id",
-    "displayName",
-    "provider",
-    "defaultMount"
-  ],
   "$defs": {
     "AuthBlock": {
+      "additionalProperties": false,
       "description": "Wire form of the whole auth block as it appears in `omnifs.provider.json`.",
-      "type": "object",
       "properties": {
         "default": {
           "description": "Key of the scheme used by `omnifs init` when no explicit choice.",
@@ -73,27 +12,27 @@
           "$ref": "#/$defs/AuthInject"
         },
         "schemes": {
-          "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/ManifestAuthScheme"
-          }
+          },
+          "type": "object"
         }
       },
-      "additionalProperties": false,
       "required": [
         "inject",
         "default",
         "schemes"
-      ]
+      ],
+      "type": "object"
     },
     "AuthInject": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "domains": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "header": {
           "type": "string"
@@ -102,201 +41,16 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "domains",
         "header",
         "prefix"
-      ]
+      ],
+      "type": "object"
     },
-    "CapabilityEntry": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "domain"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "gitRepo"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "unixSocket"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "preopenedPath"
-            },
-            "value": {
-              "$ref": "#/$defs/PreopenedPath"
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "memoryMb"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "fetchBlobBytes"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "readBlobBytes"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        }
-      ]
-    },
-    "ContractEvidence": {
-      "description": "The contract a built provider component was compiled against: the\n`omnifs:provider` WIT package version and the SDK version. The `#[provider]`\nmacro stamps this into the embedded manifest so the host can later detect a\nprovider built against an incompatible contract.",
-      "type": "object",
+    "BuildEvidence": {
+      "additionalProperties": false,
+      "description": "Build provenance for a compiled provider component: the `omnifs:provider`\nWIT package version and the SDK version it was built against. The\n`#[provider]` macro stamps this into the embedded manifest so the host can\nlater detect a provider built against an incompatible contract.",
       "properties": {
         "sdk": {
           "type": "string"
@@ -305,18 +59,18 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "wit",
         "sdk"
-      ]
+      ],
+      "type": "object"
     },
     "ManifestAuthScheme": {
       "description": "On-disk discriminant for a scheme entry.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "On-disk compact form of a static-token scheme inside `omnifs.provider.json`.",
-          "type": "object",
           "properties": {
             "creationUrl": {
               "type": [
@@ -336,10 +90,10 @@
             },
             "setup": {
               "description": "Ordered provider-specific prerequisite steps beyond creating the token.",
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "summary": {
               "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
@@ -349,8 +103,8 @@
               ]
             },
             "type": {
-              "type": "string",
-              "const": "staticToken"
+              "const": "staticToken",
+              "type": "string"
             },
             "validation": {
               "anyOf": [
@@ -363,15 +117,15 @@
               ]
             }
           },
-          "additionalProperties": false,
           "required": [
             "type",
             "description"
-          ]
+          ],
+          "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "On-disk compact form of an OAuth scheme inside `omnifs.provider.json`.",
-          "type": "object",
           "properties": {
             "clientId": {
               "type": [
@@ -393,17 +147,17 @@
               "$ref": "#/$defs/ManifestOAuthFlow"
             },
             "scopes": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "setup": {
               "description": "Ordered provider-specific prerequisite steps (create an OAuth app,\nenable an API). Required when no `clientId` is shipped.",
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "summary": {
               "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
@@ -413,20 +167,20 @@
               ]
             },
             "tokenEndpointAuth": {
-              "description": "How the host authenticates at the token endpoint. `none` (the default)\nsuits public PKCE clients; confidential clients that must present a\nsecret use `clientSecretPost` or `clientSecretBasic`.",
-              "$ref": "#/$defs/TokenEndpointAuthMethod"
+              "$ref": "#/$defs/TokenEndpointAuthMethod",
+              "description": "How the host authenticates at the token endpoint. `none` (the default)\nsuits public PKCE clients; confidential clients that must present a\nsecret use `clientSecretPost` or `clientSecretBasic`."
             },
             "type": {
-              "type": "string",
-              "const": "oauth"
+              "const": "oauth",
+              "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
             "type",
             "displayName",
             "flow"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
@@ -434,7 +188,7 @@
       "description": "On-disk compact flow descriptor inside an OAuth scheme.",
       "oneOf": [
         {
-          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "authorizationEndpoint": {
               "type": "string"
@@ -443,30 +197,30 @@
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "deviceCode"
+              "const": "deviceCode",
+              "type": "string"
             },
             "tokenEndpoint": {
               "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
             "kind",
             "authorizationEndpoint",
             "deviceAuthorizationEndpoint",
             "tokenEndpoint"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "authorizationEndpoint": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "pkceLoopback"
+              "const": "pkceLoopback",
+              "type": "string"
             },
             "redirectUriTemplate": {
               "type": "string"
@@ -475,23 +229,23 @@
               "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
             "kind",
             "authorizationEndpoint",
             "tokenEndpoint",
             "redirectUriTemplate"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "authorizationEndpoint": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "pkceManualCode"
+              "const": "pkceManualCode",
+              "type": "string"
             },
             "redirectUri": {
               "type": "string"
@@ -500,23 +254,23 @@
               "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
             "kind",
             "authorizationEndpoint",
             "tokenEndpoint",
             "redirectUri"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "authorizationEndpoint": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "clientSideToken"
+              "const": "clientSideToken",
+              "type": "string"
             },
             "redirectUriTemplate": {
               "type": [
@@ -528,24 +282,211 @@
               "type": "string"
             }
           },
-          "additionalProperties": false,
           "required": [
             "kind",
             "authorizationEndpoint",
             "tokenEndpoint"
-          ]
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Need": {
+      "description": "One capability a provider *needs*, declared in its manifest\n(`omnifs.provider.json`, embedded). A need is never a grant: the host checks\na mount's [`Grants`] against these, it never grants from them at runtime.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "domain",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "gitRepo",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "unixSocket",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "preopenedPath",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/PreopenedPath"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "memoryMb",
+              "type": "string"
+            },
+            "value": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "fetchBlobBytes",
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dynamic": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "readBlobBytes",
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ],
+          "type": "object"
         }
       ]
     },
     "PreopenMode": {
-      "type": "string",
+      "description": "Access mode for a preopened directory grant.",
       "enum": [
         "ro",
         "rw"
-      ]
+      ],
+      "type": "string"
     },
     "PreopenedPath": {
-      "type": "object",
+      "description": "A host directory exposed into the provider sandbox at a guest path.",
       "properties": {
         "guest": {
           "type": "string"
@@ -561,7 +502,8 @@
       "required": [
         "host",
         "guest"
-      ]
+      ],
+      "type": "object"
     },
     "Schema": {
       "type": [
@@ -572,25 +514,25 @@
     "TokenEndpointAuthMethod": {
       "oneOf": [
         {
+          "const": "none",
           "description": "Public client: no secret presented at the token endpoint (PKCE).",
-          "type": "string",
-          "const": "none"
+          "type": "string"
         },
         {
+          "const": "clientSecretPost",
           "description": "Confidential client: secret sent in the token request body.",
-          "type": "string",
-          "const": "clientSecretPost"
+          "type": "string"
         },
         {
+          "const": "clientSecretBasic",
           "description": "Confidential client: secret sent via HTTP Basic auth.",
-          "type": "string",
-          "const": "clientSecretBasic"
+          "type": "string"
         }
       ]
     },
     "TokenValidation": {
+      "additionalProperties": false,
       "description": "Token self-validation probe, carried by a provider's static-token scheme.\n\nThe host uses this to verify a newly-entered token before storing it.",
-      "type": "object",
       "properties": {
         "body": {
           "type": [
@@ -599,16 +541,16 @@
           ]
         },
         "expectStatus": {
-          "type": "integer",
           "format": "uint16",
           "maximum": 65535,
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "extract": {
-          "type": "object",
           "additionalProperties": {
             "type": "string"
-          }
+          },
+          "type": "object"
         },
         "jsonPointer": {
           "type": [
@@ -623,12 +565,80 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "method",
         "url",
         "expectStatus"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "auth": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthBlock"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "buildEvidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/Need"
+      },
+      "type": "array"
+    },
+    "configSchema": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Schema"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "defaultMount": {
+      "type": "string"
+    },
+    "displayName": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "provider": {
+      "description": "Filename of the provider WASM component.",
+      "type": "string"
+    },
+    "version": {
+      "description": "Provider crate version (`CARGO_PKG_VERSION`), stamped by the `#[provider]`\nmacro. Informational catalog/UI context, never identity.",
+      "type": [
+        "string",
+        "null"
       ]
     }
-  }
+  },
+  "required": [
+    "id",
+    "displayName",
+    "provider",
+    "defaultMount"
+  ],
+  "title": "ProviderManifest",
+  "type": "object"
 }

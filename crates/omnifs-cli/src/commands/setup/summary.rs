@@ -9,7 +9,7 @@ use omnifs_home::WorkspaceLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitResult {
-    pub provider_id: String,
+    pub provider_name: String,
     pub mount_name: String,
     pub outcome: Result<(), String>,
 }
@@ -86,15 +86,15 @@ impl Display for SetupSummary<'_> {
             let mount_path = format!("{}/{}", self.mount_root, result.mount_name);
             match &result.outcome {
                 Ok(()) => {
-                    writeln!(out, "  {mount_path}   ({})   ok", result.provider_id)?;
+                    writeln!(out, "  {mount_path}   ({})   ok", result.provider_name)?;
                 },
                 Err(reason) => {
                     writeln!(
                         out,
                         "  {} ({})   failed: {reason}",
-                        result.mount_name, result.provider_id
+                        result.mount_name, result.provider_name
                     )?;
-                    writeln!(out, "    retry with `omnifs init {}`", result.provider_id)?;
+                    writeln!(out, "    retry with `omnifs init {}`", result.provider_name)?;
                 },
             }
         }

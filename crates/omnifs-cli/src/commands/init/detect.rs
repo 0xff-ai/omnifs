@@ -17,9 +17,9 @@ pub enum DetectedCredential {
     },
 }
 
-pub fn detect(provider_id: &str) -> Vec<DetectedCredential> {
+pub fn detect(provider_name: &str) -> Vec<DetectedCredential> {
     let mut found = Vec::new();
-    match provider_id {
+    match provider_name {
         "github" => {
             if let Some(value) = std::env::var_os("GITHUB_TOKEN")
                 && !value.is_empty()

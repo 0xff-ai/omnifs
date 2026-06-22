@@ -25,6 +25,7 @@ readme = "README.md"
 [workspace.dependencies]
 omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
+omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
 omnifs-creds = { version = "0.2.1", path = "crates/omnifs-creds" }
 omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
@@ -43,6 +44,7 @@ omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "winch", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
+blake3 = "1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

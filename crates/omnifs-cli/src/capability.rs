@@ -1,30 +1,27 @@
 //! Human-readable formatting for provider capability manifest entries.
 
-use omnifs_provider::{CapabilityEntry, PreopenMode, PreopenedPath};
+use omnifs_caps::{Need, PreopenMode, PreopenedPath};
 
-pub(crate) fn capability_label(entry: &CapabilityEntry) -> &'static str {
+pub(crate) fn capability_label(entry: &Need) -> &'static str {
     match entry {
-        CapabilityEntry::Domain { .. } => "Network domains",
-        CapabilityEntry::GitRepo { .. } => "Git remotes",
-        CapabilityEntry::UnixSocket { .. } => "Unix sockets",
-        CapabilityEntry::PreopenedPath { .. } => "Filesystem preopens",
-        CapabilityEntry::MemoryMb { .. } => "Memory limit",
-        CapabilityEntry::FetchBlobBytes { .. } => "Fetch body limit",
-        CapabilityEntry::ReadBlobBytes { .. } => "Blob read limit",
+        Need::Domain { .. } => "Network domains",
+        Need::GitRepo { .. } => "Git remotes",
+        Need::UnixSocket { .. } => "Unix sockets",
+        Need::PreopenedPath { .. } => "Filesystem preopens",
+        Need::MemoryMb { .. } => "Memory limit",
+        Need::FetchBlobBytes { .. } => "Fetch body limit",
+        Need::ReadBlobBytes { .. } => "Blob read limit",
     }
 }
 
-pub(crate) fn capability_value(entry: &CapabilityEntry) -> String {
+pub(crate) fn capability_value(entry: &Need) -> String {
     let value = match entry {
-        CapabilityEntry::Domain { value, .. }
-        | CapabilityEntry::GitRepo { value, .. }
-        | CapabilityEntry::UnixSocket { value, .. } => value.clone(),
-        CapabilityEntry::PreopenedPath { value, .. } => {
-            preopen_summary(std::slice::from_ref(value))
-        },
-        CapabilityEntry::MemoryMb { value, .. } => format!("{value} MiB"),
-        CapabilityEntry::FetchBlobBytes { value, .. }
-        | CapabilityEntry::ReadBlobBytes { value, .. } => value.to_string(),
+        Need::Domain { value, .. }
+        | Need::GitRepo { value, .. }
+        | Need::UnixSocket { value, .. } => value.clone(),
+        Need::PreopenedPath { value, .. } => preopen_summary(std::slice::from_ref(value)),
+        Need::MemoryMb { value, .. } => format!("{value} MiB"),
+        Need::FetchBlobBytes { value, .. } | Need::ReadBlobBytes { value, .. } => value.to_string(),
     };
     if entry.is_dynamic() {
         format!("{value} (config-dependent)")

@@ -1,80 +1,195 @@
-# Provider contract versioning
+# Provider references and upgrade
 
-omnifs ships providers embedded in the CLI binary and refreshes them on the host the moment a user upgrades. That refresh is correct, but it exposes a gap: a mount spec authored against one version of a provider can end up running against a different one, either failing cryptically or drifting silently. This is the design for making that boundary explicit, so a spec carries the provider contract it was built against and omnifs reconciles the two on upgrade.
+This document supersedes the previous provider contract snapshot design. A mount
+must not carry a copied subset of the provider manifest as its compatibility
+authority. A mount references a provider artifact by canonical content id, and
+provider upgrade compares the old and new provider manifests by loading the
+artifacts themselves.
 
-It builds on the embedded provider bundle (`install_embedded_bundle`, `crates/omnifs-cli/src/provider_bundle.rs`) and the disk-reconcile daemon (`ProviderRegistry::reconcile`, `crates/omnifs-host/src/registry.rs`).
+It builds on the embedded provider bundle (`install_embedded_bundle`,
+`crates/omnifs-cli/src/provider_bundle.rs`) and the disk-reconcile daemon
+(`ProviderRegistry::reconcile`, `crates/omnifs-host/src/registry.rs`).
 
-## Why this exists
+## Core model
 
-Three facts about today combine into the gap:
+Provider bytecode is canonically addressed by the BLAKE3 hash of the exact WASM
+component bytes. That hash is the provider id.
 
-- On upgrade, `install_embedded_bundle` overwrites every built-in `omnifs_provider_*.wasm` and the tool wasm with the new binary's versions (a sentinel-id mismatch forces a full unpack). Providers are version-locked to the binary.
-- `ProviderRegistry::reconcile` re-instantiates a mount when `mount_fingerprint` moves, and that fingerprint folds in the provider wasm's size and mtime, so the overwrite is picked up rather than skipped.
-- A spec that no longer fits the refreshed provider fails soft but cryptically: `reconcile` records a `MountFailure` (from `Spec::from_file` with `deny_unknown_fields`, from `materialize`, or from instantiation) and keeps serving the other mounts.
+```rust
+pub struct Provider {
+    pub id: ProviderId,
+    pub meta: ProviderMeta,
+    artifact: ProviderArtifact,
+}
 
-So an upgrade can leave a mount dark with a raw serde or materialization error. Worse, a spec that still parses against a changed provider but now means something different loads with no error at all. `deny_unknown_fields` (`crates/omnifs-mount/src/mount_config.rs`) catches an added or removed field; it cannot catch a changed capability set, a changed auth scheme, or a field whose meaning moved.
+pub struct ProviderRef {
+    pub id: ProviderId,
+    pub meta: ProviderMeta,
+}
 
-## The contract
+pub struct ProviderMeta {
+    pub name: ProviderName,
+    pub version: Option<ProviderVersionLabel>,
+}
+```
 
-What invalidates a spec is not the provider's code version but its contract: the surface a spec is written against. That surface is `{capabilities, auth, config schema}`, declared in the provider manifest (`omnifs.provider.json`).
+`Provider.id` and `ProviderRef.id` are the same kind of value: the BLAKE3
+bytecode hash. `ProviderRef` is what the mount spec stores. It references the
+provider by id and carries a narrow metadata snapshot so status output and UI
+can show a useful label even when the artifact is missing.
 
-omnifs derives a hash over that surface and treats the hash, plus a structural diff of it, as the sole compatibility authority. The provider's cargo version rides along as a provenance label only: every provider is `version.workspace = true`, so the version is workspace-shared, bumps on every release regardless of whether a given provider's contract moved, and cannot answer "did this provider's contract change."
+`ProviderMeta.name` and `ProviderMeta.version` are not identity. They are
+provider-declared metadata read from the embedded manifest and indexed by the
+catalog for lookup, display, and upgrade discovery.
 
-## Decisions
+The provider manifest is not inlined into the mount spec. The manifest lives
+inside the provider artifact and in the catalog's parsed view of that artifact.
+The mount stores only the provider reference, auth binding, config, and mount
+settings.
 
-| Decision | Choice | Why |
-|---|---|---|
-| Compatibility authority | contract hash plus structural diff | the only signal that tracks the actual surface |
-| Version role | provenance label | workspace-shared, bumps every release, says nothing per-provider |
-| Snapshot home | a `contract` block in the spec | the spec stays self-describing of what it was built against |
-| Who evaluates | the CLI, in `omnifs up` | upgrade is interactive (consent, prompts) and CLI-owned |
-| Daemon role | refuse a drifted mount | a backstop, not the resolver |
-| Orphan prune | out of scope for now | not load-bearing yet |
+## Why the contract model goes away
 
-## The spec contract block
+The old model stamped a `contract` block into the mount spec: config fields,
+capabilities, auth scheme, and a version label copied out of the provider
+manifest. That is the wrong authority. The provider manifest already owns that
+surface, and copying part of it into the mount makes the spec both redundant and
+lossy.
 
-`omnifs init` stamps each mount spec with a `contract` block: a structural snapshot of the surface the spec was built against. It records the config fields (name and required flag), the capability set (kind and value), the auth scheme id, and the cargo-version label. The hash is derived from the block on demand, not stored.
+The old provider surface is still needed for upgrade classification, but it
+does not need to live in the spec. It can be recovered from the old provider
+artifact, provided the artifact is retained. The mount stores a reference to
+that artifact, not a reserialized fragment of the old manifest.
 
-The block describes the provider's contract, not the user's chosen values, so editing config in the spec never desyncs it. It is stored in the spec, rather than computed, because the old contract has to survive the upgrade: once `install_embedded_bundle` overwrites the provider wasm and manifest, the spec is the only place the previous contract remains. That is what makes a structural diff possible at all. A bare hash would record that the contract changed but leave omnifs unable to classify the change, which the auto-migrate path below depends on.
+## Provider storage
+
+Provider bytecode cannot be overwritten in place while a mount references it.
+Provider installation may advance a "latest by provider name" index, but the
+content-addressed artifact named by `ProviderRef.id` must remain available.
+A mounted provider resolves to the artifact it names, not to the newest artifact
+that happens to be installed.
+
+If the referenced bytecode is missing, that is an artifact-retention or
+corruption error. It is not a compatibility error. A later garbage collector can
+remove old artifacts only after proving no mount references their ids.
+
+## Catalog indexes
+
+The catalog resolves artifacts by id and indexes provider metadata for
+discovery:
+
+```rust
+catalog.get(id) -> Provider
+catalog.latest_by_name(name) -> Provider
+catalog.versions_by_name(name) -> Vec<Provider>
+```
+
+Only `get(id)` is used for normal serving of an existing mount. The name and
+version indexes are for `omnifs init`, status/debug surfaces, and explicit
+upgrade discovery.
+
+## Normal mount resolution
+
+Normal serving should not compare a mount to the latest provider. It should:
+
+1. Parse and validate the mount spec.
+2. Resolve `spec.provider.id` through the provider catalog.
+3. Return a `Provider` handle for that exact artifact.
+4. Validate config and credential binding against the manifest on that provider
+   handle.
+5. Materialize the mount from the resolved provider.
+
+A newer provider with the same `ProviderMeta.name` is not an error. It only
+means an upgrade candidate exists. Legacy specs that reference providers by
+filename or name need an adoption path that resolves the current artifact and
+writes the first `ProviderRef`.
 
 ## Upgrade flow
 
-`omnifs up` runs a pre-flight before reconcile. For each mount it derives the live provider contract and diffs it against the stamped block:
+Provider upgrade is an explicit transition from an old provider reference to a
+new provider candidate. The flow is:
 
-| Delta | Action |
-|---|---|
-| identical | nothing |
-| additive config only (new optional field with a default) | auto: fill defaults, re-stamp, no prompt |
-| breaking config (new required field, rename, removal) | prompt for the changed fields, prior answers prefilled |
-| capability or auth delta | show the delta, require explicit re-consent, re-stamp |
-| provider removed | hard error: the provider no longer ships |
+1. Load the old provider artifact named by `mount.spec.provider.id`.
+2. Load the old `ProviderManifest` from that artifact.
+3. Choose a new provider candidate from the catalog, usually through
+   `latest_by_name(old.meta.name)`.
+4. Load the new candidate's `ProviderManifest`.
+5. Compare the manifest surfaces directly: config schema, capabilities, auth
+   declaration, and any future declarative migration hints.
+6. Ask the user to approve what is changing and to provide any missing values.
+7. Rewrite the mount with migrated config, the chosen credential binding, and
+   the new `ProviderRef`.
 
-Resolved specs are rewritten and reconcile is triggered. Anything that needs consent routes through `omnifs upgrade <mount>`; `omnifs up` auto-handles the safe cases and never blocks silently.
+The comparison is best effort and host-driven. Additive config with defaults can
+be migrated mechanically. Required or renamed config needs user input.
+Capability or auth changes require explicit user approval because they change
+the provider authority the mount was initialized with. Provider-supplied
+imperative migration code remains out of scope unless separately approved as a
+new provider authority.
 
-The daemon's materialize path (`materialize`, `crates/omnifs-mount/src/materialize.rs`, invoked by `reconcile`) is the backstop. It hashes the spec's `contract` block, hashes the live provider contract, and refuses on mismatch with a typed `ContractMismatch`, which surfaces as a `MountFailure` while the rest keep serving. Because the CLI clears mismatches before reconcile, this fires only when something drifts behind the CLI's back; it guarantees the daemon never serves a contract the spec was not written against.
+## What dies
 
-## Classification follows the trust boundary
+The mount-level contract system should be removed, not renamed:
 
-The additive, breaking, and capability split is not arbitrary; it maps to whether the security-relevant surface moved.
+- `Spec.contract`
+- `omnifs_mount::contract`
+- `Spec::stamp_contract`
+- `Catalog::live_contract_for`
+- `omnifs_cli::contract_preflight`
+- `MaterializeError::ContractMismatch`
 
-- A capability or auth change is exactly what the user consented to at `omnifs init`. It resurfaces for explicit approval and never auto-migrates. This is the security invariant restated: the user approves a provider's reach, and a change to that reach is a new approval.
-- An additive config change touches nothing the user reviewed, so it auto-migrates with no friction.
-- A breaking config change needs a value omnifs does not have, so it prompts.
+The daemon backstop changes shape. It should fail when the referenced artifact
+is missing or cannot validate the mount, not when the mount is older than the
+latest provider. The CLI owns the interactive upgrade path.
 
-So the routing table is a consequence of the trust model, not a set of hand-tuned cases.
+Provider-manifest WIT or SDK evidence, such as an internal
+`ContractEvidence` field, is a separate concept. It records what host/provider
+interface a provider was built against. It must not be used as the mount
+compatibility snapshot, and it may need a clearer name to avoid reviving the
+deleted contract model.
 
-## Open question before building
+## Required capabilities and over-grant
 
-The additive-config branch assumes providers declare their config fields somewhere diffable. The manifest declares `capabilities` and `auth` but may not declare a general config-field schema. If config is validated dynamically inside the provider, the contract is effectively `{capabilities, auth}`, config compatibility cannot be classified statically, and a bad config degrades to a `materialize` refuse and a re-init. Locating or defining the provider config schema (SDK side, manifest side, or the `omnifs init` path) sizes the additive branch, possibly to nothing. Resolve this first.
+The manifest declares only what a provider *needs* (`caps::Need`); it is never a
+runtime grant source. A mount spec's `capabilities` block carries the explicit
+*grants* (`caps::Grants`), seeded from the manifest's needs at `omnifs init`
+(`Grants::from_needs`) and owned by the spec thereafter. The host resolves those
+grants into the enforcement allowlist (`CapabilityChecker::from_config`,
+resolving dynamic markers such as a unix socket from the mount endpoint). So the
+spec, not the provider's own declaration, bounds the grant.
 
-## What this should not do
+**Required capabilities (enforced).** At provider start `materialize` rejects a
+spec whose grants do not satisfy every capability the manifest declares the
+provider needs (`Grants::satisfies` returning `caps::Missing`, surfaced as
+`MaterializeError::MissingCapabilities`). The check covers the four
+access-control kinds (domains, git repos, unix sockets, preopened paths); a
+missing grant would otherwise surface as a denied callout at the provider's
+first request, so the mount fails fast at start instead. Narrowing a glob
+(`git@github.com:*` to a concrete repo) still satisfies; a dynamic need is met
+only by a dynamic grant of the same kind. Scalar resource limits (memory, blob
+bytes) are out of scope: they carry host defaults and fail as resource
+exhaustion, not access denial. The check never weakens the trust boundary, it
+only guarantees a provider is not under-provisioned, so it is not a gated change.
 
-- It does not version provider code or gate releases on per-provider semver. The hash detects; the cargo version only labels.
-- It does not introduce provider-supplied migration functions. Migration is host-driven (defaults, prompts, re-consent); a provider running migration logic would be new provider authority and is out of scope.
-- It does not prune orphaned provider files. A provider dropped from the built-in set leaves stale wasm on disk; a referencing mount surfaces as "provider removed" through the flow above, not as a missing-file error. Pruning is a separate change to provider-dir ownership.
-- It does not move the snapshot to a sidecar lockfile. The block lives in the spec so the spec is self-describing; the Cargo.toml and Cargo.lock split was considered and set aside for that reason.
+**Over-grant (deferred).** Nothing enforces `spec grants ⊆ manifest needs`, so a
+hand-authored or hand-edited spec can grant a provider more reach (extra HTTP
+domains, git repos, unix sockets, filesystem preopens, or auth schemes) than its
+pinned manifest declares. This predates the content-addressed provider work;
+pinning did not introduce it. Adding an over-grant check would change the
+security model (a gated decision), so the upgrade flow deliberately ships without
+it, preserving the user's ability to grant capabilities beyond the manifest. A
+later slice should decide the over-grant surface (the confused-deputy-risky
+preopen/socket/auth surface is the first candidate; network egress may stay
+user-grantable) and add the check. Until then the gap is recorded in
+`architecture.md` section 10.
 
-## Later
+## Open implementation details
 
-- Independent provider versions: un-share the workspace version for `providers/*` so the version expresses per-provider contract intent and can guard the hash. A real change to how providers are versioned, deferred.
-- Provider-declared migration hints: declarative rename and default rules in the manifest, so more breaking changes auto-migrate without a prompt.
+The direction above is fixed; these are implementation details to settle in the
+first slice:
+
+- The final wire shape for `Spec.provider`.
+- The concrete provider version label source. If the manifest lacks a provider
+  version field, add a label field rather than making version a gate.
+- The provider artifact store layout and retention rule.
+- The CLI policy for surfacing available upgrades during `omnifs up` versus a
+  dedicated `omnifs upgrade <mount>` command.

@@ -1,6 +1,6 @@
-use crate::runtime_grants::PreopenMode;
 use crate::sections::ProviderMetadataError;
 use indexmap::IndexMap;
+use omnifs_caps::PreopenMode;
 use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,11 @@ pub struct ConfigSchema {
     pub schema_type: ConfigSchemaType,
     #[serde(default)]
     pub properties: IndexMap<String, ConfigProperty>,
+    /// JSON-Schema `required` array. A field can be required and still carry a
+    /// default, so this is the authoritative required signal: default-presence
+    /// only governs seeding (`defaults`), never required-ness.
+    #[serde(default)]
+    pub required: Vec<String>,
 }
 
 impl ConfigSchema {

@@ -227,19 +227,15 @@ async fn probe_image_cached(runtime: &Runtime) -> ProbeResult {
 }
 
 fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
-    let builtin_count = ProviderCatalog::builtin_manifests().map_or(0, |v| v.len());
     match catalog.provider_dir_status() {
-        ProviderDirStatus::Missing if builtin_count > 0 => {
-            ProbeResult::Ok(format!("{builtin_count} built-in, provider dir missing"))
-        },
-        ProviderDirStatus::Present { wasm_count } if builtin_count + wasm_count > 0 => {
-            ProbeResult::Ok(format!("{builtin_count} built-in, {wasm_count} on disk"))
+        ProviderDirStatus::Present { wasm_count } if wasm_count > 0 => {
+            ProbeResult::Ok(format!("{wasm_count} provider(s) installed"))
         },
         ProviderDirStatus::Missing | ProviderDirStatus::Present { .. } => {
-            ProbeResult::Warn("no providers discovered".into())
+            ProbeResult::Warn("no providers installed (run `omnifs up` or `omnifs setup`)".into())
         },
         ProviderDirStatus::Unreadable(error) => {
-            ProbeResult::Err(format!("provider dir unreadable: {error}"))
+            ProbeResult::Err(format!("provider store unreadable: {error}"))
         },
     }
 }

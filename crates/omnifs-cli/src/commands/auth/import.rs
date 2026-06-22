@@ -77,7 +77,7 @@ pub(super) fn import_static_token_value(
     }
     anstream::println!(
         "Imported static token for `{mount}` as provider={} scheme={} account={}",
-        key.provider_id(),
+        key.provider_name(),
         key.scheme(),
         key.account()
     );

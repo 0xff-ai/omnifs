@@ -16,7 +16,6 @@ mod config;
 mod manifest;
 mod records;
 mod resolve;
-mod runtime_grants;
 mod sections;
 mod validation;
 mod wasm;
@@ -31,8 +30,7 @@ pub use config::{
     ConfigProperty, ConfigSchema, ConfigSchemaType, InitHint, InitInput, PreopenStrategy,
 };
 pub use manifest::{
-    AuthInject, CapabilityEntry, ContractEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest,
-    ProviderManifest,
+    AuthInject, BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest,
 };
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
@@ -40,9 +38,6 @@ pub use records::{
     TAG_SUBTREE_ROUTE, encode_handler, encode_mutation, encode_subtree_route, frame_record,
 };
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
-pub use runtime_grants::{
-    PreopenMode, PreopenedPath, ProviderCapabilities, UnixSocketEndpointError,
-};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
     ProviderMetadataError, provider_manifest_json, read_manifest_section,

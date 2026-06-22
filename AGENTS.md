@@ -1,23 +1,34 @@
 # AGENTS.md
 
-Repository-local guidance for working in `omnifs`, shared by every coding agent (Claude, Codex) and human contributor. `CLAUDE.md` is a symlink to this file; keep it self-contained, because other agents read it directly and do not expand `@imports`.
-
-`omnifs` projects external services (GitHub, DNS, arXiv, Docker, Linear, Kubernetes, a SQL database) as a Linux filesystem. The host owns trust, caching, auth, and I/O; providers own meaning (what paths exist, what bytes they hold). That one boundary explains most of what follows. Why the system is shaped this way: `docs/design/architecture.md`.
+`omnifs` projects external services as native frontend filesystems. The host owns trust, caching, auth, and I/O; providers own meaning (what paths exist, what bytes they hold). That one boundary explains most of what follows. Why the system is shaped this way: `docs/design/architecture.md`.
 
 ## Vocabulary
 
-The load-bearing terms, disambiguated. Fuller definitions live in `docs/design/architecture.md`.
+Fuller definitions live in `docs/design/architecture.md`.
 
-- **Projection.** Lazy, on-demand mapping of an external system into paths and bytes.
+- **Projection.** A mapping of an external system into paths and bytes, responding to some path access.
+- **Canonical.** Bytes returned from the upstream as-is, stored in the canonical cache.
 - **Provider.** A sandboxed WASM component (`wasm32-wasip2`) that defines what paths exist and what bytes they hold for one service.
 - **Host.** The trusted runtime (daemon, caches, auth, I/O) that owns trust and drives providers.
-- **Frontend.** A host-side surface that exposes the projected tree to an operating system (FUSE on Linux; NFSv4 loopback host-native). Distinct from render.
+- **Frontend.** A host-side surface that exposes the projected tree to an operating system.
+  - Supported: FUSE (default on Linux), NFSv4 (default on macOS).
+- **Object.** Canonical bytes representing an object: identity, canonical bytes, and the files derived from them.
 - **Render.** SDK-side assembly of an object's canonical bytes. A provider concern, never a frontend.
-- **Object.** The SDK-side unit of meaning: identity, canonical bytes, and the files derived from them.
 - **Callout.** A host-run effect a provider suspends on (for example an HTTP fetch); the host executes it and resumes the provider.
 - **Effect.** The single terminal channel a provider returns (cache writes, invalidations).
 - **Preload.** Any resource a provider returns other than the one requested.
 - **Mount, spec.** A mount projects one provider under a path; the spec (JSON) is the wire and config truth (`Spec`, `Resolved`, `Auth`).
+
+## Invariants
+
+- The host owns trust. Providers are untrusted. A change that weakens this is wrong.
+- **Byte boundary.** The host knows only paths, bytes, content types, and file attributes. 
+- **No new provider authority without sign-off.** Granting provider WASM more reach (new callout families, preopens, process or socket effects) changes the security model. Treat it as a gated decision (below), never a casual one.
+- **Honest about its limits.** The boundary stops confused-deputy and lateral-movement attacks; it does not stop a determined hostile provider exfiltrating through its allowed domains. Do not weaken it, and do not over-claim it in code or docs.
+
+## Responsibilities
+
+- All object reasoning (identity, canonical assembly via render, versioning, preload, revalidation) lives SDK-side.
 
 ## How these rules bind
 
@@ -31,16 +42,6 @@ Sections are tiered by how hard they bind and how they change. Read the tier bef
 
 Keep this file current as you work. In the same change: delete a footgun when its stated condition dies, update Current shape when you change the shape, and fix or add a rule when one proves wrong or missing in practice. Edit the file directly; do not let it drift.
 
-## Invariants
-
-### Security and trust boundary
-
-The host owns trust; providers are untrusted. A change that weakens this is wrong.
-
-- **Byte boundary.** The host knows only paths, bytes, content types, and file attributes. All object reasoning (identity, canonical assembly via render, versioning, preload, revalidation) lives SDK-side.
-- **No new provider authority without sign-off.** Granting provider WASM more reach (new callout families, preopens, process or socket effects) changes the security model. Treat it as a gated decision (below), never a casual one.
-- **Honest about its limits.** The boundary stops confused-deputy and lateral-movement attacks; it does not stop a determined hostile provider exfiltrating through its allowed domains. Do not weaken it, and do not over-claim it in code or docs.
-
 ### Product thesis: behaves like real files
 
 The projected tree must behave like real files for the standard Linux toolbox, judged against every consumer, not one calling pattern. Every consumer (shells, scripts, editors, agents, applications) is served by the same mount; none may be special-cased. Prove no regression through `tests/smoke/` or a unit test when adding a feature. The toolbox to hold against:
@@ -50,9 +51,19 @@ The projected tree must behave like real files for the standard Linux toolbox, j
 - stat: `ls -l`/`-h`, `du -sh`, `wc`, `stat`
 - copy and archive: `cp`, `mv`, `tar c/x/t`, `rsync`; compare and hash: `diff`, `cmp`, `*sum`; inspect: `jq`, `yq`, `xmllint`; editors: `vim`, `nano` (mmap editors best-effort)
 
+
+## Invariants
+
+### Security and trust boundary
+
+## Agentic development
+
+- If a task specifies a technology, library, or architecture, never substitute an alternative when blocked. Report the blocker, stop, and wait for approval. Completing with a substituted approach without explicit sign-off is forbidden.
+
+
 ### Objective fidelity
 
-If a task specifies a technology, library, or architecture, never substitute an alternative when blocked. Report the blocker, stop, and wait for approval. Completing with a substituted approach without explicit sign-off is forbidden.
+
 
 ## Gated decisions
 
@@ -160,3 +171,7 @@ Two triggers that drift the docs fastest:
 - **A crate, type, or registration-verb rename** updates the docs that name it. Grep `docs/` for the old name before calling the rename done.
 
 `just docs-check` (in `just check` and CI preflight) fails on any doc that references a nonexistent `docs/` path. It does not check code paths; that is what the cite-don't-transcribe doctrine is for.
+
+## Editing this file
+
+Repository-local guidance for working in `omnifs`, shared by every coding agent (Claude, Codex) and human contributor. `CLAUDE.md` is a symlink to this file; keep it self-contained, because other agents read it directly and do not expand `@imports`.

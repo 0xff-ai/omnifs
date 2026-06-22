@@ -40,19 +40,17 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
     let providers_dir = config_dir.path().join("providers");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
     std::fs::create_dir_all(&providers_dir).expect("providers dir");
-    std::fs::copy(
-        provider_wasm_path("test_provider.wasm"),
-        providers_dir.join("test_provider.wasm"),
-    )
-    .expect("copy test provider");
+    // The archive tool stays flat; the test provider goes into the by-hash store.
     std::fs::copy(
         provider_wasm_path("omnifs_tool_archive.wasm"),
         providers_dir.join("omnifs_tool_archive.wasm"),
     )
     .expect("copy archive tool");
+    install_test_provider(&providers_dir);
+    let reference = serde_json::to_string(&test_provider_reference()).expect("provider ref json");
     let provider_config = format!(
         r#"{{
-            "provider": "test_provider.wasm",
+            "provider": {reference},
             "mount": {mount:?},
             "root_mount": {root_mount},
             "capabilities": {{
@@ -83,6 +81,46 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
         _cache_dir: cache_dir,
         _clone_dir: clone_dir,
     }
+}
+
+/// The pinned reference for the test provider, derived from its built bytes.
+pub fn test_provider_reference() -> omnifs_core::ProviderRef {
+    use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    let bytes =
+        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
+    ProviderRef {
+        id: ProviderId::from_wasm_bytes(&bytes),
+        meta: ProviderMeta {
+            name: ProviderName::new("test-provider").unwrap(),
+            version: None,
+        },
+    }
+}
+
+/// A mount `Spec` for the test provider, pinned to the by-hash store any
+/// `TestExport` installs it into.
+#[allow(dead_code)]
+pub fn test_provider_spec(mount: &str) -> omnifs_mount::mounts::Spec {
+    let value = serde_json::json!({
+        "provider": test_provider_reference(),
+        "mount": mount,
+    });
+    serde_json::from_value(value).expect("build test spec")
+}
+
+/// Install the test provider into the content-addressed store at `providers_dir`.
+fn install_test_provider(providers_dir: &Path) {
+    use omnifs_mount::mounts::ProviderStore;
+    let reference = test_provider_reference();
+    let bytes =
+        std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
+    let store = ProviderStore::new(providers_dir);
+    store
+        .put_if_absent(&reference.id, &bytes)
+        .expect("put test provider");
+    store
+        .install(reference.id, reference.meta, "test_provider.wasm".into())
+        .expect("install test provider");
 }
 
 pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {

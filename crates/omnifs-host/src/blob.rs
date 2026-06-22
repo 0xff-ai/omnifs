@@ -396,7 +396,8 @@ fn lookup_header(headers: &[(String, String)], name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::auth::AuthManager;
-    use crate::capability::{CapabilityChecker, CapabilityGrants};
+    use crate::capability::CapabilityChecker;
+    use omnifs_caps::Allowlist;
 
     #[test]
     fn safe_path_segment_rejects_traversal() {
@@ -470,7 +471,7 @@ mod tests {
                 size: 6,
             },
         );
-        let capability = CapabilityChecker::new(CapabilityGrants {
+        let capability = CapabilityChecker::new(Allowlist {
             domains: Vec::new(),
             git_repos: Vec::new(),
             max_memory_mb: 16,

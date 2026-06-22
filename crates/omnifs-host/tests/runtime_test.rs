@@ -9,9 +9,8 @@ use omnifs_host::cloner::GitCloner;
 use omnifs_host::{HostContext, LookupOutcome, Runtime};
 use omnifs_itest::{
     inline_content, make_engine, make_extractor, make_initialized_runtime, make_runtime,
-    provider_wasm_path,
+    provider_wasm_path, spec_with_test_provider,
 };
-use omnifs_mount::mounts::Spec;
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
 
 fn p(value: &str) -> Path {
@@ -799,31 +798,22 @@ fn cache_delete_prefix_respects_segment_boundaries() {
 #[allow(clippy::too_many_lines)]
 async fn test_cache_isolated_by_mount_name() {
     let engine = make_engine();
-    let config = Spec::parse(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
-        }
-    "#,
-    )
-    .unwrap();
+    let config = spec_with_test_provider(
+        r#"{ "mount": "test", "capabilities": { "domains": ["httpbin.org"] } }"#,
+    );
 
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
     let extractor = make_extractor();
-    let wasm_path = provider_wasm_path(&config.provider);
+    let wasm_path = provider_wasm_path("test_provider.wasm");
     let mut config_a = config.clone();
     config_a.mount = "mount-a".to_string();
     let mut config_b = config;
     config_b.mount = "mount-b".to_string();
-    let resolved_a = config_a.into_resolved("test_provider", None).unwrap();
-    let resolved_b = config_b.into_resolved("test_provider", None).unwrap();
+    let resolved_a = config_a.into_resolved(None).unwrap();
+    let resolved_b = config_b.into_resolved(None).unwrap();
     // Both runtimes share the same global Caches; mount isolation is via key prefix.
     let caches = Caches::open(cache_dir.path()).unwrap();
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());

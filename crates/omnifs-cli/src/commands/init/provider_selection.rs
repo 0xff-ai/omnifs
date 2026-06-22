@@ -19,8 +19,7 @@ impl<'a> ProviderSelection<'a> {
             .iter()
             .map(|(_, template)| template)
             .collect();
-        providers
-            .sort_by_key(|template| (template.source.sort_key(), template.manifest.id.as_str()));
+        providers.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         providers
             .into_iter()
             .map(|template| template.manifest.id.clone())

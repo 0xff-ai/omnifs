@@ -216,7 +216,7 @@ The cache is host-owned plain byte storage. Providers can return canonical upstr
 
 ## Development workflows
 
-Use `omnifs dev` when working from this repository. It builds the dev image, provisions credentials for the built-in dev mounts from your host (`gh` CLI, provider env vars) into a dedicated `~/.omnifs/dev` home, fetches the Chinook SQLite fixture, synthesizes dev mounts from the built-in provider manifests, and starts the container. Nothing is written into the checkout.
+Use `omnifs dev` when working from this repository. It builds the dev image, provisions credentials for the built-in dev mounts from your host (`gh` CLI, provider env vars) into a dedicated `~/.omnifs-dev` home, fetches the Chinook SQLite fixture, synthesizes dev mounts from the built-in provider manifests, and starts the container. Nothing is written into the checkout.
 
 ```bash
 git clone https://github.com/0xff-ai/omnifs

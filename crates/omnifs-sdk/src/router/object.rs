@@ -601,7 +601,7 @@ impl<O: Object> ObjectRoute<O> {
     /// and emits the canonical-store effect plus eager field preloads. A
     /// fresh load teaches the host every view leaf; `Unchanged` emits
     /// nothing; `NotFound` makes the whole anchor not-found.
-    async fn list<S>(&self, cx: &Cx<S>, caps: Captures, list_path: String) -> Result<Effects>
+    async fn list<S>(&self, cx: &Cx<S>, caps: Captures, list_path: String) -> Result<ObjectListing>
     where
         O::Key: Key<State = S> + FacetMetadata,
     {
@@ -620,12 +620,24 @@ impl<O: Object> ObjectRoute<O> {
                 canonical,
                 effects,
             } => (value, canonical, effects),
-            Load::Unchanged => return Ok(Effects::new()),
+            Load::Unchanged => {
+                return Ok(ObjectListing {
+                    effects: Effects::new(),
+                    source: None,
+                });
+            },
             Load::NotFound => {
                 return Err(ProviderError::not_found(format!(
                     "object not found: {list_path}"
                 )));
             },
+        };
+        // The source representation leaf is the verbatim canonical bytes, so
+        // its size is known here without a read; stamp it onto the listing.
+        let source = SourceLeafAttrs {
+            len: canonical.bytes.len() as u64,
+            validator: canonical.validator.clone(),
+            stability,
         };
         let id = key.anchor();
         let mut effects = Effects::new();
@@ -637,7 +649,10 @@ impl<O: Object> ObjectRoute<O> {
         );
         effects.extend(extra_effects);
         self.project_eager_fields(&mut effects, &id, &value, &list_path, stability)?;
-        Ok(effects)
+        Ok(ObjectListing {
+            effects,
+            source: Some(source),
+        })
     }
 
     /// The object read path, in priority order:
@@ -827,8 +842,26 @@ type BoxedObjectList<S> = Box<
         &'a Cx<S>,
         Captures,
         String,
-    ) -> Pin<Box<dyn Future<Output = Result<Effects>> + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ObjectListing>> + 'a>>,
 >;
+
+/// What an anchor's list dispatch needs: the load's effects, plus the exact
+/// attrs of the verbatim source representation leaf (its bytes are the loaded
+/// canonical, so its size is known without a read). The dispatch stamps the
+/// source leaf with these so a cold `ls -l` reports the real size; rendered
+/// leaves stay size-unknown until read (their length needs a render).
+pub(super) struct ObjectListing {
+    pub effects: Effects,
+    /// `None` on an `Unchanged` load: the host serves the cached dirent, which
+    /// a prior fresh listing already stamped.
+    pub source: Option<SourceLeafAttrs>,
+}
+
+pub(super) struct SourceLeafAttrs {
+    pub len: u64,
+    pub validator: Option<VersionToken>,
+    pub stability: Stability,
+}
 
 /// Which child of the anchor a read addresses: a representation by content
 /// type (dispatch resolves the `stem.ext` leaf name through the render

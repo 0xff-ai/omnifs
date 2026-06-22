@@ -6,8 +6,37 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow};
+use omnifs_home::{OMNIFS_HOME_ENV, WorkspaceLayout};
 
 use crate::error::WithHint;
+
+/// The contributor dev home: a peer of the production `~/.omnifs`, isolated so
+/// `omnifs dev` never touches a real user's mounts. A sibling directory rather
+/// than a `~/.omnifs/dev` subdir so the production and dev roots can never
+/// nest into one another.
+pub(crate) fn dev_home_root() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("cannot resolve dev home: set HOME or OMNIFS_HOME"))?;
+    Ok(home.join(".omnifs-dev"))
+}
+
+/// Resolve the CLI home layout for one invocation.
+///
+/// An explicit `OMNIFS_HOME` always wins. Otherwise, inside the omnifs source
+/// checkout the whole contributor command family (`dev`, `shell`, `status`,
+/// `logs`, `down`) defaults to the dev home so a session started by `omnifs
+/// dev` is visible to the others without an `OMNIFS_HOME` prefix. Outside a
+/// checkout the normal `~/.omnifs` applies.
+pub(crate) fn contributor_layout() -> anyhow::Result<WorkspaceLayout> {
+    if std::env::var_os(OMNIFS_HOME_ENV).is_some() {
+        return Ok(WorkspaceLayout::resolve()?);
+    }
+    if WorkspaceRoot::discover().is_ok() {
+        return Ok(WorkspaceLayout::under_root(&dev_home_root()?));
+    }
+    Ok(WorkspaceLayout::resolve()?)
+}
 
 pub(crate) struct WorkspaceRoot(PathBuf);
 

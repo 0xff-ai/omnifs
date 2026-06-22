@@ -1,4 +1,4 @@
-use crate::provider::{self, Id as ProviderId};
+use crate::provider::{self, ProviderName};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
@@ -82,7 +82,9 @@ impl FromStr for AccountId {
 /// Stable address for one host-managed HTTP credential.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CredentialId {
-    provider_id: ProviderId,
+    /// The provider NAME slug (e.g. `github`), never the content `ProviderId`
+    /// hash. Credentials key on the name so they survive provider upgrades.
+    provider_name: ProviderName,
     scheme: SchemeId,
     account: AccountId,
 }
@@ -97,7 +99,7 @@ impl CredentialId {
         let scheme = scheme.into();
         let account = account.into();
         Ok(Self::from_parts(
-            ProviderId::new(provider_id.clone())
+            ProviderName::new(provider_id.clone())
                 .map_err(|_| CredentialIdError::invalid("provider_id", &provider_id))?,
             SchemeId::new(scheme.clone())
                 .map_err(|_| CredentialIdError::invalid("scheme", &scheme))?,
@@ -106,9 +108,9 @@ impl CredentialId {
         ))
     }
 
-    pub fn from_parts(provider_id: ProviderId, scheme: SchemeId, account: AccountId) -> Self {
+    pub fn from_parts(provider_name: ProviderName, scheme: SchemeId, account: AccountId) -> Self {
         Self {
-            provider_id,
+            provider_name,
             scheme,
             account,
         }
@@ -116,11 +118,11 @@ impl CredentialId {
 
     /// Stable account name used in the credential store.
     pub fn storage_key(&self) -> String {
-        format!("{}:{}:{}", self.provider_id, self.scheme, self.account)
+        format!("{}:{}:{}", self.provider_name, self.scheme, self.account)
     }
 
-    pub fn provider_id(&self) -> &str {
-        self.provider_id.as_str()
+    pub fn provider_name(&self) -> &str {
+        self.provider_name.as_str()
     }
 
     pub fn scheme(&self) -> &str {
@@ -167,7 +169,7 @@ struct CredentialIdWire {
 impl Serialize for CredentialId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         CredentialIdWire {
-            provider_id: self.provider_id.to_string(),
+            provider_id: self.provider_name.to_string(),
             scheme: self.scheme.to_string(),
             account: self.account.to_string(),
         }
@@ -231,5 +233,38 @@ impl CredentialIdError {
                 value: value.to_owned(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_id_keys_on_name_and_wire_is_byte_stable() {
+        let id = CredentialId::new("github", "pat", "user").unwrap();
+        assert_eq!(id.provider_name(), "github");
+        assert_eq!(id.scheme(), "pat");
+        assert_eq!(id.account(), "user");
+        // The storage-key format is unchanged: name:scheme:account.
+        assert_eq!(id.storage_key(), "github:pat:user");
+        // The JSON wire keeps the field name `provider_id` so credentials.json
+        // stays byte-stable across the slug -> ProviderName type rename.
+        let value = serde_json::to_value(&id).unwrap();
+        assert_eq!(value["provider_id"], "github");
+        assert_eq!(value["scheme"], "pat");
+        assert_eq!(value["account"], "user");
+        assert_eq!(serde_json::from_value::<CredentialId>(value).unwrap(), id);
+    }
+
+    #[test]
+    fn credential_id_round_trips_through_storage_key() {
+        let id = CredentialId::new("github", "device", "default").unwrap();
+        assert_eq!(id.storage_key().parse::<CredentialId>().unwrap(), id);
+    }
+
+    #[test]
+    fn credential_id_rejects_invalid_name() {
+        assert!(CredentialId::new("bad name!", "pat", "default").is_err());
     }
 }

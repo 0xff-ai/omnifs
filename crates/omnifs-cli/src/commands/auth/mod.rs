@@ -163,8 +163,8 @@ fn resolve_target_manifest<'a>(
         return Ok(&template.manifest);
     }
     if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target) {
-        let provider_ref = &mount.config.provider;
-        if let Some((_, template)) = templates.by_reference(provider_ref) {
+        let provider_name = mount.config.provider.meta.name.as_str();
+        if let Some(template) = templates.by_id(provider_name) {
             return Ok(&template.manifest);
         }
     }

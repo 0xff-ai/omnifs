@@ -1,7 +1,7 @@
 use std::fmt;
 
 use anyhow::Context;
-use omnifs_core::{AccountId, AuthSchemeId, CredentialId, IdError, ProviderId};
+use omnifs_core::{AccountId, AuthSchemeId, CredentialId, IdError, ProviderName};
 use omnifs_creds::{CredentialEntry, CredentialStore};
 use omnifs_mount::Auth;
 use omnifs_mount::mounts::Resolved;
@@ -43,7 +43,7 @@ impl CredentialTarget {
         scheme: &str,
         account: Option<&str>,
     ) -> Result<Self, CredentialTargetError> {
-        let provider_id = ProviderId::new(provider_id)?;
+        let provider_id = ProviderName::new(provider_id)?;
         let scheme = AuthSchemeId::new(scheme)?;
         let account = account
             .map(AccountId::new)
@@ -94,7 +94,7 @@ impl CredentialTarget {
         let Some(scheme) = auth.scheme() else {
             return Self::None;
         };
-        let Ok(provider_id) = ProviderId::new(&config.provider_id) else {
+        let Ok(provider_id) = ProviderName::new(&config.provider_name) else {
             return Self::None;
         };
         let account = auth
@@ -154,7 +154,7 @@ impl CredentialTarget {
         scheme: &str,
         account: Option<&str>,
     ) -> Result<Self, CredentialTargetError> {
-        let provider_id = ProviderId::new(&config.provider_id)?;
+        let provider_id = ProviderName::new(&config.provider_name)?;
         let account = account
             .or_else(|| auth.and_then(Auth::account))
             .map(AccountId::new)

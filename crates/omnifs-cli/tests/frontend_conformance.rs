@@ -59,8 +59,6 @@ fn curl(args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-const TEST_MOUNT_SPEC: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
-
 /// What platform-default frontend the daemon will use on this OS.
 #[cfg(target_os = "linux")]
 const PLATFORM_FRONTEND: &str = "fuse";
@@ -196,11 +194,33 @@ fn start() -> Option<Daemon> {
             std::fs::copy(&path, providers.join(path.file_name().unwrap())).expect("copy wasm");
         }
     }
+    // The daemon serves by content id, so the test provider must be in the
+    // by-hash store (the flat copy above only satisfies the archive tool).
+    let test_bytes =
+        std::fs::read(wasm_dir.join("test_provider.wasm")).expect("read test provider wasm");
+    let test_id = omnifs_core::ProviderId::from_wasm_bytes(&test_bytes);
+    let store = omnifs_mount::mounts::ProviderStore::new(&providers);
+    store
+        .put_if_absent(&test_id, &test_bytes)
+        .expect("put test provider");
+    store
+        .install(
+            test_id,
+            omnifs_core::ProviderMeta {
+                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+                version: None,
+            },
+            "test_provider.wasm".into(),
+        )
+        .expect("install test provider");
 
     // Write the mount spec before spawning so the daemon reconciles it on start.
     let mounts_dir = home.path().join("mounts");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-    std::fs::write(mounts_dir.join("test.json"), TEST_MOUNT_SPEC).expect("write test mount spec");
+    let test_spec = format!(
+        r#"{{"provider":{{"id":"{test_id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
+    );
+    std::fs::write(mounts_dir.join("test.json"), test_spec).expect("write test mount spec");
 
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");

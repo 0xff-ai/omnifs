@@ -1,9 +1,10 @@
 use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
+use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
-use omnifs_mount::mounts::Spec;
+use omnifs_mount::mounts::{Catalog, ProviderStore, Spec};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
@@ -23,16 +24,18 @@ pub struct RuntimeHarness {
     pub clone_dir: TempDir,
     pub cache_dir: TempDir,
     pub config_dir: TempDir,
+    /// Per-harness content-addressed provider store the runtime resolves from.
+    pub providers_dir: TempDir,
     pub runtime: Runtime,
 }
 
 impl RuntimeHarness {
-    pub fn new(spec: Spec) -> Result<Self, BuildError> {
+    pub fn new(config_json: &str) -> Result<Self, BuildError> {
         let engine = make_engine();
-        Self::with_engine(spec, &engine)
+        Self::with_engine(config_json, &engine)
     }
 
-    pub fn with_engine(spec: Spec, engine: &wasmtime::Engine) -> Result<Self, BuildError> {
+    pub fn with_engine(config_json: &str, engine: &wasmtime::Engine) -> Result<Self, BuildError> {
         let clone_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
             path: std::env::temp_dir(),
             source,
@@ -45,9 +48,19 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
+        let providers_dir = tempfile::tempdir().map_err(|source| BuildError::CacheDir {
+            path: std::env::temp_dir(),
+            source,
+        })?;
         let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
-        let provider_dir = provider_artifact_dir();
-        let catalog = omnifs_mount::mounts::Catalog::new(&paths.mounts_dir, &provider_dir);
+
+        // Pin the named provider into this harness's by-hash store and rewrite
+        // the test config's `provider` field to the resulting `ProviderRef`, so
+        // resolution and serving go through the content-addressed path the host
+        // uses in production.
+        let spec = pin_spec_from_json(config_json, providers_dir.path())?;
+
+        let catalog = Catalog::new(&paths.mounts_dir, providers_dir.path());
         let resolved = catalog
             .resolve_spec(spec, false)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
@@ -65,7 +78,7 @@ impl RuntimeHarness {
             &HostContext::new(
                 cache_dir.path(),
                 &paths.config_dir,
-                &provider_dir,
+                providers_dir.path(),
                 &paths.credentials_file,
             ),
             make_extractor(),
@@ -77,6 +90,7 @@ impl RuntimeHarness {
             clone_dir,
             cache_dir,
             config_dir,
+            providers_dir,
             runtime,
         })
     }
@@ -308,14 +322,17 @@ pub fn make_engine() -> wasmtime::Engine {
         .clone()
 }
 
+/// The canonical test-provider mount config the bare `make_runtime` uses.
+pub const TEST_PROVIDER_CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test","capabilities":{"domains":["httpbin.org"]}}"#;
+
 pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
-    RuntimeHarness::with_engine(test_provider_spec(), engine).unwrap()
+    RuntimeHarness::with_engine(TEST_PROVIDER_CONFIG, engine).unwrap()
 }
 
 pub fn try_make_runtime_from_config(
     config_json: &str,
 ) -> Result<RuntimeHarness, omnifs_host::BuildError> {
-    RuntimeHarness::new(Spec::parse(config_json).unwrap())
+    RuntimeHarness::new(config_json)
 }
 
 pub fn make_runtime_from_config(config_json: &str) -> RuntimeHarness {
@@ -326,23 +343,96 @@ pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
     make_runtime_from_config(config_json)
 }
 
-pub fn project_paths(effects: &Effects) -> Vec<&str> {
-    effects.fs.iter().map(|write| write.path.as_str()).collect()
+/// Pin the provider named in `config_json`'s `provider` field into the by-hash
+/// store under `providers_dir`, then return the config as a `Spec` whose
+/// `provider` is the resulting `ProviderRef`. This routes test resolution and
+/// serving through the content-addressed path the host uses in production.
+fn pin_spec_from_json(config_json: &str, providers_dir: &StdPath) -> Result<Spec, BuildError> {
+    let mut value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|error| BuildError::InvalidConfig(format!("parse test config: {error}")))?;
+    let provider_file = value
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| BuildError::InvalidConfig("test config has no string `provider`".into()))?
+        .to_string();
+    let reference = pin_provider(providers_dir, &provider_file)?;
+    value["provider"] = serde_json::to_value(&reference)
+        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+    serde_json::from_value(value)
+        .map_err(|error| BuildError::InvalidConfig(format!("build test spec: {error}")))
 }
 
-pub fn test_provider_spec() -> Spec {
-    Spec::parse(
-        r#"
-        {
-            "provider": "test_provider.wasm",
-            "mount": "test",
-            "capabilities": {
-                "domains": ["httpbin.org"]
-            }
-        }
-    "#,
-    )
-    .unwrap()
+/// Lay the built `provider_file` WASM into a by-hash store and return its pinned
+/// reference, named from the artifact's embedded manifest id (which can differ
+/// from the file stem, e.g. `test_provider.wasm` -> `test-provider`).
+fn pin_provider(providers_dir: &StdPath, provider_file: &str) -> Result<ProviderRef, BuildError> {
+    let src = provider_wasm_path(provider_file);
+    let bytes = std::fs::read(&src)
+        .map_err(|error| BuildError::InvalidConfig(format!("read {}: {error}", src.display())))?;
+    let id = ProviderId::from_wasm_bytes(&bytes);
+    let manifest = omnifs_provider::read_provider_metadata_section(&bytes).map_err(|error| {
+        BuildError::InvalidConfig(format!("read manifest from {provider_file}: {error}"))
+    })?;
+    let name = manifest
+        .as_ref()
+        .map_or_else(|| stem_provider_name(provider_file), |m| m.id.clone());
+    let version = manifest.and_then(|m| m.version);
+    let meta = ProviderMeta {
+        name: ProviderName::new(name)
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?,
+        version: version.map(ProviderVersion::new),
+    };
+    let store = ProviderStore::new(providers_dir);
+    store
+        .put_if_absent(&id, &bytes)
+        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+    store
+        .install(id, meta.clone(), provider_file.to_string())
+        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+    Ok(ProviderRef { id, meta })
+}
+
+/// Fallback name for a tool wasm with no embedded manifest.
+fn stem_provider_name(provider_file: &str) -> String {
+    StdPath::new(provider_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(
+            || provider_file.to_string(),
+            |stem| {
+                stem.strip_prefix("omnifs_provider_")
+                    .unwrap_or(stem)
+                    .to_string()
+            },
+        )
+}
+
+/// A pinned reference for the test provider with a placeholder id, for tests
+/// that pass the wasm path to `Runtime::new` directly and never resolve through
+/// a store.
+#[must_use]
+pub fn test_provider_ref() -> ProviderRef {
+    ProviderRef {
+        id: ProviderId::from_wasm_bytes(b"test-provider"),
+        meta: ProviderMeta {
+            name: ProviderName::new("test-provider").unwrap(),
+            version: None,
+        },
+    }
+}
+
+/// Build a `Spec` from a JSON `body` (with no `provider` field) plus the test
+/// provider's placeholder reference. For tests that drive `Runtime::new`
+/// directly with a known wasm path rather than through the store.
+#[must_use]
+pub fn spec_with_test_provider(body: &str) -> Spec {
+    let mut value: serde_json::Value = serde_json::from_str(body).expect("test body json");
+    value["provider"] = serde_json::to_value(test_provider_ref()).expect("serialize provider ref");
+    serde_json::from_value(value).expect("build test spec")
+}
+
+pub fn project_paths(effects: &Effects) -> Vec<&str> {
+    effects.fs.iter().map(|write| write.path.as_str()).collect()
 }
 
 fn workspace_root() -> PathBuf {

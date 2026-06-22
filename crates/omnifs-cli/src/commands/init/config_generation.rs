@@ -1,7 +1,7 @@
 use anyhow::{Context, anyhow};
+use omnifs_caps::{Grant, Grants, PreopenedPath};
 use omnifs_provider::{
-    ConfigProperty, ConfigSchema, InitHint, InitInput, PreopenStrategy, PreopenedPath,
-    ProviderCapabilities, ProviderManifest,
+    ConfigProperty, ConfigSchema, InitHint, InitInput, PreopenStrategy, ProviderManifest,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Clone)]
 pub(super) struct GeneratedMountConfig {
     pub(super) config: Option<Value>,
-    pub(super) capabilities: Option<ProviderCapabilities>,
+    pub(super) capabilities: Option<Grants>,
 }
 
 pub(super) struct MountConfigGenerator<'a> {
@@ -22,12 +22,18 @@ impl<'a> MountConfigGenerator<'a> {
     }
 
     pub(super) fn generate(&self, interactive: bool) -> anyhow::Result<GeneratedMountConfig> {
+        // Seed explicit grants from the manifest's declared needs. The manifest
+        // never grants at runtime; the spec owns these grants from here on.
+        let mut capabilities =
+            (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
         let Some(schema) = self.manifest.config_schema.as_ref() else {
-            return Ok(GeneratedMountConfig::default());
+            return Ok(GeneratedMountConfig {
+                config: None,
+                capabilities,
+            });
         };
         let schema = ConfigSchema::parse(schema)?;
         let mut config = schema.defaults();
-        let mut capabilities = None;
         if interactive {
             self.prompt_fields(&schema, &mut config, &mut capabilities)?;
         }
@@ -51,7 +57,7 @@ impl<'a> MountConfigGenerator<'a> {
         hint: &InitHint,
         host_path: &Path,
         config: &mut Value,
-        capabilities: &mut Option<ProviderCapabilities>,
+        capabilities: &mut Option<Grants>,
     ) -> anyhow::Result<()> {
         let host_path = host_path
             .canonicalize()
@@ -75,7 +81,6 @@ impl<'a> MountConfigGenerator<'a> {
             .ok_or_else(|| anyhow!("{} has no UTF-8 file name", host_path.display()))?;
         let guest_path = format!("{}/{}", guest_dir.trim_end_matches('/'), file_name);
 
-        let prior_field_set_capabilities = capabilities.is_some();
         let manifest_caps =
             (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
         let mut caps = capabilities.take().or(manifest_caps).unwrap_or_default();
@@ -85,16 +90,22 @@ impl<'a> MountConfigGenerator<'a> {
             mode: hint.preopen_mode,
         };
         match hint.preopen_strategy {
+            // Replace swaps in this field's preopen, dropping any preopen the
+            // manifest seeded as a placeholder. `prompt_fields` enforces at most
+            // one Replace hint per provider, so this never clobbers another
+            // field's Replace.
             PreopenStrategy::Replace => {
-                if prior_field_set_capabilities {
-                    anyhow::bail!(
-                        "x-omnifs-init for `{field_name}` uses preopenStrategy: replace, but a previous field already configured capabilities; at most one Replace hint per provider is allowed"
-                    );
-                }
-                caps.preopened_paths = Some(vec![preopen]);
+                caps.preopened_paths = Some(Grant::Literal(vec![preopen]));
             },
             PreopenStrategy::Append => {
-                let preopens = caps.preopened_paths.get_or_insert_with(Vec::new);
+                let grant = caps
+                    .preopened_paths
+                    .get_or_insert_with(|| Grant::Literal(Vec::new()));
+                let Grant::Literal(preopens) = grant else {
+                    anyhow::bail!(
+                        "x-omnifs-init for `{field_name}` cannot append a preopen to a dynamic grant"
+                    );
+                };
                 if let Some(existing) = preopens
                     .iter()
                     .find(|existing| existing.guest == preopen.guest)
@@ -122,14 +133,23 @@ impl<'a> MountConfigGenerator<'a> {
         &self,
         schema: &ConfigSchema,
         config: &mut Value,
-        capabilities: &mut Option<ProviderCapabilities>,
+        capabilities: &mut Option<Grants>,
     ) -> anyhow::Result<()> {
+        let mut replace_used = false;
         for (name, property) in &schema.properties {
             let Some(hint) = property.init.as_ref() else {
                 continue;
             };
             match hint.input {
                 Some(InitInput::HostFile) => {
+                    if hint.preopen_strategy == PreopenStrategy::Replace {
+                        if replace_used {
+                            anyhow::bail!(
+                                "x-omnifs-init for `{name}` uses preopenStrategy: replace, but a previous field already used Replace; at most one Replace hint per provider is allowed"
+                            );
+                        }
+                        replace_used = true;
+                    }
                     let host_path = prompt_host_file(name, property)?;
                     self.apply_host_file_hint(name, hint, &host_path, config, capabilities)?;
                 },

@@ -35,7 +35,6 @@ fn main() {
         .collect::<Vec<_>>();
     manifest_paths.sort();
 
-    let mut manifest_out = String::from("&[\n");
     let mut dev_mount_out =
         String::from("pub(crate) static EMBEDDED_DEV_MOUNTS: &[(&str, &str)] = &[\n");
     let mut provider_files = Vec::new();
@@ -62,12 +61,6 @@ fn main() {
             .and_then(|value| value.as_str())
             .unwrap_or_else(|| panic!("{} must set provider", manifest_path.display()));
         provider_files.push(provider_file.to_string());
-
-        writeln!(
-            manifest_out,
-            "    include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../providers/{provider_name}/omnifs.provider.json\")),"
-        )
-        .unwrap();
 
         // A provider is auto-mounted by `omnifs dev` only if it ships a
         // `dev-mount.json`. Providers that need external setup before they can
@@ -101,11 +94,8 @@ fn main() {
         .unwrap();
     }
 
-    manifest_out.push_str("]\n");
     dev_mount_out.push_str("];\n");
 
-    fs::write(out_dir.join("builtin_provider_manifests.rs"), manifest_out)
-        .expect("write built-in provider manifest list");
     fs::write(out_dir.join("embedded_dev_mounts.rs"), dev_mount_out)
         .expect("write embedded dev mount list");
 
