@@ -13,13 +13,10 @@ use super::route_shape::ReadRoute;
 impl<S> Router<S> {
     /// Read the bytes at an absolute file path.
     ///
-    /// A plain file route (including object handler files) wins first: its
-    /// handler runs and the projection lowers to a one-shot content
-    /// terminal. Otherwise the path resolves through the object read path:
-    /// either the path is an object anchor (`content_type` selects the
-    /// representation, falling back to octet-stream when the mime string is
-    /// unknown) or a leaf under a dir-shaped anchor (representation by
-    /// `stem.ext` name, projected field by name).
+    /// A plain file route wins first: its handler runs and the projection
+    /// lowers to a one-shot content terminal. Otherwise the path resolves
+    /// through the object read path as a leaf under an object anchor:
+    /// representation by `stem.ext` name, projected field by name.
     ///
     /// `cached` is the host-pushed canonical for that object id; the object
     /// path uses it to re-render without an upstream call. Plain file routes
@@ -40,7 +37,8 @@ impl<S> Router<S> {
         let abs = parse_provider_path(path)?;
         let shape = self.shape();
 
-        match shape.read_route(&abs, content_type) {
+        let _ = content_type;
+        match shape.read_route(&abs) {
             Some(ReadRoute::File(route)) => {
                 let proj = (route.entry.handler)(cx.clone(), route.captures).await?;
                 proj.into_browse_content().map(ReadOutcome::Found)
@@ -54,10 +52,9 @@ impl<S> Router<S> {
 
     /// Open a ranged read session at an absolute file path.
     ///
-    /// Only file routes participate, including object handler file leaves
-    /// (representation and projected leaves are whole-byte reads), and the
-    /// handler must return a [`FileSource::Ranged`] projection; anything
-    /// else is an input error.
+    /// Only file routes participate. Object representation and projected
+    /// leaves are whole-byte reads, and a file-route handler must return a
+    /// [`FileSource::Ranged`] projection; anything else is an input error.
     /// The returned reader serves subsequent `read_chunk` calls.
     pub async fn open_file(&self, cx: &Cx<S>, path: &str) -> Result<OpenedFile> {
         debug_assert!(path.starts_with('/'), "open_file expects an absolute path");

@@ -4,7 +4,6 @@ use crate::browse::Lookup;
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::handler::{DirCx, DirIntent};
-use crate::object::ObjectShape;
 
 use super::super::pattern::{parse_child_segment, parse_provider_path};
 use super::super::register::Router;
@@ -22,8 +21,7 @@ impl<S> Router<S> {
     /// 2. A dir route at the child path: answer statically, without running
     ///    the child's handler, unless a file route also matches with
     ///    strictly higher precedence (then the file claims the name).
-    /// 3. An object anchored at the child path: a dir-shaped anchor answers
-    ///    as a static directory; a file-shaped one as its file entry.
+    /// 3. An object anchored at the child path: answer as a static directory.
     /// 4. A representation or field leaf of an object anchored at the
     ///    parent.
     /// 5. A file route at the child path: answer statically.
@@ -63,11 +61,8 @@ impl<S> Router<S> {
             }
         }
 
-        if let Some(route) = shape.object_route(&child_abs) {
-            return match route.entry.shape {
-                ObjectShape::Dir => Ok(shape.static_dir_lookup(&parent_abs, name)),
-                ObjectShape::File => Ok(route.entry.child_file_lookup(&parent_abs, name)),
-            };
+        if shape.object_route(&child_abs).is_some() {
+            return Ok(shape.static_dir_lookup(&parent_abs, name));
         }
 
         let object_file_lookup = shape.object_leaf_lookup(&parent_abs, name);

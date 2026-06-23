@@ -114,8 +114,6 @@ impl<S> Cx<S> {
     }
 
     /// A typed handle to a declared outbound [`crate::endpoint::Endpoint`].
-    /// Usable only if the endpoint is listed in the provider's
-    /// `resources(endpoints = [..])`.
     pub fn endpoint<E: crate::endpoint::Endpoint>(
         &self,
     ) -> crate::endpoint::EndpointHandle<'_, E, S> {

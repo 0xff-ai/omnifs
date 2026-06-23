@@ -7,9 +7,7 @@
 //! `SQLite`-only build: `rusqlite` (with the `bundled` feature) compiles
 //! the C `SQLite` source against `wasi-libc`, opens the database file
 //! through preopened WASI directories, and exposes schema, indexes,
-//! counts, and small samples per table. `PostgreSQL` or other backends
-//! would slot in behind the same path tree with a new `database_type`
-//! discriminator (likely as a network callout).
+//! counts, and small samples per table.
 //!
 //! The provider opens `SQLite` read-only by default with `mode=ro` and
 //! `immutable=1` so databases left in WAL mode and shipped as
@@ -30,20 +28,9 @@ mod backend;
 
 use backend::{FileInfo, SqliteBackend};
 
-/// Database backend discriminator. `Sqlite` is the only variant
-/// today; future backends slot in as additional arms.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(crate = "omnifs_sdk::serde", rename_all = "lowercase")]
-pub(crate) enum DatabaseType {
-    Sqlite,
-}
-
 #[derive(Clone)]
 #[omnifs_sdk::config]
 pub(crate) struct Config {
-    /// Backend selector. Currently only `"sqlite"` is supported.
-    #[serde(default = "default_database_type")]
-    pub database_type: DatabaseType,
     /// Absolute path to the database file, as seen by the WASM
     /// component (i.e. through a preopened WASI directory).
     pub path: String,
@@ -57,10 +44,6 @@ pub(crate) struct Config {
     /// but `sample.json` is truncated to `sample_limit`.
     #[serde(default = "default_sample_limit")]
     pub sample_limit: u32,
-}
-
-fn default_database_type() -> DatabaseType {
-    DatabaseType::Sqlite
 }
 
 fn default_read_only() -> bool {
@@ -145,10 +128,8 @@ impl DbProvider {
     type State = State;
 
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
-        let backend = match config.database_type {
-            DatabaseType::Sqlite => SqliteBackend::open(&config.path, config.read_only)
-                .map_err(|e| ProviderError::internal(format!("open sqlite database: {e}")))?,
-        };
+        let backend = SqliteBackend::open(&config.path, config.read_only)
+            .map_err(|e| ProviderError::internal(format!("open sqlite database: {e}")))?;
         install_known_tables(
             backend
                 .list_tables()

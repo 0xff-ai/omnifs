@@ -248,13 +248,17 @@ impl TestProvider {
         r.object::<Item>("/items/{filter}/{number}", |o| {
             o.stable();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(Item::title)?;
-            o.file("state").project(Item::state)?;
-            o.file("body").project(Item::body)?;
-            o.dir("comments").handler(item_comments)?;
-            o.file("comments/{idx}").handler(item_comment_read)?;
+            o.file("title")
+                .project(|value: &Item, _key| value.title())?;
+            o.file("state")
+                .project(|value: &Item, _key| value.state())?;
+            o.file("body").project(|value: &Item, _key| value.body())?;
             Ok(())
         })?;
+        r.dir("/items/{filter}/{number}/comments")
+            .handler(item_comments)?;
+        r.file("/items/{filter}/{number}/comments/{idx}")
+            .handler(item_comment_read)?;
 
         // Preserved structural surface (route-shaped coverage).
         r.dir("/hello").handler(hello_dir)?;
@@ -548,61 +552,5 @@ impl RangeReader for LargeRangedReader {
                 offset.saturating_add(len) >= LARGE_RANGED_SIZE,
             ))
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Clone, Copy)]
-    struct OpenFacet;
-
-    impl FromStr for OpenFacet {
-        type Err = ProviderError;
-
-        fn from_str(_s: &str) -> Result<Self> {
-            Ok(Self)
-        }
-    }
-
-    impl fmt::Display for OpenFacet {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("context")
-        }
-    }
-
-    impl PathSegment for OpenFacet {}
-
-    #[omnifs_sdk::path_captures]
-    struct OpenFacetKey {
-        #[allow(dead_code)]
-        context: Facet<OpenFacet>,
-        id: u64,
-    }
-
-    #[test]
-    fn path_captures_generates_finite_facet_metadata() {
-        let axes = ItemKey::facet_axes();
-        assert_eq!(axes.len(), 1);
-        assert_eq!(axes[0].capture_name, "filter");
-        assert_eq!(axes[0].choices, &["open", "all"]);
-
-        let key = ItemKey {
-            filter: Facet(StateFilter::Open),
-            number: 7,
-        };
-        assert_eq!(key.identity_captures(), vec![("number", "7".to_string())]);
-    }
-
-    #[test]
-    fn path_captures_skips_open_ended_facet_metadata() {
-        assert!(OpenFacetKey::facet_axes().is_empty());
-
-        let key = OpenFacetKey {
-            context: Facet(OpenFacet),
-            id: 9,
-        };
-        assert_eq!(key.identity_captures(), vec![("id", "9".to_string())]);
     }
 }

@@ -8,9 +8,7 @@ use crate::error::{ProviderError, Result};
 use crate::object::Object;
 
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
-use super::object::{
-    DirObjectBlock, FileObjectBlock, ObjectHandle, file_object, mount_object, object,
-};
+use super::object::{DirObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::parse_pattern;
 
 // ===========================================================================
@@ -20,10 +18,9 @@ use super::pattern::parse_pattern;
 /// The registration and dispatch surface; `S` is the provider state type
 /// handlers receive through their `Cx<S>` / `DirCx<S>`.
 ///
-/// Routes live in per-kind tables (dirs, files, treerefs, objects, plus the
-/// file/dir handler leaves objects contribute). Separately,
-/// `leaf_claims` accumulates one pattern per leaf so [`Self::seal`] can
-/// enforce one-path-one-route across all kinds at once.
+/// Routes live in per-kind tables (dirs, files, treerefs, objects).
+/// Separately, `leaf_claims` accumulates one pattern per leaf so
+/// [`Self::seal`] can enforce one-path-one-route across all kinds at once.
 ///
 /// ```ignore
 /// fn start(config: Config, r: &mut Router<State>) -> Result<State> {
@@ -33,8 +30,8 @@ use super::pattern::parse_pattern;
 ///     r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
 ///     r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
 ///         o.representations("item", (Markdown,))?;
-///         o.file("title").project(Issue::title)?;
-///         o.file("body").lazy().project(Issue::body)?;
+///         o.file("title").project(|issue, _key| issue.title())?;
+///         o.file("body").lazy().project(|issue, _key| issue.body())?;
 ///         Ok(())
 ///     })?;
 ///     Ok(State::default())
@@ -45,8 +42,6 @@ pub struct Router<S = ()> {
     pub(super) files: Vec<super::handlers::FileEntry<S>>,
     pub(super) treerefs: Vec<super::handlers::TreeRefEntry<S>>,
     pub(super) objects: Vec<super::object::ObjectEntry<S>>,
-    pub(super) handler_files: Vec<super::handlers::FileEntry<S>>,
-    pub(super) handler_dirs: Vec<super::handlers::DirEntry<S>>,
     pub(super) leaf_claims: Vec<super::pattern::Pattern>,
 }
 
@@ -57,8 +52,6 @@ impl<S> Default for Router<S> {
             files: Vec::new(),
             treerefs: Vec::new(),
             objects: Vec::new(),
-            handler_files: Vec::new(),
-            handler_dirs: Vec::new(),
             leaf_claims: Vec::new(),
         }
     }
@@ -123,23 +116,6 @@ impl<S> Router<S> {
         self.mount_handle("", &handle)
     }
 
-    /// Bind a file-shaped [`Object`] at `template`. Like [`Self::object`] but
-    /// the anchor presents as a file rather than a directory of leaves;
-    /// the block only declares representations and an optional `when`
-    /// predicate (no child leaves).
-    pub fn file_object<O: Object + 'static>(
-        &mut self,
-        template: &'static str,
-        block: impl FnOnce(&mut FileObjectBlock<O>) -> Result<()>,
-    ) -> Result<&mut Self>
-    where
-        O::Key: crate::object::Key<State = S> + crate::object::FacetMetadata + 'static,
-        S: 'static,
-    {
-        let handle = file_object(template, block)?;
-        self.mount_handle("", &handle)
-    }
-
     /// Mount a detached [`ObjectHandle`] under `prefix`. The handle's
     /// absolute template is appended to `prefix` (trailing slashes on
     /// `prefix` are trimmed), so one object definition can be replayed at
@@ -167,11 +143,9 @@ impl<S> Router<S> {
     {
         let combined = combine_template(prefix, handle.template)?;
         let pattern = parse_pattern(&combined)?;
-        let mounted = mount_object(&pattern, handle.shape, handle.spec.as_ref(), &combined)?;
+        let mounted = mount_object(&pattern, handle.spec.as_ref(), &combined)?;
         self.objects.push(mounted.entry);
         self.leaf_claims.extend(mounted.claims);
-        self.handler_files.extend(mounted.handler_files);
-        self.handler_dirs.extend(mounted.handler_dirs);
         Ok(self)
     }
 

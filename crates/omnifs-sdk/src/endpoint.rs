@@ -1,12 +1,11 @@
 //! Typed outbound endpoints (ADR-0001 §10).
 //!
-//! A provider declares each upstream host once with `#[derive(Endpoint)]`,
-//! lists it in the provider's `resources(endpoints = [..])`, and reaches it
-//! through [`Cx::endpoint`]. The returned [`EndpointHandle`] builds requests
-//! whose `path` is relative to [`Endpoint::base`]; the SDK forms the URL via
-//! [`crate::http::HttpEndpoint`] and lowers the request onto the [`crate::http`]
-//! callout machinery, so awaiting a terminal suspends the handler while the
-//! host runs the fetch.
+//! A provider declares each upstream host once with `#[derive(Endpoint)]` and
+//! reaches it through [`Cx::endpoint`]. The returned [`EndpointHandle`] builds
+//! requests whose `path` is relative to [`Endpoint::base`]; the SDK forms the
+//! URL via [`crate::http::HttpEndpoint`] and lowers the request onto the
+//! [`crate::http`] callout machinery, so awaiting a terminal suspends the
+//! handler while the host runs the fetch.
 //!
 //! Pick the terminal by what the response status means for the route:
 //!
@@ -99,9 +98,7 @@ pub trait Endpoint {
     }
 }
 
-/// A typed handle to a declared [`Endpoint`], obtained from
-/// [`Cx::endpoint`]. Usable only if the endpoint is listed in the provider's
-/// `resources(endpoints = [..])`.
+/// A typed handle to a declared [`Endpoint`], obtained from [`Cx::endpoint`].
 pub struct EndpointHandle<'a, E, S = ()> {
     cx: &'a Cx<S>,
     _endpoint: core::marker::PhantomData<E>,

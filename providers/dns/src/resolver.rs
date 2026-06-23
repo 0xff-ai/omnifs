@@ -1,4 +1,4 @@
-//! DNS resolution: validators, `DoH` transport, and record queries.
+//! DNS resolution: validators, `DoH` fetches, and record queries.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -13,7 +13,6 @@ use hickory_proto::rr::RecordType as HickoryRecordType;
 use omnifs_sdk::Cx;
 use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
-use omnifs_sdk::serde::Deserialize;
 
 use crate::{DnsRecord, State};
 
@@ -166,64 +165,21 @@ impl AsRef<str> for ResolverName {
     }
 }
 
-/// Provider-local `DoH` transport boundary: fetch a prepared `DoH` URL and
-/// return the raw DNS wire-format response body.
-///
-/// Production goes through the SDK's `Callout::Fetch` via the [`Cx<State>`]
-/// impl below; tests inject canned responses without touching the WIT
-/// contract.
-pub(crate) trait DohTransport {
-    async fn fetch_dns_message(&self, url: String) -> Result<Vec<u8>>;
-}
+const BUILTIN_RESOLVERS: &[(&str, &str, &[&str])] = &[
+    (
+        "cloudflare",
+        "https://cloudflare-dns.com/dns-query",
+        &["1.1.1.1", "1.0.0.1"],
+    ),
+    (
+        "google",
+        "https://dns.google/dns-query",
+        &["8.8.8.8", "8.8.4.4", "dns.google"],
+    ),
+];
 
-impl DohTransport for Cx<State> {
-    async fn fetch_dns_message(&self, url: String) -> Result<Vec<u8>> {
-        let response = self
-            .http()
-            .get(url)
-            .header("Accept", "application/dns-message")
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(response.into_body())
-    }
-}
-
-const BUILTIN_DEFAULTS_JSON: &str = r#"{
-  "default_resolver": "cloudflare",
-  "resolvers": {
-    "cloudflare": {
-      "url": "https://cloudflare-dns.com/dns-query",
-      "aliases": ["1.1.1.1", "1.0.0.1"]
-    },
-    "google": {
-      "url": "https://dns.google/dns-query",
-      "aliases": ["8.8.8.8", "8.8.4.4", "dns.google"]
-    }
-  }
-}"#;
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct RawConfig {
-    default_resolver: String,
-    #[serde(default)]
-    resolvers: BTreeMap<String, RawResolver>,
-}
-
-impl Default for RawConfig {
-    fn default() -> Self {
-        Self {
-            default_resolver: "cloudflare".to_string(),
-            resolvers: BTreeMap::new(),
-        }
-    }
-}
-
-#[derive(Deserialize)]
 struct RawResolver {
     url: String,
-    #[serde(default)]
     aliases: Vec<String>,
 }
 
@@ -246,6 +202,30 @@ fn build_resolver_entries(
             })
         })
         .collect()
+}
+
+fn builtin_resolver_entries() -> Result<Vec<ResolverEntry>> {
+    BUILTIN_RESOLVERS
+        .iter()
+        .map(|(name, url, aliases)| {
+            Ok(ResolverEntry {
+                name: (*name).to_string(),
+                url: Endpoint::new(*url).map_err(ProviderError::invalid_input)?,
+                aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
+            })
+        })
+        .collect()
+}
+
+async fn fetch_dns_message(cx: &Cx<State>, url: String) -> Result<Vec<u8>> {
+    let response = cx
+        .http()
+        .get(url)
+        .header("Accept", "application/dns-message")
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.into_body())
 }
 
 /// Validated `DoH` endpoint URL (always HTTPS).
@@ -319,13 +299,7 @@ impl ResolverConfig {
             .collect();
 
         let resolvers = if resolvers.is_empty() {
-            let raw: RawConfig = omnifs_sdk::serde_json::from_slice(
-                BUILTIN_DEFAULTS_JSON.as_bytes(),
-            )
-            .map_err(|error| {
-                ProviderError::invalid_input(format!("invalid resolver config: {error}"))
-            })?;
-            build_resolver_entries(raw.resolvers)?
+            builtin_resolver_entries()?
         } else {
             build_resolver_entries(resolvers)?
         };
@@ -444,22 +418,13 @@ pub(crate) async fn read_reverse_bytes(
     ip: &str,
 ) -> Result<Vec<u8>> {
     let config = cx.state(|s| s.resolvers.clone());
-    read_reverse_bytes_with(cx, &config, resolver, ip).await
-}
-
-async fn read_reverse_bytes_with<T: DohTransport>(
-    transport: &T,
-    config: &ResolverConfig,
-    resolver: Option<&ResolverName>,
-    ip: &str,
-) -> Result<Vec<u8>> {
     let resolver_name = resolver.map(ResolverName::as_ref);
     let addr = ip
         .parse::<IpAddr>()
         .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
     let name = Name::from(addr);
-    let url = query_with_name(config, resolver_name, name, SupportedRecordType::PTR)?;
-    let body = transport.fetch_dns_message(url).await?;
+    let url = query_with_name(&config, resolver_name, name, SupportedRecordType::PTR)?;
+    let body = fetch_dns_message(cx, url).await?;
     let (records, _) = parse_response(&body)?;
     Ok(format_record_lines(&records))
 }
@@ -471,16 +436,6 @@ pub(crate) async fn read_record_bytes(
     record: &str,
 ) -> Result<Vec<u8>> {
     let config = cx.state(|s| s.resolvers.clone());
-    read_record_bytes_with(cx, &config, resolver, domain, record).await
-}
-
-async fn read_record_bytes_with<T: DohTransport>(
-    transport: &T,
-    config: &ResolverConfig,
-    resolver: Option<&ResolverName>,
-    domain: &DomainName,
-    record: &str,
-) -> Result<Vec<u8>> {
     match record {
         "all" => {
             let domain_str = domain.to_string();
@@ -488,8 +443,8 @@ async fn read_record_bytes_with<T: DohTransport>(
 
             let mut requests = Vec::with_capacity(SupportedRecordType::common().len());
             for record_type in SupportedRecordType::common() {
-                let url = query_url(config, resolver_ref, &domain_str, *record_type)?;
-                requests.push(transport.fetch_dns_message(url));
+                let url = query_url(&config, resolver_ref, &domain_str, *record_type)?;
+                requests.push(fetch_dns_message(cx, url));
             }
 
             let responses = join_all(requests).await;
@@ -527,8 +482,8 @@ async fn read_record_bytes_with<T: DohTransport>(
         "raw" => {
             let domain_str = domain.to_string();
             let resolver_ref = resolver.map(ResolverName::as_ref);
-            let url = query_url(config, resolver_ref, &domain_str, SupportedRecordType::A)?;
-            let body = transport.fetch_dns_message(url).await?;
+            let url = query_url(&config, resolver_ref, &domain_str, SupportedRecordType::A)?;
+            let body = fetch_dns_message(cx, url).await?;
             let (records, _) = parse_response(&body)?;
 
             let mut out = String::new();
@@ -549,8 +504,8 @@ async fn read_record_bytes_with<T: DohTransport>(
                 .map_err(|()| ProviderError::not_found("record not found"))?;
             let domain_str = domain.to_string();
             let resolver_name = resolver.map(ResolverName::as_ref);
-            let url = query_url(config, resolver_name, &domain_str, record_type)?;
-            let body = transport.fetch_dns_message(url).await?;
+            let url = query_url(&config, resolver_name, &domain_str, record_type)?;
+            let body = fetch_dns_message(cx, url).await?;
             let (records, _) = parse_response(&body)?;
             Ok(format_record_lines(&records))
         },

@@ -142,14 +142,6 @@ pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
     }
 }
 
-/// Filesystem shape of an object anchor: a directory of leaves, or a
-/// single file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObjectShape {
-    Dir,
-    File,
-}
-
 /// The identity side of an object: how to fetch it and what logical id it
 /// anchors to. Keys are `#[path_captures]` structs; only `load` is written
 /// by hand.
@@ -220,8 +212,8 @@ impl FacetMetadata for () {
     }
 }
 
-/// Project a field leaf from a loaded object value: a pure function of
-/// the object, no callouts. The SDK runs these eagerly after a fresh load
-/// and again on warm reads, so the leaf is always derivable from the
-/// canonical alone.
-pub type ProjectFn<O> = fn(&O) -> Result<FileContent>;
+/// Project a field leaf from a loaded object value and the route key that
+/// selected it: a pure function, no callouts. The SDK runs these eagerly after
+/// a fresh load and again on warm reads, so the leaf must be derivable from the
+/// canonical object plus route context such as a version facet.
+pub type ProjectFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileContent>;

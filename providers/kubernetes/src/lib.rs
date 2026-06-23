@@ -184,46 +184,41 @@ impl KubernetesProvider {
     type State = State;
 
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
-        register_routes(r)?;
+        r.dir("/namespaces").handler(namespaces_dir)?;
+        r.dir("/namespaces/{ns}").handler(ns_types_dir)?;
+        r.dir("/namespaces/{ns}/{rtype}")
+            .handler(ns_resources_dir)?;
+        r.object::<NamespacedResource>("/namespaces/{ns}/{rtype}/{name}", |o| {
+            o.dynamic();
+            o.representations("manifest", (Yaml,))?;
+            o.file("status.yaml")
+                .project(|value: &NamespacedResource, _key| value.status_yaml())?;
+            Ok(())
+        })?;
+        r.file("/namespaces/{ns}/{rtype}/{name}/events.txt")
+            .handler(namespaced_events_txt)?;
+        r.dir("/namespaces/{ns}/{rtype}/{name}/logs")
+            .handler(pod_logs_dir)?;
+        r.file("/namespaces/{ns}/{rtype}/{name}/logs/{logfile}")
+            .ranged()
+            .handler(pod_log_read)?;
+
+        r.dir("/cluster").handler(cluster_types_dir)?;
+        r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
+        r.object::<ClusterResource>("/cluster/{rtype}/{name}", |o| {
+            o.dynamic();
+            o.representations("manifest", (Yaml,))?;
+            o.file("status.yaml")
+                .project(|value: &ClusterResource, _key| value.status_yaml())?;
+            Ok(())
+        })?;
+
         Ok(State {
             endpoint: HttpEndpoint::parse(&config.endpoint),
             hide_empty_types: config.hide_empty_types,
             discovery: Rc::new(RefCell::new(None)),
         })
     }
-}
-
-fn register_routes(r: &mut Router<State>) -> Result<()> {
-    r.dir("/namespaces").handler(namespaces_dir)?;
-    r.dir("/namespaces/{ns}").handler(ns_types_dir)?;
-    r.dir("/namespaces/{ns}/{rtype}")
-        .handler(ns_resources_dir)?;
-    r.object::<NamespacedResource>("/namespaces/{ns}/{rtype}/{name}", |o| {
-        o.dynamic();
-        o.representations("manifest", (Yaml,))?;
-        o.file("status.yaml")
-            .project(NamespacedResource::status_yaml)?;
-        Ok(())
-    })?;
-    r.file("/namespaces/{ns}/{rtype}/{name}/events.txt")
-        .handler(namespaced_events_txt)?;
-    r.dir("/namespaces/{ns}/{rtype}/{name}/logs")
-        .handler(pod_logs_dir)?;
-    r.file("/namespaces/{ns}/{rtype}/{name}/logs/{logfile}")
-        .ranged()
-        .handler(pod_log_read)?;
-
-    r.dir("/cluster").handler(cluster_types_dir)?;
-    r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
-    r.object::<ClusterResource>("/cluster/{rtype}/{name}", |o| {
-        o.dynamic();
-        o.representations("manifest", (Yaml,))?;
-        o.file("status.yaml")
-            .project(ClusterResource::status_yaml)?;
-        Ok(())
-    })?;
-
-    Ok(())
 }
 
 fn empty_dir() -> DirProjection {

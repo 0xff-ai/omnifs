@@ -352,7 +352,7 @@ mod tests {
             &format!(
                 r#"{{
                 "mount": "db",
-                "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                "config": {{"path": "/data/chinook.sqlite"}},
                 "capabilities": {{
                     "preopened_paths": [{{"host": "{}", "guest": "/data", "mode": "ro"}}]
                 }}
@@ -400,7 +400,7 @@ mod tests {
             &format!(
                 r#"{{
                 "mount": "db",
-                "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                "config": {{"path": "/data/chinook.sqlite"}},
                 "capabilities": {{
                     "preopened_paths": [{{"host": "{}", "guest": "/data", "mode": "ro"}}]
                 }}

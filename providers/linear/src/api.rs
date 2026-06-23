@@ -124,10 +124,8 @@ pub(crate) struct TeamsData {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub(crate) struct Team {
     pub(crate) key: String,
-    pub(crate) name: String,
 }
 
 #[derive(Debug, Deserialize)]

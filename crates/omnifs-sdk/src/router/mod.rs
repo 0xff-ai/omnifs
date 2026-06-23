@@ -14,10 +14,10 @@
 //!   [`crate::projection::FileProjection`].
 //! - [`Router::treeref`]: a subtree handoff; the handler returns a
 //!   [`crate::handler::TreeRef`] the host resolves to a bind-mounted tree.
-//! - [`Router::object`] / [`Router::file_object`] / [`Router::attach`]: bind a
-//!   typed [`crate::object::Object`] whose [`crate::object::Key`] both loads
-//!   and identifies the canonical resource; representations and field leaves
-//!   are declared in a [`DirObjectBlock`] / [`FileObjectBlock`].
+//! - [`Router::object`] / [`Router::attach`]: bind a typed
+//!   [`crate::object::Object`] whose [`crate::object::Key`] both loads and
+//!   identifies the canonical resource; representations and field leaves are
+//!   declared in a [`DirObjectBlock`].
 //!
 //! Route templates are absolute paths built from literal segments,
 //! `{capture}` segments, prefix captures (`@{resolver}`, `v{version}`), and
@@ -48,10 +48,9 @@ mod register;
 #[cfg(test)]
 mod tests;
 
-pub use handlers::RouteHandle;
 pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
     WithSyncKeyMethod,
 };
-pub use object::{DirObjectBlock, FileObjectBlock, ObjectHandle, object};
+pub use object::{DirObjectBlock, ObjectHandle, object};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};

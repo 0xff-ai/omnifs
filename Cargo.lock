@@ -3518,15 +3518,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lru"
-version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
-dependencies = [
- "hashbrown 0.16.1",
-]
-
-[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4318,7 +4309,6 @@ dependencies = [
 name = "omnifs-provider-arxiv"
 version = "0.2.1"
 dependencies = [
- "hashbrown 0.15.5",
  "omnifs-sdk",
  "percent-encoding",
  "quick-xml",
@@ -4349,8 +4339,6 @@ dependencies = [
  "hickory-proto",
  "omnifs-sdk",
  "serde",
- "serde_json",
- "strum 0.27.2",
 ]
 
 [[package]]
@@ -4359,7 +4347,6 @@ version = "0.2.1"
 dependencies = [
  "bollard-stubs",
  "hashbrown 0.15.5",
- "hex",
  "omnifs-sdk",
  "serde",
  "serde_json",
@@ -4396,9 +4383,7 @@ name = "omnifs-provider-linear"
 version = "0.2.1"
 dependencies = [
  "hashbrown 0.15.5",
- "http",
  "omnifs-core",
- "omnifs-provider",
  "omnifs-sdk",
  "serde",
  "serde_json",
@@ -4423,13 +4408,10 @@ dependencies = [
  "hashbrown 0.15.5",
  "hex",
  "http",
- "lru 0.16.4",
  "mime",
  "omnifs-core",
- "omnifs-provider",
  "omnifs-sdk-macros",
  "omnifs-wit",
- "postcard",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5014,7 +4996,7 @@ dependencies = [
  "indoc",
  "instability",
  "itertools 0.13.0",
- "lru 0.12.5",
+ "lru",
  "paste",
  "strum 0.26.3",
  "unicode-segmentation",

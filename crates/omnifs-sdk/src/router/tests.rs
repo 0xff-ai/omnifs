@@ -7,7 +7,7 @@ use crate::cx::Cx;
 use crate::error::{ProviderError, ProviderErrorKind, Result};
 use crate::handler::DirCx;
 use crate::identity::{Facet, IdentityCaptures, LogicalId};
-use crate::object::{Canonical, Key, Load, Object, ObjectKind, ObjectShape};
+use crate::object::{Canonical, Key, Load, Object, ObjectKind};
 use crate::projection::{DirProjection, Entry, FileProjection};
 use crate::repr::{Markdown, Representable};
 use omnifs_core::ContentType;
@@ -293,29 +293,19 @@ fn seal_rejects_overlapping_routes() {
 }
 
 #[test]
-fn object_listing_includes_top_level_handler_leaves_only() {
+fn object_mount_lists_only_canonical_derived_leaves() {
     let handle = object("/items/{id}", |o| {
         o.representations("item", (Markdown,))?;
         o.dynamic();
         o.file("summary")
-            .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"summary").build()) })?;
-        o.dir("comments").handler(|_cx: DirCx<()>| async {
-            Ok(DirProjection::exhaustive([Entry::file("1")]))
-        })?;
-        o.file("comments/{idx}")
-            .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"comment").build()) })?;
+            .project(|value: &DemoObj, _key| value.title())?;
         Ok(())
     })
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
 
-    let mounted = super::object::mount_object::<DemoObj, ()>(
-        &pattern,
-        ObjectShape::Dir,
-        &handle.spec,
-        "/items/{id}",
-    )
-    .unwrap();
+    let mounted =
+        super::object::mount_object::<DemoObj, ()>(&pattern, &handle.spec, "/items/{id}").unwrap();
     let leaf_names: Vec<&str> = mounted
         .entry
         .leaves
@@ -323,12 +313,7 @@ fn object_listing_includes_top_level_handler_leaves_only() {
         .map(|leaf| leaf.name.as_str())
         .collect();
 
-    assert_eq!(
-        leaf_names,
-        vec!["item.md", "item.json", "summary", "comments"]
-    );
-    assert_eq!(mounted.handler_files.len(), 2);
-    assert_eq!(mounted.handler_dirs.len(), 1);
+    assert_eq!(leaf_names, vec!["item.md", "item.json", "summary"]);
 }
 
 #[test]
@@ -336,20 +321,19 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
     let handle = object("/items/{id}", |o| {
         o.representations("item", (Markdown,))?;
         o.dynamic();
-        o.file("title").project(DemoObj::title)?;
-        o.file("body").lazy().project(DemoObj::body)?;
-        o.file("state").project(DemoObj::state)?;
+        o.file("title")
+            .project(|value: &DemoObj, _key| value.title())?;
+        o.file("body")
+            .lazy()
+            .project(|value: &DemoObj, _key| value.body())?;
+        o.file("state")
+            .project(|value: &DemoObj, _key| value.state())?;
         Ok(())
     })
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
-    let mounted = super::object::mount_object::<DemoObj, ()>(
-        &pattern,
-        ObjectShape::Dir,
-        &handle.spec,
-        "/items/{id}",
-    )
-    .unwrap();
+    let mounted =
+        super::object::mount_object::<DemoObj, ()>(&pattern, &handle.spec, "/items/{id}").unwrap();
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let caps = Captures::new(vec![Capture {
         name: "id".into(),
@@ -384,21 +368,26 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
 }
 
 #[test]
-fn route_shape_tracks_object_handler_leaves() {
+fn route_shape_tracks_explicit_child_routes_under_object_anchor() {
     let mut router = Router::<()>::new();
     router
         .object::<DemoObj>("/items/{id}", |o| {
             o.representations("item", (Markdown,))?;
             o.dynamic();
-            o.file("summary")
-                .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"summary").build()) })?;
-            o.dir("comments").handler(|_cx: DirCx<()>| async {
-                Ok(DirProjection::exhaustive([Entry::file("1")]))
-            })?;
-            o.file("comments/{idx}")
-                .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"comment").build()) })?;
             Ok(())
         })
+        .unwrap();
+    router
+        .file("/items/{id}/summary")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"summary").build()) })
+        .unwrap();
+    router
+        .dir("/items/{id}/comments")
+        .handler(|_cx: DirCx<()>| async { Ok(DirProjection::exhaustive([Entry::file("1")])) })
+        .unwrap();
+    router
+        .file("/items/{id}/comments/{idx}")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::inline(b"comment").build()) })
         .unwrap();
 
     let shape = router.shape();
@@ -415,13 +404,13 @@ fn route_shape_tracks_object_handler_leaves() {
         shape
             .list_dir_route(&omnifs_core::path::Path::parse("/items/42/comments").unwrap())
             .is_some(),
-        "handler dir should be a list route"
+        "explicit child dir should be a list route"
     );
     assert!(
         shape
             .file_route(&omnifs_core::path::Path::parse("/items/42/comments/1").unwrap())
             .is_some(),
-        "handler file should be a read route"
+        "explicit child file should be a read route"
     );
 }
 
@@ -488,11 +477,19 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
         .object::<DemoObj>("/items/{id}", |o| {
             o.representations("item", (Markdown,))?;
             o.dynamic();
-            o.file("title").project(DemoObj::title)?;
-            o.file("body").lazy().project(DemoObj::body)?;
-            o.file("state").project(DemoObj::state)?;
+            o.file("title")
+                .project(|value: &DemoObj, _key| value.title())?;
+            o.file("body")
+                .lazy()
+                .project(|value: &DemoObj, _key| value.body())?;
+            o.file("state")
+                .project(|value: &DemoObj, _key| value.state())?;
             Ok(())
         })
+        .unwrap();
+    router
+        .dir("/items/{id}/comments")
+        .handler(|_cx: DirCx<()>| async { Ok(DirProjection::exhaustive([Entry::file("1")])) })
         .unwrap();
     router.seal().unwrap();
 
@@ -523,9 +520,51 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
     sibling_names.sort_unstable();
     assert_eq!(
         sibling_names,
-        vec!["item.json", "item.md", "state", "title"],
+        vec!["comments", "item.json", "item.md", "state", "title"],
         "an exhaustive object-dir leaf lookup must carry every other leaf as a \
          sibling, or the host's lookup-hints fold collapses the directory to the \
          single looked-up child"
     );
+}
+
+#[test]
+fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
+    let mut router = Router::<()>::new();
+    router
+        .file("/items/{id}/body")
+        .handler(|_cx: Cx<()>| async { Ok(FileProjection::body(b"body".to_vec()).build()) })
+        .unwrap();
+    router.seal().unwrap();
+
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+
+    let mut lookup = Box::pin(router.lookup_child(&cx, "/items", "42"));
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
+    let lookup = match lookup.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => panic!("implicit dynamic directory lookup resolves without callouts"),
+    };
+    let (wire, _effects) = lookup.into_result_and_effects();
+    let wit_types::LookupChildResult::Entry(entry) = wire else {
+        panic!("dynamic capture prefix should resolve as a directory");
+    };
+    assert_eq!(entry.target.name, "42");
+    assert!(matches!(entry.target.kind, wit_types::EntryKind::Directory));
+
+    let mut list = Box::pin(router.list_children(&cx, "/items/42", None, None));
+    let listing = match list.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => panic!("implicit dynamic directory listing resolves without callouts"),
+    };
+    let (wire, _effects) = listing.into_result_and_effects();
+    let wit_types::ListChildrenResult::Entries(listing) = wire else {
+        panic!("dynamic capture prefix should list static route-table children");
+    };
+    let names: Vec<&str> = listing
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["body"]);
 }

@@ -28,11 +28,6 @@ impl Format for Markdown {
     const CT: ContentType = ContentType::Markdown;
 }
 
-pub struct Octet;
-impl Format for Octet {
-    const CT: ContentType = ContentType::Octet;
-}
-
 pub struct Atom;
 impl Format for Atom {
     const CT: ContentType = ContentType::Atom;
@@ -43,24 +38,11 @@ impl Format for Yaml {
     const CT: ContentType = ContentType::Yaml;
 }
 
-pub struct Html;
-impl Format for Html {
-    const CT: ContentType = ContentType::Custom("text/html");
-}
-
-pub struct Diff;
-impl Format for Diff {
-    const CT: ContentType = ContentType::Custom("text/x-diff");
-}
-
 /// Build erased render fns from format markers for object `O`.
 ///
-/// Implemented only for the fixed tuples `()`, `(Markdown,)`,
-/// `(Markdown, Html)`, and `(Markdown, Html, Diff)`; each non-unit element
-/// requires `O: Representable<F>`. `()` means the object exposes only its
-/// canonical representation. A new combination needs a new
-/// `impl_render_set!` line in this module; it cannot be assembled at a
-/// provider call site.
+/// Implemented only for `()`, `(Markdown,)`, and `(Yaml,)`; each non-unit
+/// element requires `O: Representable<F>`. `()` means the object exposes only
+/// its canonical representation.
 pub trait RenderSet<O: crate::object::Object> {
     fn register(table: &mut Vec<(ContentType, RenderFn)>);
 }
@@ -81,8 +63,6 @@ macro_rules! impl_render_set {
 
 impl_render_set!(Markdown);
 impl_render_set!(Yaml);
-impl_render_set!(Markdown, Html);
-impl_render_set!(Markdown, Html, Diff);
 
 fn render_fn<O, F>() -> RenderFn
 where

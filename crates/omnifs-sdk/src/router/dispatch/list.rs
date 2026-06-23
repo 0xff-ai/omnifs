@@ -4,7 +4,6 @@ use crate::browse::List;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::handler::{Cursor, DirCx, DirIntent};
-use crate::object::ObjectShape;
 
 use super::super::pattern::parse_provider_path;
 use super::super::register::Router;
@@ -12,12 +11,11 @@ use super::super::register::Router;
 impl<S> Router<S> {
     /// List an absolute directory path.
     ///
-    /// Resolution order: treeref handoff; a dir route (including object
-    /// handler dirs) run with [`DirIntent::List`] and the resume cursor; a
-    /// dir-shaped object anchor (precomputed leaf names, with the load's
-    /// canonical-store and eager-preload effects attached); an
-    /// auto-navigable literal prefix listed from the route table alone.
-    /// File routes and file-shaped anchors report not-a-directory.
+    /// Resolution order: treeref handoff; a dir route run with
+    /// [`DirIntent::List`] and the resume cursor; an object anchor
+    /// (precomputed leaf names, with the load's canonical-store and
+    /// eager-preload effects attached); an auto-navigable literal prefix
+    /// listed from the route table alone. File routes report not-a-directory.
     ///
     /// Handler and anchor listings are merged with the literal sibling
     /// routes registered at that depth, ordered by name, the handler winning
@@ -59,14 +57,11 @@ impl<S> Router<S> {
         }
 
         if let Some(route) = shape.object_route(&abs) {
-            if route.entry.shape == ObjectShape::Dir {
-                let out = (route.entry.list)(cx, route.captures, path.to_string()).await?;
-                let listing = shape
-                    .object_dir_listing(route.entry, &abs, out.source.as_ref())
-                    .with_effects(out.effects);
-                return Ok(List::entries(listing));
-            }
-            return Err(ProviderError::not_a_directory(format!("{path} is a file")));
+            let out = (route.entry.list)(cx, route.captures, path.to_string()).await?;
+            let listing = shape
+                .object_dir_listing(route.entry, &abs, out.source.as_ref())
+                .with_effects(out.effects);
+            return Ok(List::entries(listing));
         }
 
         if let Some(listing) = shape.implicit_dir_listing(&abs) {

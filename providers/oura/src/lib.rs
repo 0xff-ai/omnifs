@@ -29,19 +29,13 @@ const DATE_FIELDS: &[&str] = &[
 #[endpoint(default_header = "Accept: application/json")]
 struct Api;
 
-#[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
-    resources(endpoints = [Api]),
-)]
+#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl OuraProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/").handler(root)?;
         r.dir("/{day}").handler(DayKey::entries)?;
-        r.file_object::<DailyCollection>("/{day}/{collection}", |o| {
-            o.dynamic();
-            o.representations("collection", ())?;
-            Ok(())
-        })?;
+        r.file("/{day}/{collection}")
+            .handler(DailyCollectionKey::read)?;
         Ok(())
     }
 }
@@ -245,6 +239,42 @@ impl DailyCollectionKey {
         effects.project_dir(self.day_path())?;
         effects.project_file_with_id(self.path(), Some(&self.anchor()), file)?;
         Ok(())
+    }
+
+    async fn read(self, cx: Cx) -> Result<FileProjection> {
+        match self.load(&cx, None).await? {
+            Load::Fresh {
+                canonical, effects, ..
+            } => {
+                let validator = canonical.validator.clone();
+                let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
+                let mut all_effects = Effects::new();
+                all_effects.canonical_store(
+                    &self.anchor(),
+                    validator.clone(),
+                    canonical.bytes.clone(),
+                    vec![self.path()],
+                );
+                all_effects.extend(effects);
+
+                let mut file = FileProjection::body(canonical.bytes)
+                    .size(size)
+                    .dynamic()
+                    .content_type(ContentType::Json)
+                    .with_effects(all_effects);
+                if let Some(validator) = validator {
+                    file = file.version(validator);
+                }
+                Ok(file.build())
+            },
+            Load::Unchanged => Err(ProviderError::internal(
+                "Oura file load returned unchanged without cached canonical bytes",
+            )),
+            Load::NotFound => Err(ProviderError::not_found(format!(
+                "Oura collection not found: {}",
+                self.path()
+            ))),
+        }
     }
 }
 
