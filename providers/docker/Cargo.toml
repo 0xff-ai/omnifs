@@ -18,7 +18,7 @@ omnifs-sdk = { workspace = true }
 # `tokio` dep requires the `net` feature which `compile_error!`s on
 # wasm). We accept the trade by treating each version bump as a small
 # migration, not a routine `cargo update`.
-bollard-stubs = { version = "=1.53.1-rc.29.3.1", default-features = false }
+bollard-stubs = { version = "=1.52.1-rc.29.1.3", default-features = false }
 hashbrown = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

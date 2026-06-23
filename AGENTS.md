@@ -51,19 +51,9 @@ The projected tree must behave like real files for the standard Linux toolbox, j
 - stat: `ls -l`/`-h`, `du -sh`, `wc`, `stat`
 - copy and archive: `cp`, `mv`, `tar c/x/t`, `rsync`; compare and hash: `diff`, `cmp`, `*sum`; inspect: `jq`, `yq`, `xmllint`; editors: `vim`, `nano` (mmap editors best-effort)
 
-
-## Invariants
-
-### Security and trust boundary
-
 ## Agentic development
 
 - If a task specifies a technology, library, or architecture, never substitute an alternative when blocked. Report the blocker, stop, and wait for approval. Completing with a substituted approach without explicit sign-off is forbidden.
-
-
-### Objective fidelity
-
-
 
 ## Gated decisions
 
@@ -89,6 +79,7 @@ Where the architecture is heading. Build with the grain; the "don't deepen" note
 Today's architecture. The baseline to understand and compare against; expect it to change, and update this section in the same change when it does.
 
 - **Topology.** A single `omnifs` binary is both CLI and daemon: the runtime loop lives behind a hidden `omnifs daemon` subcommand that loads provider WASM components (`wasm32-wasip2`) and drives them through the `omnifs:provider` WIT interface. The CLI owns host credentials and the daemon lifecycle and talks to the daemon over an HTTP control API. `omnifs up` reads `[system].runtime` (`docker` or `native`, defaulting to native) and either runs the daemon in a container or spawns `omnifs daemon` as a detached host-native child; there is no separate `omnifsd` binary.
+- **Contributor dev session.** `omnifs dev` is a blocking foreground session: `omnifs-fixture` brings up profile-selected fixtures via testcontainers (GenericBuildableImage for db, DockerCompose for k8s), the CLI copies provider WASM from `target/wasm32-wasip2/release/`, launches the FUSE runtime container, then opens an interactive shell at `/omnifs` inside it. Mount specs are discovered from `providers/*/dev/mount.json` filtered by `contrib/dev-profiles/`; exit or Ctrl+C tears fixtures and runtime down. `omnifs down` sweeps orphaned fixtures via `~/.omnifs/dev/session.json`.
 - **Mount frontends.** Two frontends serve the same projected tree: FUSE (Linux kernel, used by native Linux and by the optional Docker runtime inside the container) and a read-only NFSv4.0 loopback frontend (`crates/omnifs-nfs`, started via `omnifs daemon --frontend nfs`) for non-Linux host-native integration, primarily macOS. Do not reintroduce macFUSE, `diskutil`, or macOS-specific FUSE mount behavior; use the NFS path for non-Linux host integration. Details: `docs/design/nfsv4-loopback-mount.md`.
 - **Core pieces.** inode table, router, providers, caches, clone manager. Understand the current shape before changing it; see `docs/design/architecture.md`.
 - **A provider in one breath.** One `#[omnifs_sdk::provider]` impl with a synchronous `fn start` that registers routes imperatively on a `Router`; it returns a terminal `op-result` with `effects`, or suspends on callouts the host runs and resumes. Registration verbs, macros, and effect shapes are in the SKILL and `architecture.md` sections 2 to 6.

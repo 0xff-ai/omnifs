@@ -316,6 +316,14 @@ impl<S> ObjectEntry<S> {
     /// dir-shaped object, `name` must be one of the anchor's file leaves;
     /// the file-shaped branch instead tests `parent_abs`'s final segment
     /// against the leaf names.
+    ///
+    /// A dir-shaped match carries the anchor's OTHER leaves as exhaustive
+    /// siblings. The leaf set is statically known (it is the same set
+    /// [`Shape::object_dir_listing`] enumerates), so a single child lookup
+    /// teaches the host the whole directory in one round trip. Omitting the
+    /// siblings while still reporting `exhaustive` (the default) would make the
+    /// host's lookup-hints merge treat the directory as containing only the
+    /// looked-up child, collapsing a later readdir to that one entry.
     pub(super) fn child_file_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         if self.shape == ObjectShape::File {
             if parent_abs.is_root() {
@@ -328,9 +336,30 @@ impl<S> ObjectEntry<S> {
             return Lookup::not_found();
         }
         if self.has_file_leaf(name) {
-            return Lookup::entry(BrowseEntry::file(name, FileProj::listing_shape()));
+            return Lookup::entry(BrowseEntry::file(name, FileProj::listing_shape()))
+                .with_siblings(self.sibling_leaves(name));
         }
         Lookup::not_found()
+    }
+
+    /// The anchor's leaves other than `target`, as browse entries: the sibling
+    /// set a dir-shaped child lookup carries so the host caches the whole
+    /// (statically known, exhaustive) directory from one lookup. Mirrors the
+    /// leaf-to-entry mapping in [`Shape::object_dir_listing`]; placeholder
+    /// shapes are used because a lookup does not load the canonical, so leaf
+    /// sizes (including the source leaf) resolve at read time.
+    fn sibling_leaves(&self, target: &str) -> Vec<BrowseEntry> {
+        self.leaves
+            .iter()
+            .filter(|leaf| leaf.name != target)
+            .map(|leaf| {
+                if leaf.is_dir {
+                    BrowseEntry::dir(&leaf.name)
+                } else {
+                    BrowseEntry::file(&leaf.name, FileProj::listing_shape())
+                }
+            })
+            .collect()
     }
 
     fn has_file_leaf(&self, name: &str) -> bool {

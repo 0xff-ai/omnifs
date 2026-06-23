@@ -7,14 +7,15 @@
 //! already present under `by-hash/` is skipped.
 
 use anyhow::Context as _;
+use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
 use omnifs_mount::mounts::ProviderStore;
 
 const ARCHIVE_TOOL_WASM: &str = "omnifs_tool_archive.wasm";
+const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];
 
 static EMBEDDED_PROVIDER_BUNDLE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/provider-bundle.tar.zst"));
@@ -50,39 +51,79 @@ pub(crate) fn ensure_providers_installed(providers_dir: &Path) -> anyhow::Result
     Ok(())
 }
 
-/// Export provider WASM freshly from the workspace via Docker, then ingest the
-/// exported artifacts into the content-addressed store. Used by `omnifs dev`
-/// build mode, which rebuilds providers from the source checkout.
-pub(crate) fn install_workspace_bundle(
-    workspace: &Path,
-    providers_dir: &Path,
-) -> anyhow::Result<()> {
+/// Install freshly-built provider WASM from the workspace's
+/// `target/wasm32-wasip2/release` into the content-addressed store. Used by
+/// `omnifs dev`, which rebuilds providers from the source checkout and wants
+/// the just-built WASM rather than the bundle embedded at CLI compile time.
+pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> anyhow::Result<()> {
+    let artifact_dir = workspace.join("target/wasm32-wasip2/release");
+    let expected = expected_files(workspace)?;
+    let missing = expected
+        .iter()
+        .filter(|file| !artifact_dir.join(file).is_file())
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "provider WASM artifacts missing in {}; run `just providers-build` first (missing: {})",
+        artifact_dir.display(),
+        missing.join(", ")
+    );
+
     std::fs::create_dir_all(providers_dir)
         .with_context(|| format!("create {}", providers_dir.display()))?;
     anstream::println!(
-        "Exporting provider WASM bundle into {}",
+        "Installing provider WASM from {} into {}",
+        artifact_dir.display(),
         providers_dir.display()
     );
-    let output = format!("type=local,dest={}", providers_dir.display());
-    let status = Command::new("docker")
-        .args([
-            "build",
-            "--target",
-            "wasm-artifacts",
-            "--output",
-            &output,
-            ".",
-        ])
-        .current_dir(workspace)
-        .status()
-        .context("invoke docker build for provider WASM artifacts")?;
-    if !status.success() {
-        anyhow::bail!("provider WASM export failed");
+
+    for file in &expected {
+        let source = artifact_dir.join(file);
+        let bytes = std::fs::read(&source)
+            .with_context(|| format!("read provider artifact {}", source.display()))?;
+        write_if_changed(providers_dir, file, &bytes)?;
     }
     ingest_exported_artifacts(providers_dir)
 }
 
-/// Ingest the flat WASM files Docker exported into `providers_dir` into the
+/// The provider WASM filenames `omnifs dev` expects in the workspace build
+/// output: each non-fixture provider's `provider` artifact plus the host
+/// archive tool. Derived by scanning the checkout's `providers/` directory,
+/// the same source the build script bundles from.
+fn expected_files(workspace: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let provider_root = workspace.join("providers");
+    let mut files = BTreeSet::new();
+    let read = std::fs::read_dir(&provider_root)
+        .with_context(|| format!("scan {}", provider_root.display()))?;
+    for entry in read {
+        let entry = entry.with_context(|| format!("scan {}", provider_root.display()))?;
+        let dir_name = entry.file_name();
+        let Some(dir_name) = dir_name.to_str() else {
+            continue;
+        };
+        if FIXTURE_PROVIDER_DIRS.contains(&dir_name) {
+            continue;
+        }
+        let manifest_path = entry.path().join("omnifs.provider.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest_json = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_json)
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        let provider_file = manifest
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .with_context(|| format!("{} must set provider", manifest_path.display()))?;
+        files.insert(provider_file.to_string());
+    }
+    files.insert(ARCHIVE_TOOL_WASM.to_string());
+    Ok(files)
+}
+
+/// Ingest the flat WASM files copied into `providers_dir` into the
 /// content-addressed store. The archive tool stays flat; every other WASM is
 /// hashed and indexed.
 fn ingest_exported_artifacts(providers_dir: &Path) -> anyhow::Result<()> {
@@ -106,6 +147,35 @@ fn ingest_exported_artifacts(providers_dir: &Path) -> anyhow::Result<()> {
         install_artifact(&store, providers_dir, name, &bytes)?;
     }
     Ok(())
+}
+
+/// Write `file` into `providers_dir` only when its bytes differ from what is
+/// already there, replacing atomically via a temp file.
+fn write_if_changed(providers_dir: &Path, file: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let target = providers_dir.join(file);
+    if target.is_file() && std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
+        return Ok(());
+    }
+    let temp = temp_path(&target);
+    std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+    std::fs::rename(&temp, &target).with_context(|| {
+        format!(
+            "move provider bundle file {} to {}",
+            temp.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn temp_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("provider.wasm");
+    let mut temp = target.to_path_buf();
+    temp.set_file_name(format!("{file_name}.tmp-{}", std::process::id()));
+    temp
 }
 
 /// Install one bundle entry. The archive tool is written flat; a provider is

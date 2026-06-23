@@ -35,9 +35,9 @@ pub enum Commands {
     /// For first-run setup use `omnifs setup`; `omnifs dev` is the contributor
     /// sandbox built from a source checkout.
     Up(commands::up::UpArgs),
-    /// Contributor sandbox: build the image from the source checkout, wire host
-    /// credentials, expose the Docker socket + DB fixture, and start the
-    /// container with all built-in providers' dev mounts.
+    /// Contributor sandbox: blocking dev session from a source checkout.
+    /// Brings up profile-selected fixtures, launches the FUSE runtime container,
+    /// and opens an interactive shell at `/omnifs` inside it (exit tears down).
     ///
     /// For normal use run `omnifs setup` (first run) or `omnifs up`.
     Dev(commands::dev::DevArgs),

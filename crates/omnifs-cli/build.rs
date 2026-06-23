@@ -1,5 +1,4 @@
 use std::env;
-use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,7 +13,6 @@ fn main() {
     let workspace_root = manifest_dir.join("../..");
     let provider_root = manifest_dir.join("../../providers");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let dev_mounts_dir = out_dir.join("dev-mounts");
 
     println!("cargo:rerun-if-changed={}", provider_root.display());
     println!("cargo:rerun-if-env-changed={PROVIDER_BUNDLE_DIR_ENV}");
@@ -35,22 +33,8 @@ fn main() {
         .collect::<Vec<_>>();
     manifest_paths.sort();
 
-    let mut dev_mount_out =
-        String::from("pub(crate) static EMBEDDED_DEV_MOUNTS: &[(&str, &str)] = &[\n");
     let mut provider_files = Vec::new();
-
-    let _ = fs::remove_dir_all(&dev_mounts_dir);
-    fs::create_dir_all(&dev_mounts_dir).expect("create embedded dev-mounts dir");
-
     for manifest_path in manifest_paths {
-        let provider_dir = manifest_path
-            .parent()
-            .expect("provider manifest path has a parent");
-        let provider_name = provider_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_else(|| panic!("invalid provider dir {}", provider_dir.display()));
-
         println!("cargo:rerun-if-changed={}", manifest_path.display());
         let manifest_json = fs::read_to_string(&manifest_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));
@@ -61,53 +45,9 @@ fn main() {
             .and_then(|value| value.as_str())
             .unwrap_or_else(|| panic!("{} must set provider", manifest_path.display()));
         provider_files.push(provider_file.to_string());
-
-        // A provider is auto-mounted by `omnifs dev` only if it ships a
-        // `dev-mount.json`. Providers that need external setup before they can
-        // mount (e.g. kubernetes needs a live cluster) keep their mount spec
-        // under `testenv/` and are mounted by their own flow instead.
-        let dev_mount_path = provider_dir.join("dev-mount.json");
-        if !dev_mount_path.is_file() {
-            continue;
-        }
-        println!("cargo:rerun-if-changed={}", dev_mount_path.display());
-        let dev_json = fs::read_to_string(&dev_mount_path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", dev_mount_path.display()));
-
-        let dev_value: serde_json::Value = serde_json::from_str(&dev_json)
-            .unwrap_or_else(|error| panic!("parse dev mount for `{provider_name}`: {error}"));
-        let mount_name = dev_value
-            .get("mount")
-            .and_then(|value| value.as_str())
-            .unwrap_or_else(|| panic!("dev mount for `{provider_name}` must set `mount`"));
-        let filename = format!("{mount_name}.json");
-        fs::write(
-            dev_mounts_dir.join(&filename),
-            ensure_trailing_newline(&dev_json),
-        )
-        .unwrap_or_else(|error| panic!("write embedded dev mount `{filename}`: {error}"));
-
-        writeln!(
-            dev_mount_out,
-            "    (\"{filename}\", include_str!(\"dev-mounts/{filename}\")),"
-        )
-        .unwrap();
     }
-
-    dev_mount_out.push_str("];\n");
-
-    fs::write(out_dir.join("embedded_dev_mounts.rs"), dev_mount_out)
-        .expect("write embedded dev mount list");
 
     write_provider_bundle(&workspace_root, &out_dir, provider_files);
-}
-
-fn ensure_trailing_newline(json: &str) -> String {
-    if json.ends_with('\n') {
-        json.to_string()
-    } else {
-        format!("{json}\n")
-    }
 }
 
 fn write_provider_bundle(

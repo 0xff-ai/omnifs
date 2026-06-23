@@ -470,3 +470,62 @@ fn facet_view_leaves_expand_across_aliases() {
         "canonical-store leaves must cover every finite facet alias for the same object"
     );
 }
+
+/// Regression: looking up one child of an object directory must report the
+/// anchor's OTHER leaves as siblings.
+///
+/// An object-dir child lookup answers `exhaustive` (the leaf set is statically
+/// known, so absence is authoritative). The host folds an exhaustive lookup's
+/// `target + siblings` into the parent's cached dirents as the whole directory.
+/// If the lookup omitted its siblings, that fold would shrink the dirents to the
+/// single looked-up child, so a later `readdir` would enumerate only that child
+/// (reading `body` makes `ls` of the issue dir return just `body`). Asserting
+/// the full sibling set here keeps the lookup honest at the source.
+#[test]
+fn object_dir_child_lookup_carries_all_sibling_leaves() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/items/{id}", |o| {
+            o.representations("item", (Markdown,))?;
+            o.dynamic();
+            o.file("title").project(DemoObj::title)?;
+            o.file("body").lazy().project(DemoObj::body)?;
+            o.file("state").project(DemoObj::state)?;
+            Ok(())
+        })
+        .unwrap();
+    router.seal().unwrap();
+
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+    let mut fut = Box::pin(router.lookup_child(&cx, "/items/42", "body"));
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
+    let lookup = match fut.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => panic!("an object-dir leaf lookup resolves without callouts"),
+    };
+
+    let (wire, _effects) = lookup.into_result_and_effects();
+    let wit_types::LookupChildResult::Entry(entry) = wire else {
+        panic!("object-dir leaf lookup must resolve to an entry");
+    };
+
+    assert_eq!(
+        entry.target.name, "body",
+        "the looked-up leaf is the target"
+    );
+    assert!(
+        entry.exhaustive,
+        "an object's statically-known leaf set is exhaustive"
+    );
+
+    let mut sibling_names: Vec<&str> = entry.siblings.iter().map(|s| s.name.as_str()).collect();
+    sibling_names.sort_unstable();
+    assert_eq!(
+        sibling_names,
+        vec!["item.json", "item.md", "state", "title"],
+        "an exhaustive object-dir leaf lookup must carry every other leaf as a \
+         sibling, or the host's lookup-hints fold collapses the directory to the \
+         single looked-up child"
+    );
+}
