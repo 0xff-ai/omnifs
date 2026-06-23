@@ -12,7 +12,6 @@ use core::fmt;
 use core::str::FromStr;
 use core::time::Duration;
 
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::handler::BoxFuture;
 use omnifs_sdk::object::{Key, Load};
 use omnifs_sdk::prelude::*;
@@ -85,20 +84,25 @@ struct Item {
 }
 
 impl Item {
-    fn title(&self) -> Result<FileContent> {
-        Ok(FileContent::new(self.title.as_bytes())
-            .with_content_type(ContentType::Custom("text/plain")))
+    fn title(&self) -> Result<FileProjection> {
+        Ok(text_projection(self.title.as_bytes()))
     }
 
-    fn state(&self) -> Result<FileContent> {
-        Ok(FileContent::new(self.state.as_bytes())
-            .with_content_type(ContentType::Custom("text/plain")))
+    fn state(&self) -> Result<FileProjection> {
+        Ok(text_projection(self.state.as_bytes()))
     }
 
-    fn body(&self) -> Result<FileContent> {
-        Ok(FileContent::new(self.body.as_deref().unwrap_or(""))
-            .with_content_type(ContentType::Markdown))
+    fn body(&self) -> Result<FileProjection> {
+        Ok(FileProjection::inline(self.body.as_deref().unwrap_or(""))
+            .content_type(ContentType::Markdown)
+            .build())
     }
+}
+
+fn text_projection(bytes: impl Into<Vec<u8>>) -> FileProjection {
+    FileProjection::inline(bytes)
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
 }
 
 impl Representable<Markdown> for Item {

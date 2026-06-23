@@ -1,6 +1,5 @@
 //! arXiv paper object, representations, and warm projections.
 
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -38,13 +37,14 @@ impl Paper {
         Ok(())
     }
 
-    pub(crate) fn metadata_json(&self, key: &PaperVersionKey) -> Result<FileContent> {
+    pub(crate) fn metadata_json(&self, key: &PaperVersionKey) -> Result<FileProjection> {
         if let Some(version) = key.version.number() {
             self.validate_version(version)?;
         }
         Ok(
-            FileContent::new(self.metadata_json_bytes(key.version.number())?)
-                .with_content_type(ContentType::Json),
+            FileProjection::inline(self.metadata_json_bytes(key.version.number())?)
+                .content_type(ContentType::Json)
+                .build(),
         )
     }
 
