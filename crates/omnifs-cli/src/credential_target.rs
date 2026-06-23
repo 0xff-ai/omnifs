@@ -56,58 +56,11 @@ impl CredentialTarget {
         )))
     }
 
-    pub(crate) fn from_resolved_mount(config: &Resolved) -> Result<Self, CredentialTargetError> {
-        let Some(auth) = config.spec.auth.first() else {
-            return Ok(Self::None);
-        };
-
-        if let Some(token_file) = auth.token_file() {
-            return Ok(Self::External(ExternalCredentialSource::TokenFile(
-                token_file.to_owned(),
-            )));
-        }
-        if let Some(token_env) = auth.token_env() {
-            return Ok(Self::External(ExternalCredentialSource::TokenEnv(
-                token_env.to_owned(),
-            )));
-        }
-
-        let Some(scheme) = auth.scheme() else {
-            return Err(CredentialTargetError::MissingScheme);
-        };
-        Self::internal_from_parts(config, Some(auth), scheme, auth.account())
-    }
-
     pub(crate) fn for_mount(config: &Resolved) -> Self {
-        if config.spec.auth.is_empty() {
-            return Self::None;
-        }
-
-        let auth = &config.spec.auth[0];
-        if let Some(token_file) = auth.token_file() {
-            return Self::External(ExternalCredentialSource::TokenFile(token_file.to_owned()));
-        }
-        if let Some(token_env) = auth.token_env() {
-            return Self::External(ExternalCredentialSource::TokenEnv(token_env.to_owned()));
-        }
-
-        let Some(scheme) = auth.scheme() else {
-            return Self::None;
-        };
-        let Ok(provider_id) = ProviderName::new(&config.provider_name) else {
-            return Self::None;
-        };
-        let account = auth
-            .account()
-            .map(AccountId::new)
-            .transpose()
-            .ok()
-            .flatten()
-            .unwrap_or_else(AccountId::default_account);
-        let Ok(scheme_key) = AuthSchemeId::new(scheme) else {
-            return Self::None;
-        };
-        Self::Internal(CredentialId::from_parts(provider_id, scheme_key, account))
+        config.spec.auth.first().map_or(Self::None, |auth| {
+            Self::for_configured_auth(config, auth, auth.scheme(), auth.account())
+                .unwrap_or(Self::None)
+        })
     }
 
     pub(crate) fn keys(&self) -> Vec<&CredentialId> {
@@ -146,6 +99,26 @@ impl CredentialTarget {
             return Ok(None);
         };
         store.get(key).map_err(Into::into)
+    }
+
+    pub(crate) fn for_configured_auth(
+        config: &Resolved,
+        auth: &Auth,
+        scheme: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<Self, CredentialTargetError> {
+        if let Some(token_file) = auth.token_file() {
+            return Ok(Self::External(ExternalCredentialSource::TokenFile(
+                token_file.to_owned(),
+            )));
+        }
+        if let Some(token_env) = auth.token_env() {
+            return Ok(Self::External(ExternalCredentialSource::TokenEnv(
+                token_env.to_owned(),
+            )));
+        }
+        let scheme = scheme.ok_or(CredentialTargetError::MissingScheme)?;
+        Self::internal_from_parts(config, Some(auth), scheme, account)
     }
 
     fn internal_from_parts(

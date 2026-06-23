@@ -19,38 +19,17 @@
 
 #![cfg(not(target_os = "wasi"))]
 
+mod common;
+
 use std::ffi::OsStr;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-/// `target/wasm32-wasip2/release`, where provider wasm (incl. `test_provider.wasm`
-/// and the archive tool) is expected. Produced by `just providers-build`.
-fn release_wasm_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("target/wasm32-wasip2/release")
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
-fn omnifs_bin() -> PathBuf {
-    std::env::var_os("NEXTEST_BIN_EXE_omnifs")
-        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
-        .map_or_else(
-            || PathBuf::from(env!("CARGO_BIN_EXE_omnifs")),
-            PathBuf::from,
-        )
-}
+use common::{
+    copy_release_wasm_into, free_port, install_test_provider, live_acceptance_enabled,
+    nfs_serial_lock, omnifs_bin, platform_can_mount, release_wasm_dir, test_mount_spec,
+};
 
 fn curl(args: &[&str]) -> bool {
     Command::new("curl")
@@ -64,24 +43,6 @@ fn curl(args: &[&str]) -> bool {
 const PLATFORM_FRONTEND: &str = "fuse";
 #[cfg(not(target_os = "linux"))]
 const PLATFORM_FRONTEND: &str = "nfs";
-
-/// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
-/// mounts. Below the OS ephemeral range, so it never collides with `free_port`.
-const NFS_LOCK_PORT: u16 = 48761;
-
-/// Acquire the cross-process NFS serialization lock, returning the bound socket
-/// as the guard. nextest runs each integration-test binary as its own process,
-/// so an in-process mutex cannot serialize the lifecycle and conformance suites
-/// against each other; a fixed bound port does, and the OS frees it the instant
-/// the holder exits, so a killed test never wedges the next one.
-fn nfs_serial_lock() -> std::net::TcpListener {
-    loop {
-        match std::net::TcpListener::bind(("127.0.0.1", NFS_LOCK_PORT)) {
-            Ok(listener) => return listener,
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
-}
 
 /// A running `omnifs daemon` with the test-provider mounted, torn down on drop.
 struct Daemon {
@@ -124,30 +85,6 @@ impl Daemon {
     }
 }
 
-/// Live-mount acceptance tests are opt-in: they spawn a real daemon and mount a
-/// real filesystem, slow and noisy on a developer machine. A plain
-/// `cargo nextest` skips them; set `OMNIFS_ACCEPTANCE_LIVE=1` to run them
-/// (serialized across binaries via the `serial-nfs` nextest group).
-fn live_acceptance_enabled() -> bool {
-    std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_some()
-}
-
-/// Returns `true` if this platform has the capability to bring up a mount.
-///
-/// On Linux, FUSE requires a `/dev/fuse` device. On macOS, NFS loopback is
-/// always available (the kernel supports it without root). Checking the device
-/// is cheap and avoids a timeout-skip when /dev/fuse is simply absent.
-fn platform_can_mount() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new("/dev/fuse").exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
-}
-
 /// Bring up `omnifs daemon` (platform-default frontend) with only the
 /// test-provider mounted. The spec is written to `mounts/` before spawning so
 /// the daemon reconciles it on startup.
@@ -183,44 +120,16 @@ fn start() -> Option<Daemon> {
     let home = tempfile::tempdir().expect("home tempdir");
     let providers = home.path().join("providers");
     std::fs::create_dir_all(&providers).expect("providers dir");
-    // Copy every built provider/tool wasm so the registry finds the test
-    // provider and the archive extractor it loads at init.
-    for entry in std::fs::read_dir(&wasm_dir)
-        .expect("read release wasm dir")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "wasm") {
-            std::fs::copy(&path, providers.join(path.file_name().unwrap())).expect("copy wasm");
-        }
-    }
+    copy_release_wasm_into(&providers);
     // The daemon serves by content id, so the test provider must be in the
     // by-hash store (the flat copy above only satisfies the archive tool).
-    let test_bytes =
-        std::fs::read(wasm_dir.join("test_provider.wasm")).expect("read test provider wasm");
-    let test_id = omnifs_core::ProviderId::from_wasm_bytes(&test_bytes);
-    let store = omnifs_mount::mounts::ProviderStore::new(&providers);
-    store
-        .put_if_absent(&test_id, &test_bytes)
-        .expect("put test provider");
-    store
-        .install(
-            test_id,
-            omnifs_core::ProviderMeta {
-                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
+    let test_id = install_test_provider(&providers);
 
     // Write the mount spec before spawning so the daemon reconciles it on start.
     let mounts_dir = home.path().join("mounts");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-    let test_spec = format!(
-        r#"{{"provider":{{"id":"{test_id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
-    );
-    std::fs::write(mounts_dir.join("test.json"), test_spec).expect("write test mount spec");
+    std::fs::write(mounts_dir.join("test.json"), test_mount_spec(&test_id))
+        .expect("write test mount spec");
 
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");

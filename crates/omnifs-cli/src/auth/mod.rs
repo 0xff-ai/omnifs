@@ -8,5 +8,5 @@ pub(crate) mod readiness;
 pub(crate) use manifest_view::AuthManifestView;
 pub(crate) use mount::{AuthSelection, MountAuth};
 pub(crate) use readiness::{
-    AuthProbeSeverity, AuthProbeSummary, AuthReadiness, AuthTerminalKind, credential_notices,
+    AuthProbeSeverity, AuthProbeSummary, AuthReadiness, AuthReadinessJson, AuthTerminalKind,
 };

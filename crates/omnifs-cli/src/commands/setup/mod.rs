@@ -89,7 +89,7 @@ impl SetupArgs {
         let configured = templates.configured_mounts(catalog, &mounts);
 
         let selected = resolve_selection(&self, &templates, &configured)?;
-        let results = run_init_loop(&selected, &self, &templates).await;
+        let results = run_init_loop(&selected, &self, &templates, &workspace).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
             // The daemon resolves its own mount point; we preview the expected
@@ -306,6 +306,7 @@ async fn run_init_loop(
     selected: &[String],
     args: &SetupArgs,
     templates: &ProviderTemplates,
+    workspace: &Workspace,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
     for provider_name in selected {
@@ -321,8 +322,6 @@ async fn run_init_loop(
 
         anstream::println!();
         anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
-        init::print_capability_justifications(&template.manifest);
-        anstream::println!();
 
         if !args.yes {
             let proceed = inquire::Confirm::new(&format!("Configure `{provider_name}`?"))
@@ -358,9 +357,11 @@ async fn run_init_loop(
             token: None,
             token_env: None,
             scopes: Vec::new(),
-            show_capabilities: false,
         };
-        let outcome = init_args.run().await.map_err(|e| e.to_string());
+        let outcome = init_args
+            .run_in_workspace(workspace)
+            .await
+            .map_err(|e| e.to_string());
         out.push(InitResult {
             provider_name: provider_name.clone(),
             mount_name,

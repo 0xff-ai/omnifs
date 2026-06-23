@@ -12,10 +12,6 @@ use std::path::{Path, PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub system: ConfigSystem,
-    /// Legacy top-level setting, still accepted for existing config files.
-    pub container_name: Option<String>,
-    /// Legacy top-level setting, still accepted for existing config files.
-    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -40,14 +36,6 @@ pub enum ConfiguredBackend {
     Native,
 }
 
-impl ConfiguredBackend {
-    /// Default when `setup` has recorded nothing: host-native everywhere.
-    /// Docker remains an optional backend selected explicitly in config.
-    pub fn platform_default() -> Self {
-        Self::Native
-    }
-}
-
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = match std::fs::read_to_string(path) {
@@ -59,26 +47,13 @@ impl Config {
                 return Err(error).with_context(|| format!("read {}", path.display()));
             },
         };
-        let mut config: Self =
-            toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))?;
-        config.apply_system_section();
-        Ok(config)
-    }
-
-    fn apply_system_section(&mut self) {
-        self.container_name = self
-            .container_name
-            .clone()
-            .or(self.system.container_name.clone());
-        self.image = self.image.clone().or(self.system.image.clone());
+        toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))
     }
 
     /// Daemon launch backend: the recorded `[system].runtime`, or the platform
     /// default when `setup` has not chosen one.
     pub fn backend(&self) -> ConfiguredBackend {
-        self.system
-            .runtime
-            .unwrap_or_else(ConfiguredBackend::platform_default)
+        self.system.runtime.unwrap_or(ConfiguredBackend::Native)
     }
 }
 
@@ -137,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_section_feeds_legacy_runtime_fields() {
+    fn system_section_reads_runtime_fields() {
         let config: Config = toml::from_str(
             r#"
                 [system]
@@ -146,11 +121,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        let mut config = config;
-        config.apply_system_section();
-
-        assert_eq!(config.container_name.as_deref(), Some("omnifs-test"));
-        assert_eq!(config.image.as_deref(), Some("ghcr.io/example/omnifs:test"));
+        assert_eq!(config.system.container_name.as_deref(), Some("omnifs-test"));
+        assert_eq!(
+            config.system.image.as_deref(),
+            Some("ghcr.io/example/omnifs:test")
+        );
     }
 
     #[test]

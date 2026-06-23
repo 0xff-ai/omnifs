@@ -1,18 +1,11 @@
 //! `omnifs inspect` — live JSONL inspector TUI.
 
-use std::io::Write;
-use std::path::PathBuf;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Args;
-use omnifs_inspector::parse_record_line;
 
-use crate::inspector::{
-    AttachOutcome, ConnectionMode, EventsClient, SourceKind, daemon_addr, format_record, run_plain,
-    run_tui,
-};
+use crate::inspector::{ConnectionMode, SourceKind, daemon_addr, run_plain, run_tui};
 use crate::launch_backend::{ContainerName, DockerTarget};
 use crate::workspace::Workspace;
 
@@ -52,6 +45,7 @@ impl InspectArgs {
             )
         } else {
             let container = self.resolve_container()?;
+            check_record_path(self.record.as_deref())?;
             let addr = daemon_addr();
             let label = container.as_str().to_string();
             (
@@ -75,9 +69,10 @@ impl InspectArgs {
             return run_plain(SourceKind::Replay(path));
         }
         let _container = self.resolve_container()?;
+        check_record_path(self.record.as_deref())?;
         let addr = daemon_addr();
         let record = self.record.clone();
-        tokio::task::spawn_blocking(move || socket_plain_attach(&addr, record.as_deref()))
+        tokio::task::spawn_blocking(move || run_plain(SourceKind::Socket { addr, record }))
             .await
             .context("inspector plain task")?
     }
@@ -89,112 +84,15 @@ impl InspectArgs {
     }
 }
 
-/// How long to wait silently before announcing that the inspector
-/// socket is unreachable. Short enough that the user notices a
-/// misconfiguration quickly, long enough that the common
-/// `omnifs inspect` racing `omnifs dev` startup doesn't print noise.
-const PLAIN_WAITING_ANNOUNCE_AFTER: Duration = Duration::from_secs(2);
-/// Re-announce cadence while still waiting on a never-reached peer.
-const PLAIN_WAITING_REMIND_EVERY: Duration = Duration::from_secs(15);
-
-/// Plain-mode driver: subscribe to the daemon's event stream, forward
-/// each line to stdout (formatted on parse, raw on parse-failure), and
-/// optionally append to a host-side record file.
-///
-/// Connection-state transitions are reported to stderr so the user
-/// can tell "still waiting on the daemon" apart from "connected but
-/// quiet".
-fn socket_plain_attach(addr: &str, record_path: Option<&std::path::Path>) -> anyhow::Result<()> {
-    let mut record = record_path.map(open_record_file).transpose()?;
-    anstream::eprintln!("omnifs inspect: connecting to {addr}…");
-    let client = EventsClient::new(addr)?;
-    let mut ever_connected = false;
-    let mut wait_started = Instant::now();
-    let mut last_waiting_announce: Option<Instant> = None;
-    // Reconnect loop: lets the user start `omnifs inspect` before
-    // `omnifs dev` finishes binding the listener.
-    loop {
-        let outcome = client
-            .attach(
-                || {
-                    anstream::eprintln!("omnifs inspect: connected to {addr}");
-                },
-                |line| emit_plain_line(line, record.as_mut()),
-            )
-            .context("write inspector stream")?;
-        match outcome {
-            AttachOutcome::Unreachable => {
-                announce_waiting(
-                    addr,
-                    ever_connected,
-                    wait_started,
-                    &mut last_waiting_announce,
-                );
-                thread::sleep(Duration::from_millis(250));
-            },
-            AttachOutcome::Ended => {
-                ever_connected = true;
-                last_waiting_announce = None;
-                anstream::eprintln!("omnifs inspect: disconnected from {addr}, reconnecting…");
-                wait_started = Instant::now();
-                thread::sleep(Duration::from_millis(500));
-            },
-        }
-    }
-}
-
-/// Emit a stderr hint when the initial connect has been failing for a
-/// while, then a quieter periodic reminder. Silent until we've waited
-/// `PLAIN_WAITING_ANNOUNCE_AFTER`; rate-limited after that to avoid
-/// spamming a tail-style invocation.
-fn announce_waiting(
-    addr: &str,
-    ever_connected: bool,
-    wait_started: Instant,
-    last_announce: &mut Option<Instant>,
-) {
-    if wait_started.elapsed() < PLAIN_WAITING_ANNOUNCE_AFTER {
-        return;
-    }
-    if let Some(prev) = *last_announce
-        && prev.elapsed() < PLAIN_WAITING_REMIND_EVERY
-    {
-        return;
-    }
-    if ever_connected {
-        anstream::eprintln!("omnifs inspect: still trying to reach {addr}…");
-    } else {
-        anstream::eprintln!(
-            "omnifs inspect: no inspector listening on {addr}. \
-             Is the omnifs container running with the inspector port published? \
-             (try `omnifs up` or `omnifs dev`). Still retrying…"
-        );
-    }
-    *last_announce = Some(Instant::now());
-}
-
-fn open_record_file(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+fn check_record_path(path: Option<&Path>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .with_context(|| format!("open record file `{}`", path.display()))
-}
-
-fn emit_plain_line(line: &str, mut record: Option<&mut std::fs::File>) -> std::io::Result<()> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
-    match parse_record_line(trimmed) {
-        Ok(record_parsed) => anstream::println!("{}", format_record(&record_parsed)),
-        Err(_) => anstream::println!("{trimmed}"),
-    }
-    if let Some(file) = record.as_mut() {
-        file.write_all(trimmed.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.flush()?;
-    }
+        .with_context(|| format!("open record file `{}`", path.display()))?;
     Ok(())
 }
 
@@ -202,22 +100,10 @@ fn emit_plain_line(line: &str, mut record: Option<&mut std::fs::File>) -> std::i
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::{Read, Seek};
     use tempfile::NamedTempFile;
 
     #[test]
-    fn plain_jsonl_io() {
-        let mut capture = NamedTempFile::new().expect("tempfile");
-        let json = r#"{"v":1,"ts":"t","mono_us":1,"seq":0,"trace_id":1,"event":{"type":"fuse.start","op":"read","mount":"m","path":"/"}}"#;
-        emit_plain_line(json, Some(capture.as_file_mut())).expect("emit");
-        capture.as_file_mut().rewind().expect("rewind");
-        let mut contents = String::new();
-        capture
-            .as_file()
-            .read_to_string(&mut contents)
-            .expect("read");
-        assert!(contents.contains("fuse.start"));
-
+    fn replay_plain_reads_jsonl_file() {
         let replay_file = NamedTempFile::new().expect("tempfile");
         let record = omnifs_inspector::InspectorRecord::new(
             "t",

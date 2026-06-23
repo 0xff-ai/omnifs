@@ -193,7 +193,7 @@ impl DevArgs {
         let store = Box::new(FileStore::new(&layout.credentials_file));
         launch_runtime(
             LaunchSpec {
-                backend: LaunchBackend::docker(docker_target),
+                backend: LaunchBackend::Docker(docker_target),
                 paths: &layout,
                 store,
                 verb: "omnifs dev",

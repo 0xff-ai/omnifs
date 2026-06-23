@@ -4,12 +4,13 @@ use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
 use omnifs_auth::oauth_request_from_config;
 use omnifs_core::AuthKind;
-use omnifs_creds::{CredentialEntry, CredentialStore};
+use omnifs_creds::CredentialStore;
 use omnifs_mount::Auth;
 use omnifs_mount::mounts::Resolved;
 use omnifs_provider::{AuthInject, AuthManifest, AuthScheme, ProviderManifest, StaticTokenScheme};
 
 use super::manifest_view::AuthManifestView;
+use super::readiness::AuthReadiness;
 use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
 use omnifs_core::MountName;
@@ -191,11 +192,12 @@ impl MountAuth {
         self.target_for_scheme(auth, &scheme, account)
     }
 
-    pub(crate) fn status_entry(
-        &self,
-        store: &dyn CredentialStore,
-    ) -> anyhow::Result<Option<CredentialEntry>> {
-        self.status_target()?.lookup(store)
+    pub(crate) fn readiness(&self, store: &dyn CredentialStore) -> AuthReadiness {
+        let target = match self.status_target() {
+            Ok(target) => target,
+            Err(error) => return AuthReadiness::Error(error.to_string()),
+        };
+        AuthReadiness::from_target(&self.config.spec.mount, target, store)
     }
 
     pub(crate) fn configured_target(
@@ -222,18 +224,28 @@ impl MountAuth {
     }
 
     fn status_target(&self) -> anyhow::Result<CredentialTarget> {
-        let auth = self.primary_auth();
+        let Some(auth) = self.primary_auth() else {
+            return Ok(CredentialTarget::None);
+        };
         let view = self.manifest_view();
-        let scheme = view
-            .oauth_scheme(auth.and_then(Auth::scheme))
-            .ok()
-            .map(|scheme| scheme.key.clone())
-            .or_else(|| {
-                view.static_token_scheme_key(None, auth.and_then(Auth::scheme))
-                    .ok()
-            })
-            .unwrap_or_else(|| "unknown".to_owned());
-        self.target_for_scheme(auth, &scheme, None)
+        let scheme = if auth.is_oauth() {
+            view.oauth_scheme(auth.scheme())
+                .map(|scheme| scheme.key.clone())
+                .or_else(|_| {
+                    auth.scheme()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow!("missing auth.scheme"))
+                })?
+        } else {
+            view.static_token_scheme_key(None, auth.scheme())
+                .or_else(|_| {
+                    auth.scheme()
+                        .map(str::to_owned)
+                        .ok_or_else(|| anyhow!("missing auth.scheme"))
+                })?
+        };
+        CredentialTarget::for_configured_auth(&self.config, auth, Some(&scheme), auth.account())
+            .map_err(anyhow::Error::from)
     }
 
     fn target_for_scheme(

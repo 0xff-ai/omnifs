@@ -37,66 +37,6 @@ pub(crate) struct ContainerExtras {
     pub(crate) binds: Vec<String>,
 }
 
-/// Pure description of a container launch: all bind mounts, env vars, and TCP
-/// port forwards assembled without touching any bollard types. Constructed by
-/// [`ContainerLaunchSpec::from_runtime_home`]; mapped to a
-/// [`ContainerCreateBody`] by [`Runtime::build_container_body`].
-#[derive(Debug, Default)]
-pub(crate) struct ContainerLaunchSpec {
-    pub(crate) image: String,
-    pub(crate) binds: Vec<String>,
-    pub(crate) env: Vec<String>,
-    /// TCP ports forwarded to host loopback as `127.0.0.1:N:N`.
-    pub(crate) tcp_ports: Vec<u16>,
-}
-
-impl ContainerLaunchSpec {
-    /// Assemble the launch spec from the host runtime home and caller-supplied
-    /// extras, without making any bollard calls.
-    pub(crate) fn from_runtime_home(
-        image: &ImageRef,
-        runtime_home: &Path,
-        extras: ContainerExtras,
-    ) -> Self {
-        let mut binds = vec![format!("{}:{OMNIFS_HOME}", runtime_home.display())];
-
-        // SSH_AUTH_SOCK bind enables git callouts. Skip if unset; only providers
-        // that perform git operations will notice (and they'll error clearly).
-        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
-            let host_sock = PathBuf::from(&sock);
-            if host_sock.exists() {
-                binds.push(format!("{}:/ssh-agent", host_sock.display()));
-            } else {
-                anstream::eprintln!(
-                    "SSH_AUTH_SOCK={} does not exist; git callouts will not work",
-                    host_sock.display()
-                );
-            }
-        }
-
-        // Docker socket bind powers the in-container Docker provider. Optional.
-        let docker_sock = PathBuf::from("/var/run/docker.sock");
-        if docker_sock.exists() {
-            binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
-        }
-
-        binds.extend(extras.binds);
-
-        let env = vec![
-            format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
-            "SSH_AUTH_SOCK=/ssh-agent".to_string(),
-            "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
-        ];
-        Self {
-            image: image.as_str().to_string(),
-            binds,
-            env,
-            // The control API port is always published on the host loopback.
-            tcp_ports: vec![omnifs_api::DEFAULT_PORT],
-        }
-    }
-}
-
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {
     /// Daemon responded to ping; the connected `Runtime` is returned for reuse.
@@ -332,13 +272,30 @@ impl Runtime {
 
         self.remove().await?;
 
-        let spec = ContainerLaunchSpec::from_runtime_home(&self.image, runtime_home, extras);
+        let mut binds = vec![format!("{}:{OMNIFS_HOME}", runtime_home.display())];
+        if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
+            let host_sock = PathBuf::from(&sock);
+            if host_sock.exists() {
+                binds.push(format!("{}:/ssh-agent", host_sock.display()));
+            } else {
+                anstream::eprintln!(
+                    "SSH_AUTH_SOCK={} does not exist; git callouts will not work",
+                    host_sock.display()
+                );
+            }
+        }
+        let docker_sock = PathBuf::from("/var/run/docker.sock");
+        if docker_sock.exists() {
+            binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
+        }
+        binds.extend(extras.binds);
+
         anstream::println!(
             "Creating container `{}` from image `{}`",
             self.container_name,
             self.image
         );
-        let create = Self::build_container_body(&spec);
+        let create = Self::build_container_body(&self.image, binds);
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -378,9 +335,9 @@ impl Runtime {
                 if !running {
                     return Ok(false);
                 }
-                // Check the image name recorded in the container config. Docker
-                // stores the tag the container was created from in
-                // `config.image`, which is what we compare against.
+                // Check the image name recorded in Docker's container config.
+                // It stores the tag the container was created from, which is
+                // what we compare against.
                 let container_image = container
                     .config
                     .as_ref()
@@ -563,28 +520,21 @@ impl Runtime {
         )
     }
 
-    fn build_container_body(spec: &ContainerLaunchSpec) -> ContainerCreateBody {
+    fn build_container_body(image: &ImageRef, binds: Vec<String>) -> ContainerCreateBody {
         let mut port_bindings = HashMap::new();
-        let mut exposed_ports = Vec::new();
-        for port in &spec.tcp_ports {
-            let key = format!("{port}/tcp");
-            exposed_ports.push(key.clone());
-            port_bindings.insert(
-                key,
-                Some(vec![PortBinding {
-                    host_ip: Some("127.0.0.1".to_string()),
-                    host_port: Some(port.to_string()),
-                }]),
-            );
-        }
+        let port = omnifs_api::DEFAULT_PORT;
+        let port_key = format!("{port}/tcp");
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: Some(port.to_string()),
+            }]),
+        );
 
         let host_config = HostConfig {
-            binds: Some(spec.binds.clone()),
-            port_bindings: if port_bindings.is_empty() {
-                None
-            } else {
-                Some(port_bindings)
-            },
+            binds: Some(binds),
+            port_bindings: Some(port_bindings),
             devices: Some(vec![DeviceMapping {
                 path_on_host: Some("/dev/fuse".to_string()),
                 path_in_container: Some("/dev/fuse".to_string()),
@@ -596,13 +546,13 @@ impl Runtime {
         };
 
         ContainerCreateBody {
-            image: Some(spec.image.clone()),
-            env: Some(spec.env.clone()),
-            exposed_ports: if exposed_ports.is_empty() {
-                None
-            } else {
-                Some(exposed_ports)
-            },
+            image: Some(image.as_str().to_string()),
+            env: Some(vec![
+                format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
+                "SSH_AUTH_SOCK=/ssh-agent".to_string(),
+                "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
+            ]),
+            exposed_ports: Some(vec![port_key]),
             host_config: Some(host_config),
             ..Default::default()
         }
@@ -782,48 +732,42 @@ mod tests {
         );
     }
 
-    /// Verify that `ContainerLaunchSpec::from_runtime_home` assembles the spec
-    /// correctly: guest env vars are always present and extras are appended
-    /// without clobbering the base set.
     #[test]
-    fn launch_spec_binds_and_env_ordering() {
+    fn container_body_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();
-        let extras = ContainerExtras {
-            binds: vec!["/extra:/extra:ro".to_string()],
-        };
-
-        let spec = ContainerLaunchSpec::from_runtime_home(&image, &paths.config_dir, extras);
+        let binds = vec![
+            format!("{}:{OMNIFS_HOME}", paths.config_dir.display()),
+            "/extra:/extra:ro".to_string(),
+        ];
+        let body = Runtime::build_container_body(&image, binds);
+        let host_config = body.host_config.expect("host config");
+        let binds = host_config.binds.expect("binds");
 
         assert_eq!(
-            spec.binds[0],
+            binds[0],
             format!("{}:{OMNIFS_HOME}", paths.config_dir.display())
         );
-
-        // Extras bind is appended after the runtime home bind.
         assert_eq!(
-            spec.binds.last().map(String::as_str),
+            binds.last().map(String::as_str),
             Some("/extra:/extra:ro"),
-            "extras bind should be last: {:?}",
-            spec.binds
+            "extra bind should be last: {binds:?}"
         );
 
-        // Required guest env vars are present.
+        let env = body.env.expect("env");
         let expected_home_env = format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}");
         assert!(
-            spec.env.iter().any(|e| e == &expected_home_env),
+            env.iter().any(|e| e == &expected_home_env),
             "{OMNIFS_HOME_ENV} must be set"
         );
         assert!(
-            spec.env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),
+            env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),
             "SSH_AUTH_SOCK must be forwarded inside container"
         );
 
-        // The control API port is always published; image propagates.
-        assert_eq!(spec.tcp_ports, vec![omnifs_api::DEFAULT_PORT]);
-        assert_eq!(spec.image, "ghcr.io/0xff-ai/omnifs:test");
+        assert_eq!(body.image.as_deref(), Some("ghcr.io/0xff-ai/omnifs:test"));
     }
 }

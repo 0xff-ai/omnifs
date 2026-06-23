@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use omnifs_core::AuthKind;
 use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
-use omnifs_mount::mounts::Resolved;
+use serde::Serialize;
 
 use crate::credential_target::CredentialTarget;
 
@@ -56,12 +56,11 @@ pub(crate) struct AuthTerminalRow {
 }
 
 impl AuthReadiness {
-    pub(crate) fn from_config(config: &Resolved, store: &dyn CredentialStore) -> Self {
-        let target = match CredentialTarget::from_resolved_mount(config) {
-            Ok(target) => target,
-            Err(error) => return Self::Error(error.to_string()),
-        };
-
+    pub(crate) fn from_target(
+        mount_name: &str,
+        target: CredentialTarget,
+        store: &dyn CredentialStore,
+    ) -> Self {
         match target {
             CredentialTarget::None => return Self::None,
             CredentialTarget::External(source) => {
@@ -72,7 +71,7 @@ impl AuthReadiness {
             CredentialTarget::Internal(_) => {},
         }
 
-        let command = format!("omnifs auth login {}", config.spec.mount);
+        let command = format!("omnifs auth login {mount_name}");
         match target.lookup(store) {
             Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
             Ok(None) => Self::Missing { command },
@@ -187,6 +186,67 @@ impl AuthReadiness {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum AuthReadinessJson {
+    None,
+    Ready {
+        kind: String,
+        scopes: Vec<String>,
+        expires_at: Option<String>,
+        refreshability: Refreshability,
+        notices: Vec<String>,
+    },
+    ConfiguredExternally {
+        source: String,
+    },
+    Missing {
+        command: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+impl From<&AuthReadiness> for AuthReadinessJson {
+    fn from(auth: &AuthReadiness) -> Self {
+        match auth {
+            AuthReadiness::None => Self::None,
+            AuthReadiness::Ready {
+                kind,
+                scopes,
+                expires_at,
+                refreshability,
+                notices,
+            } => Self::Ready {
+                kind: kind.clone(),
+                scopes: scopes.clone(),
+                expires_at: expires_at.clone(),
+                refreshability: *refreshability,
+                notices: notices.clone(),
+            },
+            AuthReadiness::ConfiguredExternally { source } => Self::ConfiguredExternally {
+                source: source.clone(),
+            },
+            AuthReadiness::Missing { command } => Self::Missing {
+                command: command.clone(),
+            },
+            AuthReadiness::Error(error) => Self::Error {
+                message: error.clone(),
+            },
+        }
+    }
+}
+
+impl Serialize for AuthReadiness {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        AuthReadinessJson::from(self).serialize(serializer)
+    }
+}
+
 pub(crate) fn credential_notices(
     entry: &CredentialEntry,
     reauth_command: Option<&str>,
@@ -215,44 +275,31 @@ mod tests {
     use super::*;
     use omnifs_core::CredentialId;
     use omnifs_creds::MemoryStore;
-    use omnifs_mount::mounts::Spec;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
-    fn resolved_mount(json: &str) -> Resolved {
-        let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
-        value["provider"] = crate::test_support::provider_ref_value("github");
-        let spec: Spec = serde_json::from_value(value).unwrap();
-        spec.into_resolved(None).unwrap()
-    }
-
     #[test]
-    fn from_config_reports_no_auth_required() {
-        let config = resolved_mount(
-            r#"{
-                "provider": "omnifs_provider_github.wasm",
-                "mount": "github"
-            }"#,
-        );
+    fn from_target_reports_no_auth_required() {
         let store = MemoryStore::new();
         assert_eq!(
-            AuthReadiness::from_config(&config, &store),
+            AuthReadiness::from_target("github", CredentialTarget::None, &store),
             AuthReadiness::None
         );
     }
 
     #[test]
-    fn from_config_reports_external_token_source() {
-        let config = resolved_mount(
-            r#"{
-                "provider": "omnifs_provider_github.wasm",
-                "mount": "github",
-                "auth": [{ "type": "static-token", "token_env": "GITHUB_TOKEN" }]
-            }"#,
-        );
+    fn from_target_reports_external_token_source() {
         let store = MemoryStore::new();
         assert_eq!(
-            AuthReadiness::from_config(&config, &store),
+            AuthReadiness::from_target(
+                "github",
+                CredentialTarget::External(
+                    crate::credential_target::ExternalCredentialSource::TokenEnv(
+                        "GITHUB_TOKEN".into()
+                    )
+                ),
+                &store
+            ),
             AuthReadiness::ConfiguredExternally {
                 source: "token_env=GITHUB_TOKEN".into(),
             }
@@ -260,14 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn from_config_reports_ready_credential() {
-        let config = resolved_mount(
-            r#"{
-                "provider": "omnifs_provider_github.wasm",
-                "mount": "github",
-                "auth": [{ "type": "oauth", "scheme": "device" }]
-            }"#,
-        );
+    fn from_target_reports_ready_credential() {
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
         store
@@ -283,7 +323,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        match AuthReadiness::from_config(&config, &store) {
+        match AuthReadiness::from_target("github", CredentialTarget::Internal(key), &store) {
             AuthReadiness::Ready { kind, scopes, .. } => {
                 assert_eq!(kind, "oauth");
                 assert_eq!(scopes, vec!["repo".to_string()]);
@@ -293,17 +333,11 @@ mod tests {
     }
 
     #[test]
-    fn from_config_reports_missing_credential() {
-        let config = resolved_mount(
-            r#"{
-                "provider": "omnifs_provider_github.wasm",
-                "mount": "github",
-                "auth": [{ "type": "oauth", "scheme": "device" }]
-            }"#,
-        );
+    fn from_target_reports_missing_credential() {
         let store = MemoryStore::new();
+        let key = CredentialId::new("github", "device", "default").unwrap();
         assert_eq!(
-            AuthReadiness::from_config(&config, &store),
+            AuthReadiness::from_target("github", CredentialTarget::Internal(key), &store),
             AuthReadiness::Missing {
                 command: "omnifs auth login github".into(),
             }

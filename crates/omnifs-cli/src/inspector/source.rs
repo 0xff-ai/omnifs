@@ -136,6 +136,10 @@ impl EventSource {
         }
         messages
     }
+
+    pub fn recv(&self) -> Option<SourceMessage> {
+        self.rx.recv().ok()
+    }
 }
 
 impl Drop for EventSource {

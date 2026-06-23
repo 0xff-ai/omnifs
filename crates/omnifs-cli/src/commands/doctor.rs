@@ -1,7 +1,6 @@
 //! `omnifs doctor` — environment + auth diagnostics. No auto-fix.
 
 use clap::Args;
-use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -9,12 +8,11 @@ use omnifs_creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::catalog::{ProviderCatalog, ProviderDirStatus};
+use crate::launch_backend::{DockerTarget, ImageRef};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
 use omnifs_home::WorkspaceLayout;
-
-const IMAGE: &str = concat!("ghcr.io/0xff-ai/omnifs:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -27,11 +25,32 @@ pub(crate) enum DoctorVerdict {
     Failures,
 }
 
+impl DoctorVerdict {
+    fn record(&mut self, name: impl std::fmt::Display, result: &ProbeResult) {
+        anstream::println!("{}", result.render(&name.to_string()));
+        match result {
+            ProbeResult::Err(_) => *self = Self::Failures,
+            ProbeResult::Warn(_) if *self == Self::Clean => *self = Self::Warnings,
+            ProbeResult::Ok(_) | ProbeResult::Warn(_) | ProbeResult::Skipped(_) => {},
+        }
+    }
+}
+
 impl DoctorArgs {
     pub async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let workspace = Workspace::resolve()?;
         let mounts = workspace.mounts()?;
-        run(workspace.layout(), workspace.catalog(), mounts).await
+        let docker_target = workspace
+            .config()
+            .and_then(|config| DockerTarget::resolve(None, None, &config))
+            .map_err(|error| format!("resolve target: {error:#}"));
+        run(
+            workspace.layout(),
+            workspace.catalog(),
+            mounts,
+            docker_target,
+        )
+        .await
     }
 }
 
@@ -59,55 +78,9 @@ impl ProbeResult {
             Self::Skipped(reason) => reason,
         }
     }
-}
 
-#[derive(Debug)]
-struct ProbeRecord {
-    name: Cow<'static, str>,
-    result: ProbeResult,
-}
-
-impl ProbeRecord {
-    fn render(&self) -> String {
-        format!(
-            "  {} {:<28} {}",
-            self.result.glyph(),
-            self.name,
-            self.result.message()
-        )
-    }
-}
-
-#[derive(Debug, Default)]
-struct DoctorReport {
-    probes: Vec<ProbeRecord>,
-}
-
-impl DoctorReport {
-    fn record(&mut self, name: impl Into<Cow<'static, str>>, result: ProbeResult) -> String {
-        self.probes.push(ProbeRecord {
-            name: name.into(),
-            result,
-        });
-        self.probes.last().expect("record just pushed").render()
-    }
-
-    fn verdict(&self) -> DoctorVerdict {
-        let any_red = self
-            .probes
-            .iter()
-            .any(|probe| matches!(probe.result, ProbeResult::Err(_)));
-        let any_yellow = self
-            .probes
-            .iter()
-            .any(|probe| matches!(probe.result, ProbeResult::Warn(_)));
-        if any_red {
-            DoctorVerdict::Failures
-        } else if any_yellow {
-            DoctorVerdict::Warnings
-        } else {
-            DoctorVerdict::Clean
-        }
+    fn render(&self, name: &str) -> String {
+        format!("  {} {:<28} {}", self.glyph(), name, self.message())
     }
 }
 
@@ -115,82 +88,74 @@ pub async fn run(
     paths: &WorkspaceLayout,
     catalog: &ProviderCatalog,
     mounts: Vec<crate::session::MountConfig>,
+    docker_target: Result<DockerTarget, String>,
 ) -> anyhow::Result<DoctorVerdict> {
-    let mut report = DoctorReport::default();
+    let mut verdict = DoctorVerdict::Clean;
 
     // 1. docker_reachable
-    let (runtime, docker_result) = probe_docker_reachable().await;
+    let (runtime, docker_target, docker_result) = probe_docker_reachable(docker_target).await;
     let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
-    anstream::println!("{}", report.record("docker reachable", docker_result));
+    verdict.record("docker reachable", &docker_result);
 
     // 2. fuse (Linux only)
-    let fuse_result = probe_fuse();
-    anstream::println!("{}", report.record("fuse", fuse_result));
+    verdict.record("fuse", &probe_fuse());
 
     // 3. image_cached (depends on docker)
-    let image_result = match (docker_ok, runtime.as_ref()) {
-        (true, Some(runtime)) => probe_image_cached(runtime).await,
+    let image_result = match (docker_ok, runtime.as_ref(), docker_target.as_ref()) {
+        (true, Some(runtime), Some(target)) => probe_image_cached(runtime, target.image()).await,
         _ => ProbeResult::Skipped("docker unreachable"),
     };
-    anstream::println!("{}", report.record("image cached", image_result));
+    verdict.record("image cached", &image_result);
 
     // 4. providers_discovered
-    let providers_result = probe_providers_discovered(catalog);
-    anstream::println!(
-        "{}",
-        report.record("providers discovered", providers_result)
-    );
+    verdict.record("providers discovered", &probe_providers_discovered(catalog));
 
     // 5. credential store
-    let credential_store_result = probe_credential_store(paths);
-    anstream::println!(
-        "{}",
-        report.record("credential store", credential_store_result)
-    );
+    verdict.record("credential store", &probe_credential_store(paths));
 
     // 6. ssh_agent
-    let ssh_result = probe_ssh_agent();
-    anstream::println!("{}", report.record("ssh-agent", ssh_result));
+    verdict.record("ssh-agent", &probe_ssh_agent());
 
     // 7. config file
-    let cfg_result = probe_config_file(paths);
-    anstream::println!("{}", report.record("config file", cfg_result));
+    verdict.record("config file", &probe_config_file(paths));
 
     // 8. mount configs valid + 9. auth ready (combined because the loader does both)
     let mount_results = probe_mount_configs(paths, catalog, mounts);
-    anstream::println!("{}", report.record("mount configs valid", mount_results.0));
+    verdict.record("mount configs valid", &mount_results.0);
     for (mount, result) in mount_results.1 {
-        anstream::println!("{}", report.record(format!("auth ready ({mount})"), result));
+        verdict.record(format!("auth ready ({mount})"), &result);
     }
 
     // 10. network (best effort)
-    let network_result = probe_network().await;
-    anstream::println!("{}", report.record("network", network_result));
+    verdict.record("network", &probe_network().await);
 
-    Ok(report.verdict())
+    Ok(verdict)
 }
 
-async fn probe_docker_reachable() -> (Option<Runtime>, ProbeResult) {
-    use crate::launch_backend::DockerTarget;
+async fn probe_docker_reachable(
+    target: Result<DockerTarget, String>,
+) -> (Option<Runtime>, Option<DockerTarget>, ProbeResult) {
     use crate::runtime::DockerProbeOutcome;
 
-    // Use the default runtime target so that probe_image_cached checks the
-    // same image omnifs up would pull.
-    let target = match Workspace::resolve().and_then(|workspace| {
-        let config = workspace.config()?;
-        DockerTarget::resolve(None, None, &config)
-    }) {
+    let target = match target {
         Ok(target) => target,
-        Err(error) => return (None, ProbeResult::Err(format!("resolve target: {error}"))),
+        Err(error) => return (None, None, ProbeResult::Err(error)),
     };
 
     match Runtime::probe_docker(&target).await {
         DockerProbeOutcome::Reachable(runtime) => (
             Some(runtime),
+            Some(target),
             ProbeResult::Ok("docker daemon responds".into()),
         ),
-        DockerProbeOutcome::ConnectFailed(e) => (None, ProbeResult::Err(format!("connect: {e}"))),
-        DockerProbeOutcome::PingFailed(e) => (None, ProbeResult::Err(format!("ping: {e}"))),
+        DockerProbeOutcome::ConnectFailed(e) => (
+            None,
+            Some(target),
+            ProbeResult::Err(format!("connect: {e}")),
+        ),
+        DockerProbeOutcome::PingFailed(e) => {
+            (None, Some(target), ProbeResult::Err(format!("ping: {e}")))
+        },
     }
 }
 
@@ -216,12 +181,12 @@ fn probe_fuse() -> ProbeResult {
     }
 }
 
-async fn probe_image_cached(runtime: &Runtime) -> ProbeResult {
-    match runtime.inspect_image(IMAGE).await {
-        Ok(_) => ProbeResult::Ok(format!("{IMAGE} cached")),
+async fn probe_image_cached(runtime: &Runtime, image: &ImageRef) -> ProbeResult {
+    match runtime.inspect_image(image.as_str()).await {
+        Ok(_) => ProbeResult::Ok(format!("{image} cached")),
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
-        }) => ProbeResult::Warn(format!("{IMAGE} not cached (will pull on `omnifs up`)")),
+        }) => ProbeResult::Warn(format!("{image} not cached (will pull on `omnifs up`)")),
         Err(error) => ProbeResult::Err(format!("inspect: {error}")),
     }
 }
