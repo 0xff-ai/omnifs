@@ -276,36 +276,23 @@ async fn db_missing_table_negative_record() {
 }
 
 #[tokio::test]
-async fn db_sample_served_ranged() {
+async fn db_sample_served_whole_uncapped() {
     let (_dir, harness) = db_harness();
 
-    // `sample.json` is declared `ranged`, so every sample (any size) is served
-    // through the open-file/read-chunk session, never a full read.
-    let wide = read_ranged(&harness, "/tables/Wide/sample.json").await;
+    // `sample.json` is a fully-materialized body projection, served whole
+    // through the read-file terminal with no inline-size cap. The Wide sample
+    // (20 rows * ~4 KiB at LIMIT 20) exceeds 64 KiB, proving it is not capped.
+    let wide = read_bytes(&harness, "/tables/Wide/sample.json").await;
     assert!(wide.starts_with(b"["));
+    assert!(
+        wide.len() > 64 * 1024,
+        "wide sample should be served whole and uncapped, got {} bytes",
+        wide.len()
+    );
 
-    let album = read_ranged(&harness, "/tables/Album/sample.json").await;
+    let album = read_bytes(&harness, "/tables/Album/sample.json").await;
     let album_text = String::from_utf8_lossy(&album);
     assert!(album_text.contains("For Those About To Rock"));
-}
-
-/// Read a ranged file whole: open, pull chunks until EOF, close.
-async fn read_ranged(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
-    let ns = harness.runtime.namespace();
-    let opened = ns.open_file(&parse_path(path)).await.unwrap();
-    let mut bytes = Vec::new();
-    loop {
-        let chunk = ns
-            .read_chunk(opened.handle, bytes.len() as u64, 64 * 1024)
-            .await
-            .unwrap();
-        bytes.extend_from_slice(&chunk.content);
-        if chunk.eof {
-            break;
-        }
-    }
-    harness.runtime.call_close_file(opened.handle).unwrap();
-    bytes
 }
 
 #[tokio::test]
