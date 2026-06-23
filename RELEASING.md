@@ -158,7 +158,7 @@ The publish pipeline cannot catch install-time failures, so verify before cuttin
 ```bash
 # 1. Pack the root npm package as it would publish.
 scratch="$(mktemp -d)"; cd "$scratch"
-npm pack /Users/raul/W/omnifs/npm/omnifs
+npm pack "$OLDPWD/npm/omnifs"
 
 # 2. Install the tarball into a scratch prefix, both with and without scripts.
 prefix="$scratch/prefix"; mkdir -p "$prefix"
