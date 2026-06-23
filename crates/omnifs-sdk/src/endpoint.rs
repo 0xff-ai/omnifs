@@ -53,7 +53,7 @@ use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::VersionToken;
 use crate::http::{BlobRequest, HttpEndpoint, Request, ResponseExt};
-use crate::object::{Canonical, Load};
+use crate::object::{Canonical, Load, Object};
 use core::fmt::Display;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 
@@ -304,21 +304,19 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
         Ok(resp)
     }
 
-    /// Object/revalidation terminal: 200 -> `Fresh(serde(T))`, 404 ->
+    /// Object/revalidation terminal: 200 -> `Fresh(O::decode(body))`, 404 ->
     /// `NotFound`, 304 -> `Unchanged`, other 4xx/5xx -> `Err`. On `Fresh` the
-    /// stored [`Canonical`] is the raw response body verbatim with the
-    /// response `ETag` as its validator; deserialization only produces the
-    /// in-memory value.
-    pub async fn load<T: serde::de::DeserializeOwned>(self) -> Result<Load<T>> {
+    /// stored [`Canonical`] is the raw response body verbatim with the response
+    /// `ETag` as its validator; [`Object::decode`] only produces the in-memory
+    /// value. Use [`Self::load_with`] for a one-off parse fn when no `Object`
+    /// type applies.
+    pub async fn load<O: Object>(self) -> Result<Load<O>> {
         let resp = self.send_raw().await?;
-        load_from_response(resp, |bytes| {
-            serde_json::from_slice::<T>(bytes)
-                .map_err(|e| ProviderError::invalid_input(format!("json decode: {e}")))
-        })
+        load_from_response(resp, O::decode)
     }
 
-    /// Like [`Self::load`] but parses the canonical with `parse` (non-JSON
-    /// canonicals such as arXiv Atom).
+    /// Like [`Self::load`] but parses the canonical with `parse` (non-`Object`
+    /// structural DTOs, or a custom decode).
     pub async fn load_with<T>(self, parse: impl Fn(&[u8]) -> Result<T>) -> Result<Load<T>> {
         let resp = self.send_raw().await?;
         load_from_response(resp, parse)

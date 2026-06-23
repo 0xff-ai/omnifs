@@ -1,22 +1,27 @@
 //! Object model: typed canonical resources addressed by typed keys.
 //!
-//! An [`Object`] is a value parsed from one canonical upstream payload (a
-//! GitHub issue, an arXiv paper); its [`Key`] knows how to fetch that
-//! payload and what logical identity it has. Register the pair on an
-//! object route and the SDK handles the cache protocol: it emits
-//! canonical-store effects on fresh loads, re-renders from host-pushed
-//! canonical bytes on warm reads, and answers conditional reloads through
-//! the `since` validator. The provider's only upstream-facing code is
-//! [`Key::load`].
+//! An [`Object`] is a value assembled from one replayable canonical payload (a
+//! GitHub issue, an arXiv paper). It owns identity context ([`Key`]), how to
+//! fetch itself ([`Object::load`]), how to read its stored bytes back
+//! ([`Object::decode`]), and what format those bytes are in
+//! ([`Object::Canonical`]). Register it on an object route and the SDK handles
+//! the cache protocol: it emits canonical-store effects on fresh loads,
+//! re-renders from host-pushed canonical bytes on warm reads, and answers
+//! conditional reloads through the `since` validator.
+//!
+//! The split from the previous design: `load` and `decode` live on `Object`
+//! (the key is pure identity + route context), the canonical content type is an
+//! associated [`Format`] rather than a method, and there is no `serde` bound
+//! (a private transport DTO may live inside `decode`).
 
-use crate::browse::Effects;
-use crate::captures::FromCaptures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::VersionToken;
 use crate::identity::{IdentityCaptures, LogicalId};
 use crate::projection::FileProjection;
+use crate::repr::Format;
 use omnifs_core::ContentType;
+use std::future::Future;
 
 /// An object kind tag for the canonical store and diagnostics (e.g.
 /// `github.issue`). A compile-time constant supplied by the `#[object]` macro.
@@ -36,161 +41,183 @@ pub type Validator = VersionToken;
 
 /// The canonical bytes the remote returned, captured verbatim on a load.
 ///
-/// Verbatim means exactly that: the raw response body, not a re-encoding
-/// of the parsed value. These bytes are what the host stores and later
-/// pushes back through `Object::parse_canonical`, so any normalization
+/// Verbatim means exactly that: the raw response body, or a deterministic
+/// logical-object assembly that [`Object::decode`] consumes byte-for-byte, not
+/// a convenience re-encoding of the parsed value. These bytes are what the host
+/// stores and later pushes back through `Object::decode`, so any normalization
 /// here breaks warm re-rendering.
 pub struct Canonical {
     pub bytes: Vec<u8>,
     pub validator: Option<Validator>,
 }
 
-/// The outcome of a key's [`Key::load`].
+impl Canonical {
+    pub fn new(bytes: impl Into<Vec<u8>>, validator: Option<Validator>) -> Self {
+        Self {
+            bytes: bytes.into(),
+            validator,
+        }
+    }
+}
+
+/// The outcome of an object's [`Object::load`].
 ///
 /// - `Fresh`: a new payload was fetched; carry the parsed value plus the
-///   verbatim upstream bytes and their validator (e.g. the response `ETag`).
-///   `effects` carries any additional host effects derived from the same
-///   response and is empty for the common single-object case; use
-///   [`Load::fresh_with_effects`] when one list or range payload contains
-///   complete sibling objects to store in the canonical cache alongside the
-///   requested object.
+///   verbatim canonical bytes and their validator. `preloads` carries any
+///   sibling objects or files derivable from the SAME payload (see
+///   [`Load::preload_object`] / [`Load::preload_file`]); it is empty for the
+///   common single-object case.
 /// - `Unchanged`: a conditional request matched the `since` validator
-///   (HTTP 304 shape); the host's cached canonical is still current and
-///   the SDK serves from it. Return this only when `since` was given.
-/// - `NotFound`: the upstream says the object does not exist. Lowered to
-///   a not-found terminal, not an error.
+///   (HTTP 304 shape); the host's cached canonical is still current and the SDK
+///   serves from it. Return this only when `since` was given.
+/// - `NotFound`: the upstream says the object does not exist. Lowered to a
+///   not-found terminal, not an error.
 pub enum Load<T> {
     Fresh {
         value: T,
         canonical: Canonical,
-        effects: Effects,
+        preloads: Preloads,
     },
     Unchanged,
     NotFound,
 }
 
 impl<T> Load<T> {
-    /// A fresh value with empty canonical bytes and no validator.
-    ///
-    /// The SDK still emits a canonical-store effect for the empty payload,
-    /// so this effectively opts the route out of meaningful durable
-    /// caching: a warm read would push empty bytes that
-    /// `Object::parse_canonical` cannot parse. Appropriate only when the
-    /// value is synthesized rather than fetched and re-rendering from
-    /// canonical is never expected; for real upstream loads, return
-    /// `Load::Fresh` with the verbatim body (the endpoint helpers
-    /// [`crate::endpoint::RequestBuilder::load`] and `load_with` do this
-    /// for you).
-    pub fn fresh(value: T) -> Self {
-        Self::Fresh {
-            value,
-            canonical: Canonical {
-                bytes: Vec::new(),
-                validator: None,
-            },
-            effects: Effects::new(),
-        }
-    }
-
-    /// A fresh value with its verbatim canonical payload and no extra effects.
-    pub fn fresh_from(value: T, canonical: Canonical) -> Self {
+    /// A fresh value with its verbatim canonical payload and no preloads.
+    pub fn fresh(value: T, canonical: Canonical) -> Self {
         Self::Fresh {
             value,
             canonical,
-            effects: Effects::new(),
+            preloads: Preloads::default(),
         }
     }
 
-    /// A fresh value plus host effects derived from the same upstream response
-    /// (e.g. sibling objects from one list or range payload).
-    pub fn fresh_with_effects(value: T, canonical: Canonical, effects: Effects) -> Self {
-        Self::Fresh {
+    /// Preload a sibling file derivable from the same payload (the `project`
+    /// effect). Only inline/deferred sources lower; a `Body`/`Ranged`/`Blob`
+    /// source is rejected when the preload is lowered (serve those through
+    /// their own face).
+    #[must_use]
+    pub fn preload_file(mut self, path: impl Into<String>, file: FileProjection) -> Self {
+        if let Self::Fresh { preloads, .. } = &mut self {
+            preloads.files.push((path.into(), file));
+        }
+        self
+    }
+}
+
+impl<O: Object> Load<O> {
+    /// Preload a SAME-TYPE sibling object the load payload already contained
+    /// (Oura's date-range window: one fetch materializes neighboring days).
+    /// The sibling's canonical is stored against its own logical id with the
+    /// sibling object's faces expanded as view leaves. Cross-type preloads are
+    /// not supported in this pass.
+    #[must_use]
+    pub fn preload_object(mut self, entry: ObjectEntry<O>) -> Self {
+        if let Self::Fresh { preloads, .. } = &mut self {
+            preloads.objects.push(ObjectPreload {
+                identity_captures: entry.key.identity_captures(),
+                canonical: entry.canonical,
+            });
+        }
+        self
+    }
+}
+
+/// Typed preloads accumulated on a [`Load::Fresh`], lowered onto
+/// [`crate::browse::Effects`] by the object dispatch path (which holds the
+/// route template, faces, and facet expansion needed to compute sibling paths
+/// and view leaves).
+#[derive(Default)]
+pub struct Preloads {
+    pub(crate) objects: Vec<ObjectPreload>,
+    pub(crate) files: Vec<(String, FileProjection)>,
+}
+
+/// A same-type sibling object preload, type-erased to its identity captures
+/// plus canonical bytes. Dispatch reconstructs its anchor id and view-leaf
+/// paths from the requested object's `O::kind()`, route template, and faces.
+pub(crate) struct ObjectPreload {
+    pub(crate) identity_captures: Vec<(&'static str, String)>,
+    pub(crate) canonical: Canonical,
+}
+
+/// A sibling object entry for [`Load::preload_object`]: the sibling key, value,
+/// and its canonical bytes. The value mirrors [`crate::collection::CollectionEntry`]
+/// for symmetry; lowering uses the key (for identity) and the canonical bytes.
+pub struct ObjectEntry<O: Object> {
+    pub(crate) key: O::Key,
+    #[allow(dead_code)]
+    pub(crate) value: O,
+    pub(crate) canonical: Canonical,
+}
+
+impl<O: Object> ObjectEntry<O> {
+    pub fn fresh(key: O::Key, value: O, canonical: Canonical) -> Self {
+        Self {
+            key,
             value,
             canonical,
-            effects,
         }
     }
 }
 
-/// A typed canonical resource. Usually implemented via
-/// `#[omnifs_sdk::object(kind = "...", key = ...)]` rather than by hand.
+/// A typed canonical resource. Usually paired with
+/// `#[omnifs_sdk::object(kind = "...", key = ...)]`, which emits everything
+/// except [`Self::load`] (a hand-written async fn the macro forwards to).
 ///
-/// `parse_canonical` must accept the exact bytes [`Key::load`] captured in
-/// [`Canonical`]: it runs again on every warm read when the host pushes
-/// cached canonical bytes back. The default parses JSON; objects with a
-/// non-JSON canonical (e.g. arXiv's Atom) override both
-/// `canonical_content_type` and `parse_canonical` (the macro wires this
-/// from its `canonical`/`parse` arguments).
-pub trait Object: serde::Serialize + serde::de::DeserializeOwned + Sized {
-    type Key: Key<Object = Self>;
+/// [`Self::decode`] must accept the exact bytes [`Self::load`] stored in
+/// [`Canonical`]: it runs again on every warm read when the host pushes cached
+/// canonical bytes back. A private transport DTO may live inside `decode`; it
+/// must not be part of the public object API.
+pub trait Object: Sized {
+    /// Identity + route context. Loads do not live here.
+    type Key: Key;
+    /// Provider state threaded through [`Self::load`].
+    type State;
+    /// The format of the verbatim canonical bytes. The canonical face serves
+    /// these bytes as-is under [`Format::CT`].
+    type Canonical: Format;
+
+    /// Fetch the object from upstream, honoring `since` as a conditional
+    /// validator (map it to `If-None-Match`). Return `Load::Fresh` with the
+    /// parsed value plus the verbatim canonical bytes and validator;
+    /// `Load::Unchanged` when `since` matched (304); `Load::NotFound` for
+    /// genuine absence. Reserve `Err` for failures.
+    fn load(
+        cx: &Cx<Self::State>,
+        key: &Self::Key,
+        since: Option<Validator>,
+    ) -> impl Future<Output = Result<Load<Self>>>;
+
+    /// Parse the verbatim canonical bytes back into a value. Failures surface
+    /// as invalid-input; never normalize bytes here, fix [`Self::load`] to
+    /// store the right bytes instead.
+    fn decode(bytes: &[u8]) -> Result<Self>;
 
     /// The stable kind tag; part of every [`LogicalId`] derived for this
     /// object, so renaming it orphans previously cached objects.
     fn kind() -> ObjectKind;
 
-    /// The content type of the verbatim canonical bytes. The identity
-    /// representation leaf serves these bytes as-is under this type.
-    fn canonical_content_type() -> ContentType {
-        ContentType::Json
-    }
-
-    /// Parse the verbatim canonical bytes back into a value. Failures
-    /// surface as invalid-input; never normalize bytes here to make
-    /// parsing easier, fix [`Key::load`] to store the right bytes instead.
-    fn parse_canonical(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| ProviderError::invalid_input(format!("canonical parse: {e}")))
+    /// The canonical bytes' content type, from [`Self::Canonical`].
+    fn canonical_ct() -> ContentType {
+        <Self::Canonical as Format>::CT
     }
 }
 
-/// The identity side of an object: how to fetch it and what logical id it
-/// anchors to. Keys are `#[path_captures]` structs; only `load` is written
-/// by hand.
-pub trait Key: FromCaptures + IdentityCaptures + Sized {
-    type Object: Object<Key = Self>;
-    type State;
-
-    /// Fetch the object from upstream, honoring `since` as a conditional
-    /// validator.
-    ///
-    /// The contract:
-    ///
-    /// - return `Load::Fresh` with the parsed value plus the verbatim
-    ///   response bytes and their validator in [`Canonical`];
-    /// - when `since` is `Some` and the upstream confirms no change (304,
-    ///   matching `ETag`), return `Load::Unchanged` instead of refetching
-    ///   the body: the host already holds the bytes;
-    /// - return `Load::NotFound` for genuine upstream absence; reserve
-    ///   `Err` for failures.
-    ///
-    /// `since` arrives from the host's cached canonical on warm reads and
-    /// from the listing validator on re-lists; ignoring it is correct but
-    /// wastes a full refetch per read.
-    ///
-    /// ```ignore
-    /// impl Key for PaperVersionKey {
-    ///     type Object = Paper;
-    ///     type State = ();
-    ///
-    ///     async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Paper>> {
-    ///         load_paper(cx, self.paper.decoded(), since).await
-    ///     }
-    /// }
-    /// ```
-    fn load(
-        &self,
-        cx: &Cx<Self::State>,
-        since: Option<Validator>,
-    ) -> impl core::future::Future<Output = Result<Load<Self::Object>>>;
-
-    /// The logical id this key anchors: the object kind plus the key's
-    /// identity captures in declaration order. [`crate::identity::Facet`]
+/// The identity side of an object: route-context captures and the logical id
+/// they anchor. Keys are `#[path_captures]` structs (the macro emits an empty
+/// `impl Key`); only the captures and facets are declared, never behavior.
+pub trait Key: FromCaptures + IdentityCaptures + FacetMetadata + Sized {
+    /// The logical id this key anchors under `kind`: the object kind plus the
+    /// key's identity captures in declaration order. [`crate::identity::Facet`]
     /// fields are excluded, which is how multiple route aliases share one
     /// cached object.
-    fn anchor(&self) -> LogicalId {
-        LogicalId::new(Self::Object::kind(), self.identity_captures())
+    fn anchor(&self, kind: ObjectKind) -> LogicalId {
+        LogicalId::new(kind, self.identity_captures())
     }
 }
+
+use crate::captures::FromCaptures;
 
 /// Route-context capture metadata for multikey view-leaf expansion.
 ///
@@ -218,3 +245,11 @@ impl FacetMetadata for () {
 /// a fresh load and again on warm reads, so the leaf must be derivable from the
 /// canonical object plus route context such as a version facet.
 pub type ProjectFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileProjection>;
+
+/// Decode helper for the default JSON canonical: providers whose canonical is
+/// `Json` and whose type is `DeserializeOwned` get this as their `decode` from
+/// the `#[object]` macro.
+pub fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| ProviderError::invalid_input(format!("canonical decode: {e}")))
+}
