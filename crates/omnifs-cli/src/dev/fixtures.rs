@@ -1,66 +1,52 @@
-//! Testcontainers-backed fixtures for the contributor dev session.
-//!
-//! Brings up optional provider fixtures (Chinook `SQLite`, local k3s) before the
-//! omnifs runtime container starts, and tears them down when the session ends.
+//! CLI-owned fixtures for `omnifs dev`.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result, bail};
-use bollard::Docker;
-use bollard::query_parameters::RemoveContainerOptions;
-use testcontainers::compose::DockerCompose;
-use testcontainers::core::Mount;
-use testcontainers::runners::{AsyncBuilder, AsyncRunner};
-use testcontainers::{ContainerAsync, GenericBuildableImage, GenericImage, ImageExt};
 
-const DB_IMAGE: &str = "omnifs-dev-db";
-const DB_TAG: &str = "local";
+const DB_IMAGE: &str = "omnifs-dev-db:local";
 const DB_CONTAINER: &str = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT: &str = "omnifs-devcluster";
 const GUEST_DB_DIR: &str = "/data";
 const GUEST_SOCK_DIR: &str = "/run/omnifs";
 
-/// A provider mount name from a dev profile (e.g. `"github"`, `"db"`, `"k8s"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MountSpec {
-    pub name: String,
-}
-
 /// Host bind strings to layer onto the omnifs runtime container.
 #[derive(Debug, Clone, Default)]
-pub struct FixtureBinds {
-    pub binds: Vec<String>,
+pub(crate) struct FixtureBinds {
+    pub(crate) binds: Vec<String>,
 }
 
 /// Running fixture containers. Teardown is explicit via [`FixtureSession::down`]
-/// or [`DevSessionRecord::teardown_all`]; there is no `Drop` impl so detached
-/// sessions keep fixtures alive until `omnifs down`.
-pub struct FixtureSession {
-    db: Option<ContainerAsync<GenericImage>>,
-    k8s: Option<DockerCompose>,
+/// or [`DevSessionRecord::teardown_all`]; detached sessions keep fixtures alive
+/// until `omnifs down`.
+pub(crate) struct FixtureSession {
+    workspace: PathBuf,
+    db_container_id: Option<String>,
+    k8s: bool,
     k8s_sock_dir: Option<PathBuf>,
 }
 
 impl FixtureSession {
-    /// Bring up fixtures required by `profile_mounts`.
-    pub async fn up(
-        profile_mounts: &[MountSpec],
+    /// Bring up fixtures required by profile mount names.
+    pub(crate) fn up(
+        profile_mounts: &[String],
         dev_home: &Path,
         workspace: &Path,
     ) -> Result<(Self, FixtureBinds)> {
-        let wants_db = profile_mounts.iter().any(|m| m.name == "db");
-        let wants_k8s = profile_mounts.iter().any(|m| m.name == "k8s");
+        let wants_db = profile_mounts.iter().any(|name| name == "db");
+        let wants_k8s = profile_mounts.iter().any(|name| name == "k8s");
 
         let mut binds = FixtureBinds::default();
-        let mut db = None;
-        let mut k8s = None;
+        let mut db_container_id = None;
+        let mut k8s = false;
         let mut k8s_sock_dir = None;
 
         if wants_db {
             let db_dir = dev_home.join("fixtures/db");
             std::fs::create_dir_all(&db_dir)
                 .with_context(|| format!("create {}", db_dir.display()))?;
-            db = Some(start_db_fixture(workspace, &db_dir).await?);
+            db_container_id = Some(start_db_fixture(workspace, &db_dir)?);
             binds
                 .binds
                 .push(format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()));
@@ -70,7 +56,8 @@ impl FixtureSession {
             let sock_dir = dev_home.join("fixtures/k8s");
             std::fs::create_dir_all(&sock_dir)
                 .with_context(|| format!("create {}", sock_dir.display()))?;
-            k8s = Some(start_k8s_fixture(workspace, &sock_dir).await?);
+            start_k8s_fixture(workspace, &sock_dir)?;
+            k8s = true;
             k8s_sock_dir = Some(sock_dir.clone());
             binds
                 .binds
@@ -79,7 +66,8 @@ impl FixtureSession {
 
         Ok((
             Self {
-                db,
+                workspace: workspace.to_path_buf(),
+                db_container_id,
                 k8s,
                 k8s_sock_dir,
             },
@@ -87,38 +75,35 @@ impl FixtureSession {
         ))
     }
 
-    pub fn db_container_id(&self) -> Option<String> {
-        self.db.as_ref().map(|container| container.id().to_string())
+    pub(crate) fn db_container_id(&self) -> Option<String> {
+        self.db_container_id.clone()
     }
 
-    pub fn k8s_active(&self) -> bool {
-        self.k8s.is_some()
+    pub(crate) fn k8s_active(&self) -> bool {
+        self.k8s
     }
 
-    pub fn k8s_sock_dir(&self) -> Option<&Path> {
+    pub(crate) fn k8s_sock_dir(&self) -> Option<&Path> {
         self.k8s_sock_dir.as_deref()
     }
 
     /// Best-effort teardown of any running fixtures using live handles.
-    pub async fn down(self) -> Result<()> {
-        let mut session = self;
-        if let Some(compose) = session.k8s.take() {
-            compose
-                .down()
-                .await
-                .context("stop k8s fixture compose stack")?;
+    pub(crate) fn down(self) -> Result<()> {
+        if self.k8s {
+            let sock_dir = self
+                .k8s_sock_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new("/tmp/omnifs-k8s-sock"));
+            teardown_k8s_compose(&self.workspace, sock_dir)?;
         }
-        if let Some(container) = session.db.take() {
-            container
-                .stop()
-                .await
-                .context("stop db fixture container")?;
+        if let Some(container_id) = &self.db_container_id {
+            remove_container(container_id, "db fixture container")?;
         }
         Ok(())
     }
 }
 
-async fn start_db_fixture(workspace: &Path, db_dir: &Path) -> Result<ContainerAsync<GenericImage>> {
+fn start_db_fixture(workspace: &Path, db_dir: &Path) -> Result<String> {
     let context = workspace.join("providers/db/dev");
     let dockerfile = context.join("Dockerfile");
     if !dockerfile.is_file() {
@@ -129,27 +114,55 @@ async fn start_db_fixture(workspace: &Path, db_dir: &Path) -> Result<ContainerAs
     }
 
     tracing::info!("building db fixture image (Chinook SQLite)");
-    let image = GenericBuildableImage::new(DB_IMAGE, DB_TAG)
-        .with_dockerfile(&dockerfile)
-        .with_file(context.join("seed-entrypoint.sh"), "./seed-entrypoint.sh")
-        .build_image()
-        .await
-        .context("build db fixture image")?;
+    run_status(
+        Command::new("docker")
+            .args(["build", "-t", DB_IMAGE, "."])
+            .current_dir(&context),
+        "build db fixture image",
+    )?;
+
+    let _ = remove_container(DB_CONTAINER, "stale db fixture container");
 
     tracing::info!("starting db fixture container");
-    let container = image
-        .with_container_name(DB_CONTAINER)
-        .with_mount(Mount::bind_mount(
-            db_dir.to_string_lossy(),
-            "/data".to_string(),
-        ))
-        .start()
-        .await
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--name",
+            DB_CONTAINER,
+            "-v",
+            &format!("{}:/data", db_dir.display()),
+            DB_IMAGE,
+        ])
+        .output()
         .context("start db fixture container")?;
-    Ok(container)
+    if !output.status.success() {
+        bail!(
+            "start db fixture container failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn k8s_compose(workspace: &Path, sock_dir: &Path) -> Result<DockerCompose> {
+fn start_k8s_fixture(workspace: &Path, sock_dir: &Path) -> Result<()> {
+    tracing::info!("starting dev Kubernetes cluster (k3s)");
+    let compose_file = k8s_compose_file(workspace)?;
+    run_status(
+        docker_compose(&compose_file, sock_dir).args(["up", "-d", "--wait"]),
+        "start k8s fixture compose stack",
+    )
+}
+
+fn teardown_k8s_compose(workspace: &Path, sock_dir: &Path) -> Result<()> {
+    let compose_file = k8s_compose_file(workspace)?;
+    run_status(
+        docker_compose(&compose_file, sock_dir).args(["down", "-v"]),
+        "stop k8s fixture compose stack",
+    )
+}
+
+fn k8s_compose_file(workspace: &Path) -> Result<PathBuf> {
     let compose_file = workspace.join("providers/kubernetes/dev/compose.yaml");
     if !compose_file.is_file() {
         bail!(
@@ -157,128 +170,82 @@ fn k8s_compose(workspace: &Path, sock_dir: &Path) -> Result<DockerCompose> {
             compose_file.display()
         );
     }
-
-    let mut compose = DockerCompose::with_local_client(&[compose_file])
-        .with_project_name(K8S_COMPOSE_PROJECT)
-        .with_env(
-            "OMNIFS_K8S_SOCK_DIR",
-            sock_dir.to_string_lossy().into_owned(),
-        );
-    compose.with_remove_volumes(true);
-    Ok(compose)
+    Ok(compose_file)
 }
 
-async fn start_k8s_fixture(workspace: &Path, sock_dir: &Path) -> Result<DockerCompose> {
-    tracing::info!("starting dev Kubernetes cluster (k3s)");
-    let mut compose = k8s_compose(workspace, sock_dir)?;
-    compose
-        .up()
-        .await
-        .context("start k8s fixture compose stack")?;
-    tracing::info!("dev Kubernetes cluster ready");
-    Ok(compose)
+fn docker_compose(compose_file: &Path, sock_dir: &Path) -> Command {
+    let mut command = Command::new("docker");
+    command
+        .args([
+            "compose",
+            "-p",
+            K8S_COMPOSE_PROJECT,
+            "-f",
+            &compose_file.display().to_string(),
+        ])
+        .env("OMNIFS_K8S_SOCK_DIR", sock_dir);
+    command
 }
 
-async fn teardown_k8s_compose(workspace: &Path, sock_dir: &Path) -> Result<()> {
-    let compose = k8s_compose(workspace, sock_dir)?;
-    compose
-        .down()
-        .await
-        .context("stop orphaned k8s fixture compose stack")?;
+fn remove_container(container: &str, context: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["rm", "-f", container])
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("remove {context} `{container}`"))?;
+    if !status.success() {
+        tracing::debug!("{context} `{container}` removal exited with {status}");
+    }
     Ok(())
 }
 
-async fn remove_runtime_container(container_name: &str) -> Result<()> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("connect to Docker daemon for runtime container teardown")?;
-    match docker
-        .remove_container(
-            container_name,
-            Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            }),
-        )
-        .await
-    {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            tracing::debug!("runtime container `{container_name}` removal: {error:#}");
-            Ok(())
-        },
+fn run_status(command: &mut Command, context: &str) -> Result<()> {
+    let status = command.status().with_context(|| context.to_string())?;
+    if !status.success() {
+        bail!("{context} failed");
     }
+    Ok(())
 }
 
-async fn remove_db_container(container_id: &str) -> Result<()> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("connect to Docker daemon for fixture teardown")?;
-    match docker
-        .remove_container(
-            container_id,
-            Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            }),
-        )
-        .await
-    {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            tracing::debug!("db fixture container `{container_id}` removal: {error:#}");
-            Ok(())
-        },
-    }
-}
-
-async fn teardown_fixtures(record: &DevSessionRecord) -> Result<()> {
+fn teardown_fixtures(record: &DevSessionRecord) {
     if record.fixtures.k8s {
         let sock_dir = record
             .fixtures
             .k8s_sock_dir
             .as_deref()
             .unwrap_or_else(|| Path::new("/tmp/omnifs-k8s-sock"));
-        if let Err(error) = teardown_k8s_compose(&record.workspace, sock_dir).await {
+        if let Err(error) = teardown_k8s_compose(&record.workspace, sock_dir) {
             tracing::debug!("k8s fixture teardown: {error:#}");
         }
     }
 
     if let Some(container_id) = &record.fixtures.db_container_id
-        && let Err(error) = remove_db_container(container_id).await
+        && let Err(error) = remove_container(container_id, "db fixture container")
     {
         tracing::debug!("db fixture container `{container_id}` teardown: {error:#}");
     }
-
-    Ok(())
-}
-
-/// Tear down fixtures recorded in a dev session file. Best-effort and idempotent.
-pub async fn teardown_from_session(session_path: &Path) -> Result<()> {
-    let dev_home = session_path
-        .parent()
-        .context("dev session path must have a parent directory")?;
-    DevSessionRecord::teardown_all(dev_home).await
 }
 
 /// Minimal dev session state for crash recovery and `omnifs down` orphan sweep.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct DevSessionRecord {
-    pub workspace: PathBuf,
-    pub profile: String,
-    pub container_name: String,
-    pub fixtures: DevSessionFixtures,
+pub(crate) struct DevSessionRecord {
+    pub(crate) workspace: PathBuf,
+    pub(crate) profile: String,
+    pub(crate) container_name: String,
+    pub(crate) fixtures: DevSessionFixtures,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct DevSessionFixtures {
-    pub k8s: bool,
+pub(crate) struct DevSessionFixtures {
+    pub(crate) k8s: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub k8s_sock_dir: Option<PathBuf>,
+    pub(crate) k8s_sock_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub db_container_id: Option<String>,
+    pub(crate) db_container_id: Option<String>,
 }
 
 impl DevSessionRecord {
-    pub fn read(dev_home: &Path) -> Result<Option<Self>> {
+    pub(crate) fn read(dev_home: &Path) -> Result<Option<Self>> {
         let path = dev_home.join("session.json");
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -291,7 +258,7 @@ impl DevSessionRecord {
         Ok(Some(session))
     }
 
-    pub fn write(&self, dev_home: &Path) -> Result<()> {
+    pub(crate) fn write(&self, dev_home: &Path) -> Result<()> {
         let path = dev_home.join("session.json");
         let json = serde_json::to_string_pretty(self).context("serialize dev session")?;
         std::fs::write(&path, format!("{json}\n"))
@@ -299,7 +266,7 @@ impl DevSessionRecord {
         Ok(())
     }
 
-    pub fn clear(dev_home: &Path) -> Result<()> {
+    pub(crate) fn clear(dev_home: &Path) -> Result<()> {
         let path = dev_home.join("session.json");
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -308,7 +275,7 @@ impl DevSessionRecord {
         }
     }
 
-    pub fn clear_launch_record(dev_home: &Path) -> Result<()> {
+    pub(crate) fn clear_launch_record(dev_home: &Path) -> Result<()> {
         let path = dev_home.join("launch.json");
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -318,16 +285,16 @@ impl DevSessionRecord {
     }
 
     /// Full dev session teardown: runtime container, fixtures, session and launch records.
-    pub async fn teardown_all(dev_home: &Path) -> Result<()> {
+    pub(crate) fn teardown_all(dev_home: &Path) -> Result<()> {
         let Some(record) = Self::read(dev_home)? else {
             return Ok(());
         };
 
-        if let Err(error) = remove_runtime_container(&record.container_name).await {
+        if let Err(error) = remove_container(&record.container_name, "runtime container") {
             tracing::debug!("runtime container teardown: {error:#}");
         }
 
-        teardown_fixtures(&record).await?;
+        teardown_fixtures(&record);
 
         let _ = Self::clear(dev_home);
         let _ = Self::clear_launch_record(dev_home);
@@ -372,15 +339,15 @@ mod tests {
         DevSessionRecord::clear_launch_record(dir.path()).unwrap();
     }
 
-    #[tokio::test]
-    async fn teardown_all_without_session_is_idempotent() {
+    #[test]
+    fn teardown_all_without_session_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        DevSessionRecord::teardown_all(dir.path()).await.unwrap();
-        DevSessionRecord::teardown_all(dir.path()).await.unwrap();
+        DevSessionRecord::teardown_all(dir.path()).unwrap();
+        DevSessionRecord::teardown_all(dir.path()).unwrap();
     }
 
-    #[tokio::test]
-    async fn teardown_all_clears_session_files() {
+    #[test]
+    fn teardown_all_clears_session_files() {
         let dir = tempfile::tempdir().unwrap();
         let record = DevSessionRecord {
             workspace: dir.path().join("workspace"),
@@ -391,7 +358,7 @@ mod tests {
         record.write(dir.path()).unwrap();
         std::fs::write(dir.path().join("launch.json"), "{}\n").unwrap();
 
-        DevSessionRecord::teardown_all(dir.path()).await.unwrap();
+        DevSessionRecord::teardown_all(dir.path()).unwrap();
 
         assert!(!dir.path().join("session.json").exists());
         assert!(!dir.path().join("launch.json").exists());
