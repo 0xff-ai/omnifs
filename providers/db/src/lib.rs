@@ -156,7 +156,6 @@ impl DbProvider {
         r.file("/tables/{table}/count.txt")
             .handler(table_count_txt)?;
         r.file("/tables/{table}/sample.json")
-            .ranged()
             .handler(table_sample)?;
 
         Ok(state)
@@ -381,12 +380,13 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         Ok((bytes, version))
     })?;
 
-    // Always ranged: the sample bytes are already in memory, and the route is
-    // declared `ranged`, so the host serves any size through one ranged session
-    // (a small sample is a single chunk) without an inline-size cap.
-    let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    let mut builder = FileProjection::ranged(MemoryRangeReader::new(bytes))
-        .size(size)
+    // The sample is bounded by `sample_limit` and already fully in memory, so
+    // serve it as a whole-file body projection: the host returns it through the
+    // read-file terminal in one shot, with no inline-size cap (unlike a
+    // dir-entry-embedded inline source) and without the ranged open/read-chunk
+    // session a streaming source would need.
+    let mut builder = FileProjection::body(bytes)
+        .content_type(ContentType::Json)
         .dynamic();
     if let Some(v) = version {
         builder = builder.version(v);

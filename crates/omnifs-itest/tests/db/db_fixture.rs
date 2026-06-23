@@ -16,7 +16,7 @@ pub fn write_chinook_fixture(dir: &Path) -> PathBuf {
              (1,'For Those About To Rock We Salute You',1),
              (2,'Balls to the Wall',2),
              (3,'Restless and Wild',2);
-         -- A wide table for the ranged-sample test: 25 rows * ~4 KiB > 64 KiB at LIMIT 20.
+         -- A wide table for the uncapped-sample test: 25 rows * ~4 KiB > 64 KiB at LIMIT 20.
          CREATE TABLE Wide (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);",
     )
     .expect("seed schema");
