@@ -313,7 +313,15 @@ mod tests {
             name: MountName::try_from("db").unwrap(),
             config: spec_with_provider(
                 "db",
-                r#"{ "mount": "db", "config": {"path": "/data/test.db"} }"#,
+                r#"{
+                    "mount": "db",
+                    "config": {"path": "/data/test.db"},
+                    "capabilities": {
+                        "preopened_paths": [
+                            {"host": "/data", "guest": "/data", "mode": "ro"}
+                        ]
+                    }
+                }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
@@ -322,9 +330,26 @@ mod tests {
         let mount = DockerMountMaterializer::new(&catalog, &store)
             .materialize(&config)
             .unwrap();
+        let spec = mount.spec();
+        let preopen = &spec
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .preopened_paths
+            .as_ref()
+            .and_then(|grant| match grant {
+                omnifs_caps::Grant::Literal(paths) => Some(paths),
+                omnifs_caps::Grant::Dynamic(_) => None,
+            })
+            .unwrap()[0];
+        assert_eq!(
+            (preopen.host.as_str(), preopen.guest.as_str()),
+            ("/data", "/data"),
+            "a container-native preopen (host == guest) passes through unrewritten"
+        );
         assert!(
             mount.preopen_binds().is_empty(),
-            "manifest preopens are already container paths"
+            "container-native preopens are fixture-provided, so no host bind is emitted"
         );
     }
 
