@@ -4,11 +4,13 @@
 //! and the daemon (to reconcile `mounts/*.json` into the registry). The steps,
 //! in order: apply provider metadata (auth scheme and config defaults) into any
 //! field the user left unset, check that the spec's capability grants satisfy
-//! the manifest's declared needs, then rewrite preopens. On the host the preopen
-//! host path is canonicalized in place and no binds are emitted; for a container
-//! each preopen is rewritten to a stable guest path under [`GUEST_PREOPENS_DIR`]
-//! and the corresponding host bind is returned for the launcher to pass to
-//! `docker create`.
+//! the manifest's declared needs, then rewrite preopens. A preopen whose host
+//! equals its guest is container-native (provided in the runtime's own
+//! filesystem, e.g. a dev fixture bind) and passes through untouched. Otherwise,
+//! on the host the preopen host path is canonicalized in place and no binds are
+//! emitted; for a container each preopen is rewritten to a stable guest path
+//! under [`GUEST_PREOPENS_DIR`] and the corresponding host bind is returned for
+//! the launcher to pass to `docker create`.
 
 use std::path::{Path, PathBuf};
 
@@ -287,6 +289,16 @@ fn rewrite_preopens(
 
     let mut binds = ContainerPreopenBinds::default();
     for (index, preopen) in preopens.iter_mut().enumerate() {
+        // A preopen whose host already equals its guest is container-native: the
+        // path is provided in the runtime's own filesystem (a dev fixture bind
+        // such as the db provider's `/data`, or the daemon's host in
+        // host-native mode), not by the launcher. Materialization runs both on
+        // the host (to compute Docker binds) and inside the container (the
+        // daemon reconciling `mounts/`); the host has no such path, so neither
+        // canonicalize it nor emit a bind. The runtime opens it directly.
+        if preopen.host == preopen.guest {
+            continue;
+        }
         let host_path = Path::new(&preopen.host).canonicalize().map_err(|source| {
             MaterializeError::PreopenPath {
                 path: preopen.host.clone(),
@@ -427,5 +439,41 @@ mod tests {
             .unwrap()
             .literal()[0];
         assert_eq!(preopen.host, canonical.display().to_string());
+    }
+
+    /// A container-native preopen (host == guest) is provided by a fixture bind
+    /// in the runtime's own filesystem, so it must pass through without being
+    /// canonicalized against the materializing host (where `/data` need not
+    /// exist) and without emitting a launcher bind. Holds in both modes.
+    #[test]
+    fn container_native_preopen_passes_through() {
+        for mode in [MaterializationMode::Docker, MaterializationMode::HostNative] {
+            let tmp = tempfile::tempdir().unwrap();
+            let spec = spec_with_provider(
+                "db",
+                r#"{
+                "mount": "db",
+                "config": {"path": "/data/test.db"},
+                "capabilities": {
+                    "preopened_paths": [{"host": "/data", "guest": "/data", "mode": "ro"}]
+                }
+            }"#,
+            );
+
+            let out = materialize(spec, &builtin_catalog(tmp.path()), mode).unwrap();
+
+            assert!(out.preopen_binds().is_empty(), "mode {mode:?}");
+            let preopen = &out
+                .spec()
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .preopened_paths
+                .as_ref()
+                .unwrap()
+                .literal()[0];
+            assert_eq!(preopen.host, "/data", "mode {mode:?}");
+            assert_eq!(preopen.guest, "/data", "mode {mode:?}");
+        }
     }
 }
