@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
+use omnifs_cache::{Record, RecordKind};
 use omnifs_core::path::Path;
-use omnifs_core::view::EntryMeta;
+use omnifs_core::view::{DirentsPayload, EntryMeta};
 use omnifs_host::LookupOutcome;
 use omnifs_host::Runtime;
 use omnifs_host::pagination::is_control_name;
@@ -111,6 +112,10 @@ impl Tree {
             };
         }
 
+        if let Some(meta) = cached_dirent_child(runtime, parent, name) {
+            return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
+        }
+
         match runtime
             .namespace()
             .lookup_child(parent, name, ctx.trace)
@@ -144,4 +149,28 @@ impl Tree {
             },
         }
     }
+}
+
+fn cached_dirent_child(runtime: &Runtime, parent: &Path, name: &str) -> Option<EntryMeta> {
+    runtime
+        .cache()
+        .mem_get(parent, RecordKind::Dirents, None)
+        .as_ref()
+        .and_then(|record| dirent_child(record, name))
+        .or_else(|| {
+            runtime
+                .cache()
+                .cache_get(parent, RecordKind::Dirents, None)
+                .as_ref()
+                .and_then(|record| dirent_child(record, name))
+        })
+}
+
+fn dirent_child(record: &Record, name: &str) -> Option<EntryMeta> {
+    let dirents = DirentsPayload::deserialize(&record.payload)?;
+    dirents
+        .entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.meta.clone())
 }

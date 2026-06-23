@@ -20,13 +20,10 @@ use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access, open_data_slice,
 };
-use crate::frontend;
-use crate::frontend::LookupCacheHit;
 use crate::protocol::consts::{
     EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, OPEN_MATERIALIZE_MAX_BYTES, ROOT_ID,
 };
 use dashmap::DashMap;
-use omnifs_cache::RecordKind;
 use omnifs_core::MountName;
 use omnifs_core::path::{Path, Segment};
 use omnifs_core::view as view_types;
@@ -334,7 +331,7 @@ impl Export {
                     }
                     if let Some(incoming_attrs) = attrs_for_update.clone()
                         && let Some(merged_attrs) =
-                            frontend::merge_file_attrs(entry.attrs.as_ref(), Some(incoming_attrs))
+                            merge_file_attrs(entry.attrs.as_ref(), Some(incoming_attrs))
                     {
                         entry.size = merged_attrs.st_size();
                         entry.size_exact =
@@ -547,60 +544,6 @@ impl Export {
             | TreeErrorKind::Network
             | TreeErrorKind::Internal => Status::Io,
         }
-    }
-
-    /// Resolve a child from the parent's cached dirents record, if present. NFS
-    /// consults a non-exhaustive cached listing for a positive entry before
-    /// falling through to `Tree`. Returns `None` when the record is absent or the
-    /// name is not a positive entry.
-    fn lookup_from_cached_dirents(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        parent_path: &Path,
-        parent: u64,
-        name: &Segment,
-        runtime: &Arc<Runtime>,
-    ) -> Option<u64> {
-        let record = runtime
-            .cache()
-            .cache_get(parent_path, RecordKind::Dirents, None)?;
-        let LookupCacheHit::Positive(meta) =
-            frontend::cached_dirent_lookup(&record, name.as_str())?
-        else {
-            return None;
-        };
-        let child_path = parent_path.join_segment(name);
-        Some(self.allocate_meta_entry(scope, mount_name, &child_path, parent, meta, Some(runtime)))
-    }
-
-    /// Allocate an inode for a resolved positive `meta`, promoting a static
-    /// ranged placeholder to its probed size.
-    fn allocate_meta_entry(
-        &self,
-        scope: u64,
-        mount_name: &str,
-        child_path: &Path,
-        parent: u64,
-        mut meta: EntryMeta,
-        runtime: Option<&Arc<Runtime>>,
-    ) -> u64 {
-        if runtime.is_some() {
-            meta = self.promote_ranged_placeholder_meta(mount_name, child_path, meta);
-        }
-        let kind = Self::meta_kind(&meta);
-        let (size, size_exact) = Self::meta_size(&meta);
-        self.get_or_alloc(EntrySeed {
-            scope,
-            mount_name,
-            path: child_path,
-            parent,
-            kind,
-            size,
-            size_exact,
-            attrs: meta.into_attrs(),
-            body: EntryBody::Provider,
-        })
     }
 
     /// Resolve `name` under the provider directory `parent_path` through
@@ -1243,19 +1186,6 @@ impl ReadOnlyExport for Export {
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
 
-        // NFS-specific: a positive entry in a (possibly non-exhaustive) cached
-        // listing can be bound without another provider lookup.
-        if let Some(id) = self.lookup_from_cached_dirents(
-            scope,
-            &mount_name,
-            &parent_path,
-            parent,
-            &name,
-            &runtime,
-        ) {
-            return Ok(id);
-        }
-
         match self.lookup_via_tree(scope, &mount_name, &parent_path, parent, &name, &runtime) {
             Err(Status::NoEnt) if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME => {
                 Ok(EXPORT_ROOT_ID)
@@ -1591,6 +1521,16 @@ impl ReadOnlyExport for Export {
     fn materialize_for_open(&self, id: u64) -> StatusResult<Vec<u8>> {
         self.read(id)
     }
+}
+
+/// Keep a learned exact size on the NFS inode across an origin-agnostic refresh:
+/// a re-listing that projects a kind-derived placeholder must not erase a size
+/// learned from a complete read.
+fn merge_file_attrs(
+    existing: Option<&FileAttrsCache>,
+    incoming: Option<FileAttrsCache>,
+) -> Option<FileAttrsCache> {
+    FileAttrsCache::merge_preserving_learned_size(existing, incoming)
 }
 
 #[cfg(test)]
