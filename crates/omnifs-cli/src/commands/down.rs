@@ -34,8 +34,8 @@ impl DownArgs {
         // teardown. A no-op outside a dev session, so production `down` never
         // touches it.
         let dev_home = workspace.layout().config_dir.clone();
-        if omnifs_fixture::DevSessionRecord::read(&dev_home)?.is_some() {
-            match omnifs_fixture::DevSessionRecord::teardown_all(&dev_home).await {
+        if crate::dev::DevSessionRecord::read(&dev_home)?.is_some() {
+            match crate::dev::DevSessionRecord::teardown_all(&dev_home) {
                 Ok(()) => anstream::println!("✓ Dev session torn down"),
                 Err(error) => anstream::eprintln!("note: dev session teardown: {error:#}"),
             }

@@ -25,7 +25,6 @@ omnifs-creds = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-inspector = { workspace = true }
 omnifs-core = { workspace = true }
-omnifs-fixture = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }

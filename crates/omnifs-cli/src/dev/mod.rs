@@ -1,6 +1,7 @@
 //! Contributor dev session orchestration.
 
 mod discover;
+pub(crate) mod fixtures;
 mod profiles;
 
 use std::fs;
@@ -10,7 +11,6 @@ use std::process::Command;
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
-use omnifs_fixture::{DevSessionFixtures, DevSessionRecord, FixtureSession, MountSpec};
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::mounts::Spec;
 use tokio::signal;
@@ -27,6 +27,9 @@ use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, MountConfig, env_string, set_private_dir,
 };
 use crate::workspace::Workspace;
+
+pub(crate) use fixtures::DevSessionRecord;
+use fixtures::{DevSessionFixtures, FixtureBinds, FixtureSession};
 
 #[derive(Args, Debug, Clone)]
 pub struct DevArgs {
@@ -96,12 +99,8 @@ impl DevArgs {
         fs::create_dir_all(&dev_home).with_context(|| format!("create {}", dev_home.display()))?;
         set_private_dir(&dev_home)?;
 
-        let fixture_specs: Vec<MountSpec> = profile_mounts
-            .iter()
-            .map(|name| MountSpec { name: name.clone() })
-            .collect();
         let (fixture_session, fixture_binds) =
-            FixtureSession::up(&fixture_specs, &dev_home, workspace.path()).await?;
+            FixtureSession::up(&profile_mounts, &dev_home, workspace.path())?;
 
         match self
             .bootstrap_runtime(
@@ -138,18 +137,18 @@ impl DevArgs {
                 match run_container_shell(&container_name).await {
                     Ok(()) => {},
                     Err(error) => {
-                        if let Err(teardown) = DevSessionRecord::teardown_all(&dev_home).await {
+                        if let Err(teardown) = DevSessionRecord::teardown_all(&dev_home) {
                             anstream::eprintln!("note: dev session teardown: {teardown:#}");
                         }
                         return Err(error);
                     },
                 }
 
-                DevSessionRecord::teardown_all(&dev_home).await?;
+                DevSessionRecord::teardown_all(&dev_home)?;
                 Ok(())
             },
             Err(error) => {
-                if let Err(teardown) = fixture_session.down().await {
+                if let Err(teardown) = fixture_session.down() {
                     anstream::eprintln!("note: fixture teardown: {teardown:#}");
                 }
                 Err(error)
@@ -164,7 +163,7 @@ impl DevArgs {
         image: &str,
         container_name: &str,
         discovered_mounts: Vec<discover::DiscoveredMount>,
-        fixture_binds: omnifs_fixture::FixtureBinds,
+        fixture_binds: FixtureBinds,
     ) -> Result<()> {
         if self.image.is_none() {
             build_image(workspace.path(), image)?;
