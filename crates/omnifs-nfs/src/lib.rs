@@ -8,7 +8,6 @@
 mod adapter;
 mod error;
 mod export;
-mod frontend;
 mod mount;
 mod protocol;
 mod server;

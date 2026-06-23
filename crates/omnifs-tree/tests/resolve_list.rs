@@ -17,7 +17,10 @@
 
 use std::sync::Arc;
 
+use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
+use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta};
+use omnifs_host::Runtime;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_tree::{ListOutcome, NodeBody, RequestCtx, Tree, TreeErrorKind};
 use tempfile::TempDir;
@@ -28,6 +31,7 @@ use tempfile::TempDir;
 /// for the whole test.
 struct TestTree {
     tree: Tree,
+    runtime: Arc<Runtime>,
     _clone_dir: TempDir,
     _cache_dir: TempDir,
     _config_dir: TempDir,
@@ -42,9 +46,11 @@ fn test_tree() -> TestTree {
         runtime,
         ..
     } = make_runtime(&engine);
-    let tree = Tree::for_runtime(Arc::new(runtime), "test");
+    let runtime = Arc::new(runtime);
+    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
     TestTree {
         tree,
+        runtime,
         _clone_dir: clone_dir,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
@@ -92,6 +98,41 @@ async fn resolve_missing_is_not_found() {
         .await
         .expect_err("missing child must error");
     assert_eq!(err.kind, TreeErrorKind::NotFound);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_child_uses_cached_dirent_positive() {
+    let t = test_tree();
+    let tree = &t.tree;
+    let ctx = RequestCtx::default();
+
+    let parent = tree
+        .resolve(&Path::parse("/hello").unwrap(), &ctx)
+        .await
+        .expect("resolve /hello");
+    let payload = DirentsPayload {
+        entries: vec![DirentRecord {
+            name: "cached-only.txt".to_string(),
+            meta: EntryMeta::file_without_attrs(),
+        }],
+        exhaustive: false,
+        validator: None,
+        next_cursor: None,
+        paginated: false,
+    }
+    .serialize()
+    .expect("serialize dirents");
+    let record = CacheRecord::new(RecordKind::Dirents, payload);
+    t.runtime
+        .cache()
+        .cache_put(parent.path(), RecordKind::Dirents, None, &record);
+
+    let child = tree
+        .resolve_child(&parent, "cached-only.txt", &ctx)
+        .await
+        .expect("resolve cached dirent child");
+    assert_eq!(child.path().as_str(), "/hello/cached-only.txt");
+    assert!(child.is_file());
 }
 
 #[tokio::test(flavor = "multi_thread")]

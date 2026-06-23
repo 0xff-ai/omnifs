@@ -101,7 +101,9 @@ fn synthetic_names(listing: &Listing) -> Vec<&str> {
 }
 
 fn cached_dirents(runtime: &Runtime, path_str: &str) -> Option<DirentsPayload> {
-    let record = runtime.cache_get(&path(path_str), RecordKind::Dirents, None)?;
+    let record = runtime
+        .cache()
+        .cache_get(&path(path_str), RecordKind::Dirents, None)?;
     DirentsPayload::deserialize(&record.payload)
 }
 
@@ -416,6 +418,7 @@ async fn lookup_negative_cached() {
     // The miss armed the live negative index.
     assert!(
         t.runtime
+            .cache()
             .negative_for(&path(missing), now_millis())
             .is_some(),
         "a lookup miss must arm the negative index"

@@ -241,6 +241,7 @@ async fn reads_whole_file_exact_bytes() {
     // The read durably cached the immutable payload (aux None).
     assert!(
         t.runtime
+            .cache()
             .cache_get(&path("/hello/message"), RecordKind::File, None)
             .is_some(),
         "an immutable whole-file read is durably cached"
@@ -362,6 +363,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
+            .cache()
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the cold read must populate the durable view cache"
@@ -371,10 +373,11 @@ async fn invalidation_evicts_cached_read() {
     // evicts the view leaf (the coherence the read-path fence protects).
     t.runtime.apply_effects_for_test(
         &listing_invalidation("/hello/greeting"),
-        t.runtime.current_generation(),
+        t.runtime.cache().current_generation(),
     );
     assert!(
         t.runtime
+            .cache()
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_none(),
         "the invalidation must evict the durable view leaf"
@@ -386,6 +389,7 @@ async fn invalidation_evicts_cached_read() {
     t.assert_read("/hello/greeting", b"Hi there!\n").await;
     assert!(
         t.runtime
+            .cache()
             .cache_get(&path("/hello/greeting"), RecordKind::File, None)
             .is_some(),
         "the re-render must re-populate the durable view cache"
