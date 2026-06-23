@@ -298,8 +298,3 @@ pub(super) struct TreeRefEntry<S> {
     pub(super) handler: BoxedTreeRefHandler<S>,
     pub(super) validator: RouteValidator,
 }
-
-/// An opaque route identifier. Reserved in the public surface; no current
-/// registration verb returns one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteHandle(pub u32);

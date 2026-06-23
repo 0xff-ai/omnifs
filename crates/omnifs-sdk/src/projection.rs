@@ -17,7 +17,7 @@
 //! [`DirProjection::preload_dir`], [`DirProjection::store_canonical`]) and the
 //! host decides what to keep, evict, and invalidate.
 
-use crate::browse::{Effects, Entry as BrowseEntry, FileContent, Listing};
+use crate::browse::{Effects, Entry as BrowseEntry, FileContent};
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::handler::{Cursor, RangeReader};
@@ -35,6 +35,7 @@ pub struct FileProjection {
     source: FileSource,
     attrs: FileAttrs,
     content_type: Option<ContentType>,
+    effects: Effects,
     extra_files: Vec<(String, FileProjection)>,
 }
 
@@ -107,8 +108,13 @@ impl FileProjection {
         self.content_type
     }
 
-    pub fn extra_files(&self) -> &[(String, FileProjection)] {
-        &self.extra_files
+    /// Attach host effects to this file read result. Use this when the file
+    /// handler fetched more than the returned bytes and can safely preload or
+    /// invalidate related host state in the same successful operation.
+    #[must_use]
+    pub fn with_effects(mut self, effects: Effects) -> Self {
+        self.effects.extend(effects);
+        self
     }
 
     /// Lower the carried sibling preloads onto the browse [`Effects`]
@@ -117,7 +123,7 @@ impl FileProjection {
     /// the read. A sibling whose source has no `FileProj` lowering (`Body`/
     /// `Ranged`/`Blob`) is skipped; the host serves those through their own read.
     pub fn project_effects(&self) -> Result<Effects> {
-        let mut effects = Effects::new();
+        let mut effects = self.effects.clone();
         for (path, file) in &self.extra_files {
             if let Some(proj) = file.as_file_proj() {
                 effects.project_file(path, proj)?;
@@ -225,6 +231,7 @@ pub struct FileProjBuilder<Src> {
     source: FileSource,
     attrs: FileAttrs,
     content_type: Option<ContentType>,
+    effects: Effects,
     extra_files: Vec<(String, FileProjection)>,
     _src: core::marker::PhantomData<Src>,
 }
@@ -235,6 +242,7 @@ impl<Src> FileProjBuilder<Src> {
             source,
             attrs: FileAttrs::new(size, Stability::Stable),
             content_type: None,
+            effects: Effects::new(),
             extra_files: Vec::new(),
             _src: core::marker::PhantomData,
         }
@@ -245,6 +253,7 @@ impl<Src> FileProjBuilder<Src> {
             source: self.source,
             attrs: self.attrs,
             content_type: self.content_type,
+            effects: self.effects,
             extra_files: self.extra_files,
             _src: core::marker::PhantomData,
         }
@@ -288,6 +297,13 @@ impl<Src> FileProjBuilder<Src> {
         self.extra_files.push((path.into(), file));
         self
     }
+
+    /// Attach host effects to the eventual file read result.
+    #[must_use]
+    pub fn with_effects(mut self, effects: Effects) -> Self {
+        self.effects.extend(effects);
+        self
+    }
 }
 
 // A `Deferred` source must resolve its read mode before it is `Buildable`.
@@ -329,6 +345,7 @@ impl<Src: Buildable> FileProjBuilder<Src> {
             source: self.source,
             attrs: self.attrs,
             content_type: self.content_type,
+            effects: self.effects,
             extra_files: self.extra_files,
         }
     }
@@ -343,9 +360,6 @@ impl<Src: Buildable> FileProjBuilder<Src> {
 /// the listing analog of [`crate::object::Load::Unchanged`] (the cached
 /// validator matched, so the host serves its cached dirents).
 ///
-/// The enumerated variants retain the [`Entry`] values rather than
-/// pre-lowering to [`Listing`], so the per-entry SDK content type survives for
-/// the router. [`Self::to_listing`] performs the browse lowering on demand.
 pub struct DirProjection {
     outcome: DirOutcome,
     validator: Option<VersionToken>,
@@ -501,32 +515,6 @@ impl DirProjection {
         self.validator.as_ref()
     }
 
-    pub fn extra_files(&self) -> &[(String, FileProjection)] {
-        &self.extra_files
-    }
-
-    /// Lower the enumerated entries onto a browse [`Listing`]. Returns `None`
-    /// for the [`DirOutcome::Unchanged`] sentinel (no entries to lower). The
-    /// per-entry SDK content type is dropped in this lowering; the router reads
-    /// it from [`DirOutcome::Entries`] to populate `file-proj.content-type`.
-    pub fn to_listing(&self) -> Option<Listing> {
-        match &self.outcome {
-            DirOutcome::Entries {
-                entries,
-                exhaustive,
-                ..
-            } => {
-                let browse = entries.iter().map(Entry::to_browse_entry);
-                Some(if *exhaustive {
-                    Listing::complete(browse)
-                } else {
-                    Listing::partial(browse)
-                })
-            },
-            DirOutcome::Unchanged => None,
-        }
-    }
-
     /// Lower the carried extra-file preloads onto the browse [`Effects`]
     /// `project_file` channel. Sources without a `FileProj` lowering (`Body`,
     /// `Ranged`, `Blob`) are skipped; the router serves them through their own
@@ -559,12 +547,10 @@ impl DirProjection {
 
 /// A directory entry: a bare name plus a kind. Unlike the v1
 /// [`crate::browse::Entry`], a file entry carries no [`FileProj`] argument; it
-/// lowers to a default deferred-Full-Stable file projection. An optional content type types a
-/// bare-name leaf the host suffix map cannot.
+/// lowers to a default deferred-Full-Stable file projection.
 pub struct Entry {
     name: String,
     kind: EntryKind,
-    content_type: Option<ContentType>,
 }
 
 /// The kind of a [`Entry`].
@@ -581,7 +567,6 @@ impl Entry {
         Self {
             name: name.into(),
             kind: EntryKind::Dir,
-            content_type: None,
         }
     }
 
@@ -593,15 +578,7 @@ impl Entry {
         Self {
             name: name.into(),
             kind: EntryKind::File,
-            content_type: None,
         }
-    }
-
-    /// Type an SDK-typed leaf so the host echoes its content type opaquely.
-    #[must_use]
-    pub fn content_type(mut self, ct: ContentType) -> Self {
-        self.content_type = Some(ct);
-        self
     }
 
     pub fn name(&self) -> &str {
@@ -612,14 +589,8 @@ impl Entry {
         self.kind
     }
 
-    pub fn declared_content_type(&self) -> Option<ContentType> {
-        self.content_type
-    }
-
     /// Lower to a v1 browse [`Entry`]. A file lowers to the default
-    /// deferred-Full-Stable projection; the per-entry SDK content type does
-    /// not survive this lowering (the browse [`FileProj`] has no content-type
-    /// field), so the router reads it from [`Entry::declared_content_type`].
+    /// deferred-Full-Stable projection.
     pub fn to_browse_entry(&self) -> BrowseEntry {
         match self.kind {
             EntryKind::Dir => BrowseEntry::dir(&self.name),

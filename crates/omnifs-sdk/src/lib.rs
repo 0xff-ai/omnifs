@@ -22,7 +22,6 @@
 //!
 //! #[omnifs_sdk::provider(
 //!     metadata = "omnifs.provider.json",
-//!     resources(endpoints = [Api]),
 //! )]
 //! impl MyProvider {
 //!     type Config = Config;   // defaults to NoConfig when omitted

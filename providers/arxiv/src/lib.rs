@@ -10,8 +10,7 @@ use core::fmt;
 use core::str::FromStr;
 
 use crate::api::{
-    ArxivApi, ArxivWeb, CATEGORY_PAGE_SIZE, download_pdf, download_source, fetch_category_page,
-    load_paper,
+    CATEGORY_PAGE_SIZE, download_pdf, download_source, fetch_category_page, load_paper,
 };
 use crate::objects::Paper;
 use omnifs_sdk::prelude::*;
@@ -192,10 +191,7 @@ pub struct CategoryKey {
     category: CategoryName,
 }
 
-#[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
-    resources(endpoints = [ArxivApi, ArxivWeb]),
-)]
+#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl ArxivProvider {
     fn start(r: &mut Router) -> Result<()> {
         let papers = object::<Paper>("/{paper}/{version}", |o| {
@@ -207,14 +203,21 @@ impl ArxivProvider {
                 }
             });
             o.representations("paper", ())?;
-            o.file("paper.json").handler(PaperVersionKey::json)?;
-            o.file("paper.pdf").handler(PaperVersionKey::pdf)?;
-            o.file("source.tar.gz").handler(PaperVersionKey::source)?;
+            o.file("paper.json")
+                .project(|paper: &Paper, key| paper.metadata_json(key))?;
             Ok(())
         })?;
 
         r.attach("/papers", &papers)?;
         r.attach("/categories/{category}/papers", &papers)?;
+        r.file("/papers/{paper}/{version}/paper.pdf")
+            .handler(PaperVersionKey::pdf)?;
+        r.file("/papers/{paper}/{version}/source.tar.gz")
+            .handler(PaperVersionKey::source)?;
+        r.file("/categories/{category}/papers/{paper}/{version}/paper.pdf")
+            .handler(PaperVersionKey::pdf)?;
+        r.file("/categories/{category}/papers/{paper}/{version}/source.tar.gz")
+            .handler(PaperVersionKey::source)?;
 
         r.dir("/papers/{paper}").handler(PaperKey::versions)?;
         r.dir("/categories/{category}/papers/{paper}")
@@ -279,20 +282,6 @@ impl PaperVersionKey {
         }
         let blob = download_source(&cx, key.paper.decoded(), version).await?;
         let builder = FileProjection::blob(blob.id).size(Size::Exact(blob.size));
-        Ok(if key.version.is_numbered() {
-            builder.stable().build()
-        } else {
-            builder.dynamic().build()
-        })
-    }
-
-    async fn json(cx: Cx, key: PaperVersionKey) -> Result<FileProjection> {
-        let paper = loaded_paper(&cx, &key.paper_key()).await?;
-        if let Some(version) = key.version.number() {
-            paper.validate_version(version)?;
-        }
-        let builder = FileProjection::body(paper.metadata_json_bytes(key.version.number())?)
-            .content_type(ContentType::Json);
         Ok(if key.version.is_numbered() {
             builder.stable().build()
         } else {

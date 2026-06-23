@@ -9,7 +9,6 @@ use crate::browse::{Entry as BrowseEntry, List, Listing, Lookup};
 use crate::captures::Captures;
 use crate::error::Result;
 use crate::file_attrs::{FileProj, ReadMode, Size};
-use crate::object::ObjectShape;
 use crate::projection::{DirOutcome, DirProjection};
 use omnifs_core::ContentType;
 use omnifs_core::path::Path;
@@ -59,65 +58,39 @@ impl<S> Shape<'_, S> {
         route_match(self.router.treerefs.iter(), abs)
     }
 
-    /// Dir routes registered via `r.dir(..)` only; object handler dirs are
-    /// excluded. Lookup uses this for its file-vs-dir precedence comparison.
+    /// Dir routes registered via `r.dir(..)`. Lookup uses this for its
+    /// file-vs-dir precedence comparison.
     pub(super) fn direct_dir_route(&self, abs: &Path) -> Option<RouteMatch<'_, DirEntry<S>>> {
         route_match(self.router.dirs.iter(), abs)
     }
 
-    /// Dir routes including object handler dirs: the set whose handlers can
-    /// answer a listing or a lookup fallback.
+    /// Dir routes whose handlers can answer a listing or a lookup fallback.
     pub(in crate::router) fn list_dir_route(
         &self,
         abs: &Path,
     ) -> Option<RouteMatch<'_, DirEntry<S>>> {
-        route_match(
-            self.router
-                .dirs
-                .iter()
-                .chain(self.router.handler_dirs.iter()),
-            abs,
-        )
+        route_match(self.router.dirs.iter(), abs)
     }
 
-    /// File routes including object handler files.
+    /// File routes.
     pub(in crate::router) fn file_route(&self, abs: &Path) -> Option<RouteMatch<'_, FileEntry<S>>> {
-        route_match(
-            self.router
-                .files
-                .iter()
-                .chain(self.router.handler_files.iter()),
-            abs,
-        )
+        route_match(self.router.files.iter(), abs)
     }
 
     pub(super) fn object_route(&self, abs: &Path) -> Option<RouteMatch<'_, ObjectEntry<S>>> {
         route_match(self.router.objects.iter(), abs)
     }
 
-    /// Resolve a read path: file route first; then an object anchor at the
-    /// path (representation chosen by the requested content type); then a
-    /// leaf one level under a dir-shaped anchor, where the leaf name
-    /// resolves to a representation (`stem.ext` against the render table)
-    /// before a projected field.
-    pub(super) fn read_route(&self, abs: &Path, content_type: &str) -> Option<ReadRoute<'_, S>> {
+    /// Resolve a read path: file route first; then a leaf one level under
+    /// an object anchor, where the leaf name resolves to a representation
+    /// (`stem.ext` against the render table) before a projected field.
+    pub(super) fn read_route(&self, abs: &Path) -> Option<ReadRoute<'_, S>> {
         if let Some(route) = self.file_route(abs) {
             return Some(ReadRoute::File(route));
         }
 
-        if let Some(route) = self.object_route(abs) {
-            let ct = ContentType::from_mime(content_type).unwrap_or(ContentType::Octet);
-            return Some(ReadRoute::Object {
-                route,
-                target: ObjectReadTarget::Representation(ct),
-            });
-        }
-
         let (parent_abs, leaf) = abs.parent_and_name()?;
         let route = self.object_route(&parent_abs)?;
-        if route.entry.shape != ObjectShape::Dir {
-            return None;
-        }
 
         if let Some(ct) = route.entry.representation_ct_for_leaf(leaf) {
             return Some(ReadRoute::Object {
@@ -162,13 +135,27 @@ impl<S> Shape<'_, S> {
             .exhaustive(exhaustive)
     }
 
-    /// Resolve `name` as a leaf of an object anchored at `parent_abs`;
-    /// not-found when no object is anchored there.
+    /// Resolve `name` against the visible children of an object anchored at
+    /// `parent_abs`; not-found when no object is anchored there.
     pub(super) fn object_leaf_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         let Some(route) = self.object_route(parent_abs) else {
             return Lookup::not_found();
         };
-        route.entry.child_file_lookup(parent_abs, name)
+        let listing = self.object_dir_listing(route.entry, parent_abs, None);
+        let Some(target) = listing
+            .entries()
+            .iter()
+            .find(|entry| entry.name() == name)
+            .cloned()
+        else {
+            return Lookup::not_found();
+        };
+        let siblings = listing
+            .entries()
+            .iter()
+            .filter(|entry| entry.name() != name)
+            .cloned();
+        Lookup::entry(target).with_siblings(siblings)
     }
 
     /// List an auto-navigable literal prefix from the route table alone:
@@ -290,9 +277,7 @@ impl<S> Shape<'_, S> {
         let static_entries = self.static_entries_for_parent(anchor_abs);
         let source_leaf_name = format!("{}.{}", entry.source_stem, entry.source_ext);
         let object_entries = entry.leaves.iter().map(|leaf| {
-            if leaf.is_dir {
-                BrowseEntry::dir(&leaf.name)
-            } else if leaf.name == source_leaf_name
+            if leaf.name == source_leaf_name
                 && let Some(source) = source
             {
                 BrowseEntry::file(&leaf.name, source_leaf_shape(source))
@@ -312,60 +297,8 @@ impl<S> Shape<'_, S> {
 }
 
 impl<S> ObjectEntry<S> {
-    /// Resolve a leaf name against this entry's declared file leaves. For a
-    /// dir-shaped object, `name` must be one of the anchor's file leaves;
-    /// the file-shaped branch instead tests `parent_abs`'s final segment
-    /// against the leaf names.
-    ///
-    /// A dir-shaped match carries the anchor's OTHER leaves as exhaustive
-    /// siblings. The leaf set is statically known (it is the same set
-    /// [`Shape::object_dir_listing`] enumerates), so a single child lookup
-    /// teaches the host the whole directory in one round trip. Omitting the
-    /// siblings while still reporting `exhaustive` (the default) would make the
-    /// host's lookup-hints merge treat the directory as containing only the
-    /// looked-up child, collapsing a later readdir to that one entry.
-    pub(super) fn child_file_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
-        if self.shape == ObjectShape::File {
-            if parent_abs.is_root() {
-                return Lookup::not_found();
-            }
-            let parent_name = parent_abs.name();
-            if self.leaves.iter().any(|leaf| leaf.name == parent_name) {
-                return Lookup::entry(BrowseEntry::file(name, FileProj::listing_shape()));
-            }
-            return Lookup::not_found();
-        }
-        if self.has_file_leaf(name) {
-            return Lookup::entry(BrowseEntry::file(name, FileProj::listing_shape()))
-                .with_siblings(self.sibling_leaves(name));
-        }
-        Lookup::not_found()
-    }
-
-    /// The anchor's leaves other than `target`, as browse entries: the sibling
-    /// set a dir-shaped child lookup carries so the host caches the whole
-    /// (statically known, exhaustive) directory from one lookup. Mirrors the
-    /// leaf-to-entry mapping in [`Shape::object_dir_listing`]; placeholder
-    /// shapes are used because a lookup does not load the canonical, so leaf
-    /// sizes (including the source leaf) resolve at read time.
-    fn sibling_leaves(&self, target: &str) -> Vec<BrowseEntry> {
-        self.leaves
-            .iter()
-            .filter(|leaf| leaf.name != target)
-            .map(|leaf| {
-                if leaf.is_dir {
-                    BrowseEntry::dir(&leaf.name)
-                } else {
-                    BrowseEntry::file(&leaf.name, FileProj::listing_shape())
-                }
-            })
-            .collect()
-    }
-
     fn has_file_leaf(&self, name: &str) -> bool {
-        self.leaves
-            .iter()
-            .any(|leaf| leaf.name == name && !leaf.is_dir)
+        self.leaves.iter().any(|leaf| leaf.name == name)
     }
 
     /// Map a `stem.ext` leaf name back to its representation content type:

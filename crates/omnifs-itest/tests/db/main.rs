@@ -28,7 +28,6 @@ fn db_config(host: &str) -> String {
                 "preopened_paths": [{{ "host": "{host}", "guest": "/data", "mode": "ro" }}]
             }},
             "config": {{
-                "database_type": "sqlite",
                 "path": "/data/chinook.sqlite",
                 "read_only": true,
                 "sample_limit": 20

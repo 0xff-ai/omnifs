@@ -1,5 +1,6 @@
 //! arXiv paper object, representations, and warm projections.
 
+use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -29,19 +30,22 @@ pub struct Paper {
     pub comments: Vec<String>,
 }
 
-impl Representable<Json> for Paper {
-    fn represent(&self) -> Vec<u8> {
-        self.metadata_json_bytes(None)
-            .expect("JSON encode: infallible for json! value")
-    }
-}
-
 impl Paper {
     pub(crate) fn validate_version(&self, version: u32) -> Result<()> {
         if version == 0 || version > self.latest_version {
             return Err(ProviderError::not_found("paper version not found"));
         }
         Ok(())
+    }
+
+    pub(crate) fn metadata_json(&self, key: &PaperVersionKey) -> Result<FileContent> {
+        if let Some(version) = key.version.number() {
+            self.validate_version(version)?;
+        }
+        Ok(
+            FileContent::new(self.metadata_json_bytes(key.version.number())?)
+                .with_content_type(ContentType::Json),
+        )
     }
 
     pub(crate) fn metadata_json_bytes(&self, version: Option<u32>) -> Result<Vec<u8>> {

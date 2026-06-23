@@ -11,7 +11,6 @@ use super::super::pattern::Pattern;
 use crate::browse::{Entry as BrowseEntry, EntryKind as BrowseEntryKind};
 use crate::captures::Captures;
 use crate::file_attrs::FileProj;
-use crate::object::ObjectShape;
 use crate::router::handlers::RouteValidator;
 use omnifs_core::path::Path;
 
@@ -63,9 +62,9 @@ impl<S> Shape<'_, S> {
 
     /// Whether a path is an auto-navigable intermediate directory: not
     /// itself a dir/file/treeref/object route (those answer through their
-    /// own dispatch arms), but a literal directory child its parent's
-    /// static entries advertise. The root qualifies whenever any route at
-    /// all is registered.
+    /// own dispatch arms), but either a concrete path with literal children
+    /// beneath it or a literal directory child its parent's static entries
+    /// advertise. The root qualifies whenever any route at all is registered.
     pub(super) fn is_implicit_prefix_dir(&self, absolute_path: &Path) -> bool {
         if best_match(self.router.dirs.iter(), absolute_path).is_some()
             || best_match(self.router.files.iter(), absolute_path).is_some()
@@ -79,6 +78,9 @@ impl<S> Shape<'_, S> {
                 || !self.router.files.is_empty()
                 || !self.router.treerefs.is_empty()
                 || !self.router.objects.is_empty();
+        }
+        if !self.static_entries_for_parent(absolute_path).is_empty() {
+            return true;
         }
         let Some((parent_abs, name)) = absolute_path.parent_and_name() else {
             return false;
@@ -98,9 +100,8 @@ impl<S> Shape<'_, S> {
             .any(|(pattern, _, _, _)| pattern.has_dynamic_child_after(&parent_segments))
     }
 
-    /// Every route (all kinds, including object handler leaves) whose
-    /// pattern extends strictly below the parent, with the entry kind its
-    /// leaf would have.
+    /// Every route whose pattern extends strictly below the parent, with the
+    /// entry kind its leaf would have.
     fn routes_extending_parent<'a>(
         &'a self,
         parent_segments: &'a [&'a str],
@@ -109,26 +110,22 @@ impl<S> Shape<'_, S> {
             .router
             .dirs
             .iter()
-            .chain(self.router.handler_dirs.iter())
             .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         let files = self
             .router
             .files
             .iter()
-            .chain(self.router.handler_files.iter())
             .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File, r.ranged));
         let treerefs = self
             .router
             .treerefs
             .iter()
             .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
-        let objects = self.router.objects.iter().map(|r| {
-            let kind = match r.shape {
-                ObjectShape::Dir => BrowseEntryKind::Directory,
-                ObjectShape::File => BrowseEntryKind::File,
-            };
-            (&r.pattern, &r.validator, kind, false)
-        });
+        let objects = self
+            .router
+            .objects
+            .iter()
+            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
         dirs.chain(files)
             .chain(treerefs)
             .chain(objects)

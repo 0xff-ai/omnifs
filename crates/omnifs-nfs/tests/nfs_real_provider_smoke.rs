@@ -279,7 +279,6 @@ fn db_mount_json(db_dir: &Path) -> String {
                 ]
             }},
             "config":{{
-                "database_type":"sqlite",
                 "path":"/data/test.db",
                 "read_only":true,
                 "sample_limit":20

@@ -23,7 +23,6 @@ pub struct ProviderArgs {
     metadata_path: Option<LitStr>,
     git: bool,
     memory_mb: Option<u32>,
-    endpoints: Vec<Path>,
     timer: Option<TimerSpec>,
     name: Option<LitStr>,
     version: Option<LitStr>,
@@ -36,7 +35,6 @@ impl Parse for ProviderArgs {
             metadata_path: None,
             git: false,
             memory_mb: None,
-            endpoints: Vec::new(),
             timer: None,
             name: None,
             version: None,
@@ -102,21 +100,10 @@ fn parse_resources(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Re
                 let value: LitInt = content.parse()?;
                 args.memory_mb = Some(value.base10_parse::<u32>()?);
             },
-            "endpoints" => {
-                let _: Token![=] = content.parse()?;
-                let list;
-                syn::bracketed!(list in content);
-                while !list.is_empty() {
-                    args.endpoints.push(list.parse()?);
-                    if list.peek(Token![,]) {
-                        let _: Token![,] = list.parse()?;
-                    }
-                }
-            },
             _ => {
                 return Err(syn::Error::new(
                     key.span(),
-                    "supported resources are `git = <bool>`, `memory_mb = <int>`, and `endpoints = [..]`",
+                    "supported resources are `git = <bool>` and `memory_mb = <int>`",
                 ));
             },
         }
@@ -369,24 +356,6 @@ fn requested_capabilities_tokens(args: &ProviderArgs) -> TokenStream2 {
             max_memory_mb: #memory,
             ..omnifs_sdk::prelude::RequestedCapabilities::empty()
         }
-    }
-}
-
-fn endpoint_assert_tokens(endpoints: &[Path]) -> TokenStream2 {
-    if endpoints.is_empty() {
-        return TokenStream2::new();
-    }
-    let asserts = endpoints
-        .iter()
-        .map(|path| quote! { assert_endpoint::<#path>(); });
-    quote! {
-        // `endpoints = [..]` is a declared-intent list; keep it honest by
-        // statically asserting each names a real `Endpoint`, without any
-        // runtime registration (`cx.endpoint::<E>()` needs none).
-        const _: fn() = || {
-            fn assert_endpoint<E: omnifs_sdk::endpoint::Endpoint>() {}
-            #(#asserts)*
-        };
     }
 }
 
@@ -770,7 +739,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let manifest = read_manifest_facts(&type_name, args.metadata_path.as_ref())?;
     let info_tokens = provider_info_tokens(&type_name, args, &manifest);
     let caps_tokens = requested_capabilities_tokens(args);
-    let endpoint_assert = endpoint_assert_tokens(&args.endpoints);
 
     let state_management = generate_state_management(state_type);
     let lifecycle = generate_lifecycle(
@@ -791,7 +759,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
 
         #state_management
         #metadata_section
-        #endpoint_assert
 
         impl #type_name {
             #(#methods)*

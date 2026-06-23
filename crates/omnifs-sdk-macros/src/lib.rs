@@ -37,10 +37,8 @@ mod provider_macro;
 ///   and supplies the provider name/description (overridable with
 ///   `name = ".."` / `description = ".."`; `version = ".."` overrides the
 ///   crate version).
-/// - `resources(git = <bool>, memory_mb = <int>, endpoints = [TypeA, ..])`:
-///   requested capabilities. `endpoints` is a declared-intent list of
-///   [`Endpoint`](../omnifs_sdk/endpoint/trait.Endpoint.html) types,
-///   statically asserted to implement the trait.
+/// - `resources(git = <bool>, memory_mb = <int>)`: requested capabilities
+///   exported during initialization.
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
 ///   handler `async fn method(cx: Cx<State>) -> Result<Effects>`; the
 ///   interval is exported as the manifest's `refresh-interval-secs`.
@@ -128,8 +126,7 @@ pub fn path_captures(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `rate_limit = "off"` or `rate_limit = "<seconds>"`: the per-authority
 ///   429 breaker policy (default cooldown applies when omitted).
 ///
-/// Use via `cx.endpoint::<MyApi>().get("/path")..` after listing the type
-/// in the provider's `resources(endpoints = [..])`.
+/// Use via `cx.endpoint::<MyApi>().get("/path")..`.
 #[proc_macro_derive(Endpoint, attributes(endpoint))]
 pub fn endpoint_derive(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);

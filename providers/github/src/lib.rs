@@ -57,10 +57,7 @@ impl PathSegment for StateFilter {
     }
 }
 
-#[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
-    resources(endpoints = [api::GitHubApi], git = true),
-)]
+#[omnifs_sdk::provider(metadata = "omnifs.provider.json", resources(git = true))]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/{owner}").handler(OwnerKey::repos)?;
@@ -78,14 +75,20 @@ impl GithubProvider {
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
             o.dynamic();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(Issue::title)?;
-            o.file("body").lazy().project(Issue::body)?;
-            o.file("state").project(Issue::state)?;
-            o.file("user").project(Issue::user)?;
-            o.dir("comments").handler(IssueKey::comments)?;
-            o.file("comments/{idx}").handler(IssueCommentKey::read)?;
+            o.file("title")
+                .project(|value: &Issue, _key| value.title())?;
+            o.file("body")
+                .lazy()
+                .project(|value: &Issue, _key| value.body())?;
+            o.file("state")
+                .project(|value: &Issue, _key| value.state())?;
+            o.file("user").project(|value: &Issue, _key| value.user())?;
             Ok(())
         })?;
+        r.dir("/{owner}/{repo}/issues/{filter}/{number}/comments")
+            .handler(IssueKey::comments)?;
+        r.file("/{owner}/{repo}/issues/{filter}/{number}/comments/{idx}")
+            .handler(IssueCommentKey::read)?;
 
         r.dir("/{owner}/{repo}/pulls")
             .handler(PullsRootKey::filters)?;
@@ -94,15 +97,23 @@ impl GithubProvider {
         r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
             o.dynamic();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(PullRequest::title)?;
-            o.file("body").lazy().project(PullRequest::body)?;
-            o.file("state").project(PullRequest::state)?;
-            o.file("user").project(PullRequest::user)?;
-            o.dir("comments").handler(PullKey::comments)?;
-            o.file("comments/{idx}").handler(PullCommentKey::read)?;
-            o.file("diff").handler(PullKey::diff)?;
+            o.file("title")
+                .project(|value: &PullRequest, _key| value.title())?;
+            o.file("body")
+                .lazy()
+                .project(|value: &PullRequest, _key| value.body())?;
+            o.file("state")
+                .project(|value: &PullRequest, _key| value.state())?;
+            o.file("user")
+                .project(|value: &PullRequest, _key| value.user())?;
             Ok(())
         })?;
+        r.dir("/{owner}/{repo}/pulls/{filter}/{number}/comments")
+            .handler(PullKey::comments)?;
+        r.file("/{owner}/{repo}/pulls/{filter}/{number}/comments/{idx}")
+            .handler(PullCommentKey::read)?;
+        r.file("/{owner}/{repo}/pulls/{filter}/{number}/diff")
+            .handler(PullKey::diff)?;
 
         r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
 
@@ -111,11 +122,14 @@ impl GithubProvider {
         r.object::<Run>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
             o.dynamic();
             o.representations("run", ())?;
-            o.file("status").project(Run::status)?;
-            o.file("conclusion").project(Run::conclusion)?;
-            o.file("log").handler(RunKey::log)?;
+            o.file("status")
+                .project(|value: &Run, _key| value.status())?;
+            o.file("conclusion")
+                .project(|value: &Run, _key| value.conclusion())?;
             Ok(())
         })?;
+        r.file("/{owner}/{repo}/actions/runs/{run_id}/log")
+            .handler(RunKey::log)?;
 
         Ok(())
     }

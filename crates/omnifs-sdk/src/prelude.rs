@@ -22,12 +22,9 @@ pub use crate::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectKind, ProjectFn, Validator,
 };
 pub use crate::projection::{DirProjection, Entry, FileProjection};
-pub use crate::repr::{
-    Atom, Diff, Format, Html, Json, Markdown, Octet, RenderSet, RenderTable, Representable, Yaml,
-};
+pub use crate::repr::{Atom, Format, Json, Markdown, RenderSet, RenderTable, Representable, Yaml};
 pub use crate::router::{
-    DirObjectBlock, DirRoute, FileObjectBlock, FileRoute, ObjectHandle, RouteHandle, Router,
-    TreeRefRoute, object,
+    DirObjectBlock, DirRoute, FileRoute, ObjectHandle, Router, TreeRefRoute, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

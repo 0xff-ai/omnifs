@@ -139,10 +139,7 @@ struct IssueKey {
     ident: IssueIdent,
 }
 
-#[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
-    resources(endpoints = [LinearApi]),
-)]
+#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/teams").handler(teams_list)?;
@@ -153,13 +150,17 @@ impl LinearProvider {
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
             o.dynamic();
             o.representations("item", (Markdown,))?;
-            o.file("title").project(Issue::title)?;
-            o.file("state").project(Issue::state)?;
-            o.file("priority").project(Issue::priority)?;
-            o.file("assignee").project(Issue::assignee)?;
+            o.file("title")
+                .project(|value: &Issue, _key| value.title())?;
+            o.file("state")
+                .project(|value: &Issue, _key| value.state())?;
+            o.file("priority")
+                .project(|value: &Issue, _key| value.priority())?;
+            o.file("assignee")
+                .project(|value: &Issue, _key| value.assignee())?;
             o.file("description.md")
                 .lazy()
-                .project(Issue::description)?;
+                .project(|value: &Issue, _key| value.description())?;
             Ok(())
         })?;
         Ok(())

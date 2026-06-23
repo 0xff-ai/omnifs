@@ -269,7 +269,7 @@ mod tests {
                 &format!(
                     r#"{{
                     "mount": "db",
-                    "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}},
+                    "config": {{"path": "/data/chinook.sqlite"}},
                     "capabilities": {{
                         "preopened_paths": [
                             {{"host": "{}", "guest": "/data", "mode": "ro"}}
@@ -308,7 +308,7 @@ mod tests {
             name: MountName::try_from("db").unwrap(),
             config: spec_with_provider(
                 "db",
-                r#"{ "mount": "db", "config": {"database_type": "sqlite", "path": "/data/test.db"} }"#,
+                r#"{ "mount": "db", "config": {"path": "/data/test.db"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };

@@ -17,15 +17,9 @@
   ],
   "configSchema": {
     "type": "object",
-    "required": ["database_type", "path"],
+    "required": ["path"],
     "additionalProperties": false,
     "properties": {
-      "database_type": {
-        "type": "string",
-        "enum": ["sqlite"],
-        "default": "sqlite",
-        "description": "Database type"
-      },
       "path": {
         "type": "string",
         "default": "/data/test.db",

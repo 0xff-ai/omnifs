@@ -410,7 +410,6 @@ mod tests {
         std::fs::write(&db, "").unwrap();
         let manifest = provider_manifest();
         let mut config = serde_json::json!({
-            "database_type": "sqlite",
             "path": "/data/test.db",
             "read_only": true
         });

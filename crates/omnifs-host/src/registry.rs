@@ -869,7 +869,7 @@ mod tests {
                 r#"{{
                 "provider": {{ "id": "{missing_id}", "meta": {{ "name": "db" }} }},
                 "mount": "db",
-                "config": {{"database_type": "sqlite", "path": "/data/chinook.sqlite"}}
+                "config": {{"path": "/data/chinook.sqlite"}}
             }}"#
             ),
         )

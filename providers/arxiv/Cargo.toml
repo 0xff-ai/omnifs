@@ -17,7 +17,6 @@ default-target = "wasm32-wasip2"
 targets = []
 
 [dependencies]
-hashbrown = { workspace = true }
 omnifs-sdk = { workspace = true }
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }

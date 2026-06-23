@@ -75,7 +75,6 @@ token, so a sample of any size is served through one ranged session.
     ]
   },
   "config": {
-    "database_type": "sqlite",
     "path": "/data/test.db",
     "read_only": true,
     "sample_limit": 20
@@ -129,7 +128,7 @@ calling `cargo build --target wasm32-wasip2`.
 - Per-row paths (`rows/{pk}/...`); needs design for composite,
   non-integer, and missing-PK tables.
 - PostgreSQL backend (a network callout, plus a connection-pool
-  story). The `database_type` discriminator is already in place.
+  story).
 - Write paths. Read-only is the only flow exercised; the `read_only:
   false` escape hatch exists but is mostly there for journal-mode
   quirks.

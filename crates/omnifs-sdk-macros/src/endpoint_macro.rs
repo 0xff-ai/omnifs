@@ -4,6 +4,21 @@ use syn::spanned::Spanned;
 
 pub(crate) fn endpoint_derive_impl(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let type_name = &input.ident;
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "Endpoint can only be derived for a non-generic unit struct",
+        ));
+    }
+    match &input.data {
+        syn::Data::Struct(data) if matches!(data.fields, syn::Fields::Unit) => {},
+        _ => {
+            return Err(syn::Error::new(
+                input.span(),
+                "Endpoint can only be derived for a unit struct",
+            ));
+        },
+    }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let mut base: Option<String> = None;
@@ -107,6 +122,8 @@ pub(crate) fn endpoint_derive_impl(input: &syn::DeriveInput) -> syn::Result<Toke
     });
 
     Ok(quote! {
+        const _: #type_name = #type_name;
+
         impl #impl_generics omnifs_sdk::endpoint::Endpoint for #type_name #ty_generics #where_clause {
             fn base() -> &'static str {
                 #base_url
