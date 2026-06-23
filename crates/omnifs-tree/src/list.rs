@@ -15,16 +15,16 @@
 //!   controls and the mount-root ignore files as renderer-neutral synthetic
 //!   entries).
 //!
-//! A first-page browse listing (`cursor = None`) carries the synthetic entries
-//! (controls + ignore files) in `Listing::synthetic`; an explicit-cursor
-//! continuation (`cursor = Some`) is a raw page drain with no synthetic entries,
-//! so a renderer that flattens a dynamic dir into a finite snapshot (NFS) drives
-//! the cursor forward over raw provider pages.
+//! A first-page browse listing (`cursor = None`) carries synthetic entries
+//! (controls + ignore files) in `Listing::entries` with `EntryOrigin::Synthetic`;
+//! an explicit-cursor continuation (`cursor = Some`) is a raw page drain with no
+//! synthetic entries, so a renderer that flattens a dynamic dir into a finite
+//! snapshot (NFS) drives the cursor forward over raw provider pages.
 
 use std::path::PathBuf;
 
 use omnifs_cache::{Record as CacheRecord, RecordKind};
-use omnifs_core::view::{CachedCursor, DirentRecord, DirentsPayload};
+use omnifs_core::view::{CachedCursor, DirentRecord, DirentsPayload, EntryMeta};
 use omnifs_host::wit_protocol::{
     cached_cursor_from_wit, cached_cursor_to_wit, entry_meta_from_kind,
 };
@@ -33,7 +33,7 @@ use omnifs_wit::provider::types::{self as wit_types, ErrorKind};
 use tracing::warn;
 
 use crate::error::{Result, TreeError};
-use crate::node::{Entry, Node};
+use crate::node::{Entry, Node, PaginationControl, Synthetic};
 use crate::synthetic;
 use crate::{RequestCtx, Tree};
 
@@ -48,18 +48,15 @@ pub struct Cursor(pub CachedCursor);
 /// finite snapshot, and lookup stays the authoritative name oracle (readdir may
 /// be non-exhaustive). `next_cursor` drives pagination through `Tree`.
 ///
-/// `entries` are the provider-projected children (with reserved-`@` names
-/// already dropped). `synthetic` are the host-synthesized entries `Tree` appends
-/// to a first-page browse listing: the `@next`/`@all` pagination controls when
-/// the listing carries a resume cursor, and the mount-root ignore files at the
-/// mount root. Every renderer materializes `synthetic` identically (a browse
-/// renderer like FUSE appends them to its snapshot; a flatten renderer like NFS
-/// can present them the same way). A continuation page (`cursor = Some`) leaves
-/// `synthetic` empty.
+/// `entries` contains both provider-projected children (with reserved-`@` names
+/// already dropped) and host-synthesized entries tagged with `EntryOrigin::Synthetic`:
+/// the `@next`/`@all` pagination controls when the listing carries a resume
+/// cursor, and the mount-root ignore files at the mount root. Every renderer
+/// materializes them identically. A continuation page (`cursor = Some`) returns
+/// only provider entries.
 #[derive(Debug, Clone)]
 pub struct Listing {
     pub entries: Vec<Entry>,
-    pub synthetic: Vec<Entry>,
     pub exhaustive: bool,
     pub next_cursor: Option<Cursor>,
 }
@@ -76,7 +73,7 @@ pub enum ListOutcome {
 impl Tree {
     /// List a directory node. `cursor = None` starts a first-page browse listing
     /// (coalesced, cache-consulted, and carrying the host-synthesized control /
-    /// ignore entries in `Listing::synthetic`); `Some(cursor)` continues
+    /// ignore entries as synthetic `Entry` origins); `Some(cursor)` continues
     /// pagination as a raw page drain. Returns `ListOutcome::Listing` or
     /// `ListOutcome::Subtree(backing_dir)`.
     pub async fn list(
@@ -85,8 +82,22 @@ impl Tree {
         cursor: Option<Cursor>,
         ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
-        if let crate::node::Backing::Subtree(dir) = node.backing() {
+        if let Some(dir) = node.subtree_path() {
             return Ok(ListOutcome::Subtree(dir.clone()));
+        }
+
+        if self.is_mount_enumeration_root(node.mount(), node.path()) {
+            let entries = self
+                .mount_names()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mount| Entry::provider(mount, EntryMeta::directory()))
+                .collect();
+            return Ok(ListOutcome::Listing(Listing {
+                entries,
+                exhaustive: true,
+                next_cursor: None,
+            }));
         }
 
         let runtime = self.runtime_for(node.mount())?;
@@ -130,7 +141,6 @@ impl Tree {
         match result {
             wit_types::ListChildrenResult::Entries(listing) => Ok(Listing {
                 entries: provider_entries(&listing.entries),
-                synthetic: Vec::new(),
                 exhaustive: listing.exhaustive && listing.next_cursor.is_none(),
                 next_cursor: listing
                     .next_cursor
@@ -140,7 +150,6 @@ impl Tree {
             // stable; treat it as exhausted with no further entries.
             wit_types::ListChildrenResult::Unchanged => Ok(Listing {
                 entries: Vec::new(),
-                synthetic: Vec::new(),
                 exhaustive: true,
                 next_cursor: None,
             }),
@@ -272,14 +281,13 @@ fn snapshot_from_provider_listing(
         runtime.cache_put(path, RecordKind::Dirents, None, &record);
     }
 
-    let entries: Vec<Entry> = dirent_records
+    let mut entries: Vec<Entry> = dirent_records
         .into_iter()
         .map(|r| Entry::provider(r.name, r.meta))
         .collect();
-    let synthetic_entries = synthetic_entries_for(node, paginated, &entries);
+    entries.extend(synthetic_entries_for(node, paginated, &entries));
     Listing {
         entries,
-        synthetic: synthetic_entries,
         exhaustive: dirents_payload.exhaustive,
         next_cursor: next_cursor.map(Cursor),
     }
@@ -291,10 +299,10 @@ fn snapshot_from_provider_listing(
 fn synthetic_entries_for(node: &Node, paginated: bool, provider_entries: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
     if paginated {
-        out.extend(synthetic::control_entries());
+        out.extend(PaginationControl::entries());
     }
-    if synthetic::is_mount_root(node.path()) {
-        out.extend(synthetic::root_ignore_entries(provider_entries));
+    if node.path().is_root() {
+        out.extend(Synthetic::root_ignore_entries(provider_entries));
     }
     out
 }
@@ -318,7 +326,7 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     for record in &dirents.entries {
         if synthetic::is_reserved_provider_leaf(&record.name) {
             // A persisted control record; surfaced as a synthetic entry below.
-            if synthetic::control_action(&record.name).is_some() {
+            if PaginationControl::from_name(&record.name).is_some() {
                 has_control = true;
             }
             continue;
@@ -331,15 +339,15 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload) -> Listing {
     // record still carrying a control (a resume cursor remains, or the persisted
     // control records are present for an in-progress accumulation).
     if has_control || dirents.next_cursor.is_some() {
-        synthetic_entries.extend(synthetic::control_entries());
+        synthetic_entries.extend(PaginationControl::entries());
     }
-    if synthetic::is_mount_root(node.path()) {
-        synthetic_entries.extend(synthetic::root_ignore_entries(&entries));
+    if node.path().is_root() {
+        synthetic_entries.extend(Synthetic::root_ignore_entries(&entries));
     }
+    entries.extend(synthetic_entries);
 
     Listing {
         entries,
-        synthetic: synthetic_entries,
         exhaustive: dirents.exhaustive,
         next_cursor: dirents.next_cursor.clone().map(Cursor),
     }

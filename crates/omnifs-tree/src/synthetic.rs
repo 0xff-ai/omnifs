@@ -15,7 +15,7 @@
 //! exactly one place and the FUSE/NFS copies collapse onto it.
 
 use omnifs_core::path::Path;
-use omnifs_core::view::{ByteSource, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
+use omnifs_core::view::{EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
 use omnifs_host::Runtime;
 use omnifs_host::pagination::{
     self, CTRL_ALL, CTRL_NEXT, IGNORE_CONTENT, IGNORE_FILES, is_control_name, is_ignore_name,
@@ -23,71 +23,83 @@ use omnifs_host::pagination::{
 
 use crate::node::{Entry, PaginationControl, Synthetic, SyntheticContent};
 
-/// True when `path` is the mount root (the only directory where ignore files are
-/// synthesized). Mount-relative paths are rooted at `/`.
-pub(crate) fn is_mount_root(path: &Path) -> bool {
-    path.is_root()
-}
-
-/// Live-file `EntryMeta` for a synthetic mount-root ignore file. Its size is
-/// exact (the ignore content is fixed) so `ls -l`/`cat` report the right length
-/// without a learned-size round trip. Mirrors the FUSE `root_ignore_meta`.
-pub(crate) fn root_ignore_meta() -> EntryMeta {
-    EntryMeta::file(FileAttrsCache {
-        size: FileSize::Exact(IGNORE_CONTENT.len() as u64),
-        bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: Stability::Live,
-        version_token: None,
-    })
-}
-
-/// The synthetic descriptor for an ignore file: its fixed bytes.
-pub(crate) fn root_ignore_synthetic() -> Synthetic {
-    Synthetic {
-        content: SyntheticContent::Fixed(IGNORE_CONTENT.as_bytes().to_vec()),
+impl PaginationControl {
+    /// Map a control name to its pagination action. `None` for any other name.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            CTRL_NEXT => Some(Self::Next),
+            CTRL_ALL => Some(Self::All),
+            _ => None,
+        }
     }
-}
 
-/// Map a control name to its pagination action. `None` for any other name.
-pub(crate) fn control_action(name: &str) -> Option<PaginationControl> {
-    match name {
-        CTRL_NEXT => Some(PaginationControl::Next),
-        CTRL_ALL => Some(PaginationControl::All),
-        _ => None,
-    }
-}
-
-/// The two pagination-control `Entry`s a paged directory's listing carries.
-/// Reuses the host `Runtime::control_entries` dirent records (the same `@next`/
-/// `@all` names and `control_entry_meta`) so the control surface is identical to
-/// what the host accumulates into the cached dirents.
-pub(crate) fn control_entries() -> Vec<Entry> {
-    Runtime::control_entries()
-        .into_iter()
-        .filter_map(|record| {
-            control_action(&record.name).map(|action| Entry {
-                name: record.name,
-                meta: record.meta,
-                synthetic: Some(Synthetic {
-                    content: SyntheticContent::PaginationControl(action),
-                }),
+    /// The two pagination-control `Entry`s a paged directory's listing carries.
+    /// Reuses the host `Runtime::control_entries` dirent records (the same
+    /// `@next`/`@all` names and `control_entry_meta`) so the control surface is
+    /// identical to what the host accumulates into cached dirents.
+    pub(crate) fn entries() -> Vec<Entry> {
+        Runtime::control_entries()
+            .into_iter()
+            .filter_map(|record| {
+                Self::from_name(&record.name).map(|action| {
+                    Entry::synthetic(
+                        record.name,
+                        record.meta,
+                        Synthetic::pagination_control(action),
+                    )
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
-/// The mount-root ignore `Entry`s to append to a root listing, skipping any name
-/// the provider already projects (a real `.gitignore` wins and is NOT shadowed).
-pub(crate) fn root_ignore_entries(existing: &[Entry]) -> Vec<Entry> {
-    IGNORE_FILES
-        .iter()
-        .filter(|name| !existing.iter().any(|e| &e.name == *name))
-        .map(|name| Entry {
-            name: (*name).to_string(),
-            meta: root_ignore_meta(),
-            synthetic: Some(root_ignore_synthetic()),
-        })
-        .collect()
+impl Synthetic {
+    /// File `EntryMeta` for a synthetic mount-root ignore file. Its size is
+    /// exact (the ignore content is fixed) so `ls -l`/`cat` report the right
+    /// length without a learned-size round trip.
+    fn root_ignore_meta() -> EntryMeta {
+        EntryMeta::file(
+            FileAttrsCache::deferred(
+                FileSize::Exact(IGNORE_CONTENT.len() as u64),
+                ReadMode::Full,
+                Stability::Stable,
+                None,
+            )
+            .expect("root ignore attrs are valid"),
+        )
+    }
+
+    /// The synthetic descriptor for an ignore file: its fixed bytes.
+    fn root_ignore() -> Self {
+        Self {
+            content: SyntheticContent::Fixed(IGNORE_CONTENT.as_bytes().to_vec()),
+        }
+    }
+
+    fn pagination_control(action: PaginationControl) -> Self {
+        Self {
+            content: SyntheticContent::PaginationControl(action),
+        }
+    }
+
+    fn root_ignore_entry(name: &str) -> Entry {
+        Entry::synthetic(
+            name.to_string(),
+            Self::root_ignore_meta(),
+            Self::root_ignore(),
+        )
+    }
+
+    /// The mount-root ignore `Entry`s to append to a root listing, skipping any
+    /// name the provider already projects (a real `.gitignore` wins and is NOT
+    /// shadowed).
+    pub(crate) fn root_ignore_entries(existing: &[Entry]) -> Vec<Entry> {
+        IGNORE_FILES
+            .iter()
+            .filter(|name| !existing.iter().any(|e| &e.name == *name))
+            .map(|name| Self::root_ignore_entry(name))
+            .collect()
+    }
 }
 
 /// Resolve a synthetic child by name against its parent. Returns the
@@ -111,22 +123,17 @@ pub(crate) fn resolve_synthetic_child(
     provider_has_real: bool,
 ) -> Option<(EntryMeta, Synthetic)> {
     if is_control_name(name) {
-        let action = control_action(name)?;
+        let action = PaginationControl::from_name(name)?;
         // A control resolves only while the parent's accumulated dirents still
         // carry it (a resume cursor remains). Probe the view cache for the
         // control dirent; absent => the feed is exhausted and the control is
         // gone, so the caller surfaces NotFound.
         let dirent = cached_control_dirent(runtime, parent, name)?;
-        return Some((
-            dirent.meta,
-            Synthetic {
-                content: SyntheticContent::PaginationControl(action),
-            },
-        ));
+        return Some((dirent.meta, Synthetic::pagination_control(action)));
     }
 
-    if is_ignore_name(name) && is_mount_root(parent) && !provider_has_real {
-        return Some((root_ignore_meta(), root_ignore_synthetic()));
+    if is_ignore_name(name) && parent.is_root() && !provider_has_real {
+        return Some((Synthetic::root_ignore_meta(), Synthetic::root_ignore()));
     }
 
     None

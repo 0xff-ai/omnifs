@@ -4,12 +4,11 @@
 //! deduplication and stale entry updates.
 
 use crate::Frontend;
+use crate::common::InodeBody;
 use fuser::{FileAttr, FileType, INodeNo};
 use omnifs_core::path::Path;
-use omnifs_core::view::{EntryMeta, FileAttrsCache};
+use omnifs_core::view::{EntryKind, EntryMeta, FileAttrsCache};
 use omnifs_host::path_key::PathKey;
-use omnifs_host::wit_protocol;
-use omnifs_wit::provider::types as wit_types;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -32,27 +31,30 @@ fn current_gid() -> u32 {
 pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
     pub(crate) path: Path,
-    pub(crate) kind: wit_types::EntryKind,
+    pub(crate) kind: EntryKind,
     pub(crate) attrs: Option<FileAttrsCache>,
     pub(crate) size: u64,
-    /// When set, FUSE operations for this inode serve directly from the backing
-    /// filesystem instead of routing through the Wasm provider.
-    pub(crate) backing_path: Option<PathBuf>,
-    /// When set, this inode is a host-synthesized mount-root ignore file
-    /// (`.gitignore`/`.ignore`/`.rgignore`). `open` serves its fixed content
-    /// from a per-`fh` buffer instead of calling the provider. A real provider
-    /// file of the same name is never marked synthetic, so it reads normally.
-    pub(crate) synthetic: bool,
+    pub(crate) body: InodeBody,
 }
 
 impl NodeEntry {
+    pub(crate) fn meta(&self) -> EntryMeta {
+        match self.kind {
+            EntryKind::Directory => EntryMeta::directory(),
+            EntryKind::File => match self.attrs.clone() {
+                Some(attrs) => EntryMeta::file(attrs),
+                None => EntryMeta::file_without_attrs(),
+            },
+        }
+    }
+
     fn refresh(
         &mut self,
-        incoming_kind: wit_types::EntryKind,
+        incoming_kind: EntryKind,
         incoming_attrs: Option<&FileAttrsCache>,
         fallback_size: u64,
     ) {
-        let attrs = self.refreshed_attrs(&incoming_kind, incoming_attrs);
+        let attrs = self.refreshed_attrs(incoming_kind, incoming_attrs);
         let size = attrs
             .as_ref()
             .map_or(fallback_size, FileAttrsCache::st_size);
@@ -64,7 +66,7 @@ impl NodeEntry {
 
     fn refreshed_attrs(
         &self,
-        incoming_kind: &wit_types::EntryKind,
+        incoming_kind: EntryKind,
         incoming_attrs: Option<&FileAttrsCache>,
     ) -> Option<FileAttrsCache> {
         match (self.attrs.as_ref(), incoming_attrs) {
@@ -84,8 +86,8 @@ impl NodeEntry {
             // so a stale value here never reaches them.
             (Some(existing), None)
                 if matches!(
-                    (&self.kind, incoming_kind),
-                    (wit_types::EntryKind::File(_), wit_types::EntryKind::File(_))
+                    (self.kind, incoming_kind),
+                    (EntryKind::File, EntryKind::File)
                 ) =>
             {
                 Some(existing.clone())
@@ -95,58 +97,51 @@ impl NodeEntry {
     }
 }
 
-/// What the caller knows about an inode allocation, which drives how the
-/// `synthetic` flag is updated on an existing (refreshed) inode.
+/// What the caller knows about an inode allocation, which drives how the inode
+/// body is updated on an existing node.
 ///
-/// The flag is set-once-true by [`NodeOrigin::Synthetic`] and cleared by a
-/// genuine resolution of a real node ([`NodeOrigin::Provider`] or
-/// [`NodeOrigin::Backing`]); a [`NodeOrigin::Refresh`] (cache-driven re-touch
-/// that does not authoritatively know the origin) leaves it unchanged, so a
-/// stale dirents/control refresh can never silently demote a still-synthetic
-/// node, while a real provider file of the same name still wins.
+/// A genuine resolution sets the concrete body. The test-only refresh path
+/// leaves the existing body untouched, proving a cache-driven re-touch does not
+/// silently demote a still-synthetic node.
 pub(crate) enum NodeOrigin {
     /// A cache-driven refresh (cached dirents/control replay) that does not
-    /// assert the node's origin. Leaves `synthetic` unchanged on an existing
-    /// inode; defaults to non-synthetic on first insert.
+    /// assert the node's origin. Leaves the body unchanged on an existing inode;
+    /// defaults to provider on first insert.
+    #[cfg(test)]
     Refresh,
-    /// A genuine provider resolution proved a real node at this path. Clears
-    /// `synthetic` (a real provider file wins over a host-synthesized one).
+    /// A genuine provider resolution proved a real node at this path.
     Provider,
-    /// Passthrough to a real backing-filesystem file. Clears `synthetic`.
+    /// Passthrough to a real backing-filesystem file.
     Backing(PathBuf),
-    /// Host-synthesized node (a mount-root ignore file). Sets `synthetic`.
+    /// Host-synthesized node (a mount-root ignore file).
     Synthetic,
 }
 
-/// How an inode refresh updates the `synthetic` flag of an existing node.
-enum SyntheticUpdate {
-    /// Set `synthetic = true` (host synthesis).
-    Set,
-    /// Set `synthetic = false` (a real node resolved here).
-    Clear,
-    /// Leave the existing `synthetic` flag untouched (origin-agnostic refresh).
+/// How an inode refresh updates the body of an existing node.
+enum BodyUpdate {
+    Set(InodeBody),
+    #[cfg(test)]
     Keep,
 }
 
 impl NodeOrigin {
-    fn backing_path(&self) -> Option<&PathBuf> {
+    fn body_on_insert(&self) -> InodeBody {
         match self {
-            NodeOrigin::Backing(path) => Some(path),
-            NodeOrigin::Refresh | NodeOrigin::Provider | NodeOrigin::Synthetic => None,
+            #[cfg(test)]
+            NodeOrigin::Refresh => InodeBody::Provider,
+            NodeOrigin::Provider => InodeBody::Provider,
+            NodeOrigin::Backing(path) => InodeBody::Backing(path.clone()),
+            NodeOrigin::Synthetic => InodeBody::Synthetic,
         }
     }
 
-    /// How a fresh insert should initialize `synthetic`.
-    fn synthetic_on_insert(&self) -> bool {
-        matches!(self, NodeOrigin::Synthetic)
-    }
-
-    /// How a refresh of an existing inode should update `synthetic`.
-    fn synthetic_update(&self) -> SyntheticUpdate {
+    fn body_update(&self) -> BodyUpdate {
         match self {
-            NodeOrigin::Synthetic => SyntheticUpdate::Set,
-            NodeOrigin::Provider | NodeOrigin::Backing(_) => SyntheticUpdate::Clear,
-            NodeOrigin::Refresh => SyntheticUpdate::Keep,
+            #[cfg(test)]
+            NodeOrigin::Refresh => BodyUpdate::Keep,
+            NodeOrigin::Provider => BodyUpdate::Set(InodeBody::Provider),
+            NodeOrigin::Backing(path) => BodyUpdate::Set(InodeBody::Backing(path.clone())),
+            NodeOrigin::Synthetic => BodyUpdate::Set(InodeBody::Synthetic),
         }
     }
 }
@@ -160,11 +155,12 @@ impl Frontend {
         self.next_fh.fetch_add(1, Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_or_alloc_ino(
         &self,
         mount_name: &str,
         path: &Path,
-        kind: wit_types::EntryKind,
+        kind: EntryKind,
         size: u64,
     ) -> u64 {
         self.get_or_alloc_ino_inner(mount_name, path, kind, None, size, &NodeOrigin::Refresh)
@@ -188,15 +184,9 @@ impl Frontend {
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
-        let kind = wit_protocol::entry_kind_to_wit(&meta.kind);
-        self.get_or_alloc_ino_inner(
-            mount_name,
-            path,
-            kind,
-            meta.attrs,
-            size,
-            &NodeOrigin::Refresh,
-        )
+        let kind = meta.kind();
+        let attrs = meta.into_attrs();
+        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Refresh)
     }
 
     /// Allocate (or refresh) an inode for a node a provider lookup/listing just
@@ -210,22 +200,16 @@ impl Frontend {
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
-        let kind = wit_protocol::entry_kind_to_wit(&meta.kind);
-        self.get_or_alloc_ino_inner(
-            mount_name,
-            path,
-            kind,
-            meta.attrs,
-            size,
-            &NodeOrigin::Provider,
-        )
+        let kind = meta.kind();
+        let attrs = meta.into_attrs();
+        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Provider)
     }
 
     pub(crate) fn get_or_alloc_ino_backing(
         &self,
         mount_name: &str,
         path: &Path,
-        kind: wit_types::EntryKind,
+        kind: EntryKind,
         size: u64,
         backing_path: PathBuf,
     ) -> u64 {
@@ -249,22 +233,16 @@ impl Frontend {
         meta: EntryMeta,
     ) -> u64 {
         let size = meta.st_size();
-        let kind = wit_protocol::entry_kind_to_wit(&meta.kind);
-        self.get_or_alloc_ino_inner(
-            mount_name,
-            path,
-            kind,
-            meta.attrs,
-            size,
-            &NodeOrigin::Synthetic,
-        )
+        let kind = meta.kind();
+        let attrs = meta.into_attrs();
+        self.get_or_alloc_ino_inner(mount_name, path, kind, attrs, size, &NodeOrigin::Synthetic)
     }
 
     fn get_or_alloc_ino_inner(
         &self,
         mount_name: &str,
         path: &Path,
-        kind: wit_types::EntryKind,
+        kind: EntryKind,
         attrs: Option<FileAttrsCache>,
         size: u64,
         origin: &NodeOrigin,
@@ -274,28 +252,22 @@ impl Frontend {
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
         let incoming_attrs = attrs;
-        let synthetic_on_insert = origin.synthetic_on_insert();
-        let synthetic_update = origin.synthetic_update();
-        let backing_path = origin.backing_path();
+        let body_on_insert = origin.body_on_insert();
+        let body_update = origin.body_update();
         *self
             .path_to_inode
             .entry(key)
             .and_modify(|existing_ino| {
                 if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
-                    entry.refresh(kind.clone(), incoming_attrs.as_ref(), size);
-                    // A genuine provider/backing resolution (Clear) overrides a
-                    // prior synthetic marker, so a `.gitignore` that later
-                    // appears in the provider stops being host-synthesized. An
-                    // origin-agnostic refresh (Keep) must NOT flip the flag: a
-                    // cached dirents/control replay can't demote a still-
-                    // synthetic node.
-                    match synthetic_update {
-                        SyntheticUpdate::Set => entry.synthetic = true,
-                        SyntheticUpdate::Clear => entry.synthetic = false,
-                        SyntheticUpdate::Keep => {},
-                    }
-                    if let Some(backing_path) = backing_path {
-                        entry.backing_path = Some(backing_path.clone());
+                    entry.refresh(kind, incoming_attrs.as_ref(), size);
+                    // A genuine resolution overrides the prior body, so a
+                    // `.gitignore` that later appears in the provider stops
+                    // being host-synthesized. An origin-agnostic refresh must
+                    // not demote a still-synthetic node.
+                    match &body_update {
+                        BodyUpdate::Set(body) => entry.body = body.clone(),
+                        #[cfg(test)]
+                        BodyUpdate::Keep => {},
                     }
                 }
             })
@@ -309,8 +281,7 @@ impl Frontend {
                         kind,
                         attrs: incoming_attrs.clone(),
                         size,
-                        backing_path: backing_path.cloned(),
-                        synthetic: synthetic_on_insert,
+                        body: body_on_insert.clone(),
                     },
                 );
                 ino
@@ -398,7 +369,6 @@ impl Frontend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::file_kind_placeholder;
     use omnifs_core::view as view_types;
 
     fn attrs(size: view_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
@@ -410,12 +380,13 @@ mod tests {
         stability: view_types::Stability,
         version_token: Option<&str>,
     ) -> FileAttrsCache {
-        FileAttrsCache {
+        FileAttrsCache::deferred(
             size,
-            bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
+            view_types::ReadMode::Full,
             stability,
-            version_token: version_token.map(str::to_string),
-        }
+            version_token.map(str::to_string),
+        )
+        .expect("test attrs are valid")
     }
 
     fn file_entry(attrs: FileAttrsCache) -> NodeEntry {
@@ -423,16 +394,15 @@ mod tests {
         NodeEntry {
             mount_name: "test".to_string(),
             path: Path::parse("/hello/fresh-full").unwrap(),
-            kind: file_kind_placeholder(),
+            kind: EntryKind::File,
             attrs: Some(attrs),
             size,
-            backing_path: None,
-            synthetic: false,
+            body: InodeBody::Provider,
         }
     }
 
     fn refresh_file(entry: &mut NodeEntry, incoming: &FileAttrsCache) {
-        entry.refresh(file_kind_placeholder(), Some(incoming), incoming.st_size());
+        entry.refresh(EntryKind::File, Some(incoming), incoming.st_size());
     }
 
     struct RefreshCase {

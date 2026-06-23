@@ -138,14 +138,16 @@ NFS-specific attr rules:
 - Unsupported backing types such as sockets, devices, and FIFOs are rejected
   rather than treated as regular files.
 
-For `Size::NonZero` and `Size::Unknown` full-deferred files, NFS materializes
-on open, publishes the learned exact size before post-open attrs, and serves
-the first read from open state. For ranged files, NFS opens a provider ranged
-handle and reads chunks through `read-chunk`; EOF can promote a learned size
-when the file is non-volatile and the provider proves the observation complete.
+For `Size::NonZero` and `Size::Unknown` full-deferred files, NFS asks
+`omnifs-tree` to materialize on open, so learned exact size publication uses
+the same file-attribute policy as FUSE. For ranged files, NFS opens a
+Tree-owned ranged handle and reads chunks through `read-chunk`; EOF can promote
+a learned size when the file is non-volatile and the provider proves the
+observation complete.
 
 Cached non-exact dirents do not downgrade a learned exact size for the same
-stability, byte mode, and version identity.
+file unless they carry a different explicit version token or their own exact
+size.
 
 ## Cache and invalidation
 
@@ -160,7 +162,6 @@ prefixes evict:
 
 - NFS path-to-object entries.
 - Object records.
-- Expected negative-probe cache entries.
 - Full open-state snapshots.
 - Ranged provider handles.
 

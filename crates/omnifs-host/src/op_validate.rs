@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::op::Op;
 use crate::object_id::ObjectId;
-use crate::wit_protocol::{file_attrs_from_attrs, file_attrs_from_file_out};
+use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
 use omnifs_core::path::Path;
 use omnifs_core::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
 use omnifs_wit::provider::types as wit_types;
@@ -232,7 +232,7 @@ where
     }
 
     fn file_out(&mut self, file: &wit_types::FileOut) -> std::result::Result<(), String> {
-        let attrs = file_attrs_from_file_out(file);
+        let attrs = try_file_attrs_from_file_out(file)?;
         attrs.validate()?;
         self.add_eager_bytes(attrs.eager_byte_len())
     }
@@ -244,7 +244,7 @@ where
         Self::file_attrs_metadata(&result.attrs)?;
         match &result.bytes {
             wit_types::ByteSource::Inline(bytes) => {
-                let attrs = file_attrs_from_attrs(&result.attrs);
+                let attrs = try_file_attrs_from_attrs(&result.attrs)?;
                 attrs
                     .validate_complete_content(bytes.len())
                     .map_err(|error| format!("read-file result: {error}"))?;

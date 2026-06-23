@@ -1,7 +1,7 @@
 //! `fuser::Filesystem` trait implementation for [`super::Frontend`].
 
 use super::Frontend;
-use super::common::{FullReadTarget, ROOT_INO, TTL, file_kind_placeholder};
+use super::common::{FullReadTarget, ROOT_INO, TTL};
 use super::errno::inspector_outcome;
 use super::read_helpers::data_slice;
 use super::trace::FuseTrace;
@@ -10,9 +10,10 @@ use fuser::{
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
 use omnifs_core::path::Path;
+use omnifs_core::view::EntryKind;
 use omnifs_host::inspector::{self, InspectorFuseScope};
 use omnifs_inspector::CacheKind;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_tree::{ListOutcome, RequestCtx};
 use std::ffi::OsStr;
 use std::time::Duration;
 use tracing::{debug, debug_span, warn};
@@ -29,17 +30,18 @@ impl Filesystem for Frontend {
         let root_mount = (parent.0 == ROOT_INO).then(|| self.sync_root_mount());
         // Synthetic root (no root_mount): mount points are children.
         if root_mount.as_ref().is_some_and(Option::is_none) {
-            if self.registry.get(name_str).is_some() {
-                let ino = self.get_or_alloc_ino(
-                    name_str,
-                    &Path::root(),
-                    wit_types::EntryKind::Directory,
-                    0,
-                );
-                reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
+            let Ok(path) = Path::root().join(name_str) else {
+                reply.error(Errno::EINVAL);
                 return;
+            };
+            let ctx = RequestCtx::default();
+            match self.rt.block_on(self.tree.resolve(&path, &ctx)) {
+                Ok(node) => {
+                    let (attr, ttl) = self.inode_attr_for_node(node.mount(), &node);
+                    reply.entry(&ttl, &attr, Generation(0));
+                },
+                Err(_) => reply.error(Errno::ENOENT),
             }
-            reply.error(Errno::ENOENT);
             return;
         }
 
@@ -49,7 +51,7 @@ impl Filesystem for Frontend {
         };
         let mount_name = parent_entry.mount_name.clone();
         let parent_path = parent_entry.path.clone();
-        let parent_backing_path = parent_entry.backing_path.clone();
+        let parent_backing_path = parent_entry.body.backing_path().cloned();
         drop(parent_entry);
 
         let child_path = parent_path
@@ -66,9 +68,9 @@ impl Filesystem for Frontend {
             match std::fs::symlink_metadata(&child_rp) {
                 Ok(meta) => {
                     let kind = if meta.is_dir() {
-                        wit_types::EntryKind::Directory
+                        EntryKind::Directory
                     } else {
-                        file_kind_placeholder()
+                        EntryKind::File
                     };
                     let ino = self.get_or_alloc_ino_backing(
                         &mount_name,
@@ -118,8 +120,8 @@ impl Filesystem for Frontend {
             return;
         };
 
-        // Passthrough for inodes with backing_path.
-        if let Some(ref rp) = entry.backing_path {
+        // Passthrough for inodes backed by the local filesystem.
+        if let Some(rp) = entry.body.backing_path() {
             match std::fs::symlink_metadata(rp) {
                 Ok(meta) => {
                     let attr = self.attr_from_metadata(ino.0, &meta);
@@ -134,8 +136,8 @@ impl Filesystem for Frontend {
         }
 
         let attr = match &entry.kind {
-            wit_types::EntryKind::Directory => self.dir_attr(ino.0),
-            wit_types::EntryKind::File(_) => {
+            EntryKind::Directory => self.dir_attr(ino.0),
+            EntryKind::File => {
                 let size = entry
                     .size
                     .max(self.follow_sizes.get(&ino.0).map_or(0, |v| *v));
@@ -155,15 +157,19 @@ impl Filesystem for Frontend {
         let root_mount = (ino.0 == ROOT_INO).then(|| self.sync_root_mount());
         // Synthetic root (no root_mount): list mount points.
         if root_mount.as_ref().is_some_and(Option::is_none) {
-            let mounts = self.registry.mounts();
-            let mut entries = Vec::new();
-            for m in mounts {
-                let child_ino =
-                    self.get_or_alloc_ino(&m, &Path::root(), wit_types::EntryKind::Directory, 0);
-                entries.push((child_ino, m, wit_types::EntryKind::Directory));
+            let ctx = RequestCtx::default();
+            match self.rt.block_on(async {
+                let root = self.tree.resolve(&Path::root(), &ctx).await?;
+                self.tree.list(&root, None, &ctx).await
+            }) {
+                Ok(ListOutcome::Listing(listing)) => {
+                    let snapshot = self.snapshot_from_listing("", &Path::root(), &listing);
+                    self.dir_snapshots.insert(fh, snapshot);
+                    reply.opened(FuseFileHandle(fh), FopenFlags::empty());
+                },
+                Ok(ListOutcome::Subtree(_)) => reply.error(Errno::EIO),
+                Err(_) => reply.error(Errno::ENOENT),
             }
-            self.dir_snapshots.insert(fh, entries);
-            reply.opened(FuseFileHandle(fh), FopenFlags::empty());
             return;
         }
 
@@ -173,7 +179,7 @@ impl Filesystem for Frontend {
         };
         let mount_name = inode_entry.mount_name.clone();
         let path = inode_entry.path.clone();
-        let backing_path = inode_entry.backing_path.clone();
+        let backing_path = inode_entry.body.backing_path().cloned();
         drop(inode_entry);
 
         let live_scope = inspector::global()
@@ -237,8 +243,8 @@ impl Filesystem for Frontend {
         let skip = offset as usize;
         for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(skip) {
             let ftype = match kind {
-                wit_types::EntryKind::Directory => fuser::FileType::Directory,
-                wit_types::EntryKind::File(_) => fuser::FileType::RegularFile,
+                EntryKind::Directory => fuser::FileType::Directory,
+                EntryKind::File => fuser::FileType::RegularFile,
             };
             let buffer_full = reply.add(INodeNo(*ino), (index + 1) as u64, ftype, name.as_str());
             if buffer_full {
@@ -322,9 +328,8 @@ impl Filesystem for Frontend {
         };
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
-        let backing_path = entry.backing_path.clone();
+        let body = entry.body.clone();
         let attrs = entry.attrs.clone();
-        let synthetic = entry.synthetic;
         drop(entry);
 
         let target = FullReadTarget {
@@ -332,9 +337,8 @@ impl Filesystem for Frontend {
             fh,
             mount_name,
             path,
-            backing_path,
+            body,
             attrs,
-            synthetic,
         };
 
         let live_scope = inspector::global().map(|sink| {
@@ -390,7 +394,7 @@ impl Filesystem for Frontend {
             reply.error(Errno::ENOENT);
             return;
         };
-        if let Some(ref rp) = entry.backing_path {
+        if let Some(rp) = entry.body.backing_path() {
             match std::fs::read_link(rp) {
                 Ok(target) => reply.data(target.as_os_str().as_encoded_bytes()),
                 Err(e) => {

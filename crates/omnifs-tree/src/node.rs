@@ -8,11 +8,13 @@ use omnifs_core::view::{EntryKind, EntryMeta, FileAttrsCache};
 /// Where a node's bytes/children live. `Provider` is the normal projected
 /// case; `Subtree` is a treeref already resolved (via `Runtime::resolve_tree_ref`)
 /// to a bind-mounted clone/archive dir, captured at resolve time so read/list
-/// branch to passthrough without a second provider round trip.
+/// branch to passthrough without a second provider round trip; `Synthetic` is
+/// host-produced content that no provider projected.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Backing {
+pub enum NodeBody {
     Provider,
     Subtree(PathBuf),
+    Synthetic(Synthetic),
 }
 
 /// A host-synthesized entry that no provider projects, represented identically
@@ -81,22 +83,62 @@ pub struct Node {
     mount: String,
     path: Path,
     meta: EntryMeta,
-    backing: Backing,
-    /// `Some` when this node is a host-synthesized entry (a pagination control
-    /// or a mount-root ignore file) the renderer must read through `Tree::read`
-    /// rather than dispatch to the provider.
-    synthetic: Option<Synthetic>,
+    body: NodeBody,
 }
 
 impl Node {
-    pub fn new(mount: String, path: Path, meta: EntryMeta, backing: Backing) -> Self {
+    pub fn new(mount: String, path: Path, meta: EntryMeta, body: NodeBody) -> Self {
         Self {
             mount,
             path,
             meta,
-            backing,
-            synthetic: None,
+            body,
         }
+    }
+
+    /// Construct a provider-backed directory node. Frontends use this when
+    /// their own identity tables have already proved a path is a directory and
+    /// need `Tree` to resolve/list under it.
+    pub fn provider_dir(mount: impl Into<String>, path: Path) -> Self {
+        Self::new(
+            mount.into(),
+            path,
+            EntryMeta::directory(),
+            NodeBody::Provider,
+        )
+    }
+
+    /// Construct a provider-backed file node from projected attrs cached by a
+    /// frontend identity table. `Tree::read`/`Tree::open` own the semantics
+    /// implied by those attrs.
+    pub fn provider_file(
+        mount: impl Into<String>,
+        path: Path,
+        attrs: Option<FileAttrsCache>,
+    ) -> Self {
+        Self::new(
+            mount.into(),
+            path,
+            attrs.map_or_else(EntryMeta::file_without_attrs, EntryMeta::file),
+            NodeBody::Provider,
+        )
+    }
+
+    /// Construct a synthetic file node from projected attrs cached by a
+    /// frontend identity table. The `synthetic` descriptor owns the byte source
+    /// and `Tree::read` owns the semantics.
+    pub fn synthetic_file(
+        mount: impl Into<String>,
+        path: Path,
+        attrs: Option<FileAttrsCache>,
+        synthetic: Synthetic,
+    ) -> Self {
+        Self::synthetic(
+            mount.into(),
+            path,
+            attrs.map_or_else(EntryMeta::file_without_attrs, EntryMeta::file),
+            synthetic,
+        )
     }
 
     /// Construct a host-synthesized node (a pagination control or a mount-root
@@ -107,8 +149,7 @@ impl Node {
             mount,
             path,
             meta,
-            backing: Backing::Provider,
-            synthetic: Some(synthetic),
+            body: NodeBody::Synthetic(synthetic),
         }
     }
 
@@ -124,12 +165,16 @@ impl Node {
         &self.meta
     }
 
+    pub fn projected_meta(&self) -> EntryMeta {
+        self.meta.clone()
+    }
+
     pub fn kind(&self) -> EntryKind {
-        self.meta.kind
+        self.meta.kind()
     }
 
     pub fn attrs(&self) -> Option<&FileAttrsCache> {
-        self.meta.attrs.as_ref()
+        self.meta.attrs()
     }
 
     pub fn st_size(&self) -> u64 {
@@ -144,12 +189,19 @@ impl Node {
         self.meta.is_file()
     }
 
-    pub fn backing(&self) -> &Backing {
-        &self.backing
+    pub fn body(&self) -> &NodeBody {
+        &self.body
     }
 
     pub fn is_backing(&self) -> bool {
-        !matches!(self.backing, Backing::Provider)
+        matches!(self.body, NodeBody::Subtree(_))
+    }
+
+    pub fn subtree_path(&self) -> Option<&PathBuf> {
+        match &self.body {
+            NodeBody::Subtree(dir) => Some(dir),
+            NodeBody::Provider | NodeBody::Synthetic(_) => None,
+        }
     }
 
     /// The synthetic descriptor when this node is a host-synthesized entry; a
@@ -157,11 +209,14 @@ impl Node {
     /// result from a per-handle buffer so a partial read never re-runs the
     /// mutating action.
     pub fn synthetic_kind(&self) -> Option<&Synthetic> {
-        self.synthetic.as_ref()
+        match &self.body {
+            NodeBody::Synthetic(synthetic) => Some(synthetic),
+            NodeBody::Provider | NodeBody::Subtree(_) => None,
+        }
     }
 
     pub fn is_synthetic(&self) -> bool {
-        self.synthetic.is_some()
+        matches!(self.body, NodeBody::Synthetic(_))
     }
 
     /// Stable identity the renderer persists in its kernel handle.
@@ -173,18 +228,22 @@ impl Node {
     }
 }
 
-/// One child within a `Listing`. Renderer-neutral: name + meta. The renderer
-/// mints its own inode/filehandle over (parent.mount, parent.path.join(name))
-/// and reads attrs from meta without a second resolve. `synthetic` is `Some`
-/// for the host-synthesized control / ignore entries `Tree` appends to a
-/// listing; the renderer marks its inode/handle so a later `read` of that child
-/// goes back through `Tree::read` (where the synthetic byte source is served)
-/// rather than the provider.
+/// One child within a `Listing`. Renderer-neutral: name + meta + origin. The
+/// renderer mints its own inode/filehandle over (parent.mount, parent.path.join(name))
+/// and reads attrs from meta without a second resolve. Synthetic entries carry
+/// their byte source directly, so a frontend can mark its inode/handle without
+/// side-channel vectors.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub meta: EntryMeta,
-    pub synthetic: Option<Synthetic>,
+    pub origin: EntryOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryOrigin {
+    Provider,
+    Synthetic(Synthetic),
 }
 
 impl Entry {
@@ -193,7 +252,28 @@ impl Entry {
         Self {
             name,
             meta,
-            synthetic: None,
+            origin: EntryOrigin::Provider,
         }
+    }
+
+    /// A host-synthesized child surfaced by `Tree` and materialized by a
+    /// frontend through `Tree::read`.
+    pub fn synthetic(name: String, meta: EntryMeta, synthetic: Synthetic) -> Self {
+        Self {
+            name,
+            meta,
+            origin: EntryOrigin::Synthetic(synthetic),
+        }
+    }
+
+    pub fn synthetic_kind(&self) -> Option<&Synthetic> {
+        match &self.origin {
+            EntryOrigin::Provider => None,
+            EntryOrigin::Synthetic(synthetic) => Some(synthetic),
+        }
+    }
+
+    pub fn is_synthetic(&self) -> bool {
+        matches!(self.origin, EntryOrigin::Synthetic(_))
     }
 }

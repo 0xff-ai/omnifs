@@ -3,14 +3,12 @@
 #![allow(dead_code, clippy::wildcard_imports)]
 
 use super::Frontend;
-use super::common::{
-    DirSnapshot, FullReadTarget, file_kind_placeholder, root_ignore_meta, split_parent_leaf,
-};
+use super::common::{DirSnapshot, FullReadTarget, InodeBody, root_ignore_meta, split_parent_leaf};
 use super::read_helpers::data_slice;
 use fuser::Errno;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
-use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta};
+use omnifs_core::view::{DirentRecord, DirentsPayload, EntryKind, EntryMeta};
 use omnifs_host::HostContext;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::pagination;
@@ -177,7 +175,7 @@ impl FuseHarness {
         let path = Path::parse(path).expect("test path");
         let ino = self
             .fs
-            .get_or_alloc_ino(Self::MOUNT, &path, wit_types::EntryKind::Directory, 0);
+            .get_or_alloc_ino(Self::MOUNT, &path, EntryKind::Directory, 0);
         self.fs.opendir_op(Self::MOUNT, ino, &path, None)
     }
 
@@ -245,22 +243,23 @@ impl FuseHarness {
     /// Build the `FullReadTarget` the `open`/`read` op boundary consumes:
     /// resolve `path` to an inode (walking parent dirents so each segment is
     /// allocated), allocate a fresh `fh`, and snapshot the inode-cached
-    /// projection (attrs + `synthetic` marker) the open dispatch reads.
+    /// projection attrs + inode body the open dispatch reads.
     fn read_target(&self, path: &str) -> FullReadTarget {
         let ino = self.lookup_path(path).expect("path resolves before open");
-        let (attrs, synthetic) = self
+        let (attrs, body) = self
             .fs
             .inodes
             .get(&ino)
-            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+            .map_or((None, InodeBody::Provider), |e| {
+                (e.attrs.clone(), e.body.clone())
+            });
         FullReadTarget {
             ino,
             fh: self.fs.alloc_fh(),
             mount_name: Self::MOUNT.to_string(),
             path: Path::parse(path).expect("test path"),
-            backing_path: None,
+            body,
             attrs,
-            synthetic,
         }
     }
 
@@ -475,7 +474,7 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
     let ino = h.fs.get_or_alloc_ino(
         FuseHarness::MOUNT,
         &test_path("/hello/feed/@next"),
-        file_kind_placeholder(),
+        EntryKind::File,
         0,
     );
     let target = FullReadTarget {
@@ -483,9 +482,8 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
         fh: h.fs.alloc_fh(),
         mount_name: FuseHarness::MOUNT.to_string(),
         path: test_path("/hello/feed/@next"),
-        backing_path: None,
+        body: InodeBody::Provider,
         attrs: None,
-        synthetic: false,
     };
     assert!(
         matches!(h.fs.open_synthetic(&target, None), Err(e) if i32::from(e) == i32::from(Errno::ENOENT)),
@@ -751,7 +749,9 @@ fn provider_gitignore_wins_over_synthetic_marker() {
     let synth_ino =
         h.fs.get_or_alloc_ino_synthetic(FuseHarness::MOUNT, &test_path("/.gitignore"), meta);
     assert!(
-        h.fs.inodes.get(&synth_ino).is_some_and(|e| e.synthetic),
+        h.fs.inodes
+            .get(&synth_ino)
+            .is_some_and(|e| e.body.is_synthetic()),
         "stale host-synthesized .gitignore starts synthetic"
     );
 
@@ -761,7 +761,9 @@ fn provider_gitignore_wins_over_synthetic_marker() {
         "provider lookup reuses the existing path inode"
     );
     assert!(
-        h.fs.inodes.get(&resolved_ino).is_some_and(|e| !e.synthetic),
+        h.fs.inodes
+            .get(&resolved_ino)
+            .is_some_and(|e| !e.body.is_synthetic()),
         "provider lookup clears the synthetic marker"
     );
 
@@ -770,9 +772,8 @@ fn provider_gitignore_wins_over_synthetic_marker() {
         fh: h.fs.alloc_fh(),
         mount_name: FuseHarness::MOUNT.to_string(),
         path: test_path("/.gitignore"),
-        backing_path: None,
+        body: InodeBody::Provider,
         attrs: None,
-        synthetic: false,
     };
     assert!(
         h.fs.open_synthetic(&target, None).unwrap().is_none(),
@@ -810,7 +811,9 @@ fn synthetic_root_ignore_survives_dirents_refresh() {
     h.opendir("/");
     let synth_ino = h.lookup("/", ".gitignore").expect(".gitignore resolves");
     assert!(
-        h.fs.inodes.get(&synth_ino).is_some_and(|e| e.synthetic),
+        h.fs.inodes
+            .get(&synth_ino)
+            .is_some_and(|e| e.body.is_synthetic()),
         "synthetic before refresh"
     );
 
@@ -820,7 +823,9 @@ fn synthetic_root_ignore_survives_dirents_refresh() {
         h.fs.get_or_alloc_ino_meta(FuseHarness::MOUNT, &test_path("/.gitignore"), meta);
     assert_eq!(refreshed, synth_ino, "refresh reuses the inode");
     assert!(
-        h.fs.inodes.get(&refreshed).is_some_and(|e| e.synthetic),
+        h.fs.inodes
+            .get(&refreshed)
+            .is_some_and(|e| e.body.is_synthetic()),
         "an origin-agnostic refresh keeps the synthetic marker"
     );
 
@@ -858,7 +863,7 @@ fn concurrent_next_accumulates_every_page_with_no_loss() {
                 let ino = fs.get_or_alloc_ino(
                     FuseHarness::MOUNT,
                     &test_path("/hello/feed/@next"),
-                    file_kind_placeholder(),
+                    EntryKind::File,
                     0,
                 );
                 let target = FullReadTarget {
@@ -866,9 +871,8 @@ fn concurrent_next_accumulates_every_page_with_no_loss() {
                     fh: fs.alloc_fh(),
                     mount_name: FuseHarness::MOUNT.to_string(),
                     path: test_path("/hello/feed/@next"),
-                    backing_path: None,
+                    body: InodeBody::Provider,
                     attrs: None,
-                    synthetic: false,
                 };
                 let _ = fs.open_op(&target, None);
             });
@@ -942,19 +946,20 @@ fn volatile_follow_pump_advances_reported_size() {
     // Drive the real lookup->open path: the inode carries only the cheap
     // Deferred(Full) lookup placeholder, and `open_ranged_file` probes
     // `open_file` to discover the file is actually ranged + live.
-    let (attrs, synthetic) =
+    let (attrs, body) =
         h.fs.inodes
             .get(&ino)
-            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+            .map_or((None, InodeBody::Provider), |e| {
+                (e.attrs.clone(), e.body.clone())
+            });
     let fh = h.fs.alloc_fh();
     let target = FullReadTarget {
         ino,
         fh,
         mount_name: FuseHarness::MOUNT.to_string(),
         path: test_path(path),
-        backing_path: None,
+        body,
         attrs,
-        synthetic,
     };
     let flags = h.fs.open_op(&target, None).expect("open ranged live");
     assert!(
@@ -996,19 +1001,20 @@ fn volatile_follow_pump_probes_from_foreground_eof() {
     let h = build_harness();
     let path = "/hello/volatile-tail";
     let ino = h.lookup_path(path).expect("volatile-tail resolves");
-    let (attrs, synthetic) =
+    let (attrs, body) =
         h.fs.inodes
             .get(&ino)
-            .map_or((None, false), |e| (e.attrs.clone(), e.synthetic));
+            .map_or((None, InodeBody::Provider), |e| {
+                (e.attrs.clone(), e.body.clone())
+            });
     let fh = h.fs.alloc_fh();
     let target = FullReadTarget {
         ino,
         fh,
         mount_name: FuseHarness::MOUNT.to_string(),
         path: test_path(path),
-        backing_path: None,
+        body,
         attrs,
-        synthetic,
     };
     h.fs.open_op(&target, None).expect("open ranged live");
 

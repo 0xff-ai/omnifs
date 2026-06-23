@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::view as view_types;
-use omnifs_core::view::{FileAttrsCache, FilePayload};
+use omnifs_core::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
 use omnifs_host::pagination::{self, NextPageOutcome};
 use omnifs_host::wit_protocol::file_attrs_from_attrs;
 use omnifs_host::{Error, Runtime};
@@ -19,7 +19,7 @@ use omnifs_wit::provider::types::{ByteSource, ReadFileResult};
 use tracing::warn;
 
 use crate::error::{Result, TreeError};
-use crate::node::{Backing, Node, PaginationControl, SyntheticContent};
+use crate::node::{Node, PaginationControl, SyntheticContent};
 use crate::{RequestCtx, Tree};
 
 /// Result of `Tree::read`. A two-arm shape so a treeref-backed node (read via
@@ -49,7 +49,85 @@ pub struct Chunk {
     pub learned_attrs: Option<FileAttrsCache>,
 }
 
+pub(crate) struct FileAttrStore<'a> {
+    runtime: &'a Runtime,
+    path: &'a omnifs_core::path::Path,
+}
+
+impl<'a> FileAttrStore<'a> {
+    pub(crate) fn new(runtime: &'a Runtime, path: &'a omnifs_core::path::Path) -> Self {
+        Self { runtime, path }
+    }
+
+    pub(crate) fn cached(&self) -> Option<FileAttrsCache> {
+        if let Some(record) = self.runtime.cache_get(self.path, RecordKind::Lookup, None)
+            && let Some(LookupPayload::Positive(meta)) = LookupPayload::deserialize(&record.payload)
+            && let Some(attrs) = meta.into_attrs()
+        {
+            return Some(attrs);
+        }
+
+        self.runtime
+            .cache_get(self.path, RecordKind::Attr, None)
+            .and_then(|record| AttrPayload::deserialize(&record.payload))
+            .and_then(|payload| payload.meta.into_attrs())
+    }
+
+    pub(crate) fn publish(&self, attrs: FileAttrsCache) -> Result<()> {
+        let meta = EntryMeta::file(attrs);
+        let lookup = LookupPayload::Positive(meta.clone());
+        if let Some(payload) = lookup.serialize() {
+            self.runtime.cache_put(
+                self.path,
+                RecordKind::Lookup,
+                None,
+                &CacheRecord::new(RecordKind::Lookup, payload),
+            );
+        } else {
+            return Err(TreeError::internal(format!(
+                "could not serialize lookup attrs for {}",
+                self.path
+            )));
+        }
+
+        let attr = AttrPayload { meta };
+        if let Some(payload) = attr.serialize() {
+            self.runtime.cache_put(
+                self.path,
+                RecordKind::Attr,
+                None,
+                &CacheRecord::new(RecordKind::Attr, payload),
+            );
+            Ok(())
+        } else {
+            Err(TreeError::internal(format!(
+                "could not serialize file attrs for {}",
+                self.path
+            )))
+        }
+    }
+}
+
 impl Tree {
+    pub fn cached_file_attrs(
+        &self,
+        mount: &str,
+        path: &omnifs_core::path::Path,
+    ) -> Option<FileAttrsCache> {
+        let runtime = self.runtime_for(mount).ok()?;
+        FileAttrStore::new(&runtime, path).cached()
+    }
+
+    pub fn publish_file_attrs(
+        &self,
+        mount: &str,
+        path: &omnifs_core::path::Path,
+        attrs: FileAttrsCache,
+    ) -> Result<()> {
+        let runtime = self.runtime_for(mount)?;
+        FileAttrStore::new(&runtime, path).publish(attrs)
+    }
+
     /// Whole-file read. Faithful port of the FUSE whole-file read DECISION
     /// logic: the read cache cascade (exact-0 short-circuit, mem hit, durable
     /// view hit, backing-fs read), then on a view miss the cold provider render
@@ -70,22 +148,46 @@ impl Tree {
 
         // A treeref-backed node is served by the renderer from the real backing
         // dir; `Tree` hands the path back without a provider round trip.
-        if let Backing::Subtree(dir) = node.backing() {
+        if let Some(dir) = node.subtree_path() {
             return Ok(ReadResult::Backing(dir.clone()));
         }
 
         let runtime = self.runtime_for(node.mount())?;
         let path = node.path();
-        let attrs = node.attrs();
+        let attr_store = FileAttrStore::new(&runtime, path);
+        let projected_attrs = attr_store.cached().or_else(|| node.attrs().cloned());
+        let attrs = projected_attrs.as_ref();
 
         // Exact-0 short-circuit: a file the projection sizes at exactly zero is
         // empty without any provider call.
         if let Some(attrs) = attrs
-            && matches!(attrs.size, view_types::FileSize::Exact(0))
+            && matches!(attrs.size(), view_types::FileSize::Exact(0))
         {
             return Ok(ReadResult::Bytes {
                 data: Vec::new(),
                 attrs: Some(attrs.clone()),
+                content_type: None,
+            });
+        }
+
+        // Inline projected bytes are already the canonical answer for this view
+        // leaf. Serve them here instead of forcing each frontend to decode cached
+        // lookup/attr payloads or know whether a provider file route exists.
+        if let Some(attrs) = attrs
+            && let Some(bytes) = attrs.inline_bytes()
+        {
+            let data = bytes.to_vec();
+            let attrs = attrs
+                .learned_complete_content_attrs(data.len())
+                .map_err(|error| {
+                    TreeError::internal(format!(
+                        "inline projection for {path} contradicts file attrs: {error}"
+                    ))
+                })?;
+            attr_store.publish(attrs.clone())?;
+            return Ok(ReadResult::Bytes {
+                data,
+                attrs: Some(attrs),
                 content_type: None,
             });
         }
@@ -100,12 +202,12 @@ impl Tree {
             if let Some(record) = runtime.mem_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
-                return Ok(read_result_from_cache(payload, attrs));
+                return read_result_from_cache(path, payload, attrs);
             }
             if let Some(record) = runtime.cache_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
-                return Ok(read_result_from_cache(payload, attrs));
+                return read_result_from_cache(path, payload, attrs);
             }
         }
 
@@ -220,18 +322,21 @@ fn finish_read(
         )));
     };
 
-    let attrs_cache = learned_full_read_attrs(result_attrs, data.len());
-    if !full_read_matches_attrs(&attrs_cache, data.len()) {
-        warn!(
-            path = %path,
-            expected = ?attrs_cache.size,
-            actual = data.len(),
-            "provider returned bytes that contradict file attrs"
-        );
-        return Err(TreeError::internal(format!(
-            "read for {path} returned bytes that contradict file attrs"
-        )));
-    }
+    let attrs_cache = result_attrs
+        .learned_complete_content_attrs(data.len())
+        .map_err(|error| {
+            warn!(
+                path = %path,
+                expected = ?result_attrs.size(),
+                actual = data.len(),
+                error,
+                "provider returned bytes that contradict file attrs"
+            );
+            TreeError::internal(format!(
+                "read for {path} returned bytes that contradict file attrs"
+            ))
+        })?;
+    FileAttrStore::new(runtime, path).publish(attrs_cache.clone())?;
 
     if !from_canonical {
         cache_durable_file_payload(
@@ -266,7 +371,7 @@ fn cache_durable_file_payload(
     let Some(aux) = attrs_cache.durable_cache_aux() else {
         return Ok(());
     };
-    let payload = FilePayload::new(attrs_cache.version_token.clone(), data.to_vec())
+    let payload = FilePayload::new(attrs_cache.version_token_owned(), data.to_vec())
         .with_content_type(content_type);
     let Some(payload) = payload.serialize() else {
         return Err(TreeError::internal(format!(
@@ -327,55 +432,6 @@ fn resolve_read_payload(
     }
 }
 
-/// Promote a learned exact size into the result attrs when the read returned a
-/// complete buffer and the stability permits publishing a learned size.
-fn learned_full_read_attrs(attrs: FileAttrsCache, content_len: usize) -> FileAttrsCache {
-    if !can_publish_learned_size(&attrs) {
-        return attrs;
-    }
-    match attrs.size {
-        view_types::FileSize::Exact(_) => attrs,
-        view_types::FileSize::NonZero | view_types::FileSize::Unknown => {
-            attrs.with_exact_size(u64::try_from(content_len).unwrap_or(u64::MAX))
-        },
-    }
-}
-
-/// Learn an exact size from a ranged EOF-short read, mirroring the whole-file
-/// learned-size rule. `None` when the size is already exact or learning is
-/// disallowed for the stability.
-pub(crate) fn learned_ranged_eof_attrs(
-    attrs: FileAttrsCache,
-    eof_size: u64,
-) -> Option<FileAttrsCache> {
-    if !can_publish_learned_size(&attrs) {
-        return None;
-    }
-    match attrs.size {
-        view_types::FileSize::Exact(_) => None,
-        view_types::FileSize::NonZero | view_types::FileSize::Unknown => {
-            Some(attrs.with_exact_size(eof_size))
-        },
-    }
-}
-
-fn can_publish_learned_size(attrs: &FileAttrsCache) -> bool {
-    match attrs.stability {
-        view_types::Stability::Stable | view_types::Stability::Dynamic => true,
-        view_types::Stability::Live => false,
-    }
-}
-
-fn full_read_matches_attrs(attrs: &FileAttrsCache, content_len: usize) -> bool {
-    match attrs.size {
-        view_types::FileSize::Exact(size) => {
-            u64::try_from(content_len).is_ok_and(|content_len| content_len == size)
-        },
-        view_types::FileSize::NonZero => content_len > 0,
-        view_types::FileSize::Unknown => true,
-    }
-}
-
 /// Validate a cached `File` record against the projected attrs, returning the
 /// decoded payload only when it is still a faithful answer for the projection.
 fn file_payload_for_attrs(
@@ -384,12 +440,15 @@ fn file_payload_for_attrs(
 ) -> Option<FilePayload> {
     let payload = FilePayload::deserialize(&record.payload)?;
     let attrs = attrs?;
-    if matches!(attrs.stability, view_types::Stability::Dynamic)
-        && payload.version_token != attrs.version_token
+    if matches!(attrs.stability(), view_types::Stability::Dynamic)
+        && payload.version_token.as_deref() != attrs.version_token()
     {
         return None;
     }
-    if !full_read_matches_attrs(attrs, payload.content.len()) {
+    if attrs
+        .validate_complete_content(payload.content.len())
+        .is_err()
+    {
         return None;
     }
     Some(payload)
@@ -399,11 +458,26 @@ fn file_payload_for_attrs(
 /// exact size the same way a cold provider read does. Most hits already carry a
 /// learned size from an earlier read; preloaded file payloads can arrive before
 /// any renderer has promoted the placeholder attrs.
-fn read_result_from_cache(payload: FilePayload, attrs: Option<&FileAttrsCache>) -> ReadResult {
+fn read_result_from_cache(
+    path: &omnifs_core::path::Path,
+    payload: FilePayload,
+    attrs: Option<&FileAttrsCache>,
+) -> Result<ReadResult> {
     let content_len = payload.content.len();
-    ReadResult::Bytes {
+    let attrs = attrs
+        .map(|attrs| {
+            attrs
+                .learned_complete_content_attrs(content_len)
+                .map_err(|error| {
+                    TreeError::internal(format!(
+                        "cached file payload for {path} contradicts file attrs: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+    Ok(ReadResult::Bytes {
         data: payload.content,
-        attrs: attrs.map(|attrs| learned_full_read_attrs(attrs.clone(), content_len)),
+        attrs,
         content_type: payload.content_type,
-    }
+    })
 }

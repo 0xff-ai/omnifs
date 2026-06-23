@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use omnifs_core::path::Path;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{Backing, ListOutcome, RequestCtx, Tree, TreeErrorKind};
+use omnifs_tree::{ListOutcome, NodeBody, RequestCtx, Tree, TreeErrorKind};
 use tempfile::TempDir;
 
 /// Owns the harness temp dirs that must outlive the `Runtime`, plus the `Tree`
@@ -108,18 +108,34 @@ async fn list_root_yields_known_children() {
         ListOutcome::Listing(l) => l,
         ListOutcome::Subtree(_) => panic!("root must be a provider listing, not a subtree"),
     };
-    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = listing
+        .entries
+        .iter()
+        .filter(|e| !e.is_synthetic())
+        .map(|e| e.name.as_str())
+        .collect();
+    let synthetic_names: Vec<&str> = listing
+        .entries
+        .iter()
+        .filter(|e| e.is_synthetic())
+        .map(|e| e.name.as_str())
+        .collect();
     // Verified against providers/test/src/lib.rs route registrations on this
     // branch: the root projects items, hello, scoped, the /dynamic capture
     // prefix, and the checkout treeref. (The blueprint cited 4 from a stale
     // runtime_test.rs:47 that predates the /dynamic route; the host's own
     // test_list_root is failing the same way on feat/omnifs-nfs.)
-    assert_eq!(listing.entries.len(), 5, "got {names:?}");
+    assert_eq!(names.len(), 5, "got {names:?}");
     assert!(names.contains(&"items"));
     assert!(names.contains(&"hello"));
     assert!(names.contains(&"scoped"));
     assert!(names.contains(&"checkout"));
     assert!(names.contains(&"dynamic"));
+    assert_eq!(
+        synthetic_names,
+        [".gitignore", ".ignore", ".rgignore"],
+        "got {synthetic_names:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -153,7 +169,7 @@ async fn list_hello_yields_fourteen_children_with_message() {
 /// validator rejects the lookup with "subtree result references unknown tree
 /// 777" (runtime_test.rs:560-584). This exercises the `LookupChildResult::Subtree`
 /// -> `resolve_tree_ref` seam in `Tree::resolve`; with a real backing dir it
-/// would return `Backing::Subtree`. Slice-1 deviation from the blueprint's
+/// would return `NodeBody::Subtree`. Slice-1 deviation from the blueprint's
 /// `checkout_is_a_subtree_handoff` test, which assumed a resolvable treeref.
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_dangling_treeref_surfaces_as_error() {
@@ -169,9 +185,9 @@ async fn checkout_dangling_treeref_surfaces_as_error() {
         err.message.contains("777") || err.message.contains("tree"),
         "expected a tree-ref error, got: {err}"
     );
-    // The Backing::Subtree shape exists for the resolvable case; assert the
+    // The NodeBody::Subtree shape exists for the resolvable case; assert the
     // type is reachable so the seam stays wired.
-    let _ = Backing::Subtree(std::path::PathBuf::from("/unused"));
+    let _ = NodeBody::Subtree(std::path::PathBuf::from("/unused"));
 }
 
 /// NFSv4 filehandle-first / FUSE bare-inode rehydration: persist a NodeId

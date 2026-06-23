@@ -4277,7 +4277,6 @@ dependencies = [
  "omnifs-host",
  "omnifs-mount",
  "omnifs-tree",
- "omnifs-wit",
  "serde",
  "serde_json",
  "tempfile",

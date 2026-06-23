@@ -250,7 +250,7 @@ impl MountCommand {
                 OsString::from("-n"),
                 OsString::from("mount_nfs"),
                 OsString::from("-o"),
-                OsString::from(render_mount_options(macos_mount_options(port))),
+                OsString::from(MountOptions::macos(port).render()),
                 OsString::from(export_source()),
                 mount_point.as_os_str().to_owned(),
             ],
@@ -267,7 +267,7 @@ impl MountCommand {
                 OsString::from("-t"),
                 OsString::from("nfs4"),
                 OsString::from("-o"),
-                OsString::from(render_mount_options(linux_mount_options(port))),
+                OsString::from(MountOptions::linux(port).render()),
                 OsString::from(export_source()),
                 mount_point.as_os_str().to_owned(),
             ],
@@ -307,78 +307,89 @@ impl MountOption {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn macos_mount_options(port: u16) -> Vec<MountOption> {
-    vec![
-        MountOption::new("vers=4", "use the NFSv4 protocol subset implemented here"),
-        MountOption::new("tcp", "match the loopback TCP listener"),
-        MountOption::new(
-            format!("port={port}"),
-            "connect to the ephemeral loopback server port",
-        ),
-        MountOption::new("sec=sys", "use local AUTH_SYS credentials only"),
-        MountOption::new("ro", "preserve omnifs' read-only provider contract"),
-        MountOption::new(
-            "intr",
-            "allow interrupted client operations during teardown",
-        ),
-        MountOption::new("nocallback", "disable delegations and callback traffic"),
-        MountOption::new("noac", "avoid kernel attribute caching while attrs mature"),
-        MountOption::new(
-            "nonegnamecache",
-            "avoid stale negative lookup caching for provider-backed paths",
-        ),
-        MountOption::new(
-            "retrycnt=0",
-            "fail the mount promptly when loopback setup is wrong",
-        ),
-        MountOption::new("timeo=5", "bound client wait time for a local server"),
-        MountOption::new("retrans=1", "avoid long retry tails on local failures"),
-    ]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountOptions {
+    options: Vec<MountOption>,
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn linux_mount_options(port: u16) -> Vec<MountOption> {
-    vec![
-        MountOption::new(
-            "vers=4.0",
-            "use the NFSv4.0 protocol subset implemented here",
-        ),
-        MountOption::new("proto=tcp", "match the loopback TCP listener"),
-        MountOption::new(
-            format!("port={port}"),
-            "connect to the ephemeral loopback server port",
-        ),
-        MountOption::new("ro", "preserve omnifs' read-only provider contract"),
-        MountOption::new(
-            "soft",
-            "avoid indefinite hangs against the local test server",
-        ),
-        MountOption::new("timeo=5", "bound client wait time for a local server"),
-        MountOption::new("retrans=1", "avoid long retry tails on local failures"),
-        MountOption::new(
-            "lookupcache=none",
-            "force lookups through the NFS frontend while invalidation matures",
-        ),
-        MountOption::new(
-            "actimeo=0",
-            "disable Linux attribute-cache retention during bring-up",
-        ),
-    ]
-}
+impl MountOptions {
+    #[cfg(any(target_os = "macos", test))]
+    fn macos(port: u16) -> Self {
+        Self {
+            options: vec![
+                MountOption::new("vers=4", "use the NFSv4 protocol subset implemented here"),
+                MountOption::new("tcp", "match the loopback TCP listener"),
+                MountOption::new(
+                    format!("port={port}"),
+                    "connect to the ephemeral loopback server port",
+                ),
+                MountOption::new("sec=sys", "use local AUTH_SYS credentials only"),
+                MountOption::new("ro", "preserve omnifs' read-only provider contract"),
+                MountOption::new(
+                    "intr",
+                    "allow interrupted client operations during teardown",
+                ),
+                MountOption::new("nocallback", "disable delegations and callback traffic"),
+                MountOption::new("noac", "avoid kernel attribute caching while attrs mature"),
+                MountOption::new(
+                    "nonegnamecache",
+                    "avoid stale negative lookup caching for provider-backed paths",
+                ),
+                MountOption::new(
+                    "retrycnt=0",
+                    "fail the mount promptly when loopback setup is wrong",
+                ),
+                MountOption::new("timeo=5", "bound client wait time for a local server"),
+                MountOption::new("retrans=1", "avoid long retry tails on local failures"),
+            ],
+        }
+    }
 
-fn render_mount_options(options: Vec<MountOption>) -> String {
-    options
-        .into_iter()
-        .map(|option| {
-            assert!(
-                !option.rationale.is_empty(),
-                "mount options must document their correctness or performance rationale"
-            );
-            option.value
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+    #[cfg(any(target_os = "linux", test))]
+    fn linux(port: u16) -> Self {
+        Self {
+            options: vec![
+                MountOption::new(
+                    "vers=4.0",
+                    "use the NFSv4.0 protocol subset implemented here",
+                ),
+                MountOption::new("proto=tcp", "match the loopback TCP listener"),
+                MountOption::new(
+                    format!("port={port}"),
+                    "connect to the ephemeral loopback server port",
+                ),
+                MountOption::new("ro", "preserve omnifs' read-only provider contract"),
+                MountOption::new(
+                    "soft",
+                    "avoid indefinite hangs against the local test server",
+                ),
+                MountOption::new("timeo=5", "bound client wait time for a local server"),
+                MountOption::new("retrans=1", "avoid long retry tails on local failures"),
+                MountOption::new(
+                    "lookupcache=none",
+                    "force lookups through the NFS frontend while invalidation matures",
+                ),
+                MountOption::new(
+                    "actimeo=0",
+                    "disable Linux attribute-cache retention during bring-up",
+                ),
+            ],
+        }
+    }
+
+    fn render(self) -> String {
+        self.options
+            .into_iter()
+            .map(|option| {
+                assert!(
+                    !option.rationale.is_empty(),
+                    "mount options must document their correctness or performance rationale"
+                );
+                option.value
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 fn export_source() -> String {
@@ -677,9 +688,9 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountTableEntry, NfsMountOptions, UnmountCommand, ensure_private_state_dir,
-        linux_mount_options, macos_mount_options, mount_table_contains, parse_macos_mounts,
-        parse_proc_mounts, read_mount_states, render_mount_options, write_state,
+        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, UnmountCommand,
+        ensure_private_state_dir, mount_table_contains, parse_macos_mounts, parse_proc_mounts,
+        read_mount_states, write_state,
     };
     use serde_json::Value;
     use std::ffi::OsString;
@@ -755,9 +766,10 @@ mod tests {
 
     #[test]
     fn mount_options_do_not_carry_secret_material() {
-        for option in render_mount_options(linux_mount_options(2049))
+        for option in MountOptions::linux(2049)
+            .render()
             .split(',')
-            .chain(render_mount_options(macos_mount_options(2049)).split(','))
+            .chain(MountOptions::macos(2049).render().split(','))
         {
             let option = option.to_ascii_lowercase();
             assert!(!option.contains("token"));

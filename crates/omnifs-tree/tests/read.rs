@@ -30,12 +30,10 @@ use std::sync::Arc;
 
 use omnifs_cache::RecordKind;
 use omnifs_core::path::Path;
-use omnifs_core::view::{
-    ByteSource, EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability,
-};
+use omnifs_core::view::{EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability};
 use omnifs_host::Runtime;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{Backing, Node, ReadResult, RequestCtx, Tree};
+use omnifs_tree::{Node, NodeBody, ReadResult, RequestCtx, Tree};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
 
@@ -103,7 +101,7 @@ async fn read_whole_file_returns_provider_bytes() {
 
     // The whole read learns the exact size from the returned bytes.
     let attrs = attrs.expect("a provider read carries post-read attrs");
-    assert_eq!(attrs.size, FileSize::Exact(13));
+    assert_eq!(attrs.size(), FileSize::Exact(13));
 
     // The payload is now in the durable view cache (immutable -> aux None).
     let record = t
@@ -158,17 +156,14 @@ async fn read_exact_zero_short_circuits() {
     let t = test_tree();
     let ctx = RequestCtx::default();
 
-    let meta = EntryMeta::file(FileAttrsCache {
-        size: FileSize::Exact(0),
-        bytes: ByteSource::Inline(Vec::new()),
-        stability: Stability::Stable,
-        version_token: None,
-    });
+    let meta = EntryMeta::file(
+        FileAttrsCache::inline(Vec::new(), Stability::Stable, None).expect("valid empty attrs"),
+    );
     let node = Node::new(
         "test".to_string(),
         path("/hello/no-such-route"),
         meta,
-        Backing::Provider,
+        NodeBody::Provider,
     );
 
     let result = t.tree.read(&node, &ctx).await.expect("read empty file");
@@ -176,7 +171,7 @@ async fn read_exact_zero_short_circuits() {
         panic!("expected provider bytes");
     };
     assert!(data.is_empty(), "exact-0 file reads empty");
-    assert_eq!(attrs.map(|a| a.size), Some(FileSize::Exact(0)));
+    assert_eq!(attrs.map(|a| a.size()), Some(FileSize::Exact(0)));
 }
 
 // --- Ranged reads ------------------------------------------------------------
@@ -189,13 +184,16 @@ async fn read_exact_zero_short_circuits() {
 /// test plays that renderer role: it constructs the node with the ranged byte
 /// source so `Tree::open`'s precondition is met.
 fn ranged_node(path_str: &str) -> Node {
-    let meta = EntryMeta::file(FileAttrsCache {
-        size: FileSize::Unknown,
-        bytes: ByteSource::Deferred(ReadMode::Ranged),
-        stability: Stability::Dynamic,
-        version_token: None,
-    });
-    Node::new("test".to_string(), path(path_str), meta, Backing::Provider)
+    let meta = EntryMeta::file(
+        FileAttrsCache::deferred(
+            FileSize::Unknown,
+            ReadMode::Ranged,
+            Stability::Dynamic,
+            None,
+        )
+        .expect("valid ranged attrs"),
+    );
+    Node::new("test".to_string(), path(path_str), meta, NodeBody::Provider)
 }
 
 /// `Tree::open` of a `Deferred(Ranged)` file yields a `RangedHandle` whose
@@ -213,8 +211,8 @@ async fn open_ranged_then_read_chunks() {
         .expect("open ranged file")
         .expect("file is ranged");
     // open_file reports the provider's real attrs: Exact(26), Dynamic.
-    assert_eq!(handle.attrs().size, FileSize::Exact(26));
-    assert_eq!(handle.attrs().stability, Stability::Dynamic);
+    assert_eq!(handle.attrs().size(), FileSize::Exact(26));
+    assert_eq!(handle.attrs().stability(), Stability::Dynamic);
 
     // A mid-file chunk: "cdef" at offset 2, not EOF.
     let chunk = handle.read(2, 4).await.expect("read mid chunk");
@@ -239,17 +237,15 @@ async fn open_unknown_ranged_learns_size_on_eof() {
     let ctx = RequestCtx::default();
 
     // The unknown-ranged file is immutable + Unknown size.
-    let meta = EntryMeta::file(FileAttrsCache {
-        size: FileSize::Unknown,
-        bytes: ByteSource::Deferred(ReadMode::Ranged),
-        stability: Stability::Stable,
-        version_token: None,
-    });
+    let meta = EntryMeta::file(
+        FileAttrsCache::deferred(FileSize::Unknown, ReadMode::Ranged, Stability::Stable, None)
+            .expect("valid unknown ranged attrs"),
+    );
     let node = Node::new(
         "test".to_string(),
         path("/hello/unknown-ranged"),
         meta,
-        Backing::Provider,
+        NodeBody::Provider,
     );
 
     let handle = t
@@ -258,7 +254,7 @@ async fn open_unknown_ranged_learns_size_on_eof() {
         .await
         .expect("open unknown-ranged")
         .expect("unknown-ranged is ranged");
-    assert_eq!(handle.attrs().size, FileSize::Unknown);
+    assert_eq!(handle.attrs().size(), FileSize::Unknown);
 
     // Reading from offset 8 returns the tail "size\n" and EOF. The exact size is
     // 8 + 5 = 13 ("unknown-size\n").
@@ -268,7 +264,7 @@ async fn open_unknown_ranged_learns_size_on_eof() {
     let learned = chunk
         .learned_attrs
         .expect("an EOF-short read on an Unknown-size file learns the size");
-    assert_eq!(learned.size, FileSize::Exact(13));
+    assert_eq!(learned.size(), FileSize::Exact(13));
 
     handle.close().expect("close handle");
 }
@@ -366,7 +362,7 @@ async fn read_item_md_is_durably_cached() {
     };
     assert_eq!(data, b"# Item 7\n\nBody 7\n");
     assert_eq!(
-        attrs.map(|a| a.stability),
+        attrs.map(|a| a.stability()),
         Some(Stability::Stable),
         "the Markdown representation is an immutable rendering"
     );

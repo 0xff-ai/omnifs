@@ -40,22 +40,34 @@ pub(crate) fn byte_source_from_wit(source: &wit_types::ByteSource) -> ByteSource
     }
 }
 
+pub(crate) fn try_file_attrs_from_file_out(
+    file: &wit_types::FileOut,
+) -> Result<FileAttrsCache, String> {
+    FileAttrsCache::from_parts(
+        file_size_from_wit(file.attrs.size),
+        byte_source_from_wit(&file.bytes),
+        stability_from_wit(file.attrs.stability),
+        file.attrs.version_token.clone(),
+    )
+}
+
 pub(crate) fn file_attrs_from_file_out(file: &wit_types::FileOut) -> FileAttrsCache {
-    FileAttrsCache {
-        size: file_size_from_wit(file.attrs.size),
-        bytes: byte_source_from_wit(&file.bytes),
-        stability: stability_from_wit(file.attrs.stability),
-        version_token: file.attrs.version_token.clone(),
-    }
+    try_file_attrs_from_file_out(file)
+        .expect("provider file attrs are validated before view conversion")
+}
+
+pub fn try_file_attrs_from_attrs(attrs: &wit_types::FileAttrs) -> Result<FileAttrsCache, String> {
+    FileAttrsCache::deferred(
+        file_size_from_wit(attrs.size),
+        ReadMode::Full,
+        stability_from_wit(attrs.stability),
+        attrs.version_token.clone(),
+    )
 }
 
 pub fn file_attrs_from_attrs(attrs: &wit_types::FileAttrs) -> FileAttrsCache {
-    FileAttrsCache {
-        size: file_size_from_wit(attrs.size),
-        bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: stability_from_wit(attrs.stability),
-        version_token: attrs.version_token.clone(),
-    }
+    try_file_attrs_from_attrs(attrs)
+        .expect("provider file attrs are validated before view conversion")
 }
 
 pub fn entry_meta_from_kind(kind: &wit_types::EntryKind) -> EntryMeta {

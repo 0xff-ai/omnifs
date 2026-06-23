@@ -4,17 +4,14 @@
 //! inode size promotion) plus the kernel offset/size slicing.
 
 use super::Frontend;
-use super::common::{FullReadTarget, RangedSlot, split_parent_leaf};
-use super::inode::NodeEntry;
-use super::lookup::provider_dir_node;
+use super::common::{FullReadTarget, RangedSlot};
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
 use omnifs_core::view as view_types;
-use omnifs_core::view::{EntryMeta, FileAttrsCache};
+use omnifs_core::view::FileAttrsCache;
 use omnifs_host::inspector::InspectorFuseScope;
-use omnifs_host::pagination;
 use omnifs_inspector::TraceId;
-use omnifs_tree::{Backing, Node, ReadResult, RequestCtx};
+use omnifs_tree::{Node, ReadResult, RequestCtx};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -40,7 +37,7 @@ impl Frontend {
         match self.rt.block_on(slot.handle.read(offset, size)) {
             Ok(chunk) => {
                 if let Some(attrs) = chunk.learned_attrs {
-                    if matches!(attrs.stability, view_types::Stability::Live) {
+                    if matches!(attrs.stability(), view_types::Stability::Live) {
                         // A live file's learned size grows monotonically (the
                         // ranged handle owns that decision); grow the inode so a
                         // polling `tail -f` re-stats and reads the appended
@@ -83,8 +80,8 @@ impl Frontend {
         };
         let mount_name = inode_entry.mount_name.clone();
         let path = inode_entry.path.clone();
-        let backing_path = inode_entry.backing_path.clone();
-        let meta = node_meta_from_entry(&inode_entry);
+        let backing_path = inode_entry.body.backing_path().cloned();
+        let meta = inode_entry.meta();
         drop(inode_entry);
 
         // Drive the kernel-side invalidation fan-out before the read; `Tree::read`
@@ -110,7 +107,7 @@ impl Frontend {
             return;
         }
 
-        let node = Node::new(mount_name, path, meta, Backing::Provider);
+        let node = Node::new(mount_name, path, meta, omnifs_tree::NodeBody::Provider);
         let ctx = RequestCtx {
             trace: live.map(InspectorFuseScope::trace_id),
         };
@@ -165,7 +162,7 @@ impl Frontend {
         // into the per-`fh` buffer. A control whose feed has exhausted no longer
         // resolves (ENOENT); a real provider file of the same name is not
         // synthetic and falls through to the normal open path below.
-        if is_synthetic_candidate(target)
+        if target.is_synthetic_candidate()
             && let Some(flags) = self.open_synthetic(target, trace)?
         {
             return Ok(flags);
@@ -173,11 +170,11 @@ impl Frontend {
 
         // Backing-fs files open lazily: `read` serves them from the real
         // filesystem.
-        if target.backing_path.is_some() {
-            return Ok(lazy_open_flags(target));
+        if target.body.is_backing() {
+            return Ok(target.lazy_open_flags());
         }
 
-        let node = provider_file_node(target);
+        let node = target.provider_node();
 
         // A route declared `ranged` carries a `Deferred(Ranged)` placeholder, so
         // dispatch straight to `open_file` and bind a `RangedHandle` to `fh`. A
@@ -185,7 +182,7 @@ impl Frontend {
         // so a whole-payload provider is asked exactly once. `Tree::open`
         // returning `None` means the route declared `ranged` but the handler
         // answered full (a provider bug): fall through and serve it as full.
-        if is_ranged(target.attrs.as_ref())
+        if target.is_ranged()
             && let Some(flags) = self.open_ranged_handle(target, &node, trace)?
         {
             return Ok(flags);
@@ -193,7 +190,7 @@ impl Frontend {
 
         // Unknown-size full-deferred files prefetch whole on open so `cat`/`ls`
         // see a learned size; an exact-size full file opens lazily.
-        if should_prefetch_full(target.attrs.as_ref()) {
+        if target.should_prefetch_full() {
             let ctx = RequestCtx { trace };
             match self.rt.block_on(self.tree.read(&node, &ctx)) {
                 Ok(ReadResult::Bytes { data, attrs, .. }) => {
@@ -206,13 +203,13 @@ impl Frontend {
                 Ok(ReadResult::Backing(_)) => {
                     // A full-deferred provider file never resolves to a backing
                     // dir; fall through to a lazy open.
-                    return Ok(lazy_open_flags(target));
+                    return Ok(target.lazy_open_flags());
                 },
                 Err(error) => return Err(super::errno::tree_error_errno(&error)),
             }
         }
 
-        Ok(lazy_open_flags(target))
+        Ok(target.lazy_open_flags())
     }
 
     /// Re-resolve a synthetic leaf through `Tree` and serve its bytes into the
@@ -225,10 +222,10 @@ impl Frontend {
         target: &FullReadTarget,
         trace: Option<TraceId>,
     ) -> Result<Option<FopenFlags>, Errno> {
-        let Some((parent_path, leaf)) = split_parent_leaf(&target.path) else {
+        let Some((parent_path, leaf)) = target.parent_and_leaf() else {
             return Ok(None);
         };
-        let parent = provider_dir_node(&target.mount_name, &parent_path);
+        let parent = Node::provider_dir(target.mount_name.clone(), parent_path);
         let ctx = RequestCtx { trace };
         // Resolve and render in one runtime entry: a `None` short-circuits when
         // the leaf is a real provider file (the caller falls through), so the
@@ -280,7 +277,7 @@ impl Frontend {
         // learns upstream growth on a cadence and records it in `follow_sizes`,
         // which `getattr` reports so an idle reader sees the file grow. The
         // size-learning is `Tree`'s; the reporting is ours.
-        if matches!(attrs.stability, view_types::Stability::Live) {
+        if matches!(attrs.stability(), view_types::Stability::Live) {
             self.spawn_follow_pump(
                 target.ino,
                 target.fh,
@@ -300,7 +297,7 @@ impl Frontend {
     }
 
     pub(super) fn promote_inode_attrs(&self, ino: u64, attrs: FileAttrsCache) {
-        if matches!(attrs.stability, view_types::Stability::Live) {
+        if matches!(attrs.stability(), view_types::Stability::Live) {
             return;
         }
         let Some(mut entry) = self.inodes.get_mut(&ino) else {
@@ -372,73 +369,4 @@ impl Frontend {
         });
         self.follow_pumps.insert(fh, task.abort_handle());
     }
-}
-
-/// The `EntryMeta` projected by an inode entry (kind + optional attrs).
-fn node_meta_from_entry(entry: &NodeEntry) -> EntryMeta {
-    let kind = match &entry.kind {
-        omnifs_wit::provider::types::EntryKind::Directory => {
-            omnifs_core::view::EntryKind::Directory
-        },
-        omnifs_wit::provider::types::EntryKind::File(_) => omnifs_core::view::EntryKind::File,
-    };
-    EntryMeta {
-        kind,
-        attrs: entry.attrs.clone(),
-    }
-}
-
-fn is_ranged(attrs: Option<&FileAttrsCache>) -> bool {
-    attrs.is_some_and(|attrs| {
-        matches!(
-            attrs.bytes,
-            view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-        )
-    })
-}
-
-fn should_prefetch_full(attrs: Option<&FileAttrsCache>) -> bool {
-    attrs.is_some_and(|attrs| {
-        matches!(
-            attrs.bytes,
-            view_types::ByteSource::Deferred(view_types::ReadMode::Full)
-        ) && !matches!(attrs.size, view_types::FileSize::Exact(_))
-    })
-}
-
-/// True when this inode could be a host-synthesized leaf: a `@next`/`@all`
-/// control (gated by name) or a mount-root ignore file (gated by the
-/// `synthetic` inode marker set at lookup/listing).
-fn is_synthetic_candidate(target: &FullReadTarget) -> bool {
-    if target.synthetic {
-        return true;
-    }
-    split_parent_leaf(&target.path).is_some_and(|(_, leaf)| pagination::is_control_name(&leaf))
-}
-
-/// Build the provider-backed file `Node` for `target` from its inode-cached
-/// projection. The open path only reaches this for files, so the meta kind is
-/// `File`; the projected attrs drive `Tree::read`/`Tree::open` (the read mode,
-/// the durable aux key, the learned-size policy).
-fn provider_file_node(target: &FullReadTarget) -> Node {
-    let meta = EntryMeta {
-        kind: omnifs_core::view::EntryKind::File,
-        attrs: target.attrs.clone(),
-    };
-    Node::new(
-        target.mount_name.clone(),
-        target.path.clone(),
-        meta,
-        Backing::Provider,
-    )
-}
-
-/// The open flags for a file served lazily (read on demand): direct I/O only
-/// when the projection requests it.
-fn lazy_open_flags(target: &FullReadTarget) -> FopenFlags {
-    target
-        .attrs
-        .as_ref()
-        .filter(|attrs| attrs.should_direct_io())
-        .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO)
 }

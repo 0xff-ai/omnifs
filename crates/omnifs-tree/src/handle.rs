@@ -19,7 +19,7 @@ use omnifs_host::{Error, Runtime};
 
 use crate::error::{Result, TreeError};
 use crate::node::Node;
-use crate::read::{Chunk, learned_ranged_eof_attrs};
+use crate::read::{Chunk, FileAttrStore};
 use crate::{RequestCtx, Tree};
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
@@ -97,7 +97,7 @@ impl RangedHandle {
                     self.path.as_str()
                 ))
             })?;
-            if matches!(self.attrs.stability, view_types::Stability::Live) {
+            if matches!(self.attrs.stability(), view_types::Stability::Live) {
                 // A live file (tail -f shapes) is meant to change while observed,
                 // so a freshly observed end never contradicts the open-time size.
                 // Grow the shared high-water mark monotonically and learn that
@@ -109,13 +109,15 @@ impl RangedHandle {
                     .max(eof_size);
                 learned_attrs = Some(self.attrs.clone().with_exact_size(end));
             } else {
-                if let Err(error) = self.attrs.validate_observed_size(eof_size) {
-                    return Err(TreeError::internal(format!(
+                learned_attrs = self.attrs.learned_ranged_eof_attrs(eof_size).map_err(|error| {
+                    TreeError::internal(format!(
                         "provider returned ranged EOF that contradicts file attrs for {}: {error}",
                         self.path.as_str()
-                    )));
+                    ))
+                })?;
+                if let Some(attrs) = &learned_attrs {
+                    FileAttrStore::new(&self.runtime, &self.path).publish(attrs.clone())?;
                 }
-                learned_attrs = learned_ranged_eof_attrs(self.attrs.clone(), eof_size);
             }
         }
 
@@ -152,7 +154,7 @@ impl Tree {
                 node.path().as_str()
             ))
         })?;
-        if !matches!(projected.bytes, view_types::ByteSource::Deferred(_)) {
+        if !projected.is_deferred() {
             return Err(TreeError::invalid_input(format!(
                 "open requires byte-source::deferred: {}",
                 node.path().as_str()
@@ -174,13 +176,55 @@ impl Tree {
             Err(error) => return Err(error.into()),
         };
 
+        let attrs = opened_file_attrs(&opened.attrs);
+        FileAttrStore::new(&runtime, node.path()).publish(attrs.clone())?;
         Ok(Some(RangedHandle {
             runtime,
             path: node.path().clone(),
             provider_handle: opened.handle,
-            attrs: opened_file_attrs(&opened.attrs),
+            attrs,
             observed_end: Arc::new(AtomicU64::new(0)),
         }))
+    }
+
+    /// Probe a deferred ranged file's real attrs by opening it through the
+    /// provider, then immediately closing the provider handle. This is for
+    /// frontends such as NFS that must render child attrs during directory
+    /// flattening. The probe is intentionally named as provider I/O, and the
+    /// learned attrs are published through the shared view cache before returning.
+    pub async fn probe_ranged_attrs(
+        &self,
+        mount: &str,
+        path: &Path,
+    ) -> Result<Option<FileAttrsCache>> {
+        let runtime = self.runtime_for(mount)?;
+        let opened = match runtime.namespace().open_file(path).await {
+            Ok(opened) => opened,
+            Err(Error::ProviderError(error))
+                if matches!(
+                    error.kind,
+                    omnifs_wit::provider::types::ErrorKind::InvalidInput
+                        | omnifs_wit::provider::types::ErrorKind::NotFound
+                ) =>
+            {
+                return Ok(None);
+            },
+            Err(error) => return Err(error.into()),
+        };
+
+        let attrs = opened_file_attrs(&opened.attrs);
+        let validation = attrs.validate().map_err(|error| {
+            TreeError::internal(format!(
+                "open-file returned invalid attrs for {path}: {error}"
+            ))
+        });
+        let close = runtime.call_close_file(opened.handle);
+        if let Err(error) = close {
+            tracing::warn!(path = %path, error = %error, "ranged attr probe close failed");
+        }
+        validation?;
+        FileAttrStore::new(&runtime, path).publish(attrs.clone())?;
+        Ok(Some(attrs))
     }
 }
 
@@ -216,10 +260,11 @@ pub async fn probe_live_growth(
 /// source is fixed to `Deferred(Ranged)`; the real size and stability come from
 /// the open result.
 fn opened_file_attrs(opened: &omnifs_wit::provider::types::FileAttrs) -> FileAttrsCache {
-    FileAttrsCache {
-        size: file_size_from_wit(opened.size),
-        bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Ranged),
-        stability: stability_from_wit(opened.stability),
-        version_token: opened.version_token.clone(),
-    }
+    FileAttrsCache::deferred(
+        file_size_from_wit(opened.size),
+        view_types::ReadMode::Ranged,
+        stability_from_wit(opened.stability),
+        opened.version_token.clone(),
+    )
+    .expect("provider open attrs are validated before view conversion")
 }

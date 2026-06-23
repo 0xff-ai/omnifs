@@ -37,7 +37,7 @@ enum StaticData {
 
 struct StaticExport {
     nodes: BTreeMap<u64, StaticNode>,
-    opens: OpenTable,
+    opens: OpenTable<Vec<u8>>,
     exhaustive_listings: bool,
 }
 
@@ -192,13 +192,13 @@ impl ReadOnlyExport for StaticExport {
             inode: id,
             clientid,
             access,
-            materialized_bytes: data,
+            body: data,
         });
         Ok(OpenResult { stateid, attr })
     }
 
     fn validate_state(&self, stateid: StateId) -> StatusResult<()> {
-        self.opens.touch(stateid).map(|_| ())
+        self.opens.touch(stateid)
     }
 
     fn read_state(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
@@ -206,7 +206,7 @@ impl ReadOnlyExport for StaticExport {
     }
 
     fn close_state(&self, stateid: StateId) -> StatusResult<StateId> {
-        self.opens.close(stateid)
+        self.opens.close(stateid).map(|(next, _)| next)
     }
 
     fn renew_client(&self, clientid: u64) -> StatusResult<()> {

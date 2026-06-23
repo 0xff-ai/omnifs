@@ -74,8 +74,30 @@ async fn listing(t: &TestTree, node: &Node, cursor: Option<Cursor>, ctx: &Reques
     }
 }
 
-fn names(entries: &[omnifs_tree::Entry]) -> Vec<&str> {
-    entries.iter().map(|e| e.name.as_str()).collect()
+fn provider_names(listing: &Listing) -> Vec<&str> {
+    listing
+        .entries
+        .iter()
+        .filter(|entry| !entry.is_synthetic())
+        .map(|entry| entry.name.as_str())
+        .collect()
+}
+
+fn synthetic_entries(listing: &Listing) -> Vec<&omnifs_tree::Entry> {
+    listing
+        .entries
+        .iter()
+        .filter(|entry| entry.is_synthetic())
+        .collect()
+}
+
+fn synthetic_names(listing: &Listing) -> Vec<&str> {
+    listing
+        .entries
+        .iter()
+        .filter(|entry| entry.is_synthetic())
+        .map(|entry| entry.name.as_str())
+        .collect()
 }
 
 fn cached_dirents(runtime: &Runtime, path_str: &str) -> Option<DirentsPayload> {
@@ -86,8 +108,8 @@ fn cached_dirents(runtime: &Runtime, path_str: &str) -> Option<DirentsPayload> {
 // --- Pagination controls -----------------------------------------------------
 
 /// A first-page browse listing of a paged directory carries the `@next`/`@all`
-/// pagination controls as renderer-neutral synthetic entries (NOT mixed into the
-/// provider `entries`), and surfaces the resume cursor. The persisted dirents
+/// pagination controls as renderer-neutral synthetic entries, and surfaces the
+/// resume cursor. The persisted dirents
 /// record carries the control records so a later cached serve and a control
 /// lookup still find them.
 #[tokio::test(flavor = "multi_thread")]
@@ -98,14 +120,14 @@ async fn list_emits_pagination_controls() {
 
     let page0 = listing(&t, &feed, None, &ctx).await;
     // The provider entries stay raw: page 0 is item-0, item-1, no controls.
-    assert_eq!(names(&page0.entries), ["item-0", "item-1"]);
+    assert_eq!(provider_names(&page0), ["item-0", "item-1"]);
     // The controls are synthetic entries, presented identically for every
     // renderer.
-    let mut control_names = names(&page0.synthetic);
+    let mut control_names = synthetic_names(&page0);
     control_names.sort_unstable();
     assert_eq!(control_names, ["@all", "@next"]);
-    for entry in &page0.synthetic {
-        let syn = entry.synthetic.as_ref().expect("a control is synthetic");
+    for entry in synthetic_entries(&page0) {
+        let syn = entry.synthetic_kind().expect("a control is synthetic");
         let want = if entry.name == "@next" {
             PaginationControl::Next
         } else {
@@ -139,9 +161,9 @@ async fn list_non_paged_dir_has_no_controls() {
 
     let page = listing(&t, &hello, None, &ctx).await;
     assert!(
-        page.synthetic.is_empty(),
+        synthetic_entries(&page).is_empty(),
         "a non-paged dir emits no controls, got {:?}",
-        names(&page.synthetic)
+        synthetic_names(&page)
     );
 }
 
@@ -156,21 +178,21 @@ async fn list_paginates_with_cursor() {
     let feed = t.tree.resolve(&path("/hello/feed"), &ctx).await.unwrap();
 
     let page0 = listing(&t, &feed, None, &ctx).await;
-    assert_eq!(names(&page0.entries), ["item-0", "item-1"]);
+    assert_eq!(provider_names(&page0), ["item-0", "item-1"]);
     let cursor0 = page0.next_cursor.expect("page 0 carries a cursor");
 
     let page1 = listing(&t, &feed, Some(cursor0), &ctx).await;
-    assert_eq!(names(&page1.entries), ["item-2", "item-3"]);
+    assert_eq!(provider_names(&page1), ["item-2", "item-3"]);
     assert!(
-        page1.synthetic.is_empty(),
+        synthetic_entries(&page1).is_empty(),
         "a continuation page carries no synthetic controls"
     );
     let cursor1 = page1.next_cursor.expect("page 1 carries a cursor");
     assert_eq!(cursor1, Cursor(CachedCursor::Page(2)));
 
     let page2 = listing(&t, &feed, Some(cursor1), &ctx).await;
-    assert_eq!(names(&page2.entries), ["item-4", "item-5"]);
-    assert!(page2.synthetic.is_empty());
+    assert_eq!(provider_names(&page2), ["item-4", "item-5"]);
+    assert!(synthetic_entries(&page2).is_empty());
     assert!(
         page2.next_cursor.is_none(),
         "the terminal page clears the cursor, got {:?}",
@@ -214,7 +236,7 @@ async fn read_next_control_advances_one_page() {
     // The learned exact size matches the status length so `cat` reads it whole.
     let attrs = attrs.expect("a control read carries learned attrs");
     assert_eq!(
-        attrs.size,
+        attrs.size(),
         omnifs_core::view::FileSize::Exact(status.len() as u64)
     );
 
@@ -272,8 +294,8 @@ async fn read_all_control_exhausts_then_control_is_gone() {
 
 /// The mount root carries the `.gitignore`/`.ignore`/`.rgignore` ignore files as
 /// synthetic entries, each serving the fixed `@*\n` content so ignore-respecting
-/// tree walks skip the `@`-prefixed controls. They are synthetic (not in the
-/// provider `entries`) and resolve + read through `Tree`.
+/// tree walks skip the `@`-prefixed controls. They are synthetic and resolve +
+/// read through `Tree`.
 #[tokio::test(flavor = "multi_thread")]
 async fn root_ignore_synthesized() {
     let t = test_tree();
@@ -281,13 +303,16 @@ async fn root_ignore_synthesized() {
     let root = t.tree.resolve(&path("/"), &ctx).await.unwrap();
 
     let listing = listing(&t, &root, None, &ctx).await;
-    let mut ignore_names = names(&listing.synthetic);
+    let mut ignore_names = synthetic_names(&listing);
     ignore_names.sort_unstable();
     assert_eq!(ignore_names, [".gitignore", ".ignore", ".rgignore"]);
     // The provider entries do not contain the ignore files.
     for n in [".gitignore", ".ignore", ".rgignore"] {
         assert!(
-            !listing.entries.iter().any(|e| e.name == n),
+            !listing
+                .entries
+                .iter()
+                .any(|e| e.name == n && !e.is_synthetic()),
             "ignore files are synthetic, not provider entries"
         );
     }
@@ -321,7 +346,7 @@ async fn root_ignore_not_synthesized_below_root() {
     let listing = listing(&t, &hello, None, &ctx).await;
     for n in [".gitignore", ".ignore", ".rgignore"] {
         assert!(
-            !listing.synthetic.iter().any(|e| e.name == n),
+            !synthetic_entries(&listing).iter().any(|e| e.name == n),
             "ignore files belong only at the mount root"
         );
     }
@@ -350,7 +375,7 @@ async fn list_unchanged_serves_cached() {
 
     // Cold: caches the paginated (authoritative) dirents.
     let cold = listing(&t, &feed, None, &ctx).await;
-    assert_eq!(names(&cold.entries), ["item-0", "item-1"]);
+    assert_eq!(provider_names(&cold), ["item-0", "item-1"]);
     assert!(
         cached_dirents(&t.runtime, "/hello/feed").is_some(),
         "a paged listing caches authoritative dirents"
@@ -358,8 +383,8 @@ async fn list_unchanged_serves_cached() {
 
     // Warm: served from the cached authoritative record, same shape.
     let warm = listing(&t, &feed, None, &ctx).await;
-    assert_eq!(names(&warm.entries), ["item-0", "item-1"]);
-    let mut control_names = names(&warm.synthetic);
+    assert_eq!(provider_names(&warm), ["item-0", "item-1"]);
+    let mut control_names = synthetic_names(&warm);
     control_names.sort_unstable();
     assert_eq!(
         control_names,

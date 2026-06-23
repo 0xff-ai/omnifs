@@ -26,8 +26,7 @@ use super::{Error, Runtime};
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
 use omnifs_core::view::{
-    ByteSource, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FileSize, ReadMode,
-    Stability,
+    DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability,
 };
 use omnifs_inspector::TraceId;
 use omnifs_wit::provider::types as wit_types;
@@ -284,16 +283,10 @@ impl Runtime {
 /// A small dynamic file: each `cat` re-fires the control action and directory
 /// recursion never descends through it.
 fn control_entry_meta() -> EntryMeta {
-    EntryMeta::file(FileAttrsCache {
-        size: FileSize::Unknown,
-        // `Dynamic`, not `Live`: each open recomputes the status (the action
-        // runs once per open, served from the per-`fh` buffer), so a re-read may
-        // differ, but it is not a live ranged stream. `Live` would also
-        // violate the attrs invariant (`Live` requires `Deferred(Ranged)`).
-        bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: Stability::Dynamic,
-        version_token: None,
-    })
+    EntryMeta::file(
+        FileAttrsCache::deferred(FileSize::Unknown, ReadMode::Full, Stability::Dynamic, None)
+            .expect("control attrs are valid"),
+    )
 }
 
 /// Attrs for a control file once its status content has been generated at open.
@@ -303,12 +296,13 @@ fn control_entry_meta() -> EntryMeta {
 /// of the `Unknown` placeholder's single byte. Mirrors the learned-size
 /// promotion the regular full-read path applies.
 pub fn control_read_attrs(len: u64) -> FileAttrsCache {
-    FileAttrsCache {
-        size: FileSize::Exact(len),
-        bytes: ByteSource::Deferred(ReadMode::Full),
-        stability: Stability::Dynamic,
-        version_token: None,
-    }
+    FileAttrsCache::deferred(
+        FileSize::Exact(len),
+        ReadMode::Full,
+        Stability::Dynamic,
+        None,
+    )
+    .expect("control read attrs are valid")
 }
 
 /// Drop any `@`-prefixed control entries from an accumulated dirents list.
