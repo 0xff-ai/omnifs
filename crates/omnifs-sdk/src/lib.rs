@@ -153,7 +153,7 @@ mod async_runtime;
 pub mod blob;
 pub mod browse;
 pub mod captures;
-
+pub mod collection;
 pub mod cx;
 pub mod endpoint;
 pub mod error;
@@ -164,6 +164,7 @@ pub mod helpers;
 pub mod http;
 pub mod identity;
 pub mod init;
+pub mod invalidation;
 pub mod object;
 pub mod prelude;
 pub mod projection;

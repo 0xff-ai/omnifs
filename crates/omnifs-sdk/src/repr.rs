@@ -69,7 +69,7 @@ where
     O: crate::object::Object + Representable<F>,
     F: Format,
 {
-    |canonical| O::parse_canonical(canonical).map(|value| value.represent())
+    |canonical| O::decode(canonical).map(|value| value.represent())
 }
 
 /// A value that can render itself into format `F`.
