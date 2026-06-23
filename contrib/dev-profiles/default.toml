@@ -1,1 +1,1 @@
-mounts = ["github", "linear"]
+mounts = ["github", "db", "k8s", "arxiv", "dns"]
