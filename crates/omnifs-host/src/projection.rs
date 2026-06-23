@@ -359,4 +359,91 @@ mod tests {
                 .is_some()
         );
     }
+
+    /// Regression: reading one child of an exhaustively-listed object directory
+    /// must not collapse the cached dirents to that single child.
+    ///
+    /// An object dir (a GitHub issue dir, a k8s resource dir, an arxiv
+    /// paper-version dir) is listed exhaustively, then a child lookup folds its
+    /// `target + siblings` into the cached dirents. Because the lookup reports
+    /// `exhaustive`, that fold REPLACES the listing with the lookup's entries.
+    /// An honest object-dir lookup carries every other leaf as a sibling, so the
+    /// replacement equals the full listing and `readdir` still enumerates all
+    /// children. (The bug: a sibling-less exhaustive lookup shrank the dirents
+    /// to the looked-up child, so `cat dir/body` then `ls dir` returned only
+    /// `body`.)
+    #[test]
+    fn exhaustive_child_lookup_with_siblings_preserves_full_listing() {
+        let (_dir, _caches, store) = open_store("test");
+        let dir = "/o/r/issues/all/42";
+        let children = ["body", "comments", "state", "title", "user"];
+
+        // Cold exhaustive listing of the object dir.
+        let listing = wit_types::DirListing {
+            entries: children.iter().map(|n| dir_entry(n)).collect(),
+            exhaustive: true,
+            validator: None,
+            next_cursor: None,
+        };
+        apply_listing_projection(&store, &p(dir), &listing);
+        assert_eq!(cached_dirents(&store, dir).entries.len(), children.len());
+
+        // `cat dir/body`: the lookup resolves `body` and, because an object's
+        // leaf set is statically known and exhaustive, carries every OTHER leaf
+        // as a sibling.
+        let lookup = wit_types::LookupEntry {
+            target: dir_entry("body"),
+            siblings: children
+                .iter()
+                .filter(|n| **n != "body")
+                .map(|n| dir_entry(n))
+                .collect(),
+            exhaustive: true,
+        };
+        apply_lookup_projection(&store, &p(dir), &lookup);
+
+        let dirents = cached_dirents(&store, dir);
+        let mut names: Vec<&str> = dirents.entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names, children,
+            "readdir must still enumerate every child after one child is read"
+        );
+    }
+
+    /// Guards the inverse: a sibling-less exhaustive lookup is exactly the shape
+    /// that collapses the directory, so the host fold is faithful and the fix
+    /// must live at the lookup's source (the SDK carries the siblings). This
+    /// documents WHY the host arm replaces wholesale and pins the failure mode.
+    #[test]
+    fn sibling_less_exhaustive_lookup_shrinks_listing() {
+        let (_dir, _caches, store) = open_store("test");
+        let dir = "/o/r/issues/all/42";
+        let listing = wit_types::DirListing {
+            entries: ["body", "title", "user"]
+                .iter()
+                .map(|n| dir_entry(n))
+                .collect(),
+            exhaustive: true,
+            validator: None,
+            next_cursor: None,
+        };
+        apply_listing_projection(&store, &p(dir), &listing);
+
+        let lookup = wit_types::LookupEntry {
+            target: dir_entry("body"),
+            siblings: Vec::new(),
+            exhaustive: true,
+        };
+        apply_lookup_projection(&store, &p(dir), &lookup);
+
+        let dirents = cached_dirents(&store, dir);
+        assert_eq!(
+            dirents.entries.len(),
+            1,
+            "a sibling-less exhaustive lookup is treated as the whole directory; \
+             the SDK must never emit one for a multi-leaf object dir"
+        );
+        assert_eq!(dirents.entries[0].name, "body");
+    }
 }

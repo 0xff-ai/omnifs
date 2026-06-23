@@ -28,25 +28,21 @@ impl DownArgs {
         let DownArgs { force } = self;
         let workspace = Workspace::resolve()?;
 
+        // A contributor dev session (started by `omnifs dev`) records itself
+        // under the dev home; its runtime and db/k8s fixtures run in
+        // containers. Sweep the whole session and skip the normal daemon
+        // teardown. A no-op outside a dev session, so production `down` never
+        // touches it.
+        let dev_home = workspace.layout().config_dir.clone();
+        if omnifs_fixture::DevSessionRecord::read(&dev_home)?.is_some() {
+            match omnifs_fixture::DevSessionRecord::teardown_all(&dev_home).await {
+                Ok(()) => anstream::println!("✓ Dev session torn down"),
+                Err(error) => anstream::eprintln!("note: dev session teardown: {error:#}"),
+            }
+            return Ok(());
+        }
+
         DaemonTeardown::new(&workspace).down(force).await?;
-
-        // A dev sandbox in a workspace checkout also brings up a local
-        // Kubernetes cluster (via `omnifs dev`); tear it down so `omnifs down`
-        // is a full stop. A no-op outside a workspace checkout, so production
-        // `down` never touches it.
-        teardown_dev_cluster();
         Ok(())
-    }
-}
-
-/// Best-effort teardown of the contributor dev Kubernetes cluster. Only a
-/// workspace checkout ever starts one (via `omnifs dev`); outside a workspace
-/// this is a no-op.
-fn teardown_dev_cluster() {
-    let Ok(workspace) = crate::dev_support::WorkspaceRoot::discover() else {
-        return;
-    };
-    if let Err(error) = crate::kubernetes_testenv::down(workspace.path()) {
-        anstream::eprintln!("note: dev cluster teardown: {error:#}");
     }
 }

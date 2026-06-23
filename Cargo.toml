@@ -40,6 +40,7 @@ omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
 omnifs-tree = { version = "0.2.1", path = "crates/omnifs-tree" }
 omnifs-cache = { version = "0.2.1", path = "crates/omnifs-cache" }
+omnifs-fixture = { version = "0.2.1", path = "crates/omnifs-fixture" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "43", default-features = false, features = ["cache", "component-model", "cranelift", "winch", "runtime"] }
 tokio = { version = "1", features = ["full"] }
@@ -54,6 +55,8 @@ schemars = "1"
 jsonschema = { version = "0.46", default-features = false }
 postcard = { version = "1", features = ["alloc"] }
 tracing = "0.1"
+testcontainers = "0.27.3"
+bollard = "0.20.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }

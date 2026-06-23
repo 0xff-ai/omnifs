@@ -385,6 +385,76 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
     assert_eq!(file_payload(&state).content, b"open\n");
 }
 
+/// Regression (live FUSE collapse): looking up one child of an object directory
+/// must not shrink the directory's cached listing to that single child.
+///
+/// `ls` of an object dir (here `/items/open/7`) lists every leaf. A later access
+/// of one child (`cat body`) drives a `lookup_child`, which folds its
+/// `target + siblings` into the parent's cached dirents. The object's leaf set is
+/// statically known, so the lookup answers `exhaustive` and the host treats the
+/// fold as the whole directory. The lookup therefore MUST carry every other leaf
+/// as a sibling; otherwise the fold replaces the listing with just the
+/// looked-up child and a subsequent readdir enumerates only `body`.
+#[tokio::test]
+async fn test_object_dir_child_lookup_preserves_full_listing() {
+    let harness = make_initialized_runtime(
+        r#"
+        {
+            "provider": "test_provider.wasm",
+            "mount": "test",
+            "capabilities": { "domains": ["httpbin.org"] }
+        }
+    "#,
+    );
+
+    let object_dir = p("/items/open/7");
+    let expected = vec!["body", "comments", "item.json", "item.md", "state", "title"];
+
+    // Cold `ls` of the object dir lists every leaf.
+    let listing = harness
+        .runtime
+        .namespace()
+        .list_children(&object_dir, None, None, None)
+        .await
+        .unwrap();
+    let ListChildrenResult::Entries(listing) = listing else {
+        panic!("expected list entries");
+    };
+    let mut cold_names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    cold_names.sort_unstable();
+    assert_eq!(
+        cold_names, expected,
+        "cold listing must enumerate every leaf"
+    );
+
+    // `cat /items/open/7/body`: the lookup the FUSE/NFS path runs to resolve the
+    // child before reading it.
+    let lookup = harness
+        .runtime
+        .namespace()
+        .lookup_child(&object_dir, "body", None)
+        .await
+        .unwrap();
+    match &lookup {
+        LookupOutcome::Entry(entry) => assert_eq!(entry.path().as_str(), "/items/open/7/body"),
+        other => panic!("expected lookup entry, got {other:?}"),
+    }
+
+    // A subsequent readdir reads the cached dirents the lookup just folded into.
+    let dirents_record = harness
+        .runtime
+        .cache_get(&object_dir, RecordKind::Dirents, None)
+        .expect("object dir dirents must stay cached");
+    let dirents = DirentsPayload::deserialize(&dirents_record.payload)
+        .expect("dirents payload should deserialize");
+    let mut warm_names: Vec<&str> = dirents.entries.iter().map(|e| e.name.as_str()).collect();
+    warm_names.sort_unstable();
+    assert_eq!(
+        warm_names, expected,
+        "reading one child must not collapse the object dir's listing"
+    );
+}
+
 #[tokio::test]
 async fn test_ranged_open_read_chunk_contract() {
     let harness = make_initialized_runtime(
