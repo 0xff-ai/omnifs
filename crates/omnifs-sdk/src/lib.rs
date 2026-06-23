@@ -232,17 +232,10 @@ mod tests {
     use super::NoConfig;
 
     #[test]
-    fn no_config_accepts_empty_mount_config() {
-        assert_eq!(serde_json::from_str::<NoConfig>("{}").unwrap(), NoConfig);
-    }
-
-    #[test]
-    fn no_config_accepts_null_for_json_absence() {
-        assert_eq!(serde_json::from_str::<NoConfig>("null").unwrap(), NoConfig);
-    }
-
-    #[test]
-    fn no_config_rejects_provider_specific_keys() {
+    fn no_config_json_absence() {
+        for json in ["{}", "null"] {
+            assert_eq!(serde_json::from_str::<NoConfig>(json).unwrap(), NoConfig);
+        }
         let err = serde_json::from_str::<NoConfig>(r#"{"endpoint":"x"}"#).unwrap_err();
         assert!(
             err.to_string().contains("empty provider config object"),

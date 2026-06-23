@@ -356,27 +356,21 @@ mod tests {
     }
 
     #[test]
-    fn nullproc_returns_success() {
+    fn rpc_dispatch_accept_stats() {
         let export = NullExport;
-        let call = build_rpc_call(1, NFS_PROGRAM, NFS_VERSION_4, PROC_NULL, &[]);
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
-        assert_eq!(reply_accept_stat(&reply), Some(RPC_SUCCESS));
-    }
-
-    #[test]
-    fn unknown_procedure_returns_proc_unavail() {
-        let export = NullExport;
-        let call = build_rpc_call(2, NFS_PROGRAM, NFS_VERSION_4, 99, &[]);
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
-        assert_eq!(reply_accept_stat(&reply), Some(RPC_PROC_UNAVAIL));
-    }
-
-    #[test]
-    fn wrong_program_returns_prog_unavail() {
-        let export = NullExport;
-        let call = build_rpc_call(3, 999_999, NFS_VERSION_4, PROC_NULL, &[]);
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
-        assert_eq!(reply_accept_stat(&reply), Some(RPC_PROG_UNAVAIL));
+        for (xid, program, version, proc, expected) in [
+            (1, NFS_PROGRAM, NFS_VERSION_4, PROC_NULL, RPC_SUCCESS),
+            (2, NFS_PROGRAM, NFS_VERSION_4, 99, RPC_PROC_UNAVAIL),
+            (3, 999_999, NFS_VERSION_4, PROC_NULL, RPC_PROG_UNAVAIL),
+        ] {
+            let call = build_rpc_call(xid, program, version, proc, &[]);
+            let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+            assert_eq!(
+                reply_accept_stat(&reply),
+                Some(expected),
+                "xid={xid} program={program} proc={proc}"
+            );
+        }
     }
 
     #[test]
@@ -450,29 +444,24 @@ mod tests {
     }
 
     #[test]
-    fn truncated_call_header_returns_garbage_args() {
+    fn truncated_rpc_header_returns_garbage_args() {
         let export = NullExport;
-        // Only 8 bytes: xid + CALL, then EOF.
-        let mut w = XdrWriter::new();
-        w.u32(7);
-        w.u32(RPC_CALL);
-        let call = w.into_inner();
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let short = {
+            let mut w = XdrWriter::new();
+            w.u32(7);
+            w.u32(RPC_CALL);
+            w.into_inner()
+        };
+        let reply = handle_rpc_record(&short, 0, &clients(), &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_GARBAGE_ARGS));
-    }
 
-    #[test]
-    fn truncated_auth_returns_garbage_args() {
-        let export = NullExport;
-        // Valid header but truncated after program.
         let mut w = XdrWriter::new();
         w.u32(8);
         w.u32(RPC_CALL);
         w.u32(2);
         w.u32(NFS_PROGRAM);
-        // EOF after program: missing version, procedure, and auth.
-        let call = w.into_inner();
-        let reply = handle_rpc_record(&call, 0, &clients(), &export, &trace());
+        let truncated_auth = w.into_inner();
+        let reply = handle_rpc_record(&truncated_auth, 0, &clients(), &export, &trace());
         assert_eq!(reply_accept_stat(&reply), Some(RPC_GARBAGE_ARGS));
     }
 

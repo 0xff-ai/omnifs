@@ -52,6 +52,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 
 ### Internal & maintenance
 - **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
+- **Test:** Removed or merged narrow tests across many crates, folding useful coverage into broader behavior-oriented cases. (#147)
 
 ## [0.2.1] - 2026-06-08
 

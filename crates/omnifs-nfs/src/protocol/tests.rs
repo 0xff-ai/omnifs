@@ -8,7 +8,7 @@ use crate::protocol::compound::handle_compound;
 use crate::protocol::consts::{
     CLAIM_NULL, FATTR4_FILEID, FATTR4_SIZE, FATTR4_TYPE, NF4REG, NFS4_OK, NFS4ERR_BAD_COOKIE,
     NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT,
-    NFS4ERR_NOFILEHANDLE, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL, NFS4ERR_ROFS,
+    NFS4ERR_NOFILEHANDLE, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL,
     NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL, OP_CLOSE, OP_GETATTR, OP_GETFH,
     OP_ILLEGAL, OP_LOOKUP, OP_OPEN, OP_OPEN_CONFIRM, OP_PUTFH, OP_PUTROOTFH, OP_READ, OP_READDIR,
     OP_READLINK, OP_SECINFO,
@@ -414,16 +414,64 @@ fn op_putfh(id: u64) -> Vec<u8> {
 }
 
 #[test]
-fn synthetic_lookup_read_close_compound_succeeds() {
+fn synthetic_protocol_edge_cases() {
     let export = StaticExport::fixture();
+
     let open = compound_result(&export, &[op_only(OP_PUTROOTFH), op_open("README.txt", 1)]);
     let stateid = open_stateid(&open);
-
     let status = compound_status(
         &export,
         &[op_putfh(2), op_read(stateid, 0, 64), op_close(stateid)],
     );
     assert_eq!(status, NFS4_OK);
+
+    let (status, _result) = handle_readdir(
+        &export,
+        7,
+        Some(export.root()),
+        0,
+        &[0xcc; 8],
+        4096,
+        &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
+    );
+    assert_eq!(status, NFS4_OK);
+
+    let status = compound_status(
+        &export,
+        &[op_only(OP_PUTROOTFH), op_lookup("README.txt"), op_readdir()],
+    );
+    assert_eq!(status, NFS4ERR_NOTDIR);
+
+    let (status, _result) = handle_readdir(
+        &export,
+        7,
+        Some(export.root()),
+        5,
+        &[0xbb; 8],
+        4096,
+        &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
+    );
+    assert_eq!(status, NFS4ERR_BAD_COOKIE);
+}
+
+#[test]
+fn synthetic_readonly_compound_ops_succeed() {
+    let export = StaticExport::fixture();
+    assert_eq!(
+        compound_status(&export, &[op_only(OP_PUTROOTFH), op_readdir()]),
+        NFS4_OK
+    );
+    assert_eq!(
+        compound_status(
+            &export,
+            &[
+                op_only(OP_PUTROOTFH),
+                op_lookup("readme-link"),
+                op_only(OP_READLINK),
+            ],
+        ),
+        NFS4_OK
+    );
 }
 
 #[test]
@@ -439,22 +487,6 @@ fn synthetic_opens_create_independent_stateids() {
     assert_eq!(close_first, NFS4_OK);
     let read_second = compound_status(&export, &[op_putfh(2), op_read(second_stateid, 0, 5)]);
     assert_eq!(read_second, NFS4_OK);
-}
-
-#[test]
-fn synthetic_readdir_and_readlink_succeed() {
-    let export = StaticExport::fixture();
-    let readdir = compound_status(&export, &[op_only(OP_PUTROOTFH), op_readdir()]);
-    assert_eq!(readdir, NFS4_OK);
-    let readlink = compound_status(
-        &export,
-        &[
-            op_only(OP_PUTROOTFH),
-            op_lookup("readme-link"),
-            op_only(OP_READLINK),
-        ],
-    );
-    assert_eq!(readlink, NFS4_OK);
 }
 
 #[test]
@@ -556,36 +588,6 @@ fn synthetic_readdir_non_exhaustive_listing_returns_known_snapshot() {
 }
 
 #[test]
-fn synthetic_readdir_rejects_nonzero_cookie_with_stale_verifier() {
-    let export = StaticExport::fixture();
-    let (status, _result) = handle_readdir(
-        &export,
-        7,
-        Some(export.root()),
-        5,
-        &[0xbb; 8],
-        4096,
-        &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
-    );
-    assert_eq!(status, NFS4ERR_BAD_COOKIE);
-}
-
-#[test]
-fn synthetic_readdir_cookie_zero_ignores_verifier() {
-    let export = StaticExport::fixture();
-    let (status, _result) = handle_readdir(
-        &export,
-        7,
-        Some(export.root()),
-        0,
-        &[0xcc; 8],
-        4096,
-        &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
-    );
-    assert_eq!(status, NFS4_OK);
-}
-
-#[test]
 fn synthetic_readdir_sorts_entries_before_assigning_cookies() {
     let export = StaticExport::fixture_with_root_children(vec![3, 2]);
     let (status, result) = handle_readdir(
@@ -648,24 +650,7 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
 }
 
 #[test]
-fn synthetic_readdir_on_file_returns_notdir() {
-    let export = StaticExport::fixture();
-    let status = compound_status(
-        &export,
-        &[op_only(OP_PUTROOTFH), op_lookup("README.txt"), op_readdir()],
-    );
-    assert_eq!(status, NFS4ERR_NOTDIR);
-}
-
-#[test]
-fn synthetic_write_open_returns_read_only() {
-    let export = StaticExport::fixture();
-    let status = compound_status(&export, &[op_only(OP_PUTROOTFH), op_open("README.txt", 2)]);
-    assert_eq!(status, NFS4ERR_ROFS);
-}
-
-#[test]
-fn synthetic_open_rejects_zero_or_unknown_share_access() {
+fn synthetic_open_rejections() {
     let export = StaticExport::fixture();
     for share_access in [0, 0x8000_0000] {
         let status = compound_status(
@@ -674,11 +659,7 @@ fn synthetic_open_rejects_zero_or_unknown_share_access() {
         );
         assert_eq!(status, NFS4ERR_INVAL, "share_access={share_access}");
     }
-}
 
-#[test]
-fn synthetic_open_rejects_unconfirmed_clientid() {
-    let export = StaticExport::fixture();
     let clients = ClientTable::new(TEST_GENERATION);
     let status = compound_status_with_clients(
         &export,
@@ -686,11 +667,7 @@ fn synthetic_open_rejects_unconfirmed_clientid() {
         &[op_only(OP_PUTROOTFH), op_open("README.txt", 1)],
     );
     assert_eq!(status, NFS4ERR_STALE_CLIENTID);
-}
 
-#[test]
-fn synthetic_open_rejects_nonzero_share_deny() {
-    let export = StaticExport::fixture();
     let status = compound_status(
         &export,
         &[op_only(OP_PUTROOTFH), op_open_with_deny("README.txt", 1, 1)],

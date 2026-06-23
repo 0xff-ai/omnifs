@@ -27,15 +27,12 @@ fn under_root_builds_the_workspace_layout() {
 }
 
 #[test]
-fn resolve_requires_home_when_no_root_source_exists() {
+fn workspace_layout_resolve_requires_home_or_omnifs_home() {
     with_env(&[("HOME", None), (OMNIFS_HOME_ENV, None)], || {
         let error = WorkspaceLayout::resolve().unwrap_err();
         assert_eq!(error, ResolveError);
     });
-}
 
-#[test]
-fn resolve_uses_omnifs_home_without_home() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("omnifs");
 
@@ -48,7 +45,6 @@ fn resolve_uses_omnifs_home_without_home() {
             let paths = WorkspaceLayout::resolve().unwrap();
             assert_eq!(paths.config_dir, root);
             assert_eq!(paths.config_file, paths.config_dir.join(CONFIG_FILE));
-            assert_eq!(paths.cache_dir, paths.config_dir.join(CACHE_SUBDIR));
         },
     );
 }

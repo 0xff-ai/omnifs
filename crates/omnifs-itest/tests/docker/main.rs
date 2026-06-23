@@ -5,7 +5,7 @@ mod support;
 use omnifs_host::TestOp;
 use omnifs_wit::provider::types::Effects;
 use omnifs_wit::provider::types::{
-    ByteSource, CalloutResult, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
+    ByteSource, CalloutResult, FsKind, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
     Stability,
 };
 use support::{TestOpExt, docker_harness, project_paths};
@@ -33,7 +33,7 @@ fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
     .unwrap();
 }
 
-fn assert_no_cache_effects(effects: &Effects) {
+fn assert_no_persistent_effects(effects: &Effects) {
     assert!(
         effects.canonical.is_empty(),
         "docker must not store canonical objects: {:?}",
@@ -44,9 +44,37 @@ fn assert_no_cache_effects(effects: &Effects) {
         "route-shaped docker reads should not emit invalidations: {:?}",
         effects.invalidations
     );
+}
+
+fn assert_project_paths(effects: &Effects, expected: &[&str]) {
+    assert_eq!(
+        project_paths(effects),
+        expected,
+        "unexpected docker preload files: {:?}",
+        effects.fs
+    );
+}
+
+fn assert_projected_inline_file(effects: &Effects, path: &str, expected: &[u8]) {
+    let write = effects
+        .fs
+        .iter()
+        .find(|write| write.path == path)
+        .unwrap_or_else(|| panic!("expected docker preload file {path}"));
+    let FsKind::File(file) = &write.kind else {
+        panic!("expected docker preload file {path}, got {:?}", write.kind);
+    };
+    assert_eq!(file.attrs.stability, Stability::Dynamic);
+    match &file.bytes {
+        ByteSource::Inline(bytes) => assert_eq!(bytes.as_slice(), expected),
+        other => panic!("expected inline docker preload for {path}, got {other:?}"),
+    }
+}
+
+fn assert_no_project_effects(effects: &Effects) {
     assert!(
         project_paths(effects).is_empty(),
-        "docker should not preload field files: {:?}",
+        "docker should not preload files for this operation: {:?}",
         effects.fs
     );
 }
@@ -79,7 +107,10 @@ fn docker_inspect_fetches_fresh_without_canonical_store() {
     );
 
     resume_http(&mut op, stub.clone());
-    assert_no_cache_effects(op.effects().unwrap());
+    let effects = op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_project_paths(effects, &["/state", "/summary.txt"]);
+    assert_projected_inline_file(effects, "/state", b"running\n");
     assert_inline_file(&op, &stub);
 }
 
@@ -99,7 +130,9 @@ fn docker_state_fetches_fresh_on_each_read() {
         first_fetch.url
     );
     resume_http(&mut first_op, inspect_body("running", true));
-    assert_no_cache_effects(first_op.effects().unwrap());
+    let effects = first_op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_project_paths(effects, &["/summary.txt"]);
     assert_inline_file(&first_op, b"running\n");
 
     let mut second_op = harness
@@ -114,7 +147,9 @@ fn docker_state_fetches_fresh_on_each_read() {
         second_fetch.url
     );
     resume_http(&mut second_op, inspect_body("exited", false));
-    assert_no_cache_effects(second_op.effects().unwrap());
+    let effects = second_op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_project_paths(effects, &["/summary.txt"]);
     assert_inline_file(&second_op, b"exited\n");
 }
 
@@ -130,7 +165,10 @@ fn docker_summary_txt_renders_from_fresh_inspect() {
     );
 
     resume_http(&mut op, inspect_body("running", true));
-    assert_no_cache_effects(op.effects().unwrap());
+    let effects = op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_project_paths(effects, &["/state"]);
+    assert_projected_inline_file(effects, "/state", b"running\n");
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => match &file.bytes {
             ByteSource::Inline(body) => {
@@ -185,7 +223,9 @@ fn docker_by_name_listing_enumerates_names() {
         },
         other => panic!("expected by-name listing, got {other:?}"),
     }
-    assert_no_cache_effects(op.effects().unwrap());
+    let effects = op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_no_project_effects(effects);
 }
 
 #[test]
@@ -250,6 +290,8 @@ fn docker_compose_container_leaf_uses_shared_fresh_handler() {
     );
 
     resume_http(&mut op, inspect_body("running", true));
-    assert_no_cache_effects(op.effects().unwrap());
+    let effects = op.effects().unwrap();
+    assert_no_persistent_effects(effects);
+    assert_project_paths(effects, &["/summary.txt"]);
     assert_inline_file(&op, b"running\n");
 }

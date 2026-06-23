@@ -408,15 +408,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inline_file_payload_round_trips() {
-        let meta = EntryMeta::file(FileAttrsCache {
+    fn cache_payload_postcard_roundtrip() {
+        let inline = EntryMeta::file(FileAttrsCache {
             size: FileSize::Exact(4),
             bytes: ByteSource::Inline(vec![0xde, 0xad, 0xbe, 0xef]),
             stability: Stability::Stable,
             version_token: Some("v1".to_string()),
         });
-
-        let lookup_bytes = LookupPayload::Positive(meta.clone()).serialize().unwrap();
+        let lookup_bytes = LookupPayload::Positive(inline.clone()).serialize().unwrap();
         let Some(LookupPayload::Positive(decoded)) = LookupPayload::deserialize(&lookup_bytes)
         else {
             panic!("expected positive lookup payload");
@@ -428,26 +427,22 @@ mod tests {
         assert_eq!(attrs.version_token.as_deref(), Some("v1"));
         assert_eq!(attrs.inline_bytes(), Some(&[0xde, 0xad, 0xbe, 0xef][..]));
 
-        let attr_bytes = AttrPayload { meta: meta.clone() }.serialize().unwrap();
+        let attr_bytes = AttrPayload { meta: inline }.serialize().unwrap();
         let decoded = AttrPayload::deserialize(&attr_bytes).unwrap();
         assert!(decoded.meta.is_file());
         assert_eq!(decoded.meta.st_size(), 4);
 
-        let dirents_bytes = DirentsPayload {
-            entries: vec![DirentRecord {
-                name: "blob".to_string(),
-                meta,
-            }],
-            exhaustive: true,
-            validator: None,
-            next_cursor: None,
-            paginated: false,
-        }
-        .serialize()
-        .unwrap();
-        let decoded = DirentsPayload::deserialize(&dirents_bytes).unwrap();
-        assert_eq!(decoded.entries.len(), 1);
-        assert!(decoded.entries[0].meta.is_file());
+        let ranged = EntryMeta::file(FileAttrsCache {
+            size: FileSize::Unknown,
+            bytes: ByteSource::Deferred(ReadMode::Ranged),
+            stability: Stability::Live,
+            version_token: None,
+        });
+        let bytes = AttrPayload { meta: ranged }.serialize().unwrap();
+        let decoded = AttrPayload::deserialize(&bytes).unwrap();
+        let attrs = decoded.meta.attrs.expect("file should carry attrs");
+        assert_eq!(attrs.stability, Stability::Live);
+        assert_eq!(attrs.bytes, ByteSource::Deferred(ReadMode::Ranged));
     }
 
     // Regression: an object representation (`repo.json`) is read-answered as a
@@ -479,21 +474,6 @@ mod tests {
             ..placeholder
         };
         assert!(!learned.keeps_learned_size_over(&newer));
-    }
-
-    #[test]
-    fn ranged_volatile_payload_round_trips() {
-        let meta = EntryMeta::file(FileAttrsCache {
-            size: FileSize::Unknown,
-            bytes: ByteSource::Deferred(ReadMode::Ranged),
-            stability: Stability::Live,
-            version_token: None,
-        });
-        let bytes = AttrPayload { meta }.serialize().unwrap();
-        let decoded = AttrPayload::deserialize(&bytes).unwrap();
-        let attrs = decoded.meta.attrs.expect("file should carry attrs");
-        assert_eq!(attrs.stability, Stability::Live);
-        assert_eq!(attrs.bytes, ByteSource::Deferred(ReadMode::Ranged));
     }
 
     // --- DirentsPayload::merged ---

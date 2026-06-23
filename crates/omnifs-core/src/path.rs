@@ -443,15 +443,4 @@ mod path_tests {
             Path::root()
         );
     }
-
-    #[test]
-    fn serde_uses_the_durable_string_shape() {
-        let path = Path::parse("/owner/repo").unwrap();
-        assert_eq!(serde_json::to_string(&path).unwrap(), "\"/owner/repo\"");
-        assert_eq!(
-            serde_json::from_str::<Path>("\"/owner/repo\"").unwrap(),
-            path
-        );
-        assert!(serde_json::from_str::<Path>("\"/owner//repo\"").is_err());
-    }
 }

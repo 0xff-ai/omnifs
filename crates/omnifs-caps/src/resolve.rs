@@ -94,7 +94,7 @@ mod tests {
     fn relative_socket_is_rejected() {
         assert!(matches!(
             endpoint_socket("unix://relative/path"),
-            Err(EndpointError::HexHost { .. }) | Err(EndpointError::NonAbsolute { .. })
+            Err(EndpointError::HexHost { .. } | EndpointError::NonAbsolute { .. })
         ));
     }
 }

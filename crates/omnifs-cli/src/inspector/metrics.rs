@@ -196,25 +196,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evicts_old_samples_outside_window() {
+    fn mount_window_aggregates() {
         let mut w = MountWindow::default();
         w.record_completion(0, 10_000, InspectorOutcome::Ok);
         w.record_completion(WINDOW_US + 1, 10_000, InspectorOutcome::Ok);
         assert_eq!(w.samples.len(), 1, "old sample should be evicted");
-    }
 
-    #[test]
-    fn cache_hit_ratio_counts_only_hits() {
         let mut w = MountWindow::default();
         w.record_completion(1, 10_000, InspectorOutcome::Ok);
         w.record_cache_hit(2);
         w.record_cache_hit(3);
         w.record_completion(4, 10_000, InspectorOutcome::Ok);
         assert!((w.cache_hit_ratio().unwrap() - 0.5).abs() < 1e-6);
-    }
 
-    #[test]
-    fn p95_uses_completion_latencies_only() {
         let mut w = MountWindow::default();
         for us in [1_000, 2_000, 3_000, 4_000, 50_000] {
             w.record_completion(us, us, InspectorOutcome::Ok);

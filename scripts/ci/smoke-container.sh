@@ -48,6 +48,6 @@ omnifs dev --yes --image "$IMAGE" || { SMOKE_FAILED=1; exit 1; }
 # Exercise the live mount with the demo baked into the image.
 docker exec "$CONTAINER" env \
   OMNIFS_DEMO_MODE=smoke \
-  OMNIFS_DEMO_OWNER=ollama \
-  OMNIFS_DEMO_REPO=ollama \
+  OMNIFS_DEMO_OWNER=0xff-ai \
+  OMNIFS_DEMO_REPO=omnifs \
   /tmp/demo.sh || { SMOKE_FAILED=1; exit 1; }

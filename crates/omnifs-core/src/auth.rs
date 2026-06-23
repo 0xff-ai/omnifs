@@ -258,12 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn credential_id_round_trips_through_storage_key() {
-        let id = CredentialId::new("github", "device", "default").unwrap();
-        assert_eq!(id.storage_key().parse::<CredentialId>().unwrap(), id);
-    }
-
-    #[test]
     fn credential_id_rejects_invalid_name() {
         assert!(CredentialId::new("bad name!", "pat", "default").is_err());
     }

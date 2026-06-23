@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn json_serializes_value_and_sets_content_type_exactly_once() {
+    fn json_content_type_handling() {
         #[derive(serde::Serialize)]
         struct Payload<'a> {
             name: &'a str,
@@ -494,7 +494,6 @@ mod tests {
 
         let state = Rc::new(RefCell::new(()));
         let cx = Cx::new(1, state);
-
         let payload = Payload {
             name: "alice",
             count: 3,
@@ -511,7 +510,6 @@ mod tests {
         assert_eq!(req.method, "POST");
         let body = req.body.expect("json() must set a body");
         assert_eq!(body, br#"{"name":"alice","count":3}"#.to_vec());
-
         let ct_headers: Vec<&Header> = req
             .headers
             .iter()
@@ -519,13 +517,9 @@ mod tests {
             .collect();
         assert_eq!(ct_headers.len(), 1, "Content-Type must be set exactly once");
         assert_eq!(ct_headers[0].value, "application/json");
-    }
 
-    #[test]
-    fn json_respects_caller_set_content_type() {
         let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
+        let cx = Cx::new(2, state);
         let mut fut = Box::pin(
             cx.http()
                 .post("https://example.test/api")

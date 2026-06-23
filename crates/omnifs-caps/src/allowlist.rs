@@ -175,7 +175,7 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 mod tests {
     use super::*;
 
-    fn allow(domains: Vec<&str>, sockets: Vec<&str>) -> Allowlist {
+    fn make_allowlist(domains: Vec<&str>, sockets: Vec<&str>) -> Allowlist {
         Allowlist {
             domains: domains.into_iter().map(String::from).collect(),
             git_repos: Vec::new(),
@@ -190,58 +190,37 @@ mod tests {
     }
 
     #[test]
-    fn https_callout_against_allowed_domain_passes() {
-        let allow = allow(vec!["api.example.com"], Vec::new());
-        allow
+    fn callout_url_policy() {
+        let https = make_allowlist(vec!["api.example.com"], Vec::new());
+        https
             .check_url("https://api.example.com/v1/things")
-            .expect("https GET against allowlisted domain must succeed");
-    }
+            .expect("allowlisted https domain");
+        assert!(matches!(
+            https.check_url("https://other.example.com/").unwrap_err(),
+            Error::DomainDenied { .. }
+        ));
+        assert!(matches!(
+            https.check_url("http://api.example.com/").unwrap_err(),
+            Error::HttpDenied
+        ));
+        assert!(matches!(
+            https.check_url("https://10.0.0.1/v1/things").unwrap_err(),
+            Error::PrivateIpDenied { .. }
+        ));
 
-    #[test]
-    fn https_callout_against_disallowed_domain_fails() {
-        let allow = allow(vec!["api.example.com"], Vec::new());
-        let err = allow.check_url("https://other.example.com/").unwrap_err();
-        assert!(matches!(err, Error::DomainDenied { .. }));
-    }
-
-    #[test]
-    fn http_scheme_is_denied() {
-        let allow = allow(vec!["api.example.com"], Vec::new());
-        let err = allow.check_url("http://api.example.com/").unwrap_err();
-        assert!(matches!(err, Error::HttpDenied));
-    }
-
-    #[test]
-    fn private_ip_is_denied() {
-        let allow = allow(vec!["10.0.0.1"], Vec::new());
-        let err = allow.check_url("https://10.0.0.1/v1/things").unwrap_err();
-        assert!(matches!(err, Error::PrivateIpDenied { .. }));
-    }
-
-    #[test]
-    fn unix_callout_against_allowed_socket_passes() {
-        let allow = allow(Vec::new(), vec!["/var/run/docker.sock"]);
-        let url = unix_url("/var/run/docker.sock", "/v1.43/containers/json");
-        allow
-            .check_url(&url)
-            .expect("unix GET against allowlisted socket must succeed");
-    }
-
-    #[test]
-    fn unix_callout_against_disallowed_socket_fails() {
-        let allow = allow(Vec::new(), vec!["/var/run/docker.sock"]);
-        let url = unix_url("/var/run/other.sock", "/v1.43/containers/json");
-        let err = allow.check_url(&url).unwrap_err();
-        assert!(matches!(err, Error::UnixSocketDenied { .. }));
-    }
-
-    #[test]
-    fn unix_url_skips_https_and_private_ip_rules() {
-        // The socket path looks IP-ish and would trip the private-IP check if
-        // we still applied that rule to unix URLs. We don't.
-        let allow = allow(Vec::new(), vec!["/127.0.0.1"]);
-        let url = unix_url("/127.0.0.1", "/whatever");
-        allow.check_url(&url).unwrap();
+        let unix = make_allowlist(Vec::new(), vec!["/var/run/docker.sock"]);
+        unix.check_url(&unix_url("/var/run/docker.sock", "/v1.43/containers/json"))
+            .expect("allowlisted unix socket");
+        assert!(matches!(
+            unix.check_url(&unix_url("/var/run/other.sock", "/v1.43/containers/json"))
+                .unwrap_err(),
+            Error::UnixSocketDenied { .. }
+        ));
+        // Socket path looks IP-ish; unix URLs must not trip the https private-IP rule.
+        let ipish = make_allowlist(Vec::new(), vec!["/127.0.0.1"]);
+        ipish
+            .check_url(&unix_url("/127.0.0.1", "/whatever"))
+            .expect("unix url skips private-ip https rules");
     }
 
     #[test]

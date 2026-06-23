@@ -11,8 +11,8 @@ use omnifs_wit::provider::types::{
     OpResult, ReadFileOutcome, Stability,
 };
 use support::{
-    TestOpExt, github_harness, project_file_is_deferred_full, project_file_stability,
-    project_paths, seed_github_repo_cache,
+    TestOpExt, github_harness, project_file_inline_bytes, project_file_is_deferred_full,
+    project_file_stability, project_paths, seed_github_repo_cache,
 };
 
 fn parse_path(s: &str) -> Path {
@@ -149,8 +149,9 @@ fn github_issue_list_projects_files() {
         .unwrap();
 
     // Listing preloads the issue directory shape and cheap fields already
-    // present in the list row. Body-derived leaves stay deferred because
-    // GitHub list responses can carry many large issue bodies.
+    // present in the list row. Body-derived leaves inline when they fit the
+    // shared aggregate preload budget; item.json stays deferred because the
+    // row cannot reconstruct the single-item response byte-for-byte.
     assert!(
         response.callouts().is_empty(),
         "list terminal should carry no callouts, got {:?}",
@@ -182,18 +183,32 @@ fn github_issue_list_projects_files() {
             let effects = response.effects().unwrap();
             let issue_body_path = "/octocat/Hello-World/issues/open/7/body";
             let issue_md_path = "/octocat/Hello-World/issues/open/7/item.md";
-            assert!(
-                project_file_is_deferred_full(effects, issue_body_path),
+            let issue_json_path = "/octocat/Hello-World/issues/open/7/item.json";
+            assert_eq!(
+                project_file_inline_bytes(effects, issue_body_path),
+                Some(b"Issue body".as_slice()),
                 "{:?}",
                 effects
                     .fs
                     .iter()
                     .find(|write| write.path == issue_body_path)
             );
-            assert!(
-                project_file_is_deferred_full(effects, issue_md_path),
+            assert_eq!(
+                project_file_inline_bytes(effects, issue_md_path),
+                Some(
+                    b"# Issue title\n\n- Number: 7\n- State: open\n- User: \n\nIssue body\n"
+                        .as_slice()
+                ),
                 "{:?}",
                 effects.fs.iter().find(|write| write.path == issue_md_path)
+            );
+            assert!(
+                project_file_is_deferred_full(effects, issue_json_path),
+                "{:?}",
+                effects
+                    .fs
+                    .iter()
+                    .find(|write| write.path == issue_json_path)
             );
         },
         other => panic!("expected issue listing terminal, got {other:?}"),
@@ -444,15 +459,26 @@ fn github_pr_list_projects_files() {
             let effects = response.effects().unwrap();
             let pull_body_path = "/octocat/Hello-World/pulls/open/7/body";
             let pull_md_path = "/octocat/Hello-World/pulls/open/7/item.md";
-            assert!(
-                project_file_is_deferred_full(effects, pull_body_path),
+            let pull_json_path = "/octocat/Hello-World/pulls/open/7/item.json";
+            assert_eq!(
+                project_file_inline_bytes(effects, pull_body_path),
+                Some(b"PR body".as_slice()),
                 "{:?}",
                 effects.fs.iter().find(|write| write.path == pull_body_path)
             );
-            assert!(
-                project_file_is_deferred_full(effects, pull_md_path),
+            assert_eq!(
+                project_file_inline_bytes(effects, pull_md_path),
+                Some(
+                    b"# PR title\n\n- Number: 7\n- State: open\n- User: octocat\n\nPR body\n"
+                        .as_slice()
+                ),
                 "{:?}",
                 effects.fs.iter().find(|write| write.path == pull_md_path)
+            );
+            assert!(
+                project_file_is_deferred_full(effects, pull_json_path),
+                "{:?}",
+                effects.fs.iter().find(|write| write.path == pull_json_path)
             );
         },
         other => panic!("expected PR listing terminal, got {other:?}"),

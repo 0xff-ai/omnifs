@@ -202,34 +202,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn literal_grant_round_trips_as_a_bare_array() {
-        let json = r#"["api.github.com","github.com"]"#;
-        let grant: Grant<String> = serde_json::from_str(json).unwrap();
+    fn grant_and_need_json_shapes() {
+        let literal: Grant<String> =
+            serde_json::from_str(r#"["api.github.com","github.com"]"#).unwrap();
         assert_eq!(
-            grant,
+            literal,
             Grant::Literal(vec!["api.github.com".into(), "github.com".into()])
         );
-        assert!(!grant.is_dynamic());
-    }
+        assert!(!literal.is_dynamic());
 
-    #[test]
-    fn dynamic_grant_round_trips_as_the_marker_object() {
-        let json = r#"{"dynamic":true}"#;
-        let grant: Grant<String> = serde_json::from_str(json).unwrap();
-        assert!(grant.is_dynamic());
-        assert!(grant.literal().is_empty());
-    }
+        let dynamic: Grant<String> = serde_json::from_str(r#"{"dynamic":true}"#).unwrap();
+        assert!(dynamic.is_dynamic());
+        assert!(dynamic.literal().is_empty());
 
-    #[test]
-    fn rw_covers_ro_but_not_the_reverse() {
-        assert!(PreopenMode::Rw.covers(PreopenMode::Ro));
-        assert!(PreopenMode::Rw.covers(PreopenMode::Rw));
-        assert!(PreopenMode::Ro.covers(PreopenMode::Ro));
-        assert!(!PreopenMode::Ro.covers(PreopenMode::Rw));
-    }
-
-    #[test]
-    fn need_dynamic_flag_round_trips() {
         let omitted: Need = serde_json::from_str(
             r#"{"kind":"domain","value":"api.example.com","why":"fetch data"}"#,
         )
@@ -241,7 +226,14 @@ mod tests {
         )
         .unwrap();
         assert!(explicit.is_dynamic());
-        let encoded = serde_json::to_value(&explicit).unwrap();
-        assert_eq!(encoded["dynamic"], true);
+        assert_eq!(serde_json::to_value(&explicit).unwrap()["dynamic"], true);
+    }
+
+    #[test]
+    fn rw_covers_ro_but_not_the_reverse() {
+        assert!(PreopenMode::Rw.covers(PreopenMode::Ro));
+        assert!(PreopenMode::Rw.covers(PreopenMode::Rw));
+        assert!(PreopenMode::Ro.covers(PreopenMode::Ro));
+        assert!(!PreopenMode::Ro.covers(PreopenMode::Rw));
     }
 }

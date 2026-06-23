@@ -210,25 +210,23 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_duplicate_render_ct() {
-        let result = RenderTable::build(
-            ContentType::Json,
-            vec![
-                (ContentType::Markdown, upper),
-                (ContentType::Markdown, upper),
-            ],
-        );
+    fn build_rejects_invalid_render_table() {
         assert_eq!(
-            result.err().map(|e| e.kind()),
+            RenderTable::build(
+                ContentType::Json,
+                vec![
+                    (ContentType::Markdown, upper),
+                    (ContentType::Markdown, upper),
+                ],
+            )
+            .err()
+            .map(|e| e.kind()),
             Some(crate::error::ProviderErrorKind::InvalidInput),
         );
-    }
-
-    #[test]
-    fn build_rejects_render_equal_source() {
-        let result = RenderTable::build(ContentType::Json, vec![(ContentType::Json, upper)]);
         assert_eq!(
-            result.err().map(|e| e.kind()),
+            RenderTable::build(ContentType::Json, vec![(ContentType::Json, upper)])
+                .err()
+                .map(|e| e.kind()),
             Some(crate::error::ProviderErrorKind::InvalidInput),
         );
     }
