@@ -133,6 +133,14 @@ pub struct Preloads {
     pub(crate) files: Vec<(String, FileProjection)>,
 }
 
+impl Preloads {
+    /// Decompose into the typed object and file preloads, for the object
+    /// dispatch path that lowers them onto `Effects`.
+    pub(crate) fn into_parts(self) -> (Vec<ObjectPreload>, Vec<(String, FileProjection)>) {
+        (self.objects, self.files)
+    }
+}
+
 /// A same-type sibling object preload, type-erased to its identity captures
 /// plus canonical bytes. Dispatch reconstructs its anchor id and view-leaf
 /// paths from the requested object's `O::kind()`, route template, and faces.
@@ -239,12 +247,6 @@ impl FacetMetadata for () {
         &[]
     }
 }
-
-/// Project a field leaf from a loaded object value and the route key that
-/// selected it: a pure function, no callouts. The SDK runs these eagerly after
-/// a fresh load and again on warm reads, so the leaf must be derivable from the
-/// canonical object plus route context such as a version facet.
-pub type ProjectFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileProjection>;
 
 /// Decode helper for the default JSON canonical: providers whose canonical is
 /// `Json` and whose type is `DeserializeOwned` get this as their `decode` from

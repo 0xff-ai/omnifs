@@ -157,6 +157,7 @@ impl<T: Object, C: Cursor> Collection<T, C> {
         CollectionPage {
             entries: entries.into_iter().collect(),
             validator: None,
+            _cursor: std::marker::PhantomData,
         }
     }
 
@@ -191,6 +192,7 @@ impl<T: Object, C: Cursor> Collection<T, C> {
 pub struct CollectionPage<T: Object, C> {
     entries: Vec<CollectionEntry<T>>,
     validator: Option<VersionToken>,
+    _cursor: std::marker::PhantomData<C>,
 }
 
 impl<T: Object, C: Cursor> CollectionPage<T, C> {
@@ -209,6 +211,94 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
         self.validator = Some(validator.into());
         self
     }
+}
+
+/// Lower a typed [`Collection`] to the [`crate::projection::DirProjection`] the
+/// SDK-generated collection dir handler returns.
+///
+/// Each entry becomes a child directory named by the entry key's last identity
+/// capture (the child object anchor's last segment). A `Fresh` entry also
+/// stores the child canonical against its own logical id so a later read of the
+/// child serves warm; the view leaf is the child anchor's canonical path
+/// (`child_dir/`). A `Derived` entry projects its shallow leaves. The
+/// completeness variant selects exhaustive / open / paged.
+pub(crate) fn collection_to_dir_projection<T, C>(
+    dir_path: &str,
+    kind: crate::object::ObjectKind,
+    collection: Collection<T, C>,
+) -> Result<crate::projection::DirProjection>
+where
+    T: Object,
+    T::Key: crate::object::Key,
+    C: Cursor,
+{
+    use crate::identity::IdentityCaptures;
+    use crate::object::Key as _Key;
+    use crate::projection::{DirProjection, Entry};
+
+    let (entries, cursor, validator, complete) = match collection {
+        Collection::Complete { entries, validator } => (entries, None, validator, true),
+        Collection::Partial { entries, validator } => (entries, None, validator, false),
+        Collection::Page {
+            entries,
+            next,
+            validator,
+        } => (entries, Some(encode_cursor(&next)), validator, false),
+        Collection::Unchanged => return Ok(DirProjection::unchanged()),
+    };
+
+    let mut dir_entries = Vec::with_capacity(entries.len());
+    let mut projection_seed: Option<DirProjection> = None;
+    let mut canonical_stores: Vec<(
+        crate::identity::LogicalId,
+        Option<VersionToken>,
+        Vec<u8>,
+        String,
+    )> = Vec::new();
+    let mut derived_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
+
+    for entry in entries {
+        let key = entry.entry_key();
+        let captures = key.identity_captures();
+        let Some((_, child_name)) = captures.last() else {
+            continue;
+        };
+        let child_name = child_name.clone();
+        let child_dir = format!("{}/{}", dir_path.trim_end_matches('/'), child_name);
+        dir_entries.push(Entry::dir(child_name));
+
+        match entry {
+            CollectionEntry::Fresh { key, canonical, .. } => {
+                let id = key.anchor(kind);
+                canonical_stores.push((id, canonical.validator, canonical.bytes, child_dir));
+            },
+            CollectionEntry::Derived { files, .. } => {
+                for (leaf, file) in files {
+                    derived_files.push((format!("{child_dir}/{leaf}"), file));
+                }
+            },
+            CollectionEntry::Key { .. } => {},
+        }
+    }
+
+    let _ = &mut projection_seed;
+    let mut projection = if complete {
+        DirProjection::exhaustive(dir_entries)
+    } else if let Some(cursor) = cursor {
+        DirProjection::paged(dir_entries, cursor)
+    } else {
+        DirProjection::open(dir_entries)
+    };
+    if let Some(validator) = validator {
+        projection = projection.with_validator(validator);
+    }
+    for (id, val, bytes, child_dir) in canonical_stores {
+        projection = projection.store_canonical(id, val, bytes, vec![child_dir]);
+    }
+    for (path, file) in derived_files {
+        projection = projection.preload_file(path, file);
+    }
+    Ok(projection)
 }
 
 /// Encode a typed cursor into the host-opaque token carried by the wire.

@@ -22,6 +22,7 @@ use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::handler::{Cursor, RangeReader};
 use crate::identity::LogicalId;
+use crate::repr::Format;
 use omnifs_core::ContentType;
 use std::rc::Rc;
 
@@ -566,6 +567,147 @@ impl Entry {
             EntryKind::Dir => BrowseEntry::dir(&self.name),
             EntryKind::File => BrowseEntry::file(&self.name, FileProj::listing_shape()),
         }
+    }
+}
+
+// ===========================================================================
+// Object face value types (blob / stream)
+// ===========================================================================
+
+/// A host-resident blob file, returned by an object `blob` face. The bytes
+/// stay host-side; only a [`crate::blob::BlobId`] handle crosses back. The
+/// content type defaults to `F::CT` and can be overridden.
+pub struct BlobFile<F: Format> {
+    id: crate::blob::BlobId,
+    size: Size,
+    version: Option<VersionToken>,
+    content_type: Option<ContentType>,
+    _format: core::marker::PhantomData<F>,
+}
+
+impl<F: Format> BlobFile<F> {
+    /// A blob file with content type `F::CT` and unknown size.
+    pub fn new(id: crate::blob::BlobId) -> Self {
+        Self {
+            id,
+            size: Size::Unknown,
+            version: None,
+            content_type: None,
+            _format: core::marker::PhantomData,
+        }
+    }
+
+    /// The exact blob size, so `stat` is honest before the first read.
+    #[must_use]
+    pub fn size(mut self, size: Size) -> Self {
+        self.size = size;
+        self
+    }
+
+    #[must_use]
+    pub fn version(mut self, version: impl Into<VersionToken>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Override the content type (defaults to `F::CT`).
+    #[must_use]
+    pub fn content_type(mut self, content_type: ContentType) -> Self {
+        self.content_type = Some(content_type);
+        self
+    }
+
+    /// Lower to the [`FileProjection`] the router serves through the blob
+    /// terminal.
+    pub fn into_projection(self) -> FileProjection {
+        let ct = self.content_type.unwrap_or(F::CT);
+        let mut builder = FileProjection::blob(self.id)
+            .size(self.size)
+            .content_type(ct);
+        if let Some(version) = self.version {
+            builder = builder.version(version);
+        }
+        builder.build()
+    }
+}
+
+/// A ranged byte stream, returned by an object `stream` face: a range reader
+/// plus declared size, stability, and content type. The only face that may be
+/// `Live`.
+pub struct StreamFile {
+    reader: Rc<dyn RangeReader>,
+    size: Size,
+    stability: Stability,
+    content_type: Option<ContentType>,
+    version: Option<VersionToken>,
+}
+
+impl StreamFile {
+    /// A stream over `reader` with unknown size, `Stability::Dynamic`, and no
+    /// content type.
+    pub fn new(reader: impl RangeReader + 'static) -> Self {
+        Self {
+            reader: Rc::new(reader),
+            size: Size::Unknown,
+            stability: Stability::Dynamic,
+            content_type: None,
+            version: None,
+        }
+    }
+
+    #[must_use]
+    pub fn size(mut self, size: Size) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Mark the stream live: its bytes may change while observed (`tail -f`).
+    #[must_use]
+    pub fn live(mut self) -> Self {
+        self.stability = Stability::Live;
+        self
+    }
+
+    #[must_use]
+    pub fn stability(mut self, stability: Stability) -> Self {
+        self.stability = stability;
+        self
+    }
+
+    #[must_use]
+    pub fn content_type(mut self, content_type: ContentType) -> Self {
+        self.content_type = Some(content_type);
+        self
+    }
+
+    #[must_use]
+    pub fn version(mut self, version: impl Into<VersionToken>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// The attrs an open session reports.
+    pub fn attrs(&self) -> FileAttrs {
+        let attrs = FileAttrs::new(self.size.clone(), self.stability);
+        match &self.version {
+            Some(version) => attrs.with_version(version.clone()),
+            None => attrs,
+        }
+    }
+
+    /// The reader serving chunks.
+    pub fn reader(&self) -> Rc<dyn RangeReader> {
+        self.reader.clone()
+    }
+
+    pub fn content_type_value(&self) -> Option<ContentType> {
+        self.content_type
+    }
+}
+
+impl<R: RangeReader + 'static> From<R> for StreamFile {
+    fn from(reader: R) -> Self {
+        Self::new(reader)
     }
 }
 

@@ -244,5 +244,10 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         }
 
         #facet_metadata_impl
+
+        impl #impl_generics omnifs_sdk::object::Key for #struct_ident #ty_generics
+        #where_clause
+        {
+        }
     })
 }

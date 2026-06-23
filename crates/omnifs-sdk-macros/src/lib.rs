@@ -40,10 +40,11 @@ mod provider_macro;
 /// - `resources(git = <bool>, memory_mb = <int>)`: requested capabilities
 ///   exported during initialization.
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
-///   handler `async fn method(cx: Cx<State>) -> Result<Effects>`; the
-///   interval is exported as the manifest's `refresh-interval-secs`.
-///   Provider events without a registered handler warn and return empty
-///   effects.
+///   handler `async fn method(cx: Cx<State>) -> Result<Invalidation>`; the
+///   interval is exported as the manifest's `refresh-interval-secs`. The
+///   returned [`Invalidation`](../omnifs_sdk/invalidation/struct.Invalidation.html)
+///   lowers to the host invalidation effect channel. Provider events without a
+///   registered handler warn and return no invalidations.
 ///
 /// What the expansion does, so debugging is not archaeology: it defines the
 /// provider type, thread-local `STATE`/`ROUTER`/async-runtime/range-handle
@@ -68,12 +69,19 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// - `kind = "provider.noun"` (required): the canonical-store kind tag,
 ///   e.g. `"github.issue"`. Stable; changing it orphans cached objects.
-/// - `key = KeyType` (required): the `#[path_captures]` struct that loads
-///   this object (`KeyType: Key<Object = Self>`).
-/// - `canonical = Json | Xml | ..` (default `Json`): the upstream payload's
-///   content type. Non-JSON canonicals require `parse`.
-/// - `parse = path::to::fn`: custom `fn(&[u8]) -> Result<Self>` replacing
-///   the default serde-JSON `parse_canonical`.
+/// - `key = KeyType` (required): the `#[path_captures]` struct that identifies
+///   this object (`KeyType: Key`).
+/// - `state = StateType` (default `()`): the provider state threaded through
+///   `load`.
+/// - `canonical = Json | Markdown | Atom | Yaml` (default `Json`): the format
+///   of the verbatim canonical bytes (`type Canonical`). Non-JSON canonicals
+///   require `decode`.
+/// - `decode = path::to::fn`: custom `fn(&[u8]) -> Result<Self>` replacing the
+///   default `omnifs_sdk::object::decode_json` (which requires the type to be
+///   `DeserializeOwned`).
+/// - `load = path::to::fn` (default `Self::load`): the provider-written
+///   inherent `async fn(cx, key, since) -> Result<Load<Self>>` that
+///   `Object::load` forwards to.
 ///
 /// Stability is declared in the object builder, not here: call
 /// `o.stable()` / `o.dynamic()` / `o.live()` for a constant, or
