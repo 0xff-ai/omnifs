@@ -24,7 +24,8 @@ use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::provider_bundle;
 use crate::runtime::ContainerExtras;
 use crate::session::{
-    CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, MountConfig, env_string, set_private_dir,
+    CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, GUEST_SHELL, MountConfig, env_string,
+    set_private_dir,
 };
 use crate::workspace::Workspace;
 
@@ -236,7 +237,6 @@ fn session_record(
 }
 
 async fn run_container_shell(container_name: &str) -> Result<()> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     anstream::println!(
         "Opening shell at {GUEST_FUSE_MOUNT} inside `{container_name}` (exit or Ctrl+D to end session)"
     );
@@ -244,7 +244,14 @@ async fn run_container_shell(container_name: &str) -> Result<()> {
     let container = container_name.to_string();
     let shell_task = tokio::task::spawn_blocking(move || {
         let status = Command::new("docker")
-            .args(["exec", "-it", "-w", GUEST_FUSE_MOUNT, &container, &shell])
+            .args([
+                "exec",
+                "-it",
+                "-w",
+                GUEST_FUSE_MOUNT,
+                &container,
+                GUEST_SHELL,
+            ])
             .status()
             .with_context(|| format!("docker exec shell in `{container}`"))?;
         Ok::<std::process::ExitStatus, anyhow::Error>(status)

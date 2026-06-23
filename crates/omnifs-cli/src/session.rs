@@ -22,6 +22,11 @@ pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 pub(crate) const GUEST_FUSE_MOUNT: &str = "/omnifs";
 pub(crate) const OMNIFS_HOME: &str = "/root/.omnifs";
 
+/// Shell the runtime image ships and configures (`Dockerfile` sets
+/// `SHELL=/bin/zsh` and installs `/etc/zsh/zshrc`). The host's `$SHELL` is
+/// meaningless inside the guest, so the interactive dev shell uses this.
+pub(crate) const GUEST_SHELL: &str = "/bin/zsh";
+
 #[derive(Debug, Clone)]
 pub(crate) struct MountConfig {
     pub(crate) name: MountName,
