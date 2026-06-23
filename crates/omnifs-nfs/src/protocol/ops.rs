@@ -133,19 +133,6 @@ impl ClaimType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpErrorBody {
-    Empty,
-}
-
-impl OpErrorBody {
-    fn encode(self, _writer: &mut XdrWriter) {
-        match self {
-            Self::Empty => {},
-        }
-    }
-}
-
 pub(crate) fn handle_op(
     op: u32,
     reader: &mut XdrReader<'_>,
@@ -746,44 +733,5 @@ pub(crate) fn handle_readlink(export: &dyn ReadOnlyExport, current: Option<u64>)
 
 fn error_reply(op: u32, status: Status) -> (u32, Vec<u8>) {
     let wire = status.wire();
-    let mut res = op_status(op, wire);
-    op_error_body(op, status).encode(&mut res);
-    (wire, res.into_inner())
-}
-
-fn op_error_body(op: u32, status: Status) -> OpErrorBody {
-    match op {
-        OP_LOCK | OP_LOCKT | OP_LOCKU | OP_OPEN | OP_READ => current_empty_error_body(status),
-        _ => OpErrorBody::Empty,
-    }
-}
-
-#[allow(clippy::match_same_arms)]
-fn current_empty_error_body(status: Status) -> OpErrorBody {
-    match status {
-        Status::Access
-        | Status::BadCookie
-        | Status::BadHandle
-        | Status::BadStateId
-        | Status::Expired
-        | Status::FhExpired
-        | Status::Invalid
-        | Status::Io
-        | Status::IsDir
-        | Status::LockNotSupported
-        | Status::MinorVersionMismatch
-        | Status::NoEnt
-        | Status::NoFileHandle
-        | Status::NotDir
-        | Status::NotSupported
-        | Status::OldStateId
-        | Status::OpenMode
-        | Status::OpIllegal
-        | Status::ReadOnlyFs
-        | Status::Resource
-        | Status::Stale
-        | Status::StaleClientId
-        | Status::Symlink
-        | Status::TooSmall => OpErrorBody::Empty,
-    }
+    (wire, op_status(op, wire).into_inner())
 }

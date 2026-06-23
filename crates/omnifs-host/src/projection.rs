@@ -102,7 +102,7 @@ pub(crate) fn push_projected_file_content(
     if let Some(content) = attrs_cache.inline_bytes()
         && let Some(aux) = attrs_cache.durable_cache_aux()
     {
-        let payload = FilePayload::new(attrs_cache.version_token.clone(), content.to_vec())
+        let payload = FilePayload::new(attrs_cache.version_token_owned(), content.to_vec())
             .with_content_type(file.content_type.clone());
         if let Some(payload) = payload.serialize() {
             batch.push(BatchRecord::new(

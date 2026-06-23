@@ -343,12 +343,9 @@ fn omnifs_export_positive_cache_evidence_beats_expected_negative_probe() {
         assert!(matches!(export.lookup(hello, name), Err(Status::NoEnt)));
 
         let runtime = harness.registry.get("test").expect("test runtime");
-        let attrs = FileAttrsCache {
-            size: view_types::FileSize::Exact(5),
-            bytes: view_types::ByteSource::Inline(b"live\n".to_vec()),
-            stability: view_types::Stability::Dynamic,
-            version_token: None,
-        };
+        let attrs =
+            FileAttrsCache::inline(b"live\n".to_vec(), view_types::Stability::Dynamic, None)
+                .expect("valid inline attrs");
         let dirents = DirentsPayload {
             entries: vec![DirentRecord {
                 name: name.to_string(),
@@ -384,12 +381,8 @@ fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
         .lookup(export.root(), "test")
         .expect("top-level mount lookup");
 
-    let attrs = FileAttrsCache {
-        size: view_types::FileSize::Unknown,
-        bytes: view_types::ByteSource::Inline(b"live\n".to_vec()),
-        stability: view_types::Stability::Dynamic,
-        version_token: None,
-    };
+    let attrs = FileAttrsCache::inline(b"live\n".to_vec(), view_types::Stability::Dynamic, None)
+        .expect("valid inline attrs");
     let dirents = DirentsPayload {
         entries: vec![DirentRecord {
             name: "inline-only".to_string(),
@@ -409,7 +402,7 @@ fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
     let inline = export
         .lookup(test_root, "inline-only")
         .expect("inline cached lookup");
-    assert_eq!(export.attr(inline).expect("placeholder attr").size, 1);
+    assert_eq!(export.attr(inline).expect("inline attr").size, 5);
     assert_eq!(
         export.read(inline).expect("inline cached read"),
         b"live\n".to_vec()

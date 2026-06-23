@@ -10,7 +10,6 @@ use crate::protocol::consts::{
 use dashmap::DashMap;
 #[cfg(test)]
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -191,10 +190,6 @@ impl StateId {
         raw
     }
 
-    pub(crate) fn other(self) -> StateIdOther {
-        self.other
-    }
-
     fn next(self) -> Self {
         Self {
             seqid: self.seqid.saturating_add(1),
@@ -203,35 +198,41 @@ impl StateId {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct OpenTable {
+pub(crate) struct OpenTable<B> {
     next: AtomicU32,
-    states: DashMap<StateIdOther, OpenState>,
+    states: DashMap<StateIdOther, OpenState<B>>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct OpenState {
+pub(crate) struct OpenState<B> {
     pub(crate) inode: u64,
     pub(crate) clientid: u64,
     pub(crate) access: u32,
-    pub(crate) materialized_bytes: Arc<[u8]>,
+    pub(crate) body: B,
     seqid: u32,
     renewed_at: Instant,
 }
 
-pub(crate) struct OpenSeed {
+pub(crate) struct OpenSeed<B> {
     pub(crate) generation: u64,
     pub(crate) inode: u64,
     pub(crate) clientid: u64,
     pub(crate) access: u32,
-    pub(crate) materialized_bytes: Vec<u8>,
+    pub(crate) body: B,
 }
 
-pub(crate) struct OpenInfo {
-    pub(crate) id: u64,
+impl<B> OpenSeed<B> {
+    pub(crate) fn with_body<T>(self, body: T) -> OpenSeed<T> {
+        OpenSeed {
+            generation: self.generation,
+            inode: self.inode,
+            clientid: self.clientid,
+            access: self.access,
+            body,
+        }
+    }
 }
 
-impl OpenTable {
+impl<B> OpenTable<B> {
     pub(crate) fn new() -> Self {
         Self {
             next: AtomicU32::new(1),
@@ -239,7 +240,7 @@ impl OpenTable {
         }
     }
 
-    pub(crate) fn open(&self, seed: OpenSeed) -> StateId {
+    pub(crate) fn open(&self, seed: OpenSeed<B>) -> StateId {
         let open_id = self.next.fetch_add(1, Ordering::Relaxed);
         let stateid = StateId::new(1, seed.generation, open_id);
         self.states.insert(
@@ -248,7 +249,7 @@ impl OpenTable {
                 inode: seed.inode,
                 clientid: seed.clientid,
                 access: seed.access,
-                materialized_bytes: Arc::from(seed.materialized_bytes),
+                body: seed.body,
                 seqid: 1,
                 renewed_at: Instant::now(),
             },
@@ -256,33 +257,14 @@ impl OpenTable {
         stateid
     }
 
-    pub(crate) fn read(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
-        self.with_state(stateid, |state| {
-            ensure_read_access(state.access)?;
-            let (data, eof) = open_data_slice(&state.materialized_bytes, offset, count);
-            Ok(OpenRead {
-                id: state.inode,
-                data,
-                eof,
-            })
-        })?
+    pub(crate) fn touch(&self, stateid: StateId) -> StatusResult<()> {
+        self.with_state(stateid, |_| ())
     }
 
-    pub(crate) fn touch(&self, stateid: StateId) -> StatusResult<OpenInfo> {
-        self.with_state(stateid, |state| OpenInfo { id: state.inode })
-    }
-
-    pub(crate) fn read_info(&self, stateid: StateId) -> StatusResult<OpenInfo> {
-        self.with_state(stateid, |state| {
-            ensure_read_access(state.access)?;
-            Ok(OpenInfo { id: state.inode })
-        })?
-    }
-
-    fn with_state<T>(
+    pub(crate) fn with_state<T>(
         &self,
         stateid: StateId,
-        f: impl FnOnce(&mut OpenState) -> T,
+        f: impl FnOnce(&mut OpenState<B>) -> T,
     ) -> StatusResult<T> {
         let Some(mut state) = self.states.get_mut(&stateid.other) else {
             return Err(Status::BadStateId);
@@ -291,15 +273,13 @@ impl OpenTable {
             return Err(Status::OldStateId);
         }
         if state.renewed_at.elapsed() > lease_duration() {
-            drop(state);
-            self.states.remove(&stateid.other);
             return Err(Status::Expired);
         }
         state.renewed_at = Instant::now();
         Ok(f(&mut state))
     }
 
-    pub(crate) fn close(&self, stateid: StateId) -> StatusResult<StateId> {
+    pub(crate) fn close(&self, stateid: StateId) -> StatusResult<(StateId, B)> {
         use dashmap::mapref::entry::Entry;
 
         // Holding the entry write lock from the seqid/lease check through
@@ -312,14 +292,19 @@ impl OpenTable {
                     return Err(Status::OldStateId);
                 }
                 if state.renewed_at.elapsed() > lease_duration() {
-                    occupied.remove();
                     return Err(Status::Expired);
                 }
-                occupied.remove();
-                Ok(stateid.next())
+                let (_, state) = occupied.remove_entry();
+                Ok((stateid.next(), state.body))
             },
             Entry::Vacant(_) => Err(Status::BadStateId),
         }
+    }
+
+    pub(crate) fn remove_body(&self, stateid: StateId) -> Option<B> {
+        self.states
+            .remove(&stateid.other)
+            .map(|(_, state)| state.body)
     }
 
     pub(crate) fn renew_client(&self, clientid: u64) {
@@ -330,9 +315,30 @@ impl OpenTable {
         }
     }
 
-    pub(crate) fn remove_inodes(&self, inodes: &[u64]) {
-        self.states
-            .retain(|_, state| !inodes.contains(&state.inode));
+    pub(crate) fn remove_inodes(&self, inodes: &[u64]) -> Vec<B> {
+        self.remove_where(|state| inodes.contains(&state.inode))
+    }
+
+    pub(crate) fn remove_where(
+        &self,
+        mut should_remove: impl FnMut(&OpenState<B>) -> bool,
+    ) -> Vec<B> {
+        let stale = self
+            .states
+            .iter()
+            .filter_map(|entry| should_remove(entry.value()).then(|| *entry.key()))
+            .collect::<Vec<_>>();
+        let mut removed = Vec::with_capacity(stale.len());
+        for key in stale {
+            if let Some((_, state)) = self.states.remove(&key) {
+                removed.push(state.body);
+            }
+        }
+        removed
+    }
+
+    pub(crate) fn any(&self, mut predicate: impl FnMut(&OpenState<B>) -> bool) -> bool {
+        self.states.iter().any(|state| predicate(state.value()))
     }
 
     #[cfg(test)]
@@ -344,7 +350,22 @@ impl OpenTable {
     }
 }
 
-fn open_data_slice(data: &[u8], offset: u64, count: u32) -> (Vec<u8>, bool) {
+#[cfg(test)]
+impl<B: AsRef<[u8]>> OpenTable<B> {
+    pub(crate) fn read(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
+        self.with_state(stateid, |state| {
+            ensure_read_access(state.access)?;
+            let (data, eof) = open_data_slice(state.body.as_ref(), offset, count);
+            Ok(OpenRead {
+                id: state.inode,
+                data,
+                eof,
+            })
+        })?
+    }
+}
+
+pub(crate) fn open_data_slice(data: &[u8], offset: u64, count: u32) -> (Vec<u8>, bool) {
     let start = usize::try_from(offset).unwrap_or(usize::MAX);
     if start >= data.len() {
         return (Vec::new(), true);
@@ -354,7 +375,7 @@ fn open_data_slice(data: &[u8], offset: u64, count: u32) -> (Vec<u8>, bool) {
     (data[start..end].to_vec(), end >= data.len())
 }
 
-fn ensure_read_access(access: u32) -> StatusResult<()> {
+pub(crate) fn ensure_read_access(access: u32) -> StatusResult<()> {
     if access & OPEN4_SHARE_ACCESS_READ == 0 {
         return Err(Status::OpenMode);
     }

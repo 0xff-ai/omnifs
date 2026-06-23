@@ -233,7 +233,7 @@ async fn reads_whole_file_exact_bytes() {
     };
     let attrs = attrs.expect("a provider read carries post-read attrs");
     assert_eq!(
-        attrs.size,
+        attrs.size(),
         FileSize::Exact(13),
         "whole read learns the exact size"
     );
@@ -265,8 +265,8 @@ async fn reads_ranged_file_in_chunks() {
         .await
         .expect("open ranged file")
         .expect("file is ranged");
-    assert_eq!(handle.attrs().size, FileSize::Exact(26));
-    assert_eq!(handle.attrs().stability, Stability::Dynamic);
+    assert_eq!(handle.attrs().size(), FileSize::Exact(26));
+    assert_eq!(handle.attrs().stability(), Stability::Dynamic);
 
     // A mid-file chunk: "cdef" at offset 2, not EOF.
     let chunk = handle.read(2, 4).await.expect("read mid chunk");
@@ -293,14 +293,7 @@ async fn lists_cursored_pages() {
 
     // Page 0: item-0, item-1, with a resume cursor to page 1.
     let page0 = t.list(&feed, None).await;
-    assert_eq!(
-        page0
-            .entries
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect::<Vec<_>>(),
-        ["item-0", "item-1"]
-    );
+    assert_eq!(provider_entry_names(&page0), ["item-0", "item-1"]);
     let Some(Cursor(CachedCursor::Page(1))) = page0.next_cursor else {
         panic!(
             "page 0 must carry a resume cursor to page 1, got {:?}",
@@ -310,14 +303,7 @@ async fn lists_cursored_pages() {
 
     // Page 1: item-2, item-3, with a resume cursor to page 2.
     let page1 = t.list(&feed, Some(Cursor(CachedCursor::Page(1)))).await;
-    assert_eq!(
-        page1
-            .entries
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect::<Vec<_>>(),
-        ["item-2", "item-3"]
-    );
+    assert_eq!(provider_entry_names(&page1), ["item-2", "item-3"]);
     let Some(Cursor(CachedCursor::Page(2))) = page1.next_cursor else {
         panic!(
             "page 1 must carry a resume cursor to page 2, got {:?}",
@@ -327,14 +313,7 @@ async fn lists_cursored_pages() {
 
     // Page 2 is terminal: item-4, item-5, no resume cursor.
     let page2 = t.list(&feed, Some(Cursor(CachedCursor::Page(2)))).await;
-    assert_eq!(
-        page2
-            .entries
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect::<Vec<_>>(),
-        ["item-4", "item-5"]
-    );
+    assert_eq!(provider_entry_names(&page2), ["item-4", "item-5"]);
     assert!(
         page2.next_cursor.is_none(),
         "the terminal page clears the cursor, got {:?}",
@@ -423,19 +402,24 @@ async fn invalidation_evicts_cached_read() {
 /// known once the renderer has classified the leaf as ranged. The harness plays
 /// that renderer role so `Tree::open`'s precondition is met.
 fn ranged_node(path_str: &str) -> Node {
-    use omnifs_core::view::{ByteSource, EntryMeta, FileAttrsCache, ReadMode};
-    let meta = EntryMeta::file(FileAttrsCache {
-        size: FileSize::Unknown,
-        bytes: ByteSource::Deferred(ReadMode::Ranged),
-        stability: Stability::Dynamic,
-        version_token: None,
-    });
-    Node::new(
-        "test".to_string(),
-        path(path_str),
-        meta,
-        omnifs_tree::Backing::Provider,
+    use omnifs_core::view::{FileAttrsCache, ReadMode};
+    let attrs = FileAttrsCache::deferred(
+        FileSize::Unknown,
+        ReadMode::Ranged,
+        Stability::Dynamic,
+        None,
     )
+    .expect("ranged attrs");
+    Node::provider_file("test".to_string(), path(path_str), Some(attrs))
+}
+
+fn provider_entry_names(listing: &Listing) -> Vec<&str> {
+    listing
+        .entries
+        .iter()
+        .filter(|entry| !entry.is_synthetic())
+        .map(|entry| entry.name.as_str())
+        .collect()
 }
 
 fn listing_invalidation(path_str: &str) -> Effects {

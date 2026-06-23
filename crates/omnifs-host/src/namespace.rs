@@ -6,7 +6,7 @@ use crate::runtime::Result;
 use crate::{Error, Namespace, Op};
 use omnifs_cache::RecordKind;
 use omnifs_core::path::{Path, Segment};
-use omnifs_core::view::{AttrPayload, Stability};
+use omnifs_core::view::{AttrPayload, FileAttrsCache, Stability};
 use omnifs_inspector::TraceId;
 use omnifs_wit::provider::types as wit_types;
 
@@ -217,7 +217,7 @@ fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
     ns.runtime
         .cache_get(path, RecordKind::Attr, None)
         .and_then(|record| AttrPayload::deserialize(&record.payload))
-        .and_then(|attr| attr.meta.attrs.as_ref().map(|a| a.stability))
+        .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
 }
 
 fn enoent(path: &str) -> Error {

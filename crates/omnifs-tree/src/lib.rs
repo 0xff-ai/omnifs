@@ -50,7 +50,7 @@ pub use crate::handle::{RangedHandle, probe_live_growth};
 pub use crate::invalidate::{InvalidationReport, WatchStream};
 pub use crate::list::{Cursor, ListOutcome, Listing};
 pub use crate::node::{
-    Backing, Entry, Node, NodeId, PaginationControl, Synthetic, SyntheticContent,
+    Entry, EntryOrigin, Node, NodeBody, NodeId, PaginationControl, Synthetic, SyntheticContent,
 };
 pub use crate::read::{Chunk, ReadResult};
 
@@ -66,6 +66,8 @@ enum Mounts {
         runtime: Arc<Runtime>,
     },
 }
+
+const MOUNT_ENUMERATION_MOUNT: &str = "";
 
 /// The renderer-neutral, async-first projection core.
 pub struct Tree {
@@ -142,11 +144,7 @@ impl Tree {
                     return Ok((root, path.clone()));
                 }
                 if path.is_root() {
-                    // Mount-enumeration root: a synthetic directory listing the
-                    // mounts. Represented as a sentinel empty mount name; the
-                    // renderer composes the actual mount list above Tree. Slice
-                    // 1's tracer never hits this arm.
-                    return Ok((String::new(), Path::root()));
+                    return Ok((MOUNT_ENUMERATION_MOUNT.to_string(), Path::root()));
                 }
                 let mut segments = path.segments();
                 let Some(mount) = segments.next() else {
@@ -169,6 +167,23 @@ impl Tree {
                 })?;
                 Ok((mount, rel))
             },
+        }
+    }
+
+    pub(crate) fn is_mount_enumeration_root(&self, mount: &str, path: &Path) -> bool {
+        matches!(&self.mounts, Mounts::Registry(registry) if registry.root_mount_name().is_none())
+            && mount == MOUNT_ENUMERATION_MOUNT
+            && path.is_root()
+    }
+
+    pub(crate) fn mount_names(&self) -> Option<Vec<String>> {
+        match &self.mounts {
+            Mounts::Registry(registry) if registry.root_mount_name().is_none() => {
+                let mut mounts = registry.mounts();
+                mounts.sort();
+                Some(mounts)
+            },
+            Mounts::Registry(_) | Mounts::Single { .. } => None,
         }
     }
 }

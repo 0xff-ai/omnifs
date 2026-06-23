@@ -2,15 +2,15 @@
 //!
 //! `Export` is the NFS renderer: it owns the NFS-side identity and reply
 //! concerns (the inode table that backs `(generation, id)` filehandles, the
-//! stateid open tables, the `/omnifs` export-root alias, the expected-negative
-//! probe table, the materialize cap, and `fattr4` size construction) and drives
+//! stateid open tables, the `/omnifs` export-root alias, the materialize cap,
+//! and `fattr4` size construction) and drives
 //! all path resolution / listing / reads through `Tree::resolve_child`,
 //! `Tree::list`, and `Tree::read`. The cache consult+populate, the cold provider
 //! round trips, the `@next`/`@all` controls, the mount-root ignore synthesis,
 //! the write fence, and learned-size promotion all live in `Tree`; the renderer
 //! keeps only a learned-attrs slot on its inode table (so a learned size
 //! survives across ops, exactly like the FUSE inode), the flatten-renderer
-//! eager size probing for ranged children, and the inline-projection read path.
+//! eager size probing for ranged children, and NFS protocol state.
 //!
 //! There is no private object-metadata TTL table: an inode entry lives as long
 //! as a path is referenced and is pruned only by explicit invalidation, mirroring
@@ -18,7 +18,7 @@
 
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
-    ReadOnlyExport, StateId, StateIdOther, Status, StatusResult,
+    ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access, open_data_slice,
 };
 use crate::frontend;
 use crate::frontend::LookupCacheHit;
@@ -31,14 +31,13 @@ use omnifs_core::MountName;
 use omnifs_core::path::{Path, Segment};
 use omnifs_core::view as view_types;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
+use omnifs_host::Runtime;
 use omnifs_host::path_key::PathKey;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_host::{Error as RuntimeError, Runtime};
 use omnifs_tree::{
-    Backing, Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult,
-    RequestCtx, Synthetic, Tree, TreeError, TreeErrorKind,
+    Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult, RequestCtx,
+    Synthetic, Tree, TreeError, TreeErrorKind,
 };
-use omnifs_wit::provider::types as wit_types;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path as FsPath, PathBuf};
@@ -63,12 +62,34 @@ struct NodeEntry {
     size: u64,
     size_exact: bool,
     attrs: Option<FileAttrsCache>,
-    backing_path: Option<PathBuf>,
-    /// `Some` when this inode is a host-synthesized entry (`@next`/`@all` control
-    /// or a mount-root ignore file). `read`/`open` serve its bytes through
-    /// `Tree::read` (which runs the synthetic byte source) instead of a normal
-    /// provider read.
-    synthetic: Option<Synthetic>,
+    body: EntryBody,
+}
+
+#[derive(Debug, Clone)]
+enum EntryBody {
+    Provider,
+    Backing(PathBuf),
+    Synthetic(Synthetic),
+}
+
+impl EntryBody {
+    fn backing_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Backing(path) => Some(path),
+            Self::Provider | Self::Synthetic(_) => None,
+        }
+    }
+
+    fn synthetic(&self) -> Option<&Synthetic> {
+        match self {
+            Self::Synthetic(synthetic) => Some(synthetic),
+            Self::Provider | Self::Backing(_) => None,
+        }
+    }
+
+    fn is_provider(&self) -> bool {
+        matches!(self, Self::Provider)
+    }
 }
 
 struct EntrySeed<'a> {
@@ -80,8 +101,7 @@ struct EntrySeed<'a> {
     size: u64,
     size_exact: bool,
     attrs: Option<FileAttrsCache>,
-    backing_path: Option<PathBuf>,
-    synthetic: Option<Synthetic>,
+    body: EntryBody,
 }
 
 /// A live ranged open bound to a stateid. Holds the `Tree`-owned `RangedHandle`
@@ -97,12 +117,40 @@ struct RangedOpen {
     follow_pump: Option<tokio::task::AbortHandle>,
 }
 
+#[derive(Debug, Default)]
+struct FollowSizes {
+    sizes: DashMap<u64, u64>,
+}
+
+impl FollowSizes {
+    fn grow(&self, ino: u64, size: u64) {
+        self.sizes
+            .entry(ino)
+            .and_modify(|current| *current = (*current).max(size))
+            .or_insert(size);
+    }
+
+    fn get(&self, ino: u64) -> Option<u64> {
+        self.sizes.get(&ino).map(|entry| *entry.value())
+    }
+
+    fn remove(&self, ino: u64) {
+        self.sizes.remove(&ino);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BackingOpen {
     id: u64,
     mount_name: String,
     path: Path,
     backing_path: PathBuf,
+}
+
+enum OpenBody {
+    Materialized(Vec<u8>),
+    Ranged(RangedOpen),
+    Backing(BackingOpen),
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -122,15 +170,11 @@ impl ObjectKey {
     }
 }
 
-fn path_key(mount_name: &str, path: &Path) -> PathKey {
-    PathKey::with_mount_str(mount_name, path.clone()).expect("runtime mount name")
-}
-
 pub struct Export {
     rt: Handle,
-    /// The provider registry both the adapter and `Tree` hold. The adapter reads
-    /// it only for mount enumeration and the synthetic NFS export root; all
-    /// provider round trips go through `tree`.
+    /// The provider registry both the adapter and `Tree` hold. The adapter uses
+    /// it only to recover the runtime for protocol-local state; mount
+    /// enumeration and provider round trips go through `tree`.
     registry: Arc<ProviderRegistry>,
     /// The renderer-neutral projection core. Owns resolve/list/read decision
     /// logic; the NFS adapter enters the async runtime to call it and turns the
@@ -138,17 +182,14 @@ pub struct Export {
     tree: Tree,
     inodes: DashMap<u64, NodeEntry>,
     path_to_inode: DashMap<ObjectKey, u64>,
-    negative_lookups: DashMap<PathKey, ()>,
     next_ino: AtomicU64,
     root_mount: Option<String>,
-    opens: OpenTable,
-    ranged_opens: DashMap<StateIdOther, RangedOpen>,
-    backing_opens: DashMap<StateIdOther, BackingOpen>,
+    opens: OpenTable<OpenBody>,
     /// Per-inode live-follow size learned by a ranged open's background pump.
     /// `attr` reports `max(entry.size, follow_sizes[ino])` so a polling `tail -f`
     /// over the `noac` mount re-stats, sees growth, and reads the new bytes.
     /// Shared into the spawned pump task, so `Arc`.
-    follow_sizes: Arc<DashMap<u64, u64>>,
+    follow_sizes: Arc<FollowSizes>,
 }
 
 impl Export {
@@ -174,8 +215,7 @@ impl Export {
                     size: 0,
                     size_exact: true,
                     attrs: None,
-                    backing_path: None,
-                    synthetic: None,
+                    body: EntryBody::Provider,
                 },
             );
             if root_mount.is_some() {
@@ -188,13 +228,10 @@ impl Export {
             tree,
             inodes,
             path_to_inode,
-            negative_lookups: DashMap::new(),
             next_ino: AtomicU64::new(EXPORT_ROOT_ID + 1),
             root_mount,
             opens: OpenTable::new(),
-            ranged_opens: DashMap::new(),
-            backing_opens: DashMap::new(),
-            follow_sizes: Arc::new(DashMap::new()),
+            follow_sizes: Arc::new(FollowSizes::default()),
         }
     }
 
@@ -210,8 +247,8 @@ impl Export {
     }
 
     /// Drain pending runtime invalidations through `Tree` and drive the NFS-side
-    /// fan-out: prune the inode table, the negative-lookup table, and the open
-    /// stateid tables (closing ranged provider handles).
+    /// fan-out: prune the inode table and the open stateid tables (closing ranged
+    /// provider handles).
     ///
     /// `Tree::drain_invalidations` owns the renderer-neutral half (queue drain +
     /// mem eviction); the NFS adapter consumes the returned report to prune its
@@ -229,18 +266,6 @@ impl Export {
             report.paths.iter().any(|invalidated| invalidated == path)
                 || report.prefixes.iter().any(|prefix| path.has_prefix(prefix))
         };
-
-        let stale_negative_lookups = self
-            .negative_lookups
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                (key.mount.as_str() == mount_name && matches(&key.path)).then(|| key.clone())
-            })
-            .collect::<Vec<_>>();
-        for key in stale_negative_lookups {
-            self.negative_lookups.remove(&key);
-        }
 
         let stale_paths = self
             .path_to_inode
@@ -262,32 +287,18 @@ impl Export {
                 stale_inodes.push(id);
             }
         }
-        self.opens.remove_inodes(&stale_inodes);
-
-        let stale_opens = self
-            .ranged_opens
-            .iter()
-            .filter_map(|entry| {
-                let ranged = entry.value();
-                (ranged.mount_name == mount_name && matches(&ranged.path)).then(|| *entry.key())
-            })
-            .collect::<Vec<_>>();
-        for stateid in stale_opens {
-            if let Some((_, ranged)) = self.ranged_opens.remove(&stateid) {
-                self.close_ranged_open(ranged);
-            }
+        for body in self.opens.remove_inodes(&stale_inodes) {
+            self.close_open_body(body);
         }
 
-        let stale_backing_opens = self
-            .backing_opens
-            .iter()
-            .filter_map(|entry| {
-                let backing = entry.value();
-                (backing.mount_name == mount_name && matches(&backing.path)).then(|| *entry.key())
-            })
-            .collect::<Vec<_>>();
-        for stateid in stale_backing_opens {
-            self.backing_opens.remove(&stateid);
+        for body in self.opens.remove_where(|state| match &state.body {
+            OpenBody::Materialized(_) => false,
+            OpenBody::Ranged(ranged) => ranged.mount_name == mount_name && matches(&ranged.path),
+            OpenBody::Backing(backing) => {
+                backing.mount_name == mount_name && matches(&backing.path)
+            },
+        }) {
+            self.close_open_body(body);
         }
     }
 
@@ -305,12 +316,11 @@ impl Export {
             size,
             size_exact,
             attrs,
-            backing_path,
-            synthetic,
+            body,
         } = seed;
         let key = ObjectKey::new(scope, mount_name, path);
         let attrs_for_update = attrs.clone();
-        let synthetic_for_update = synthetic.clone();
+        let body_for_update = body.clone();
         *self
             .path_to_inode
             .entry(key)
@@ -328,17 +338,11 @@ impl Export {
                     {
                         entry.size = merged_attrs.st_size();
                         entry.size_exact =
-                            matches!(merged_attrs.size, view_types::FileSize::Exact(_));
+                            matches!(merged_attrs.size(), view_types::FileSize::Exact(_));
                         entry.attrs = Some(merged_attrs);
                     }
-                    // A genuine resolution carries an explicit synthetic state:
-                    // a real provider/backing entry clears any prior synthetic
-                    // marker (a real `.gitignore` wins), a synthetic entry sets
-                    // it. Every caller passes the resolved state, so there is no
-                    // origin-agnostic refresh to preserve.
-                    entry.synthetic.clone_from(&synthetic_for_update);
-                    if backing_path.is_some() {
-                        entry.backing_path.clone_from(&backing_path);
+                    entry.body.clone_from(&body_for_update);
+                    if matches!(entry.body, EntryBody::Backing(_)) {
                         entry.size_exact = true;
                         entry.attrs = None;
                     }
@@ -357,8 +361,7 @@ impl Export {
                         size,
                         size_exact,
                         attrs,
-                        backing_path,
-                        synthetic,
+                        body,
                     },
                 );
                 id
@@ -366,15 +369,15 @@ impl Export {
     }
 
     fn promote_file_attrs(&self, id: u64, attrs: FileAttrsCache) {
-        if matches!(attrs.stability, view_types::Stability::Live) {
+        if matches!(attrs.stability(), view_types::Stability::Live) {
             return;
         }
         if let Some(mut entry) = self.inodes.get_mut(&id)
             && entry.kind == NodeKind::File
-            && entry.backing_path.is_none()
+            && !matches!(entry.body, EntryBody::Backing(_))
         {
             entry.size = attrs.st_size();
-            entry.size_exact = matches!(attrs.size, view_types::FileSize::Exact(_));
+            entry.size_exact = matches!(attrs.size(), view_types::FileSize::Exact(_));
             entry.attrs = Some(attrs);
         }
     }
@@ -442,10 +445,13 @@ impl Export {
         entry.size.hash(&mut hasher);
         entry.size_exact.hash(&mut hasher);
         if let Some(attrs) = &entry.attrs {
-            attrs.version_token.hash(&mut hasher);
-            std::mem::discriminant(&attrs.size).hash(&mut hasher);
-            std::mem::discriminant(&attrs.bytes).hash(&mut hasher);
-            std::mem::discriminant(&attrs.stability).hash(&mut hasher);
+            attrs.version_token().hash(&mut hasher);
+            let size = attrs.size();
+            let bytes = attrs.byte_source();
+            let stability = attrs.stability();
+            std::mem::discriminant(&size).hash(&mut hasher);
+            std::mem::discriminant(&bytes).hash(&mut hasher);
+            std::mem::discriminant(&stability).hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -477,87 +483,44 @@ impl Export {
     }
 
     fn meta_kind(meta: &EntryMeta) -> NodeKind {
-        match &meta.kind {
+        match meta.kind() {
             view_types::EntryKind::Directory => NodeKind::Directory,
             view_types::EntryKind::File => NodeKind::File,
         }
     }
 
     fn meta_size(meta: &EntryMeta) -> (u64, bool) {
-        let exact = match &meta.attrs {
-            Some(attrs) => matches!(&attrs.size, view_types::FileSize::Exact(_)),
+        let exact = match meta.attrs() {
+            Some(attrs) => matches!(attrs.size(), view_types::FileSize::Exact(_)),
             None => true,
         };
         (meta.st_size(), exact)
     }
 
-    /// Probe a ranged file's exact size by opening it through the provider. NFS
-    /// flattens a directory into a finite snapshot whose `fattr4` carries each
-    /// child's size, so a ranged child that lists as a static `Unknown`/`Full`
-    /// placeholder must be promoted to its real size before `ls -l` stats it.
-    /// FUSE has no analogue because it promotes size lazily on the inode at read
-    /// time. The probe writes the learned attrs back through the cache so a later
-    /// lookup serves them without re-probing.
-    fn probe_ranged_attrs(&self, runtime: &Arc<Runtime>, path: &Path) -> Option<FileAttrsCache> {
-        let opened = match self.rt.block_on(runtime.namespace().open_file(path)) {
-            Ok(opened) => opened,
-            Err(RuntimeError::ProviderError(error))
-                if matches!(
-                    error.kind,
-                    wit_types::ErrorKind::InvalidInput | wit_types::ErrorKind::NotFound
-                ) =>
-            {
-                return None;
-            },
-            Err(RuntimeError::ProviderError(error)) => {
-                tracing::warn!(
-                    path = %path,
-                    kind = ?error.kind,
-                    retryable = error.retryable,
-                    message = %error.message,
-                    "NFS ranged attr probe failed"
-                );
-                return None;
-            },
-            Err(error) => {
-                tracing::warn!(path = %path, error = %error, "NFS ranged attr probe failed");
-                return None;
-            },
-        };
-
-        let attrs = FileAttrsCache {
-            size: omnifs_host::wit_protocol::file_size_from_wit(opened.attrs.size),
-            bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Ranged),
-            stability: omnifs_host::wit_protocol::stability_from_wit(opened.attrs.stability),
-            version_token: opened.attrs.version_token,
-        };
-        if let Err(error) = attrs.validate() {
-            tracing::warn!(path = %path, error, "NFS ranged attr probe returned invalid attrs");
-            let _ = runtime.call_close_file(opened.handle);
-            return None;
-        }
-        if let Err(error) = runtime.call_close_file(opened.handle) {
-            tracing::warn!(path = %path, error = %error, "NFS ranged attr probe close failed");
-        }
-        Some(attrs)
-    }
-
     /// Promote an unsized ranged-placeholder file meta to its real attrs via a
-    /// provider open-probe, caching the learned attrs.
+    /// `Tree` open-probe, caching the learned attrs through the shared projection
+    /// layer.
     fn promote_ranged_placeholder_meta(
         &self,
-        runtime: &Arc<Runtime>,
+        mount_name: &str,
         child_path: &Path,
         mut meta: EntryMeta,
     ) -> EntryMeta {
-        if meta
-            .attrs
-            .as_ref()
-            .is_some_and(Self::needs_ranged_size_probe)
-            && let Some(attrs) = self.probe_ranged_attrs(runtime, child_path)
-        {
-            frontend::cache_file_metadata(runtime, child_path, attrs.clone());
-            meta = EntryMeta::file(attrs);
+        if meta.attrs().is_some_and(Self::needs_ranged_size_probe) {
+            match self
+                .rt
+                .block_on(self.tree.probe_ranged_attrs(mount_name, child_path))
+            {
+                Ok(Some(attrs)) => meta = EntryMeta::file(attrs),
+                Ok(None) => {},
+                Err(error) => {
+                    tracing::warn!(
+                        path = %child_path,
+                        error = %error,
+                        "NFS ranged attr probe failed"
+                    );
+                },
+            }
         }
         meta
     }
@@ -568,11 +531,7 @@ impl Export {
     /// real size must be learned before `ls -l`/`stat` reads it (a full file
     /// learns its size lazily on `read`, so it is not probed here).
     fn needs_ranged_size_probe(attrs: &FileAttrsCache) -> bool {
-        matches!(attrs.size, view_types::FileSize::Unknown)
-            && matches!(
-                attrs.bytes,
-                view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-            )
+        matches!(attrs.size(), view_types::FileSize::Unknown) && attrs.is_deferred_ranged()
     }
 
     fn tree_status(error: &TreeError) -> Status {
@@ -590,15 +549,10 @@ impl Export {
         }
     }
 
-    fn expected_negative_probe(name: &str) -> bool {
-        name == ".DS_Store" || name.starts_with("._")
-    }
-
     /// Resolve a child from the parent's cached dirents record, if present. NFS
-    /// consults a non-exhaustive cached listing for a positive entry so a probe
-    /// name (e.g. `.DS_Store`) seen in a partial listing beats the
-    /// expected-negative shortcut. Returns `None` when the record is absent or
-    /// the name is not a positive entry; the caller then falls through to `Tree`.
+    /// consults a non-exhaustive cached listing for a positive entry before
+    /// falling through to `Tree`. Returns `None` when the record is absent or the
+    /// name is not a positive entry.
     fn lookup_from_cached_dirents(
         &self,
         scope: u64,
@@ -608,7 +562,7 @@ impl Export {
         name: &Segment,
         runtime: &Arc<Runtime>,
     ) -> Option<u64> {
-        let record = frontend::cache_get(runtime, parent_path, RecordKind::Dirents, None)?;
+        let record = runtime.cache_get(parent_path, RecordKind::Dirents, None)?;
         let LookupCacheHit::Positive(meta) =
             frontend::cached_dirent_lookup(&record, name.as_str())?
         else {
@@ -619,7 +573,7 @@ impl Export {
     }
 
     /// Allocate an inode for a resolved positive `meta`, promoting a static
-    /// ranged placeholder to its probed size and clearing any stale negative.
+    /// ranged placeholder to its probed size.
     fn allocate_meta_entry(
         &self,
         scope: u64,
@@ -629,10 +583,8 @@ impl Export {
         mut meta: EntryMeta,
         runtime: Option<&Arc<Runtime>>,
     ) -> u64 {
-        self.negative_lookups
-            .remove(&path_key(mount_name, child_path));
-        if let Some(runtime) = runtime {
-            meta = self.promote_ranged_placeholder_meta(runtime, child_path, meta);
+        if runtime.is_some() {
+            meta = self.promote_ranged_placeholder_meta(mount_name, child_path, meta);
         }
         let kind = Self::meta_kind(&meta);
         let (size, size_exact) = Self::meta_size(&meta);
@@ -644,9 +596,8 @@ impl Export {
             kind,
             size,
             size_exact,
-            attrs: meta.attrs,
-            backing_path: None,
-            synthetic: None,
+            attrs: meta.into_attrs(),
+            body: EntryBody::Provider,
         })
     }
 
@@ -664,21 +615,14 @@ impl Export {
         name: &Segment,
         runtime: &Arc<Runtime>,
     ) -> StatusResult<u64> {
-        let parent_node = provider_dir_node(mount_name, parent_path);
+        let parent_node = Node::provider_dir(mount_name.to_string(), parent_path.clone());
         let ctx = RequestCtx::default();
-        let child_path = parent_path.join_segment(name);
         match self
             .rt
             .block_on(self.tree.resolve_child(&parent_node, name.as_str(), &ctx))
         {
             Ok(node) => Ok(self.bind_node(scope, mount_name, parent, &node, Some(runtime))),
-            Err(error) if error.kind == TreeErrorKind::NotFound => {
-                if Self::expected_negative_probe(name.as_str()) {
-                    self.negative_lookups
-                        .insert(path_key(mount_name, &child_path), ());
-                }
-                Err(Status::NoEnt)
-            },
+            Err(error) if error.kind == TreeErrorKind::NotFound => Err(Status::NoEnt),
             Err(error) => {
                 tracing::warn!(
                     op = "lookup",
@@ -705,9 +649,7 @@ impl Export {
         runtime: Option<&Arc<Runtime>>,
     ) -> u64 {
         let child_path = node.path().clone();
-        self.negative_lookups
-            .remove(&path_key(mount_name, &child_path));
-        if let Backing::Subtree(dir) = node.backing() {
+        if let Some(dir) = node.subtree_path() {
             return self.get_or_alloc(EntrySeed {
                 scope,
                 mount_name,
@@ -717,14 +659,13 @@ impl Export {
                 size: 0,
                 size_exact: true,
                 attrs: None,
-                backing_path: Some(dir.clone()),
-                synthetic: None,
+                body: EntryBody::Backing(dir.clone()),
             });
         }
 
-        let mut meta = node_meta(node);
-        if let (None, Some(runtime)) = (node.synthetic_kind(), runtime) {
-            meta = self.promote_ranged_placeholder_meta(runtime, &child_path, meta);
+        let mut meta = node.projected_meta();
+        if node.synthetic_kind().is_none() && runtime.is_some() {
+            meta = self.promote_ranged_placeholder_meta(mount_name, &child_path, meta);
         }
         let kind = Self::meta_kind(&meta);
         let (size, size_exact) = Self::meta_size(&meta);
@@ -736,9 +677,11 @@ impl Export {
             kind,
             size,
             size_exact,
-            attrs: meta.attrs,
-            backing_path: None,
-            synthetic: node.synthetic_kind().cloned(),
+            attrs: meta.into_attrs(),
+            body: node
+                .synthetic_kind()
+                .cloned()
+                .map_or(EntryBody::Provider, EntryBody::Synthetic),
         })
     }
 
@@ -755,8 +698,6 @@ impl Export {
         let metadata = std::fs::symlink_metadata(&child).map_err(|_| Status::NoEnt)?;
         let kind = Self::backing_kind(&metadata)?;
         let child_path = parent_path.join_segment(name);
-        self.negative_lookups
-            .remove(&path_key(mount_name, &child_path));
         Ok(self.get_or_alloc(EntrySeed {
             scope,
             mount_name,
@@ -766,14 +707,11 @@ impl Export {
             size: metadata.len(),
             size_exact: true,
             attrs: None,
-            backing_path: Some(child),
-            synthetic: None,
+            body: EntryBody::Backing(child),
         }))
     }
 
-    /// Build a finite directory snapshot from a `Tree` `Listing`: provider
-    /// children (each ranged-probed and inode-allocated), then the host-synthesized
-    /// `@next`/`@all` controls and mount-root ignore files materialized as files.
+    /// Build a finite directory snapshot from a `Tree` `Listing`.
     fn snapshot_from_listing(
         &self,
         scope: u64,
@@ -783,17 +721,15 @@ impl Export {
         listing: &Listing,
         runtime: &Arc<Runtime>,
     ) -> DirListing {
-        let mut entries = Vec::with_capacity(listing.entries.len() + listing.synthetic.len());
+        let mut entries = Vec::with_capacity(listing.entries.len());
         for entry in &listing.entries {
+            let runtime = if entry.is_synthetic() {
+                None
+            } else {
+                Some(runtime)
+            };
             if let Some(dir_entry) =
-                self.dir_entry_from_tree(scope, mount_name, path, parent, entry, Some(runtime))
-            {
-                entries.push(dir_entry);
-            }
-        }
-        for entry in &listing.synthetic {
-            if let Some(dir_entry) =
-                self.dir_entry_from_tree(scope, mount_name, path, parent, entry, None)
+                self.dir_entry_from_tree(scope, mount_name, path, parent, entry, runtime)
             {
                 entries.push(dir_entry);
             }
@@ -820,11 +756,10 @@ impl Export {
     ) -> Option<DirEntry> {
         let name = Segment::try_from(entry.name.as_str()).ok()?;
         let child_path = path.join_segment(&name);
-        self.negative_lookups
-            .remove(&path_key(mount_name, &child_path));
         let mut meta = entry.meta.clone();
-        if let (None, Some(runtime)) = (entry.synthetic.as_ref(), runtime) {
-            meta = self.promote_ranged_placeholder_meta(runtime, &child_path, meta);
+        let synthetic = entry.synthetic_kind().cloned();
+        if synthetic.is_none() && runtime.is_some() {
+            meta = self.promote_ranged_placeholder_meta(mount_name, &child_path, meta);
         }
         let kind = Self::meta_kind(&meta);
         let (size, size_exact) = Self::meta_size(&meta);
@@ -836,9 +771,8 @@ impl Export {
             kind,
             size,
             size_exact,
-            attrs: meta.attrs,
-            backing_path: None,
-            synthetic: entry.synthetic.clone(),
+            attrs: meta.into_attrs(),
+            body: synthetic.map_or(EntryBody::Provider, EntryBody::Synthetic),
         });
         let attr = self.attr(id).unwrap_or(Attr {
             id,
@@ -889,8 +823,7 @@ impl Export {
                 size: metadata.len(),
                 size_exact: true,
                 attrs: None,
-                backing_path: Some(backing_path),
-                synthetic: None,
+                body: EntryBody::Backing(backing_path),
             });
             entries.push(DirEntry {
                 id,
@@ -904,11 +837,10 @@ impl Export {
         })
     }
 
-    /// Read a provider-backed file. A host-synthesized node and a treeref backing
-    /// node are served by `Tree::read`; an inline-projection node (whose bytes
-    /// travel in its cached attrs, with no provider file route) is served from
-    /// those bytes directly. Everything else renders through `Tree::read`, which
-    /// owns the cache cascade, the write fence, and learned-size promotion.
+    /// Read a provider-backed file. Host-synthesized nodes, treeref backing
+    /// nodes, inline projected bytes, cache hits, cold provider reads, write
+    /// fencing, and learned-size publication are all served by `Tree::read`.
+    /// The adapter only promotes the returned attrs onto its inode.
     fn read_provider_file(
         &self,
         id: u64,
@@ -916,33 +848,16 @@ impl Export {
         path: &Path,
         attrs: Option<&FileAttrsCache>,
         synthetic: Option<Synthetic>,
-        runtime: &Arc<Runtime>,
     ) -> StatusResult<Vec<u8>> {
-        // Inline cached projection: the bytes live in the attrs (a manually
-        // cached dirents/lookup entry with no provider file route), so serve them
-        // directly and learn the exact size, without a provider round trip.
-        if synthetic.is_none()
-            && let Some(attrs) =
-                frontend::cached_file_attrs(runtime, path).or_else(|| attrs.cloned())
-            && let Some(bytes) = attrs.inline_bytes()
-        {
-            let data = bytes.to_vec();
-            let attrs = frontend::learned_full_read_attrs(attrs.clone(), data.len());
-            if !frontend::full_read_matches_attrs(&attrs, data.len()) {
-                tracing::warn!(
-                    path = %path,
-                    expected = ?attrs.size,
-                    actual = data.len(),
-                    "cached inline file attrs contradict content length"
-                );
-                return Err(Status::Io);
-            }
-            self.promote_file_attrs(id, attrs.clone());
-            frontend::cache_file_metadata(runtime, path, attrs);
-            return Ok(data);
-        }
-
-        let node = file_node(mount_name, path, attrs, synthetic);
+        let node = match synthetic {
+            Some(synthetic) => Node::synthetic_file(
+                mount_name.to_string(),
+                path.clone(),
+                attrs.cloned(),
+                synthetic,
+            ),
+            None => Node::provider_file(mount_name.to_string(), path.clone(), attrs.cloned()),
+        };
         let ctx = RequestCtx::default();
         match self.rt.block_on(self.tree.read(&node, &ctx)) {
             Ok(ReadResult::Bytes {
@@ -951,8 +866,7 @@ impl Export {
                 ..
             }) => {
                 if let Some(read_attrs) = read_attrs {
-                    self.promote_file_attrs(id, read_attrs.clone());
-                    frontend::cache_file_metadata(runtime, path, read_attrs);
+                    self.promote_file_attrs(id, read_attrs);
                 }
                 Ok(data)
             },
@@ -1008,13 +922,10 @@ impl Export {
             // follow path, not the inode (`promote_file_attrs` skips Live); fold
             // an EOF-short read's growth into `follow_sizes` so the next stat
             // reflects it without waiting for the pump's next tick.
-            if matches!(attrs.stability, view_types::Stability::Live) {
-                grow_follow_size(&self.follow_sizes, id, attrs.st_size());
+            if matches!(attrs.stability(), view_types::Stability::Live) {
+                self.follow_sizes.grow(id, attrs.st_size());
             } else {
                 self.promote_file_attrs(id, attrs.clone());
-                if let Some(runtime) = self.runtime_for_mount(&ranged.mount_name) {
-                    frontend::cache_file_metadata(&runtime, &ranged.path, attrs);
-                }
             }
         }
         Ok(OpenRead {
@@ -1072,12 +983,9 @@ impl Export {
             return Ok(());
         }
         if let Some(projected_attrs) = attrs
-            && matches!(
-                projected_attrs.bytes,
-                view_types::ByteSource::Deferred(view_types::ReadMode::Full)
-            )
+            && projected_attrs.is_deferred_full()
         {
-            match projected_attrs.size {
+            match projected_attrs.size() {
                 view_types::FileSize::Exact(declared) if declared > OPEN_MATERIALIZE_MAX_BYTES => {
                     tracing::warn!(
                         op = "open",
@@ -1106,11 +1014,10 @@ impl Export {
             pump.abort();
         }
         if !self
-            .ranged_opens
-            .iter()
-            .any(|entry| entry.value().ino == ranged.ino)
+            .opens
+            .any(|state| matches!(&state.body, OpenBody::Ranged(open) if open.ino == ranged.ino))
         {
-            self.follow_sizes.remove(&ranged.ino);
+            self.follow_sizes.remove(ranged.ino);
         }
         if let Err(error) = ranged.handle.close() {
             tracing::warn!(
@@ -1122,6 +1029,18 @@ impl Export {
         }
     }
 
+    fn close_open_body(&self, body: OpenBody) {
+        if let OpenBody::Ranged(ranged) = body {
+            self.close_ranged_open(ranged);
+        }
+    }
+
+    fn close_expired_open(&self, stateid: StateId) {
+        if let Some(body) = self.opens.remove_body(stateid) {
+            self.close_open_body(body);
+        }
+    }
+
     /// Open a `Deferred(Ranged)` file through `Tree::open` and register the
     /// resulting handle under a fresh stateid. `Tree` owns the provider open and
     /// chunk reads; the adapter keeps the renderer-side stateid binding. Returns
@@ -1129,14 +1048,17 @@ impl Export {
     /// (`Tree::open` reports the mismatch), so the caller serves it as a full read.
     fn open_ranged_state(
         &self,
-        seed: OpenSeed,
+        seed: OpenSeed<()>,
         mount_name: &str,
         path: &Path,
         projected_attrs: &FileAttrsCache,
-        runtime: &Arc<Runtime>,
     ) -> StatusResult<Option<OpenResult>> {
         let ino = seed.inode;
-        let node = file_node(mount_name, path, Some(projected_attrs), None);
+        let node = Node::provider_file(
+            mount_name.to_string(),
+            path.clone(),
+            Some(projected_attrs.clone()),
+        );
         let ctx = RequestCtx::default();
         let handle = match self.rt.block_on(self.tree.open(&node, &ctx)) {
             Ok(Some(handle)) => handle,
@@ -1159,7 +1081,6 @@ impl Export {
             return Err(Status::Io);
         }
         self.promote_file_attrs(ino, opened_attrs.clone());
-        frontend::cache_file_metadata(runtime, path, opened_attrs.clone());
         let attr = match self.attr(ino) {
             Ok(attr) => attr,
             Err(status) => {
@@ -1172,11 +1093,11 @@ impl Export {
         // upstream growth on a cadence; `attr` reports it so an idle reader over
         // the `noac` mount re-stats and reads forward. The size-learning is
         // `Tree`'s (via `probe_live_growth`); the reporting is the adapter's.
-        let follow_pump = if matches!(opened_attrs.stability, view_types::Stability::Live) {
+        let follow_pump = if matches!(opened_attrs.stability(), view_types::Stability::Live) {
             let initial = opened_attrs
                 .st_size()
                 .max(handle.observed_end().load(Ordering::Relaxed));
-            grow_follow_size(&self.follow_sizes, ino, initial);
+            self.follow_sizes.grow(ino, initial);
             Some(self.spawn_follow_pump(
                 ino,
                 mount_name.to_string(),
@@ -1186,17 +1107,13 @@ impl Export {
         } else {
             None
         };
-        let stateid = self.opens.open(seed);
-        self.ranged_opens.insert(
-            stateid.other(),
-            RangedOpen {
-                ino,
-                mount_name: mount_name.to_string(),
-                path: path.clone(),
-                handle,
-                follow_pump,
-            },
-        );
+        let stateid = self.opens.open(seed.with_body(OpenBody::Ranged(RangedOpen {
+            ino,
+            mount_name: mount_name.to_string(),
+            path: path.clone(),
+            handle,
+            follow_pump,
+        })));
         Ok(Some(OpenResult { stateid, attr }))
     }
 
@@ -1230,7 +1147,7 @@ impl Export {
                 )
                 .await
                 {
-                    Ok(Some(new_end)) => grow_follow_size(&follow_sizes, ino, new_end),
+                    Ok(Some(new_end)) => follow_sizes.grow(ino, new_end),
                     Ok(None) => {},
                     Err(_) => break,
                 }
@@ -1238,61 +1155,6 @@ impl Export {
         });
         task.abort_handle()
     }
-}
-
-/// Grow a per-inode live-follow size monotonically (never shrinks). Shared by
-/// the open-time seed, the EOF-read learn, and the background pump (which holds
-/// its own `Arc` clone of the map), so it is a free function, not a method.
-fn grow_follow_size(follow_sizes: &DashMap<u64, u64>, ino: u64, size: u64) {
-    follow_sizes
-        .entry(ino)
-        .and_modify(|current| *current = (*current).max(size))
-        .or_insert(size);
-}
-
-/// The `EntryMeta` a resolved `Node` projects (kind + optional attrs).
-fn node_meta(node: &Node) -> EntryMeta {
-    EntryMeta {
-        kind: node.kind(),
-        attrs: node.attrs().cloned(),
-    }
-}
-
-/// Build the provider-backed (or synthetic) file `Node` `Tree::read`/`Tree::open`
-/// consume, from inode-cached projection state.
-fn file_node(
-    mount_name: &str,
-    path: &Path,
-    attrs: Option<&FileAttrsCache>,
-    synthetic: Option<Synthetic>,
-) -> Node {
-    let meta = match attrs {
-        Some(attrs) => EntryMeta::file(attrs.clone()),
-        None => EntryMeta {
-            kind: view_types::EntryKind::File,
-            attrs: None,
-        },
-    };
-    match synthetic {
-        Some(synthetic) => Node::synthetic(mount_name.to_string(), path.clone(), meta, synthetic),
-        None => Node::new(
-            mount_name.to_string(),
-            path.clone(),
-            meta,
-            Backing::Provider,
-        ),
-    }
-}
-
-/// Build the minimal provider-backed directory `Node` `Tree` needs to resolve a
-/// child or list a directory. The inode table has already proved this is a dir.
-fn provider_dir_node(mount_name: &str, path: &Path) -> Node {
-    Node::new(
-        mount_name.to_string(),
-        path.clone(),
-        EntryMeta::directory(),
-        Backing::Provider,
-    )
 }
 
 impl ReadOnlyExport for Export {
@@ -1303,7 +1165,7 @@ impl ReadOnlyExport for Export {
     fn attr(&self, id: u64) -> StatusResult<Attr> {
         let entry = self.inodes.get(&id).ok_or(Status::Stale)?;
         let mount_name = entry.mount_name.clone();
-        let backing_path = entry.backing_path.clone();
+        let backing_path = entry.body.backing_path().cloned();
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
@@ -1321,8 +1183,8 @@ impl ReadOnlyExport for Export {
             // A live file's size is owned by its follow pump, never the inode
             // (`promote_file_attrs` skips Live); report the learned growth so a
             // polling `tail -f` re-stats and reads forward. Never shrinks.
-            if let Some(grown) = self.follow_sizes.get(&id) {
-                attr.size = attr.size.max(*grown);
+            if let Some(grown) = self.follow_sizes.get(id) {
+                attr.size = attr.size.max(grown);
             }
             Ok(attr)
         }
@@ -1331,26 +1193,20 @@ impl ReadOnlyExport for Export {
     fn lookup(&self, parent: u64, name: &str) -> StatusResult<u64> {
         let name = Segment::try_from(name).map_err(|_| Status::Invalid)?;
 
-        if (parent == ROOT_ID || parent == EXPORT_ROOT_ID)
-            && self.root_mount.is_none()
-            && self.registry.get(name.as_str()).is_some()
-        {
-            return Ok(self.get_or_alloc(EntrySeed {
-                scope: parent,
-                mount_name: name.as_str(),
-                path: &Path::root(),
-                parent,
-                kind: NodeKind::Directory,
-                size: 0,
-                size_exact: true,
-                attrs: None,
-                backing_path: None,
-                synthetic: None,
-            }));
-        }
+        if (parent == ROOT_ID || parent == EXPORT_ROOT_ID) && self.root_mount.is_none() {
+            let child_path = Path::root().join_segment(&name);
+            let ctx = RequestCtx::default();
+            if let Ok(node) = self.rt.block_on(self.tree.resolve(&child_path, &ctx))
+                && !node.is_synthetic()
+            {
+                return Ok(self.bind_node(parent, node.mount(), parent, &node, None));
+            }
 
-        if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME {
-            return Ok(EXPORT_ROOT_ID);
+            if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME {
+                return Ok(EXPORT_ROOT_ID);
+            }
+
+            return Err(Status::NoEnt);
         }
 
         let parent_entry = self.inodes.get(&parent).ok_or(Status::Stale)?;
@@ -1360,7 +1216,7 @@ impl ReadOnlyExport for Export {
         let mount_name = parent_entry.mount_name.clone();
         let parent_path = parent_entry.path.clone();
         let scope = parent_entry.scope;
-        let backing_path = parent_entry.backing_path.clone();
+        let backing_path = parent_entry.body.backing_path().cloned();
         drop(parent_entry);
 
         self.drain_invalidations_for_mount(&mount_name);
@@ -1384,10 +1240,9 @@ impl ReadOnlyExport for Export {
         }
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        let child_path = parent_path.join_segment(&name);
 
         // NFS-specific: a positive entry in a (possibly non-exhaustive) cached
-        // listing beats the expected-negative shortcut.
+        // listing can be bound without another provider lookup.
         if let Some(id) = self.lookup_from_cached_dirents(
             scope,
             &mount_name,
@@ -1399,39 +1254,48 @@ impl ReadOnlyExport for Export {
             return Ok(id);
         }
 
-        if Self::expected_negative_probe(name.as_str())
-            && self
-                .negative_lookups
-                .contains_key(&path_key(&mount_name, &child_path))
-        {
-            return Err(Status::NoEnt);
+        match self.lookup_via_tree(scope, &mount_name, &parent_path, parent, &name, &runtime) {
+            Err(Status::NoEnt) if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME => {
+                Ok(EXPORT_ROOT_ID)
+            },
+            result => result,
         }
-
-        self.lookup_via_tree(scope, &mount_name, &parent_path, parent, &name, &runtime)
     }
 
     fn readdir(&self, id: u64) -> StatusResult<DirListing> {
         if (id == ROOT_ID || id == EXPORT_ROOT_ID) && self.root_mount.is_none() {
-            let mut mounts = self.registry.mounts();
-            mounts.sort();
-            let entries = mounts
+            let ctx = RequestCtx::default();
+            let root = self
+                .rt
+                .block_on(self.tree.resolve(&Path::root(), &ctx))
+                .map_err(|error| Self::tree_status(&error))?;
+            let listing = match self
+                .rt
+                .block_on(self.tree.list(&root, None, &ctx))
+                .map_err(|error| Self::tree_status(&error))?
+            {
+                ListOutcome::Listing(listing) => listing,
+                ListOutcome::Subtree(_) => return Err(Status::Io),
+            };
+            let entries = listing
+                .entries
                 .into_iter()
-                .map(|mount| {
+                .filter(|entry| !entry.is_synthetic())
+                .map(|entry| {
                     let child = self.get_or_alloc(EntrySeed {
                         scope: id,
-                        mount_name: &mount,
+                        mount_name: &entry.name,
                         path: &Path::root(),
                         parent: id,
                         kind: NodeKind::Directory,
-                        size: 0,
+                        size: entry.meta.st_size(),
                         size_exact: true,
-                        attrs: None,
-                        backing_path: None,
-                        synthetic: None,
+                        attrs: entry.meta.into_attrs(),
+                        body: EntryBody::Provider,
                     });
                     DirEntry {
                         id: child,
-                        name: mount,
+                        name: entry.name,
                         attr: self.attr(child).expect("fresh mount attr"),
                     }
                 })
@@ -1449,7 +1313,7 @@ impl ReadOnlyExport for Export {
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let scope = entry.scope;
-        let backing_path = entry.backing_path.clone();
+        let backing_path = entry.body.backing_path().cloned();
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
@@ -1462,7 +1326,7 @@ impl ReadOnlyExport for Export {
         }
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        let node = provider_dir_node(&mount_name, &path);
+        let node = Node::provider_dir(mount_name.clone(), path.clone());
         let ctx = RequestCtx::default();
         match self.rt.block_on(self.tree.list(&node, None, &ctx)) {
             Ok(ListOutcome::Listing(listing)) => {
@@ -1470,9 +1334,9 @@ impl ReadOnlyExport for Export {
             },
             Ok(ListOutcome::Subtree(dir)) => {
                 if let Some(mut entry) = self.inodes.get_mut(&id)
-                    && entry.backing_path.is_none()
+                    && !matches!(entry.body, EntryBody::Backing(_))
                 {
-                    entry.backing_path = Some(dir.clone());
+                    entry.body = EntryBody::Backing(dir.clone());
                 }
                 self.readdir_backing(scope, &mount_name, &path, id, &dir)
             },
@@ -1500,8 +1364,7 @@ impl ReadOnlyExport for Export {
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let attrs = entry.attrs.clone();
-        let backing_path = entry.backing_path.clone();
-        let synthetic = entry.synthetic.clone();
+        let body = entry.body.clone();
         drop(entry);
 
         self.drain_invalidations_for_mount(&mount_name);
@@ -1509,7 +1372,7 @@ impl ReadOnlyExport for Export {
             return Err(Status::Stale);
         }
 
-        if let Some(backing_path) = backing_path {
+        if let Some(backing_path) = body.backing_path().cloned() {
             let metadata = std::fs::symlink_metadata(&backing_path).map_err(|_| Status::Stale)?;
             if metadata.file_type().is_symlink() {
                 return Err(Status::Symlink);
@@ -1523,8 +1386,16 @@ impl ReadOnlyExport for Export {
             return std::fs::read(backing_path).map_err(|_| Status::Io);
         }
 
-        let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        self.read_provider_file(id, &mount_name, &path, attrs.as_ref(), synthetic, &runtime)
+        if self.runtime_for_mount(&mount_name).is_none() {
+            return Err(Status::NoEnt);
+        }
+        self.read_provider_file(
+            id,
+            &mount_name,
+            &path,
+            attrs.as_ref(),
+            body.synthetic().cloned(),
+        )
     }
 
     fn readlink(&self, id: u64) -> StatusResult<Vec<u8>> {
@@ -1533,7 +1404,7 @@ impl ReadOnlyExport for Export {
             return Err(Status::Invalid);
         }
         let mount_name = entry.mount_name.clone();
-        let Some(path) = entry.backing_path.clone() else {
+        let Some(path) = entry.body.backing_path().cloned() else {
             return Err(Status::Invalid);
         };
         drop(entry);
@@ -1557,67 +1428,60 @@ impl ReadOnlyExport for Export {
         let mount_name = entry.mount_name.clone();
         let path = entry.path.clone();
         let attrs = entry.attrs.clone();
-        let backing_path = entry.backing_path.clone();
-        let synthetic = entry.synthetic.clone();
+        let body = entry.body.clone();
         drop(entry);
         self.drain_invalidations_for_mount(&mount_name);
         if !self.inodes.contains_key(&id) {
             return Err(Status::Stale);
         }
 
-        Self::enforce_materialize_cap(&mount_name, &path, attrs.as_ref(), backing_path.as_deref())?;
+        Self::enforce_materialize_cap(
+            &mount_name,
+            &path,
+            attrs.as_ref(),
+            body.backing_path().map(PathBuf::as_path),
+        )?;
 
         // The projected placeholder declares the read mode (a `ranged` route
         // carries `Deferred(Ranged)`), so `open` dispatches on it directly: no
         // discovery probe. A host-synthesized control / ignore file is full-mode
         // and falls through to the whole-file materialize path below.
-        if synthetic.is_none()
-            && backing_path.is_none()
+        if body.is_provider()
             && let Some(projected_attrs) = attrs.as_ref()
-            && matches!(
-                projected_attrs.bytes,
-                view_types::ByteSource::Deferred(view_types::ReadMode::Ranged)
-            )
-        {
-            let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-            if let Some(result) = self.open_ranged_state(
+            && projected_attrs.is_deferred_ranged()
+            && let Some(result) = self.open_ranged_state(
                 OpenSeed {
                     generation,
                     inode: id,
                     clientid,
                     access,
-                    materialized_bytes: Vec::new(),
+                    body: (),
                 },
                 &mount_name,
                 &path,
                 projected_attrs,
-                &runtime,
-            )? {
-                return Ok(result);
-            }
-            // The route declared `ranged` but the provider answered full
-            // (`Tree::open` returned `None`): fall through to the whole-file
-            // materialize path so a mis-declared route degrades, not breaks.
+            )?
+        {
+            return Ok(result);
         }
+        // If a route declared `ranged` but the provider answered full
+        // (`Tree::open` returned `None`), fall through to the whole-file
+        // materialize path so a mis-declared route degrades, not breaks.
 
-        if let Some(backing_path) = backing_path {
+        if let Some(backing_path) = body.backing_path().cloned() {
             let attr = self.attr(id)?;
             let stateid = self.opens.open(OpenSeed {
                 generation,
                 inode: id,
                 clientid,
                 access,
-                materialized_bytes: Vec::new(),
-            });
-            self.backing_opens.insert(
-                stateid.other(),
-                BackingOpen {
+                body: OpenBody::Backing(BackingOpen {
                     id,
                     mount_name,
                     path,
                     backing_path,
-                },
-            );
+                }),
+            });
             return Ok(OpenResult { stateid, attr });
         }
 
@@ -1642,19 +1506,16 @@ impl ReadOnlyExport for Export {
             inode: id,
             clientid,
             access,
-            materialized_bytes: data,
+            body: OpenBody::Materialized(data),
         });
         Ok(OpenResult { stateid, attr })
     }
 
     fn validate_state(&self, stateid: StateId) -> StatusResult<()> {
         match self.opens.touch(stateid) {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(Status::Expired) => {
-                if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_open(ranged);
-                }
-                self.backing_opens.remove(&stateid.other());
+                self.close_expired_open(stateid);
                 Err(Status::Expired)
             },
             Err(status) => Err(status),
@@ -1662,77 +1523,58 @@ impl ReadOnlyExport for Export {
     }
 
     fn read_state(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
-        if let Some(backing) = self
-            .backing_opens
-            .get(&stateid.other())
-            .map(|entry| entry.clone())
-        {
-            self.drain_invalidations_for_mount(&backing.mount_name);
-            if !self.backing_opens.contains_key(&stateid.other()) {
-                return Err(Status::BadStateId);
-            }
-            match self.opens.read_info(stateid) {
-                Ok(_) => {},
-                Err(Status::Expired) => {
-                    self.backing_opens.remove(&stateid.other());
-                    return Err(Status::Expired);
-                },
-                Err(status) => return Err(status),
-            }
-            return Self::read_backing_state(&backing, offset, count);
-        }
-
-        if let Some(mount_name) = self
-            .ranged_opens
-            .get(&stateid.other())
-            .map(|entry| entry.mount_name.clone())
-        {
-            // Drain before re-binding the open: an invalidation may evict this
-            // stateid (closing its provider handle). The drain must not run while
-            // a `ranged_opens` guard is held, so the mount name is copied out
-            // first and the entry is re-acquired afterward.
-            self.drain_invalidations_for_mount(&mount_name);
-            let info = match self.opens.read_info(stateid) {
-                Ok(info) => info,
-                Err(Status::Expired) => {
-                    if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                        self.close_ranged_open(ranged);
-                    }
-                    return Err(Status::Expired);
-                },
-                Err(status) => return Err(status),
-            };
-            // `read_ranged_state` drives the `RangedHandle` (which only touches
-            // the runtime, never `ranged_opens`), so holding the guard across the
-            // chunk read is safe.
-            let Some(ranged) = self.ranged_opens.get(&stateid.other()) else {
-                return Err(Status::BadStateId);
-            };
-            return self.read_ranged_state(info.id, &ranged, offset, count);
-        }
-
-        let info = self.opens.touch(stateid)?;
-        let entry = self.inodes.get(&info.id).ok_or(Status::Stale)?;
-        let mount_name = entry.mount_name.clone();
-        drop(entry);
+        let mount_name = match self.opens.with_state(stateid, |state| match &state.body {
+            OpenBody::Materialized(_) => self
+                .inodes
+                .get(&state.inode)
+                .map(|entry| entry.mount_name.clone())
+                .ok_or(Status::Stale),
+            OpenBody::Ranged(ranged) => Ok(ranged.mount_name.clone()),
+            OpenBody::Backing(backing) => Ok(backing.mount_name.clone()),
+        }) {
+            Ok(Ok(mount_name)) => mount_name,
+            Err(Status::Expired) => {
+                self.close_expired_open(stateid);
+                return Err(Status::Expired);
+            },
+            Ok(Err(status)) | Err(status) => return Err(status),
+        };
         self.drain_invalidations_for_mount(&mount_name);
-        self.opens.read(stateid, offset, count)
+
+        match self.opens.with_state(stateid, |state| {
+            ensure_read_access(state.access)?;
+            match &mut state.body {
+                OpenBody::Materialized(data) => {
+                    let (data, eof) = open_data_slice(data, offset, count);
+                    Ok(OpenRead {
+                        id: state.inode,
+                        data,
+                        eof,
+                    })
+                },
+                OpenBody::Ranged(ranged) => {
+                    self.read_ranged_state(state.inode, ranged, offset, count)
+                },
+                OpenBody::Backing(backing) => Self::read_backing_state(backing, offset, count),
+            }
+        }) {
+            Ok(result) => result,
+            Err(Status::Expired) => {
+                self.close_expired_open(stateid);
+                Err(Status::Expired)
+            },
+            Err(status) => Err(status),
+        }
     }
 
     fn close_state(&self, stateid: StateId) -> StatusResult<StateId> {
         match self.opens.close(stateid) {
-            Ok(next_stateid) => {
-                if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_open(ranged);
-                }
-                self.backing_opens.remove(&stateid.other());
+            Ok((next_stateid, body)) => {
+                self.close_open_body(body);
                 Ok(next_stateid)
             },
             Err(Status::Expired) => {
-                if let Some((_, ranged)) = self.ranged_opens.remove(&stateid.other()) {
-                    self.close_ranged_open(ranged);
-                }
-                self.backing_opens.remove(&stateid.other());
+                self.close_expired_open(stateid);
                 Err(Status::Expired)
             },
             Err(status) => Err(status),
@@ -1819,26 +1661,6 @@ mod tests {
         }
     }
 
-    fn attrs(
-        size: view_types::FileSize,
-        stability: view_types::Stability,
-        version_token: Option<&str>,
-    ) -> FileAttrsCache {
-        FileAttrsCache {
-            size,
-            bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-            stability,
-            version_token: version_token.map(str::to_string),
-        }
-    }
-
-    fn exact_size(attrs: &FileAttrsCache) -> Option<u64> {
-        match attrs.size {
-            view_types::FileSize::Exact(size) => Some(size),
-            view_types::FileSize::NonZero | view_types::FileSize::Unknown => None,
-        }
-    }
-
     fn test_path(name: &str) -> Path {
         Path::root().join(name).expect("test path segment is valid")
     }
@@ -1850,12 +1672,13 @@ mod tests {
         declared_size: view_types::FileSize,
     ) {
         let path = test_path(name);
-        let attrs = FileAttrsCache {
-            size: declared_size,
-            bytes: view_types::ByteSource::Deferred(view_types::ReadMode::Full),
-            stability: view_types::Stability::Stable,
-            version_token: None,
-        };
+        let attrs = FileAttrsCache::deferred(
+            declared_size,
+            view_types::ReadMode::Full,
+            view_types::Stability::Stable,
+            None,
+        )
+        .expect("test attrs are valid");
         let recorded_size = match declared_size {
             view_types::FileSize::Exact(n) => n,
             _ => 0,
@@ -1874,8 +1697,7 @@ mod tests {
                 size: recorded_size,
                 size_exact: matches!(declared_size, view_types::FileSize::Exact(_)),
                 attrs: Some(attrs),
-                backing_path: None,
-                synthetic: None,
+                body: EntryBody::Provider,
             },
         );
     }
@@ -1896,8 +1718,7 @@ mod tests {
                 size,
                 size_exact: true,
                 attrs: None,
-                backing_path: Some(backing),
-                synthetic: None,
+                body: EntryBody::Backing(backing),
             },
         );
     }
@@ -1975,48 +1796,5 @@ mod tests {
             .expect("backing read");
         assert_eq!(chunk.data, vec![0]);
         assert!(chunk.eof);
-    }
-
-    #[test]
-    fn learned_exact_size_survives_only_same_version_non_exact_refresh() {
-        for (existing_version, incoming_size, incoming_version, expected) in [
-            (
-                Some("v1"),
-                view_types::FileSize::Unknown,
-                Some("v1"),
-                Some(42),
-            ),
-            (
-                Some("v1"),
-                view_types::FileSize::Exact(7),
-                Some("v1"),
-                Some(7),
-            ),
-            (
-                Some("current"),
-                view_types::FileSize::Unknown,
-                Some("next"),
-                None,
-            ),
-            (None, view_types::FileSize::Unknown, None, None),
-        ] {
-            let existing = attrs(
-                view_types::FileSize::Exact(42),
-                view_types::Stability::Dynamic,
-                existing_version,
-            );
-            let incoming = attrs(
-                incoming_size,
-                view_types::Stability::Dynamic,
-                incoming_version,
-            );
-
-            let merged = frontend::merge_file_attrs(Some(&existing), Some(incoming)).unwrap();
-            assert_eq!(
-                exact_size(&merged),
-                expected,
-                "existing_version={existing_version:?}, incoming_size={incoming_size:?}, incoming_version={incoming_version:?}"
-            );
-        }
     }
 }

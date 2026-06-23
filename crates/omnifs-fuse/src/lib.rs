@@ -21,17 +21,17 @@ mod tests;
 
 pub(crate) use common::{DirSnapshot, ROOT_INO, RangedSlot, TTL, TTL_DYNAMIC};
 
+use common::InodeBody;
 use dashmap::DashMap;
 use fuser::{FileAttr, INodeNo, MountOption, Notifier};
 use inode::NodeEntry;
 use omnifs_core::view as view_types;
-use omnifs_core::view::{EntryMeta, FileAttrsCache};
+use omnifs_core::view::{EntryKind, EntryMeta, FileAttrsCache};
 #[cfg(test)]
 use omnifs_host::Runtime;
 use omnifs_host::path_key::{PathKey, PathToInode};
 use omnifs_host::registry::ProviderRegistry;
 use omnifs_tree::Tree;
-use omnifs_wit::provider::types as wit_types;
 use parking_lot::Mutex;
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -125,11 +125,10 @@ impl Frontend {
         let root_entry = NodeEntry {
             mount_name: registry.root_mount_name().unwrap_or_default(),
             path: omnifs_core::path::Path::root(),
-            kind: wit_types::EntryKind::Directory,
+            kind: EntryKind::Directory,
             attrs: None,
             size: 0,
-            backing_path: None,
-            synthetic: false,
+            body: InodeBody::Provider,
         };
         inodes.insert(ROOT_INO, root_entry);
 
@@ -247,21 +246,21 @@ impl Frontend {
         }
     }
 
-    fn attr_for_kind(&self, ino: u64, kind: &wit_types::EntryKind, size: u64) -> FileAttr {
+    fn attr_for_kind(&self, ino: u64, kind: EntryKind, size: u64) -> FileAttr {
         match kind {
-            wit_types::EntryKind::Directory => self.dir_attr(ino),
-            wit_types::EntryKind::File(_) => self.file_attr(ino, size),
+            EntryKind::Directory => self.dir_attr(ino),
+            EntryKind::File => self.file_attr(ino, size),
         }
     }
 
     pub(crate) fn attr_for_inode_or_meta(
         &self,
         ino: u64,
-        fallback_kind: &wit_types::EntryKind,
+        fallback_kind: EntryKind,
         fallback_size: u64,
     ) -> FileAttr {
         if let Some(entry) = self.inodes.get(&ino) {
-            return self.attr_for_kind(ino, &entry.kind, entry.size);
+            return self.attr_for_kind(ino, entry.kind, entry.size);
         }
         self.attr_for_kind(ino, fallback_kind, fallback_size)
     }
@@ -270,8 +269,8 @@ impl Frontend {
         let Some(attrs) = attrs else {
             return TTL;
         };
-        if !matches!(attrs.size, view_types::FileSize::Exact(_))
-            || !matches!(attrs.stability, view_types::Stability::Stable)
+        if !matches!(attrs.size(), view_types::FileSize::Exact(_))
+            || !matches!(attrs.stability(), view_types::Stability::Stable)
         {
             return TTL_DYNAMIC;
         }
@@ -279,7 +278,7 @@ impl Frontend {
     }
 
     pub(crate) fn ttl_for_meta(meta: &EntryMeta) -> Duration {
-        Self::ttl_for_attrs(meta.attrs.as_ref())
+        Self::ttl_for_attrs(meta.attrs())
     }
 
     fn ttl_for_entry(entry: &NodeEntry) -> Duration {

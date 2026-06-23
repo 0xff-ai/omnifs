@@ -1,9 +1,10 @@
 //! Shared FUSE constants, path helpers, and inode read targets.
 
+use fuser::FopenFlags;
 use omnifs_core::path::Path;
-use omnifs_core::view::FileAttrsCache;
-use omnifs_tree::RangedHandle;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_core::view::{EntryKind, FileAttrsCache};
+use omnifs_host::pagination;
+use omnifs_tree::{Node, RangedHandle};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,39 +17,49 @@ pub(crate) const TTL: Duration = Duration::from_secs(u32::MAX as u64);
 pub(crate) const TTL_DYNAMIC: Duration = Duration::from_secs(0);
 pub(crate) const ROOT_INO: u64 = 1;
 
-pub(crate) type DirSnapshot = Vec<(u64, String, wit_types::EntryKind)>;
+pub(crate) type DirSnapshot = Vec<(u64, String, EntryKind)>;
 
-/// Construct a placeholder `wit_types::EntryKind::File(FileOut)` for FUSE
-/// snapshot/inode use where only the kind discriminator matters and no
-/// real projection data is available (e.g. from a backing-path read or a
-/// pre-projection allocation). The embedded `FileOut` is never inspected;
-/// only the variant tag is used for `FileType` resolution.
-pub(crate) fn file_kind_placeholder() -> wit_types::EntryKind {
-    wit_types::EntryKind::File(wit_types::FileOut {
-        attrs: wit_types::FileAttrs {
-            size: wit_types::FileSize::Unknown,
-            stability: wit_types::Stability::Dynamic,
-            version_token: None,
-        },
-        bytes: wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
-        content_type: None,
-    })
+#[derive(Debug, Clone)]
+pub(crate) enum InodeBody {
+    Provider,
+    Backing(PathBuf),
+    Synthetic,
 }
 
-/// Live-file `EntryMeta` for a synthetic mount-root ignore file, mirroring
+impl InodeBody {
+    pub(crate) fn backing_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Backing(path) => Some(path),
+            Self::Provider | Self::Synthetic => None,
+        }
+    }
+
+    pub(crate) fn is_backing(&self) -> bool {
+        matches!(self, Self::Backing(_))
+    }
+
+    pub(crate) fn is_synthetic(&self) -> bool {
+        matches!(self, Self::Synthetic)
+    }
+}
+
+/// File `EntryMeta` for a synthetic mount-root ignore file, mirroring
 /// the `Tree` synthetic projection. The live adapter materializes ignore files
-/// from `Tree`'s `Listing::synthetic`; the in-crate harness uses this to seed a
+/// from `Tree` entries with synthetic origin; the in-crate harness uses this to seed a
 /// host-synthesized inode directly.
 #[cfg(test)]
 pub(crate) fn root_ignore_meta() -> omnifs_core::view::EntryMeta {
-    omnifs_core::view::EntryMeta::file(FileAttrsCache {
-        size: omnifs_core::view::FileSize::Exact(
-            omnifs_host::pagination::IGNORE_CONTENT.len() as u64
-        ),
-        bytes: omnifs_core::view::ByteSource::Deferred(omnifs_core::view::ReadMode::Full),
-        stability: omnifs_core::view::Stability::Live,
-        version_token: None,
-    })
+    omnifs_core::view::EntryMeta::file(
+        FileAttrsCache::deferred(
+            omnifs_core::view::FileSize::Exact(
+                omnifs_host::pagination::IGNORE_CONTENT.len() as u64,
+            ),
+            omnifs_core::view::ReadMode::Full,
+            omnifs_core::view::Stability::Stable,
+            None,
+        )
+        .expect("root ignore attrs are valid"),
+    )
 }
 
 /// Split a protocol path into `(parent, leaf)`. Returns `None` for the mount
@@ -72,9 +83,46 @@ pub(crate) struct FullReadTarget {
     pub(crate) fh: u64,
     pub(crate) mount_name: String,
     pub(crate) path: Path,
-    pub(crate) backing_path: Option<PathBuf>,
+    pub(crate) body: InodeBody,
     pub(crate) attrs: Option<FileAttrsCache>,
-    /// True when the inode is a host-synthesized mount-root ignore file, so
-    /// `open` serves its fixed content from `fh` rather than the provider.
-    pub(crate) synthetic: bool,
+}
+
+impl FullReadTarget {
+    pub(crate) fn provider_node(&self) -> Node {
+        Node::provider_file(
+            self.mount_name.clone(),
+            self.path.clone(),
+            self.attrs.clone(),
+        )
+    }
+
+    pub(crate) fn parent_and_leaf(&self) -> Option<(Path, String)> {
+        split_parent_leaf(&self.path)
+    }
+
+    pub(crate) fn is_synthetic_candidate(&self) -> bool {
+        self.body.is_synthetic()
+            || self
+                .parent_and_leaf()
+                .is_some_and(|(_, leaf)| pagination::is_control_name(&leaf))
+    }
+
+    pub(crate) fn is_ranged(&self) -> bool {
+        self.attrs
+            .as_ref()
+            .is_some_and(FileAttrsCache::is_deferred_ranged)
+    }
+
+    pub(crate) fn should_prefetch_full(&self) -> bool {
+        self.attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.is_deferred_full() && !attrs.has_exact_size())
+    }
+
+    pub(crate) fn lazy_open_flags(&self) -> FopenFlags {
+        self.attrs
+            .as_ref()
+            .filter(|attrs| attrs.should_direct_io())
+            .map_or_else(FopenFlags::empty, |_| FopenFlags::FOPEN_DIRECT_IO)
+    }
 }

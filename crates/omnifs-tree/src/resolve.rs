@@ -9,7 +9,7 @@ use omnifs_host::Runtime;
 use omnifs_host::pagination::is_control_name;
 
 use crate::error::{Result, TreeError};
-use crate::node::{Backing, Node};
+use crate::node::{Node, NodeBody};
 use crate::synthetic;
 use crate::{RequestCtx, Tree};
 
@@ -30,7 +30,7 @@ impl Tree {
                 mount,
                 rel,
                 EntryMeta::directory(),
-                Backing::Provider,
+                NodeBody::Provider,
             ));
         }
 
@@ -51,7 +51,7 @@ impl Tree {
     /// `lookup` and NFS from `LOOKUP`: both hold a parent handle plus a leaf
     /// name, so neither has to reconstruct (and re-split) a full protocol path.
     /// `parent` must be a provider-backed directory (a treeref subtree child is
-    /// resolved by the renderer through `Backing::Subtree`, not here).
+    /// resolved by the renderer through `NodeBody::Subtree`, not here).
     ///
     /// Owns the synthetic-entry resolution FUSE otherwise carries in
     /// `lookup_check_caches` and `synthesize_root_ignore_lookup`: a
@@ -59,7 +59,7 @@ impl Tree {
     /// dirents (absent => NotFound, never a provider round trip), and a
     /// mount-root ignore file is synthesized ONLY after a negative provider
     /// result (a real provider `.gitignore` wins). Subtree outcomes resolve
-    /// through `Runtime::resolve_tree_ref` into `Backing::Subtree`.
+    /// through `Runtime::resolve_tree_ref` into `NodeBody::Subtree`.
     pub async fn resolve_child(&self, parent: &Node, name: &str, ctx: &RequestCtx) -> Result<Node> {
         let runtime = self.runtime_for(parent.mount())?;
         self.resolve_child_in(
@@ -87,6 +87,19 @@ impl Tree {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
 
+        if self.is_mount_enumeration_root(&mount, parent)
+            && self
+                .mount_names()
+                .is_some_and(|mounts| mounts.iter().any(|m| m == name))
+        {
+            return Ok(Node::new(
+                name.to_string(),
+                Path::root(),
+                EntryMeta::directory(),
+                NodeBody::Provider,
+            ));
+        }
+
         // A pagination control (`@next`/`@all`) resolves ONLY from the parent's
         // cached dirents (a resume cursor remains). A reserved control name is
         // never a real provider entry, so once the control is gone (feed
@@ -107,7 +120,7 @@ impl Tree {
                 mount,
                 entry.path().clone(),
                 entry.meta().clone(),
-                Backing::Provider,
+                NodeBody::Provider,
             )),
             LookupOutcome::Subtree(tref) => {
                 let dir = runtime
@@ -117,7 +130,7 @@ impl Tree {
                     mount,
                     rel,
                     EntryMeta::directory(),
-                    Backing::Subtree(dir),
+                    NodeBody::Subtree(dir),
                 ))
             },
             // The provider has no such child: synthesize a mount-root ignore file

@@ -5,13 +5,12 @@
 //! which the renderer reads directly with no provider round trip.
 
 use super::Frontend;
-use super::common::{DirSnapshot, file_kind_placeholder};
-use super::lookup::provider_dir_node;
+use super::common::{DirSnapshot, InodeBody};
 use fuser::Errno;
 use omnifs_core::path::Path;
-use omnifs_host::wit_protocol;
+use omnifs_core::view::EntryKind;
 use omnifs_inspector::TraceId;
-use omnifs_tree::{ListOutcome, Listing, RequestCtx};
+use omnifs_tree::{EntryOrigin, ListOutcome, Listing, Node, RequestCtx};
 use std::path::Path as StdPath;
 
 impl Frontend {
@@ -35,20 +34,15 @@ impl Frontend {
                 continue;
             };
             let kind = if meta.is_dir() {
-                omnifs_wit::provider::types::EntryKind::Directory
+                EntryKind::Directory
             } else {
-                file_kind_placeholder()
+                EntryKind::File
             };
             let child_path = path
                 .join(fname_str)
                 .expect("backing directory entry must be a valid path segment");
-            let child_ino = self.get_or_alloc_ino_backing(
-                mount_name,
-                &child_path,
-                kind.clone(),
-                meta.len(),
-                child_rp,
-            );
+            let child_ino =
+                self.get_or_alloc_ino_backing(mount_name, &child_path, kind, meta.len(), child_rp);
             snapshot.push((child_ino, fname_str.to_string(), kind));
         }
         Ok(snapshot)
@@ -60,7 +54,7 @@ impl Frontend {
     /// Enters the async runtime exactly once (`block_on(Tree::list)`). `Tree`
     /// owns the cache consult+populate, the serve-cached/`unchanged`/serve-stale
     /// paths, the reserved-`@` drop, and the host-synthesized `@next`/`@all`
-    /// controls + mount-root ignore files (returned in `Listing::synthetic`).
+    /// controls + mount-root ignore files (returned as synthetic entry origins).
     /// The adapter only allocates inodes: provider entries clear any prior
     /// synthetic marker, synthetic entries set it. A `Subtree` outcome binds the
     /// backing dir on `ino` and snapshots it from the real filesystem.
@@ -76,7 +70,7 @@ impl Frontend {
         // `Tree::list`'s own cache consult then sees the post-eviction state.
         self.drain_and_evict_pending(mount_name);
 
-        let node = provider_dir_node(mount_name, path);
+        let node = Node::provider_dir(mount_name.to_string(), path.clone());
         let ctx = RequestCtx { trace };
         match self
             .rt
@@ -88,41 +82,44 @@ impl Frontend {
             },
             ListOutcome::Subtree(dir) => {
                 if let Some(mut entry) = self.inodes.get_mut(&ino)
-                    && entry.backing_path.is_none()
+                    && !entry.body.is_backing()
                 {
-                    entry.backing_path = Some(dir.clone());
+                    entry.body = InodeBody::Backing(dir.clone());
                 }
                 self.snapshot_from_fs(mount_name, path, &dir)
             },
         }
     }
 
-    /// Materialize a kernel directory snapshot from a neutral `Listing`: provider
-    /// children first (each authoritatively resolved, clearing any synthetic
-    /// marker), then the host-synthesized controls / ignore files (each marked
-    /// `synthetic` so `open` serves them from a per-`fh` buffer).
-    fn snapshot_from_listing(
+    /// Materialize a kernel directory snapshot from a neutral `Listing`.
+    pub(crate) fn snapshot_from_listing(
         &self,
         mount_name: &str,
         path: &Path,
         listing: &Listing,
     ) -> DirSnapshot {
-        let mut snapshot = Vec::with_capacity(listing.entries.len() + listing.synthetic.len());
+        let mut snapshot = Vec::with_capacity(listing.entries.len());
         for entry in &listing.entries {
-            let child_path = path
-                .join(&entry.name)
-                .expect("listing entry must be a valid path segment");
-            let kind = wit_protocol::entry_kind_to_wit(&entry.meta.kind);
-            let ino =
-                self.get_or_alloc_ino_meta_resolved(mount_name, &child_path, entry.meta.clone());
-            snapshot.push((ino, entry.name.clone(), kind));
-        }
-        for entry in &listing.synthetic {
-            let child_path = path
-                .join(&entry.name)
-                .expect("synthetic entry must be a valid path segment");
-            let kind = wit_protocol::entry_kind_to_wit(&entry.meta.kind);
-            let ino = self.get_or_alloc_ino_synthetic(mount_name, &child_path, entry.meta.clone());
+            let (entry_mount, child_path) = if mount_name.is_empty() && path.is_root() {
+                (entry.name.as_str(), Path::root())
+            } else {
+                (
+                    mount_name,
+                    path.join(&entry.name)
+                        .expect("listing entry must be a valid path segment"),
+                )
+            };
+            let kind = entry.meta.kind();
+            let ino = match &entry.origin {
+                EntryOrigin::Provider => self.get_or_alloc_ino_meta_resolved(
+                    entry_mount,
+                    &child_path,
+                    entry.meta.clone(),
+                ),
+                EntryOrigin::Synthetic(_) => {
+                    self.get_or_alloc_ino_synthetic(mount_name, &child_path, entry.meta.clone())
+                },
+            };
             snapshot.push((ino, entry.name.clone(), kind));
         }
         snapshot
