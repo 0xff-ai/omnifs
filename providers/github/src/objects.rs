@@ -1,7 +1,6 @@
 //! GitHub object bodies and field projections.
 
 use omnifs_core::ContentType;
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::de::IgnoredAny;
@@ -34,24 +33,24 @@ impl ItemData {
         self.pull_request.is_some()
     }
 
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileContent> {
-        Ok(FileContent::new(self.title.clone())
-            .with_content_type(ContentType::Custom("text/plain")))
+    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
+        Ok(text_projection(self.title.clone()))
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileContent> {
-        Ok(FileContent::new(self.state.clone())
-            .with_content_type(ContentType::Custom("text/plain")))
+    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
+        Ok(text_projection(self.state.clone()))
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
         let login = self.user.as_ref().map_or("", |u| u.login.as_str());
-        Ok(FileContent::new(login.to_owned()).with_content_type(ContentType::Custom("text/plain")))
+        Ok(text_projection(login.to_owned()))
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
         let body = self.body.as_deref().unwrap_or("");
-        Ok(FileContent::new(body.to_owned()).with_content_type(ContentType::Markdown))
+        Ok(FileProjection::body(body.to_owned())
+            .content_type(ContentType::Markdown)
+            .build())
     }
 
     fn body_bytes(&self) -> Vec<u8> {
@@ -97,9 +96,9 @@ impl ItemData {
                 "comments",
                 DirProjection::open(core::iter::empty::<Entry>()),
             )
-            .preload_file("title", FileProjection::from_content(&self.title()?)?)
-            .preload_file("state", FileProjection::from_content(&self.state()?)?)
-            .preload_file("user", FileProjection::from_content(&self.user()?)?)
+            .preload_file("title", self.title()?)
+            .preload_file("state", self.state()?)
+            .preload_file("user", self.user()?)
             .preload_file("body", body)
             .preload_file("item.md", item_md)
             .preload_file("item.json", item_json);
@@ -142,19 +141,19 @@ fn inline_or_deferred_markdown(bytes: Vec<u8>, budget: &mut usize) -> FileProjec
 pub(crate) struct Issue(pub(crate) ItemData);
 
 impl Issue {
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.title()
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.state()
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.user()
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.body()
     }
 }
@@ -171,19 +170,19 @@ impl Representable<Markdown> for Issue {
 pub(crate) struct PullRequest(pub(crate) ItemData);
 
 impl PullRequest {
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.title()
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.state()
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.user()
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
         self.0.body()
     }
 }
@@ -211,13 +210,18 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    pub(crate) fn status(&self) -> omnifs_sdk::error::Result<FileContent> {
-        Ok(FileContent::new(self.status.clone())
-            .with_content_type(ContentType::Custom("text/plain")))
+    pub(crate) fn status(&self) -> omnifs_sdk::error::Result<FileProjection> {
+        Ok(text_projection(self.status.clone()))
     }
 
-    pub(crate) fn conclusion(&self) -> omnifs_sdk::error::Result<FileContent> {
+    pub(crate) fn conclusion(&self) -> omnifs_sdk::error::Result<FileProjection> {
         let c = self.conclusion.clone().unwrap_or_default();
-        Ok(FileContent::new(c).with_content_type(ContentType::Custom("text/plain")))
+        Ok(text_projection(c))
     }
+}
+
+fn text_projection(bytes: impl Into<Vec<u8>>) -> FileProjection {
+    FileProjection::inline(bytes)
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
 }

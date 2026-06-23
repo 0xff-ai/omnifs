@@ -25,8 +25,9 @@ use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, FileProj, Size, Stability, VersionToken};
+use crate::file_attrs::{FileAttrs, ProjBytes, Size, Stability, VersionToken};
 use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object, ProjectFn};
+use crate::projection::FileProjection;
 use crate::repr::{RenderSet, RenderTable};
 use omnifs_core::ContentType;
 use std::future::Future;
@@ -263,7 +264,7 @@ impl<'a, O: Object> FileLeafBuilder<'a, O> {
     /// inline bytes; listing fails otherwise.
     pub fn project(
         self,
-        method: fn(&O, &O::Key) -> Result<FileContent>,
+        method: fn(&O, &O::Key) -> Result<FileProjection>,
     ) -> Result<&'a mut DirObjectBlock<O>> {
         let pattern = parse_pattern(&format!(
             "{}/{}",
@@ -602,16 +603,18 @@ impl<O: Object> ObjectRoute<O> {
             if *lazy {
                 continue;
             }
-            let content = project(value, key)?;
-            let bytes = content.content().ok_or_else(|| {
+            let projection = project(value, key)?;
+            let mut file = projection.as_file_proj().ok_or_else(|| {
                 ProviderError::internal(format!(
                     "projected object leaf {leaf_name:?} cannot preload non-inline bytes"
                 ))
             })?;
-            let mut file = FileProj::inline(bytes.to_vec(), stability, None);
-            if let Some(content_type) = content.content_type() {
-                file = file.with_content_type(content_type);
+            if !matches!(file.bytes, ProjBytes::Inline(_)) {
+                return Err(ProviderError::internal(format!(
+                    "projected object leaf {leaf_name:?} cannot preload non-inline bytes"
+                )));
             }
+            file.attrs = FileAttrs::new(file.attrs.size, stability);
             effects.project_file_with_id(format!("{list_path}/{leaf_name}"), Some(id), file)?;
         }
         Ok(())
@@ -841,7 +844,7 @@ fn serve_projected<O: Object>(
         } = leaf
             && leaf_name == name
         {
-            let content = project(value, key)?;
+            let content = project(value, key)?.into_browse_content()?;
             let size = content_size(&content);
             let content = content.with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
             return Ok(ReadOutcome::Found(content.with_effects(effects)));

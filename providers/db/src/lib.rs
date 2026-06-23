@@ -19,7 +19,6 @@ use std::fmt;
 use std::rc::Rc;
 use std::str::FromStr;
 
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::handler::DirIntent;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::{Deserialize, Serialize};
@@ -165,25 +164,29 @@ impl DbProvider {
 }
 
 impl TableDoc {
-    fn schema_sql(&self) -> FileContent {
+    fn schema_sql(&self) -> FileProjection {
         text_content(self.create_sql.as_deref().unwrap_or("").as_bytes().to_vec())
     }
 
-    fn schema_json(&self) -> Result<FileContent> {
+    fn schema_json(&self) -> Result<FileProjection> {
         let mut bytes = serde_json::to_vec_pretty(&self.columns)
             .map_err(|e| ProviderError::internal(format!("encode schema: {e}")))?;
         bytes.push(b'\n');
-        Ok(FileContent::new(bytes).with_content_type(ContentType::Json))
+        Ok(FileProjection::body(bytes)
+            .content_type(ContentType::Json)
+            .build())
     }
 
-    fn indexes_json(&self) -> Result<FileContent> {
+    fn indexes_json(&self) -> Result<FileProjection> {
         let mut bytes = serde_json::to_vec_pretty(&self.indexes)
             .map_err(|e| ProviderError::internal(format!("encode indexes: {e}")))?;
         bytes.push(b'\n');
-        Ok(FileContent::new(bytes).with_content_type(ContentType::Json))
+        Ok(FileProjection::body(bytes)
+            .content_type(ContentType::Json)
+            .build())
     }
 
-    fn count(&self) -> FileContent {
+    fn count(&self) -> FileProjection {
         text_content(format!("{}\n", self.row_count))
     }
 }
@@ -197,7 +200,7 @@ enum TableLeaf {
 }
 
 impl TableLeaf {
-    fn content(self, doc: &TableDoc) -> Result<FileContent> {
+    fn content(self, doc: &TableDoc) -> Result<FileProjection> {
         match self {
             Self::SchemaSql => Ok(doc.schema_sql()),
             Self::SchemaJson => doc.schema_json(),
@@ -208,32 +211,7 @@ impl TableLeaf {
 
     fn read(self, cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         let doc = read_table_doc(&cx, &key)?;
-        let content = self.content(&doc)?;
-        let attrs = content.attrs().clone();
-        let content_type = content.content_type();
-        let bytes = content
-            .content()
-            .ok_or_else(|| ProviderError::internal("table leaf must be inline"))?
-            .to_vec();
-        let mut requested = FileProjection::body(bytes).size(attrs.size);
-        match attrs.stability {
-            Stability::Stable => {
-                requested = requested.stable();
-            },
-            Stability::Dynamic => {
-                requested = requested.dynamic();
-            },
-            Stability::Live => {
-                return Err(ProviderError::internal("table leaves cannot be live"));
-            },
-        }
-        if let Some(version) = attrs.version {
-            requested = requested.version(version);
-        }
-        if let Some(content_type) = content_type {
-            requested = requested.content_type(content_type);
-        }
-        Ok(requested.build())
+        self.content(&doc)
     }
 }
 
@@ -277,12 +255,12 @@ async fn meta_info_json(cx: Cx<State>) -> Result<FileProjection> {
 
 async fn meta_version(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    Ok(file_content_projection(FileInfo::version(&info)?))
+    FileInfo::version(&info)
 }
 
 async fn meta_path(cx: Cx<State>) -> Result<FileProjection> {
     let info = read_file_info(&cx)?;
-    Ok(file_content_projection(FileInfo::path(&info)?))
+    FileInfo::path(&info)
 }
 
 fn read_table_doc(cx: &Cx<State>, key: &TableKey) -> Result<TableDoc> {
@@ -345,11 +323,11 @@ async fn table_count_txt(cx: Cx<State>, key: TableKey) -> Result<FileProjection>
 }
 
 impl FileInfo {
-    fn version(info: &Self) -> Result<FileContent> {
+    fn version(info: &Self) -> Result<FileProjection> {
         Ok(text_content(format!("{}\n", info.sqlite_version)))
     }
 
-    fn path(info: &Self) -> Result<FileContent> {
+    fn path(info: &Self) -> Result<FileProjection> {
         Ok(text_content(format!("{}\n", info.path)))
     }
 }
@@ -416,25 +394,8 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
     Ok(builder.build())
 }
 
-fn text_content(bytes: impl Into<Vec<u8>>) -> FileContent {
-    FileContent::new(bytes).with_content_type(ContentType::Custom("text/plain"))
-}
-
-fn file_content_projection(content: FileContent) -> FileProjection {
-    let attrs = content.attrs().clone();
-    let content_type = content.content_type();
-    let bytes = content.content().unwrap_or_default().to_vec();
-    let mut builder = FileProjection::body(bytes).size(attrs.size);
-    builder = match attrs.stability {
-        Stability::Stable => builder.stable(),
-        Stability::Dynamic => builder.dynamic(),
-        Stability::Live => builder.dynamic(),
-    };
-    if let Some(version) = attrs.version {
-        builder = builder.version(version);
-    }
-    if let Some(content_type) = content_type {
-        builder = builder.content_type(content_type);
-    }
-    builder.build()
+fn text_content(bytes: impl Into<Vec<u8>>) -> FileProjection {
+    FileProjection::body(bytes)
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
 }

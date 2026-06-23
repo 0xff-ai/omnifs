@@ -1,7 +1,6 @@
 //! Router unit tests for the object model contracts.
 
 use super::*;
-use crate::browse::FileContent;
 use crate::captures::{Capture, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, ProviderErrorKind, Result};
@@ -46,25 +45,25 @@ impl Representable<Markdown> for DemoObj {
 }
 
 impl DemoObj {
-    fn title(&self) -> Result<FileContent> {
+    fn title(&self) -> Result<FileProjection> {
         if self.title.is_empty() {
             return Err(ProviderError::invalid_input("missing title"));
         }
-        Ok(FileContent::new(self.title.clone()))
+        Ok(FileProjection::inline(self.title.clone()).build())
     }
 
-    fn body(&self) -> Result<FileContent> {
+    fn body(&self) -> Result<FileProjection> {
         if self.title.is_empty() {
             return Err(ProviderError::invalid_input("missing title"));
         }
-        Ok(FileContent::new(format!("body: {}", self.title)))
+        Ok(FileProjection::body(format!("body: {}", self.title)).build())
     }
 
-    fn state(&self) -> Result<FileContent> {
+    fn state(&self) -> Result<FileProjection> {
         if self.title.is_empty() {
             return Err(ProviderError::invalid_input("missing title"));
         }
-        Ok(FileContent::new("open"))
+        Ok(FileProjection::inline("open").build())
     }
 }
 

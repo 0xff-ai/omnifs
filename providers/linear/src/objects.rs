@@ -1,7 +1,6 @@
 //! Linear issue object body and field projections.
 
 use omnifs_core::ContentType;
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::{Deserialize, Serialize};
@@ -56,25 +55,27 @@ impl Issue {
         self.state.as_ref().map_or("", |s| s.name.as_str())
     }
 
-    pub(crate) fn title(&self) -> crate::Result<FileContent> {
+    pub(crate) fn title(&self) -> crate::Result<FileProjection> {
         Ok(text_content(newline(&self.title)))
     }
 
-    pub(crate) fn state(&self) -> crate::Result<FileContent> {
+    pub(crate) fn state(&self) -> crate::Result<FileProjection> {
         Ok(text_content(newline(self.state_label())))
     }
 
-    pub(crate) fn priority(&self) -> crate::Result<FileContent> {
+    pub(crate) fn priority(&self) -> crate::Result<FileProjection> {
         Ok(text_content(newline(priority_label(self.priority))))
     }
 
-    pub(crate) fn assignee(&self) -> crate::Result<FileContent> {
+    pub(crate) fn assignee(&self) -> crate::Result<FileProjection> {
         Ok(text_content(newline(self.assignee_label())))
     }
 
-    pub(crate) fn description(&self) -> crate::Result<FileContent> {
+    pub(crate) fn description(&self) -> crate::Result<FileProjection> {
         let body = self.description.as_deref().unwrap_or("");
-        Ok(FileContent::new(newline(body)).with_content_type(ContentType::Markdown))
+        Ok(FileProjection::body(newline(body))
+            .content_type(ContentType::Markdown)
+            .build())
     }
 
     pub(crate) fn listed_dir(&self) -> crate::Result<DirProjection> {
@@ -84,10 +85,10 @@ impl Issue {
             Entry::file("priority"),
             Entry::file("assignee"),
         ])
-        .preload_file("title", FileProjection::from_content(&self.title()?)?)
-        .preload_file("state", FileProjection::from_content(&self.state()?)?)
-        .preload_file("priority", FileProjection::from_content(&self.priority()?)?)
-        .preload_file("assignee", FileProjection::from_content(&self.assignee()?)?))
+        .preload_file("title", self.title()?)
+        .preload_file("state", self.state()?)
+        .preload_file("priority", self.priority()?)
+        .preload_file("assignee", self.assignee()?))
     }
 }
 
@@ -114,6 +115,8 @@ pub(crate) fn newline(text: &str) -> Vec<u8> {
     bytes
 }
 
-fn text_content(bytes: Vec<u8>) -> FileContent {
-    FileContent::new(bytes).with_content_type(ContentType::Custom("text/plain"))
+fn text_content(bytes: Vec<u8>) -> FileProjection {
+    FileProjection::inline(bytes)
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
 }

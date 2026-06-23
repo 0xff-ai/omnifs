@@ -1,6 +1,5 @@
 //! Kubernetes object canonicals and filesystem projections.
 
-use omnifs_sdk::browse::FileContent;
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Representable, Yaml};
 use serde::{Deserialize, Serialize};
@@ -36,10 +35,11 @@ impl KubeManifest {
         yaml_bytes(&self.0)
     }
 
-    fn status_yaml(&self) -> Result<FileContent> {
+    fn status_yaml(&self) -> Result<FileProjection> {
         let status = self.0.get("status").cloned().unwrap_or(Value::Null);
-        Ok(FileContent::new(yaml_bytes(&status)?)
-            .with_content_type(ContentType::Custom("application/yaml")))
+        Ok(FileProjection::inline(yaml_bytes(&status)?)
+            .content_type(ContentType::Custom("application/yaml"))
+            .build())
     }
 }
 
@@ -53,7 +53,7 @@ impl NamespacedResource {
         Self(manifest)
     }
 
-    pub(crate) fn status_yaml(&self) -> Result<FileContent> {
+    pub(crate) fn status_yaml(&self) -> Result<FileProjection> {
         self.0.status_yaml()
     }
 
@@ -78,7 +78,7 @@ impl ClusterResource {
         Self(manifest)
     }
 
-    pub(crate) fn status_yaml(&self) -> Result<FileContent> {
+    pub(crate) fn status_yaml(&self) -> Result<FileProjection> {
         self.0.status_yaml()
     }
 }

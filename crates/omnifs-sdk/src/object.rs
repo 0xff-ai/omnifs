@@ -9,12 +9,13 @@
 //! the `since` validator. The provider's only upstream-facing code is
 //! [`Key::load`].
 
-use crate::browse::{Effects, FileContent};
+use crate::browse::Effects;
 use crate::captures::FromCaptures;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::VersionToken;
 use crate::identity::{IdentityCaptures, LogicalId};
+use crate::projection::FileProjection;
 use omnifs_core::ContentType;
 
 /// An object kind tag for the canonical store and diagnostics (e.g.
@@ -216,4 +217,4 @@ impl FacetMetadata for () {
 /// selected it: a pure function, no callouts. The SDK runs these eagerly after
 /// a fresh load and again on warm reads, so the leaf must be derivable from the
 /// canonical object plus route context such as a version facet.
-pub type ProjectFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileContent>;
+pub type ProjectFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileProjection>;
