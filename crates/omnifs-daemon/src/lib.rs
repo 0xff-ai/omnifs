@@ -5,11 +5,12 @@
 //! implementation that serves the daemon. There is no standalone `omnifsd`
 //! binary; the daemon entrypoint is [`run`].
 
-pub mod app;
+mod app;
 mod context;
-pub mod frontends;
+mod frontends;
 #[cfg(target_os = "linux")]
 mod proc_mounts;
-pub mod server;
+mod server;
 
 pub use app::{DaemonArgs, FrontendKind, run};
+pub use server::openapi_json;

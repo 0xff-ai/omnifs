@@ -17,21 +17,15 @@ reqwest-oauth2 = { package = "reqwest", version = "0.12", default-features = fal
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-jsonschema = { workspace = true }
 postcard = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-strum = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 libc = { workspace = true }
-anyhow = { workspace = true }
-dirs-next = "2"
 futures = "0.3"
-gix = { version = "0.72", default-features = false, features = ["blocking-network-client"] }
 url = "2"
 wasmtime-wasi = { version = "43", default-features = false, features = ["p2"] }
-moka = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 omnifs-core = { workspace = true }

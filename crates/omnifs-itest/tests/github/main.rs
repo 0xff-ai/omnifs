@@ -215,14 +215,12 @@ fn github_issue_list_projects_files() {
     }
 
     let harness = github_harness();
-    harness.runtime.apply_effects_for_test(
-        response.effects().unwrap(),
-        harness.runtime.current_generation(),
-    );
-    let dirents = harness
+    harness
         .runtime
-        .view_get(
-            &parse_path("/octocat/Hello-World/issues/open/7"),
+        .apply_effects_for_test(response.effects().unwrap(), harness.current_generation());
+    let dirents = harness
+        .cache_get(
+            "/octocat/Hello-World/issues/open/7",
             RecordKind::Dirents,
             None,
         )
@@ -1840,19 +1838,9 @@ async fn open_then_all_one_load() {
     let harness = github_harness();
     harness
         .runtime
-        .apply_effects_for_test(effects, harness.runtime.current_generation());
-    assert!(
-        harness
-            .runtime
-            .cached_canonical_for(&parse_path(open_title))
-            .is_some()
-    );
-    assert!(
-        harness
-            .runtime
-            .cached_canonical_for(&parse_path(all_title))
-            .is_some()
-    );
+        .apply_effects_for_test(effects, harness.current_generation());
+    assert!(harness.cached_canonical_for(open_title).is_some());
+    assert!(harness.cached_canonical_for(all_title).is_some());
 
     let warm = harness
         .runtime

@@ -143,15 +143,15 @@ impl RuntimeHarness {
         kind: RecordKind,
         aux: Option<&str>,
     ) -> Option<CacheRecord> {
-        self.runtime.cache_get(&parse_path(path), kind, aux)
+        self.runtime.cache().cache_get(&parse_path(path), kind, aux)
     }
 
     pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
-        self.runtime.cached_canonical_for(&parse_path(path))
+        self.runtime.cache().cached_canonical_for(&parse_path(path))
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.runtime.current_generation()
+        self.runtime.cache().current_generation()
     }
 }
 

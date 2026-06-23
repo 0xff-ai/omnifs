@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use utoipa::OpenApi;
 
 use crate::context::DaemonContext;
-use crate::frontends::Frontends;
+use crate::frontends::Frontend;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -62,7 +62,7 @@ pub struct Daemon {
     context: DaemonContext,
     registry: Arc<ProviderRegistry>,
     sink: Option<Arc<InspectorSink>>,
-    frontends: Frontends,
+    frontends: Frontend,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
     /// is visible with its reason instead of silently absent.
     last_failed: std::sync::Mutex<Vec<MountFailure>>,
@@ -73,7 +73,7 @@ impl Daemon {
         context: DaemonContext,
         registry: Arc<ProviderRegistry>,
         sink: Option<Arc<InspectorSink>>,
-        frontends: Frontends,
+        frontends: Frontend,
     ) -> Self {
         Self {
             context,
@@ -110,7 +110,7 @@ impl Daemon {
         self.frontends.serve(rt)
     }
 
-    fn control_snapshot(&self) -> ControlSnapshot {
+    fn control_status(&self) -> DaemonStatus {
         let root_mount = self.registry.root_mount_name();
         let entries = self.registry.runtime_entries();
         let mut mounts: Vec<MountInfo> = entries
@@ -128,10 +128,8 @@ impl Daemon {
             .lock()
             .map(|failed| failed.clone())
             .unwrap_or_default();
-        let status = self
-            .context
-            .status(self.frontends.serving(), mounts, failed);
-        ControlSnapshot { status }
+        self.context
+            .status(self.frontends.serving(), mounts, failed)
     }
 
     /// Converge the running mount set to `mounts/*.json`, synchronously. Runs
@@ -280,42 +278,6 @@ impl Daemon {
     }
 }
 
-struct ControlSnapshot {
-    status: DaemonStatus,
-}
-
-impl ControlSnapshot {
-    fn ready(&self) -> ReadyInfo {
-        ReadyInfo {
-            ready: self.status.ready(),
-        }
-    }
-
-    fn status(self) -> DaemonStatus {
-        self.status
-    }
-
-    fn mounts(self) -> Vec<MountInfo> {
-        self.status.mounts
-    }
-
-    fn mount(&self, name: &str) -> Option<MountInfo> {
-        self.status
-            .mounts
-            .iter()
-            .find(|mount| mount.mount == name)
-            .cloned()
-    }
-
-    fn stop_report(&self) -> StopReport {
-        StopReport {
-            frontend: self.status.frontend.clone(),
-            mount_point: self.status.mount_point.clone(),
-            providers_dropped: self.status.mounts.len(),
-        }
-    }
-}
-
 pub fn openapi() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
@@ -336,7 +298,8 @@ pub fn openapi_json() -> String {
     ),
 )]
 async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
-    let info = daemon.control_snapshot().ready();
+    let ready = daemon.control_status().ready();
+    let info = ReadyInfo { ready };
     let status = if info.ready {
         StatusCode::OK
     } else {
@@ -352,7 +315,7 @@ async fn ready(State(daemon): State<Arc<Daemon>>) -> Response {
     responses((status = 200, description = "daemon runtime facts", body = DaemonStatus)),
 )]
 async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
-    Json(daemon.control_snapshot().status())
+    Json(daemon.control_status())
 }
 
 #[utoipa::path(
@@ -362,7 +325,7 @@ async fn status(State(daemon): State<Arc<Daemon>>) -> Json<DaemonStatus> {
     responses((status = 200, description = "loaded provider mounts", body = [MountInfo])),
 )]
 async fn mounts_list(State(daemon): State<Arc<Daemon>>) -> Json<Vec<MountInfo>> {
-    Json(daemon.control_snapshot().mounts())
+    Json(daemon.control_status().mounts)
 }
 
 #[utoipa::path(
@@ -379,7 +342,12 @@ async fn mount_inspect(
     State(daemon): State<Arc<Daemon>>,
     UrlPath(name): UrlPath<String>,
 ) -> Response {
-    match daemon.control_snapshot().mount(&name) {
+    match daemon
+        .control_status()
+        .mounts
+        .into_iter()
+        .find(|mount| mount.mount == name)
+    {
         Some(info) => Json(info).into_response(),
         None => (StatusCode::NOT_FOUND, format!("mount `{name}` not found\n")).into_response(),
     }
@@ -406,7 +374,12 @@ async fn reconcile(State(daemon): State<Arc<Daemon>>) -> Json<ReconcileReport> {
     responses((status = 200, description = "what the daemon tore down before exiting", body = StopReport)),
 )]
 async fn shutdown(State(daemon): State<Arc<Daemon>>) -> Json<StopReport> {
-    let report = daemon.control_snapshot().stop_report();
+    let status = daemon.control_status();
+    let report = StopReport {
+        frontend: status.frontend,
+        mount_point: status.mount_point,
+        providers_dropped: status.mounts.len(),
+    };
     daemon.trigger_shutdown();
     Json(report)
 }

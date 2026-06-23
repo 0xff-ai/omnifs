@@ -5,7 +5,7 @@
 //! `cache-key`, and a runtime-local `blob-id` handle indexes the
 //! metadata for later reads and archive extraction.
 
-use crate::sandbox::publish;
+use crate::sandbox::{publish, relative_key};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -229,22 +229,10 @@ pub(crate) enum BlobCacheError {
     Io(#[from] std::io::Error),
 }
 
-/// Validate that a cache-key or provider-scope is safe to use as a path
-/// component. Mirrors the rules in `cloner::is_safe_cache_key`.
+/// Validate that a cache-key or provider-scope is safe to use under the
+/// blob cache root.
 pub(crate) fn is_safe_path_segment(s: &str) -> bool {
-    if s.is_empty() || s.starts_with('/') {
-        return false;
-    }
-    if s.bytes().any(|b| b == 0) {
-        return false;
-    }
-    for component in s.split('/') {
-        if component.is_empty() || component == ".." || component == "." {
-            return false;
-        }
-        if component == BLOB_TMP_DIR || component == BLOB_META_DIR {
-            return false;
-        }
-    }
-    true
+    relative_key::is_safe_relative_key(s, |component| {
+        component == BLOB_TMP_DIR || component == BLOB_META_DIR
+    })
 }

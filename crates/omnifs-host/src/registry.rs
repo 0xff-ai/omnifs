@@ -27,17 +27,23 @@ pub struct ProviderRegistry {
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
     context: HostContext,
-    mounts: MountSupervisor,
+    instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
+    root_mount: parking_lot::RwLock<Option<String>>,
+    timer_shutdown: watch::Sender<bool>,
+    timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Per-mount materialized spec fingerprint, used by reconcile to detect a
+    /// spec change. The pinned `ProviderRef` is part of the spec, so an artifact
+    /// swap shows up as a spec change without re-hashing the WASM.
+    fingerprints: parking_lot::RwLock<HashMap<String, u64>>,
+    /// Serializes reconcile passes so concurrent triggers cannot race the
+    /// add/remove sequence.
+    reconcile_lock: parking_lot::Mutex<()>,
 }
 
 impl ProviderRegistry {
     /// Build an empty registry: engine, archive extractor, and cache handles
     /// are created once here and shared across every mount added later.
-    pub fn new(
-        context: impl Into<HostContext>,
-        cloner: Arc<GitCloner>,
-    ) -> Result<Self, RegistryError> {
-        let context = context.into();
+    pub fn new(context: HostContext, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
         let wasm_cache = context.wasm_cache_dir();
@@ -68,13 +74,19 @@ impl ProviderRegistry {
         let caches = Caches::open(context.cache_dir())
             .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
 
+        let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             engine,
             extractor,
             caches,
             cloner,
             context,
-            mounts: MountSupervisor::new(),
+            instances: parking_lot::RwLock::new(HashMap::new()),
+            root_mount: parking_lot::RwLock::new(None),
+            timer_shutdown,
+            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
+            fingerprints: parking_lot::RwLock::new(HashMap::new()),
+            reconcile_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -85,94 +97,6 @@ impl ProviderRegistry {
         spec: Spec,
         handle: &tokio::runtime::Handle,
     ) -> Result<Arc<Runtime>, RegistryError> {
-        self.mounts.add_mount(self, spec, handle)
-    }
-
-    /// Stop and unregister a mount: abort its timer, shut the provider
-    /// down, and drop it from the instance map.
-    pub fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
-        self.mounts.remove_mount(mount)
-    }
-
-    /// Host context this registry resolves mounts against.
-    pub fn context(&self) -> &HostContext {
-        &self.context
-    }
-
-    pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
-        self.mounts.get(mount)
-    }
-
-    pub fn mounts(&self) -> Vec<String> {
-        self.mounts.mount_names()
-    }
-
-    pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
-        self.mounts.runtime_entries()
-    }
-
-    /// Returns the mount name of the root-mounted provider, if any.
-    pub fn root_mount_name(&self) -> Option<String> {
-        self.mounts.root_mount_name()
-    }
-
-    pub fn shutdown_all(&self) {
-        self.mounts.shutdown_all();
-    }
-
-    /// Converge the running mount set to the desired state under
-    /// `<config_dir>/mounts/*.json`.
-    ///
-    /// Desired specs are materialized (metadata, runtime capabilities, preopen
-    /// rewriting) and fingerprinted; a spec that is new is added, one whose
-    /// fingerprint changed is replaced, one that disappeared is removed, and one
-    /// that fails to materialize or instantiate is recorded in
-    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
-    /// host-direct preopens versus container-rewritten preopens.
-    pub fn reconcile(
-        &self,
-        handle: &tokio::runtime::Handle,
-        mode: MaterializationMode,
-    ) -> ReconcileOutcome {
-        let _guard = self.mounts.reconcile_guard();
-        ReconcilePass::new(self, handle, mode).run()
-    }
-}
-
-struct MountSupervisor {
-    instances: parking_lot::RwLock<HashMap<String, Arc<Runtime>>>,
-    root_mount: parking_lot::RwLock<Option<String>>,
-    timer_shutdown: watch::Sender<bool>,
-    timer_tasks: parking_lot::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    /// Per-mount materialized spec fingerprint, used by reconcile to detect a
-    /// spec change. The pinned `ProviderRef` is part of the spec, so an artifact
-    /// swap shows up as a spec change without re-hashing the WASM. Keyed by
-    /// mount name.
-    fingerprints: parking_lot::RwLock<HashMap<String, MountFingerprint>>,
-    /// Serializes reconcile passes so concurrent triggers cannot race the
-    /// add/remove sequence.
-    reconcile_lock: parking_lot::Mutex<()>,
-}
-
-impl MountSupervisor {
-    fn new() -> Self {
-        let (timer_shutdown, _) = watch::channel(false);
-        Self {
-            instances: parking_lot::RwLock::new(HashMap::new()),
-            root_mount: parking_lot::RwLock::new(None),
-            timer_shutdown,
-            timer_tasks: parking_lot::Mutex::new(HashMap::new()),
-            fingerprints: parking_lot::RwLock::new(HashMap::new()),
-            reconcile_lock: parking_lot::Mutex::new(()),
-        }
-    }
-
-    fn add_mount(
-        &self,
-        registry: &ProviderRegistry,
-        spec: Spec,
-        handle: &tokio::runtime::Handle,
-    ) -> Result<Arc<Runtime>, RegistryError> {
         omnifs_core::mount::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
@@ -180,7 +104,7 @@ impl MountSupervisor {
             return Err(RegistryError::DuplicateMount(mount));
         }
 
-        let wasm_path = registry.context.provider_path_by_id(&spec.provider.id);
+        let wasm_path = self.context.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -192,13 +116,13 @@ impl MountSupervisor {
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = Runtime::new(
-            &registry.engine,
+            &self.engine,
             &wasm_path,
             &resolved,
-            registry.cloner.clone(),
-            &registry.context,
-            registry.extractor.clone(),
-            &registry.caches,
+            self.cloner.clone(),
+            &self.context,
+            self.extractor.clone(),
+            &self.caches,
         )
         .map_err(|error| registry_error(&mount, error))?;
         let runtime = Arc::new(runtime);
@@ -206,7 +130,7 @@ impl MountSupervisor {
         // Claim the root binding before the instance becomes visible: a
         // concurrent root lookup must never observe "instance present, no
         // root mount" for a root-mounted provider, or it would materialize
-        // the mount as a root *child* with an infinite-TTL dentry.
+        // the mount as a root child with an infinite-TTL dentry.
         let mut claimed_root = false;
         if is_root {
             let mut root = self.root_mount.write();
@@ -235,7 +159,9 @@ impl MountSupervisor {
         Ok(runtime)
     }
 
-    fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
+    /// Stop and unregister a mount: abort its timer, shut the provider
+    /// down, and drop it from the instance map.
+    pub fn remove_mount(&self, mount: &str) -> Result<(), RegistryError> {
         let Some(runtime) = self.instances.write().remove(mount) else {
             return Err(RegistryError::MountNotFound(mount.to_string()));
         };
@@ -255,12 +181,63 @@ impl MountSupervisor {
         Ok(())
     }
 
-    fn load_work(
-        &self,
-        registry: &ProviderRegistry,
+    /// Host context this registry resolves mounts against.
+    pub fn context(&self) -> &HostContext {
+        &self.context
+    }
+
+    pub fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
+        self.instances.read().get(mount).cloned()
+    }
+
+    pub fn mounts(&self) -> Vec<String> {
+        self.instances.read().keys().cloned().collect()
+    }
+
+    pub fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
+        self.instances
+            .read()
+            .iter()
+            .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
+            .collect()
+    }
+
+    /// Returns the mount name of the root-mounted provider, if any.
+    pub fn root_mount_name(&self) -> Option<String> {
+        self.root_mount.read().clone()
+    }
+
+    pub fn shutdown_all(&self) {
+        let _ = self.timer_shutdown.send(true);
+        for (_, task) in self.timer_tasks.lock().drain() {
+            task.abort();
+        }
+        for (mount, runtime) in self.instances.read().iter() {
+            if let Err(e) = runtime.shutdown() {
+                warn!(mount, error = %e, "shutdown failed");
+            }
+        }
+    }
+
+    /// Converge the running mount set to the desired state under
+    /// `<config_dir>/mounts/*.json`.
+    ///
+    /// Desired specs are materialized (metadata, runtime capabilities, preopen
+    /// rewriting) and fingerprinted; a spec that is new is added, one whose
+    /// fingerprint changed is replaced, one that disappeared is removed, and one
+    /// that fails to materialize or instantiate is recorded in
+    /// [`ReconcileOutcome::failed`] without aborting the pass. `mode` selects
+    /// host-direct preopens versus container-rewritten preopens.
+    pub fn reconcile(
+        self: &Arc<Self>,
         handle: &tokio::runtime::Handle,
-        work: LoadWork,
-    ) -> LoadResult {
+        mode: MaterializationMode,
+    ) -> ReconcileOutcome {
+        let _guard = self.reconcile_lock.lock();
+        ReconcilePass::new(self, handle, mode).run()
+    }
+
+    fn load_work(&self, handle: &tokio::runtime::Handle, work: LoadWork) -> LoadResult {
         let LoadWork {
             spec,
             mount,
@@ -273,7 +250,7 @@ impl MountSupervisor {
         if running {
             let _ = self.remove_mount(&mount);
         }
-        match self.add_mount(registry, spec, handle) {
+        match self.add_mount(spec, handle) {
             Ok(_) => {
                 self.fingerprints.write().insert(mount.clone(), fingerprint);
                 if running {
@@ -314,52 +291,16 @@ impl MountSupervisor {
         }
     }
 
-    fn get(&self, mount: &str) -> Option<Arc<Runtime>> {
-        self.instances.read().get(mount).cloned()
-    }
-
-    fn mount_names(&self) -> Vec<String> {
-        self.instances.read().keys().cloned().collect()
-    }
-
-    fn runtime_entries(&self) -> Vec<(String, Arc<Runtime>)> {
-        self.instances
-            .read()
-            .iter()
-            .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
-            .collect()
-    }
-
-    fn root_mount_name(&self) -> Option<String> {
-        self.root_mount.read().clone()
-    }
-
     fn is_running(&self, mount: &str) -> bool {
         self.instances.read().contains_key(mount)
     }
 
-    fn fingerprint(&self, mount: &str) -> Option<MountFingerprint> {
+    fn fingerprint(&self, mount: &str) -> Option<u64> {
         self.fingerprints.read().get(mount).copied()
     }
 
     fn remove_fingerprint(&self, mount: &str) {
         self.fingerprints.write().remove(mount);
-    }
-
-    fn shutdown_all(&self) {
-        let _ = self.timer_shutdown.send(true);
-        for (_, task) in self.timer_tasks.lock().drain() {
-            task.abort();
-        }
-        for (mount, runtime) in self.instances.read().iter() {
-            if let Err(e) = runtime.shutdown() {
-                warn!(mount, error = %e, "shutdown failed");
-            }
-        }
-    }
-
-    fn reconcile_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
-        self.reconcile_lock.lock()
     }
 
     fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
@@ -400,7 +341,7 @@ impl MountSupervisor {
 }
 
 struct ReconcilePass<'a> {
-    registry: &'a ProviderRegistry,
+    registry: &'a Arc<ProviderRegistry>,
     handle: &'a tokio::runtime::Handle,
     mode: MaterializationMode,
     catalog: Catalog,
@@ -411,7 +352,7 @@ struct ReconcilePass<'a> {
 
 impl<'a> ReconcilePass<'a> {
     fn new(
-        registry: &'a ProviderRegistry,
+        registry: &'a Arc<ProviderRegistry>,
         handle: &'a tokio::runtime::Handle,
         mode: MaterializationMode,
     ) -> Self {
@@ -489,8 +430,8 @@ impl<'a> ReconcilePass<'a> {
             .context
             .provider_path_by_id(&materialized.provider.id);
         let fingerprint = mount_fingerprint(&materialized);
-        let running = self.registry.mounts.is_running(&mount);
-        let prior_fingerprint = self.registry.mounts.fingerprint(&mount);
+        let running = self.registry.is_running(&mount);
+        let prior_fingerprint = self.registry.fingerprint(&mount);
         if running && prior_fingerprint == Some(fingerprint) {
             debug!(
                 mount = mount.as_str(),
@@ -500,7 +441,11 @@ impl<'a> ReconcilePass<'a> {
             return None;
         }
 
-        let reason = prior_fingerprint.map_or("new", |prior| fingerprint.reason_since(prior));
+        let reason = if prior_fingerprint.is_some() {
+            "config"
+        } else {
+            "new"
+        };
         Some(LoadWork {
             spec: materialized,
             mount,
@@ -512,58 +457,46 @@ impl<'a> ReconcilePass<'a> {
     }
 
     /// Compile and register the planned mounts. Compilation dominates reconcile
-    /// wall-time (a cold Cranelift compile is seconds per provider), and the
-    /// loads are independent across distinct mount names (`plan_path` enforces
-    /// that), so they run on a pool of worker threads bounded by the core count.
-    /// Empty and single-item work skips the thread setup.
-    ///
-    /// Uses [`std::thread::scope`], not tokio tasks or the blocking pool: the
-    /// work is CPU-bound WASM compile plus synchronous WASI init, not async I/O.
-    /// Scoped OS threads carry no tokio handle, so `without_tokio_handle` in
-    /// [`crate::instance`] runs instantiation inline rather than spawning an
-    /// escape thread per mount. Tokio blocking-pool threads do have a handle and
-    /// would regress bulk reconcile to O(mounts) extra threads. The async
-    /// boundary already sits at the daemon, which wraps the full reconcile in
-    /// `spawn_blocking` (`omnifs-daemon` `server.rs`). Revisit if/when the WASI
-    /// path moves to `add_to_linker_async`.
+    /// wall-time, and the loads are independent across distinct mount names
+    /// (`plan_path` enforces that), so they run on Tokio's blocking pool.
+    /// Empty and single-item work skips the task setup.
     fn load_in_parallel(&self, work: Vec<LoadWork>) -> Vec<LoadResult> {
-        let registry = self.registry;
-        let handle = self.handle;
         if work.len() <= 1 {
             return work
                 .into_iter()
-                .map(|item| registry.mounts.load_work(registry, handle, item))
+                .map(|item| self.registry.load_work(self.handle, item))
                 .collect();
         }
 
-        let workers = std::thread::available_parallelism()
-            .map_or(4, std::num::NonZero::get)
-            .min(work.len());
-
-        // Round-robin the work into one owned bucket per worker so each thread
-        // drains its own bucket with no shared mutable state.
-        let mut buckets: Vec<Vec<LoadWork>> = (0..workers).map(|_| Vec::new()).collect();
-        for (i, item) in work.into_iter().enumerate() {
-            buckets[i % workers].push(item);
+        let expected = work.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (index, item) in work.into_iter().enumerate() {
+            let mount = item.mount.clone();
+            let registry = Arc::clone(self.registry);
+            let handle = self.handle.clone();
+            let tx = tx.clone();
+            self.handle.spawn_blocking(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    registry.load_work(&handle, item)
+                }))
+                .unwrap_or_else(|_| LoadResult::Failed {
+                    mount,
+                    reason: "reconcile load task panicked".to_string(),
+                });
+                let _ = tx.send((index, result));
+            });
         }
+        drop(tx);
 
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = buckets
-                .into_iter()
-                .map(|bucket| {
-                    scope.spawn(move || {
-                        bucket
-                            .into_iter()
-                            .map(|item| registry.mounts.load_work(registry, handle, item))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().expect("reconcile worker thread panicked"))
-                .collect()
-        })
+        let mut results = Vec::with_capacity(expected);
+        while results.len() < expected {
+            let Ok(result) = rx.recv() else {
+                break;
+            };
+            results.push(result);
+        }
+        results.sort_by_key(|(index, _)| *index);
+        results.into_iter().map(|(_, result)| result).collect()
     }
 
     fn record_load(&mut self, result: LoadResult) {
@@ -600,10 +533,10 @@ impl<'a> ReconcilePass<'a> {
     }
 
     fn remove_stale_mounts(&mut self) {
-        for mount in self.registry.mounts.mount_names() {
+        for mount in self.registry.mounts() {
             if !self.desired.contains(&mount) {
                 let mount_started = Instant::now();
-                if self.registry.mounts.remove_mount(&mount).is_ok() {
+                if self.registry.remove_mount(&mount).is_ok() {
                     info!(
                         mount = mount.as_str(),
                         duration_ms = mount_started.elapsed().as_millis(),
@@ -611,7 +544,7 @@ impl<'a> ReconcilePass<'a> {
                     );
                     self.outcome.removed.push(mount.clone());
                 }
-                self.registry.mounts.remove_fingerprint(&mount);
+                self.registry.remove_fingerprint(&mount);
             }
         }
     }
@@ -622,7 +555,7 @@ struct LoadWork {
     spec: Spec,
     mount: String,
     wasm_path: PathBuf,
-    fingerprint: MountFingerprint,
+    fingerprint: u64,
     /// Whether a prior instance is being replaced (update) versus a fresh add.
     running: bool,
     reason: &'static str,
@@ -654,32 +587,11 @@ pub struct ReconcileOutcome {
     pub failed: Vec<MountFailure>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MountFingerprint {
-    spec: u64,
-}
-
-impl MountFingerprint {
-    fn reason_since(self, prior: Self) -> &'static str {
-        if self.spec == prior.spec {
-            "unchanged"
-        } else {
-            "config"
-        }
-    }
-}
-
 /// Fingerprint a materialized spec. The spec carries the pinned `ProviderRef`
 /// (content id + meta), so the spec hash already captures artifact identity: a
 /// swapped-out provider is a new id, hence a new spec hash. No file read or
 /// re-hash of the WASM is needed on reconcile.
-fn mount_fingerprint(spec: &Spec) -> MountFingerprint {
-    MountFingerprint {
-        spec: spec_fingerprint(spec),
-    }
-}
-
-fn spec_fingerprint(spec: &Spec) -> u64 {
+fn mount_fingerprint(spec: &Spec) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(bytes) = serde_json::to_vec(spec) {
@@ -804,16 +716,18 @@ mod tests {
         .expect("copy archive tool");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = ProviderRegistry::new(
-            HostContext::new(
-                cache_dir.path(),
-                &paths.config_dir,
-                providers_dir.path(),
-                &paths.credentials_file,
-            ),
-            cloner,
-        )
-        .expect("registry init");
+        let registry = Arc::new(
+            ProviderRegistry::new(
+                HostContext::new(
+                    cache_dir.path(),
+                    &paths.config_dir,
+                    providers_dir.path(),
+                    &paths.credentials_file,
+                ),
+                cloner,
+            )
+            .expect("registry init"),
+        );
 
         // Pin the test provider into the by-hash store, then mount it with an
         // out-of-schema config field the provider's configSchema forbids.
@@ -876,16 +790,18 @@ mod tests {
         .expect("write spec");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = ProviderRegistry::new(
-            HostContext::new(
-                cache_dir.path(),
-                &paths.config_dir,
-                providers_dir.path(),
-                &paths.credentials_file,
-            ),
-            cloner,
-        )
-        .expect("registry init");
+        let registry = Arc::new(
+            ProviderRegistry::new(
+                HostContext::new(
+                    cache_dir.path(),
+                    &paths.config_dir,
+                    providers_dir.path(),
+                    &paths.credentials_file,
+                ),
+                cloner,
+            )
+            .expect("registry init"),
+        );
 
         let outcome = registry.reconcile(
             &tokio::runtime::Handle::current(),

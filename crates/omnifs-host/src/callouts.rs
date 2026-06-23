@@ -27,33 +27,11 @@
 //! `RUST_LOG=omnifs_callout=info` filters everything in this layer
 //! without bringing in unrelated host tracing.
 //!
-//! Each callout produces two spans:
-//!
-//! 1. The outer `callout` span entered by `dispatch_one`, carrying
-//!    cross-cutting context:
-//!    - `operation_id`: the host-allocated u64 for the in-flight op
-//!    - `callout_index`: position of this callout in the batch
-//!    - `kind`: the `CalloutKind::as_str()` value
-//!      (`"http.fetch"`, `"git.open_repo"`, `"blob.fetch"`,
-//!      `"archive.open"`, or `"blob.read"`)
-//!
-//! 2. The inner executor span (`#[tracing::instrument]` on the
-//!    public method itself), carrying kind-specific fields. Late-bound
-//!    fields are declared as `tracing::field::Empty` and populated by
-//!    `record_outcome(&result)` before the method returns. The full
-//!    field set per kind is:
-//!
-//!    | Span | Request-side fields at NEW | Response/error fields at CLOSE |
-//!    |---|---|---|
-//!    | `HttpStack::fetch` | `method`, `url`, `request_headers`, `request_body_bytes` | `status`, `response_headers`, `response_body_bytes`, `error.{kind,message,retryable}` |
-//!    | `BlobExecutor::fetch` | `cache_key`, `method`, `url`, `request_headers`, `request_body_bytes` | `blob`, `status`, `response_headers`, `response_body_bytes`, `error.{kind,message,retryable}` |
-//!    | `BlobExecutor::read` | `blob`, `offset`, `len` | `response_body_bytes`, `error.{kind,message,retryable}` |
-//!    | `GitExecutor::open_repo` | `url` | `tree_ref`, `error.{kind,message,retryable}` |
-//!    | `ArchiveExecutor::open` | `blob`, `format`, `strip_prefix` | `tree_ref`, `error.{kind,message,retryable}` |
-//!
-//! URL and header fields render through `LogUrl` and `WitHeaders`,
-//! which redact credentials and sensitive query/header values lazily
-//! at `Display` time.
+//! Each callout produces an outer `callout` span from `dispatch_one`
+//! with operation id, batch index, and kind, plus an executor span on
+//! the public method that owns request and outcome fields for that
+//! callout. URL and header fields render through redacting display
+//! wrappers.
 //!
 //! Every field a span ever records via `Span::record` must appear in
 //! its `#[instrument(fields(...))]` declaration. `tracing` silently

@@ -1,3 +1,3 @@
 fn main() {
-    print!("{}", omnifs_daemon::server::openapi_json());
+    print!("{}", omnifs_daemon::openapi_json());
 }

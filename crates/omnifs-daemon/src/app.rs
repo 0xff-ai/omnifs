@@ -144,7 +144,7 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
     }
 
     let frontend = context.frontend();
-    let frontends = frontends::Frontends::from_context(&context, Arc::clone(&registry));
+    let frontends = frontends::Frontend::from_context(&context, Arc::clone(&registry));
     let listener = context.bind_control_listener()?;
     let daemon = Arc::new(server::Daemon::new(
         context,

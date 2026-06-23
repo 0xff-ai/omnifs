@@ -199,7 +199,9 @@ impl FuseHarness {
         );
         let runtime = self.fs.runtime_for_mount(Self::MOUNT).expect("runtime");
         let path = test_path(path);
-        runtime.cache_put(&path, RecordKind::Dirents, None, &record);
+        runtime
+            .cache()
+            .cache_put(&path, RecordKind::Dirents, None, &record);
     }
 
     /// `lookup` for a child, returning `Some(ino)` on a positive hit and
@@ -544,6 +546,7 @@ fn mutable_unversioned_full_prefetch_is_per_handle_not_durable() {
     let runtime = h.fs.runtime_for_mount(FuseHarness::MOUNT).expect("runtime");
     assert!(
         runtime
+            .cache()
             .cache_get(&test_path(path), RecordKind::File, None)
             .is_none(),
         "unversioned dynamic full-read bytes must not be written to durable view cache",
@@ -641,6 +644,7 @@ fn preload_merge_into_paged_dir_preserves_pagination_state() {
     // The accumulated record is paginated with a live cursor.
     let before = DirentsPayload::deserialize(
         &runtime
+            .cache()
             .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
             .expect("dirents before")
             .payload,
@@ -674,6 +678,7 @@ fn preload_merge_into_paged_dir_preserves_pagination_state() {
 
     let after = DirentsPayload::deserialize(
         &runtime
+            .cache()
             .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
             .expect("dirents after")
             .payload,
@@ -729,6 +734,7 @@ fn fs_effect_projection_rejects_reserved_control_leaf() {
     // written for the shadowing path.
     assert!(
         runtime
+            .cache()
             .cache_get(&test_path("/hello/feed/@next"), RecordKind::Lookup, None)
             .is_none(),
         "a reserved '@'-prefixed fs-effect leaf is never cached"
@@ -916,6 +922,7 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
     );
 
     let record = runtime
+        .cache()
         .cache_get(&test_path("/hello/feed"), RecordKind::Dirents, None)
         .expect("dirents record still cached");
     let dirents = DirentsPayload::deserialize(&record.payload).expect("dirents payload");

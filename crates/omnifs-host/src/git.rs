@@ -1,4 +1,4 @@
-//! Git operations via the `gix` crate.
+//! Git operations via the system `git` CLI.
 //!
 //! Implements provider git callouts. Today the host supports only
 //! `open_repo`, which clones a remote if needed and returns a tree-ref
@@ -64,10 +64,18 @@ impl GitExecutor {
         operation_id: u64,
     ) -> Result<u64, GitError> {
         self.capability.check_git_url(&req.clone_url)?;
-        let mut observer = super::inspector::InspectorCloneObserver::for_operation(operation_id);
         let cache_path = self
             .cloner
-            .clone_if_needed(&req.cache_key, &req.clone_url, &mut observer)
+            .clone_if_needed(
+                &req.cache_key,
+                &req.clone_url,
+                |cache_key, clone_url| {
+                    super::inspector::record_clone_start(operation_id, cache_key, clone_url);
+                },
+                |cache_key, elapsed, ok| {
+                    super::inspector::record_clone_end(operation_id, cache_key, elapsed, ok);
+                },
+            )
             .map_err(|error| {
                 warn!(
                     cache_key = %req.cache_key,

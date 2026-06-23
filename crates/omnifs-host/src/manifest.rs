@@ -20,10 +20,4 @@ impl Artifact {
     pub fn metadata(&self) -> Result<Option<mts::ProviderManifest>, String> {
         self.wasm.metadata().map_err(|error| error.to_string())
     }
-
-    pub fn auth_manifest(&self) -> Result<Option<mts::AuthManifest>, String> {
-        Ok(self
-            .metadata()?
-            .and_then(|manifest| manifest.wasm_auth_manifest()))
-    }
 }

@@ -6,4 +6,4 @@
 
 pub mod preopen;
 pub mod publish;
-pub mod tree_cache;
+pub(crate) mod relative_key;

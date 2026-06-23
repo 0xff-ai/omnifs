@@ -524,61 +524,44 @@ pub fn subtree_tree_ref(result: &wit_types::OpResult) -> Option<u64> {
     }
 }
 
-/// `CloneObserver` impl that emits `clone.start`/`clone.end` records
-/// against the currently-installed live sink. Notifications outside any
-/// FUSE/provider span (no thread-local trace id) drop silently.
-pub struct InspectorCloneObserver {
-    operation_id: u64,
-    trace_id: Option<TraceId>,
-    sink: Option<Arc<InspectorSink>>,
-}
-
-impl InspectorCloneObserver {
-    pub fn for_operation(operation_id: u64) -> Self {
-        Self {
+/// Emit clone start against the current live sink.
+/// Notifications outside any FUSE/provider span drop silently.
+pub fn record_clone_start(operation_id: u64, cache_key: &str, clone_url: &str) {
+    let (Some(trace_id), Some(sink)) = (current_trace_id(), global()) else {
+        return;
+    };
+    sink.emit(
+        trace_id,
+        InspectorEvent::CloneStart {
             operation_id,
-            trace_id: current_trace_id(),
-            sink: global(),
-        }
-    }
+            cache_key: cache_key.to_string(),
+            remote: clone_url.to_string(),
+        },
+    );
 }
 
-impl crate::cloner::CloneObserver for InspectorCloneObserver {
-    fn on_clone_start(&mut self, cache_key: &str, clone_url: &str) {
-        let (Some(trace_id), Some(sink)) = (self.trace_id, self.sink.as_ref()) else {
-            return;
-        };
-        sink.emit(
-            trace_id,
-            InspectorEvent::CloneStart {
-                operation_id: self.operation_id,
-                cache_key: cache_key.to_string(),
-                remote: clone_url.to_string(),
+/// Emit clone end against the current live sink.
+/// Notifications outside any FUSE/provider span drop silently.
+pub fn record_clone_end(operation_id: u64, cache_key: &str, elapsed: Duration, ok: bool) {
+    let (Some(trace_id), Some(sink)) = (current_trace_id(), global()) else {
+        return;
+    };
+    let outcome = if ok {
+        InspectorOutcome::Ok
+    } else {
+        InspectorOutcome::Network
+    };
+    sink.emit(
+        trace_id,
+        InspectorEvent::CloneEnd {
+            operation_id,
+            cache_key: cache_key.to_string(),
+            end: OpEnd {
+                elapsed_us: to_us(elapsed),
+                result: OutcomeFields::with_outcome(outcome),
             },
-        );
-    }
-
-    fn on_clone_end(&mut self, cache_key: &str, elapsed: Duration, ok: bool) {
-        let (Some(trace_id), Some(sink)) = (self.trace_id, self.sink.as_ref()) else {
-            return;
-        };
-        let outcome = if ok {
-            InspectorOutcome::Ok
-        } else {
-            InspectorOutcome::Network
-        };
-        sink.emit(
-            trace_id,
-            InspectorEvent::CloneEnd {
-                operation_id: self.operation_id,
-                cache_key: cache_key.to_string(),
-                end: OpEnd {
-                    elapsed_us: to_us(elapsed),
-                    result: OutcomeFields::with_outcome(outcome),
-                },
-            },
-        );
-    }
+        },
+    );
 }
 
 /// View over a foreign `wit_types::Callout` that exposes the
@@ -647,23 +630,7 @@ impl WitCalloutResultView<'_> {
             | wit_types::CalloutResult::GitRepoOpened(_)
             | wit_types::CalloutResult::ArchiveOpened(_)
             | wit_types::CalloutResult::BlobRead(_) => InspectorOutcome::Ok,
-            wit_types::CalloutResult::CalloutError(error) => match error.kind {
-                wit_types::ErrorKind::NotFound => InspectorOutcome::NotFound,
-                wit_types::ErrorKind::NotADirectory
-                | wit_types::ErrorKind::NotAFile
-                | wit_types::ErrorKind::InvalidInput => InspectorOutcome::InvalidInput,
-                wit_types::ErrorKind::PermissionDenied | wit_types::ErrorKind::Denied => {
-                    InspectorOutcome::Denied
-                },
-                wit_types::ErrorKind::TooLarge => InspectorOutcome::TooLarge,
-                wit_types::ErrorKind::RateLimited | wit_types::ErrorKind::Timeout => {
-                    InspectorOutcome::Timeout
-                },
-                wit_types::ErrorKind::Network => InspectorOutcome::Network,
-                wit_types::ErrorKind::VersionMismatch | wit_types::ErrorKind::Internal => {
-                    InspectorOutcome::Internal
-                },
-            },
+            wit_types::CalloutResult::CalloutError(error) => error_kind_outcome(error.kind),
         }
     }
 }
@@ -675,23 +642,27 @@ pub struct WitProviderErrorView<'a>(pub &'a wit_types::ProviderError);
 
 impl WitProviderErrorView<'_> {
     pub fn outcome(&self) -> InspectorOutcome {
-        match self.0.kind {
-            wit_types::ErrorKind::NotFound => InspectorOutcome::NotFound,
-            wit_types::ErrorKind::NotADirectory
-            | wit_types::ErrorKind::NotAFile
-            | wit_types::ErrorKind::InvalidInput => InspectorOutcome::InvalidInput,
-            wit_types::ErrorKind::PermissionDenied | wit_types::ErrorKind::Denied => {
-                InspectorOutcome::Denied
-            },
-            wit_types::ErrorKind::TooLarge => InspectorOutcome::TooLarge,
-            wit_types::ErrorKind::RateLimited | wit_types::ErrorKind::Timeout => {
-                InspectorOutcome::Timeout
-            },
-            wit_types::ErrorKind::Network => InspectorOutcome::Network,
-            wit_types::ErrorKind::VersionMismatch | wit_types::ErrorKind::Internal => {
-                InspectorOutcome::Internal
-            },
-        }
+        error_kind_outcome(self.0.kind)
+    }
+}
+
+fn error_kind_outcome(kind: wit_types::ErrorKind) -> InspectorOutcome {
+    match kind {
+        wit_types::ErrorKind::NotFound => InspectorOutcome::NotFound,
+        wit_types::ErrorKind::NotADirectory
+        | wit_types::ErrorKind::NotAFile
+        | wit_types::ErrorKind::InvalidInput => InspectorOutcome::InvalidInput,
+        wit_types::ErrorKind::PermissionDenied | wit_types::ErrorKind::Denied => {
+            InspectorOutcome::Denied
+        },
+        wit_types::ErrorKind::TooLarge => InspectorOutcome::TooLarge,
+        wit_types::ErrorKind::RateLimited | wit_types::ErrorKind::Timeout => {
+            InspectorOutcome::Timeout
+        },
+        wit_types::ErrorKind::Network => InspectorOutcome::Network,
+        wit_types::ErrorKind::VersionMismatch | wit_types::ErrorKind::Internal => {
+            InspectorOutcome::Internal
+        },
     }
 }
 

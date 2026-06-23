@@ -13,12 +13,14 @@
 use crate::blob_cache::BlobMetadata;
 use crate::blob_cache::{BlobCache, BlobRecord};
 use crate::callouts::{callout_error, callout_internal, callout_not_found, record_outcome};
-use crate::sandbox::tree_cache::{MaterializeError, MaterializedTree, TreeKey, TreeMaterializer};
+use crate::sandbox::publish;
 #[cfg(test)]
 use crate::tools::archive as archive_tool;
 use crate::tools::archive::{ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats};
 use crate::tree_refs::TreeRefs;
+use dashmap::DashMap;
 use omnifs_wit::provider::types as wit_types;
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,7 +37,10 @@ use tracing::{debug, warn};
 /// rename, so a registered `tree-ref` never points at a partial tree.
 pub(crate) struct ArchiveExecutor {
     cache: Arc<BlobCache>,
-    materializer: TreeMaterializer<ExtractKey>,
+    extract_root: PathBuf,
+    trees: Arc<TreeRefs>,
+    trees_by_key: DashMap<ExtractKey, u64>,
+    locks: DashMap<ExtractKey, Arc<Mutex<()>>>,
     extractor: Arc<ArchiveExtractorComponent>,
 }
 
@@ -58,9 +63,6 @@ impl ExtractKey {
             strip_prefix,
         }
     }
-}
-
-impl TreeKey for ExtractKey {
     fn dir_name(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.cache_key.as_bytes());
@@ -75,9 +77,15 @@ impl TreeKey for ExtractKey {
         format!(
             "{}-{}",
             self.format.cache_component(),
-            hex_prefix(&digest, 16),
+            hex::encode(&digest[..16])
         )
     }
+}
+
+#[derive(Debug)]
+enum ArchiveMaterialized {
+    Cached { tree: u64 },
+    Fresh { tree: u64, stats: ExtractStats },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,9 +119,15 @@ impl ArchiveExecutor {
         extract_root: PathBuf,
         extractor: Arc<ArchiveExtractorComponent>,
     ) -> Self {
+        // Startup cleanup is best-effort; later writes report concrete
+        // filesystem errors when the cache root is unusable.
+        let _ = publish::sweep_temp_publish_dirs(&extract_root);
         Self {
             cache,
-            materializer: TreeMaterializer::new(extract_root, trees),
+            extract_root,
+            trees,
+            trees_by_key: DashMap::new(),
+            locks: DashMap::new(),
             extractor,
         }
     }
@@ -165,15 +179,9 @@ impl ArchiveExecutor {
             .ok_or_else(|| ArchiveError::NotFound(format!("blob {blob_id} not found")))?;
         let key = ExtractKey::new(record.cache_key.clone(), format, strip_prefix);
 
-        let tree = match self
-            .materializer
-            .materialize(&key, |tmp| self.extract_to(tmp, &key, &record))
-        {
-            Ok(MaterializedTree::Cached { tree }) => tree,
-            Ok(MaterializedTree::Fresh {
-                tree,
-                output: stats,
-            }) => {
+        let tree = match self.materialize(&key, &record)? {
+            ArchiveMaterialized::Cached { tree } => tree,
+            ArchiveMaterialized::Fresh { tree, stats } => {
                 debug!(
                     cache_key = key.cache_key,
                     entries = stats.entries,
@@ -182,19 +190,91 @@ impl ArchiveExecutor {
                 );
                 tree
             },
-            Err(MaterializeError::Run(e)) => return Err(e),
-            Err(MaterializeError::Prepare(e)) => {
-                return Err(ArchiveError::Internal(format!(
-                    "prepare archive extraction: {e}"
-                )));
-            },
-            Err(MaterializeError::Publish(e)) => {
-                return Err(ArchiveError::Internal(format!(
-                    "publish archive extraction: {e}"
-                )));
-            },
         };
         Ok(tree)
+    }
+
+    fn materialize(
+        &self,
+        key: &ExtractKey,
+        record: &BlobRecord,
+    ) -> Result<ArchiveMaterialized, ArchiveError> {
+        if let Some(tree) = self.trees_by_key.get(key).map(|entry| *entry) {
+            return Ok(ArchiveMaterialized::Cached { tree });
+        }
+
+        let lock = self
+            .locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        if let Some(tree) = self.trees_by_key.get(key).map(|entry| *entry) {
+            self.locks.remove(key);
+            return Ok(ArchiveMaterialized::Cached { tree });
+        }
+
+        if let Err(error) = std::fs::create_dir_all(&self.extract_root) {
+            self.locks.remove(key);
+            return Err(ArchiveError::Internal(format!(
+                "prepare archive extraction: {error}"
+            )));
+        }
+        let dest = self.extract_root.join(key.dir_name());
+
+        if let Ok(metadata) = std::fs::symlink_metadata(&dest) {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                let tree = self.trees.register(dest);
+                self.trees_by_key.insert(key.clone(), tree);
+                self.locks.remove(key);
+                return Ok(ArchiveMaterialized::Cached { tree });
+            }
+            if let Err(error) = publish::remove_existing_path(&dest) {
+                self.locks.remove(key);
+                return Err(ArchiveError::Internal(format!(
+                    "prepare archive extraction: {error}"
+                )));
+            }
+        }
+
+        let tmp = publish::temp_sibling_path(&dest);
+        if tmp.exists()
+            && let Err(error) = publish::remove_existing_path(&tmp)
+        {
+            self.locks.remove(key);
+            return Err(ArchiveError::Internal(format!(
+                "prepare archive extraction: {error}"
+            )));
+        }
+        if let Err(error) = std::fs::create_dir_all(&tmp) {
+            self.locks.remove(key);
+            return Err(ArchiveError::Internal(format!(
+                "prepare archive extraction: {error}"
+            )));
+        }
+
+        let stats = match self.extract_to(&tmp, key, record) {
+            Ok(stats) => stats,
+            Err(error) => {
+                publish::remove_path_best_effort(&tmp);
+                self.locks.remove(key);
+                return Err(error);
+            },
+        };
+
+        if let Err(error) = publish::publish_dir_by_rename(&tmp, &dest) {
+            publish::remove_path_best_effort(&tmp);
+            self.locks.remove(key);
+            return Err(ArchiveError::Internal(format!(
+                "publish archive extraction: {error}"
+            )));
+        }
+
+        let tree = self.trees.register(dest);
+        self.trees_by_key.insert(key.clone(), tree);
+        self.locks.remove(key);
+        Ok(ArchiveMaterialized::Fresh { tree, stats })
     }
 
     fn extract_to(
@@ -227,16 +307,6 @@ impl From<wit_types::ArchiveFormat> for ArchiveFormat {
             wit_types::ArchiveFormat::Zip => Self::Zip,
         }
     }
-}
-
-fn hex_prefix(bytes: &[u8], len: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(len * 2);
-    for byte in bytes.iter().take(len) {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 impl From<&ExtractError> for wit_types::ErrorKind {

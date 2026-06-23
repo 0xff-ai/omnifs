@@ -83,7 +83,18 @@ fn github_pat_auth(token_env: Option<&str>, token_file: Option<&str>) -> AuthCon
 }
 
 fn github_pat_manager(auth: AuthConfig) -> AuthManager {
-    AuthManager::from_configs_and_manifest(&[auth], Some(&github_pat_manifest())).unwrap()
+    auth_manager(&[auth], Some(&github_pat_manifest()))
+}
+
+fn auth_manager(configs: &[AuthConfig], manifest: Option<&AuthManifest>) -> AuthManager {
+    AuthManager::from_configs_manifest_store_with_http(
+        configs,
+        manifest,
+        "github",
+        Arc::new(MemoryStore::default()),
+        reqwest_oauth2::Client::new(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -205,7 +216,7 @@ fn test_auth_manifest_backed_static_token_injection() {
     };
     let _env = ScopedEnvVar::set("OMNIFS_TEST_MANIFEST_TOKEN", "secret");
 
-    let manager = AuthManager::from_configs_and_manifest(&[auth], Some(&manifest)).unwrap();
+    let manager = auth_manager(&[auth], Some(&manifest));
 
     assert_eq!(
         manager.headers_for_url("https://api.example.com/repos"),
@@ -240,7 +251,7 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
         })],
     };
 
-    let manager = AuthManager::from_configs_and_manifest(&[auth], Some(&manifest)).unwrap();
+    let manager = auth_manager(&[auth], Some(&manifest));
 
     assert!(
         manager
@@ -252,7 +263,7 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
 
 #[test]
 fn test_provider_without_auth_manifest_behaves_as_no_auth() {
-    let manager = AuthManager::from_configs_and_manifest(&[], None).unwrap();
+    let manager = auth_manager(&[], None);
 
     assert!(
         manager
