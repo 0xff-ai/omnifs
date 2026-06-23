@@ -97,13 +97,18 @@ impl ProviderRegistry {
         spec: Spec,
         handle: &tokio::runtime::Handle,
     ) -> Result<Arc<Runtime>, RegistryError> {
-        omnifs_core::mount::Name::new(spec.mount.clone())
-            .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
         if self.instances.read().contains_key(&mount) {
             return Err(RegistryError::DuplicateMount(mount));
         }
+        let built = self.build_mount(spec)?;
+        self.publish_new_mount(built, handle)
+    }
 
+    fn build_mount(&self, spec: Spec) -> Result<BuiltMount, RegistryError> {
+        omnifs_core::mount::Name::new(spec.mount.clone())
+            .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
+        let mount = spec.mount.clone();
         let wasm_path = self.context.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
@@ -125,8 +130,23 @@ impl ProviderRegistry {
             &self.caches,
         )
         .map_err(|error| registry_error(&mount, error))?;
-        let runtime = Arc::new(runtime);
+        Ok(BuiltMount {
+            mount,
+            is_root,
+            runtime: Arc::new(runtime),
+        })
+    }
 
+    fn publish_new_mount(
+        &self,
+        built: BuiltMount,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Arc<Runtime>, RegistryError> {
+        let BuiltMount {
+            mount,
+            is_root,
+            runtime,
+        } = built;
         // Claim the root binding before the instance becomes visible: a
         // concurrent root lookup must never observe "instance present, no
         // root mount" for a root-mounted provider, or it would materialize
@@ -157,6 +177,58 @@ impl ProviderRegistry {
         self.start_timer(&mount, &runtime, handle);
         info!(mount = mount.as_str(), root = is_root, "loaded provider");
         Ok(runtime)
+    }
+
+    fn replace_mount(
+        &self,
+        built: BuiltMount,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<(), RegistryError> {
+        let BuiltMount {
+            mount,
+            is_root,
+            runtime,
+        } = built;
+
+        if let Some(task) = self.timer_tasks.lock().remove(&mount) {
+            task.abort();
+        }
+
+        let mut claimed_root = false;
+        {
+            let mut root = self.root_mount.write();
+            if root.as_deref() == Some(mount.as_str()) {
+                *root = None;
+            }
+            if is_root {
+                if let Some(existing) = root.as_deref() {
+                    warn!(
+                        mount = mount.as_str(),
+                        existing, "multiple root_mount providers; ignoring root_mount for this one"
+                    );
+                } else {
+                    *root = Some(mount.clone());
+                    claimed_root = true;
+                }
+            }
+        }
+
+        let old_runtime = {
+            let mut instances = self.instances.write();
+            let Some(old_runtime) = instances.insert(mount.clone(), Arc::clone(&runtime)) else {
+                if claimed_root {
+                    *self.root_mount.write() = None;
+                }
+                return Err(RegistryError::MountNotFound(mount));
+            };
+            old_runtime
+        };
+
+        self.start_timer(&mount, &runtime, handle);
+        if let Err(error) = old_runtime.shutdown() {
+            warn!(mount = mount.as_str(), error = %error, "shutdown failed");
+        }
+        Ok(())
     }
 
     /// Stop and unregister a mount: abort its timer, shut the provider
@@ -237,7 +309,7 @@ impl ProviderRegistry {
         ReconcilePass::new(self, handle, mode).run()
     }
 
-    fn load_work(&self, handle: &tokio::runtime::Handle, work: LoadWork) -> LoadResult {
+    fn build_work(&self, work: LoadWork) -> LoadResult {
         let LoadWork {
             spec,
             mount,
@@ -247,34 +319,17 @@ impl ProviderRegistry {
             reason,
         } = work;
         let started = Instant::now();
-        if running {
-            let _ = self.remove_mount(&mount);
-        }
-        match self.add_mount(spec, handle) {
-            Ok(_) => {
-                self.fingerprints.write().insert(mount.clone(), fingerprint);
-                if running {
-                    info!(
-                        mount = mount.as_str(),
-                        provider = %wasm_path.display(),
-                        reason,
-                        duration_ms = started.elapsed().as_millis(),
-                        "reconcile updated mount"
-                    );
-                    LoadResult::Updated { mount }
-                } else {
-                    info!(
-                        mount = mount.as_str(),
-                        provider = %wasm_path.display(),
-                        reason,
-                        duration_ms = started.elapsed().as_millis(),
-                        "reconcile added mount"
-                    );
-                    LoadResult::Added { mount }
-                }
+        match self.build_mount(spec) {
+            Ok(built) => LoadResult::Ready {
+                mount,
+                wasm_path,
+                fingerprint,
+                running,
+                reason,
+                duration: started.elapsed(),
+                built,
             },
             Err(error) => {
-                self.fingerprints.write().remove(&mount);
                 warn!(
                     mount = mount.as_str(),
                     provider = %wasm_path.display(),
@@ -456,15 +511,16 @@ impl<'a> ReconcilePass<'a> {
         })
     }
 
-    /// Compile and register the planned mounts. Compilation dominates reconcile
-    /// wall-time, and the loads are independent across distinct mount names
-    /// (`plan_path` enforces that), so they run on Tokio's blocking pool.
+    /// Compile the planned mounts. Compilation dominates reconcile wall-time,
+    /// and the loads are independent across distinct mount names (`plan_path`
+    /// enforces that), so they run on Tokio's blocking pool. Publication
+    /// happens later in spec-path order.
     /// Empty and single-item work skips the task setup.
     fn load_in_parallel(&self, work: Vec<LoadWork>) -> Vec<LoadResult> {
         if work.len() <= 1 {
             return work
                 .into_iter()
-                .map(|item| self.registry.load_work(self.handle, item))
+                .map(|item| self.registry.build_work(item))
                 .collect();
         }
 
@@ -473,11 +529,10 @@ impl<'a> ReconcilePass<'a> {
         for (index, item) in work.into_iter().enumerate() {
             let mount = item.mount.clone();
             let registry = Arc::clone(self.registry);
-            let handle = self.handle.clone();
             let tx = tx.clone();
             self.handle.spawn_blocking(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    registry.load_work(&handle, item)
+                    registry.build_work(item)
                 }))
                 .unwrap_or_else(|_| LoadResult::Failed {
                     mount,
@@ -501,8 +556,57 @@ impl<'a> ReconcilePass<'a> {
 
     fn record_load(&mut self, result: LoadResult) {
         match result {
-            LoadResult::Added { mount } => self.outcome.added.push(mount),
-            LoadResult::Updated { mount } => self.outcome.updated.push(mount),
+            LoadResult::Ready {
+                mount,
+                wasm_path,
+                fingerprint,
+                running,
+                reason,
+                duration,
+                built,
+            } => {
+                let apply_started = Instant::now();
+                let applied = if running {
+                    self.registry.replace_mount(built, self.handle)
+                } else {
+                    self.registry
+                        .publish_new_mount(built, self.handle)
+                        .map(|_| ())
+                };
+                match applied {
+                    Ok(()) => {
+                        self.registry
+                            .fingerprints
+                            .write()
+                            .insert(mount.clone(), fingerprint);
+                        if running {
+                            info!(
+                                mount = mount.as_str(),
+                                provider = %wasm_path.display(),
+                                reason,
+                                duration_ms = (duration + apply_started.elapsed()).as_millis(),
+                                "reconcile updated mount"
+                            );
+                            self.outcome.updated.push(mount);
+                        } else {
+                            info!(
+                                mount = mount.as_str(),
+                                provider = %wasm_path.display(),
+                                reason,
+                                duration_ms = (duration + apply_started.elapsed()).as_millis(),
+                                "reconcile added mount"
+                            );
+                            self.outcome.added.push(mount);
+                        }
+                    },
+                    Err(error) => {
+                        self.outcome.failed.push(MountFailure {
+                            mount,
+                            reason: error.to_string(),
+                        });
+                    },
+                }
+            },
             LoadResult::Failed { mount, reason } => {
                 self.outcome.failed.push(MountFailure { mount, reason });
             },
@@ -561,12 +665,28 @@ struct LoadWork {
     reason: &'static str,
 }
 
+struct BuiltMount {
+    mount: String,
+    is_root: bool,
+    runtime: Arc<Runtime>,
+}
+
 /// The outcome of loading one [`LoadWork`], folded back into the reconcile
 /// outcome by `record_load`.
 enum LoadResult {
-    Added { mount: String },
-    Updated { mount: String },
-    Failed { mount: String, reason: String },
+    Ready {
+        mount: String,
+        wasm_path: PathBuf,
+        fingerprint: u64,
+        running: bool,
+        reason: &'static str,
+        duration: Duration,
+        built: BuiltMount,
+    },
+    Failed {
+        mount: String,
+        reason: String,
+    },
 }
 
 /// One mount that did not converge during [`ProviderRegistry::reconcile`].
@@ -828,5 +948,96 @@ mod tests {
             "failure should report the missing artifact, got: {}",
             failure.reason
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_keeps_running_mount_when_replacement_fails() {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+
+        let base_wasm = test_provider_wasm_path();
+        assert!(
+            base_wasm.exists(),
+            "test provider missing at {}. Run `just providers-build` first.",
+            base_wasm.display()
+        );
+        let archive_tool_wasm = archive_tool_wasm_path();
+        assert!(
+            archive_tool_wasm.exists(),
+            "archive tool missing at {}. Run `just providers-build` first.",
+            archive_tool_wasm.display()
+        );
+        std::fs::copy(
+            &archive_tool_wasm,
+            providers_dir.path().join(ARCHIVE_TOOL_WASM),
+        )
+        .expect("copy archive tool");
+
+        let mounts_dir = paths.config_dir.join("mounts");
+        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
+        let valid_spec = pin_spec(
+            providers_dir.path(),
+            &base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let spec_path = mounts_dir.join("test.json");
+        std::fs::write(
+            &spec_path,
+            serde_json::to_vec_pretty(&valid_spec).expect("serialize valid spec"),
+        )
+        .expect("write valid spec");
+
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let registry = Arc::new(
+            ProviderRegistry::new(
+                HostContext::new(
+                    cache_dir.path(),
+                    &paths.config_dir,
+                    providers_dir.path(),
+                    &paths.credentials_file,
+                ),
+                cloner,
+            )
+            .expect("registry init"),
+        );
+
+        let first = registry.reconcile(
+            &tokio::runtime::Handle::current(),
+            MaterializationMode::Docker,
+        );
+        assert_eq!(first.added, ["test"], "first reconcile: {first:?}");
+        let running = registry.get("test").expect("mount should be running");
+
+        let missing_id = "b".repeat(64);
+        std::fs::write(
+            &spec_path,
+            format!(
+                r#"{{
+                "provider": {{ "id": "{missing_id}", "meta": {{ "name": "test-provider" }} }},
+                "mount": "test",
+                "capabilities": {{ "domains": ["httpbin.org"] }},
+                "config": {{}}
+            }}"#
+            ),
+        )
+        .expect("write broken replacement spec");
+
+        let second = registry.reconcile(
+            &tokio::runtime::Handle::current(),
+            MaterializationMode::Docker,
+        );
+        assert!(second.updated.is_empty());
+        assert!(second.failed.iter().any(|failure| failure.mount == "test"));
+        let still_running = registry
+            .get("test")
+            .expect("old mount should remain running");
+        assert!(Arc::ptr_eq(&running, &still_running));
     }
 }
