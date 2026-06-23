@@ -709,7 +709,7 @@ impl<S> RoutedEntry for TreeRefEntry<S> {
     }
 }
 
-impl<S> RoutedEntry for super::object::ObjectEntry<S> {
+impl<S> RoutedEntry for super::object::ObjectRouteEntry<S> {
     fn route_pattern(&self) -> &Pattern {
         &self.pattern
     }
@@ -736,7 +736,7 @@ impl<S> RoutedEntry for &FileEntry<S> {
     }
 }
 
-impl<S> RoutedEntry for &super::object::ObjectEntry<S> {
+impl<S> RoutedEntry for &super::object::ObjectRouteEntry<S> {
     fn route_pattern(&self) -> &Pattern {
         &self.pattern
     }

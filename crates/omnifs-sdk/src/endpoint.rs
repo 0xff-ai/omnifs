@@ -399,7 +399,7 @@ fn load_from_response<T>(
                 bytes: resp.body().clone(),
                 validator: version,
             };
-            Ok(Load::fresh_from(value, canonical))
+            Ok(Load::fresh(value, canonical))
         },
     }
 }

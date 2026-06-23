@@ -6,6 +6,7 @@ use crate::error::{ProviderError, Result};
 use crate::handler::OpenedFile;
 use crate::projection::FileSource;
 
+use super::super::object::ObjectReadTarget;
 use super::super::pattern::parse_provider_path;
 use super::super::register::Router;
 use super::route_shape::ReadRoute;
@@ -43,8 +44,24 @@ impl<S> Router<S> {
                 let proj = (route.entry.handler)(cx.clone(), route.captures).await?;
                 proj.into_browse_content().map(ReadOutcome::Found)
             },
-            Some(ReadRoute::Object { route, target }) => {
-                (route.entry.read)(cx, route.captures, target, cached, path.to_string()).await
+            Some(ReadRoute::Object { route, target }) => match target {
+                ObjectReadTarget::Direct(name) => {
+                    let proj = route.entry.read_face(cx, &name, route.captures).await?;
+                    proj.into_browse_content().map(ReadOutcome::Found)
+                },
+                ObjectReadTarget::Stream(_) => Err(ProviderError::invalid_input(format!(
+                    "stream face at {path:?} must be read through open-file, not read-file"
+                ))),
+                canonical_target => {
+                    (route.entry.read)(
+                        cx,
+                        route.captures,
+                        canonical_target,
+                        cached,
+                        path.to_string(),
+                    )
+                    .await
+                },
             },
             None => Err(ProviderError::not_found(format!("path not found: {path}"))),
         }
@@ -71,6 +88,17 @@ impl<S> Router<S> {
                     "open_file requires a ranged projection; path {path:?} returned a non-ranged source"
                 ))),
             };
+        }
+
+        // A stream face under an object anchor opens here.
+        if let Some((parent_abs, leaf)) = abs.parent_and_name()
+            && let Some(route) = shape.object_route(&parent_abs)
+            && matches!(
+                route.entry.read_target_for_leaf(leaf),
+                Some(ObjectReadTarget::Stream(_))
+            )
+        {
+            return route.entry.open_face(cx, leaf, route.captures).await;
         }
 
         Err(ProviderError::not_found(format!("path not found: {path}")))

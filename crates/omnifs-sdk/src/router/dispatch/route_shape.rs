@@ -10,11 +10,10 @@ use crate::captures::Captures;
 use crate::error::Result;
 use crate::file_attrs::{FileProj, ReadMode, Size};
 use crate::projection::{DirOutcome, DirProjection};
-use omnifs_core::ContentType;
 use omnifs_core::path::Path;
 
 use super::super::handlers::{DirEntry, FileEntry, TreeRefEntry};
-use super::super::object::{ObjectEntry, ObjectReadTarget, SourceLeafAttrs};
+use super::super::object::{ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs};
 use super::super::pattern::best_match;
 use super::super::projection::merge_entries;
 use super::super::register::Router;
@@ -42,7 +41,7 @@ impl<'a, E> RouteMatch<'a, E> {
 pub(super) enum ReadRoute<'a, S> {
     File(RouteMatch<'a, FileEntry<S>>),
     Object {
-        route: RouteMatch<'a, ObjectEntry<S>>,
+        route: RouteMatch<'a, ObjectRouteEntry<S>>,
         target: ObjectReadTarget,
     },
 }
@@ -77,31 +76,31 @@ impl<S> Shape<'_, S> {
         route_match(self.router.files.iter(), abs)
     }
 
-    pub(super) fn object_route(&self, abs: &Path) -> Option<RouteMatch<'_, ObjectEntry<S>>> {
+    pub(super) fn object_route(&self, abs: &Path) -> Option<RouteMatch<'_, ObjectRouteEntry<S>>> {
         route_match(self.router.objects.iter(), abs)
     }
 
-    /// Resolve a read path: file route first; then a leaf one level under
-    /// an object anchor, where the leaf name resolves to a representation
-    /// (`stem.ext` against the render table) before a projected field.
+    /// Resolve a read path, in order:
+    ///
+    /// 1. a file route (`r.file`);
+    /// 2. a file-object anchor (the abs path itself is the single-file object);
+    /// 3. a leaf one level under a dir-object anchor, where the leaf resolves to
+    ///    a canonical / representation / derived / direct / stream face.
     pub(super) fn read_route(&self, abs: &Path) -> Option<ReadRoute<'_, S>> {
         if let Some(route) = self.file_route(abs) {
             return Some(ReadRoute::File(route));
         }
 
+        if let Some(route) = self.object_route(abs)
+            && let Some(target) = route.entry.file_anchor_target()
+        {
+            return Some(ReadRoute::Object { route, target });
+        }
+
         let (parent_abs, leaf) = abs.parent_and_name()?;
         let route = self.object_route(&parent_abs)?;
-
-        if let Some(ct) = route.entry.representation_ct_for_leaf(leaf) {
-            return Some(ReadRoute::Object {
-                route,
-                target: ObjectReadTarget::Representation(ct),
-            });
-        }
-        route.entry.has_file_leaf(leaf).then(|| ReadRoute::Object {
-            route,
-            target: ObjectReadTarget::Projected(leaf.to_string()),
-        })
+        let target = route.entry.read_target_for_leaf(leaf)?;
+        Some(ReadRoute::Object { route, target })
     }
 
     /// A directory answer synthesized from the route table: no handler runs.
@@ -270,14 +269,13 @@ impl<S> Shape<'_, S> {
     /// render) and lookups remain placeholder until a listing or read fills in.
     pub(super) fn object_dir_listing(
         &self,
-        entry: &ObjectEntry<S>,
+        entry: &ObjectRouteEntry<S>,
         anchor_abs: &Path,
         source: Option<&SourceLeafAttrs>,
     ) -> Listing {
         let static_entries = self.static_entries_for_parent(anchor_abs);
-        let source_leaf_name = format!("{}.{}", entry.source_stem, entry.source_ext);
         let object_entries = entry.leaves.iter().map(|leaf| {
-            if leaf.name == source_leaf_name
+            if leaf.is_canonical
                 && let Some(source) = source
             {
                 BrowseEntry::file(&leaf.name, source_leaf_shape(source))
@@ -293,29 +291,6 @@ impl<S> Shape<'_, S> {
             entries.insert(entry.name().to_string(), entry);
         }
         Listing::complete(entries.into_values())
-    }
-}
-
-impl<S> ObjectEntry<S> {
-    fn has_file_leaf(&self, name: &str) -> bool {
-        self.leaves.iter().any(|leaf| leaf.name == name)
-    }
-
-    /// Map a `stem.ext` leaf name back to its representation content type:
-    /// the canonical source first, then each registered render by its
-    /// extension.
-    fn representation_ct_for_leaf(&self, leaf: &str) -> Option<ContentType> {
-        let source = format!("{}.{}", self.source_stem, self.source_ext);
-        if leaf == source {
-            return Some(self.render_table.source_ct);
-        }
-        for (ct, _) in &self.render_table.renders {
-            let ext = ct.extension().unwrap_or("raw");
-            if leaf == format!("{}.{}", self.source_stem, ext) {
-                return Some(*ct);
-            }
-        }
-        None
     }
 }
 

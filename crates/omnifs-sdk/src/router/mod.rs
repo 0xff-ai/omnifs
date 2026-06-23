@@ -17,7 +17,7 @@
 //! - [`Router::object`] / [`Router::attach`]: bind a typed
 //!   [`crate::object::Object`] whose [`crate::object::Key`] both loads and
 //!   identifies the canonical resource; representations and field leaves are
-//!   declared in a [`DirObjectBlock`].
+//!   declared in a [`ObjectBlock`].
 //!
 //! Route templates are absolute paths built from literal segments,
 //! `{capture}` segments, prefix captures (`@{resolver}`, `v{version}`), and
@@ -44,6 +44,7 @@ mod object;
 pub(crate) mod pattern;
 mod projection;
 mod register;
+mod snapshot;
 
 #[cfg(test)]
 mod tests;
@@ -52,5 +53,12 @@ pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
     WithSyncKeyMethod,
 };
-pub use object::{DirObjectBlock, ObjectHandle, object};
+pub use object::{ChildTopology, DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
+pub use snapshot::RouteSnapshot;
+
+/// The block builder for a file-shaped object anchor
+/// ([`Router::file_object`]). The anchor projects as a single file (one
+/// canonical/representation/direct/blob face), not a directory; the builder
+/// surface is the same as [`ObjectBlock`].
+pub type FileObjectBlock<O> = ObjectBlock<O>;

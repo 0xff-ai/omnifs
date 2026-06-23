@@ -1,23 +1,27 @@
-//! Attribute macro generating `Object` metadata for an object struct.
+//! Attribute macro generating the complete `Object` impl for an object struct.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Ident, ItemStruct, LitStr, Path, Token};
+use syn::{Ident, ItemStruct, LitStr, Path, Token, Type};
 
 pub(crate) struct ObjectArgs {
     pub kind: LitStr,
     pub key: Path,
+    pub state: Option<Type>,
     pub canonical: Option<Ident>,
-    pub parse: Option<Path>,
+    pub decode: Option<Path>,
+    pub load: Option<Path>,
 }
 
 impl Parse for ObjectArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut kind: Option<LitStr> = None;
         let mut object_key: Option<Path> = None;
+        let mut state: Option<Type> = None;
         let mut canonical: Option<Ident> = None;
-        let mut parse: Option<Path> = None;
+        let mut decode: Option<Path> = None;
+        let mut load: Option<Path> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -36,6 +40,13 @@ impl Parse for ObjectArgs {
                     let _: Token![=] = input.parse()?;
                     object_key = Some(input.parse()?);
                 },
+                "state" => {
+                    if state.is_some() {
+                        return Err(syn::Error::new(key.span(), "duplicate `state` argument"));
+                    }
+                    let _: Token![=] = input.parse()?;
+                    state = Some(input.parse()?);
+                },
                 "canonical" => {
                     if canonical.is_some() {
                         return Err(syn::Error::new(
@@ -46,17 +57,24 @@ impl Parse for ObjectArgs {
                     let _: Token![=] = input.parse()?;
                     canonical = Some(input.parse()?);
                 },
-                "parse" => {
-                    if parse.is_some() {
-                        return Err(syn::Error::new(key.span(), "duplicate `parse` argument"));
+                "decode" => {
+                    if decode.is_some() {
+                        return Err(syn::Error::new(key.span(), "duplicate `decode` argument"));
                     }
                     let _: Token![=] = input.parse()?;
-                    parse = Some(input.parse()?);
+                    decode = Some(input.parse()?);
+                },
+                "load" => {
+                    if load.is_some() {
+                        return Err(syn::Error::new(key.span(), "duplicate `load` argument"));
+                    }
+                    let _: Token![=] = input.parse()?;
+                    load = Some(input.parse()?);
                 },
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, and `parse = path::to::function`",
+                        "supported object arguments are `kind = \"...\"`, `key = Type`, `state = Type`, `canonical = Ident`, `decode = path::to::function`, and `load = path::to::function`",
                     ));
                 },
             }
@@ -81,13 +99,14 @@ impl Parse for ObjectArgs {
         Ok(Self {
             kind,
             key: object_key,
+            state,
             canonical,
-            parse,
+            decode,
+            load,
         })
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Result<TokenStream2> {
     let struct_ident = &item.ident;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
@@ -98,36 +117,56 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
         .canonical
         .clone()
         .unwrap_or_else(|| Ident::new("Json", proc_macro2::Span::call_site()));
-    if args.parse.is_none() && canonical_ident != "Json" {
+    let is_json = canonical_ident == "Json";
+
+    // `decode` defaults to JSON decode for `Json` canonical (the type must be
+    // `DeserializeOwned`); any other canonical requires an explicit `decode`.
+    let decode_body = if let Some(decode) = &args.decode {
+        quote! { #decode(bytes) }
+    } else if is_json {
+        quote! { omnifs_sdk::object::decode_json(bytes) }
+    } else {
         return Err(syn::Error::new(
             canonical_ident.span(),
-            "non-JSON canonical content requires `parse = path::to::function`",
+            "non-JSON canonical content requires `decode = path::to::function`",
         ));
-    }
+    };
 
-    let parse_tokens = args.parse.as_ref().map(|parse| {
-        quote! {
-            fn parse_canonical(bytes: &[u8]) -> omnifs_sdk::error::Result<Self> {
-                #parse(bytes)
-            }
-        }
-    });
+    // `state` defaults to `()`.
+    let state_type: Type = args.state.clone().unwrap_or_else(|| syn::parse_quote!(()));
+
+    // `load` forwards to a provider-written inherent async fn; defaults to
+    // `Self::load`.
+    let load_path: TokenStream2 = match &args.load {
+        Some(path) => quote! { #path },
+        None => quote! { Self::load },
+    };
 
     Ok(quote! {
         #item
 
         impl #impl_generics omnifs_sdk::object::Object for #struct_ident #ty_generics #where_clause {
             type Key = #object_key;
+            type State = #state_type;
+            type Canonical = omnifs_sdk::repr::#canonical_ident;
+
+            fn load(
+                cx: &omnifs_sdk::Cx<Self::State>,
+                key: &Self::Key,
+                since: ::core::option::Option<omnifs_sdk::object::Validator>,
+            ) -> impl ::core::future::Future<
+                Output = omnifs_sdk::error::Result<omnifs_sdk::object::Load<Self>>,
+            > {
+                #load_path(cx, key, since)
+            }
+
+            fn decode(bytes: &[u8]) -> omnifs_sdk::error::Result<Self> {
+                #decode_body
+            }
 
             fn kind() -> omnifs_sdk::object::ObjectKind {
                 omnifs_sdk::object::ObjectKind(#kind_val)
             }
-
-            fn canonical_content_type() -> omnifs_sdk::ContentType {
-                omnifs_sdk::ContentType::#canonical_ident
-            }
-
-            #parse_tokens
         }
     })
 }

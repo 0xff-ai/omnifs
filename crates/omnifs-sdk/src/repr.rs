@@ -75,7 +75,7 @@ where
 /// A value that can render itself into format `F`.
 ///
 /// Rendering is infallible by design: parse failures belong to
-/// `Object::parse_canonical`, and by the time `represent` runs the value
+/// `Object::decode`, and by the time `represent` runs the value
 /// is already a well-formed `O`. Keep it a pure function of `self`; the
 /// output may be served from cache long after the render ran.
 ///
