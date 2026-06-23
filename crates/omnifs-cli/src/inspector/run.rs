@@ -72,26 +72,48 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
 }
 
 pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
+    use super::source::SourceMessage;
+
+    match source {
+        SourceKind::Replay(path) => {
+            for line in super::source::replay_file_blocking(&path)? {
+                emit_plain_line(&line);
+            }
+        },
+        SourceKind::Socket { addr, record } => {
+            anstream::eprintln!("omnifs inspect: connecting to {addr}...");
+            let event_source = EventSource::spawn(SourceKind::Socket {
+                addr: addr.clone(),
+                record,
+            });
+            while let Some(message) = event_source.recv() {
+                match message {
+                    SourceMessage::Line(line) => emit_plain_line(&line),
+                    SourceMessage::Connected => {
+                        anstream::eprintln!("omnifs inspect: connected to {addr}");
+                    },
+                    SourceMessage::Disconnected => {
+                        anstream::eprintln!(
+                            "omnifs inspect: disconnected from {addr}, reconnecting..."
+                        );
+                    },
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+fn emit_plain_line(line: &str) {
     use super::format_record;
     use omnifs_inspector::parse_record_line;
 
-    let lines: Vec<String> = match source {
-        SourceKind::Replay(path) => super::source::replay_file_blocking(&path)?,
-        SourceKind::Socket { .. } => {
-            anyhow::bail!(
-                "plain mode against an inspector socket uses blocking attach in the inspect command"
-            );
-        },
-    };
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match parse_record_line(trimmed) {
-            Ok(record) => anstream::println!("{}", format_record(&record)),
-            Err(_) => anstream::println!("{trimmed}"),
-        }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
     }
-    Ok(())
+    match parse_record_line(trimmed) {
+        Ok(record) => anstream::println!("{}", format_record(&record)),
+        Err(_) => anstream::println!("{trimmed}"),
+    }
 }

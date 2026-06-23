@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use glob::glob;
 
 /// A dev mount discovered from `providers/<dir>/dev/mount.json`, before its
 /// provider name is pinned to a content-addressed reference.
@@ -21,15 +20,23 @@ pub struct DiscoveredMount {
     pub raw: serde_json::Value,
 }
 
-/// Glob `providers/*/dev/mount.json` from the workspace root, keyed by mount name.
+/// Read `providers/*/dev/mount.json` from the workspace root, keyed by mount name.
 pub fn discover(workspace: &Path) -> Result<BTreeMap<String, DiscoveredMount>> {
-    let pattern = workspace
-        .join("providers/*/dev/mount.json")
-        .to_string_lossy()
-        .into_owned();
+    let providers = workspace.join("providers");
     let mut mounts = BTreeMap::new();
-    for entry in glob(&pattern).with_context(|| format!("glob dev mounts `{pattern}`"))? {
-        let path = entry.with_context(|| format!("glob dev mounts `{pattern}`"))?;
+    let entries = match std::fs::read_dir(&providers) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(mounts),
+        Err(error) => return Err(error).with_context(|| format!("scan {}", providers.display())),
+    };
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("scan {}", providers.display()))?
+            .path()
+            .join("dev/mount.json");
+        if !path.is_file() {
+            continue;
+        }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("read dev mount {}", path.display()))?;
         let raw: serde_json::Value = serde_json::from_str(&contents)

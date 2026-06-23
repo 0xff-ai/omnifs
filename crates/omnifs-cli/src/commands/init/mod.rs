@@ -60,16 +60,16 @@ pub struct InitArgs {
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
-    /// Print the provider capability table at the start of the flow.
-    /// Setup-driven runs suppress this because the picker already showed it.
-    #[arg(skip = true)]
-    pub show_capabilities: bool,
 }
 
 impl InitArgs {
-    #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> anyhow::Result<()> {
         let workspace = Workspace::resolve()?;
+        self.run_in_workspace(&workspace).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
         let paths = workspace.layout();
         let interactive = !self.no_input;
         let catalog = workspace.catalog();
@@ -101,7 +101,7 @@ impl InitArgs {
                 paths.providers_dir.display()
             ))?;
         let default_auth = AuthSelection::from_provider_default(&template.manifest);
-        if interactive && self.show_capabilities {
+        if interactive {
             print_capability_justifications(&template.manifest);
         }
         if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
@@ -146,7 +146,7 @@ impl InitArgs {
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
         let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
         mount_file.write_to(&mount_path)?;
-        let spec = mount_file.into_spec()?;
+        let spec = mount_file.into_spec();
         anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
 
         if let Some(auth) = effective_auth.as_ref() {
@@ -162,7 +162,7 @@ impl InitArgs {
             } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
                 auth::login_with_workspace(
-                    &workspace,
+                    workspace,
                     mount_name.as_str(),
                     auth.account.as_deref(),
                     self.no_browser,

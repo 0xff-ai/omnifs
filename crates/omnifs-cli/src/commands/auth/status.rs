@@ -2,11 +2,11 @@
 
 use std::fmt::Write as _;
 
-use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
+use omnifs_creds::{CredentialStore, Refreshability};
 
-use super::shared::{format_rfc3339, format_scopes};
+use super::shared::format_scopes;
 use crate::auth::explain::AuthMode;
-use crate::auth::{MountAuth, credential_notices};
+use crate::auth::{AuthReadiness, AuthReadinessJson, MountAuth};
 use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 use omnifs_home::WorkspaceLayout;
@@ -25,17 +25,7 @@ pub(super) fn status(
         return Ok(());
     }
     for row in rows {
-        match row.text_detail() {
-            Some(detail) => anstream::println!("{}: {detail}", row.mount),
-            None => {
-                anstream::println!(
-                    "{}: missing credential; run `omnifs auth login {}` (`omnifs auth explain {}` for options)",
-                    row.mount,
-                    row.mount,
-                    row.mount
-                );
-            },
-        }
+        anstream::println!("{}: {}", row.mount, row.text_detail());
         if let Some(line) = row.available_line() {
             anstream::println!("  {line}");
         }
@@ -51,11 +41,7 @@ pub(super) struct AuthStatusJson {
 #[derive(serde::Serialize)]
 struct AuthEntryJson {
     key: String,
-    kind: String,
-    scopes: Vec<String>,
-    expires_at: Option<String>,
-    refreshability: Refreshability,
-    notices: Vec<String>,
+    auth: AuthReadinessJson,
     available_schemes: Vec<String>,
 }
 
@@ -67,7 +53,7 @@ pub(super) fn status_json(
     let entries = AuthStatus::new(catalog, store)
         .load(mounts)?
         .into_iter()
-        .filter_map(AuthStatusRow::into_json)
+        .map(AuthStatusRow::into_json)
         .collect();
     let payload = AuthStatusJson { entries };
     anstream::println!("{}", serde_json::to_string(&payload)?);
@@ -88,14 +74,13 @@ impl<'a> AuthStatus<'a> {
         let auth_mounts = self
             .catalog
             .load_all_mount_auth_tolerating_manifest_errors(mounts)?;
-        auth_mounts
+        Ok(auth_mounts
             .iter()
             .map(|mount| self.row_for(mount))
-            .collect()
+            .collect())
     }
 
-    fn row_for(&self, mount: &MountAuth) -> anyhow::Result<AuthStatusRow> {
-        let entry = mount.status_entry(self.store)?;
+    fn row_for(&self, mount: &MountAuth) -> AuthStatusRow {
         let available = self
             .catalog
             .provider_auth_manifest_for(mount.config())
@@ -103,11 +88,11 @@ impl<'a> AuthStatus<'a> {
             .flatten()
             .map(|auth| scheme_options(&auth))
             .unwrap_or_default();
-        Ok(AuthStatusRow {
+        AuthStatusRow {
             mount: mount.config().spec.mount.clone(),
-            entry,
+            readiness: mount.readiness(self.store),
             available,
-        })
+        }
     }
 }
 
@@ -132,15 +117,11 @@ fn scheme_options(auth: &ProviderAuthManifest) -> Vec<SchemeOption> {
 
 pub(super) struct AuthStatusRow {
     mount: String,
-    entry: Option<CredentialEntry>,
+    readiness: AuthReadiness,
     available: Vec<SchemeOption>,
 }
 
 impl AuthStatusRow {
-    fn reauth_command(&self) -> String {
-        format!("omnifs auth login {}", self.mount)
-    }
-
     fn available_line(&self) -> Option<String> {
         if self.available.is_empty() {
             return None;
@@ -160,40 +141,50 @@ impl AuthStatusRow {
         Some(format!("schemes: {list}"))
     }
 
-    fn text_detail(&self) -> Option<String> {
-        let entry = self.entry.as_ref()?;
-        let mut detail = format!("{} ready", entry.kind());
-        if !entry.scopes().is_empty() {
-            let _ = write!(detail, "; scopes: {}", format_scopes(entry.scopes()));
+    fn text_detail(&self) -> String {
+        match &self.readiness {
+            AuthReadiness::None => "no auth required".to_owned(),
+            AuthReadiness::ConfiguredExternally { source } => {
+                format!("external credential ({source})")
+            },
+            AuthReadiness::Missing { .. } => {
+                format!(
+                    "missing credential; run `omnifs auth login {}` (`omnifs auth explain {}` for options)",
+                    self.mount, self.mount
+                )
+            },
+            AuthReadiness::Error(error) => format!("error: {error}"),
+            AuthReadiness::Ready {
+                kind,
+                scopes,
+                expires_at,
+                refreshability,
+                notices,
+            } => {
+                let mut detail = format!("{kind} ready");
+                if !scopes.is_empty() {
+                    let _ = write!(detail, "; scopes: {}", format_scopes(scopes));
+                }
+                if let Some(expires_at) = expires_at {
+                    let _ = write!(detail, "; expires: {expires_at}");
+                }
+                if *refreshability != Refreshability::NotApplicable {
+                    let _ = write!(detail, "; refresh: {refreshability}");
+                }
+                for notice in notices {
+                    let _ = write!(detail, "; notice: {notice}");
+                }
+                detail
+            },
         }
-        if let Some(expires_at) = entry.expires_at() {
-            let _ = write!(detail, "; expires: {}", format_rfc3339(expires_at));
-        }
-        let refreshability = entry.refreshability();
-        if refreshability != Refreshability::NotApplicable {
-            let _ = write!(detail, "; refresh: {refreshability}");
-        }
-        for notice in credential_notices(entry, Some(&self.reauth_command())) {
-            let _ = write!(detail, "; notice: {notice}");
-        }
-        Some(detail)
     }
 
-    fn into_json(self) -> Option<AuthEntryJson> {
-        let command = self.reauth_command();
+    fn into_json(self) -> AuthEntryJson {
         let available_schemes = self.available.iter().map(|opt| opt.key.clone()).collect();
-        let entry = self.entry?;
-        let expires_at = entry.expires_at().map(format_rfc3339);
-        let refreshability = entry.refreshability();
-        let notices = credential_notices(&entry, Some(&command));
-        Some(AuthEntryJson {
+        AuthEntryJson {
             key: self.mount,
-            kind: entry.kind().to_string(),
-            scopes: entry.into_scopes(),
-            expires_at,
-            refreshability,
-            notices,
+            auth: AuthReadinessJson::from(&self.readiness),
             available_schemes,
-        })
+        }
     }
 }

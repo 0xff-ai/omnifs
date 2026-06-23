@@ -50,7 +50,7 @@ A `Paths::display` helper home-relativizes (`~/.omnifs/mounts`) for every user-v
 
 ### Config file
 
-A global `config.toml` under `config_dir` supplies defaults for the runtime image and container name (under a `[system]` section, with legacy top-level `image`/`container_name` still accepted), inline mount specs, and `up` toggles. Precedence is flag > file > built-in default. Missing file is not an error; malformed file is.
+A global `config.toml` under `config_dir` supplies defaults for the runtime image and container name under a `[system]` section, inline mount specs, and `up` toggles. Precedence is flag > file > built-in default. Missing file is not an error; malformed file is.
 
 `Paths` locates `config.toml`; the loaded config no longer changes the directory layout.
 

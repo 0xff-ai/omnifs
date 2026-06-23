@@ -20,44 +20,22 @@
 
 #![cfg(not(target_os = "wasi"))]
 
+mod common;
+
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-/// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
-/// mounts. Below the OS ephemeral range, so it never collides with a daemon's
-/// `free_port()`.
-const NFS_LOCK_PORT: u16 = 48761;
-
-/// Acquire the cross-process NFS serialization lock, returning the bound socket
-/// as the guard. macOS deadlocks under concurrent loopback mounts, and nextest
-/// runs each integration-test binary as its own process, so an in-process mutex
-/// cannot serialize across binaries. Binding a fixed port does: a second binder
-/// fails until the holder drops the socket, and the OS frees it the instant the
-/// holder exits, so even a killed test never wedges the next one.
-fn nfs_serial_lock() -> TcpListener {
-    loop {
-        match TcpListener::bind(("127.0.0.1", NFS_LOCK_PORT)) {
-            Ok(listener) => return listener,
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
-}
+use common::{
+    copy_release_wasm_into, free_port, install_test_provider, live_acceptance_enabled,
+    nfs_serial_lock, omnifs_bin, platform_can_mount, release_wasm_dir, test_mount_spec,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// No-auth mount spec for the test provider, pinning `id`. Serves
-/// `test/hello/message`.
-fn test_mount_spec(id: &omnifs_core::ProviderId) -> String {
-    format!(
-        r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
-    )
-}
 
 /// A broken spec: pins a content id with no installed by-hash artifact.
 fn broken_mount_spec() -> String {
@@ -65,75 +43,6 @@ fn broken_mount_spec() -> String {
     format!(
         r#"{{"provider":{{"id":"{bogus}","meta":{{"name":"broken"}}}},"mount":"broken","capabilities":{{"domains":[]}}}}"#
     )
-}
-
-/// Install the test provider into the by-hash store under `providers_dir` and
-/// return its content id.
-fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
-    let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
-        .expect("read test provider wasm");
-    let id = omnifs_core::ProviderId::from_wasm_bytes(&bytes);
-    let store = omnifs_mount::mounts::ProviderStore::new(providers_dir);
-    store.put_if_absent(&id, &bytes).expect("put test provider");
-    store
-        .install(
-            id,
-            omnifs_core::ProviderMeta {
-                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
-                version: None,
-            },
-            "test_provider.wasm".into(),
-        )
-        .expect("install test provider");
-    id
-}
-
-/// `target/wasm32-wasip2/release`, where provider wasm lives.
-fn release_wasm_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("target/wasm32-wasip2/release")
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
-/// Live-mount acceptance tests are opt-in: they spawn a real daemon and mount a
-/// real filesystem, which is slow and noisy on a developer machine (a stray
-/// macOS NFS mount triggers "server connection interrupted" alerts). A plain
-/// `cargo nextest` skips them; set `OMNIFS_ACCEPTANCE_LIVE=1` to run them
-/// (serialized across binaries via the `serial-nfs` nextest group).
-fn live_acceptance_enabled() -> bool {
-    std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_some()
-}
-
-fn omnifs_bin() -> PathBuf {
-    std::env::var_os("NEXTEST_BIN_EXE_omnifs")
-        .or_else(|| std::env::var_os("CARGO_BIN_EXE_omnifs"))
-        .map_or_else(
-            || PathBuf::from(env!("CARGO_BIN_EXE_omnifs")),
-            PathBuf::from,
-        )
-}
-
-/// Return `true` if the platform can serve a mount. On Linux, FUSE requires
-/// `/dev/fuse`. On macOS, NFS loopback is always available without root.
-fn platform_can_mount() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        Path::new("/dev/fuse").exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
 }
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
@@ -159,18 +68,7 @@ impl Fixture {
         let providers_dir = home.path().join("providers");
         std::fs::create_dir_all(&providers_dir).expect("providers dir");
 
-        let wasm_dir = release_wasm_dir();
-        // Copy every built wasm so the archive tool and test provider are found.
-        for entry in std::fs::read_dir(&wasm_dir)
-            .expect("read release wasm dir")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "wasm") {
-                std::fs::copy(&path, providers_dir.join(path.file_name().unwrap()))
-                    .expect("copy wasm");
-            }
-        }
+        copy_release_wasm_into(&providers_dir);
         // The daemon serves by content id, so the test provider must be in the
         // by-hash store (the flat copy above only satisfies the archive tool).
         let test_provider_id = install_test_provider(&providers_dir);
@@ -629,7 +527,7 @@ fn scenario_7_dead_daemon_record_fallback() {
     // not actually mounted. No control listener answers the fixture's port, so
     // `down` takes the record-fallback path.
     let record = format!(
-        r#"{{"version":1,"backend":"native","daemon_pid":2000000,"control_addr":"{}","mount_point":"{}","started_at":"2026-01-01T00:00:00Z"}}"#,
+        r#"{{"version":1,"backend":"native","daemon_pid":2000000,"control_addr":"{}","mount_point":"{}"}}"#,
         fixture.daemon_addr,
         fixture.mount_point.display(),
     );

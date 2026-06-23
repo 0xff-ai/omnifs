@@ -134,7 +134,7 @@ The mount-level contract system should be removed, not renamed:
 - `omnifs_mount::contract`
 - `Spec::stamp_contract`
 - `Catalog::live_contract_for`
-- `omnifs_cli::contract_preflight`
+- CLI contract preflight code
 - `MaterializeError::ContractMismatch`
 
 The daemon backstop changes shape. It should fail when the referenced artifact

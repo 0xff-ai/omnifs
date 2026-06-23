@@ -13,10 +13,6 @@ keywords = ["omnifs", "fuse", "filesystem", "wasm", "cli"]
 name = "omnifs"
 path = "src/main.rs"
 
-[lib]
-name = "omnifs_cli"
-path = "src/lib.rs"
-
 [dependencies]
 omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
@@ -30,7 +26,6 @@ omnifs-auth = { workspace = true }
 omnifs-inspector = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-fixture = { workspace = true }
-glob = "0.3"
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }
@@ -42,12 +37,10 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
-strsim = "0.11"
 secrecy = "0.10"
 anstream = "1"
 owo-colors = { version = "4", features = ["supports-colors"] }
 indicatif = "0.17"
-comfy-table = "7"
 inquire = "0.7"
 arboard = { version = "3", default-features = false }
 time = { workspace = true }

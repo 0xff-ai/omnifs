@@ -3,8 +3,8 @@ use crate::auth::AuthSelection;
 use anyhow::Context;
 use omnifs_caps::Grants;
 use omnifs_core::{AuthKind, MountName, ProviderRef};
-use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
+use omnifs_mount::{Auth, OAuth, ProviderConfig, StaticToken};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
@@ -44,9 +44,31 @@ impl<'a> MountFile<'a> {
         Ok(())
     }
 
-    pub(super) fn into_spec(self) -> anyhow::Result<Spec> {
-        let value = serde_json::to_value(self.serializable()).context("serialize mount config")?;
-        serde_json::from_value(value).context("deserialize generated mount config")
+    pub(super) fn into_spec(self) -> Spec {
+        Spec {
+            provider: self.reference.clone(),
+            mount: self.mount_name.to_string(),
+            root_mount: false,
+            auth: self.auth.map_or_else(Vec::new, |auth| {
+                let account = auth.account.clone();
+                let scheme = auth.scheme.clone();
+                match auth.auth_type {
+                    AuthKind::StaticToken => vec![Auth::StaticToken(StaticToken {
+                        scheme,
+                        account,
+                        ..StaticToken::default()
+                    })],
+                    AuthKind::OAuth => vec![Auth::OAuth(OAuth {
+                        scheme,
+                        account,
+                        scopes: (!self.scopes.is_empty()).then(|| self.scopes.to_vec()),
+                        ..OAuth::default()
+                    })],
+                }
+            }),
+            capabilities: self.generated.capabilities,
+            config_raw: self.generated.config.map(ProviderConfig::from_value),
+        }
     }
 
     fn serializable(&self) -> SerializableMountFile<'_> {

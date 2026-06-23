@@ -397,7 +397,7 @@ async fn finish_docker_launch(
             paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
-            backend: LaunchBackend::docker(target.clone()),
+            backend: LaunchBackend::Docker(target.clone()),
         };
         write_launch_record(&paths.config_dir, &record_params, None);
     }

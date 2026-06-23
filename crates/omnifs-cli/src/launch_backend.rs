@@ -125,7 +125,7 @@ impl DockerTarget {
     ) -> anyhow::Result<ContainerName> {
         let container_name = container_name
             .or_else(|| env_string(ENV_CONTAINER_NAME))
-            .or_else(|| config.container_name.clone())
+            .or_else(|| config.system.container_name.clone())
             .unwrap_or_else(|| CONTAINER_NAME.to_string());
         ContainerName::new(container_name)
     }
@@ -141,13 +141,14 @@ impl DockerTarget {
     fn resolve_image(image: Option<String>, config: &Config) -> anyhow::Result<ImageRef> {
         let image = image
             .or_else(|| env_string(ENV_IMAGE))
-            .or_else(|| config.image.clone())
+            .or_else(|| config.system.image.clone())
             .unwrap_or_else(|| IMAGE.to_string());
         Ok(ImageRef::new(image)?)
     }
 
     fn container_name_from_config(config: &Config) -> anyhow::Result<ContainerName> {
         let container_name = config
+            .system
             .container_name
             .clone()
             .unwrap_or_else(|| CONTAINER_NAME.to_string());
@@ -155,7 +156,11 @@ impl DockerTarget {
     }
 
     fn image_from_config(config: &Config) -> anyhow::Result<ImageRef> {
-        let image = config.image.clone().unwrap_or_else(|| IMAGE.to_string());
+        let image = config
+            .system
+            .image
+            .clone()
+            .unwrap_or_else(|| IMAGE.to_string());
         Ok(ImageRef::new(image)?)
     }
 }
@@ -187,17 +192,6 @@ impl LaunchBackend {
                 config,
             )?)),
         }
-    }
-
-    pub(crate) fn docker(docker: DockerTarget) -> Self {
-        Self::Docker(docker)
-    }
-
-    pub(crate) fn default_docker() -> anyhow::Result<Self> {
-        Ok(Self::Docker(DockerTarget::new(
-            CONTAINER_NAME.to_string(),
-            IMAGE.to_string(),
-        )?))
     }
 
     pub(crate) fn is_docker(&self) -> bool {
@@ -249,8 +243,10 @@ mod tests {
     fn docker_image_resolution_precedence() {
         with_env(&[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, None)], || {
             let config = Config {
-                image: Some("ghcr.io/example/custom:1.2.3".into()),
-                ..Default::default()
+                system: crate::config::ConfigSystem {
+                    image: Some("ghcr.io/example/custom:1.2.3".into()),
+                    ..Default::default()
+                },
             };
             let target = DockerTarget::resolve(None, None, &config).unwrap();
             assert_eq!(target.image().as_str(), "ghcr.io/example/custom:1.2.3");
@@ -263,8 +259,10 @@ mod tests {
             ],
             || {
                 let config = Config {
-                    image: Some("ghcr.io/example/config:1.0.0".into()),
-                    ..Default::default()
+                    system: crate::config::ConfigSystem {
+                        image: Some("ghcr.io/example/config:1.0.0".into()),
+                        ..Default::default()
+                    },
                 };
                 let target = DockerTarget::resolve(None, None, &config).unwrap();
                 assert_eq!(target.image().as_str(), "ghcr.io/example/env:9.9.9");
@@ -288,10 +286,9 @@ mod tests {
                 let config = Config {
                     system: crate::config::ConfigSystem {
                         runtime: Some(ConfiguredBackend::Docker),
-                        ..Default::default()
+                        image: Some("ghcr.io/example/config:1.0.0".into()),
+                        container_name: Some("omnifs-config".into()),
                     },
-                    image: Some("ghcr.io/example/config:1.0.0".into()),
-                    container_name: Some("omnifs-config".into()),
                 };
                 let backend = LaunchBackend::from_config(&config).unwrap();
                 let LaunchBackend::Docker(target) = backend else {
@@ -309,8 +306,10 @@ mod tests {
             &[(ENV_IMAGE, None), (ENV_CONTAINER_NAME, Some("omnifs-env"))],
             || {
                 let config = Config {
-                    container_name: Some("omnifs-config".into()),
-                    ..Default::default()
+                    system: crate::config::ConfigSystem {
+                        container_name: Some("omnifs-config".into()),
+                        ..Default::default()
+                    },
                 };
                 let container_name = DockerTarget::resolve_container_name(None, &config).unwrap();
                 assert_eq!(container_name.as_str(), "omnifs-env");

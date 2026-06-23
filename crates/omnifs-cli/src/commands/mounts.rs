@@ -73,7 +73,10 @@ fn ls() -> anyhow::Result<()> {
         {
             Ok(resolved) => {
                 let provider = resolved.provider_name.clone();
-                let auth = crate::auth::AuthReadiness::from_config(&resolved, &store)
+                let auth = workspace
+                    .catalog()
+                    .resolve_mount_auth_tolerating_manifest_errors(resolved)
+                    .readiness(&store)
                     .terminal_row()
                     .summary;
                 anstream::println!("{name}  {}  {auth}", crate::style::dim(provider));

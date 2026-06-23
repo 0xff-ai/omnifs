@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::LaunchParams;
 use crate::launch_backend::{DockerTarget, LaunchBackend};
+use crate::session::{CONTAINER_NAME, IMAGE};
 
 /// Schema version this CLI understands. A bump here means the CLI writing the
 /// record knows something the current CLI does not; the current CLI reports
@@ -32,7 +33,6 @@ pub(crate) struct LaunchRecord {
     control_addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     mount_point: Option<PathBuf>,
-    started_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,13 +70,11 @@ impl LaunchRecord {
                 image: target.image().as_str().to_string(),
             },
         };
-        let started_at = now_rfc3339()?;
         Ok(Self {
             version: RECORD_VERSION,
             backend,
             control_addr: params.control_addr.to_string(),
             mount_point: params.mount_point.clone(),
-            started_at,
         })
     }
 
@@ -164,7 +162,7 @@ impl LaunchRecord {
             RecordedBackend::Docker {
                 container_name,
                 image,
-            } => Ok(LaunchBackend::docker(DockerTarget::new(
+            } => Ok(LaunchBackend::Docker(DockerTarget::new(
                 container_name,
                 image,
             )?)),
@@ -187,35 +185,30 @@ pub(crate) fn backend_from_daemon(
     match backend {
         DaemonBackend::Native => Ok(LaunchBackend::Native),
         DaemonBackend::Docker => {
+            let default_backend = || {
+                Ok(LaunchBackend::Docker(DockerTarget::new(
+                    CONTAINER_NAME.to_string(),
+                    IMAGE.to_string(),
+                )?))
+            };
             match LaunchRecord::read(config_dir)
                 .and_then(|record| record.map(LaunchRecord::into_backend).transpose())
             {
                 Ok(Some(backend)) => Ok(backend),
-                Ok(None) => default_docker_backend(),
+                Ok(None) => default_backend(),
                 Err(error) => {
                     anstream::eprintln!(
                         "warning: launch record unreadable ({error:#}); \
                          using default container name `{}`",
                         crate::session::CONTAINER_NAME
                     );
-                    default_docker_backend()
+                    default_backend()
                 },
             }
         },
     }
 }
 
-fn default_docker_backend() -> Result<LaunchBackend> {
-    LaunchBackend::default_docker()
-}
-
 fn record_path(config_dir: &Path) -> PathBuf {
     config_dir.join("launch.json")
-}
-
-/// Current UTC time as an RFC 3339 string.
-fn now_rfc3339() -> Result<String> {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .context("format current time as RFC 3339")
 }

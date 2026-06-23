@@ -1,14 +1,12 @@
 //! Status report: data types, collection, and rendering.
 
-use comfy_table::{Cell, ContentArrangement, Table, presets};
-use omnifs_creds::{FileStore, Refreshability};
+use omnifs_creds::FileStore;
 use std::fmt::Write as _;
 
 use crate::catalog::ProviderCatalog;
 use omnifs_api::{DaemonHealth, DaemonStatus, DaemonSubsystem, HealthState, SubsystemHealth};
 use omnifs_home::WorkspaceLayout;
 
-pub(crate) use crate::auth::AuthReadiness;
 use crate::auth::AuthTerminalKind;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};
 
@@ -48,26 +46,19 @@ impl StatusReport {
         let _ = writeln!(out, "{left}{version:>padding$}");
         let _ = writeln!(out, "{}", "─".repeat(header_width));
 
-        let mut table = Table::new();
-        table
-            .load_preset(presets::NOTHING)
-            .set_content_arrangement(ContentArrangement::Dynamic);
-        table.add_row(vec![
-            Cell::new("  runtime"),
-            Cell::new("│"),
-            Cell::new(format_runtime(self.runtime.as_ref())),
-        ]);
-        table.add_row(vec![
-            Cell::new("  mount"),
-            Cell::new("│"),
-            Cell::new(format_mount(self)),
-        ]);
-        table.add_row(vec![
-            Cell::new("  cache"),
-            Cell::new("│"),
-            Cell::new(WorkspaceLayout::display(&self.paths.cache_dir)),
-        ]);
-        let _ = writeln!(out, "{table}");
+        let _ = writeln!(
+            out,
+            "  {:<7} │ {}",
+            "runtime",
+            format_runtime(self.runtime.as_ref())
+        );
+        let _ = writeln!(out, "  {:<7} │ {}", "mount", format_mount(self));
+        let _ = writeln!(
+            out,
+            "  {:<7} │ {}",
+            "cache",
+            WorkspaceLayout::display(&self.paths.cache_dir)
+        );
 
         if let Some(runtime) = &self.runtime
             && !runtime.health.subsystems.is_empty()
@@ -304,8 +295,8 @@ pub(crate) struct StatusJson {
     pub runtime: RuntimeJson,
     pub mount: Option<MountJson>,
     pub paths: WorkspaceLayout,
-    pub mounts: Vec<MountStatusJson>,
-    pub providers: Vec<ProviderStatusJson>,
+    pub mounts: Vec<UserMountStatus>,
+    pub providers: Vec<ProviderConfigStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -344,66 +335,6 @@ pub(crate) struct MountJson {
     pub fs_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum MountStatusJson {
-    Ready {
-        config_path: std::path::PathBuf,
-        mount: String,
-        provider: String,
-        provider_present: bool,
-        metadata_available: bool,
-        auth: AuthJson,
-    },
-    Invalid {
-        config_path: std::path::PathBuf,
-        error: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum AuthJson {
-    None,
-    Ready {
-        kind: String,
-        scopes: Vec<String>,
-        expires_at: Option<String>,
-        refreshability: Refreshability,
-        notices: Vec<String>,
-    },
-    ConfiguredExternally {
-        source: String,
-    },
-    Missing {
-        command: String,
-    },
-    Error {
-        message: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum ProviderStatusJson {
-    Ready {
-        config_path: std::path::PathBuf,
-        mount: String,
-        provider: String,
-        provider_present: bool,
-        metadata_available: bool,
-        root_mount: bool,
-        auth_count: usize,
-        domain_count: usize,
-        git_repo_count: usize,
-        max_memory_mb: Option<u32>,
-    },
-    Invalid {
-        config_path: std::path::PathBuf,
-        error: String,
-    },
-}
-
 impl StatusReport {
     pub(crate) fn to_json(&self) -> StatusJson {
         let runtime_json =
@@ -440,76 +371,8 @@ impl StatusReport {
                 })
             }),
             paths: self.paths.clone(),
-            mounts: self.user_mounts.iter().map(mount_status_to_json).collect(),
-            providers: self.providers.iter().map(provider_status_to_json).collect(),
+            mounts: self.user_mounts.clone(),
+            providers: self.providers.clone(),
         }
-    }
-}
-
-fn mount_status_to_json(status: &UserMountStatus) -> MountStatusJson {
-    match status {
-        UserMountStatus::Ready(m) => MountStatusJson::Ready {
-            config_path: m.config_path.clone(),
-            mount: m.mount.clone(),
-            provider: m.provider.clone(),
-            provider_present: m.provider_present,
-            metadata_available: m.metadata_available,
-            auth: AuthJson::from(&m.auth),
-        },
-        UserMountStatus::Invalid { config_path, error } => MountStatusJson::Invalid {
-            config_path: config_path.clone(),
-            error: error.clone(),
-        },
-    }
-}
-
-impl From<&AuthReadiness> for AuthJson {
-    fn from(auth: &AuthReadiness) -> Self {
-        match auth {
-            AuthReadiness::None => Self::None,
-            AuthReadiness::Ready {
-                kind,
-                scopes,
-                expires_at,
-                refreshability,
-                notices,
-            } => Self::Ready {
-                kind: kind.clone(),
-                scopes: scopes.clone(),
-                expires_at: expires_at.clone(),
-                refreshability: *refreshability,
-                notices: notices.clone(),
-            },
-            AuthReadiness::ConfiguredExternally { source } => Self::ConfiguredExternally {
-                source: source.clone(),
-            },
-            AuthReadiness::Missing { command } => Self::Missing {
-                command: command.clone(),
-            },
-            AuthReadiness::Error(error) => Self::Error {
-                message: error.clone(),
-            },
-        }
-    }
-}
-
-fn provider_status_to_json(status: &ProviderConfigStatus) -> ProviderStatusJson {
-    match status {
-        ProviderConfigStatus::Ready(s) => ProviderStatusJson::Ready {
-            config_path: s.config_path.clone(),
-            mount: s.mount.clone(),
-            provider: s.provider.clone(),
-            provider_present: s.provider_present,
-            metadata_available: s.metadata_available,
-            root_mount: s.root_mount,
-            auth_count: s.auth_count,
-            domain_count: s.domain_count,
-            git_repo_count: s.git_repo_count,
-            max_memory_mb: s.max_memory_mb,
-        },
-        ProviderConfigStatus::Invalid { config_path, error } => ProviderStatusJson::Invalid {
-            config_path: config_path.clone(),
-            error: error.clone(),
-        },
     }
 }

@@ -2,13 +2,14 @@
 
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
+use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::auth::AuthReadiness;
 use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ProviderReadyStatus {
     pub(crate) config_path: PathBuf,
     pub(crate) mount: String,
@@ -22,19 +23,21 @@ pub(crate) struct ProviderReadyStatus {
     pub(crate) max_memory_mb: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ProviderConfigStatus {
     Ready(ProviderReadyStatus),
     Invalid { config_path: PathBuf, error: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum UserMountStatus {
     Ready(UserMountReadyStatus),
     Invalid { config_path: PathBuf, error: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct UserMountReadyStatus {
     pub(crate) config_path: PathBuf,
     pub(crate) mount: String,
@@ -130,7 +133,9 @@ impl ProviderCatalog {
         let provider_path = self.provider_path(&config);
         let provider_present = provider_path.exists();
         let metadata_available = true;
-        let auth = AuthReadiness::from_config(&config, store);
+        let auth = self
+            .resolve_mount_auth_tolerating_manifest_errors(config.clone())
+            .readiness(store);
         Ok(UserMountReadyStatus {
             config_path: config_path.clone(),
             mount: config.spec.mount,
@@ -142,19 +147,10 @@ impl ProviderCatalog {
     }
 }
 
-/// Returns the mount name closest to `target` by edit distance, or `None`
-/// if no name is within half the target length.
+/// Returns the first mount whose name starts with `target`.
 pub(crate) fn closest_mount_name(mounts: &[MountConfig], target: &str) -> Option<String> {
-    let mut best: Option<(usize, String)> = None;
-    for mount in mounts {
-        let name = mount.name.to_string();
-        let distance = strsim::damerau_levenshtein(target, &name);
-        if distance <= target.len() / 2 + 1 {
-            match &best {
-                Some((current, _)) if *current <= distance => {},
-                _ => best = Some((distance, name)),
-            }
-        }
-    }
-    best.map(|(_, stem)| stem)
+    mounts
+        .iter()
+        .map(|mount| mount.name.to_string())
+        .find(|name| name.starts_with(target))
 }

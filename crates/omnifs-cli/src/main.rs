@@ -10,7 +10,7 @@ mod catalog;
 mod cli;
 mod client;
 mod commands;
-pub mod config;
+mod config;
 mod credential_target;
 mod daemon_teardown;
 mod dev;
