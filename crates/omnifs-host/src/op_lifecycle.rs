@@ -23,7 +23,7 @@ impl Runtime {
         // emits: a write is rejected if the anchor was invalidated after the
         // op began (ADR-0001 §4.1).
         let op_gen = self.cache.current_generation();
-        let id = self.operation_ids.allocate();
+        let id = self.next_operation_id();
         let trace_id = fuse_trace.or_else(inspector::current_trace_id);
         let live_op = trace_id.and_then(|t| {
             InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_name, t)

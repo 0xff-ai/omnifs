@@ -154,18 +154,8 @@ async fn db_meta_listing_is_direct_path_surface() {
         },
         other => panic!("expected meta listing, got {other:?}"),
     }
-    assert!(
-        harness
-            .runtime
-            .cached_canonical_for(&parse_path("/meta/info.json"))
-            .is_none()
-    );
-    assert!(
-        harness
-            .runtime
-            .cached_canonical_for(&parse_path("/meta/version.txt"))
-            .is_none()
-    );
+    assert!(harness.cached_canonical_for("/meta/info.json").is_none());
+    assert!(harness.cached_canonical_for("/meta/version.txt").is_none());
 }
 
 #[tokio::test]
@@ -236,14 +226,12 @@ async fn db_table_direct_files_do_not_use_canonical_cache() {
 
     assert!(
         harness
-            .runtime
-            .cached_canonical_for(&parse_path("/tables/Album/table.json"))
+            .cached_canonical_for("/tables/Album/table.json")
             .is_none()
     );
     assert!(
         harness
-            .runtime
-            .cached_canonical_for(&parse_path("/tables/Album/schema.json"))
+            .cached_canonical_for("/tables/Album/schema.json")
             .is_none()
     );
 }

@@ -59,7 +59,7 @@ impl Tree {
         if !(prefixes.is_empty() && paths.is_empty() && changed_dirs.is_empty()) {
             // Tree-owned mem eviction; the kernel-notify half stays
             // renderer-side and consumes the returned report.
-            runtime.mem_invalidate_entries_if({
+            runtime.cache().mem_invalidate_entries_if({
                 let paths = paths.clone();
                 let prefixes = prefixes.clone();
                 move |k, _| {

@@ -130,7 +130,7 @@ impl Runtime {
         let lock = self.pagination_lock(path);
         let _guard = lock.lock().await;
 
-        let Some(record) = self.cache_get(path, RecordKind::Dirents, None) else {
+        let Some(record) = self.cache.cache_get(path, RecordKind::Dirents, None) else {
             return NextPageOutcome::NoMore;
         };
         let Some(mut dirents) = DirentsPayload::deserialize(&record.payload) else {
@@ -275,7 +275,8 @@ impl Runtime {
     fn store_paginated_dirents(&self, path: &Path, dirents: &DirentsPayload) {
         if let Some(payload) = dirents.serialize() {
             let record = CacheRecord::new(RecordKind::Dirents, payload);
-            self.cache_put(path, RecordKind::Dirents, None, &record);
+            self.cache
+                .cache_put(path, RecordKind::Dirents, None, &record);
         }
     }
 }

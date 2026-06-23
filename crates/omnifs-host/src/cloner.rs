@@ -9,7 +9,7 @@ use crate::sandbox::publish;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::io::Read as _;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,46 +32,6 @@ pub enum CloneError {
     UnsafeCacheKey(String),
 }
 
-/// Validate that a cache key is safe to use as a relative path.
-/// Rejects: absolute paths, .. components, . components, empty components
-/// (double //), NUL bytes, and platform path separators other than /.
-fn is_safe_cache_key(key: &str) -> bool {
-    if key.is_empty() || key.starts_with('/') {
-        return false;
-    }
-    if key.bytes().any(|b| b == 0) {
-        return false;
-    }
-    for component in key.split('/') {
-        if component.is_empty() || component == ".." || component == "." {
-            return false;
-        }
-        if component.contains(MAIN_SEPARATOR) && MAIN_SEPARATOR != '/' {
-            return false;
-        }
-    }
-    true
-}
-
-/// Observer notified when a clone actually executes (cache miss). The
-/// runtime hooks this up to the inspector stream; tests and
-/// non-instrumented callers pass [`NoopCloneObserver`].
-pub trait CloneObserver {
-    /// A fresh clone is about to begin.
-    fn on_clone_start(&mut self, cache_key: &str, clone_url: &str);
-    /// The clone has finished (success or failure).
-    fn on_clone_end(&mut self, cache_key: &str, elapsed: Duration, ok: bool);
-}
-
-/// Observer that drops every notification. Used when no live sink is
-/// installed (tests, unit checks, etc.).
-pub struct NoopCloneObserver;
-
-impl CloneObserver for NoopCloneObserver {
-    fn on_clone_start(&mut self, _cache_key: &str, _clone_url: &str) {}
-    fn on_clone_end(&mut self, _cache_key: &str, _elapsed: Duration, _ok: bool) {}
-}
-
 /// Shared clone infrastructure. Owns the cache directory and a lock map
 /// to coalesce concurrent clones of the same repository.
 pub struct GitCloner {
@@ -91,15 +51,16 @@ impl GitCloner {
     /// `cache_key` is a provider-supplied stable identifier (e.g. "github.com/owner/repo").
     /// `clone_url` is the full URL to pass to git clone verbatim.
     ///
-    /// `observer` is notified only when a fresh clone is about to run
-    /// (cache miss). Cache hits never call the observer.
+    /// Clone callbacks are called only for a fresh clone. Cache hits never
+    /// call them.
     pub fn clone_if_needed(
         &self,
         cache_key: &str,
         clone_url: &str,
-        observer: &mut dyn CloneObserver,
+        mut record_clone_start: impl FnMut(&str, &str),
+        mut record_clone_end: impl FnMut(&str, Duration, bool),
     ) -> Result<PathBuf, CloneError> {
-        if !is_safe_cache_key(cache_key) {
+        if !crate::sandbox::relative_key::is_safe_relative_key(cache_key, |_| false) {
             return Err(CloneError::UnsafeCacheKey(cache_key.to_string()));
         }
 
@@ -131,10 +92,10 @@ impl GitCloner {
             return Ok(cache_path);
         }
 
-        observer.on_clone_start(cache_key, clone_url);
+        record_clone_start(cache_key, clone_url);
         let started = Instant::now();
         let outcome = Self::run_clone(clone_url, &cache_path);
-        observer.on_clone_end(cache_key, started.elapsed(), outcome.is_ok());
+        record_clone_end(cache_key, started.elapsed(), outcome.is_ok());
         outcome?;
         Self::write_sidecar(&sidecar, clone_url);
         Ok(cache_path)

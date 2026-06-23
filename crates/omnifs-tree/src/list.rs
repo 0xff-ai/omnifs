@@ -278,7 +278,9 @@ fn snapshot_from_provider_listing(
     };
     if let Some(encoded) = dirents_payload.serialize() {
         let record = CacheRecord::new(RecordKind::Dirents, encoded);
-        runtime.cache_put(path, RecordKind::Dirents, None, &record);
+        runtime
+            .cache()
+            .cache_put(path, RecordKind::Dirents, None, &record);
     }
 
     let mut entries: Vec<Entry> = dirent_records
@@ -364,13 +366,13 @@ fn consult_authoritative_listing(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
 ) -> Option<DirentsPayload> {
-    if let Some(record) = runtime.mem_get(path, RecordKind::Dirents, None)
+    if let Some(record) = runtime.cache().mem_get(path, RecordKind::Dirents, None)
         && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
         && dirents.is_authoritative_listing()
     {
         return Some(dirents);
     }
-    if let Some(record) = runtime.cache_get(path, RecordKind::Dirents, None)
+    if let Some(record) = runtime.cache().cache_get(path, RecordKind::Dirents, None)
         && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
         && dirents.is_authoritative_listing()
     {
@@ -393,11 +395,11 @@ fn cached_dirents_for_revalidation(
     runtime: &Runtime,
     path: &omnifs_core::path::Path,
 ) -> Option<DirentsPayload> {
-    if let Some(record) = runtime.mem_get(path, RecordKind::Dirents, None)
+    if let Some(record) = runtime.cache().mem_get(path, RecordKind::Dirents, None)
         && let Some(dirents) = DirentsPayload::deserialize(&record.payload)
     {
         return Some(dirents);
     }
-    let record = runtime.cache_get(path, RecordKind::Dirents, None)?;
+    let record = runtime.cache().cache_get(path, RecordKind::Dirents, None)?;
     DirentsPayload::deserialize(&record.payload)
 }

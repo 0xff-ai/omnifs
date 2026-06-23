@@ -16,30 +16,26 @@ use crate::context::DaemonContext;
 #[cfg(target_os = "linux")]
 use crate::proc_mounts;
 
-pub struct Frontends {
-    primary: Frontend,
-}
-
-enum Frontend {
+pub(crate) enum Frontend {
     #[cfg(target_os = "linux")]
     Fuse(Fuse),
     Nfs(Nfs),
 }
 
 #[cfg(target_os = "linux")]
-struct Fuse {
+pub(crate) struct Fuse {
     mount_point: PathBuf,
     registry: Arc<ProviderRegistry>,
     notifier: NotifierHandle,
 }
 
-struct Nfs {
+pub(crate) struct Nfs {
     mount_point: PathBuf,
     registry: Arc<ProviderRegistry>,
     options: NfsMountOptions,
 }
 
-impl Frontends {
+impl Frontend {
     pub(crate) fn from_context(context: &DaemonContext, registry: Arc<ProviderRegistry>) -> Self {
         match context.frontend() {
             #[cfg(target_os = "linux")]
@@ -66,13 +62,11 @@ impl Frontends {
         registry: Arc<ProviderRegistry>,
         notifier: NotifierHandle,
     ) -> Self {
-        Self {
-            primary: Frontend::Fuse(Fuse {
-                mount_point,
-                registry,
-                notifier,
-            }),
-        }
+        Self::Fuse(Fuse {
+            mount_point,
+            registry,
+            notifier,
+        })
     }
 
     fn nfs(
@@ -80,17 +74,15 @@ impl Frontends {
         registry: Arc<ProviderRegistry>,
         options: NfsMountOptions,
     ) -> Self {
-        Self {
-            primary: Frontend::Nfs(Nfs {
-                mount_point,
-                registry,
-                options,
-            }),
-        }
+        Self::Nfs(Nfs {
+            mount_point,
+            registry,
+            options,
+        })
     }
 
     pub fn serve(&self, rt: &Handle) -> anyhow::Result<()> {
-        match &self.primary {
+        match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => {
                 mount::run_blocking(
@@ -113,7 +105,7 @@ impl Frontends {
     }
 
     pub fn serving(&self) -> Option<FrontendInfo> {
-        match &self.primary {
+        match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => proc_mounts::find_mount(&frontend.mount_point)
                 .filter(|mount| mount.source == "omnifs" && mount.fs_type.starts_with("fuse"))
@@ -129,7 +121,7 @@ impl Frontends {
     /// `serve` loop so the process can shut down. Best-effort: a failure is
     /// logged, since `omnifs down` falls back to an external sweep.
     pub fn unmount(&self) {
-        let result = match &self.primary {
+        let result = match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => {
                 omnifs_fuse::mount::unmount(&frontend.mount_point).map_err(|e| e.to_string())
@@ -144,7 +136,7 @@ impl Frontends {
     }
 
     pub fn invalidate_root_child(&self, name: &str) {
-        match &self.primary {
+        match self {
             #[cfg(target_os = "linux")]
             Frontend::Fuse(frontend) => {
                 omnifs_fuse::invalidate_root_child(&frontend.notifier, name);

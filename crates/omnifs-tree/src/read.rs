@@ -60,7 +60,10 @@ impl<'a> FileAttrStore<'a> {
     }
 
     pub(crate) fn cached(&self) -> Option<FileAttrsCache> {
-        if let Some(record) = self.runtime.cache_get(self.path, RecordKind::Lookup, None)
+        if let Some(record) = self
+            .runtime
+            .cache()
+            .cache_get(self.path, RecordKind::Lookup, None)
             && let Some(LookupPayload::Positive(meta)) = LookupPayload::deserialize(&record.payload)
             && let Some(attrs) = meta.into_attrs()
         {
@@ -68,6 +71,7 @@ impl<'a> FileAttrStore<'a> {
         }
 
         self.runtime
+            .cache()
             .cache_get(self.path, RecordKind::Attr, None)
             .and_then(|record| AttrPayload::deserialize(&record.payload))
             .and_then(|payload| payload.meta.into_attrs())
@@ -77,7 +81,7 @@ impl<'a> FileAttrStore<'a> {
         let meta = EntryMeta::file(attrs);
         let lookup = LookupPayload::Positive(meta.clone());
         if let Some(payload) = lookup.serialize() {
-            self.runtime.cache_put(
+            self.runtime.cache().cache_put(
                 self.path,
                 RecordKind::Lookup,
                 None,
@@ -92,7 +96,7 @@ impl<'a> FileAttrStore<'a> {
 
         let attr = AttrPayload { meta };
         if let Some(payload) = attr.serialize() {
-            self.runtime.cache_put(
+            self.runtime.cache().cache_put(
                 self.path,
                 RecordKind::Attr,
                 None,
@@ -199,12 +203,16 @@ impl Tree {
         // against the projected attrs. A hit serves the cached bytes and keeps
         // the node's projected (already size-learned) attrs.
         if let Some(aux) = durable_aux.clone() {
-            if let Some(record) = runtime.mem_get(path, RecordKind::File, aux.as_deref())
+            if let Some(record) = runtime
+                .cache()
+                .mem_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 return read_result_from_cache(path, payload, attrs);
             }
-            if let Some(record) = runtime.cache_get(path, RecordKind::File, aux.as_deref())
+            if let Some(record) = runtime
+                .cache()
+                .cache_get(path, RecordKind::File, aux.as_deref())
                 && let Some(payload) = file_payload_for_attrs(&record, attrs)
             {
                 return read_result_from_cache(path, payload, attrs);
@@ -218,7 +226,7 @@ impl Tree {
 
         // Capture the generation BEFORE awaiting the render so the result can be
         // fenced against an invalidation that lands mid-read.
-        let op_gen = runtime.current_generation();
+        let op_gen = runtime.cache().current_generation();
         let result = match runtime
             .namespace()
             .read_file(path, content_type, ctx.trace)
@@ -287,7 +295,9 @@ impl Tree {
                 // dirents; drop the parent's mem listing so a later browse
                 // re-reads the stored record. The kernel re-list notify stays
                 // renderer-side (driven from the InvalidationReport).
-                runtime.mem_invalidate(&parent, RecordKind::Dirents, None);
+                runtime
+                    .cache()
+                    .mem_invalidate(&parent, RecordKind::Dirents, None);
                 let bytes = status.into_bytes();
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 Ok(ReadResult::Bytes {
@@ -381,10 +391,12 @@ fn cache_durable_file_payload(
     let record = CacheRecord::new(RecordKind::File, payload);
     // Drop the write if an invalidation for this path landed after the read
     // began: caching it would reinstate stale bytes.
-    if runtime.write_fenced(path, op_gen) {
+    if runtime.cache().write_fenced(path, op_gen) {
         return Ok(());
     }
-    runtime.cache_put(path, RecordKind::File, aux.as_deref(), &record);
+    runtime
+        .cache()
+        .cache_put(path, RecordKind::File, aux.as_deref(), &record);
     Ok(())
 }
 

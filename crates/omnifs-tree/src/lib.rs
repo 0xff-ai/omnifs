@@ -15,9 +15,8 @@
 //! - `Tree` calls `Namespace`, NEVER `Runtime::run_op` directly (that would
 //!   lose coalescing AND Materializer cache-populate).
 //! - Byte storage stays in `omnifs_cache::Store`. `Tree` reaches the cache ONLY
-//!   through `Runtime` pass-throughs (cache_get/current_generation/
-//!   write_fenced/canonical_bytes_for/...); it never holds a raw `Store`
-//!   handle, so the per-mount generation/tombstone fence and mount-prefixed
+//!   through the mount-owned `Runtime::cache()` handle; it never constructs a
+//!   raw store, so the per-mount generation/tombstone fence and mount-prefixed
 //!   keys are never bypassed.
 //! - wire->cache translation stays in `Materializer` (host-internal, inside
 //!   `Namespace` methods); `Tree` never imports `wit_types` in its public

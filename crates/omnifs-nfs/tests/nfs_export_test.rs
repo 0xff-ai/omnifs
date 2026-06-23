@@ -360,7 +360,9 @@ fn omnifs_export_positive_cache_evidence_beats_expected_negative_probe() {
             RecordKind::Dirents,
             dirents.serialize().expect("dirents serialize"),
         );
-        runtime.cache_put(&p("/hello"), RecordKind::Dirents, None, &record);
+        runtime
+            .cache()
+            .cache_put(&p("/hello"), RecordKind::Dirents, None, &record);
 
         let id = export
             .lookup(hello, name)
@@ -397,7 +399,9 @@ fn omnifs_export_reads_inline_cached_projection_without_provider_file_route() {
         RecordKind::Dirents,
         dirents.serialize().expect("dirents serialize"),
     );
-    runtime.cache_put(&p("/"), RecordKind::Dirents, None, &record);
+    runtime
+        .cache()
+        .cache_put(&p("/"), RecordKind::Dirents, None, &record);
 
     let inline = export
         .lookup(test_root, "inline-only")

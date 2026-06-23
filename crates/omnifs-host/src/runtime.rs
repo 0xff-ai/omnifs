@@ -17,15 +17,13 @@ use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::manifest::Artifact;
-use crate::operation_ids::OperationIds;
 use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
-use omnifs_cache::{BatchRecord, Caches, Key, Record as CacheRecord, RecordKind, Store};
+use omnifs_cache::{Caches, Store};
 use omnifs_caps::Grant;
 use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
-use omnifs_home::WorkspaceLayout;
 use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::{ProviderStore, Resolved};
 use omnifs_wit::provider::types as wit_types;
@@ -33,6 +31,7 @@ use omnifs_wit::provider::types as wit_types;
 use std::io;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clock::{self, DYNAMIC_TTL_MILLIS};
 use crate::object_id::ObjectId;
@@ -73,15 +72,6 @@ impl HostContext {
         }
     }
 
-    pub fn from_layout(layout: &WorkspaceLayout) -> Self {
-        Self::new(
-            &layout.cache_dir,
-            &layout.config_dir,
-            &layout.providers_dir,
-            &layout.credentials_file,
-        )
-    }
-
     pub fn cache_dir(&self) -> &StdPath {
         &self.cache_dir
     }
@@ -119,18 +109,6 @@ impl HostContext {
     }
 }
 
-impl From<WorkspaceLayout> for HostContext {
-    fn from(layout: WorkspaceLayout) -> Self {
-        Self::from_layout(&layout)
-    }
-}
-
-impl From<&WorkspaceLayout> for HostContext {
-    fn from(layout: &WorkspaceLayout) -> Self {
-        Self::from_layout(layout)
-    }
-}
-
 /// Runtime for one mounted WASM provider component.
 ///
 /// Manages the Wasmtime store, routes callouts, and handles async
@@ -140,7 +118,7 @@ pub struct Runtime {
     initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
-    pub(crate) operation_ids: OperationIds,
+    next_operation_id: AtomicU64,
     pub(crate) http: Arc<HttpStack>,
     pub(crate) git: git::GitExecutor,
     pub(crate) blob: BlobExecutor,
@@ -375,7 +353,7 @@ impl Runtime {
             initialize_result,
             mount_name: mount_name.to_string(),
             provider_name: config.provider_name.clone(),
-            operation_ids: OperationIds::new(),
+            next_operation_id: AtomicU64::new(1),
             http,
             git,
             blob,
@@ -409,6 +387,10 @@ impl Runtime {
         self.instance.close_file(handle)
     }
 
+    pub fn cache(&self) -> &Store {
+        &self.cache
+    }
+
     /// Test-only entry to drive provider effects from FUSE-path pagination
     /// harnesses without routing through a provider component.
     #[doc(hidden)]
@@ -417,49 +399,6 @@ impl Runtime {
         let (prefixes, paths) =
             crate::materialize::Materializer::new(&self.cache).apply(effects, op_gen, now);
         self.record_view_invalidations(prefixes, paths);
-    }
-
-    #[doc(hidden)]
-    pub fn cached_canonical_for(&self, path: &Path) -> Option<omnifs_cache::CachedCanonical> {
-        self.cache.cached_canonical_for(path)
-    }
-
-    #[doc(hidden)]
-    pub fn negative_for(&self, path: &Path, now_millis: u64) -> Option<omnifs_cache::Negative> {
-        self.cache.negative_for(path, now_millis)
-    }
-
-    #[doc(hidden)]
-    pub fn view_get(
-        &self,
-        path: &Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<CacheRecord> {
-        self.cache.view_get(path, kind, aux, clock::now_millis())
-    }
-
-    #[doc(hidden)]
-    pub fn view_get_at(
-        &self,
-        path: &Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-        now_millis: u64,
-    ) -> Option<CacheRecord> {
-        self.cache.view_get(path, kind, aux, now_millis)
-    }
-
-    #[doc(hidden)]
-    pub fn cache_view_leaf(
-        &self,
-        path: &Path,
-        records: &[BatchRecord],
-        expires_at: Option<u64>,
-        op_gen: u64,
-    ) -> bool {
-        self.cache
-            .cache_view_leaf(path, records, expires_at, op_gen)
     }
 
     #[doc(hidden)]
@@ -478,61 +417,6 @@ impl Runtime {
             DYNAMIC_TTL_MILLIS,
             now_millis,
         );
-    }
-
-    pub fn cache_get(
-        &self,
-        path: &Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<CacheRecord> {
-        self.cache.cache_get(path, kind, aux)
-    }
-
-    pub fn cache_put(
-        &self,
-        path: &Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-        record: &CacheRecord,
-    ) {
-        self.cache.cache_put(path, kind, aux, record);
-    }
-
-    pub fn cache_put_batch(&self, records: &[BatchRecord]) {
-        self.cache.cache_put_batch(records);
-    }
-
-    /// Per-mount generation, captured before a read begins so a rendered
-    /// result can be fenced against a concurrent invalidation (Codex #1).
-    pub fn current_generation(&self) -> u64 {
-        self.cache.current_generation()
-    }
-
-    /// Whether caching a view result for `path` rendered at `op_gen` must be
-    /// dropped because an invalidation for it landed during the read.
-    pub fn write_fenced(&self, path: &Path, op_gen: u64) -> bool {
-        self.cache.write_fenced(path, op_gen)
-    }
-
-    pub fn mem_get(
-        &self,
-        path: &Path,
-        kind: RecordKind,
-        aux: Option<&str>,
-    ) -> Option<Arc<CacheRecord>> {
-        self.cache.mem_get(path, kind, aux)
-    }
-
-    pub fn mem_invalidate(&self, path: &Path, kind: RecordKind, aux: Option<&str>) {
-        self.cache.mem_invalidate(path, kind, aux);
-    }
-
-    pub fn mem_invalidate_entries_if<P>(&self, predicate: P)
-    where
-        P: Fn(&Key, &Arc<CacheRecord>) -> bool + Send + Sync + 'static,
-    {
-        self.cache.mem_invalidate_entries_if(predicate);
     }
 
     /// Arm the mount's rate-limit window after a 429. `retry_after` is the
@@ -558,12 +442,16 @@ impl Runtime {
             None => None,
         }
     }
+
+    pub(crate) fn next_operation_id(&self) -> u64 {
+        self.next_operation_id.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 impl Runtime {
     pub fn start_op(&self, op: Op) -> Result<TestOp<'_>> {
         let op_gen = self.cache.current_generation();
-        let id = self.operation_ids.allocate();
+        let id = self.next_operation_id();
         let step = self.instance.start_op(&op, id)?;
         TestOp::from_step(self, op, id, op_gen, step)
     }

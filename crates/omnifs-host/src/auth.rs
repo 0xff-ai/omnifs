@@ -62,7 +62,7 @@ pub struct AuthManager {
 }
 
 struct StaticTokenStrategy {
-    domain: Option<String>,
+    domain: String,
     header_name: String,
     header_value: Option<String>,
 }
@@ -127,21 +127,6 @@ impl AuthStrategy {
 impl AuthManager {
     pub fn none() -> Self {
         Self { strategies: vec![] }
-    }
-
-    pub fn from_configs(configs: &[Auth]) -> Result<Self, AuthError> {
-        Self::from_configs_and_manifest(configs, None)
-    }
-
-    pub fn from_config(config: &Auth) -> Result<Self, AuthError> {
-        Self::from_configs(std::slice::from_ref(config))
-    }
-
-    pub fn from_configs_and_manifest(
-        configs: &[Auth],
-        manifest: Option<&AuthManifest>,
-    ) -> Result<Self, AuthError> {
-        Self::from_configs_manifest_store(configs, manifest, None)
     }
 
     fn from_configs_manifest_store(
@@ -292,7 +277,7 @@ impl StaticTokenStrategy {
             .inject_domains
             .iter()
             .map(|domain| Self {
-                domain: Some(domain.clone()),
+                domain: domain.clone(),
                 header_name: header_name.clone(),
                 header_value: header_value.clone(),
             })
@@ -330,11 +315,7 @@ impl StaticTokenStrategy {
         let host = url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(String::from));
-        match (&self.domain, &host) {
-            (Some(d), Some(h)) => d == h,
-            (None, _) => true,
-            _ => false,
-        }
+        host.is_some_and(|host| host == self.domain)
     }
 }
 

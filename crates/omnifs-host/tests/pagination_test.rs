@@ -31,6 +31,7 @@ fn p(value: &str) -> Path {
 fn cached_dirents(harness: &RuntimeHarness, path: &str) -> DirentsPayload {
     let record = harness
         .runtime
+        .cache()
         .cache_get(&p(path), RecordKind::Dirents, None)
         .expect("dirents must be cached");
     DirentsPayload::deserialize(&record.payload).expect("dirents must decode")

@@ -562,7 +562,9 @@ impl Export {
         name: &Segment,
         runtime: &Arc<Runtime>,
     ) -> Option<u64> {
-        let record = runtime.cache_get(parent_path, RecordKind::Dirents, None)?;
+        let record = runtime
+            .cache()
+            .cache_get(parent_path, RecordKind::Dirents, None)?;
         let LookupCacheHit::Positive(meta) =
             frontend::cached_dirent_lookup(&record, name.as_str())?
         else {

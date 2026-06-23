@@ -24,7 +24,7 @@ impl Namespace<'_> {
         if self.runtime.cache.negative_for(&child_path, now).is_some() {
             return Ok(LookupOutcome::NotFound);
         }
-        let op_gen = self.runtime.current_generation();
+        let op_gen = self.runtime.cache().current_generation();
         let op = Op::LookupChild {
             parent_path: parent_path.clone(),
             name,
@@ -51,7 +51,7 @@ impl Namespace<'_> {
         fuse_trace: Option<TraceId>,
     ) -> Result<wit_types::ListChildrenResult> {
         let is_continuation = cursor.is_some();
-        let op_gen = self.runtime.current_generation();
+        let op_gen = self.runtime.cache().current_generation();
         let op = Op::ListChildren {
             path: path.clone(),
             cached_validator,
@@ -215,6 +215,7 @@ impl Namespace<'_> {
 
 fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
     ns.runtime
+        .cache()
         .cache_get(path, RecordKind::Attr, None)
         .and_then(|record| AttrPayload::deserialize(&record.payload))
         .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
