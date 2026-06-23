@@ -14,6 +14,7 @@ use time::{Date, Duration, Time};
 
 const PRELOAD_RADIUS: Duration = Duration::days(15);
 const JSON_SUFFIX: &str = ".json";
+const DAILY_COLLECTION_KIND: ObjectKind = ObjectKind("daily_collection");
 const DATE_FIELDS: &[&str] = &[
     "day",
     "timestamp",
@@ -225,6 +226,10 @@ impl DailyCollectionKey {
         format!("/{}", self.day)
     }
 
+    fn anchor(self) -> LogicalId {
+        LogicalId::new(DAILY_COLLECTION_KIND, self.identity_captures())
+    }
+
     fn project_entry(
         self,
         effects: &mut Effects,
@@ -242,59 +247,43 @@ impl DailyCollectionKey {
     }
 
     async fn read(self, cx: Cx) -> Result<FileProjection> {
-        match self.load(&cx, None).await? {
-            Load::Fresh {
-                canonical, effects, ..
-            } => {
-                let validator = canonical.validator.clone();
-                let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
-                let mut all_effects = Effects::new();
-                all_effects.canonical_store(
-                    &self.anchor(),
-                    validator.clone(),
-                    canonical.bytes.clone(),
-                    vec![self.path()],
-                );
-                all_effects.extend(effects);
+        let CollectionLoad { canonical, effects } = self.load(&cx).await?;
+        let validator = canonical.validator.clone();
+        let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
+        let mut all_effects = Effects::new();
+        all_effects.canonical_store(
+            &self.anchor(),
+            validator.clone(),
+            canonical.bytes.clone(),
+            vec![self.path()],
+        );
+        all_effects.extend(effects);
 
-                let mut file = FileProjection::body(canonical.bytes)
-                    .size(size)
-                    .dynamic()
-                    .content_type(ContentType::Json)
-                    .with_effects(all_effects);
-                if let Some(validator) = validator {
-                    file = file.version(validator);
-                }
-                Ok(file.build())
-            },
-            Load::Unchanged => Err(ProviderError::internal(
-                "Oura file load returned unchanged without cached canonical bytes",
-            )),
-            Load::NotFound => Err(ProviderError::not_found(format!(
-                "Oura collection not found: {}",
-                self.path()
-            ))),
+        let mut file = FileProjection::body(canonical.bytes)
+            .size(size)
+            .dynamic()
+            .content_type(ContentType::Json)
+            .with_effects(all_effects);
+        if let Some(validator) = validator {
+            file = file.version(validator);
         }
+        Ok(file.build())
     }
-}
 
-#[omnifs_sdk::object(kind = "daily_collection", key = DailyCollectionKey)]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct DailyCollection(Value);
-
-impl Key for DailyCollectionKey {
-    type Object = DailyCollection;
-    type State = ();
-
-    async fn load(&self, cx: &Cx, _since: Option<Validator>) -> Result<Load<DailyCollection>> {
+    async fn load(self, cx: &Cx) -> Result<CollectionLoad> {
         RangeRequest {
             collection: self.collection,
             range: self.day.preload_range()?,
         }
         .fetch(cx)
         .await?
-        .load(*self)
+        .load(self)
     }
+}
+
+struct CollectionLoad {
+    canonical: Canonical,
+    effects: Effects,
 }
 
 #[derive(Debug)]
@@ -342,10 +331,10 @@ struct RangeResponse {
 }
 
 impl RangeResponse {
-    fn load(self, requested: DailyCollectionKey) -> Result<Load<DailyCollection>> {
+    fn load(self, requested: DailyCollectionKey) -> Result<CollectionLoad> {
         let mut grouping = self.group_by_day();
         let mut effects = Effects::new();
-        let mut requested_load = None;
+        let mut requested_canonical = None;
         // Each day's canonical bytes are materialized here anyway (to store the
         // non-requested days), so project the directory entry with its exact
         // size rather than Size::Unknown: the listing reports honest sizes cold.
@@ -359,7 +348,7 @@ impl RangeResponse {
             let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
             key.project_entry(&mut effects, size, self.validator.clone())?;
             if day == requested.day {
-                requested_load = Some((value, canonical));
+                requested_canonical = Some(canonical);
                 continue;
             }
             effects.canonical_store(
@@ -369,18 +358,13 @@ impl RangeResponse {
                 vec![key.path()],
             );
         }
-        let (value, canonical) = if let Some(pair) = requested_load {
-            pair
+        let canonical = if let Some(canonical) = requested_canonical {
+            canonical
         } else {
             let value = grouping.take(requested.day);
-            let canonical = self.canonical(&value)?;
-            (value, canonical)
+            self.canonical(&value)?
         };
-        Ok(Load::fresh_with_effects(
-            DailyCollection(value),
-            canonical,
-            effects,
-        ))
+        Ok(CollectionLoad { canonical, effects })
     }
 
     fn canonical(&self, value: &Value) -> Result<Canonical> {
