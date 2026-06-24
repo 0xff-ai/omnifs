@@ -111,6 +111,13 @@ impl Paper {
         let blob = download_pdf(&cx, key.paper.decoded(), version).await?;
         Ok(BlobFile::new(blob.id)
             .size(Size::Exact(blob.size))
+            // A numbered version (`v3`) is immutable; `@latest` aliases whichever
+            // version is current, so its bytes can change under the stable path.
+            .stability(if key.version.is_numbered() {
+                Stability::Stable
+            } else {
+                Stability::Dynamic
+            })
             .content_type(ContentType::custom("application/pdf").unwrap_or(ContentType::Octet)))
     }
 
@@ -124,6 +131,11 @@ impl Paper {
         let blob = download_source(&cx, key.paper.decoded(), version).await?;
         Ok(BlobFile::new(blob.id)
             .size(Size::Exact(blob.size))
+            .stability(if key.version.is_numbered() {
+                Stability::Stable
+            } else {
+                Stability::Dynamic
+            })
             .content_type(ContentType::Octet))
     }
 

@@ -580,17 +580,20 @@ impl Entry {
 pub struct BlobFile<F: Format> {
     id: crate::blob::BlobId,
     size: Size,
+    stability: Stability,
     version: Option<VersionToken>,
     content_type: Option<ContentType>,
     _format: core::marker::PhantomData<F>,
 }
 
 impl<F: Format> BlobFile<F> {
-    /// A blob file with content type `F::CT` and unknown size.
+    /// A blob file with content type `F::CT`, unknown size, and
+    /// `Stability::Stable`.
     pub fn new(id: crate::blob::BlobId) -> Self {
         Self {
             id,
             size: Size::Unknown,
+            stability: Stability::Stable,
             version: None,
             content_type: None,
             _format: core::marker::PhantomData,
@@ -602,6 +605,27 @@ impl<F: Format> BlobFile<F> {
     pub fn size(mut self, size: Size) -> Self {
         self.size = size;
         self
+    }
+
+    /// Declare the blob's [`Stability`] (defaults to `Stable`). A blob whose
+    /// upstream bytes can change under a stable handle (a `@latest`-style alias)
+    /// is `Dynamic`.
+    #[must_use]
+    pub fn stability(mut self, stability: Stability) -> Self {
+        self.stability = stability;
+        self
+    }
+
+    /// Shorthand for `stability(Stability::Stable)`.
+    #[must_use]
+    pub fn stable(self) -> Self {
+        self.stability(Stability::Stable)
+    }
+
+    /// Shorthand for `stability(Stability::Dynamic)`.
+    #[must_use]
+    pub fn dynamic(self) -> Self {
+        self.stability(Stability::Dynamic)
     }
 
     #[must_use]
@@ -624,6 +648,13 @@ impl<F: Format> BlobFile<F> {
         let mut builder = FileProjection::blob(self.id)
             .size(self.size)
             .content_type(ct);
+        // A blob is host-served (not a ranged source), so it cannot be `Live`;
+        // `BlobFile` exposes only stable/dynamic. Anything that is not stable
+        // lowers to dynamic.
+        builder = match self.stability {
+            Stability::Stable => builder.stable(),
+            Stability::Dynamic | Stability::Live => builder.dynamic(),
+        };
         if let Some(version) = self.version {
             builder = builder.version(version);
         }

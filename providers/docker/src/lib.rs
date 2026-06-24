@@ -152,32 +152,48 @@ pub struct ContainerKey {
 
 /// A Docker container, loaded from the inspect endpoint.
 ///
-/// Per R3 the object has direct faces only: no canonical face is declared
-/// (Docker emits no object-cache entry), so the SDK never calls `load` through
-/// the object-route machinery. `load` is implemented for trait completeness.
+/// Per R3 the object has DIRECT faces only and NO canonical face: Docker emits
+/// no object-cache entry, so the SDK never stores canonical bytes and never
+/// calls `load`/`decode` through the object-route machinery. The trait requires
+/// both, so they are implemented as unreachable error stubs (`type Canonical`
+/// defaults to `Json` and is unused). Every container read flows through the
+/// direct-face handlers (`container_inspect`/`state`/`summary`), which fetch the
+/// inspect response themselves via `fetch_inspect`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-#[omnifs_sdk::object(kind = "docker.container", key = ContainerKey, state = State)]
+#[omnifs_sdk::object(
+    kind = "docker.container",
+    key = ContainerKey,
+    state = State,
+    load = container_load_unreachable,
+    decode = container_decode_unreachable
+)]
 struct Container(ContainerInspectResponse);
 
-impl Container {
-    /// Inherent load forwarded from the `Object` trait impl. Fetches the
-    /// Docker inspect response for the given container reference.
-    ///
-    /// This is NOT called by the SDK when the object has only direct faces
-    /// (no canonical), but the trait requires an implementation.
-    async fn load(
-        cx: &Cx<State>,
-        key: &ContainerKey,
-        _since: Option<Validator>,
-    ) -> Result<Load<Self>> {
-        let bytes = fetch_bytes(cx, &format!("/containers/{}/json", key.reference), &[]).await?;
-        let inspect: ContainerInspectResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| ProviderError::internal(format!("docker inspect parse error: {e}")))?;
-        let container = Container(inspect);
-        Ok(Load::fresh(container, Canonical::new(bytes, None)))
-    }
+/// R3: the Container object declares no canonical face, so the SDK never loads
+/// it. The trait still requires `load`; this stub asserts that invariant. The
+/// macro forwards `Object::load` here and expects an `impl Future`, so it is
+/// `async` despite having nothing to await.
+#[allow(clippy::unused_async)]
+async fn container_load_unreachable(
+    _cx: &Cx<State>,
+    _key: &ContainerKey,
+    _since: Option<Validator>,
+) -> Result<Load<Container>> {
+    Err(ProviderError::internal(
+        "Container has no canonical face; load must not be called",
+    ))
+}
 
+/// R3: with no canonical face the SDK never decodes Container bytes; the trait
+/// still requires `decode`.
+fn container_decode_unreachable(_bytes: &[u8]) -> Result<Container> {
+    Err(ProviderError::internal(
+        "Container has no canonical face; decode must not be called",
+    ))
+}
+
+impl Container {
     fn state_bytes(&self) -> Vec<u8> {
         let status = self
             .0
@@ -303,10 +319,24 @@ impl DockerProvider {
         r.dir("/containers/by-name").handler(by_name)?;
         r.dir("/containers/by-id").handler(by_id)?;
 
-        // running/stopped stay as raw dir handlers listing container names
-        // (no canonical needed; individual files are reached via by-name).
+        // running/stopped are raw dir handlers listing container names, with
+        // explicit per-container file routes so the leaf files are reachable
+        // directly under running/stopped (not only via by-name). The handlers
+        // are the same direct-face fns the Container object uses.
         r.dir("/containers/running").handler(running)?;
+        r.file("/containers/running/{reference}/inspect.json")
+            .handler(container_inspect)?;
+        r.file("/containers/running/{reference}/state")
+            .handler(container_state)?;
+        r.file("/containers/running/{reference}/summary.txt")
+            .handler(container_summary)?;
         r.dir("/containers/stopped").handler(stopped)?;
+        r.file("/containers/stopped/{reference}/inspect.json")
+            .handler(container_inspect)?;
+        r.file("/containers/stopped/{reference}/state")
+            .handler(container_state)?;
+        r.file("/containers/stopped/{reference}/summary.txt")
+            .handler(container_summary)?;
 
         // Compose subtree: stays raw (R7 — future work).
         r.dir("/compose/{project}/services")

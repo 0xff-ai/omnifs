@@ -132,7 +132,7 @@ impl PaperVersion {
         self.0
     }
 
-    fn is_numbered(self) -> bool {
+    pub(crate) fn is_numbered(self) -> bool {
         self.0.is_some()
     }
 }

@@ -404,6 +404,62 @@ impl<O: Object> ObjectBlock<O> {
         DirFace { block: self, name }
     }
 
+    /// The single anchor face of a file-shaped object: the anchor path IS the
+    /// file. Only legal on `r.file_object`; on a dir-shaped anchor each face is
+    /// named with `o.file(name).<face>()`.
+    fn file_face_direct(&mut self) -> Result<FileFace<'_, O>> {
+        if self.shape != AnchorShape::File {
+            return Err(ProviderError::invalid_input(format!(
+                "object route {}: a directly-declared face (o.canonical/representation/direct/blob) \
+                 is only valid on a file-shaped object; on a dir object use o.file(name).<face>()",
+                self.template
+            )));
+        }
+        Ok(FileFace {
+            block: self,
+            name: "",
+            lazy: false,
+        })
+    }
+
+    /// Declare the file-object anchor's single canonical face: the anchor path
+    /// serves the verbatim upstream bytes. File shape only.
+    pub fn canonical<F: Format>(&mut self) -> Result<&mut Self> {
+        self.file_face_direct()?.canonical::<F>()
+    }
+
+    /// Declare the file-object anchor as a rendered representation. File shape
+    /// only.
+    pub fn representation<F: Format>(&mut self) -> Result<&mut Self>
+    where
+        O: Representable<F>,
+    {
+        self.file_face_direct()?.representation::<F>()
+    }
+
+    /// Declare the file-object anchor as a direct face (invokes upstream on the
+    /// read). File shape only.
+    pub fn direct<Fut>(&mut self, method: fn(Cx<O::State>, O::Key) -> Fut) -> Result<&mut Self>
+    where
+        Fut: Future<Output = Result<FileProjection>> + 'static,
+        O: 'static,
+        O::State: 'static,
+    {
+        self.file_face_direct()?.direct(method)
+    }
+
+    /// Declare the file-object anchor as a blob face (host-resident bytes). File
+    /// shape only.
+    pub fn blob<F, Fut>(&mut self, method: fn(Cx<O::State>, O::Key) -> Fut) -> Result<&mut Self>
+    where
+        F: Format,
+        Fut: Future<Output = Result<crate::projection::BlobFile<F>>> + 'static,
+        O: 'static,
+        O::State: 'static,
+    {
+        self.file_face_direct()?.blob(method)
+    }
+
     /// Gate the whole object on a key predicate. A key that fails the predicate
     /// behaves as not-found for both listing and reads; no load is attempted.
     pub fn when(&mut self, pred: fn(&O::Key) -> bool) -> Result<&mut Self> {
@@ -437,6 +493,13 @@ impl<O: Object> ObjectBlock<O> {
     }
 
     fn claim_leaf(&mut self, name: &str) -> Result<()> {
+        // A file-shaped anchor IS its single face: the path itself is the leaf,
+        // so there is no `template/name` child to claim (and `name` is empty).
+        // The anchor pattern is claimed once at mount; claiming a synthetic
+        // `template/` child here would record a bogus path.
+        if self.shape == AnchorShape::File {
+            return Ok(());
+        }
         let pattern = parse_pattern(&format!("{}/{}", self.template.trim_end_matches('/'), name))?;
         self.leaf_claims.push(pattern);
         Ok(())
