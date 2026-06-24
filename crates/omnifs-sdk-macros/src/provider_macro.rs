@@ -4,7 +4,7 @@
 //! on a provider impl block whose optional associated `type Config/State`
 //! aliases and a synchronous `start(..)` method define the provider.
 
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
@@ -21,24 +21,24 @@ struct TimerSpec {
 
 pub struct ProviderArgs {
     metadata_path: Option<LitStr>,
+    id: Option<LitStr>,
+    display_name: Option<LitStr>,
+    mount: Option<LitStr>,
+    capabilities: Vec<omnifs_caps::Need>,
     git: bool,
-    memory_mb: Option<u32>,
     timer: Option<TimerSpec>,
-    name: Option<LitStr>,
-    version: Option<LitStr>,
-    description: Option<LitStr>,
 }
 
 impl Parse for ProviderArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
             metadata_path: None,
+            id: None,
+            display_name: None,
+            mount: None,
+            capabilities: Vec::new(),
             git: false,
-            memory_mb: None,
             timer: None,
-            name: None,
-            version: None,
-            description: None,
         };
 
         while !input.is_empty() {
@@ -48,17 +48,22 @@ impl Parse for ProviderArgs {
                     let _: Token![=] = input.parse()?;
                     args.metadata_path = Some(input.parse()?);
                 },
-                "name" => {
+                "id" => {
                     let _: Token![=] = input.parse()?;
-                    args.name = Some(input.parse()?);
+                    args.id = Some(input.parse()?);
                 },
-                "version" => {
+                "display_name" => {
                     let _: Token![=] = input.parse()?;
-                    args.version = Some(input.parse()?);
+                    args.display_name = Some(input.parse()?);
                 },
-                "description" => {
+                "mount" => {
                     let _: Token![=] = input.parse()?;
-                    args.description = Some(input.parse()?);
+                    args.mount = Some(input.parse()?);
+                },
+                "capabilities" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    args.capabilities = parse_capabilities(&content)?;
                 },
                 "resources" => {
                     let content;
@@ -73,7 +78,7 @@ impl Parse for ProviderArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `metadata = \"...\"`, `resources(...)`, `events(...)`, and `name`/`version`/`description` overrides",
+                        "supported provider arguments are `id`/`display_name`/`mount`, `capabilities(...)`, `resources(...)`, `events(...)`, and (transitional) `metadata = \"...\"`",
                     ));
                 },
             }
@@ -86,6 +91,68 @@ impl Parse for ProviderArgs {
     }
 }
 
+/// Parse `capabilities(domain("v", "why"), memory_mb(32, "why"), ...)` into the
+/// manifest's declared `Need`s. String-valued kinds take `("value", "why")`;
+/// scalar kinds take `(<int>, "why")`. All are static (non-dynamic) here; a
+/// dynamic value (e.g. a docker socket resolved at init) is declared by the
+/// provider through config, not the manifest annotation.
+fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::Need>> {
+    let mut needs = Vec::new();
+    while !content.is_empty() {
+        let kind: syn::Ident = content.parse()?;
+        let inner;
+        syn::parenthesized!(inner in content);
+        let need = match kind.to_string().as_str() {
+            "domain" | "git_repo" | "unix_socket" => {
+                let value: LitStr = inner.parse()?;
+                let _: Token![,] = inner.parse()?;
+                let why: LitStr = inner.parse()?;
+                let (value, why) = (value.value(), why.value());
+                match kind.to_string().as_str() {
+                    "domain" => omnifs_caps::Need::Domain {
+                        value,
+                        why,
+                        dynamic: false,
+                    },
+                    "git_repo" => omnifs_caps::Need::GitRepo {
+                        value,
+                        why,
+                        dynamic: false,
+                    },
+                    _ => omnifs_caps::Need::UnixSocket {
+                        value,
+                        why,
+                        dynamic: false,
+                    },
+                }
+            },
+            "memory_mb" => {
+                let amount: LitInt = inner.parse()?;
+                let _: Token![,] = inner.parse()?;
+                let why: LitStr = inner.parse()?;
+                omnifs_caps::Need::MemoryMb {
+                    value: amount.base10_parse::<u32>()?,
+                    why: why.value(),
+                    dynamic: false,
+                }
+            },
+            other => {
+                return Err(syn::Error::new(
+                    kind.span(),
+                    format!(
+                        "unsupported capability `{other}`; expected `domain`, `git_repo`, `unix_socket`, or `memory_mb`"
+                    ),
+                ));
+            },
+        };
+        needs.push(need);
+        if content.peek(Token![,]) {
+            let _: Token![,] = content.parse()?;
+        }
+    }
+    Ok(needs)
+}
+
 fn parse_resources(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Result<()> {
     while !content.is_empty() {
         let key: syn::Ident = content.parse()?;
@@ -95,15 +162,10 @@ fn parse_resources(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Re
                 let value: LitBool = content.parse()?;
                 args.git = value.value;
             },
-            "memory_mb" => {
-                let _: Token![=] = content.parse()?;
-                let value: LitInt = content.parse()?;
-                args.memory_mb = Some(value.base10_parse::<u32>()?);
-            },
             _ => {
                 return Err(syn::Error::new(
                     key.span(),
-                    "supported resources are `git = <bool>` and `memory_mb = <int>`",
+                    "supported resources are `git = <bool>`",
                 ));
             },
         }
@@ -277,28 +339,16 @@ fn read_manifest_facts(
             format!("failed to encode provider metadata custom section: {error}"),
         )
     })?;
-    let metadata_len = metadata_bytes.len();
-    let metadata_ident = format_ident!(
-        "__OMNIFS_PROVIDER_METADATA_{}",
-        type_name.to_string().to_uppercase()
-    );
 
     // Force Cargo to track the manifest as a build input; without it an edit to
     // `omnifs.provider.json` alone leaves a stale custom section in incremental
     // and Docker-layer-cached builds. `include_bytes!` is a tracked compile-time
     // dep at zero runtime cost (the const is dropped by the linker).
     let path_lit = syn::LitStr::new(&path.display().to_string(), metadata_path.span());
+    let section = metadata_section_tokens(type_name, &metadata_bytes);
     let metadata_section = quote! {
         const _: &[u8] = include_bytes!(#path_lit);
-
-        #[cfg(all(target_arch = "wasm32", not(test)))]
-        #[unsafe(link_section = "omnifs.provider-metadata.v1")]
-        #[used]
-        static #metadata_ident: [u8; #metadata_len] = [ #(#metadata_bytes),* ];
-
-        #[cfg(test)]
-        #[allow(non_upper_case_globals)]
-        pub(crate) const #metadata_ident: [u8; #metadata_len] = [ #(#metadata_bytes),* ];
+        #section
     };
     Ok(ManifestFacts {
         metadata_section,
@@ -307,30 +357,97 @@ fn read_manifest_facts(
     })
 }
 
-fn provider_info_tokens(
+/// Emit the embedded provider-metadata custom section (the static global the
+/// host reads before instantiation) plus the `#[cfg(test)]` const mirror.
+fn metadata_section_tokens(type_name: &syn::Ident, metadata_bytes: &[u8]) -> TokenStream2 {
+    let metadata_len = metadata_bytes.len();
+    let bytes = metadata_bytes.iter();
+    let bytes_test = metadata_bytes.iter();
+    let metadata_ident = format_ident!(
+        "__OMNIFS_PROVIDER_METADATA_{}",
+        type_name.to_string().to_uppercase()
+    );
+    quote! {
+        #[cfg(all(target_arch = "wasm32", not(test)))]
+        #[unsafe(link_section = "omnifs.provider-metadata.v1")]
+        #[used]
+        static #metadata_ident: [u8; #metadata_len] = [ #(#bytes),* ];
+
+        #[cfg(test)]
+        #[allow(non_upper_case_globals)]
+        pub(crate) const #metadata_ident: [u8; #metadata_len] = [ #(#bytes_test),* ];
+    }
+}
+
+/// Build the embedded manifest from `#[provider(..)]` annotations rather than a
+/// hand-authored `omnifs.provider.json`. The full manifest is known at macro
+/// expansion for a provider with no config and no auth (`config_schema` and
+/// `auth` are `None`); config/auth providers will fill those at build time.
+fn build_manifest_facts_from_args(
     type_name: &syn::Ident,
     args: &ProviderArgs,
-    manifest: &ManifestFacts,
-) -> TokenStream2 {
-    let name = match (&args.name, &manifest.name) {
-        (Some(lit), _) => quote! { #lit.to_string() },
-        (None, Some(name)) => quote! { #name.to_string() },
-        (None, None) => quote! { stringify!(#type_name).to_string() },
+) -> syn::Result<ManifestFacts> {
+    let id = args
+        .id
+        .as_ref()
+        .expect("caller checks `id` is present")
+        .value();
+    let display_name = args
+        .display_name
+        .as_ref()
+        .map_or_else(|| id.clone(), syn::LitStr::value);
+    let default_mount = args
+        .mount
+        .as_ref()
+        .map_or_else(|| id.clone(), syn::LitStr::value);
+    let pkg_name = std::env::var("CARGO_PKG_NAME").map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("CARGO_PKG_NAME is not set: {error}"),
+        )
+    })?;
+
+    let manifest = omnifs_provider::ProviderManifest {
+        id: id.clone(),
+        display_name: display_name.clone(),
+        provider: format!("{}.wasm", pkg_name.replace('-', "_")),
+        default_mount,
+        version: std::env::var("CARGO_PKG_VERSION").ok(),
+        build_evidence: Some(omnifs_provider::BuildEvidence::current(env!(
+            "CARGO_PKG_VERSION"
+        ))),
+        capabilities: args.capabilities.clone(),
+        auth: None,
+        config_schema: None,
     };
-    let version = if let Some(lit) = &args.version {
-        quote! { #lit.to_string() }
+    let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to encode provider metadata custom section: {error}"),
+        )
+    })?;
+    Ok(ManifestFacts {
+        metadata_section: metadata_section_tokens(type_name, &metadata_bytes),
+        name: Some(id),
+        description: Some(display_name),
+    })
+}
+
+fn provider_info_tokens(type_name: &syn::Ident, manifest: &ManifestFacts) -> TokenStream2 {
+    let name = if let Some(name) = &manifest.name {
+        quote! { #name.to_string() }
     } else {
-        quote! { env!("CARGO_PKG_VERSION").to_string() }
+        quote! { stringify!(#type_name).to_string() }
     };
-    let description = match (&args.description, &manifest.description) {
-        (Some(lit), _) => quote! { #lit.to_string() },
-        (None, Some(desc)) => quote! { #desc.to_string() },
-        (None, None) => quote! { String::new() },
+    let description = if let Some(desc) = &manifest.description {
+        quote! { #desc.to_string() }
+    } else {
+        quote! { String::new() }
     };
     quote! {
         omnifs_sdk::prelude::ProviderInfo {
             name: #name,
-            version: #version,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             description: #description,
         }
     }
@@ -344,16 +461,13 @@ fn requested_capabilities_tokens(args: &ProviderArgs) -> TokenStream2 {
     } else {
         quote! { 0u32 }
     };
-    let memory = if let Some(mb) = args.memory_mb {
-        quote! { #mb }
-    } else {
-        quote! { 0u32 }
-    };
+    // The sandbox memory cap comes from the mount's granted capabilities
+    // (seeded from the manifest's `memoryMb` need), not this field, so it stays
+    // at the `empty()` default.
     quote! {
         omnifs_sdk::prelude::RequestedCapabilities {
             needs_git: #git,
             refresh_interval_secs: #refresh,
-            max_memory_mb: #memory,
             ..omnifs_sdk::prelude::RequestedCapabilities::empty()
         }
     }
@@ -736,8 +850,19 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let start_kind = classified.start_kind;
     let methods = &classified.methods;
 
-    let manifest = read_manifest_facts(&type_name, args.metadata_path.as_ref())?;
-    let info_tokens = provider_info_tokens(&type_name, args, &manifest);
+    // Two manifest sources: annotation-authored (`id = ".."` + `capabilities(..)`)
+    // or the transitional hand-authored `metadata = "omnifs.provider.json"`.
+    let manifest = if args.metadata_path.is_some() {
+        read_manifest_facts(&type_name, args.metadata_path.as_ref())?
+    } else if args.id.is_some() {
+        build_manifest_facts_from_args(&type_name, args)?
+    } else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "provider needs an `id = \"...\"` annotation (or the transitional `metadata = \"...\"`)",
+        ));
+    };
+    let info_tokens = provider_info_tokens(&type_name, &manifest);
     let caps_tokens = requested_capabilities_tokens(args);
 
     let state_management = generate_state_management(state_type);

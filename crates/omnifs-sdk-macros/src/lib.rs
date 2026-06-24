@@ -158,4 +158,3 @@ pub fn config(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(error) => error.to_compile_error().into(),
     }
 }
-

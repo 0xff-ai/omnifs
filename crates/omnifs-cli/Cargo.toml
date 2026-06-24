@@ -56,8 +56,6 @@ zstd = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
 

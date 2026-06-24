@@ -102,22 +102,17 @@ fn expected_files(workspace: &Path) -> anyhow::Result<BTreeSet<String>> {
         let Some(dir_name) = dir_name.to_str() else {
             continue;
         };
-        if FIXTURE_PROVIDER_DIRS.contains(&dir_name) {
+        // Provider crate `providers/<name>` (crate `omnifs-provider-<name>`)
+        // builds to `omnifs_provider_<name>.wasm`. The manifest travels inside
+        // the wasm custom section now, so there is no `omnifs.provider.json` to
+        // read: the provider set is the crate dirs minus the test fixtures.
+        if FIXTURE_PROVIDER_DIRS.contains(&dir_name) || !entry.path().join("Cargo.toml").is_file() {
             continue;
         }
-        let manifest_path = entry.path().join("omnifs.provider.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        let manifest_json = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("read {}", manifest_path.display()))?;
-        let manifest: serde_json::Value = serde_json::from_str(&manifest_json)
-            .with_context(|| format!("parse {}", manifest_path.display()))?;
-        let provider_file = manifest
-            .get("provider")
-            .and_then(|value| value.as_str())
-            .with_context(|| format!("{} must set provider", manifest_path.display()))?;
-        files.insert(provider_file.to_string());
+        files.insert(format!(
+            "omnifs_provider_{}.wasm",
+            dir_name.replace('-', "_")
+        ));
     }
     files.insert(ARCHIVE_TOOL_WASM.to_string());
     Ok(files)

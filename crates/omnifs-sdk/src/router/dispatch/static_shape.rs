@@ -39,9 +39,11 @@ impl<S> Shape<'_, S> {
             let Ok(child_abs) = absolute_parent.join(name) else {
                 continue;
             };
-            let Some(()) = pattern.match_prefix(&child_abs).ok().and_then(|caps| {
-                validator.accepts_present(&caps).then_some(())
-            }) else {
+            let Some(()) = pattern
+                .match_prefix(&child_abs)
+                .ok()
+                .and_then(|caps| validator.accepts_present(&caps).then_some(()))
+            else {
                 continue;
             };
             entries.entry(name.to_string()).or_insert_with(|| {

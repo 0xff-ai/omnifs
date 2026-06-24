@@ -223,7 +223,6 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
             validator: self.validator,
         }
     }
-
 }
 
 /// Lower a typed [`Collection`] to the [`crate::projection::DirProjection`] the

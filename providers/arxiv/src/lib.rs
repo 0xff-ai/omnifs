@@ -197,7 +197,25 @@ pub struct CategoryKey {
     category: CategoryName,
 }
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+#[omnifs_sdk::provider(
+    id = "arxiv",
+    display_name = "arXiv",
+    mount = "arxiv",
+    capabilities(
+        domain(
+            "export.arxiv.org",
+            "Fetch arXiv API metadata and paper resources from arXiv-owned domains."
+        ),
+        domain(
+            "arxiv.org",
+            "Fetch arXiv API metadata and paper resources from arXiv-owned domains."
+        ),
+        memory_mb(
+            64,
+            "Bound provider memory while leaving enough room for Atom feeds and paper metadata."
+        ),
+    )
+)]
 impl ArxivProvider {
     fn start(r: &mut Router) -> Result<()> {
         let papers = r.object::<Paper>("/papers/{paper}/{version}", |o| {
