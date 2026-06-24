@@ -1,4 +1,8 @@
-//! Path keys, object loads, and route handlers for the GitHub provider.
+//! Path keys, object loads, collection methods, and live faces for the GitHub
+//! provider.
+
+use core::fmt;
+use core::str::FromStr;
 
 use rc_zip_sync::ReadZip;
 
@@ -6,13 +10,15 @@ use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
 
 use crate::api::GithubRest;
-use crate::objects::{Issue, ItemData, PullRequest, Repo, Run};
+use crate::objects::{Comment, Issue, ItemData, Owner, PullRequest, Repo, WorkflowRun};
 use crate::{
-    COMMENT_PAGE_SIZE, CommentRecord, ListPage, OwnerName, RepoId, RepoName, StateFilter,
-    WorkflowRunsResponse, fetch_owner_repos, github_check_status, list_items, resolve_owner_kind,
+    COMMENT_PAGE_SIZE, OwnerName, RepoId, RepoName, StateFilter, WorkflowRunsResponse,
+    fetch_owner_repos, github_check_status, list_items, resolve_owner_kind,
 };
 
-/// List-only discriminator for the search+REST issue listing seam.
+/// Identity discriminator for the comment anchor's `{item_kind}` segment. A
+/// plain `PathSegment` capture (NOT a facet): an issue comment and a pull
+/// comment are distinct objects, so `item_kind` is part of identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ItemKind {
     Issues,
@@ -35,6 +41,36 @@ impl ItemKind {
     }
 }
 
+impl FromStr for ItemKind {
+    type Err = ProviderError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "issues" => Ok(Self::Issues),
+            "pulls" => Ok(Self::Pulls),
+            other => Err(ProviderError::invalid_input(format!(
+                "unknown item kind {other}"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for ItemKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.rest_resource())
+    }
+}
+
+impl PathSegment for ItemKind {
+    fn choices() -> Option<&'static [&'static str]> {
+        Some(&["issues", "pulls"])
+    }
+}
+
+// ===========================================================================
+// Keys
+// ===========================================================================
+
 #[omnifs_sdk::path_captures]
 pub(crate) struct OwnerKey {
     pub(crate) owner: OwnerName,
@@ -44,32 +80,6 @@ pub(crate) struct OwnerKey {
 pub(crate) struct RepoKey {
     pub(crate) owner: OwnerName,
     pub(crate) repo: RepoName,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct IssuesRootKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct PullsRootKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct IssueListKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-    pub(crate) filter: Facet<StateFilter>,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct PullListKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-    pub(crate) filter: Facet<StateFilter>,
 }
 
 #[omnifs_sdk::path_captures]
@@ -91,29 +101,14 @@ pub(crate) struct PullKey {
 }
 
 #[omnifs_sdk::path_captures]
-pub(crate) struct IssueCommentKey {
+pub(crate) struct CommentKey {
     pub(crate) owner: OwnerName,
     pub(crate) repo: RepoName,
+    pub(crate) item_kind: ItemKind,
     #[allow(dead_code)]
     pub(crate) filter: Facet<StateFilter>,
     pub(crate) number: u64,
-    pub(crate) idx: u64,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct PullCommentKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-    #[allow(dead_code)]
-    pub(crate) filter: Facet<StateFilter>,
-    pub(crate) number: u64,
-    pub(crate) idx: u64,
-}
-
-#[omnifs_sdk::path_captures]
-pub(crate) struct RunListKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
+    pub(crate) comment_id: u64,
 }
 
 #[omnifs_sdk::path_captures]
@@ -123,235 +118,292 @@ pub(crate) struct RunKey {
     pub(crate) run_id: u64,
 }
 
-impl OwnerKey {
-    pub(crate) async fn repos(self, cx: DirCx) -> Result<DirProjection> {
-        let kind = resolve_owner_kind(&cx, &self.owner)
-            .await?
-            .ok_or_else(|| ProviderError::not_found("owner not found"))?;
-        let mut names = fetch_owner_repos(&cx, &self.owner, kind).await?;
-        names.sort();
-        Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
-    }
+/// The collection-dir key for `issues/{filter}` and `pulls/{filter}`: it
+/// carries the `{filter}` segment so the listing reads the real filter
+/// (`ls issues/all` lists closed/all items, not just open). The parent anchor
+/// key (`RepoKey`) has no filter; the collection method binds this instead.
+#[omnifs_sdk::path_captures]
+pub(crate) struct ItemListKey {
+    pub(crate) owner: OwnerName,
+    pub(crate) repo: RepoName,
+    pub(crate) filter: StateFilter,
 }
 
-impl IssuesRootKey {
-    #[allow(clippy::unused_self)]
-    pub(crate) fn filters(self, _cx: DirCx) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(
-            StateFilter::choices()
-                .into_iter()
-                .flatten()
-                .map(|&name| Entry::dir(name.to_string())),
-        ))
-    }
-}
+// ===========================================================================
+// Object loads (forwarded to by the #[object] macro)
+// ===========================================================================
 
-impl PullsRootKey {
-    #[allow(clippy::unused_self)]
-    pub(crate) fn filters(self, _cx: DirCx) -> Result<DirProjection> {
-        Ok(DirProjection::exhaustive(
-            StateFilter::choices()
-                .into_iter()
-                .flatten()
-                .map(|&name| Entry::dir(name.to_string())),
-        ))
-    }
-}
-
-impl IssueListKey {
-    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
-        let route = ItemListRoute::Issues(self);
-        let page = list_items(
-            &cx,
-            route.owner(),
-            route.repo(),
-            route.kind(),
-            route.filter(),
-        )
-        .await?;
-        page.project(route)
-    }
-}
-
-impl PullListKey {
-    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
-        let route = ItemListRoute::Pulls(self);
-        let page = list_items(
-            &cx,
-            route.owner(),
-            route.repo(),
-            route.kind(),
-            route.filter(),
-        )
-        .await?;
-        page.project(route)
-    }
-}
-
-impl ListPage {
-    fn project(self, route: ItemListRoute) -> Result<DirProjection> {
-        let visible_items: Vec<_> = self
-            .items
-            .iter()
-            .filter(|item| route.includes(item))
-            .collect();
-        let entries = visible_items
-            .iter()
-            .map(|item| Entry::dir(item.number.to_string()));
-        let mut projection = if self.exhaustive {
-            DirProjection::exhaustive(entries)
-        } else {
-            DirProjection::open(entries)
-        };
-        // One aggregate eager budget across the whole listing: the host rejects
-        // a terminal response whose inline preloads exceed it, so per-item body
-        // inlining draws down a shared pool rather than each item assuming the
-        // full cap.
-        let mut budget = MAX_EAGER_RESPONSE_BYTES;
-        for item in visible_items {
-            projection = projection.preload_dir(
-                route.anchor(item.number),
-                route.listed_item_dir(item, &mut budget)?,
-            );
-        }
-        Ok(projection)
-    }
-}
-
-enum ItemListRoute {
-    Issues(IssueListKey),
-    Pulls(PullListKey),
-}
-
-impl ItemListRoute {
-    fn owner(&self) -> &OwnerName {
-        match self {
-            Self::Issues(key) => &key.owner,
-            Self::Pulls(key) => &key.owner,
-        }
-    }
-
-    fn repo(&self) -> &RepoName {
-        match self {
-            Self::Issues(key) => &key.repo,
-            Self::Pulls(key) => &key.repo,
-        }
-    }
-
-    fn filter(&self) -> StateFilter {
-        match self {
-            Self::Issues(key) => *key.filter,
-            Self::Pulls(key) => *key.filter,
-        }
-    }
-
-    const fn kind(&self) -> ItemKind {
-        match self {
-            Self::Issues(_) => ItemKind::Issues,
-            Self::Pulls(_) => ItemKind::Pulls,
-        }
-    }
-
-    fn includes(&self, item: &ItemData) -> bool {
-        match self {
-            Self::Issues(_) => !item.is_pull_request(),
-            Self::Pulls(_) => true,
-        }
-    }
-
-    fn anchor(&self, number: u64) -> String {
-        match self {
-            Self::Issues(key) => {
-                format!(
-                    "/{}/{}/issues/{}/{}",
-                    key.owner, key.repo, *key.filter, number
-                )
-            },
-            Self::Pulls(key) => {
-                format!(
-                    "/{}/{}/pulls/{}/{}",
-                    key.owner, key.repo, *key.filter, number
-                )
-            },
-        }
-    }
-
-    fn listed_item_dir(&self, item: &ItemData, budget: &mut usize) -> Result<DirProjection> {
-        item.listed_dir(matches!(self, Self::Pulls(_)), budget)
-    }
-}
-
-impl Key for IssueKey {
-    type Object = Issue;
-    type State = ();
-
-    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Issue>> {
-        let repo = RepoId::new(&self.owner, &self.repo);
+impl Owner {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &OwnerKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        // GitHub serves user and org profiles at distinct paths; probe the user
+        // endpoint first, then orgs, mirroring `resolve_owner_kind`.
         match cx
-            .github_load::<ItemData>(format!("/repos/{repo}/issues/{}", self.number), since)
+            .github_load::<Self>(format!("/users/{}", key.owner), since.clone())
+            .await
+        {
+            Ok(Load::NotFound) => {},
+            other => return other,
+        }
+        cx.github_load::<Self>(format!("/orgs/{}", key.owner), since)
+            .await
+    }
+}
+
+impl Repo {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &RepoKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        cx.github_load::<Self>(format!("/repos/{}/{}", key.owner, key.repo), since)
+            .await
+    }
+}
+
+impl Issue {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &IssueKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        match cx
+            .github_load::<ItemData>(format!("/repos/{repo}/issues/{}", key.number), since)
             .await?
         {
             Load::Fresh { value, .. } if value.is_pull_request() => Ok(Load::NotFound),
             Load::Fresh {
-                value,
-                canonical,
-                effects,
-            } => Ok(Load::fresh_with_effects(Issue(value), canonical, effects)),
+                value, canonical, ..
+            } => Ok(Load::fresh(Self(value), canonical)),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
         }
     }
 }
 
-impl Key for PullKey {
-    type Object = PullRequest;
-    type State = ();
-
-    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<PullRequest>> {
-        let repo = RepoId::new(&self.owner, &self.repo);
+impl PullRequest {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &PullKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
         match cx
-            .github_load::<ItemData>(format!("/repos/{repo}/pulls/{}", self.number), since)
+            .github_load::<ItemData>(format!("/repos/{repo}/pulls/{}", key.number), since)
             .await?
         {
             Load::Fresh {
-                value,
-                canonical,
-                effects,
-            } => Ok(Load::fresh_with_effects(
-                PullRequest(value),
-                canonical,
-                effects,
-            )),
+                value, canonical, ..
+            } => Ok(Load::fresh(Self(value), canonical)),
             Load::Unchanged => Ok(Load::Unchanged),
             Load::NotFound => Ok(Load::NotFound),
         }
     }
 }
 
-impl Key for RepoKey {
-    type Object = Repo;
-    type State = ();
+impl Comment {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &CommentKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        // Comments live under the shared issues endpoint regardless of whether
+        // the parent is an issue or a pull.
+        cx.github_load::<Self>(
+            format!("/repos/{repo}/issues/comments/{}", key.comment_id),
+            since,
+        )
+        .await
+    }
+}
 
-    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Repo>> {
-        cx.github_load::<Repo>(format!("/repos/{}/{}", self.owner, self.repo), since)
+impl WorkflowRun {
+    pub(crate) async fn load(
+        cx: &Cx,
+        key: &RunKey,
+        since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let repo = RepoId::new(&key.owner, &key.repo);
+        cx.github_load::<Self>(format!("/repos/{repo}/actions/runs/{}", key.run_id), since)
             .await
     }
 }
 
-impl Key for RunKey {
-    type Object = Run;
-    type State = ();
+// ===========================================================================
+// Collections
+// ===========================================================================
 
-    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Run>> {
-        let repo = RepoId::new(&self.owner, &self.repo);
-        cx.github_load::<Run>(format!("/repos/{repo}/actions/runs/{}", self.run_id), since)
-            .await
+impl Owner {
+    /// Anchor-topology collection: the repo names listed under `/{owner}` ARE
+    /// the child `Repo` anchors (`/{owner}/{repo}`). The repo listing carries
+    /// only the name, not the single-repo canonical, so entries are `key`.
+    pub(crate) async fn repos(
+        key: OwnerKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<Repo, NoCursor>> {
+        let kind = resolve_owner_kind(&cx, &key.owner)
+            .await?
+            .ok_or_else(|| ProviderError::not_found("owner not found"))?;
+        let mut names = fetch_owner_repos(&cx, &key.owner, kind).await?;
+        names.sort();
+        let entries = names.into_iter().filter_map(|name| {
+            RepoName::from_str(&name).ok().map(|repo| {
+                CollectionEntry::key(RepoKey {
+                    owner: key.owner.clone(),
+                    repo,
+                })
+            })
+        });
+        Ok(Collection::complete(entries))
     }
 }
 
-impl RepoKey {
-    pub(crate) async fn tree(self, cx: Cx) -> Result<TreeRef> {
-        let repo_id = RepoId::new(&self.owner, &self.repo);
+impl Repo {
+    pub(crate) async fn issues(
+        key: ItemListKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<Issue, NoCursor>> {
+        let filter = key.filter;
+        let page = list_items(&cx, &key.owner, &key.repo, ItemKind::Issues, filter).await?;
+        let entries = page
+            .items
+            .iter()
+            .filter(|item| !item.is_pull_request())
+            .map(|item| {
+                CollectionEntry::derived(
+                    IssueKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: Facet(filter),
+                        number: item.number,
+                    },
+                    eager_item_leaves(item),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(complete_or_partial(entries, page.exhaustive))
+    }
+
+    pub(crate) async fn pulls(
+        key: ItemListKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<PullRequest, NoCursor>> {
+        let filter = key.filter;
+        let page = list_items(&cx, &key.owner, &key.repo, ItemKind::Pulls, filter).await?;
+        let entries = page
+            .items
+            .iter()
+            .map(|item| {
+                CollectionEntry::derived(
+                    PullKey {
+                        owner: key.owner.clone(),
+                        repo: key.repo.clone(),
+                        filter: Facet(filter),
+                        number: item.number,
+                    },
+                    eager_item_leaves(item),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(complete_or_partial(entries, page.exhaustive))
+    }
+
+    pub(crate) async fn workflow_runs(
+        key: RepoKey,
+        cx: ListCx<NoCursor>,
+    ) -> Result<Collection<WorkflowRun, NoCursor>> {
+        let repo_id = RepoId::new(&key.owner, &key.repo);
+        let runs: WorkflowRunsResponse = cx
+            .github_json(format!("/repos/{repo_id}/actions/runs?per_page=30"))
+            .await?;
+        let entries = runs.workflow_runs.into_iter().map(|run| {
+            let files = vec![
+                ("status".to_string(), inline_text(&run.status)),
+                (
+                    "conclusion".to_string(),
+                    inline_text(run.conclusion.as_deref().unwrap_or("")),
+                ),
+            ];
+            CollectionEntry::derived(
+                RunKey {
+                    owner: key.owner.clone(),
+                    repo: key.repo.clone(),
+                    run_id: run.id,
+                },
+                files,
+            )
+        });
+        Ok(Collection::complete(entries))
+    }
+}
+
+impl Issue {
+    pub(crate) async fn comments(
+        key: IssueKey,
+        cx: ListCx<GitHubPageCursor>,
+    ) -> Result<Collection<Comment, GitHubPageCursor>> {
+        let page = cx.cursor().map_or(1, |c| c.0);
+        comments_collection(
+            &cx,
+            &key.owner,
+            &key.repo,
+            ItemKind::Issues,
+            *key.filter,
+            key.number,
+            page,
+        )
+        .await
+    }
+}
+
+impl PullRequest {
+    pub(crate) async fn comments(
+        key: PullKey,
+        cx: ListCx<GitHubPageCursor>,
+    ) -> Result<Collection<Comment, GitHubPageCursor>> {
+        let page = cx.cursor().map_or(1, |c| c.0);
+        comments_collection(
+            &cx,
+            &key.owner,
+            &key.repo,
+            ItemKind::Pulls,
+            *key.filter,
+            key.number,
+            page,
+        )
+        .await
+    }
+}
+
+// ===========================================================================
+// Live faces (blob, tree, direct)
+// ===========================================================================
+
+impl PullRequest {
+    pub(crate) async fn diff(cx: Cx, key: PullKey) -> Result<BlobFile<omnifs_sdk::repr::Json>> {
+        let repo_id = RepoId::new(&key.owner, &key.repo);
+        let blob = cx
+            .github_get(format!("/repos/{repo_id}/pulls/{}", key.number))
+            .header("Accept", "application/vnd.github.diff")
+            .into_blob()
+            .with_cache_key(format!("github/pulls/{repo_id}/{}/diff", key.number))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(BlobFile::new(blob.id())
+            .size(Size::Exact(blob.size))
+            .content_type(ContentType::Custom("text/x-diff")))
+    }
+}
+
+impl Repo {
+    pub(crate) async fn tree(cx: Cx, key: RepoKey) -> Result<TreeRef> {
+        let repo_id = RepoId::new(&key.owner, &key.repo);
         let opened = cx
             .git()
             .open_repo(
@@ -363,83 +415,11 @@ impl RepoKey {
     }
 }
 
-impl IssueKey {
-    pub(crate) async fn comments(self, cx: DirCx) -> Result<DirProjection> {
-        comments_dir(&cx, &self.owner, &self.repo, self.number).await
-    }
-}
-
-impl PullKey {
-    pub(crate) async fn comments(self, cx: DirCx) -> Result<DirProjection> {
-        comments_dir(&cx, &self.owner, &self.repo, self.number).await
-    }
-
-    pub(crate) async fn diff(self, cx: Cx) -> Result<FileProjection> {
-        let repo_id = RepoId::new(&self.owner, &self.repo);
-        let blob = cx
-            .github_get(format!("/repos/{repo_id}/pulls/{}", self.number))
-            .header("Accept", "application/vnd.github.diff")
-            .into_blob()
-            .with_cache_key(format!("github/pulls/{repo_id}/{}/diff", self.number))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(FileProjection::blob(blob.id())
-            .size(Size::Exact(blob.size))
-            .dynamic()
-            .content_type(ContentType::Custom("text/x-diff"))
-            .build())
-    }
-}
-
-impl IssueCommentKey {
-    pub(crate) async fn read(self, cx: Cx) -> Result<FileProjection> {
-        comment_read(&cx, &self.owner, &self.repo, self.number, self.idx).await
-    }
-}
-
-impl PullCommentKey {
-    pub(crate) async fn read(self, cx: Cx) -> Result<FileProjection> {
-        comment_read(&cx, &self.owner, &self.repo, self.number, self.idx).await
-    }
-}
-
-impl RunListKey {
-    pub(crate) async fn list(self, cx: DirCx) -> Result<DirProjection> {
-        let repo_id = RepoId::new(&self.owner, &self.repo);
-        let runs: WorkflowRunsResponse = cx
-            .github_json(format!("/repos/{repo_id}/actions/runs?per_page=30"))
-            .await?;
-        let mut projection = DirProjection::exhaustive(
-            runs.workflow_runs
-                .iter()
-                .map(|run| Entry::dir(run.id.to_string())),
-        );
-        for run in &runs.workflow_runs {
-            let base = format!("/{}/{}/actions/runs/{}", self.owner, self.repo, run.id);
-            projection = projection
-                .preload_file(
-                    format!("{base}/status"),
-                    FileProjection::inline(run.status.clone().into_bytes())
-                        .dynamic()
-                        .build(),
-                )
-                .preload_file(
-                    format!("{base}/conclusion"),
-                    FileProjection::inline(run.conclusion.clone().unwrap_or_default().into_bytes())
-                        .dynamic()
-                        .build(),
-                );
-        }
-        Ok(projection)
-    }
-}
-
-impl RunKey {
-    pub(crate) async fn log(self, cx: Cx) -> Result<FileProjection> {
-        let repo = RepoId::new(&self.owner, &self.repo);
+impl WorkflowRun {
+    pub(crate) async fn log(cx: Cx, key: RunKey) -> Result<FileProjection> {
+        let repo = RepoId::new(&key.owner, &key.repo);
         let resp = cx
-            .github_get(format!("/repos/{repo}/actions/runs/{}/logs", self.run_id))
+            .github_get(format!("/repos/{repo}/actions/runs/{}/logs", key.run_id))
             .send()
             .await?;
         let body = github_check_status(resp)?.into_body();
@@ -447,75 +427,113 @@ impl RunKey {
     }
 }
 
-async fn comments_dir(
-    cx: &DirCx,
-    owner: &OwnerName,
-    repo: &RepoName,
-    number: u64,
-) -> Result<DirProjection> {
-    let page = cx.page_cursor(1);
-    let comments: Vec<CommentRecord> = cx
-        .github_json(format!(
-            "/repos/{owner}/{repo}/issues/{number}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
-        ))
-        .await?;
-    let base = (u64::from(page) - 1) * COMMENT_PAGE_SIZE;
-    let entries = (1..=comments.len() as u64).map(|idx| Entry::file((base + idx).to_string()));
-    let mut projection = if (comments.len() as u64) < COMMENT_PAGE_SIZE {
-        DirProjection::exhaustive(entries)
-    } else {
-        DirProjection::paged(entries, Cursor::Page(page + 1))
-    };
-    // The page fetch already holds every comment body, so preload each file
-    // (byte-identical to comment_read) instead of forcing a per-read refetch.
-    // Bodies vary in size: inline within the per-file cap and the shared
-    // aggregate budget; comments that don't fit fall back to comment_read.
-    let mut budget = MAX_EAGER_RESPONSE_BYTES;
-    for (offset, comment) in comments.iter().enumerate() {
-        let bytes = comment_bytes(comment);
-        if bytes.len() > MAX_PROJECTED_BYTES || bytes.len() > budget {
-            continue;
-        }
-        budget -= bytes.len();
-        let idx = base + offset as u64 + 1;
-        projection = projection.preload_file(
-            idx.to_string(),
-            FileProjection::inline(bytes).dynamic().build(),
-        );
+// ===========================================================================
+// Helpers
+// ===========================================================================
+
+/// A typed page cursor for the comment listing (1-based GitHub page number),
+/// carried host-opaque through the wire.
+pub(crate) struct GitHubPageCursor(pub(crate) u64);
+
+impl ListCursor for GitHubPageCursor {
+    fn encode(&self) -> String {
+        self.0.to_string()
     }
-    Ok(projection)
+
+    fn decode(token: &str) -> Result<Self> {
+        token
+            .parse()
+            .map(Self)
+            .map_err(|_| ProviderError::invalid_input("bad comment page cursor"))
+    }
 }
 
-/// The rendered bytes for one comment leaf, shared by the listing preload and
-/// the on-demand read so both paths are byte-identical.
-fn comment_bytes(comment: &CommentRecord) -> Vec<u8> {
-    let body = comment.body.as_deref().unwrap_or("");
-    format!("{}:\n{body}\n", comment.user.login).into_bytes()
+fn inline_text(s: &str) -> FileProjection {
+    FileProjection::inline(s.as_bytes().to_vec())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .build()
 }
 
-async fn comment_read(
+/// The shallow eager leaves an issue/PR listing row can fill without the
+/// single-item canonical: the tiny `title`/`state`/`user` fields. `body`,
+/// `item.md`, and `item.json` derive from the canonical, which the lossy row
+/// cannot reproduce, so they load on first read.
+fn eager_item_leaves(item: &ItemData) -> Vec<(String, FileProjection)> {
+    let login = item.user.as_ref().map_or("", |u| u.login.as_str());
+    vec![
+        ("title".to_string(), inline_text(&item.title)),
+        ("state".to_string(), inline_text(&item.state)),
+        ("user".to_string(), inline_text(login)),
+    ]
+}
+
+/// The shallow eager leaves a comment listing row can fill from the lossy list
+/// payload: `author` and `body.md` render the same bytes from any source, so
+/// they preload at listing time. `comment.json`/`comment.md` derive from the
+/// verbatim standalone GET, which the list response cannot reproduce, so they
+/// load on first read.
+fn eager_comment_leaves(
+    comment: &Comment,
+    key: &CommentKey,
+) -> Result<Vec<(String, FileProjection)>> {
+    Ok(vec![
+        ("author".to_string(), comment.author(key)?),
+        ("body.md".to_string(), comment.body_md(key)?),
+    ])
+}
+
+fn complete_or_partial<T: omnifs_sdk::object::Object, C: ListCursor>(
+    entries: Vec<CollectionEntry<T>>,
+    exhaustive: bool,
+) -> Collection<T, C> {
+    if exhaustive {
+        Collection::complete(entries)
+    } else {
+        Collection::partial(entries)
+    }
+}
+
+async fn comments_collection(
     cx: &Cx,
     owner: &OwnerName,
     repo: &RepoName,
+    item_kind: ItemKind,
+    filter: StateFilter,
     number: u64,
-    idx: u64,
-) -> Result<FileProjection> {
-    if idx == 0 {
-        return Err(ProviderError::not_found("comments are 1-indexed"));
-    }
-    let page = ((idx - 1) / COMMENT_PAGE_SIZE) + 1;
-    let offset = ((idx - 1) % COMMENT_PAGE_SIZE) as usize;
-    let comments: Vec<CommentRecord> = cx
+    page: u64,
+) -> Result<Collection<Comment, GitHubPageCursor>> {
+    // The list response is a lossy view: serde_json would re-serialize each row
+    // key-sorted and compact, which is NOT byte-identical to the verbatim
+    // standalone comment GET that `Comment::load` stores. Storing that as the
+    // canonical would content-address `comment.json` inconsistently. So list
+    // only the eagerly-derivable leaves (author, body.md, which render the same
+    // from any source) and let `comment.json`/`comment.md` load from the
+    // verbatim GET on first read, mirroring issues/pulls/runs.
+    let comments: Vec<Comment> = cx
         .github_json(format!(
             "/repos/{owner}/{repo}/issues/{number}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
         ))
         .await?;
-    let comment = comments
-        .get(offset)
-        .ok_or_else(|| ProviderError::not_found("comment not found"))?;
-    Ok(FileProjection::body(comment_bytes(comment))
-        .dynamic()
-        .build())
+    let len = comments.len() as u64;
+    let mut entries = Vec::with_capacity(comments.len());
+    for comment in comments {
+        let key = CommentKey {
+            owner: owner.clone(),
+            repo: repo.clone(),
+            item_kind,
+            filter: Facet(filter),
+            number,
+            comment_id: comment.id,
+        };
+        let files = eager_comment_leaves(&comment, &key)?;
+        entries.push(CollectionEntry::derived(key, files));
+    }
+    if len < COMMENT_PAGE_SIZE {
+        Ok(Collection::complete(entries))
+    } else {
+        Ok(Collection::page(entries).next(GitHubPageCursor(page + 1)))
+    }
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {

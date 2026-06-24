@@ -15,12 +15,9 @@ mod item;
 mod objects;
 
 pub(crate) use api::{GithubRest, github_check_status};
-use item::{
-    IssueCommentKey, IssueKey, IssueListKey, IssuesRootKey, OwnerKey, PullCommentKey, PullKey,
-    PullListKey, PullsRootKey, RepoKey, RunKey, RunListKey,
-};
+use item::ItemKind;
 pub(crate) use objects::ItemData;
-use objects::{Issue, PullRequest, Repo, Run};
+use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
 
 /// Base URL for the GitHub REST API. Compose with a leading-slash path.
 pub(crate) const API_BASE: &str = "https://api.github.com";
@@ -57,79 +54,76 @@ impl PathSegment for StateFilter {
     }
 }
 
+const STATE_FILTERS: &[&str] = &["open", "all"];
+
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json", resources(git = true))]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {
-        r.dir("/{owner}").handler(OwnerKey::repos)?;
+        r.object::<Owner>("/{owner}", |o| {
+            o.dynamic();
+            o.file("owner.json").canonical::<Json>()?;
+            o.file("profile.md").representation::<Markdown>()?;
+            o.dir("{repo}").collection(Owner::repos)?;
+            Ok(())
+        })?;
 
         r.object::<Repo>("/{owner}/{repo}", |o| {
             o.dynamic();
-            o.representations("repo", ())?;
+            o.file("repo.json").canonical::<Json>()?;
+            o.dir("repo").tree(Repo::tree)?;
+            o.dir("issues").choices(STATE_FILTERS)?;
+            o.dir("issues/{filter}").collection(Repo::issues)?;
+            o.dir("pulls").choices(STATE_FILTERS)?;
+            o.dir("pulls/{filter}").collection(Repo::pulls)?;
+            o.dir("actions/runs").collection(Repo::workflow_runs)?;
             Ok(())
         })?;
 
-        r.dir("/{owner}/{repo}/issues")
-            .handler(IssuesRootKey::filters)?;
-        r.dir("/{owner}/{repo}/issues/{filter}")
-            .handler(IssueListKey::list)?;
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
             o.dynamic();
-            o.representations("item", (Markdown,))?;
-            o.file("title")
-                .project(|value: &Issue, _key| value.title())?;
-            o.file("body")
-                .lazy()
-                .project(|value: &Issue, _key| value.body())?;
-            o.file("state")
-                .project(|value: &Issue, _key| value.state())?;
-            o.file("user").project(|value: &Issue, _key| value.user())?;
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("title").derive(Issue::title)?;
+            o.file("state").derive(Issue::state)?;
+            o.file("user").derive(Issue::user)?;
+            o.file("body").lazy().derive(Issue::body)?;
+            o.dir("comments").collection(Issue::comments)?;
             Ok(())
         })?;
-        r.dir("/{owner}/{repo}/issues/{filter}/{number}/comments")
-            .handler(IssueKey::comments)?;
-        r.file("/{owner}/{repo}/issues/{filter}/{number}/comments/{idx}")
-            .handler(IssueCommentKey::read)?;
 
-        r.dir("/{owner}/{repo}/pulls")
-            .handler(PullsRootKey::filters)?;
-        r.dir("/{owner}/{repo}/pulls/{filter}")
-            .handler(PullListKey::list)?;
         r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
             o.dynamic();
-            o.representations("item", (Markdown,))?;
-            o.file("title")
-                .project(|value: &PullRequest, _key| value.title())?;
-            o.file("body")
-                .lazy()
-                .project(|value: &PullRequest, _key| value.body())?;
-            o.file("state")
-                .project(|value: &PullRequest, _key| value.state())?;
-            o.file("user")
-                .project(|value: &PullRequest, _key| value.user())?;
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("title").derive(PullRequest::title)?;
+            o.file("state").derive(PullRequest::state)?;
+            o.file("user").derive(PullRequest::user)?;
+            o.file("body").lazy().derive(PullRequest::body)?;
+            o.file("diff").blob(PullRequest::diff)?;
+            o.dir("comments").collection(PullRequest::comments)?;
             Ok(())
         })?;
-        r.dir("/{owner}/{repo}/pulls/{filter}/{number}/comments")
-            .handler(PullKey::comments)?;
-        r.file("/{owner}/{repo}/pulls/{filter}/{number}/comments/{idx}")
-            .handler(PullCommentKey::read)?;
-        r.file("/{owner}/{repo}/pulls/{filter}/{number}/diff")
-            .handler(PullKey::diff)?;
 
-        r.treeref("/{owner}/{repo}/repo").handler(RepoKey::tree)?;
-
-        r.dir("/{owner}/{repo}/actions/runs")
-            .handler(RunListKey::list)?;
-        r.object::<Run>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
+        r.object::<WorkflowRun>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
             o.dynamic();
-            o.representations("run", ())?;
-            o.file("status")
-                .project(|value: &Run, _key| value.status())?;
-            o.file("conclusion")
-                .project(|value: &Run, _key| value.conclusion())?;
+            o.file("run.json").canonical::<Json>()?;
+            o.file("status").derive(WorkflowRun::status)?;
+            o.file("conclusion").derive(WorkflowRun::conclusion)?;
+            o.file("log").direct(WorkflowRun::log)?;
             Ok(())
         })?;
-        r.file("/{owner}/{repo}/actions/runs/{run_id}/log")
-            .handler(RunKey::log)?;
+
+        r.object::<Comment>(
+            "/{owner}/{repo}/{item_kind}/{filter}/{number}/comments/{comment_id}",
+            |o| {
+                o.dynamic();
+                o.file("comment.json").canonical::<Json>()?;
+                o.file("comment.md").representation::<Markdown>()?;
+                o.file("body.md").derive(Comment::body_md)?;
+                o.file("author").derive(Comment::author)?;
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
@@ -335,21 +329,10 @@ pub(crate) struct ListPage {
     pub(crate) exhaustive: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct CommentRecord {
-    pub(crate) user: CommentUser,
-    pub(crate) body: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct CommentUser {
-    pub(crate) login: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkflowRunsResponse {
     #[serde(default)]
-    pub(crate) workflow_runs: Vec<objects::Run>,
+    pub(crate) workflow_runs: Vec<WorkflowRun>,
 }
 
 /// Search supplies `total_count` so we can size the rest of the work
@@ -359,7 +342,7 @@ pub(crate) async fn list_items(
     cx: &Cx,
     owner: &OwnerName,
     repo: &RepoName,
-    kind: item::ItemKind,
+    kind: ItemKind,
     filter: StateFilter,
 ) -> Result<ListPage> {
     let search_state_clause = match filter {

@@ -82,6 +82,31 @@ pub(super) struct ObjectSpec<O: Object> {
     /// each with the late-bound child view that seal resolves and the dispatch
     /// path passes in.
     pub collection_handlers: std::rc::Rc<Vec<CollectionHandlerEntry<O::State>>>,
+    /// Tree faces declared on dir faces (`o.dir(name).tree(method)`): each is
+    /// registered as a treeref route at `template/name` so a lookup/list there
+    /// returns the subtree handoff. Shared so an alias replays the same closures.
+    pub tree_faces: std::rc::Rc<Vec<TreeFaceEntry<O::State>>>,
+    /// Choices faces declared on dir faces (`o.dir(name).choices(names)`).
+    pub choices_faces: std::rc::Rc<Vec<ChoicesFace>>,
+}
+
+/// One tree face: the relative dir name and the boxed treeref handler. The
+/// handler parses `O::Key` from the dir-path captures and runs the typed tree
+/// method, lowering to a [`crate::handler::TreeRef`] (the host resolves the
+/// git-open / archive callout the method issues).
+pub(super) struct TreeFaceEntry<S> {
+    pub name: &'static str,
+    pub handler: super::handlers::BoxedTreeRefHandler<S>,
+    pub validator: RouteValidator,
+}
+
+/// One choices face: the dir face name plus the fixed finite child names. The
+/// mount registers an exhaustive dir route at `template/name` so a readdir
+/// lists exactly these names as directories.
+#[derive(Clone)]
+pub(super) struct ChoicesFace {
+    pub name: &'static str,
+    pub names: &'static [&'static str],
 }
 
 /// One SDK-generated collection list handler: the collection dir path, the
@@ -90,6 +115,10 @@ pub(super) struct CollectionHandlerEntry<S> {
     pub dir_path: String,
     pub handler: CollectionHandler<S>,
     pub late_view: LateChildView,
+    /// Capture validator for the deferred NESTED dir route, derived from the
+    /// list method's key type `K` (the collection dir path captures), not the
+    /// parent anchor's `O::Key`.
+    pub validator: RouteValidator,
 }
 
 /// A boxed future yielding a [`crate::projection::DirProjection`].
@@ -128,6 +157,8 @@ impl<O: Object> Clone for ObjectSpec<O> {
             face_handlers: self.face_handlers.clone(),
             collections: self.collections.clone(),
             collection_handlers: self.collection_handlers.clone(),
+            tree_faces: self.tree_faces.clone(),
+            choices_faces: self.choices_faces.clone(),
         }
     }
 }
@@ -148,6 +179,18 @@ impl<O: Object> ObjectHandle<O> {
     /// late-bound child view).
     pub(super) fn collection_handlers(&self) -> &[CollectionHandlerEntry<O::State>] {
         &self.spec.collection_handlers
+    }
+
+    /// The tree faces declared on this object, registered as treeref routes at
+    /// mount time.
+    pub(super) fn tree_faces(&self) -> &[TreeFaceEntry<O::State>] {
+        &self.spec.tree_faces
+    }
+
+    /// The choices faces declared on this object, registered as exhaustive dir
+    /// routes at mount time.
+    pub(super) fn choices_faces(&self) -> &[ChoicesFace] {
+        &self.spec.choices_faces
     }
 
     /// The object spec's declared canonical-view leaf names (canonical,
@@ -298,6 +341,13 @@ pub struct ObjectBlock<O: Object> {
     /// SDK-generated collection list handlers (dir path + boxed handler +
     /// late-bound child view).
     collection_handlers: Vec<CollectionHandlerEntry<O::State>>,
+    /// Tree faces (`o.dir(name).tree(method)`), registered as treeref routes at
+    /// mount time.
+    tree_faces: Vec<TreeFaceEntry<O::State>>,
+    /// Choices faces (`o.dir(name).choices(names)`): the dir face name plus the
+    /// fixed finite child names, registered as an exhaustive dir route at mount
+    /// time so a readdir lists those names.
+    choices_faces: Vec<ChoicesFace>,
     /// The single allowed file-object face name (file shape only).
     file_face_seen: bool,
     error: Option<ProviderError>,
@@ -332,6 +382,8 @@ impl<O: Object> ObjectBlock<O> {
             face_handlers: std::collections::BTreeMap::new(),
             collections: Vec::new(),
             collection_handlers: Vec::new(),
+            tree_faces: Vec::new(),
+            choices_faces: Vec::new(),
             file_face_seen: false,
             error: None,
         })
@@ -397,6 +449,8 @@ impl<O: Object> ObjectBlock<O> {
         let face_handlers = std::mem::take(&mut self.face_handlers);
         let collections = std::mem::take(&mut self.collections);
         let collection_handlers = std::mem::take(&mut self.collection_handlers);
+        let tree_faces = std::mem::take(&mut self.tree_faces);
+        let choices_faces = std::mem::take(&mut self.choices_faces);
         let stability = self.stability.ok_or_else(|| {
             ProviderError::invalid_input(
                 "object block requires a stability declaration: stability(|key| ..) or stable()/dynamic()/live()",
@@ -431,6 +485,8 @@ impl<O: Object> ObjectBlock<O> {
             face_handlers: std::rc::Rc::new(face_handlers),
             collections: std::rc::Rc::new(collections),
             collection_handlers: std::rc::Rc::new(collection_handlers),
+            tree_faces: std::rc::Rc::new(tree_faces),
+            choices_faces: std::rc::Rc::new(choices_faces),
         })
     }
 }
@@ -692,13 +748,22 @@ impl<'a, O: Object> DirFace<'a, O> {
     /// Register a child-object collection: the dir lists `C` entries, each
     /// resolving to a child `r.object::<C>` anchor. `C` must be registered as
     /// its own object route (checked at seal time).
-    pub fn collection<C, Fut, Cur>(
+    ///
+    /// The list `method`'s key `K` is parsed from the COLLECTION DIR PATH
+    /// captures (`template/name`), not the parent anchor's `O::Key`. A
+    /// collection under a captured sub-dir (`o.dir("issues/{filter}")`) can
+    /// therefore read `{filter}` from `K`; for a collection whose dir path
+    /// carries no extra captures, `K` is just `O::Key`. `C` is inferred from
+    /// the method's `Collection<C, Cur>` return, so the call site needs no
+    /// turbofish.
+    pub fn collection<C, K, Fut, Cur>(
         self,
-        method: fn(O::Key, crate::collection::ListCx<Cur, O::State>) -> Fut,
+        method: fn(K, crate::collection::ListCx<Cur, O::State>) -> Fut,
     ) -> Result<&'a mut ObjectBlock<O>>
     where
         C: Object + 'static,
         C::Key: Key + 'static,
+        K: FromCaptures + 'static,
         Cur: crate::collection::Cursor + 'static,
         Fut: Future<Output = Result<crate::collection::Collection<C, Cur>>> + 'static,
         O: 'static,
@@ -731,7 +796,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                   caps: Captures,
                   child_view: std::rc::Rc<ResolvedChildView>| {
                 Box::pin(async move {
-                    let key = O::Key::from_captures(&caps)?;
+                    let key = K::from_captures(&caps)?;
                     let cursor = match dir_cx.cursor() {
                         Some(wire) => crate::collection::decode_cursor::<Cur>(wire)?,
                         None => None,
@@ -750,28 +815,52 @@ impl<'a, O: Object> DirFace<'a, O> {
             dir_path,
             handler,
             late_view,
+            validator: captures_validator::<K>(),
         });
         Ok(self.block)
     }
 
     /// A subtree handoff registered as an object dir face so it reads in
-    /// `start()`. Lowers to the `treeref` machinery.
+    /// `start()`. Lowers to the `treeref` machinery: the face becomes a treeref
+    /// route at `template/name`, so a lookup or list there returns the subtree
+    /// handoff after the host runs the git-open / archive callout the method
+    /// issues.
     pub fn tree<Fut>(
         self,
-        _method: fn(Cx<O::State>, O::Key) -> Fut,
+        method: fn(Cx<O::State>, O::Key) -> Fut,
     ) -> Result<&'a mut ObjectBlock<O>>
     where
-        Fut: Future<Output = Result<crate::handler::TreeRef>>,
+        Fut: Future<Output = Result<crate::handler::TreeRef>> + 'static,
+        O: 'static,
+        O::State: 'static,
     {
-        // The tree face claims the dir path; the actual handoff is wired
-        // through a treeref route the provider registers (or a future
-        // object-tree lowering). For now the claim reserves the path.
-        self.block.claim_leaf(self.name)?;
+        if self.name.starts_with('@') {
+            return Err(ProviderError::invalid_input(format!(
+                "object route {}: tree child {:?} uses the reserved @ namespace",
+                self.block.template, self.name
+            )));
+        }
+        // The treeref route (registered at mount time) claims the path, so the
+        // tree face must NOT also claim_leaf or the seal overlap check fires.
+        let handler: super::handlers::BoxedTreeRefHandler<O::State> =
+            std::sync::Arc::new(move |cx: Cx<O::State>, caps: Captures| {
+                Box::pin(async move {
+                    let key = O::Key::from_captures(&caps)?;
+                    method(cx, key).await
+                }) as Pin<Box<dyn Future<Output = Result<crate::handler::TreeRef>>>>
+            });
+        self.block.tree_faces.push(TreeFaceEntry {
+            name: self.name,
+            handler,
+            validator: captures_validator::<O::Key>(),
+        });
         Ok(self.block)
     }
 
     /// Declare an exhaustive listing of a fixed finite name set: each name is a
-    /// child directory (the `StateFilter::choices()` axis).
+    /// child directory (the `StateFilter::choices()` axis). The mount registers
+    /// an exhaustive dir route at `template/name` so a readdir lists exactly
+    /// these names.
     pub fn choices(self, names: &'static [&'static str]) -> Result<&'a mut ObjectBlock<O>> {
         for name in names {
             if name.starts_with('@') {
@@ -781,9 +870,12 @@ impl<'a, O: Object> DirFace<'a, O> {
                 )));
             }
         }
-        // `choices` is a fixed static subtree; the dir face itself claims the
-        // path so the seal check sees it.
-        self.block.claim_leaf(self.name)?;
+        // The dir route (registered at mount time) claims the path, so the
+        // choices face must NOT also claim_leaf.
+        self.block.choices_faces.push(ChoicesFace {
+            name: self.name,
+            names,
+        });
         Ok(self.block)
     }
 

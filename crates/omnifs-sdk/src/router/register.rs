@@ -230,9 +230,50 @@ impl<S> Router<S> {
                 requires_canonical: decl.requires_canonical,
                 late_view: entry.late_view.clone(),
                 handler: entry.handler.clone(),
-                validator: super::handlers::captures_validator::<O::Key>(),
+                validator: entry.validator.clone(),
             });
         }
+        // Register each tree face as a treeref route at `template/name`,
+        // claiming that path exactly once (the treeref registration claims it;
+        // the tree face itself does not). A lookup/list there returns the
+        // subtree handoff.
+        let mount = template.trim_end_matches('/');
+        for face in handle.tree_faces() {
+            let tree_path = format!("{mount}/{}", face.name);
+            let pattern = parse_pattern(&tree_path)?;
+            self.treerefs.push(super::handlers::TreeRefEntry {
+                pattern: pattern.clone(),
+                handler: face.handler.clone(),
+                validator: face.validator.clone(),
+            });
+            self.leaf_claims.push(pattern);
+        }
+
+        // Register each choices face as an exhaustive dir route at
+        // `template/name`, so a readdir lists exactly the fixed names. The dir
+        // route claims the path (the choices face does not).
+        for face in handle.choices_faces() {
+            let choices_path = format!("{mount}/{}", face.name);
+            let pattern = parse_pattern(&choices_path)?;
+            let names = face.names;
+            let handler: super::handlers::BoxedDirHandler<S> =
+                std::sync::Arc::new(move |_dir_cx, _caps| {
+                    let entries = names
+                        .iter()
+                        .map(|name| crate::projection::Entry::dir(*name))
+                        .collect::<Vec<_>>();
+                    Box::pin(
+                        async move { Ok(crate::projection::DirProjection::exhaustive(entries)) },
+                    )
+                });
+            self.dirs.push(super::handlers::DirEntry {
+                pattern: pattern.clone(),
+                handler,
+                validator: super::handlers::accept_validator(),
+            });
+            self.leaf_claims.push(pattern);
+        }
+
         self.objects.push(mounted.entry);
         self.leaf_claims.extend(mounted.claims);
         Ok(())
