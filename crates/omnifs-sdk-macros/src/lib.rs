@@ -159,9 +159,3 @@ pub fn config(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-#[allow(non_snake_case)]
-#[doc(hidden)]
-#[proc_macro_attribute]
-pub fn Config(attr: TokenStream, item: TokenStream) -> TokenStream {
-    config(attr, item)
-}

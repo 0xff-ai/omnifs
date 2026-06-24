@@ -50,7 +50,7 @@ impl<S> Router<S> {
             return Ok(List::subtree(tree_ref.tree_ref));
         }
 
-        if let Some(route) = shape.list_dir_route(&abs) {
+        if let Some(route) = shape.dir_route(&abs) {
             let dir_cx = DirCx::new(cx.clone(), DirIntent::List { cursor });
             let projection = (route.entry.handler)(dir_cx, route.captures).await?;
             return shape.dir_projection_into_list(&abs, &projection);

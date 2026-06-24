@@ -57,17 +57,8 @@ impl<S> Shape<'_, S> {
         route_match(self.router.treerefs.iter(), abs)
     }
 
-    /// Dir routes registered via `r.dir(..)`. Lookup uses this for its
-    /// file-vs-dir precedence comparison.
-    pub(super) fn direct_dir_route(&self, abs: &Path) -> Option<RouteMatch<'_, DirEntry<S>>> {
-        route_match(self.router.dirs.iter(), abs)
-    }
-
-    /// Dir routes whose handlers can answer a listing or a lookup fallback.
-    pub(in crate::router) fn list_dir_route(
-        &self,
-        abs: &Path,
-    ) -> Option<RouteMatch<'_, DirEntry<S>>> {
+    /// Dir routes registered via `r.dir(..)`.
+    pub(in crate::router) fn dir_route(&self, abs: &Path) -> Option<RouteMatch<'_, DirEntry<S>>> {
         route_match(self.router.dirs.iter(), abs)
     }
 

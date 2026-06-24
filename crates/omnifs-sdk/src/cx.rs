@@ -15,7 +15,6 @@
 //! silently misalign (see [`join_all`]).
 
 use crate::archives;
-use crate::blob::{BlobId, BlobReader};
 use crate::git;
 use crate::http;
 use core::cell::RefCell;
@@ -153,13 +152,6 @@ impl<S> Cx<S> {
     /// Archive-mount callout builder; see [`crate::archives`].
     pub fn archives(&self) -> archives::Builder<'_, S> {
         archives::Builder::new(self)
-    }
-
-    /// Reader for a blob already stored host-side. Each read copies bytes
-    /// into guest memory under a host policy cap; see
-    /// [`crate::blob::BlobReader`].
-    pub fn blob(&self, id: BlobId) -> BlobReader<'_, S> {
-        BlobReader::new(self, id)
     }
 
     /// Drain the callouts queued since the last poll. Exposed for the

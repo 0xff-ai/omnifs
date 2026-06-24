@@ -9,7 +9,6 @@
 
 use super::super::pattern::Pattern;
 use crate::browse::{Entry as BrowseEntry, EntryKind as BrowseEntryKind};
-use crate::captures::Captures;
 use crate::file_attrs::FileProj;
 use crate::router::handlers::RouteValidator;
 use omnifs_core::path::Path;
@@ -40,10 +39,8 @@ impl<S> Shape<'_, S> {
             let Ok(child_abs) = absolute_parent.join(name) else {
                 continue;
             };
-            let Some(()) = pattern.match_prefix(&child_abs).ok().and_then(|matched| {
-                validator
-                    .accepts_present(&Captures::from_match(&matched))
-                    .then_some(())
+            let Some(()) = pattern.match_prefix(&child_abs).ok().and_then(|caps| {
+                validator.accepts_present(&caps).then_some(())
             }) else {
                 continue;
             };

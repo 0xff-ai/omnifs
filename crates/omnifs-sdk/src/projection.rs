@@ -640,18 +640,6 @@ impl<F: Format> BlobFile<F> {
         self
     }
 
-    /// Shorthand for `stability(Stability::Stable)`.
-    #[must_use]
-    pub fn stable(self) -> Self {
-        self.stability(Stability::Stable)
-    }
-
-    /// Shorthand for `stability(Stability::Dynamic)`.
-    #[must_use]
-    pub fn dynamic(self) -> Self {
-        self.stability(Stability::Dynamic)
-    }
-
     #[must_use]
     pub fn version(mut self, version: impl Into<VersionToken>) -> Self {
         self.version = Some(version.into());
@@ -687,33 +675,21 @@ impl<F: Format> BlobFile<F> {
 }
 
 /// A ranged byte stream, returned by an object `stream` face: a range reader
-/// plus declared size, stability, and content type. The only face that may be
-/// `Live`.
+/// plus declared size and stability. The only face that may be `Live`.
 pub struct StreamFile {
     reader: Rc<dyn RangeReader>,
     size: Size,
     stability: Stability,
-    content_type: Option<ContentType>,
-    version: Option<VersionToken>,
 }
 
 impl StreamFile {
-    /// A stream over `reader` with unknown size, `Stability::Dynamic`, and no
-    /// content type.
+    /// A stream over `reader` with unknown size and `Stability::Dynamic`.
     pub fn new(reader: impl RangeReader + 'static) -> Self {
         Self {
             reader: Rc::new(reader),
             size: Size::Unknown,
             stability: Stability::Dynamic,
-            content_type: None,
-            version: None,
         }
-    }
-
-    #[must_use]
-    pub fn size(mut self, size: Size) -> Self {
-        self.size = size;
-        self
     }
 
     /// Mark the stream live: its bytes may change while observed (`tail -f`).
@@ -723,31 +699,9 @@ impl StreamFile {
         self
     }
 
-    #[must_use]
-    pub fn stability(mut self, stability: Stability) -> Self {
-        self.stability = stability;
-        self
-    }
-
-    #[must_use]
-    pub fn content_type(mut self, content_type: ContentType) -> Self {
-        self.content_type = Some(content_type);
-        self
-    }
-
-    #[must_use]
-    pub fn version(mut self, version: impl Into<VersionToken>) -> Self {
-        self.version = Some(version.into());
-        self
-    }
-
     /// The attrs an open session reports.
     pub fn attrs(&self) -> FileAttrs {
-        let attrs = FileAttrs::new(self.size.clone(), self.stability);
-        match &self.version {
-            Some(version) => attrs.with_version(version.clone()),
-            None => attrs,
-        }
+        FileAttrs::new(self.size.clone(), self.stability)
     }
 
     /// The reader serving chunks.

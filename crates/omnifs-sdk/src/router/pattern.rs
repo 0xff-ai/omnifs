@@ -37,12 +37,9 @@
 //! are a startup error rather than silent runtime behavior.
 
 use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
-use crate::captures::Captures;
+use crate::captures::{Capture, Captures};
 use crate::error::{ProviderError, Result};
 use omnifs_core::path::{Path, Segment};
-
-// Within this module, `Result` from crate::error is `Result<T, ProviderError>`.
-// Pattern parsing returns `Result<T, Error>` using the stdlib alias directly.
 
 // ===========================================================================
 // Pattern types
@@ -84,42 +81,6 @@ enum PatternSegment {
     },
 }
 
-/// A pattern parse or match error.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct Error {
-    message: String,
-}
-
-/// The result of a successful pattern match: the matched path plus its
-/// decoded captures in template order. Prefix-capture values arrive with the
-/// prefix already stripped (`@google` yields `google`); a rest capture yields
-/// the trailing segments joined by `/` (empty string for zero segments).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Match {
-    path: Path,
-    captures: Vec<Capture>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Capture {
-    name: String,
-    value: String,
-}
-
-impl Error {
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl From<String> for Error {
-    fn from(message: String) -> Self {
-        Self { message }
-    }
-}
-
 impl CaptureLocation {
     #[must_use]
     pub fn segment_index(&self) -> usize {
@@ -135,27 +96,6 @@ impl CaptureLocation {
     }
 }
 
-impl Match {
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.captures
-            .iter()
-            .find(|capture| capture.name == name)
-            .map(|capture| capture.value.as_str())
-    }
-
-    pub fn captures(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.captures
-            .iter()
-            .map(|capture| (capture.name.as_str(), capture.value.as_str()))
-    }
-}
-
 impl Pattern {
     /// Compile a template (see the module docs for the grammar).
     ///
@@ -164,7 +104,7 @@ impl Pattern {
     /// anywhere but last, and malformed capture syntax (nested or unclosed
     /// braces, empty prefix). `"/"` compiles to the empty pattern that matches
     /// only the root path.
-    pub fn parse(template: &str) -> core::result::Result<Self, Error> {
+    pub fn parse(template: &str) -> core::result::Result<Self, String> {
         if template == "/" {
             return Ok(Self {
                 segments: Vec::new(),
@@ -174,7 +114,7 @@ impl Pattern {
             });
         }
         if !template.starts_with('/') || template.ends_with('/') || template.contains("//") {
-            return Err(format!("invalid path template {template:?}").into());
+            return Err(format!("invalid path template {template:?}"));
         }
 
         let raw_segments: Vec<&str> = template.split('/').skip(1).collect();
@@ -186,17 +126,16 @@ impl Pattern {
 
         for (index, raw) in raw_segments.into_iter().enumerate() {
             if raw.is_empty() || matches!(raw, "." | "..") {
-                return Err(format!("invalid path template segment {raw:?}").into());
+                return Err(format!("invalid path template segment {raw:?}"));
             }
             if raw.starts_with("{*") {
                 if !raw.ends_with('}') || raw.len() < 4 {
-                    return Err(format!("invalid rest-capture segment {raw:?}").into());
+                    return Err(format!("invalid rest-capture segment {raw:?}"));
                 }
                 if index != total - 1 {
                     return Err(format!(
                         "rest-capture segment {raw:?} must be the last segment of the pattern"
-                    )
-                    .into());
+                    ));
                 }
                 let name = &raw[2..raw.len() - 1];
                 validate_capture_name(name)?;
@@ -217,11 +156,11 @@ impl Pattern {
             }
             if let Some(start) = raw.find('{') {
                 if !raw.ends_with('}') || raw[start + 1..raw.len() - 1].contains('{') {
-                    return Err(format!("invalid capture segment {raw:?}").into());
+                    return Err(format!("invalid capture segment {raw:?}"));
                 }
                 let prefix = &raw[..start];
                 if prefix.is_empty() || prefix.contains('/') {
-                    return Err(format!("invalid capture prefix in segment {raw:?}").into());
+                    return Err(format!("invalid capture prefix in segment {raw:?}"));
                 }
                 let name = &raw[start + 1..raw.len() - 1];
                 validate_capture_name(name)?;
@@ -263,32 +202,29 @@ impl Pattern {
     /// segment-count match; a rest pattern matches its fixed prefix plus zero
     /// or more trailing segments (so `/ipfs/{cid}/{*path}` matches
     /// `/ipfs/Qm123` itself).
-    pub fn match_path(&self, path: &Path) -> core::result::Result<Match, Error> {
+    pub fn match_path(&self, path: &Path) -> core::result::Result<Captures, String> {
         let segments: Vec<&str> = path.segments().collect();
         if self.has_rest {
             let fixed = self.fixed_prefix_len();
             if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
-                return Err(format!("path {path:?} does not match pattern").into());
+                return Err(format!("path {path:?} does not match pattern"));
             }
         } else if segments.len() != self.segments.len() || !self.matches_prefix_segments(&segments)
         {
-            return Err(format!("path {path:?} does not match pattern").into());
+            return Err(format!("path {path:?} does not match pattern"));
         }
 
-        Ok(Match {
-            path: path.clone(),
-            captures: self.captures_from_segments(&segments),
-        })
+        Ok(self.captures_from_segments(&segments))
     }
 
     /// Match a path that may stop partway through the pattern (an ancestor
     /// probe). Captures are decoded only for the segments actually present;
     /// callers must tolerate missing captures (see
     /// [`crate::captures::FromCaptures::validate_present_captures`]).
-    pub fn match_prefix(&self, path: &Path) -> core::result::Result<Match, Error> {
+    pub fn match_prefix(&self, path: &Path) -> core::result::Result<Captures, String> {
         let segments: Vec<&str> = path.segments().collect();
         if !self.has_rest && segments.len() > self.segments.len() {
-            return Err(format!("path {path:?} is longer than pattern prefix").into());
+            return Err(format!("path {path:?} is longer than pattern prefix"));
         }
         let comparable = if self.has_rest && segments.len() > self.fixed_prefix_len() {
             &segments[..self.fixed_prefix_len()]
@@ -296,12 +232,9 @@ impl Pattern {
             segments.as_slice()
         };
         if !self.matches_prefix_segments(comparable) {
-            return Err(format!("path {path:?} does not match pattern prefix").into());
+            return Err(format!("path {path:?} does not match pattern prefix"));
         }
-        Ok(Match {
-            path: path.clone(),
-            captures: self.captures_from_segments(&segments),
-        })
+        Ok(self.captures_from_segments(&segments))
     }
 
     /// Whether `parent_segments` is a proper ancestor of paths this pattern
@@ -436,8 +369,8 @@ impl Pattern {
         }
     }
 
-    fn captures_from_segments(&self, concrete: &[&str]) -> Vec<Capture> {
-        let mut captures = Vec::new();
+    fn captures_from_segments(&self, concrete: &[&str]) -> Captures {
+        let mut items = Vec::new();
         for (index, segment) in self.segments.iter().enumerate() {
             match segment {
                 PatternSegment::Literal(_) => {},
@@ -449,7 +382,7 @@ impl Pattern {
                         Some(prefix) => raw.strip_prefix(prefix.as_str()).unwrap_or(raw),
                         None => raw,
                     };
-                    captures.push(Capture {
+                    items.push(Capture {
                         name: name.clone(),
                         value: value.to_string(),
                     });
@@ -458,14 +391,14 @@ impl Pattern {
                     if index > concrete.len() {
                         continue;
                     }
-                    captures.push(Capture {
+                    items.push(Capture {
                         name: name.clone(),
                         value: concrete[index..].join("/"),
                     });
                 },
             }
         }
-        captures
+        Captures::new(items)
     }
 
     fn matches_prefix_segments(&self, concrete: &[&str]) -> bool {
@@ -487,18 +420,18 @@ impl Pattern {
     }
 }
 
-fn validate_capture_name(name: &str) -> core::result::Result<(), Error> {
+fn validate_capture_name(name: &str) -> core::result::Result<(), String> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return Err("capture names cannot be empty".to_string().into());
+        return Err("capture names cannot be empty".to_string());
     };
     if !(first == '_' || first.is_ascii_alphabetic()) {
-        return Err(format!("invalid capture name {name:?}").into());
+        return Err(format!("invalid capture name {name:?}"));
     }
     if chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
         Ok(())
     } else {
-        Err(format!("invalid capture name {name:?}").into())
+        Err(format!("invalid capture name {name:?}"))
     }
 }
 
@@ -603,33 +536,6 @@ impl<S> RoutedEntry for super::object::ObjectRouteEntry<S> {
     }
 }
 
-impl<S> RoutedEntry for &DirEntry<S> {
-    fn route_pattern(&self) -> &Pattern {
-        &self.pattern
-    }
-    fn route_validator(&self) -> &RouteValidator {
-        &self.validator
-    }
-}
-
-impl<S> RoutedEntry for &FileEntry<S> {
-    fn route_pattern(&self) -> &Pattern {
-        &self.pattern
-    }
-    fn route_validator(&self) -> &RouteValidator {
-        &self.validator
-    }
-}
-
-impl<S> RoutedEntry for &super::object::ObjectRouteEntry<S> {
-    fn route_pattern(&self) -> &Pattern {
-        &self.pattern
-    }
-    fn route_validator(&self) -> &RouteValidator {
-        &self.validator
-    }
-}
-
 /// Highest-precedence route whose pattern matches `abs` and whose validator
 /// accepts the decoded captures.
 ///
@@ -646,8 +552,7 @@ where
     let mut candidates: Vec<(&E, Captures)> = routes
         .into_iter()
         .filter_map(|route| {
-            let matched = route.route_pattern().match_path(abs).ok()?;
-            let caps = Captures::from_match(&matched);
+            let caps = route.route_pattern().match_path(abs).ok()?;
             route
                 .route_validator()
                 .accepts(&caps)
@@ -663,8 +568,7 @@ where
 }
 
 pub(crate) fn parse_pattern(template: &str) -> Result<Pattern> {
-    Pattern::parse(template)
-        .map_err(|error| ProviderError::invalid_input(error.message().to_string()))
+    Pattern::parse(template).map_err(ProviderError::invalid_input)
 }
 
 pub(super) fn parse_provider_path(path: &str) -> Result<Path> {
@@ -682,22 +586,13 @@ mod pattern_tests {
     #[test]
     fn match_path_decodes_captures() {
         let pattern = Pattern::parse("/@{resolver}/{segment}/{*tail}").unwrap();
-        let matched = pattern
+        let caps = pattern
             .match_path(&Path::parse("/@google/example.com/a/b").unwrap())
             .unwrap();
 
-        assert_eq!(matched.path().as_str(), "/@google/example.com/a/b");
-        assert_eq!(matched.get("resolver"), Some("google"));
-        assert_eq!(matched.get("segment"), Some("example.com"));
-        assert_eq!(matched.get("tail"), Some("a/b"));
-        assert_eq!(
-            matched.captures().collect::<Vec<_>>(),
-            vec![
-                ("resolver", "google"),
-                ("segment", "example.com"),
-                ("tail", "a/b")
-            ]
-        );
+        assert_eq!(caps.get("resolver"), Some("google"));
+        assert_eq!(caps.get("segment"), Some("example.com"));
+        assert_eq!(caps.get("tail"), Some("a/b"));
     }
 
     #[test]
