@@ -35,6 +35,39 @@ async fn test_initialize() {
     assert_eq!(info.version, "0.1.0");
 }
 
+/// Every shipped provider must initialize (run `start()` + `seal()`) cleanly.
+/// The seal runs inside `initialize` and needs no credentials, so this is a
+/// deterministic gate for route-overlap and registration errors that a
+/// `cargo check` for `wasm32-wasip2` cannot catch (it compiles but never seals).
+/// This guards against the class of bug where a migrated provider mounts an
+/// object at the wrong template (e.g. an object at `/{a}/{b}` colliding with a
+/// literal route), which otherwise only surfaces at live mount time.
+#[tokio::test]
+async fn all_providers_initialize_and_seal() {
+    // Providers whose `start()` registers routes without touching a backing
+    // resource. `db` is excluded: it opens its SQLite file at init, so a bare
+    // harness (no fixture) fails with an environmental I/O error, not a seal
+    // error; db's seal is exercised through its live mount instead.
+    let providers = [
+        ("omnifs_provider_github.wasm", "github"),
+        ("omnifs_provider_arxiv.wasm", "arxiv"),
+        ("omnifs_provider_dns.wasm", "dns"),
+        ("omnifs_provider_docker.wasm", "docker"),
+        ("omnifs_provider_kubernetes.wasm", "k8s"),
+        ("omnifs_provider_linear.wasm", "linear"),
+        ("omnifs_provider_oura.wasm", "oura"),
+    ];
+    for (wasm, mount) in providers {
+        let config = format!(r#"{{"provider":"{wasm}","mount":"{mount}"}}"#);
+        let result = omnifs_itest::try_make_runtime_from_config(&config);
+        assert!(
+            result.is_ok(),
+            "provider {wasm} failed to initialize/seal: {:?}",
+            result.err()
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_list_root() {
     let engine = make_engine();
