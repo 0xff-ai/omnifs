@@ -1308,9 +1308,7 @@ fn object_stream_face_opens_live_session_and_serves_a_chunk() {
 
     // The reader serves a chunk: bytes plus an eof flag (the in-memory tail is
     // fully readable in one chunk).
-    let chunk = drive(&cx, async {
-        opened.reader.read_chunk(&cx, 0, 4096).await
-    });
+    let chunk = drive(&cx, async { opened.reader.read_chunk(&cx, 0, 4096).await });
     assert_eq!(chunk.content, b"log line for api\n");
     assert!(chunk.eof, "the in-memory tail returns eof on a full read");
 }
