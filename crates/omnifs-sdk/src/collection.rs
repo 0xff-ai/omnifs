@@ -214,17 +214,18 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
 }
 
 /// Lower a typed [`Collection`] to the [`crate::projection::DirProjection`] the
-/// SDK-generated collection dir handler returns.
+/// SDK-generated collection list handler returns.
 ///
-/// Each entry becomes a child directory named by the entry key's last identity
-/// capture (the child object anchor's last segment). A `Fresh` entry also
-/// stores the child canonical against its own logical id so a later read of the
-/// child serves warm; the view leaf is the child anchor's canonical path
-/// (`child_dir/`). A `Derived` entry projects its shallow leaves. The
-/// completeness variant selects exhaustive / open / paged.
+/// Each entry becomes a child directory named by the child object anchor's
+/// segment(s) beyond the collection dir, computed from the entry key against
+/// the CHILD's registered template (not the parent's captures). A `Fresh`
+/// entry also stores the child canonical against its own logical id with the
+/// child's canonical-view leaf paths (canonical/representation/derived,
+/// facet-expanded) as view leaves, so a later read of any child leaf serves
+/// warm. A `Derived` entry projects its shallow leaves under the child anchor.
+/// The completeness variant selects exhaustive / open / paged.
 pub(crate) fn collection_to_dir_projection<T, C>(
-    dir_path: &str,
-    kind: crate::object::ObjectKind,
+    child_view: &crate::router::ResolvedChildView,
     collection: Collection<T, C>,
 ) -> Result<crate::projection::DirProjection>
 where
@@ -233,7 +234,7 @@ where
     C: Cursor,
 {
     use crate::identity::IdentityCaptures;
-    use crate::object::Key as _Key;
+    use crate::object::FacetMetadata as _;
     use crate::projection::{DirProjection, Entry};
 
     let (entries, cursor, validator, complete) = match collection {
@@ -247,41 +248,28 @@ where
         Collection::Unchanged => return Ok(DirProjection::unchanged()),
     };
 
-    let mut dir_entries = Vec::with_capacity(entries.len());
-    let mut projection_seed: Option<DirProjection> = None;
-    let mut canonical_stores: Vec<(
-        crate::identity::LogicalId,
-        Option<VersionToken>,
-        Vec<u8>,
-        String,
-    )> = Vec::new();
+    // The child view resolution plus the canonical bytes a fresh entry stores,
+    // and the shallow derived leaves a derived entry projects.
+    let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
     let mut derived_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
+    let mut dir_entries = Vec::with_capacity(entries.len());
 
     for entry in entries {
         let key = entry.entry_key();
-        let captures = key.identity_captures();
-        let Some((_, child_name)) = captures.last() else {
-            continue;
-        };
-        let child_name = child_name.clone();
-        let child_dir = format!("{}/{}", dir_path.trim_end_matches('/'), child_name);
-        dir_entries.push(Entry::dir(child_name));
+        let view = child_view.entry_view(&key.identity_captures(), T::Key::facet_axes())?;
+        dir_entries.push(Entry::dir(view.child_name.clone()));
 
         match entry {
-            CollectionEntry::Fresh { key, canonical, .. } => {
-                let id = key.anchor(kind);
-                canonical_stores.push((id, canonical.validator, canonical.bytes, child_dir));
-            },
+            CollectionEntry::Fresh { canonical, .. } => fresh_stores.push((view, canonical)),
             CollectionEntry::Derived { files, .. } => {
                 for (leaf, file) in files {
-                    derived_files.push((format!("{child_dir}/{leaf}"), file));
+                    derived_files.push((format!("{}/{leaf}", view.anchor_base), file));
                 }
             },
             CollectionEntry::Key { .. } => {},
         }
     }
 
-    let _ = &mut projection_seed;
     let mut projection = if complete {
         DirProjection::exhaustive(dir_entries)
     } else if let Some(cursor) = cursor {
@@ -292,8 +280,13 @@ where
     if let Some(validator) = validator {
         projection = projection.with_validator(validator);
     }
-    for (id, val, bytes, child_dir) in canonical_stores {
-        projection = projection.store_canonical(id, val, bytes, vec![child_dir]);
+    for (view, canonical) in fresh_stores {
+        projection = projection.store_canonical(
+            view.id,
+            canonical.validator,
+            canonical.bytes,
+            view.view_leaves,
+        );
     }
     for (path, file) in derived_files {
         projection = projection.preload_file(path, file);

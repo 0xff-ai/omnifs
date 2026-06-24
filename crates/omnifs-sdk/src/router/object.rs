@@ -27,7 +27,7 @@ use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, ProjBytes, Size, Stability, VersionToken};
 use crate::handler::OpenedFile;
-use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object};
+use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object, ObjectKind};
 use crate::projection::FileProjection;
 use crate::repr::{Format, RenderTable, Representable};
 use omnifs_core::ContentType;
@@ -78,20 +78,43 @@ pub(super) struct ObjectSpec<O: Object> {
     /// Collection faces declared on dir faces; resolved against the object
     /// registry at seal time.
     pub collections: std::rc::Rc<Vec<CollectionDecl>>,
-    /// SDK-generated collection dir handlers, keyed by collection dir path,
-    /// registered as dir routes when the object is mounted.
-    pub collection_handlers: std::rc::Rc<Vec<(String, CollectionHandler<O::State>)>>,
+    /// SDK-generated collection list handlers, keyed by collection dir path,
+    /// each with the late-bound child view that seal resolves and the dispatch
+    /// path passes in.
+    pub collection_handlers: std::rc::Rc<Vec<CollectionHandlerEntry<O::State>>>,
 }
 
-/// A boxed collection list handler: parses the parent key + cursor, runs the
-/// typed list method, and lowers the [`crate::collection::Collection`] to a
-/// [`crate::projection::DirProjection`].
-pub(super) type CollectionHandler<S> = std::rc::Rc<
-    dyn Fn(
-        crate::handler::DirCx<S>,
-        Captures,
-    ) -> Pin<Box<dyn Future<Output = Result<crate::projection::DirProjection>>>>,
->;
+/// One SDK-generated collection list handler: the collection dir path, the
+/// boxed list handler, and the late-bound child view seal resolves.
+pub(super) struct CollectionHandlerEntry<S> {
+    pub dir_path: String,
+    pub handler: CollectionHandler<S>,
+    pub late_view: LateChildView,
+}
+
+/// A boxed future yielding a [`crate::projection::DirProjection`].
+pub(super) type DirProjectionFuture =
+    Pin<Box<dyn Future<Output = Result<crate::projection::DirProjection>>>>;
+
+/// The `dyn Fn` a [`CollectionHandler`] boxes: parse the parent key + cursor,
+/// run the typed list method, lower the [`crate::collection::Collection`] to a
+/// [`crate::projection::DirProjection`] against the seal-resolved child view.
+type CollectionListFn<S> = dyn Fn(
+    crate::handler::DirCx<S>,
+    Captures,
+    std::rc::Rc<ResolvedChildView>,
+) -> DirProjectionFuture;
+
+/// A boxed collection list handler, shared so an alias replays the same
+/// closure.
+pub(super) type CollectionHandler<S> = std::rc::Rc<CollectionListFn<S>>;
+
+/// A late-bound child-view cell: the typed `collection` face stores the handler
+/// at mount time, but the child object's template, leaves, and facet axes are
+/// only known once every route is registered, so [`super::Router::seal`]
+/// resolves them and fills this cell before dispatch can run.
+pub(super) type LateChildView =
+    std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<ResolvedChildView>>>>;
 
 impl<O: Object> Clone for ObjectSpec<O> {
     fn clone(&self) -> Self {
@@ -121,9 +144,21 @@ impl<O: Object> ObjectHandle<O> {
         &self.spec.collections
     }
 
-    /// The SDK-generated collection dir handlers (dir path + boxed handler).
-    pub(super) fn collection_handlers(&self) -> &[(String, CollectionHandler<O::State>)] {
+    /// The SDK-generated collection list handlers (dir path + boxed handler +
+    /// late-bound child view).
+    pub(super) fn collection_handlers(&self) -> &[CollectionHandlerEntry<O::State>] {
         &self.spec.collection_handlers
+    }
+
+    /// The object spec's declared canonical-view leaf names (canonical,
+    /// representation, derived), for collection child-view resolution.
+    pub(super) fn canonical_view_leaf_names(&self) -> Vec<String> {
+        self.spec
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.is_canonical_view())
+            .map(|leaf| leaf.leaf_name().to_string())
+            .collect()
     }
 }
 
@@ -220,6 +255,22 @@ impl<O: Object> ObjectLeaf<O> {
             Self::Canonical { .. } | Self::Representation { .. } | Self::Derived { .. }
         )
     }
+
+    /// The mount-time leaf kind for exact-name dispatch resolution.
+    fn leaf_kind(&self) -> LeafKind {
+        match self {
+            Self::Canonical { .. } => LeafKind::Canonical,
+            Self::Representation { ct, .. } => LeafKind::Representation(*ct),
+            Self::Derived { .. } => LeafKind::Derived,
+            Self::Live { kind, .. } => match kind {
+                // Blob faces serve through the same boxed direct handler as a
+                // direct face (the blob lowers to a `FileProjection::blob`).
+                LiveFaceKind::Direct | LiveFaceKind::Blob => LeafKind::Direct,
+                LiveFaceKind::Stream => LeafKind::Stream,
+                LiveFaceKind::Object => LeafKind::Object,
+            },
+        }
+    }
 }
 
 // ===========================================================================
@@ -244,8 +295,9 @@ pub struct ObjectBlock<O: Object> {
     /// Collections declared on dir faces, resolved against the object registry
     /// at seal time.
     collections: Vec<CollectionDecl>,
-    /// SDK-generated collection dir handlers (dir path + boxed handler).
-    collection_handlers: Vec<(String, CollectionHandler<O::State>)>,
+    /// SDK-generated collection list handlers (dir path + boxed handler +
+    /// late-bound child view).
+    collection_handlers: Vec<CollectionHandlerEntry<O::State>>,
     /// The single allowed file-object face name (file shape only).
     file_face_seen: bool,
     error: Option<ProviderError>,
@@ -257,6 +309,8 @@ pub struct ObjectBlock<O: Object> {
 pub(super) struct CollectionDecl {
     /// The full dir path of the collection (`template/name`).
     pub dir_path: String,
+    /// The parent object's template (`dir_path` minus the face name).
+    pub parent_template: String,
     pub child_kind_str: &'static str,
     /// Whether any entry can be `fresh` (requires the child to have a canonical
     /// face). Always true for the typed `collection::<C>` form.
@@ -661,19 +715,21 @@ impl<'a, O: Object> DirFace<'a, O> {
             self.block.template.trim_end_matches('/'),
             self.name
         );
+        let late_view: LateChildView = std::rc::Rc::new(std::cell::RefCell::new(None));
         self.block.collections.push(CollectionDecl {
             dir_path: dir_path.clone(),
+            parent_template: self.block.template.to_string(),
             child_kind_str: C::kind().as_str(),
             requires_canonical: true,
         });
 
-        // The SDK-generated collection dir handler: parse the parent key + the
+        // The SDK-generated collection list handler: parse the parent key + the
         // host-echoed cursor, run the typed list method, and lower the
-        // Collection to a DirProjection.
-        let handler_dir_path = dir_path.clone();
+        // Collection to a DirProjection against the seal-resolved child view.
         let handler: CollectionHandler<O::State> = std::rc::Rc::new(
-            move |dir_cx: crate::handler::DirCx<O::State>, caps: Captures| {
-                let dir_path = handler_dir_path.clone();
+            move |dir_cx: crate::handler::DirCx<O::State>,
+                  caps: Captures,
+                  child_view: std::rc::Rc<ResolvedChildView>| {
                 Box::pin(async move {
                     let key = O::Key::from_captures(&caps)?;
                     let cursor = match dir_cx.cursor() {
@@ -684,15 +740,17 @@ impl<'a, O: Object> DirFace<'a, O> {
                     let list_cx = crate::collection::ListCx::new(cx, cursor);
                     let collection = method(key, list_cx).await?;
                     crate::collection::collection_to_dir_projection::<C, Cur>(
-                        &dir_path,
-                        C::kind(),
+                        &child_view,
                         collection,
                     )
-                })
-                    as Pin<Box<dyn Future<Output = Result<crate::projection::DirProjection>>>>
+                }) as DirProjectionFuture
             },
         );
-        self.block.collection_handlers.push((dir_path, handler));
+        self.block.collection_handlers.push(CollectionHandlerEntry {
+            dir_path,
+            handler,
+            late_view,
+        });
         Ok(self.block)
     }
 
@@ -792,15 +850,54 @@ pub(super) fn file_object<O: Object>(
 pub(super) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
     pub shape: AnchorShape,
-    pub render_table: RenderTable,
-    pub has_canonical: bool,
     pub leaves: Vec<ListingLeaf>,
     pub read: BoxedObjectRead<S>,
     pub list: BoxedObjectList<S>,
     /// Per-leaf live-face handlers (direct/blob/stream/object), keyed by leaf
     /// name. Shared with the spec so an alias mount replays the same closures.
     pub face_handlers: std::rc::Rc<std::collections::BTreeMap<String, FaceHandler<S>>>,
+    /// ANCHOR-topology collections attached at seal: their child template
+    /// equals this anchor, so they merge into this anchor's listing/lookup
+    /// instead of getting a separate dir route.
+    pub anchor_collections: Vec<AnchorCollection<S>>,
     pub validator: RouteValidator,
+}
+
+/// An ANCHOR-topology collection attached to a parent object's anchor: the
+/// boxed list handler plus the child view resolved at seal time. The parent's
+/// anchor listing runs each of these, merges the child-name entries, and emits
+/// each fresh child's canonical store.
+pub(super) struct AnchorCollection<S> {
+    pub handler: CollectionHandler<S>,
+    pub child_view: std::rc::Rc<ResolvedChildView>,
+}
+
+impl<S> ObjectRouteEntry<S> {
+    /// Run the attached ANCHOR collections and lower each to a
+    /// [`crate::projection::DirProjection`], using the captures decoded from
+    /// the anchor path.
+    pub(super) async fn run_anchor_collections(
+        &self,
+        cx: &Cx<S>,
+        caps: &Captures,
+    ) -> Result<Vec<crate::projection::DirProjection>> {
+        let mut projections = Vec::with_capacity(self.anchor_collections.len());
+        for collection in &self.anchor_collections {
+            let dir_cx = crate::handler::DirCx::new(
+                cx.clone(),
+                crate::handler::DirIntent::List { cursor: None },
+            );
+            let projection =
+                (collection.handler)(dir_cx, caps.clone(), collection.child_view.clone()).await?;
+            projections.push(projection);
+        }
+        Ok(projections)
+    }
+
+    /// Whether this anchor has ANCHOR-topology collections attached.
+    pub(super) fn has_anchor_collections(&self) -> bool {
+        !self.anchor_collections.is_empty()
+    }
 }
 
 /// A live-face handler erased over its concrete future, plus how to dispatch
@@ -822,16 +919,37 @@ type BoxedFaceOpen<S> = Box<
     dyn for<'a> Fn(&'a Cx<S>, Captures) -> Pin<Box<dyn Future<Output = Result<OpenedFile>> + 'a>>,
 >;
 
+/// What kind of face a listed leaf is, resolved by exact leaf-name match (not
+/// by extension): this is how a derive leaf named `notes.md` routes to its
+/// derive fn rather than the Markdown representation render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LeafKind {
+    Canonical,
+    Representation(ContentType),
+    Derived,
+    Direct,
+    Stream,
+    Object,
+}
+
 /// A child name an object anchor lists, precomputed at mount time.
 pub(super) struct ListingLeaf {
     pub name: String,
-    /// The canonical-source leaf is stamped with the loaded byte length.
-    pub is_canonical: bool,
+    /// The face kind this leaf resolves to (exact-name match drives dispatch).
+    pub kind: LeafKind,
+}
+
+impl ListingLeaf {
+    /// Whether the canonical-source leaf is stamped with the loaded byte length.
+    pub(super) fn is_canonical(&self) -> bool {
+        matches!(self.kind, LeafKind::Canonical)
+    }
 }
 
 /// The typed runtime side of a mounted object.
 struct ObjectRoute<O: Object> {
     pattern: Pattern,
+    shape: AnchorShape,
     leaves: Vec<ObjectLeaf<O>>,
     stability: fn(&O::Key) -> Stability,
     render_table: RenderTable,
@@ -844,6 +962,7 @@ impl<O: Object> Clone for ObjectRoute<O> {
     fn clone(&self) -> Self {
         Self {
             pattern: self.pattern.clone(),
+            shape: self.shape,
             leaves: self.leaves.clone(),
             stability: self.stability,
             render_table: self.render_table.clone(),
@@ -861,6 +980,7 @@ where
     fn for_mount(spec: &ObjectSpec<O>, pattern: &Pattern) -> Result<Self> {
         Ok(Self {
             pattern: pattern.clone(),
+            shape: spec.shape,
             leaves: spec.leaves.clone(),
             stability: spec.stability,
             render_table: spec.render_table.clone(),
@@ -951,7 +1071,7 @@ where
             &id,
             canonical.validator.clone(),
             canonical.bytes,
-            self.view_leaves(&list_path)?,
+            self.view_leaves_for_base(&list_path)?,
         );
         self.project_eager_fields(&mut effects, &id, &value, &key, &list_path, stability)?;
         self.lower_preloads(&mut effects, preloads, &list_path)?;
@@ -1021,19 +1141,27 @@ where
             Load::NotFound => return Ok(ReadOutcome::NotFound(Some(key.anchor(O::kind())))),
         };
         let id = key.anchor(O::kind());
-        let view_leaves = self.facet_expansion.expand_view_leaves(&read_path)?;
+        // The anchor base of the requested object is the path its canonical is
+        // anchored at. For a dir-shaped anchor the read path is a leaf under
+        // the anchor, so strip the leaf; for a file-shaped anchor the read
+        // path IS the anchor (no leaf to strip). Both the stored view leaves
+        // and the preloads' sibling paths are computed relative to this base.
+        let anchor_base = match self.shape {
+            AnchorShape::File => read_path.clone(),
+            AnchorShape::Dir => read_path
+                .rsplit_once('/')
+                .map_or_else(|| read_path.clone(), |(base, _)| base.to_string()),
+        };
         let mut effects = Effects::new();
         effects.canonical_store(
             &id,
             canonical.validator.clone(),
             canonical.bytes.clone(),
-            view_leaves,
+            // Store every canonical-view leaf, not just the requested one, so a
+            // later warm read of a sibling representation hits the view cache
+            // (consistent with the anchor-listing path).
+            self.view_leaves_for_base(&anchor_base)?,
         );
-        // The anchor base of the requested object is its read path minus the
-        // requested leaf; preloads compute sibling paths relative to it.
-        let anchor_base = read_path
-            .rsplit_once('/')
-            .map_or_else(|| read_path.clone(), |(base, _)| base.to_string());
         self.lower_preloads(&mut effects, preloads, &anchor_base)?;
         serve_fresh::<O>(
             &value,
@@ -1050,15 +1178,20 @@ where
         )
     }
 
-    /// Every full path that maps to this object's canonical bytes: each
-    /// canonical-view leaf under the anchor, multiplied across facet choices.
-    fn view_leaves(&self, list_path: &str) -> Result<Vec<String>> {
+    /// Every full path that maps to this object's canonical bytes, with the
+    /// anchor at `base`: each canonical-view leaf under the anchor, multiplied
+    /// across facet choices. For a file-shaped anchor `base` IS the single
+    /// canonical-view file (there is no leaf to append).
+    fn view_leaves_for_base(&self, base: &str) -> Result<Vec<String>> {
+        if self.shape == AnchorShape::File {
+            return self.facet_expansion.expand_view_leaves(base);
+        }
         let mut view_leaves = Vec::new();
         for leaf in &self.leaves {
             if !leaf.is_canonical_view() {
                 continue;
             }
-            let leaf_path = format!("{list_path}/{}", leaf.leaf_name());
+            let leaf_path = format!("{base}/{}", leaf.leaf_name());
             view_leaves.extend(self.facet_expansion.expand_view_leaves(&leaf_path)?);
         }
         Ok(view_leaves)
@@ -1123,16 +1256,9 @@ where
 
         for sibling in objects {
             let sibling_base =
-                self.substitute_identity_captures(anchor_base, &sibling.identity_captures)?;
+                self.substitute_identity_captures(anchor_base, &sibling.identity_captures);
             let id = crate::identity::LogicalId::new(O::kind(), sibling.identity_captures);
-            let mut view_leaves = Vec::new();
-            for leaf in &self.leaves {
-                if !leaf.is_canonical_view() {
-                    continue;
-                }
-                let leaf_path = format!("{sibling_base}/{}", leaf.leaf_name());
-                view_leaves.extend(self.facet_expansion.expand_view_leaves(&leaf_path)?);
-            }
+            let view_leaves = self.view_leaves_for_base(&sibling_base)?;
             effects.canonical_store(
                 &id,
                 sibling.canonical.validator.clone(),
@@ -1158,7 +1284,7 @@ where
         &self,
         anchor_base: &str,
         captures: &[(&'static str, String)],
-    ) -> Result<String> {
+    ) -> String {
         let offset = usize::from(anchor_base.starts_with('/'));
         let mut segments = anchor_base
             .split('/')
@@ -1173,7 +1299,7 @@ where
                 *segment = location.render_segment(value);
             }
         }
-        Ok(segments.join("/"))
+        segments.join("/")
     }
 }
 
@@ -1260,7 +1386,7 @@ where
         .iter()
         .map(|leaf| ListingLeaf {
             name: leaf.leaf_name().to_string(),
-            is_canonical: matches!(leaf, ObjectLeaf::Canonical { .. }),
+            kind: leaf.leaf_kind(),
         })
         .collect();
 
@@ -1272,12 +1398,11 @@ where
     let entry = ObjectRouteEntry {
         pattern: pattern.clone(),
         shape: spec.shape,
-        render_table: spec.render_table.clone(),
-        has_canonical: spec.has_canonical,
         leaves: listing_leaves,
         read: route.clone().read_handler(),
         list: route.list_handler(),
         face_handlers: spec.face_handlers.clone(),
+        anchor_collections: Vec::new(),
         validator: captures_validator::<O::Key>(),
     };
 
@@ -1407,7 +1532,13 @@ pub(super) struct FacetExpansion {
 
 impl FacetExpansion {
     pub(super) fn for_pattern<K: FacetMetadata>(pattern: &Pattern) -> Result<Self> {
-        let axes = K::facet_axes()
+        Self::for_axes(pattern, K::facet_axes())
+    }
+
+    /// Build from an explicit facet-axis slice (the child key's axes resolved
+    /// at seal, where the key type is not statically in scope).
+    pub(super) fn for_axes(pattern: &Pattern, axes: &[FacetAxis]) -> Result<Self> {
+        let axes = axes
             .iter()
             .map(|axis| FacetExpansionAxis::for_pattern(pattern, axis))
             .collect::<Result<Vec<_>>>()?;
@@ -1471,6 +1602,155 @@ impl FacetExpansionAxis {
 }
 
 // ===========================================================================
+// Collection child-view resolution (seal time)
+// ===========================================================================
+
+/// The two collection topologies, discriminated at seal by comparing the
+/// collection dir pattern to the child object's registered template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum CollectionTopology {
+    /// The child template is strictly deeper than the collection dir
+    /// (`issues/{filter}` -> `.../{number}`). The collection dir is a real dir
+    /// route; child anchors live one or more segments below it.
+    Nested,
+    /// `PARENT/NAME == child template` (`{repo}`). The collection attaches to
+    /// the parent object's anchor listing; there is no separate dir route.
+    Anchor,
+}
+
+/// A collection's child object resolved against the object registry at seal
+/// time: enough to compute, for each listed entry, the child anchor path, the
+/// dir-entry name, and the child canonical-view leaf paths (facet-expanded).
+#[derive(Clone)]
+pub(crate) struct ResolvedChildView {
+    /// The child object's registered template (e.g. `/{owner}/{repo}/issues/{filter}/{number}`).
+    child_template: String,
+    /// The child object kind, for the child's logical id.
+    child_kind: ObjectKind,
+    /// The child's canonical-view leaf names (canonical/representation/derived).
+    child_leaf_names: Vec<String>,
+    /// The child's facet expansion against its own template.
+    facet_expansion: FacetExpansion,
+    /// Depth (segment count) of the collection dir path (`PARENT/NAME`), used to
+    /// split off the child-name segment(s) beyond the collection dir.
+    dir_depth: usize,
+}
+
+impl ResolvedChildView {
+    pub(super) fn new(
+        child_template: String,
+        child_kind: ObjectKind,
+        child_leaf_names: Vec<String>,
+        facet_expansion: FacetExpansion,
+        dir_depth: usize,
+    ) -> Self {
+        Self {
+            child_template,
+            child_kind,
+            child_leaf_names,
+            facet_expansion,
+            dir_depth,
+        }
+    }
+
+    /// Render the child template into a concrete anchor base from a complete
+    /// capture map (identity captures plus a default value for every facet
+    /// segment, which facet expansion later overwrites).
+    fn render_anchor_base(&self, captures: &std::collections::BTreeMap<&str, String>) -> String {
+        let mut out = String::new();
+        for raw in self.child_template.split('/').skip(1) {
+            out.push('/');
+            let segment = if let Some(name) = capture_name_of(raw) {
+                captures.get(name).cloned().map_or_else(
+                    || raw.to_string(),
+                    |value| render_template_segment(raw, &value),
+                )
+            } else {
+                raw.to_string()
+            };
+            out.push_str(&segment);
+        }
+        out
+    }
+
+    /// Compute the dir-entry name, child anchor base, child logical id, and
+    /// facet-expanded canonical-view leaf paths for one listed entry, from its
+    /// identity captures and its key's facet axes.
+    pub(crate) fn entry_view(
+        &self,
+        identity_captures: &[(&'static str, String)],
+        facet_axes: &[FacetAxis],
+    ) -> Result<EntryView> {
+        // A full capture map: identity captures verbatim, facets at their first
+        // choice (facet expansion rewrites those segments across all choices).
+        let mut captures: std::collections::BTreeMap<&str, String> = identity_captures
+            .iter()
+            .map(|(n, v)| (*n, v.clone()))
+            .collect();
+        for axis in facet_axes {
+            if let Some(first) = axis.choices.first() {
+                captures
+                    .entry(axis.capture_name)
+                    .or_insert_with(|| (*first).to_string());
+            }
+        }
+
+        let anchor_base = self.render_anchor_base(&captures);
+
+        // The dir-entry name is the segment(s) of the child anchor beyond the
+        // collection dir path.
+        let segments: Vec<&str> = anchor_base.split('/').skip(1).collect();
+        let child_name = segments
+            .get(self.dir_depth..)
+            .filter(|tail| !tail.is_empty())
+            .map(|tail| tail.join("/"))
+            .or_else(|| segments.last().map(|s| (*s).to_string()))
+            .unwrap_or_default();
+
+        let id = crate::identity::LogicalId::new(self.child_kind, identity_captures.to_vec());
+
+        let mut view_leaves = Vec::new();
+        for leaf_name in &self.child_leaf_names {
+            let leaf_path = format!("{anchor_base}/{leaf_name}");
+            view_leaves.extend(self.facet_expansion.expand_view_leaves(&leaf_path)?);
+        }
+
+        Ok(EntryView {
+            child_name,
+            id,
+            view_leaves,
+            anchor_base,
+        })
+    }
+}
+
+/// The per-entry resolution a collection lowering needs.
+pub(crate) struct EntryView {
+    pub child_name: String,
+    pub id: crate::identity::LogicalId,
+    pub view_leaves: Vec<String>,
+    pub anchor_base: String,
+}
+
+/// The capture name of a template segment (`{name}` or `prefix{name}`), or
+/// `None` for a literal segment.
+fn capture_name_of(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    if !raw.ends_with('}') {
+        return None;
+    }
+    Some(&raw[start + 1..raw.len() - 1])
+}
+
+/// Render a capture template segment with its prefix preserved (`v{version}` +
+/// `3` -> `v3`).
+fn render_template_segment(raw: &str, value: &str) -> String {
+    let start = raw.find('{').unwrap_or(0);
+    let prefix = &raw[..start];
+    format!("{prefix}{value}")
+}
+
+// ===========================================================================
 // Small lowering helpers
 // ===========================================================================
 
@@ -1518,35 +1798,23 @@ pub(super) fn body_file_content(
 // ===========================================================================
 
 impl<S> ObjectRouteEntry<S> {
-    /// Whether any leaf has this name.
-    pub(super) fn has_leaf(&self, name: &str) -> bool {
-        self.leaves.iter().any(|leaf| leaf.name == name)
-    }
-
-    /// Resolve a leaf name under this anchor to its read target, or `None` if
-    /// no such leaf exists. `Stream` faces resolve here too; the caller routes
-    /// them to `open_file`.
+    /// Resolve a leaf name under this anchor to its read target by exact
+    /// leaf-name match against its registered kind, or `None` if no such leaf
+    /// exists. Resolution is by KIND, never by extension: a derived leaf named
+    /// `notes.md` routes to its derive fn, not to a Markdown representation
+    /// render that happens to share the extension. `Stream` faces resolve here
+    /// too; the caller routes them to `open_file`.
     pub(super) fn read_target_for_leaf(&self, name: &str) -> Option<ObjectReadTarget> {
-        // Canonical / representation by content type.
-        if let Some(ct) = self.representation_ct_for_leaf(name) {
-            if self.is_canonical_leaf(name) {
-                return Some(ObjectReadTarget::Canonical);
-            }
-            return Some(ObjectReadTarget::Representation(ct));
-        }
-        // Live faces.
-        match self.face_handlers.get(name) {
-            Some(FaceHandler::Direct(_)) => {
-                return Some(ObjectReadTarget::Direct(name.to_string()));
-            },
-            Some(FaceHandler::Stream(_)) => {
-                return Some(ObjectReadTarget::Stream(name.to_string()));
-            },
-            None => {},
-        }
-        // Otherwise it must be a derived leaf.
-        self.has_leaf(name)
-            .then(|| ObjectReadTarget::Derived(name.to_string()))
+        let kind = self.leaf_kind(name)?;
+        Some(match kind {
+            LeafKind::Canonical => ObjectReadTarget::Canonical,
+            LeafKind::Representation(ct) => ObjectReadTarget::Representation(ct),
+            LeafKind::Derived => ObjectReadTarget::Derived(name.to_string()),
+            // Object faces serve their child canonical through the same boxed
+            // direct handler as a direct face.
+            LeafKind::Direct | LeafKind::Object => ObjectReadTarget::Direct(name.to_string()),
+            LeafKind::Stream => ObjectReadTarget::Stream(name.to_string()),
+        })
     }
 
     /// The read target when the file-object anchor (file shape) IS read.
@@ -1558,35 +1826,12 @@ impl<S> ObjectRouteEntry<S> {
         self.read_target_for_leaf(&leaf.name)
     }
 
-    fn is_canonical_leaf(&self, name: &str) -> bool {
+    /// The registered face kind for a leaf, by exact name match.
+    fn leaf_kind(&self, name: &str) -> Option<LeafKind> {
         self.leaves
             .iter()
-            .any(|leaf| leaf.name == name && leaf.is_canonical)
-    }
-
-    /// Map a `stem.ext` leaf name back to its representation content type: the
-    /// canonical source first, then each registered render by extension.
-    pub(super) fn representation_ct_for_leaf(&self, leaf: &str) -> Option<ContentType> {
-        // The canonical leaf serves the source content type.
-        if self.is_canonical_leaf(leaf) && self.has_canonical {
-            return Some(self.render_table.source_ct);
-        }
-        // A representation leaf's name matches a registered render's extension.
-        for (ct, _) in &self.render_table.renders {
-            let ext = ct.extension().unwrap_or("raw");
-            if leaf.ends_with(&format!(".{ext}")) && self.has_render_leaf(leaf, *ct) {
-                return Some(*ct);
-            }
-        }
-        None
-    }
-
-    fn has_render_leaf(&self, name: &str, _ct: ContentType) -> bool {
-        // Representation leaves are recorded by their literal name; checking
-        // presence is enough (the render table CT match above narrows it).
-        self.leaves
-            .iter()
-            .any(|leaf| leaf.name == name && !leaf.is_canonical)
+            .find(|leaf| leaf.name == name)
+            .map(|leaf| leaf.kind)
     }
 
     /// Call a direct/object face's boxed handler.
