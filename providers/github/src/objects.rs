@@ -34,16 +34,16 @@ impl ItemData {
     }
 
     pub(crate) fn title(&self) -> Result<FileProjection> {
-        Ok(text_projection(self.title.clone()))
+        Ok(FileProjection::text(self.title.clone(), TextFormat::Raw).build())
     }
 
     pub(crate) fn state(&self) -> Result<FileProjection> {
-        Ok(text_projection(self.state.clone()))
+        Ok(FileProjection::text(self.state.clone(), TextFormat::Raw).build())
     }
 
     pub(crate) fn user(&self) -> Result<FileProjection> {
         let login = self.user.as_ref().map_or("", |u| u.login.as_str());
-        Ok(text_projection(login.to_owned()))
+        Ok(FileProjection::text(login.to_owned(), TextFormat::Raw).build())
     }
 
     pub(crate) fn body(&self) -> Result<FileProjection> {
@@ -179,7 +179,7 @@ impl Comment {
     }
 
     pub(crate) fn author(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
-        Ok(text_projection(self.user.login.clone()))
+        Ok(FileProjection::text(self.user.login.clone(), TextFormat::Raw).build())
     }
 }
 
@@ -201,17 +201,11 @@ pub(crate) struct WorkflowRun {
 
 impl WorkflowRun {
     pub(crate) fn status(&self, _key: &crate::item::RunKey) -> Result<FileProjection> {
-        Ok(text_projection(self.status.clone()))
+        Ok(FileProjection::text(self.status.clone(), TextFormat::Raw).build())
     }
 
     pub(crate) fn conclusion(&self, _key: &crate::item::RunKey) -> Result<FileProjection> {
         let c = self.conclusion.clone().unwrap_or_default();
-        Ok(text_projection(c))
+        Ok(FileProjection::text(c, TextFormat::Raw).build())
     }
-}
-
-fn text_projection(bytes: impl Into<Vec<u8>>) -> FileProjection {
-    FileProjection::inline(bytes)
-        .content_type(ContentType::Custom("text/plain"))
-        .build()
 }

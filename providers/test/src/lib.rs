@@ -93,11 +93,11 @@ struct Item {
 impl Item {
     /// Object SDK derive signature: `fn(&Item, &ItemKey) -> Result<FileProjection>`.
     fn title(&self, _key: &ItemKey) -> Result<FileProjection> {
-        Ok(text_projection(self.title.as_bytes()))
+        Ok(FileProjection::text(self.title.as_bytes(), TextFormat::Raw).build())
     }
 
     fn state(&self, _key: &ItemKey) -> Result<FileProjection> {
-        Ok(text_projection(self.state.as_bytes()))
+        Ok(FileProjection::text(self.state.as_bytes(), TextFormat::Raw).build())
     }
 
     fn body(&self, _key: &ItemKey) -> Result<FileProjection> {
@@ -143,12 +143,6 @@ impl Item {
         }
         Ok(load)
     }
-}
-
-fn text_projection(bytes: impl Into<Vec<u8>>) -> FileProjection {
-    FileProjection::inline(bytes)
-        .content_type(ContentType::Custom("text/plain"))
-        .build()
 }
 
 impl Representable<Markdown> for Item {
@@ -253,7 +247,7 @@ struct Comment {
 
 impl Comment {
     fn author(&self, _key: &ItemCommentKey) -> Result<FileProjection> {
-        Ok(text_projection(self.author.as_bytes()))
+        Ok(FileProjection::text(self.author.as_bytes(), TextFormat::Raw).build())
     }
 
     #[allow(clippy::unused_async)]
@@ -301,22 +295,6 @@ struct ItemCommentsListKey {
     number: u64,
 }
 
-/// A page cursor for the `comments` collection: typed in the provider,
-/// round-tripped through the host-opaque wire token.
-struct PageCursor(u32);
-
-impl ListCursor for PageCursor {
-    fn encode(&self) -> String {
-        self.0.to_string()
-    }
-    fn decode(token: &str) -> Result<Self> {
-        token
-            .parse()
-            .map(Self)
-            .map_err(|_| ProviderError::invalid_input("bad comment page cursor"))
-    }
-}
-
 /// The `comments` collection: paged child `Comment` objects. Page 0 lists
 /// comment 1 with a resume cursor (typed `Page` + validator); the resumed page
 /// lists comment 2 as `Partial` (open, no cursor). Exercises typed
@@ -327,7 +305,7 @@ async fn item_comments(
     cx: ListCx<PageCursor, State>,
 ) -> Result<Collection<Comment, PageCursor>> {
     let page = cx.cursor().map_or(0, |c| c.0);
-    let idx = u64::from(page) + 1;
+    let idx = page + 1;
     let (value, canonical) = canned_comment(idx)?;
     let entry = CollectionEntry::fresh(
         ItemCommentKey {

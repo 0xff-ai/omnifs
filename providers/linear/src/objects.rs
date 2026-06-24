@@ -57,19 +57,19 @@ impl Issue {
     }
 
     pub(crate) fn title(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
-        Ok(text_content(newline(&self.title)))
+        Ok(FileProjection::text(self.title.as_str(), TextFormat::Newline).build())
     }
 
     pub(crate) fn state(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
-        Ok(text_content(newline(self.state_label())))
+        Ok(FileProjection::text(self.state_label(), TextFormat::Newline).build())
     }
 
     pub(crate) fn priority(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
-        Ok(text_content(newline(priority_label(self.priority))))
+        Ok(FileProjection::text(priority_label(self.priority), TextFormat::Newline).build())
     }
 
     pub(crate) fn assignee(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
-        Ok(text_content(newline(self.assignee_label())))
+        Ok(FileProjection::text(self.assignee_label(), TextFormat::Newline).build())
     }
 
     pub(crate) fn description(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
@@ -101,10 +101,4 @@ pub(crate) fn newline(text: &str) -> Vec<u8> {
         bytes.push(b'\n');
     }
     bytes
-}
-
-fn text_content(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::inline(bytes)
-        .content_type(ContentType::Custom("text/plain"))
-        .build()
 }

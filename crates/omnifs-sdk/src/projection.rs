@@ -60,6 +60,17 @@ pub enum FileSource {
     Blob(crate::blob::BlobId),
 }
 
+/// How [`FileProjection::text`] treats the trailing newline of its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFormat {
+    /// Emit the bytes verbatim.
+    Raw,
+    /// Append a trailing newline if absent, so the file ends in one like a
+    /// normal POSIX text file. A scalar field rendered as a leaf usually wants
+    /// this so `cat` output is not glued to the next prompt.
+    Newline,
+}
+
 impl FileProjection {
     /// `Bytes::Inline`, capped at 64 KiB. The implied size is the byte length.
     /// Suitable for a dir entry or a `project`-effect preload.
@@ -67,6 +78,19 @@ impl FileProjection {
         let bytes = bytes.into();
         let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         FileProjBuilder::new(FileSource::Inline(bytes), size)
+    }
+
+    /// An inline `text/plain` leaf: [`Self::inline`] with the content type set.
+    /// The common shape for projecting a scalar field as a small text file.
+    /// `format` controls the trailing newline (see [`TextFormat`]). Returns the
+    /// builder so the caller resolves stability with `.build()` (stable) or
+    /// `.dynamic().build()` (a mutable upstream field).
+    pub fn text(bytes: impl Into<Vec<u8>>, format: TextFormat) -> FileProjBuilder<Inline> {
+        let mut bytes = bytes.into();
+        if format == TextFormat::Newline && !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        Self::inline(bytes).content_type(ContentType::Text)
     }
 
     /// The uncapped `read-file` response body. Unlike [`Self::inline`] this is

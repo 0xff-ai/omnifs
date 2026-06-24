@@ -44,7 +44,6 @@ mod object;
 pub(crate) mod pattern;
 mod projection;
 mod register;
-mod snapshot;
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +55,6 @@ pub use handlers::{
 pub use object::{ChildTopology, DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 pub(crate) use object::{EntryView, ResolvedChildView};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
-pub use snapshot::RouteSnapshot;
 
 /// The block builder for a file-shaped object anchor
 /// ([`Router::file_object`]). The anchor projects as a single file (one

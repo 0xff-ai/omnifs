@@ -19,6 +19,8 @@ pub enum ContentType {
     Octet,
     /// `application/atom+xml` (`.atom`).
     Atom,
+    /// `text/plain` (`.txt`).
+    Text,
     /// An SDK-supplied type for a field or custom-suffix leaf the known suffix
     /// map cannot type. The host echoes the string verbatim.
     Custom(&'static str),
@@ -43,6 +45,7 @@ impl ContentType {
             Self::Xml => Some("xml"),
             Self::Octet => Some("raw"),
             Self::Atom => Some("atom"),
+            Self::Text => Some("txt"),
             Self::Custom(_) => None,
         }
     }
@@ -56,6 +59,7 @@ impl ContentType {
             "xml" => Some(Self::Xml),
             "raw" => Some(Self::Octet),
             "atom" => Some(Self::Atom),
+            "txt" => Some(Self::Text),
             _ => None,
         }
     }
@@ -69,6 +73,7 @@ impl ContentType {
             Self::Xml => "application/xml",
             Self::Octet => "application/octet-stream",
             Self::Atom => "application/atom+xml",
+            Self::Text => "text/plain",
             Self::Custom(s) => s,
         }
     }
@@ -87,6 +92,7 @@ impl ContentType {
             "application/xml" => Some(Self::Xml),
             "application/octet-stream" => Some(Self::Octet),
             "application/atom+xml" => Some(Self::Atom),
+            "text/plain" => Some(Self::Text),
             _ => None,
         }
     }

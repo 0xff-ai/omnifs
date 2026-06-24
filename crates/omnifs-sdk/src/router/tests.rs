@@ -641,25 +641,3 @@ fn file_object_anchor_reads_canonical() {
         "file-object anchor must serve its canonical face"
     );
 }
-
-#[test]
-fn route_snapshot_captures_and_validates() {
-    let mut router = Router::<()>::new();
-    router
-        .object::<DemoObj>("/items/{id}", |o| {
-            o.dynamic();
-            o.file("item.json").canonical::<Json>()?;
-            o.file("item.md").representation::<Markdown>()?;
-            Ok(())
-        })
-        .unwrap();
-
-    let snapshot = RouteSnapshot::capture(&mut router);
-    assert!(snapshot.is_valid(), "a clean mount snapshots as valid");
-    snapshot.assert_valid();
-    let rendered = snapshot.to_string();
-    assert!(
-        rendered.contains("item.json") || rendered.contains("items"),
-        "snapshot tree should mention the mount: {rendered}"
-    );
-}
