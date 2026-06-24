@@ -662,7 +662,7 @@ fn generate_routes(
                 };
                 let mut router = omnifs_sdk::prelude::Router::<#state_type>::new();
                 match #start_call {
-                    Ok(_state) => omnifs_sdk::prelude::RouteSnapshot::capture(&router),
+                    Ok(_state) => omnifs_sdk::prelude::RouteSnapshot::capture(&mut router),
                     Err(error) => omnifs_sdk::prelude::RouteSnapshot::start_error(error),
                 }
             }

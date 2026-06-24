@@ -57,10 +57,17 @@ impl<S> Router<S> {
         }
 
         if let Some(route) = shape.object_route(&abs) {
-            let out = (route.entry.list)(cx, route.captures, path.to_string()).await?;
-            let listing = shape
+            let out = (route.entry.list)(cx, route.captures.clone(), path.to_string()).await?;
+            let mut listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);
+            if route.entry.has_anchor_collections() {
+                let projections = route
+                    .entry
+                    .run_anchor_collections(cx, &route.captures)
+                    .await?;
+                listing = super::route_shape::merge_anchor_collections(&listing, &projections)?;
+            }
             return Ok(List::entries(listing));
         }
 

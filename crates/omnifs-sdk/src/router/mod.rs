@@ -54,6 +54,7 @@ pub use handlers::{
     WithSyncKeyMethod,
 };
 pub use object::{ChildTopology, DirFace, FileFace, ObjectBlock, ObjectHandle, object};
+pub(crate) use object::{EntryView, ResolvedChildView};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
 pub use snapshot::RouteSnapshot;
 

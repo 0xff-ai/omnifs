@@ -137,9 +137,10 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
 
     // `load` forwards to a provider-written inherent async fn; defaults to
     // `Self::load`.
-    let load_path: TokenStream2 = match &args.load {
-        Some(path) => quote! { #path },
-        None => quote! { Self::load },
+    let load_path: TokenStream2 = if let Some(path) = &args.load {
+        quote! { #path }
+    } else {
+        quote! { Self::load }
     };
 
     Ok(quote! {

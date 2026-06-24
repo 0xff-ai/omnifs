@@ -654,7 +654,7 @@ fn route_snapshot_captures_and_validates() {
         })
         .unwrap();
 
-    let snapshot = RouteSnapshot::capture(&router);
+    let snapshot = RouteSnapshot::capture(&mut router);
     assert!(snapshot.is_valid(), "a clean mount snapshots as valid");
     snapshot.assert_valid();
     let rendered = snapshot.to_string();

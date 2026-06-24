@@ -22,7 +22,8 @@ impl RouteSnapshot {
     /// Snapshot a sealed router: collect its leaf templates and run the seal
     /// checks. Tolerant of a failed seal (stored, not panicked) so a snapshot
     /// can render even an invalid mount.
-    pub fn capture<S>(router: &Router<S>) -> Self {
+    pub fn capture<S: 'static>(router: &mut Router<S>) -> Self {
+        let seal = router.seal();
         let mut templates: Vec<String> = router
             .leaf_claims
             .iter()
@@ -30,10 +31,7 @@ impl RouteSnapshot {
             .collect();
         templates.sort();
         templates.dedup();
-        Self {
-            templates,
-            seal: router.seal(),
-        }
+        Self { templates, seal }
     }
 
     /// A snapshot for a provider whose `start()` failed to build a router: no

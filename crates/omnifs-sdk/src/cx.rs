@@ -177,11 +177,19 @@ impl<S> Cx<S> {
         BlobReader::new(self, id)
     }
 
-    pub(crate) fn take_yielded_callouts(&self) -> Vec<Callout> {
+    /// Drain the callouts queued since the last poll. Exposed for the
+    /// WIT-boundary test harness, which drives the suspend/resume loop by
+    /// draining yielded callouts and pushing canned results; the host runtime
+    /// glue uses the same queue.
+    #[doc(hidden)]
+    pub fn take_yielded_callouts(&self) -> Vec<Callout> {
         std::mem::take(&mut *self.shared.yielded.borrow_mut())
     }
 
-    pub(crate) fn push_delivered(&self, outcome: CalloutResult) {
+    /// Deliver a callout result back to a suspended handler. Exposed for the
+    /// WIT-boundary test harness (see [`Self::take_yielded_callouts`]).
+    #[doc(hidden)]
+    pub fn push_delivered(&self, outcome: CalloutResult) {
         self.shared.delivered.borrow_mut().push_back(outcome);
     }
 
