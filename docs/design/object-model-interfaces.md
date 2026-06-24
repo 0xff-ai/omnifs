@@ -1,14 +1,23 @@
 # Object-model interface contract
 
-Status: implemented contract
+Status: WIT/storage contract current; SDK-surface sections superseded.
+
+> The provider SDK was reshaped by the object SDK redesign (`providers/DESIGN.md`).
+> The **WIT and storage** contract here (the `logical-id` record, the durable
+> object record, the negative/freshness channels) is unchanged and still current.
+> The **SDK-surface** sections below (the `Object`/`Key` trait split,
+> `parse_canonical`, `o.representations(stem, ..)`, `.project()`) describe the
+> pre-reshape SDK and are stale. For the current SDK surface, read the code
+> (`crates/omnifs-sdk/src/object.rs`, `router/object.rs`, `collection.rs`),
+> `crates/omnifs-sdk/tests/wit_boundary.rs` (worked examples),
+> `docs/design/architecture.md` §2, and `skills/omnifs-provider-sdk/SKILL.md`.
+> A full rewrite of this doc's SDK sections (cite, do not re-transcribe) is a
+> tracked follow-up; the inlined trait/builder blocks below are kept only for the
+> WIT/storage parts they surround.
+
 Derives from: the object model in `docs/design/architecture.md` §2 (authoritative
 spec), the Phase A gate review, and its three deferred-decision proposals
 (WIT / storage / SDK) reconciled here.
-
-This document is the **single contract** Tier 1 and Tier 2 build against. Every
-record, type, and method below is inlined so an implementer needs nothing else.
-When the spec and this doc agree, the spec wins on intent and this doc wins on the
-concrete shape (it is the resolution of the spec's deferred decisions).
 
 The gate review returned **GO**. The adversarial pass (D4) found no hole in the
 freshness/identity/multikey machinery. The spec needed three doc fixes (applied

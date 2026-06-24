@@ -1,6 +1,6 @@
 # Provider object SDK design
 
-Status: target direction
+Status: implemented (the SDK surface and all nine providers run on this design)
 
 ## Purpose
 
@@ -59,8 +59,8 @@ changes:
   Use object shape when the provider needs identity, decode, derived faces, or
   child relationships; use blob shape when the important property is that bytes
   stay host-side;
-- an object owns identity, load, decode, and canonical bytes. It does not require
-  a separate key struct when a tuple key is clearer;
+- an object owns identity, load, decode, and canonical bytes. Identity is a named
+  `#[path_captures]` key struct (tuple keys are a deferred future note);
 - canonical bytes are replayable object bytes. Prefer the raw upstream response
   when that response is the object contract. Allow deterministic slicing,
   normalization, or assembly from a batch response, envelope, noisy server
@@ -107,7 +107,7 @@ impl Provider for GitHub {
     fn start(r: &mut Router) -> Result<()> {
         r.object::<Owner>("/{owner}", |o| {
             o.dynamic();
-            o.file("@owner.json").canonical::<Json>()?;
+            o.file("owner.json").canonical::<Json>()?;
             o.file("profile.md").representation::<Markdown>()?;
             o.dir("{repo}").collection::<Repo>(Owner::repos)?;
             Ok(())
@@ -115,7 +115,7 @@ impl Provider for GitHub {
 
         r.object::<Repo>("/{owner}/{repo}", |o| {
             o.dynamic();
-            o.file("@repo.json").canonical::<Json>()?;
+            o.file("repo.json").canonical::<Json>()?;
             o.dir("repo").tree(Repo::tree)?;
             o.dir("issues").choices(StateFilter::choices())?;
             o.dir("issues/{filter}").collection::<Issue>(Repo::issues)?;
@@ -229,7 +229,7 @@ impl Object for Repo {
 }
 
 impl Object for RepoAlias {
-    type Key = (OwnerName, RepoName);
+    type Key = RepoAliasKey;
     type State = ();
     type Canonical = Json;
 
@@ -239,8 +239,11 @@ impl Object for RepoAlias {
 }
 ```
 
-Tuple keys are allowed. A named key struct is only required when it buys reuse,
-validation, or readability. Providers with no state use `()`.
+Keys are named `#[path_captures]` structs; `#[path_captures]` emits the `impl
+Key`. Providers with no state use `()`. Tuple keys (`type Key = (OwnerName,
+RepoName)`) are a deferred future note: they would need SDK blanket `Key` impls
+parsing positionally, and every shipped key is a named struct, so they are not
+built.
 
 The format type identifies the byte format. The object decides what those bytes
 mean. `Object::load` returns a `Load` carrying the object value, canonical
@@ -719,10 +722,10 @@ The printed shape should be enough to see the mount:
 
 ```text
 /{owner}
-  @owner.json
+  owner.json
   profile.md
   {repo}
-    @repo.json
+    repo.json
     repo/
     issues/{open,all}/{number}
       item.json
@@ -767,10 +770,9 @@ faces because the important property is host-resident bytes with exact size,
 content type, and optional ETag/version evidence. Use a file-shaped object for a
 diff only if the provider needs to decode the diff and expose derived faces. Use
 direct only when every access really should call the upstream/provider again.
-Comments can become object entries projected as directories, but the current
-provider exposes indexed `comments/{idx}` files. Treat a move to comment-id
-directories as an explicit path migration, or preserve the indexed files as
-direct/file-shaped object faces until the new path is deliberately accepted.
+Comments are `Comment` objects projected as `comments/{comment_id}` directories
+(one object keyed by the comment id, listed by the issue/PR comment collection),
+not indexed `comments/{idx}` files.
 
 The pull diff is a blob face, not a direct file. The exact return type can move,
 but the behavior must preserve host-resident bytes:
