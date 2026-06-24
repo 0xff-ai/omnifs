@@ -18,11 +18,13 @@ use omnifs_sdk::captures::{Captures, FromCaptures};
 use omnifs_sdk::collection::{Collection, CollectionEntry, Cursor, ListCx, NoCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
+use omnifs_sdk::file_attrs::{Size, Stability};
+use omnifs_sdk::handler::MemoryRangeReader;
 use omnifs_sdk::identity::{Facet, IdentityCaptures};
 use omnifs_sdk::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Validator,
 };
-use omnifs_sdk::projection::FileProjection;
+use omnifs_sdk::projection::{FileProjection, StreamFile};
 use omnifs_sdk::repr::{Json, Markdown, Representable};
 use omnifs_sdk::router::Router;
 use std::cell::RefCell;
@@ -72,6 +74,35 @@ fn drive<T>(cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> T {
                         }),
                     };
                     cx.push_delivered(result);
+                }
+            },
+        }
+    }
+}
+
+/// Like [`drive`] but returns the handler's `Result` instead of panicking on
+/// an error, for tests that assert a path is rejected.
+fn drive_result<T>(cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    let mut fut = Box::pin(fut);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
+    loop {
+        match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => {
+                let yielded = cx.take_yielded_callouts();
+                assert!(
+                    !yielded.is_empty(),
+                    "future is pending but yielded no callouts: deadlock"
+                );
+                for _callout in yielded {
+                    cx.push_delivered(wit_types::CalloutResult::HttpResponse(
+                        wit_types::HttpResponse {
+                            status: 200,
+                            headers: Vec::new(),
+                            body: b"callout-body".to_vec(),
+                        },
+                    ));
                 }
             },
         }
@@ -361,7 +392,9 @@ fn day_router() -> Router<()> {
     let mut r = Router::<()>::new();
     r.file_object::<Day>("/{day}/{collection}", |o| {
         o.dynamic();
-        o.file("snapshot").canonical::<Json>()?;
+        // The file-object anchor IS this file: declare the single canonical
+        // face directly on the block (no leaf name).
+        o.canonical::<Json>()?;
         Ok(())
     })
     .unwrap();
@@ -1157,4 +1190,127 @@ fn choices_face_lists_fixed_dir_entries_exhaustive() {
             .all(|e| matches!(e.kind, wit_types::EntryKind::Directory)),
         "each choice is a directory entry"
     );
+}
+
+// ===========================================================================
+// Object stream face (R6): a live ranged leaf under an object anchor opens
+// through `open_file` and serves chunks from its RangeReader.
+// ===========================================================================
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Pod {
+    name: String,
+}
+
+struct PodKey {
+    name: String,
+}
+
+impl FromCaptures for PodKey {
+    fn from_captures(c: &Captures) -> Result<Self> {
+        Ok(Self {
+            name: c
+                .get("name")
+                .ok_or_else(|| ProviderError::invalid_input("missing name"))?
+                .to_string(),
+        })
+    }
+}
+impl IdentityCaptures for PodKey {
+    fn identity_captures(&self) -> Vec<(&'static str, String)> {
+        vec![("name", self.name.clone())]
+    }
+}
+impl FacetMetadata for PodKey {
+    fn facet_axes() -> &'static [FacetAxis] {
+        &[]
+    }
+}
+impl Key for PodKey {}
+
+impl Object for Pod {
+    type Key = PodKey;
+    type State = ();
+    type Canonical = Json;
+    fn load(
+        _cx: &Cx<()>,
+        key: &PodKey,
+        _since: Option<Validator>,
+    ) -> impl Future<Output = Result<Load<Self>>> {
+        let name = key.name.clone();
+        async move {
+            Ok(Load::fresh(
+                Pod { name: name.clone() },
+                Canonical::new(format!(r#"{{"name":"{name}"}}"#).into_bytes(), None),
+            ))
+        }
+    }
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        omnifs_sdk::object::decode_json(bytes)
+    }
+    fn kind() -> ObjectKind {
+        ObjectKind("test.pod")
+    }
+}
+
+impl Pod {
+    /// A live log stream: a ranged reader over volatile tail bytes. The reader
+    /// is in-memory here, but the face is marked `Live` (the only stability a
+    /// stream face may carry beyond stable/dynamic).
+    fn log(_cx: Cx<()>, key: PodKey) -> impl Future<Output = Result<StreamFile>> {
+        async move {
+            let bytes = format!("log line for {}\n", key.name).into_bytes();
+            Ok(StreamFile::new(MemoryRangeReader::new(bytes)).live())
+        }
+    }
+}
+
+fn pod_router() -> Router<()> {
+    let mut r = Router::<()>::new();
+    r.object::<Pod>("/pods/{name}", |o| {
+        o.dynamic();
+        o.file("pod.json").canonical::<Json>()?;
+        o.file("log").stream(Pod::log)?;
+        Ok(())
+    })
+    .unwrap();
+    r.seal().unwrap();
+    r
+}
+
+#[test]
+fn object_stream_face_opens_live_session_and_serves_a_chunk() {
+    let r = pod_router();
+    let cx = cx();
+
+    // The stream leaf under an object anchor must NOT be a `read_file` target.
+    let read = drive_result(&cx, r.read_file(&cx, "/pods/api/log", "", None));
+    assert!(
+        read.is_err(),
+        "a stream face must be opened through open_file, not read_file"
+    );
+
+    // open_file resolves the Stream leaf under the object anchor and runs the
+    // face's open handler.
+    let opened = drive(&cx, r.open_file(&cx, "/pods/api/log"));
+
+    // The opened session reports the stream's declared attrs: Live + Unknown.
+    assert_eq!(
+        opened.attrs.stability,
+        Stability::Live,
+        "a live stream face opens with Stability::Live"
+    );
+    assert_eq!(
+        opened.attrs.size,
+        Size::Unknown,
+        "a live stream's size is unknown until read"
+    );
+
+    // The reader serves a chunk: bytes plus an eof flag (the in-memory tail is
+    // fully readable in one chunk).
+    let chunk = drive(&cx, async {
+        opened.reader.read_chunk(&cx, 0, 4096).await
+    });
+    assert_eq!(chunk.content, b"log line for api\n");
+    assert!(chunk.eof, "the in-memory tail returns eof on a full read");
 }

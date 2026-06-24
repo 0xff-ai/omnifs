@@ -36,7 +36,9 @@ impl OuraProvider {
         r.dir("/{day}").handler(DayKey::entries)?;
         r.file_object::<DailyCollection>("/{day}/{collection}", |o| {
             o.dynamic();
-            o.file("collection.json").canonical::<Json>()?;
+            // The anchor IS this file: declare the single canonical face
+            // directly on the block.
+            o.canonical::<Json>()?;
             Ok(())
         })?;
         Ok(())

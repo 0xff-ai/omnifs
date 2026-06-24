@@ -106,6 +106,14 @@ impl Item {
             .build())
     }
 
+    /// Object-level stream face (R6): a live ranged leaf under the item anchor.
+    /// It opens through `open-file` and serves volatile tail chunks (`tail -f`),
+    /// exercising the object Stream dispatch the conformance fixture must cover.
+    #[allow(clippy::unused_async)]
+    async fn log(_cx: Cx<State>, _key: ItemKey) -> Result<StreamFile> {
+        Ok(StreamFile::new(LiveTailReader).live())
+    }
+
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
     /// absent (negative lookup); a matching `since` validator is `Unchanged`
     /// (conditional load); otherwise fresh, and loading item 7 also preloads its
@@ -205,7 +213,10 @@ async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection>
             number,
         };
         let base = format!("items/{filter}/{number}");
-        let leaves = ["item.json", "item.md", "title", "state", "body", "comments"]
+        // The canonical-view leaves are the canonical/representation/derived
+        // file leaves only. `comments` is a collection DIR, not a view of the
+        // item canonical, so it must not appear here.
+        let leaves = ["item.json", "item.md", "title", "state", "body"]
             .into_iter()
             .map(|leaf| format!("/{base}/{leaf}"))
             .collect();
@@ -365,6 +376,9 @@ impl TestProvider {
             o.file("title").derive(Item::title)?;
             o.file("state").derive(Item::state)?;
             o.file("body").lazy().derive(Item::body)?;
+            // Object-level stream face (R6): a live ranged leaf opened through
+            // open-file -> object Stream dispatch.
+            o.file("log").stream(Item::log)?;
             o.dir("comments").collection(item_comments)?;
             Ok(())
         })?;
