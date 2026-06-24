@@ -119,7 +119,7 @@ impl GithubProvider {
                 o.dynamic();
                 o.file("comment.json").canonical::<Json>()?;
                 o.file("comment.md").representation::<Markdown>()?;
-                o.file("body.md").derive(Comment::body_md)?;
+                o.file("body.md").lazy().derive(Comment::body_md)?;
                 o.file("author").derive(Comment::author)?;
                 Ok(())
             },

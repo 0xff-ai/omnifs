@@ -1,7 +1,7 @@
 //! GitHub provider route-test helpers.
 
 use omnifs_itest::{RuntimeHarness, create_test_repo, make_initialized_runtime};
-use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, ReadMode, Stability};
+use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, Stability};
 
 pub use omnifs_itest::{TestOpExt, project_paths};
 
@@ -32,18 +32,6 @@ pub fn project_file_stability(effects: &Effects, path: &str) -> Option<Stability
         match &write.kind {
             FsKind::File(file) => Some(file.attrs.stability),
             FsKind::Directory(_) => None,
-        }
-    })
-}
-
-pub fn project_file_is_deferred_full(effects: &Effects, path: &str) -> bool {
-    effects.fs.iter().any(|write| {
-        if write.path != path {
-            return false;
-        }
-        match &write.kind {
-            FsKind::File(file) => matches!(file.bytes, ByteSource::Deferred(ReadMode::Full)),
-            FsKind::Directory(_) => false,
         }
     })
 }
