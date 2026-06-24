@@ -17,35 +17,31 @@ fn main() {
     println!("cargo:rerun-if-changed={}", provider_root.display());
     println!("cargo:rerun-if-env-changed={PROVIDER_BUNDLE_DIR_ENV}");
 
-    let mut manifest_paths = fs::read_dir(&provider_root)
-        .unwrap_or_else(|error| panic!("read {}: {error}", provider_root.display()))
-        .filter_map(|entry| {
-            let entry =
-                entry.unwrap_or_else(|error| panic!("scan {}: {error}", provider_root.display()));
-            let manifest = entry.path().join("omnifs.provider.json");
-            let provider_name = entry.file_name();
-            let provider_name = provider_name
-                .to_str()
-                .unwrap_or_else(|| panic!("invalid provider dir {}", entry.path().display()));
-            (manifest.is_file() && !FIXTURE_PROVIDER_DIRS.contains(&provider_name))
-                .then_some(manifest)
-        })
-        .collect::<Vec<_>>();
-    manifest_paths.sort();
-
+    // Each provider crate `providers/<name>` (crate `omnifs-provider-<name>`)
+    // builds to `omnifs_provider_<name>.wasm`. The provider manifest now travels
+    // inside that wasm as the `omnifs.provider-metadata.v1` custom section
+    // (authored from `#[provider]` annotations), so there is no
+    // `omnifs.provider.json` to read here: the set of providers is the set of
+    // crate dirs under `providers/`, minus the test fixtures.
     let mut provider_files = Vec::new();
-    for manifest_path in manifest_paths {
-        println!("cargo:rerun-if-changed={}", manifest_path.display());
-        let manifest_json = fs::read_to_string(&manifest_path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));
-        let manifest_value: serde_json::Value = serde_json::from_str(&manifest_json)
-            .unwrap_or_else(|error| panic!("parse {}: {error}", manifest_path.display()));
-        let provider_file = manifest_value
-            .get("provider")
-            .and_then(|value| value.as_str())
-            .unwrap_or_else(|| panic!("{} must set provider", manifest_path.display()));
-        provider_files.push(provider_file.to_string());
+    let read = fs::read_dir(&provider_root)
+        .unwrap_or_else(|error| panic!("read {}: {error}", provider_root.display()));
+    for entry in read {
+        let entry =
+            entry.unwrap_or_else(|error| panic!("scan {}: {error}", provider_root.display()));
+        let dir_name = entry.file_name();
+        let Some(dir_name) = dir_name.to_str() else {
+            continue;
+        };
+        if FIXTURE_PROVIDER_DIRS.contains(&dir_name) || !entry.path().join("Cargo.toml").is_file() {
+            continue;
+        }
+        provider_files.push(format!(
+            "omnifs_provider_{}.wasm",
+            dir_name.replace('-', "_")
+        ));
     }
+    provider_files.sort();
 
     write_provider_bundle(&workspace_root, &out_dir, provider_files);
 }

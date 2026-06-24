@@ -17,6 +17,7 @@ syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 omnifs-provider = { workspace = true }
+omnifs-caps = { workspace = true }
 serde_json = { workspace = true }
 
 [lints.rust]

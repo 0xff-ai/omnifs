@@ -14,9 +14,7 @@
 //!   (see [`crate::archives`]).
 
 use crate::error::{ProviderError, Result};
-use omnifs_wit::provider::types::{
-    BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header,
-};
+use omnifs_wit::provider::types::{BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header};
 
 /// Runtime-local handle for a blob stored in the host cache. Valid only for
 /// the current provider instance; do not persist it or derive paths from it.
@@ -108,4 +106,3 @@ pub(crate) fn extract_blob(result: CalloutResult) -> Result<BlobRef> {
         result,
     )
 }
-

@@ -32,7 +32,10 @@ async fn test_initialize() {
     let harness = make_runtime(&engine);
     let info = harness.runtime.provider_info();
     assert_eq!(info.name, "test-provider");
-    assert_eq!(info.version, "0.1.0");
+    // Version now comes from the provider crate's `CARGO_PKG_VERSION` (no
+    // override arg); the test provider tracks the workspace version, same as
+    // this host test crate.
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
 }
 
 /// Every shipped provider must initialize (run `start()` + `seal()`) cleanly.

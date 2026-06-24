@@ -94,7 +94,25 @@ struct ResolverReverseKey {
 // `omnifs.provider.json`; no runtime `resources(..)` or `events(..)` needed.
 // ===========================================================================
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+#[omnifs_sdk::provider(
+    id = "dns",
+    display_name = "DNS",
+    mount = "dns",
+    capabilities(
+        domain(
+            "cloudflare-dns.com",
+            "Send DNS-over-HTTPS queries to the bundled public resolver endpoints."
+        ),
+        domain(
+            "dns.google",
+            "Send DNS-over-HTTPS queries to the bundled public resolver endpoints."
+        ),
+        memory_mb(
+            32,
+            "Keep resolver execution small; DNS responses are compact and do not need a large heap."
+        ),
+    )
+)]
 impl DnsProvider {
     type Config = Config;
     type State = State;

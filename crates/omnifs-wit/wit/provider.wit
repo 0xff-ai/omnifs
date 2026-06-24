@@ -424,6 +424,56 @@ interface types {
         description: string,
     }
 
+    /// A capability the provider declares it needs (the manifest "needs" side;
+    /// the mount spec grants the matching capability and the host enforces the
+    /// grant). Mirrors `omnifs-caps` `Need`. String-valued kinds (domain, git
+    /// repo, unix socket, preopened path) carry `value`; scalar kinds (memory,
+    /// blob byte budgets) carry `amount`.
+    variant capability-need {
+        domain(string-need),
+        git-repo(string-need),
+        unix-socket(string-need),
+        preopened-path(string-need),
+        memory-mb(scalar-need),
+        fetch-blob-bytes(scalar-need),
+        read-blob-bytes(scalar-need),
+    }
+
+    record string-need {
+        value: string,
+        why: string,
+        /// The literal value is resolved at init (e.g. a docker socket from the
+        /// configured endpoint) rather than declared statically.
+        dynamic: bool,
+    }
+
+    record scalar-need {
+        amount: u64,
+        why: string,
+        dynamic: bool,
+    }
+
+    /// The provider manifest: the versioned provider/host contract describing
+    /// identity, declared capability needs, and config schema. The build step
+    /// embeds this as a static global the host reads BEFORE instantiation (to
+    /// build the capability sandbox), so it is never a runtime call. Being a
+    /// WIT type, its shape is versioned with the `omnifs:provider` package, so
+    /// a manifest-shape change is caught by the same contract-evidence check as
+    /// any other contract change. Auth is added to this record in a later
+    /// iteration; until then auth stays out of the typed manifest.
+    record provider-manifest {
+        id: string,
+        display-name: string,
+        default-mount: string,
+        /// Provider crate version (`CARGO_PKG_VERSION`); catalog/UI context,
+        /// never identity.
+        version: string,
+        capabilities: list<capability-need>,
+        /// Serialized JSON Schema of the provider config, derived at build time
+        /// via schemars. `none` for a provider with no config.
+        config-schema: option<string>,
+    }
+
     record requested-capabilities {
         domains: list<string>,
         /// Absolute unix socket paths the provider may open via the

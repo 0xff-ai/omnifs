@@ -331,7 +331,6 @@ async fn item_comments(
 
 #[omnifs_sdk::provider(
     metadata = "omnifs.provider.json",
-    version = "0.1.0",
     events(timer(Duration::from_mins(1), Self::on_tick))
 )]
 impl TestProvider {
