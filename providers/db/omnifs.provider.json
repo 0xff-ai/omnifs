@@ -11,8 +11,9 @@
     },
     {
       "kind": "preopenedPath",
-      "value": { "host": "/data", "guest": "/data", "mode": "ro" },
-      "why": "Expose the configured database file to the sandbox as a read-only WASI preopen."
+      "value": { "host": "configured database file directory", "guest": "configured database file directory", "mode": "ro" },
+      "dynamic": true,
+      "why": "Expose the configured database file to the sandbox as a read-only WASI preopen, resolved from the `path` config field at mount-start."
     }
   ],
   "configSchema": {
@@ -24,12 +25,7 @@
         "type": "string",
         "default": "/data/test.db",
         "description": "SQLite database file",
-        "x-omnifs-init": {
-          "input": "host-file",
-          "guestDir": "/data",
-          "preopenMode": "ro",
-          "preopenStrategy": "replace"
-        }
+        "x-omnifs-resource": { "kind": "file", "mode": "ro" }
       },
       "read_only": {
         "type": "boolean",

@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use omnifs_caps::{Grant, PreopenMode};
+use omnifs_provider::{ConfigSchema, HostResourceKind};
 
 use crate::mounts::{Catalog, Error as MountError, Spec};
 
@@ -167,7 +168,7 @@ pub fn materialize(
     // under-granted mount fails here rather than at the provider's first denied
     // callout. Over-granting beyond the manifest is allowed; the over-grant
     // check is deliberately not enforced (docs/future/provider-contract-versioning.md).
-    if let Some(needs) = catalog
+    if let Some(applied) = catalog
         .apply_metadata_and_needs(&mut spec)
         .map_err(MaterializeError::Metadata)?
     {
@@ -175,7 +176,7 @@ pub fn materialize(
             .capabilities
             .clone()
             .unwrap_or_default()
-            .satisfies(&needs);
+            .satisfies(&applied.needs);
         if !missing.is_empty() {
             return Err(MaterializeError::MissingCapabilities {
                 mount: spec.mount.clone(),
@@ -187,9 +188,8 @@ pub fn materialize(
                     .join(", "),
             });
         }
+        check_dynamic_socket(&spec, applied.config_schema.as_ref())?;
     }
-
-    check_dynamic_socket(&spec)?;
 
     let preopen_binds = rewrite_preopens(&mut spec, mode)?;
 
@@ -199,14 +199,18 @@ pub fn materialize(
     })
 }
 
-/// Verify that a dynamic unix-socket grant resolves from the mount's `endpoint`
-/// config. A dynamic grant passes the required-capabilities check (a dynamic
-/// grant satisfies a dynamic need), but the runtime allowlist is built by
-/// resolving the endpoint; if it does not resolve, the provider is silently
-/// denied at its first callout. Resolving here turns that into a clear,
-/// fixable mount-start error. Unix sockets are the only dynamic capability
-/// (enforced at manifest validation), so this is the only kind to resolve.
-fn check_dynamic_socket(spec: &Spec) -> Result<(), MaterializeError> {
+/// Verify that a dynamic unix-socket grant resolves from the config field the
+/// provider marks as a host socket. A dynamic grant passes the
+/// required-capabilities check (a dynamic grant satisfies a dynamic need), but
+/// the runtime allowlist is built by resolving that field's value; if it does
+/// not resolve, the provider is silently denied at its first callout. Resolving
+/// here turns that into a clear, fixable mount-start error. A dynamic preopen
+/// resolves from a host-file field at instance creation instead, so it is not
+/// checked here.
+fn check_dynamic_socket(
+    spec: &Spec,
+    schema: Option<&ConfigSchema>,
+) -> Result<(), MaterializeError> {
     let is_dynamic = spec
         .capabilities
         .as_ref()
@@ -215,13 +219,20 @@ fn check_dynamic_socket(spec: &Spec) -> Result<(), MaterializeError> {
     if !is_dynamic {
         return Ok(());
     }
+    let Some(field) = schema.and_then(|schema| schema.resource_field(HostResourceKind::Socket))
+    else {
+        return Err(MaterializeError::UnresolvedDynamicSocket {
+            mount: spec.mount.clone(),
+            detail: "no config field is marked as a host socket".to_string(),
+        });
+    };
     let endpoint = spec
         .config_raw
         .as_ref()
-        .and_then(|config| config.as_value().get("endpoint"))
+        .and_then(|config| config.as_value().get(field))
         .and_then(serde_json::Value::as_str);
     let detail = match endpoint {
-        None => "no `endpoint` config is set".to_string(),
+        None => format!("no `{field}` config is set"),
         Some(endpoint) => match omnifs_caps::endpoint_socket(endpoint) {
             Ok(Some(_)) => return Ok(()),
             Ok(None) => format!("endpoint `{endpoint}` is not a unix socket"),
@@ -258,17 +269,43 @@ mod dynamic_socket_tests {
         serde_json::from_value(value).expect("spec parses")
     }
 
+    fn socket_schema() -> ConfigSchema {
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "endpoint": { "type": "string", "x-omnifs-resource": { "kind": "socket" } }
+            }
+        }))
+        .expect("schema parses")
+    }
+
     #[test]
     fn dynamic_socket_validation_errors() {
+        let schema = socket_schema();
         assert!(
-            check_dynamic_socket(&dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock"))).is_ok()
+            check_dynamic_socket(
+                &dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock")),
+                Some(&schema)
+            )
+            .is_ok()
         );
         assert!(matches!(
-            check_dynamic_socket(&dynamic_socket_spec(None)),
+            check_dynamic_socket(&dynamic_socket_spec(None), Some(&schema)),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
         assert!(matches!(
-            check_dynamic_socket(&dynamic_socket_spec(Some("https://example.com"))),
+            check_dynamic_socket(
+                &dynamic_socket_spec(Some("https://example.com")),
+                Some(&schema)
+            ),
+            Err(MaterializeError::UnresolvedDynamicSocket { .. })
+        ));
+        // A dynamic socket grant with no host-socket field is a misconfiguration.
+        assert!(matches!(
+            check_dynamic_socket(
+                &dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock")),
+                None
+            ),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
     }

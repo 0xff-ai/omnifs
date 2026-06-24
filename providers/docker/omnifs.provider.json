@@ -24,7 +24,8 @@
       "endpoint": {
         "type": "string",
         "default": "unix:///var/run/docker.sock",
-        "description": "Docker daemon endpoint"
+        "description": "Docker daemon endpoint",
+        "x-omnifs-resource": { "kind": "socket" }
       }
     }
   }

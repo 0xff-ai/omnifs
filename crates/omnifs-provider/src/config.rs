@@ -40,14 +40,31 @@ impl ConfigSchema {
         serde_json::Value::Object(out)
     }
 
+    /// Whether `omnifs init` must prompt interactively for a value. Only a
+    /// host-file field needs a prompt; the host resolves its preopen at
+    /// mount-start from the path the user supplies.
     #[must_use]
     pub fn requires_prompt(&self) -> bool {
-        self.properties.values().any(|property| {
-            property
-                .init
-                .as_ref()
-                .is_some_and(|hint| hint.input.is_some())
+        self.resource_fields()
+            .any(|(_, resource)| matches!(resource, HostResource::File { .. }))
+    }
+
+    /// The config fields declared as host-resource references, in declaration
+    /// order. The host resolves each field's grant from its value at
+    /// mount-start (a socket into the callout allowlist, a file into a WASI
+    /// preopen).
+    pub fn resource_fields(&self) -> impl Iterator<Item = (&str, HostResource)> {
+        self.properties.iter().filter_map(|(name, property)| {
+            property.resource.map(|resource| (name.as_str(), resource))
         })
+    }
+
+    /// The single field declared as `kind`, if any.
+    #[must_use]
+    pub fn resource_field(&self, kind: HostResourceKind) -> Option<&str> {
+        self.resource_fields()
+            .find(|(_, resource)| resource.kind() == kind)
+            .map(|(name, _)| name)
     }
 }
 
@@ -71,33 +88,43 @@ pub struct ConfigProperty {
     pub default: Option<serde_json::Value>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default, rename = "x-omnifs-init")]
-    pub init: Option<InitHint>,
+    #[serde(default, rename = "x-omnifs-resource")]
+    pub resource: Option<HostResource>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct InitHint {
-    #[serde(default)]
-    pub input: Option<InitInput>,
-    #[serde(default)]
-    pub guest_dir: Option<String>,
-    #[serde(default)]
-    pub preopen_mode: PreopenMode,
-    #[serde(default)]
-    pub preopen_strategy: PreopenStrategy,
-}
-
+/// Declares that a config field's value references a host resource the sandbox
+/// must be granted. The provider also declares the matching capability as a
+/// `dynamic` need; the host resolves the concrete grant from this field's value
+/// at mount-start. One marker drives both the socket allowlist and the WASI
+/// preopen, replacing the per-kind bespoke bindings.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum InitInput {
-    HostFile,
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum HostResource {
+    /// A host file the provider opens through a preopened WASI directory. The
+    /// host preopens the file's parent directory at the same path (guest ==
+    /// host) with `mode`, so the provider opens the configured path unchanged.
+    File {
+        #[serde(default)]
+        mode: PreopenMode,
+    },
+    /// A host unix socket the host issues provider callouts over. The value is a
+    /// `unix://` endpoint resolved into the socket allowlist.
+    Socket,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PreopenStrategy {
-    #[default]
-    Append,
-    Replace,
+/// The kind discriminant of a [`HostResource`], for looking a field up by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostResourceKind {
+    File,
+    Socket,
+}
+
+impl HostResource {
+    #[must_use]
+    pub fn kind(self) -> HostResourceKind {
+        match self {
+            Self::File { .. } => HostResourceKind::File,
+            Self::Socket => HostResourceKind::Socket,
+        }
+    }
 }

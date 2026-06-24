@@ -8,7 +8,7 @@ use crate::archive::ArchiveExecutor;
 use crate::auth::{AuthManager, credential_store_for_file};
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
-use crate::capability::CapabilityChecker;
+use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
 use crate::git;
 use crate::http::HttpStack;
@@ -21,11 +21,12 @@ use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{Caches, Store};
-use omnifs_caps::Grant;
+use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::{ProviderStore, Resolved};
+use omnifs_provider::{ConfigSchema, HostResource};
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -282,35 +283,37 @@ impl Runtime {
     ) -> std::result::Result<Self, BuildError> {
         let mount_name = config.spec.mount.as_str();
         let config_bytes = config.config_bytes();
-        let preopens = config
-            .spec
-            .capabilities
-            .as_ref()
-            .and_then(|c| c.preopened_paths.as_ref())
-            .map_or(&[][..], Grant::literal);
         // Load the pinned artifact's manifest once: capability/config-schema
-        // validation and auth both read it, and enforcement rests on this
-        // pinned manifest, never on a spec-stamped snapshot.
+        // validation, preopen resolution, and auth all read it, and enforcement
+        // rests on this pinned manifest, never on a spec-stamped snapshot.
         let manifest = Artifact::load(wasm_path)
             .and_then(|artifact| artifact.metadata())
             .map_err(BuildError::InvalidConfig)?;
+        let config_schema = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.config_schema.as_ref())
+            .map(ConfigSchema::parse)
+            .transpose()
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
 
-        let instance = Instance::new(engine, wasm_path, config_bytes, preopens)?;
+        let preopens = resolve_preopens(config, config_schema.as_ref());
+        let instance = Instance::new(engine, wasm_path, config_bytes, &preopens)?;
 
         // `schemars::Schema::as_value` is the method clippy would name here, but
         // schemars is not a direct dependency, so the closure stays.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let config_schema = manifest
+        let schema_value = manifest
             .as_ref()
             .and_then(|manifest| manifest.config_schema.as_ref())
             .map(|schema| schema.as_value());
-        validate_instance_config(config_schema, config, mount_name)?;
+        validate_instance_config(schema_value, config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
         let capability = Arc::new(CapabilityChecker::from_config(
             config,
             &initialize_result.capabilities,
+            config_schema.as_ref(),
         ));
 
         let auth_manifest = manifest
@@ -630,6 +633,39 @@ fn finish_initialize_return(
         other => Err(BuildError::ProviderProtocol(format!(
             "initialize returned unexpected result: {other:?}"
         ))),
+    }
+}
+
+/// The WASI preopens to hand the instance. A literal preopen grant is used
+/// verbatim; a dynamic one is resolved at mount-start from the config fields the
+/// provider marks as host files: the file's parent directory is preopened at the
+/// same path (guest == host), so the provider opens the configured path
+/// unchanged. The mode comes from the field's `HostResource::File` marker.
+fn resolve_preopens(config: &Resolved, schema: Option<&ConfigSchema>) -> Vec<PreopenedPath> {
+    match config
+        .spec
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.preopened_paths.as_ref())
+    {
+        Some(Grant::Literal(paths)) => paths.clone(),
+        Some(Grant::Dynamic(_)) => schema
+            .into_iter()
+            .flat_map(ConfigSchema::resource_fields)
+            .filter_map(|(field, resource)| {
+                let HostResource::File { mode } = resource else {
+                    return None;
+                };
+                let value = config_str(config, field)?;
+                let dir = StdPath::new(value).parent()?.to_str()?.to_string();
+                Some(PreopenedPath {
+                    host: dir.clone(),
+                    guest: dir,
+                    mode,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
     }
 }
 

@@ -188,6 +188,14 @@ pub struct Catalog {
     providers_dir: PathBuf,
 }
 
+/// What materialization reads from a pinned manifest: the capability needs (the
+/// oracle for the required-capabilities check) and the parsed config schema,
+/// which names the host-resource config fields a dynamic grant resolves from.
+pub struct AppliedMetadata {
+    pub needs: Vec<Need>,
+    pub config_schema: Option<omnifs_provider::ConfigSchema>,
+}
+
 impl Catalog {
     #[must_use]
     pub fn new(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
@@ -259,12 +267,14 @@ impl Catalog {
         Ok(true)
     }
 
-    /// Apply the pinned manifest's metadata to `spec` and return the
-    /// capabilities it declares the provider needs, loading the artifact once.
-    /// The needs are the oracle for the required-capabilities check. `None` when
-    /// the artifact is not retained (metadata is not applied and the check is
+    /// Apply the pinned manifest's metadata to `spec` and return what
+    /// materialization checks against it, loading the artifact once. `None` when
+    /// the artifact is not retained (metadata is not applied and the checks are
     /// skipped; the missing-artifact error surfaces elsewhere).
-    pub fn apply_metadata_and_needs(&self, spec: &mut Spec) -> Result<Option<Vec<Need>>, Error> {
+    pub fn apply_metadata_and_needs(
+        &self,
+        spec: &mut Spec,
+    ) -> Result<Option<AppliedMetadata>, Error> {
         let Some(provider) = self.get(&spec.provider.id)? else {
             return Ok(None);
         };
@@ -274,7 +284,19 @@ impl Catalog {
                 path: provider.wasm_path().to_path_buf(),
                 source,
             })?;
-        Ok(Some(manifest.capabilities))
+        let config_schema = manifest
+            .config_schema
+            .as_ref()
+            .map(omnifs_provider::ConfigSchema::parse)
+            .transpose()
+            .map_err(|source| Error::ExtractProviderMetadata {
+                path: provider.wasm_path().to_path_buf(),
+                source,
+            })?;
+        Ok(Some(AppliedMetadata {
+            needs: manifest.capabilities,
+            config_schema,
+        }))
     }
 
     pub fn auth_manifest_for(&self, config: &Resolved) -> Result<Option<AuthManifest>, Error> {

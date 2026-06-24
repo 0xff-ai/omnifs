@@ -58,27 +58,9 @@ Table names collide with magic segments only inside `tables/`. A table named `me
 
 ## Configuration
 
-```json
-{
-  "provider": "omnifs_provider_db.wasm",
-  "mount": "db",
-  "capabilities": {
-    "max_memory_mb": 128,
-    "preopened_paths": [
-      { "host": "/data", "guest": "/data", "mode": "ro" }
-    ]
-  },
-  "config": {
-    "path": "/data/test.db",
-    "read_only": true,
-    "sample_limit": 20
-  }
-}
-```
+The mount config carries `path` (the database file), `read_only`, and `sample_limit`. The `path` field is marked `x-omnifs-resource: { kind: file, mode: ro }` in the provider's config schema, and the manifest declares its `preopenedPath` capability as `dynamic: true` rather than a literal directory.
 
-`preopened_paths` is a new host capability shipped with this provider. Each entry tells the host to make `host` available inside the WASM sandbox as `guest`, with `mode: "ro" | "rw"`. The host validates that paths are absolute and contain no `..`. v1 only uses `ro`; `rw` is reserved for future write-capable backends.
-
-`config.path` must be inside (or equal to) some preopened guest path. The provider opens the file by that guest-visible path.
+Binding is resolved by the host at mount-start from `config.path`, not baked into the spec: the host preopens the file's **parent directory at the same path** (guest == host) with the marker's `mode`, so the provider opens `config.path` unchanged. There is no host→guest path rewrite and no separately-declared preopen directory. The owner of this resolution is the preopen resolver in `crates/omnifs-host/src/runtime.rs`, symmetric with the dynamic unix-socket resolver in `crates/omnifs-host/src/capability.rs`; the `HostResource` marker is defined in `crates/omnifs-provider/src/config.rs`.
 
 `config.read_only` defaults to true. When true the provider opens SQLite with `SQLITE_OPEN_READ_ONLY` + `?mode=ro&immutable=1`; the URI's `immutable=1` skips all journal / WAL handling, which is correct for the v1 read-only mount. When false (escape hatch only), the provider opens read-write; the use case is recovery of WAL-mode databases that need a writable journal sidecar.
 

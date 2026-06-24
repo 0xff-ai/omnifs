@@ -24,7 +24,8 @@
       "endpoint": {
         "type": "string",
         "default": "unix:///run/omnifs/k8s.sock",
-        "description": "Kubernetes API endpoint. Use a `unix://` socket served by `kubectl proxy --unix-socket`; kubectl owns TLS and cluster credentials, and the provider issues plain HTTP over the socket."
+        "description": "Kubernetes API endpoint. Use a `unix://` socket served by `kubectl proxy --unix-socket`; kubectl owns TLS and cluster credentials, and the provider issues plain HTTP over the socket.",
+        "x-omnifs-resource": { "kind": "socket" }
       },
       "hide_empty_types": {
         "type": "boolean",
