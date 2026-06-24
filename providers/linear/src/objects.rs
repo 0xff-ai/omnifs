@@ -5,6 +5,7 @@ use omnifs_sdk::prelude::*;
 use omnifs_sdk::repr::{Markdown, Representable};
 use serde::{Deserialize, Serialize};
 
+use crate::IssueKey;
 use crate::api::priority_label;
 
 #[omnifs_sdk::object(kind = "linear.issue", key = crate::IssueKey)]
@@ -55,40 +56,27 @@ impl Issue {
         self.state.as_ref().map_or("", |s| s.name.as_str())
     }
 
-    pub(crate) fn title(&self) -> crate::Result<FileProjection> {
+    pub(crate) fn title(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         Ok(text_content(newline(&self.title)))
     }
 
-    pub(crate) fn state(&self) -> crate::Result<FileProjection> {
+    pub(crate) fn state(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         Ok(text_content(newline(self.state_label())))
     }
 
-    pub(crate) fn priority(&self) -> crate::Result<FileProjection> {
+    pub(crate) fn priority(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         Ok(text_content(newline(priority_label(self.priority))))
     }
 
-    pub(crate) fn assignee(&self) -> crate::Result<FileProjection> {
+    pub(crate) fn assignee(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         Ok(text_content(newline(self.assignee_label())))
     }
 
-    pub(crate) fn description(&self) -> crate::Result<FileProjection> {
+    pub(crate) fn description(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         let body = self.description.as_deref().unwrap_or("");
         Ok(FileProjection::body(newline(body))
             .content_type(ContentType::Markdown)
             .build())
-    }
-
-    pub(crate) fn listed_dir(&self) -> crate::Result<DirProjection> {
-        Ok(DirProjection::open([
-            Entry::file("title"),
-            Entry::file("state"),
-            Entry::file("priority"),
-            Entry::file("assignee"),
-        ])
-        .preload_file("title", self.title()?)
-        .preload_file("state", self.state()?)
-        .preload_file("priority", self.priority()?)
-        .preload_file("assignee", self.assignee()?))
     }
 }
 

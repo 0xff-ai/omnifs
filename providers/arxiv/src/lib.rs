@@ -9,10 +9,8 @@ mod objects;
 use core::fmt;
 use core::str::FromStr;
 
-use crate::api::{
-    CATEGORY_PAGE_SIZE, download_pdf, download_source, fetch_category_page, load_paper,
-};
-use crate::objects::Paper;
+use crate::api::{CATEGORY_PAGE_SIZE, fetch_category_page};
+use crate::objects::{Paper, loaded_paper};
 use omnifs_sdk::prelude::*;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 
@@ -126,11 +124,11 @@ impl PathSegment for CategoryName {
 pub struct PaperVersion(Option<u32>);
 
 impl PaperVersion {
-    fn latest() -> Self {
+    pub(crate) fn latest() -> Self {
         Self(None)
     }
 
-    fn number(self) -> Option<u32> {
+    pub(crate) fn number(self) -> Option<u32> {
         self.0
     }
 
@@ -177,13 +175,21 @@ impl PathSegment for PaperVersion {
 
 #[omnifs_sdk::path_captures]
 pub struct PaperKey {
-    paper: PaperId,
+    pub(crate) paper: PaperId,
 }
 
 #[omnifs_sdk::path_captures]
 pub struct PaperVersionKey {
-    paper: PaperId,
-    version: Facet<PaperVersion>,
+    pub(crate) paper: PaperId,
+    pub(crate) version: Facet<PaperVersion>,
+}
+
+impl PaperVersionKey {
+    pub(crate) fn paper_key(&self) -> PaperKey {
+        PaperKey {
+            paper: self.paper.clone(),
+        }
+    }
 }
 
 #[omnifs_sdk::path_captures]
@@ -194,7 +200,7 @@ pub struct CategoryKey {
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl ArxivProvider {
     fn start(r: &mut Router) -> Result<()> {
-        let papers = object::<Paper>("/{paper}/{version}", |o| {
+        let papers = r.object::<Paper>("/{paper}/{version}", |o| {
             o.stability(|key| {
                 if key.version.is_numbered() {
                     Stability::Stable
@@ -202,22 +208,15 @@ impl ArxivProvider {
                     Stability::Dynamic
                 }
             });
-            o.representations("paper", ())?;
-            o.file("paper.json")
-                .project(|paper: &Paper, key| paper.metadata_json(key))?;
+            o.file("paper.atom").canonical::<Atom>()?;
+            o.file("paper.json").derive(Paper::metadata_json)?;
+            o.file("paper.pdf").blob(Paper::pdf)?;
+            o.file("source.tar.gz").blob(Paper::source)?;
             Ok(())
         })?;
 
-        r.attach("/papers", &papers)?;
-        r.attach("/categories/{category}/papers", &papers)?;
-        r.file("/papers/{paper}/{version}/paper.pdf")
-            .handler(PaperVersionKey::pdf)?;
-        r.file("/papers/{paper}/{version}/source.tar.gz")
-            .handler(PaperVersionKey::source)?;
-        r.file("/categories/{category}/papers/{paper}/{version}/paper.pdf")
-            .handler(PaperVersionKey::pdf)?;
-        r.file("/categories/{category}/papers/{paper}/{version}/source.tar.gz")
-            .handler(PaperVersionKey::source)?;
+        r.alias("/papers/{paper}/{version}", &papers)?;
+        r.alias("/categories/{category}/papers/{paper}/{version}", &papers)?;
 
         r.dir("/papers/{paper}").handler(PaperKey::versions)?;
         r.dir("/categories/{category}/papers/{paper}")
@@ -230,63 +229,10 @@ impl ArxivProvider {
     }
 }
 
-impl Key for PaperVersionKey {
-    type Object = Paper;
-    type State = ();
-
-    async fn load(&self, cx: &Cx, since: Option<Validator>) -> Result<Load<Paper>> {
-        let loaded = load_paper(cx, self.paper.decoded(), since).await?;
-        if let Load::Fresh { ref value, .. } = loaded
-            && let Some(version) = self.version.number()
-        {
-            value.validate_version(version)?;
-        }
-        Ok(loaded)
-    }
-}
-
 impl PaperKey {
     async fn versions(cx: DirCx, key: PaperKey) -> Result<DirProjection> {
         let paper = loaded_paper(&cx, &key).await?;
         Paper::version_dirs(&paper)
-    }
-}
-
-impl PaperVersionKey {
-    fn paper_key(&self) -> PaperKey {
-        PaperKey {
-            paper: self.paper.clone(),
-        }
-    }
-
-    async fn pdf(cx: Cx, key: PaperVersionKey) -> Result<FileProjection> {
-        let paper = loaded_paper(&cx, &key.paper_key()).await?;
-        let version = key.version.number();
-        if let Some(version) = version {
-            paper.validate_version(version)?;
-        }
-        let blob = download_pdf(&cx, key.paper.decoded(), version).await?;
-        let builder = FileProjection::blob(blob.id).size(Size::Exact(blob.size));
-        Ok(if key.version.is_numbered() {
-            builder.stable().build()
-        } else {
-            builder.dynamic().build()
-        })
-    }
-
-    async fn source(cx: Cx, key: PaperVersionKey) -> Result<FileProjection> {
-        let paper = loaded_paper(&cx, &key.paper_key()).await?;
-        let version = key.version.number();
-        if let Some(version) = version {
-            paper.validate_version(version)?;
-        }
-        let blob = download_source(&cx, key.paper.decoded(), version).await?;
-        let builder = FileProjection::blob(blob.id).size(Size::Exact(blob.size));
-        Ok(if key.version.is_numbered() {
-            builder.stable().build()
-        } else {
-            builder.dynamic().build()
-        })
     }
 }
 
@@ -310,20 +256,6 @@ impl CategoryKey {
         } else {
             Ok(DirProjection::paged(entries, Cursor::Page(page + 1)))
         }
-    }
-}
-
-async fn loaded_paper(cx: &Cx, key: &PaperKey) -> Result<Paper> {
-    let version_key = PaperVersionKey {
-        paper: key.paper.clone(),
-        version: Facet(PaperVersion::latest()),
-    };
-    match version_key.load(cx, None).await? {
-        Load::Fresh { value, .. } => Ok(value),
-        Load::Unchanged => Err(ProviderError::internal(
-            "paper unchanged without a host-pushed canonical in this handler path",
-        )),
-        Load::NotFound => Err(ProviderError::not_found("paper not found")),
     }
 }
 

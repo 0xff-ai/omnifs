@@ -20,7 +20,7 @@ use crate::api::{
 };
 use crate::objects::Issue;
 
-/// State filter directories under `/teams/{KEY}/issues/`.
+/// State filter directories under `/teams/{team}/issues/`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr, strum::Display,
 )]
@@ -133,10 +133,42 @@ struct IssueListKey {
 }
 
 #[omnifs_sdk::path_captures]
-struct IssueKey {
-    team: Facet<TeamKey>,
-    filter: Facet<StateFilter>,
-    ident: IssueIdent,
+pub(crate) struct IssueKey {
+    pub(crate) team: Facet<TeamKey>,
+    // Drives facet-axis view-leaf expansion; not read in provider code.
+    #[allow(dead_code)]
+    pub(crate) filter: Facet<StateFilter>,
+    pub(crate) ident: IssueIdent,
+}
+
+impl Issue {
+    /// Fetch a single Linear issue by identifier. Linear's GraphQL has no
+    /// `If-None-Match`; `since` is unused so we always full-fetch and never
+    /// return `Load::Unchanged`.
+    pub(crate) async fn load(
+        cx: &Cx<()>,
+        key: &IssueKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Issue>> {
+        if key.ident.team() != &*key.team {
+            return Ok(Load::NotFound);
+        }
+        let vars = json!({ "id": key.ident.to_string() });
+        let resp: GqlResponse<IssueNodeData> = cx
+            .endpoint::<LinearApi>()
+            .post("/graphql")
+            .body_json(&gql_request(ISSUE_BY_IDENTIFIER_QUERY, &vars))
+            .json()
+            .await?;
+        let Some(node) = gql_unwrap(resp)?.issue else {
+            return Ok(Load::NotFound);
+        };
+        let bytes = node.get().as_bytes().to_vec();
+        let value: Issue = serde_json::from_str(node.get())
+            .map_err(|e| ProviderError::invalid_input(format!("linear issue node parse: {e}")))?;
+        let validator = value.version().map(Validator::from);
+        Ok(Load::fresh(value, Canonical::new(bytes, validator)))
+    }
 }
 
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
@@ -149,18 +181,13 @@ impl LinearProvider {
             .handler(IssueListKey::list)?;
         r.object::<Issue>("/teams/{team}/issues/{filter}/{ident}", |o| {
             o.dynamic();
-            o.representations("item", (Markdown,))?;
-            o.file("title")
-                .project(|value: &Issue, _key| value.title())?;
-            o.file("state")
-                .project(|value: &Issue, _key| value.state())?;
-            o.file("priority")
-                .project(|value: &Issue, _key| value.priority())?;
-            o.file("assignee")
-                .project(|value: &Issue, _key| value.assignee())?;
-            o.file("description.md")
-                .lazy()
-                .project(|value: &Issue, _key| value.description())?;
+            o.file("item.json").canonical::<Json>()?;
+            o.file("item.md").representation::<Markdown>()?;
+            o.file("title").derive(Issue::title)?;
+            o.file("state").derive(Issue::state)?;
+            o.file("priority").derive(Issue::priority)?;
+            o.file("assignee").derive(Issue::assignee)?;
+            o.file("description.md").lazy().derive(Issue::description)?;
             Ok(())
         })?;
         Ok(())
@@ -194,7 +221,7 @@ impl IssueListKey {
         let filter = self.filter;
         let page = fetch_all_issues(&cx, &team, filter).await?;
         let mut seen: HashSet<String> = HashSet::with_capacity(page.items.len());
-        let mut rows: Vec<(IssueIdent, Issue)> = Vec::new();
+        let mut idents: Vec<IssueIdent> = Vec::new();
         for issue in page.items {
             if !seen.insert(issue.identifier.clone()) {
                 continue;
@@ -205,50 +232,14 @@ impl IssueListKey {
             if ident.team() != &team {
                 continue;
             }
-            rows.push((ident, issue));
+            idents.push(ident);
         }
-        let mut projection = if page.truncated {
-            DirProjection::open(rows.iter().map(|(ident, _)| Entry::dir(ident.to_string())))
+        let projection = if page.truncated {
+            DirProjection::open(idents.iter().map(|ident| Entry::dir(ident.to_string())))
         } else {
-            DirProjection::exhaustive(rows.iter().map(|(ident, _)| Entry::dir(ident.to_string())))
+            DirProjection::exhaustive(idents.iter().map(|ident| Entry::dir(ident.to_string())))
         };
-        for (ident, issue) in &rows {
-            let key = IssueKey {
-                team: Facet(team.clone()),
-                filter: Facet(filter),
-                ident: ident.clone(),
-            };
-            projection = projection.preload_dir(issue_anchor_path(&key), issue.listed_dir()?);
-        }
         Ok(projection)
-    }
-}
-
-impl Key for IssueKey {
-    type Object = Issue;
-    type State = ();
-
-    async fn load(&self, cx: &Cx, _since: Option<Validator>) -> Result<Load<Issue>> {
-        if self.ident.team() != &*self.team {
-            return Ok(Load::NotFound);
-        }
-        // WHY: Linear GraphQL has no If-None-Match; `_since` is unusable, so we
-        // always full-fetch and never return Load::Unchanged.
-        let vars = json!({ "id": self.ident.to_string() });
-        let resp: GqlResponse<IssueNodeData> = cx
-            .endpoint::<LinearApi>()
-            .post("/graphql")
-            .body_json(&gql_request(ISSUE_BY_IDENTIFIER_QUERY, &vars))
-            .json()
-            .await?;
-        let Some(node) = gql_unwrap(resp)?.issue else {
-            return Ok(Load::NotFound);
-        };
-        let bytes = node.get().as_bytes().to_vec();
-        let value: Issue = serde_json::from_str(node.get())
-            .map_err(|e| ProviderError::invalid_input(format!("linear issue node parse: {e}")))?;
-        let validator = value.version().map(Validator::from);
-        Ok(Load::fresh_from(value, Canonical { bytes, validator }))
     }
 }
 
@@ -323,8 +314,4 @@ async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Resul
         }
     }
     Ok(IssuePage { items, truncated })
-}
-
-fn issue_anchor_path(key: &IssueKey) -> String {
-    format!("/teams/{}/issues/{}/{}", *key.team, *key.filter, key.ident)
 }

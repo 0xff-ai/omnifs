@@ -40,7 +40,7 @@ impl Default for Config {
 }
 
 #[derive(Clone)]
-pub(crate) struct State {
+struct State {
     endpoint: HttpEndpoint,
 }
 
@@ -141,16 +141,43 @@ impl fmt::Display for ServiceName {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Container object (R3: direct faces only, no canonical)
+// ---------------------------------------------------------------------------
+
 #[omnifs_sdk::path_captures]
 pub struct ContainerKey {
     reference: ContainerRef,
 }
 
+/// A Docker container, loaded from the inspect endpoint.
+///
+/// Per R3 the object has direct faces only: no canonical face is declared
+/// (Docker emits no object-cache entry), so the SDK never calls `load` through
+/// the object-route machinery. `load` is implemented for trait completeness.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct Container(ContainerInspectResponse);
+#[omnifs_sdk::object(kind = "docker.container", key = ContainerKey, state = State)]
+struct Container(ContainerInspectResponse);
 
 impl Container {
+    /// Inherent load forwarded from the `Object` trait impl. Fetches the
+    /// Docker inspect response for the given container reference.
+    ///
+    /// This is NOT called by the SDK when the object has only direct faces
+    /// (no canonical), but the trait requires an implementation.
+    async fn load(
+        cx: &Cx<State>,
+        key: &ContainerKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let bytes = fetch_bytes(cx, &format!("/containers/{}/json", key.reference), &[]).await?;
+        let inspect: ContainerInspectResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| ProviderError::internal(format!("docker inspect parse error: {e}")))?;
+        let container = Container(inspect);
+        Ok(Load::fresh(container, Canonical::new(bytes, None)))
+    }
+
     fn state_bytes(&self) -> Vec<u8> {
         let status = self
             .0
@@ -200,6 +227,40 @@ impl Container {
     }
 }
 
+// Direct-face handlers for the Container object block.
+
+/// `inspect.json` direct face: fetches the raw inspect JSON and preloads
+/// `state` and `summary.txt` as inline sibling files.
+async fn container_inspect(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    let (bytes, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(bytes)
+        .dynamic()
+        .content_type(ContentType::Json)
+        .preload_file("state", state_leaf(&container))
+        .preload_file("summary.txt", summary_leaf(&container))
+        .build())
+}
+
+/// `state` direct face.
+async fn container_state(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(container.state_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .preload_file("summary.txt", summary_leaf(&container))
+        .build())
+}
+
+/// `summary.txt` direct face.
+async fn container_summary(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
+    Ok(FileProjection::body(container.summary_bytes())
+        .dynamic()
+        .content_type(ContentType::Custom("text/plain"))
+        .preload_file("state", state_leaf(&container))
+        .build())
+}
+
 #[omnifs_sdk::path_captures]
 struct ProjectKey {
     project: ProjectName,
@@ -225,48 +286,39 @@ impl DockerProvider {
         r.file("/containers.json").handler(containers_listing)?;
         r.file("/compose.json").handler(compose_listing)?;
 
+        // Container object: direct faces only (R3 — no canonical, no object cache).
+        // Canonical mount at /containers/by-name/{reference}; by-id is an alias.
+        let container = r.object::<Container>("/containers/by-name/{reference}", |o| {
+            o.dynamic();
+            o.file("inspect.json").direct(container_inspect)?;
+            o.file("state").direct(container_state)?;
+            o.file("summary.txt").direct(container_summary)?;
+            Ok(())
+        })?;
+
+        // by-id is an alias of the same Container object spec.
+        r.alias("/containers/by-id/{reference}", &container)?;
+
+        // Parent directory listings for by-name and by-id.
         r.dir("/containers/by-name").handler(by_name)?;
-        r.file("/containers/by-name/{reference}/inspect.json")
-            .handler(container_inspect)?;
-        r.file("/containers/by-name/{reference}/state")
-            .handler(container_state)?;
-        r.file("/containers/by-name/{reference}/summary.txt")
-            .handler(container_summary)?;
-
         r.dir("/containers/by-id").handler(by_id)?;
-        r.file("/containers/by-id/{reference}/inspect.json")
-            .handler(container_inspect)?;
-        r.file("/containers/by-id/{reference}/state")
-            .handler(container_state)?;
-        r.file("/containers/by-id/{reference}/summary.txt")
-            .handler(container_summary)?;
 
+        // running/stopped stay as raw dir handlers listing container names
+        // (no canonical needed; individual files are reached via by-name).
         r.dir("/containers/running").handler(running)?;
-        r.file("/containers/running/{reference}/inspect.json")
-            .handler(container_inspect)?;
-        r.file("/containers/running/{reference}/state")
-            .handler(container_state)?;
-        r.file("/containers/running/{reference}/summary.txt")
-            .handler(container_summary)?;
-
         r.dir("/containers/stopped").handler(stopped)?;
-        r.file("/containers/stopped/{reference}/inspect.json")
-            .handler(container_inspect)?;
-        r.file("/containers/stopped/{reference}/state")
-            .handler(container_state)?;
-        r.file("/containers/stopped/{reference}/summary.txt")
-            .handler(container_summary)?;
 
+        // Compose subtree: stays raw (R7 — future work).
         r.dir("/compose/{project}/services")
             .handler(project_services)?;
         r.dir("/compose/{project}/services/{service}/containers")
             .handler(service_containers)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/inspect.json")
-            .handler(container_inspect)?;
+            .handler(container_inspect_raw)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/state")
-            .handler(container_state)?;
+            .handler(container_state_raw)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/summary.txt")
-            .handler(container_summary)?;
+            .handler(container_summary_raw)?;
 
         Ok(State {
             endpoint: HttpEndpoint::parse(config.endpoint),
@@ -289,6 +341,21 @@ async fn service_containers(cx: DirCx<State>, key: ProjectServiceKey) -> Result<
     let summaries = list_containers(&cx).await?;
     let names = containers_for_service(&summaries, key.project.as_str(), key.service.as_str());
     Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
+}
+
+// Raw file handlers for the Compose subtree (shares logic with the object
+// direct-face handlers but takes `ContainerKey` directly from path captures).
+
+async fn container_inspect_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    container_inspect(cx, key).await
+}
+
+async fn container_state_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    container_state(cx, key).await
+}
+
+async fn container_summary_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
+    container_summary(cx, key).await
 }
 
 async fn system_info(cx: Cx<State>) -> Result<FileProjection> {
@@ -381,34 +448,6 @@ async fn compose_listing(cx: Cx<State>) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
     let listing = ComposeListing::from(&summaries);
     Ok(snapshot_json(pretty_json(&listing)?))
-}
-
-async fn container_inspect(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    let (bytes, container) = fetch_inspect(&cx, &key.reference).await?;
-    Ok(FileProjection::body(bytes)
-        .dynamic()
-        .content_type(ContentType::Json)
-        .preload_file("state", state_leaf(&container))
-        .preload_file("summary.txt", summary_leaf(&container))
-        .build())
-}
-
-async fn container_state(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
-    Ok(FileProjection::body(container.state_bytes())
-        .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
-        .preload_file("summary.txt", summary_leaf(&container))
-        .build())
-}
-
-async fn container_summary(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    let (_, container) = fetch_inspect(&cx, &key.reference).await?;
-    Ok(FileProjection::body(container.summary_bytes())
-        .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
-        .preload_file("state", state_leaf(&container))
-        .build())
 }
 
 fn snapshot_body(bytes: Vec<u8>) -> FileProjection {
