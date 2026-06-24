@@ -6,13 +6,28 @@ Related: `architecture.md` (the invariants these must respect), `async-http.md`,
 
 These items were consolidated from the SDK-redesign design corpus once that redesign shipped. They survive here because they are real, scoped, and still wanted; the planning documents that carried them did not, because their vocabulary had gone stale against the implemented system.
 
-## Aliases and cross-path object collapse
+## Shipped in the object SDK redesign
 
-Multiple routes can already resolve to one cached object through Facet captures excluded from identity (`architecture.md` §2). What is deferred is the general case: an explicit alias channel so the SDK can declare "these paths share one canonical" and the host can index it without inspecting bytes (which the byte boundary forbids). The only current alias source is GitHub's state filter, deferred so issues project on one anchor. The open piece is the alias-anchor channel itself: an SDK-emitted effect the host indexes, plus the rule that separates identity captures from view captures so the path tuple's non-rename-stability does not corrupt identity.
+The provider object SDK redesign (`providers/DESIGN.md`) landed the one-route-API surface and removed several entries that this roadmap previously carried as deferred. These are done, recorded so they are not re-planned:
 
-## Preload anchor derivation
+- **Faces under file/dir.** `canonical`, `representation`, `derive` (eager/lazy), `object`, `direct`, `blob`, `stream`, `tree`, `collection`, `choices`, `children` (`crates/omnifs-sdk/src/router/object.rs`).
+- **Explicit aliases.** `r.alias(template, &handle)` mounts one object spec at a second template (the alias-anchor channel; identity captures stay separate from facets).
+- **Typed collections.** `Collection<C, Cur>` with `CollectionEntry::fresh/derived/key` and host-opaque typed cursors; a `fresh` entry stores the child canonical at listing time (`crates/omnifs-sdk/src/collection.rs`).
+- **Typed preloads / preload anchor derivation.** `Load::preload_object(ObjectEntry::fresh(..))` and `.preload_file(path, proj)` reach the sibling's anchor from the entry key against the registered route, replacing hand-built effect plumbing.
+- **File-shaped object anchors.** `r.file_object::<O>` projects an object as a single file.
+- **Tree face.** `o.dir(name).tree(method)` registers a subtree handoff as an object dir face.
 
-Returning a related object's canonical alongside a fetch (an issue's author and labels) so later reads hit cache is the preload mechanism, and the storage side (a `canonical-store` at the related anchor) is settled. The open piece is authoring ergonomics: `cx.preload(&value)` cannot reach the related object's anchor from a bare value, and silently no-ops when the related type is unbound. The fix is a typed `(Key, value)` or route-handle based preload with observable bound-ness, plus a reverse-routing primitive (`cx.build_path`) so a typed handle plus captures yields the anchor.
+## Typestate object blocks
+
+The face-validity checks (a representation/derive face with no canonical, two canonical faces, `Live` on a non-stream face) run at seal time and panic with a named error. The refinement is a builder typestate that makes the invalid combinations compile errors instead, removing the runtime checks. This is a builder refactor with no behavior change; deferred so the migration could land first.
+
+## Cross-type preload_object
+
+`Load::preload_object` is constrained to the requested object's OWN type (Oura's same-type sibling days). The general case is a load teaching the host about any object kind it actually fetched (an issue load preloading its author object), via the object-route registry so the SDK can reach the other type's anchor and view leaves. Deferred until a provider needs it.
+
+## Preload sibling listing-visibility
+
+A range-fetched preload (Oura's neighboring days) is resolvable by lookup but does not yet appear in the parent `ls` before it is looked up, because `lower_preloads` does not emit the `project_dir`/`project_file` listing entries the old hand-built path did. The fix is to optionally emit those listing effects so range-fetched siblings are visible in a directory listing immediately. Deferred as a non-exhaustive-listing nicety, not a correctness gap.
 
 ## Full directory enumeration
 
@@ -36,7 +51,7 @@ Category listings today are flat, stateless, and cursor-paged: `/categories/{cat
 
 ## Cross-object canonical references
 
-Object references are implicit to an entry's own object id today. An explicit `canonical-ref(anchor)` form would let one object's canonical reference another's by anchor without duplicating bytes, which is the substrate the alias and preload work both lean on. Deferred until aliases land.
+Object references are implicit to an entry's own object id today. An explicit `canonical-ref(anchor)` form would let one object's canonical reference another's by anchor without duplicating bytes. Aliases and typed preloads shipped; this remains the substrate cross-type preload (above) would build on, deferred until that driver appears.
 
 ## Rate-limit unification
 

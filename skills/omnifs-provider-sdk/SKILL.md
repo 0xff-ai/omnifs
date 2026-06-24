@@ -16,7 +16,7 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 3. **`lookup` is the authoritative name oracle; `readdir` may be non-exhaustive.** A listing's `exhaustive` flag means "these are all the names I know"; lookup may still resolve names absent from the latest listing.
 4. **Never write stub handlers for intermediate directories.** Any registered route's literal prefix is auto-navigable; listings merge your enumeration with literal sibling routes at that depth.
 5. **Capture parse rejection = fallthrough**, not NotFound: the route becomes a non-candidate and dispatch tries the next-most-specific route. Use it (e.g. `@latest` vs `v{n}` selectors as distinct types).
-6. **Captures validate syntax only.** Existence is decided by handlers, lookup intent, or `Key::load`. Exception: a finite `choices()` set when the universe is truly static or a dynamic route would otherwise synthesize false anchors (the DB provider's table-name case).
+6. **Captures validate syntax only.** Existence is decided by handlers, lookup intent, or `Object::load`. Exception: a finite `choices()` set when the universe is truly static or a dynamic route would otherwise synthesize false anchors (the DB provider's table-name case).
 7. **Attribute honesty.** Inline bytes require `Size::Exact(len)` and are capped at 64 KiB (`MAX_PROJECTED_BYTES`); bigger or unknown content is deferred. `Stability::Live` requires `Deferred { read: Ranged }` (the validator rejects anything else). Dynamic upstream = dynamic projection; versioned upstream = stable projection.
 8. **Identity vs facets.** A key's non-`Facet` fields, in declaration order, ARE the object's identity (its logical id and cache key). Route-context captures that must not split the cache (list filter, version selector, team alias) are `Facet<T>`. Changing an object's `kind` string or identity captures orphans every cached object.
 9. **Auth never appears in provider code.** Credentials are declared in `omnifs.provider.json` and materialized into requests by the host. `#[endpoint(auth = ..)]` is rejected at compile time by design.
@@ -26,20 +26,23 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 13. **Error semantics:** `NotFound` for absent upstream resources or rows; `InvalidInput` for impossible path syntax; `rate_limited(..).with_retry_after(..)` on 429 (drives the SDK breaker and host window); `from_http_status` for the rest. Put operation context in the message.
 14. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `omnifs dev` container (repo policy).
 
-## Which SDK flavour: the decision table
+## One route API: which face
 
-Decide per route family, not per provider; hybrids are normal (arxiv, github).
+There is one route API. `file` and `dir` are the nouns; the *face* you put under them is the choice. Decide per route family, not per provider; hybrids are normal (arxiv, github). Object faces are the default for anything with identity and replayable canonical bytes; raw `r.dir`/`r.file`/`r.treeref` handlers are the escape hatch.
 
 | Question about the path family | Answer | Use |
 |---|---|---|
-| Is there ONE canonical upstream payload (an issue, a paper, a PR) serving several derived leaves (`title`, `body`, `item.json`)? | yes | **Object-oriented**: `r.object::<O>(template, \|o\| ..)` with `#[omnifs_sdk::object]` + a `#[path_captures]` key implementing `Key::load` |
-| Is the data a query result or operational state with no durable object behind it (DNS answer, `docker ps`, a DB row read, live metrics)? | yes | **Path-oriented**: `r.dir`/`r.file` handlers returning fresh bytes with honest stability; emit NO canonical-store effects |
-| Is the subtree a real tree the host can materialize wholesale (git repo, release archive)? | yes | **Treeref handoff**: `r.treeref(template).handler(..)` returning `TreeRef`; provider dispatch stops there |
-| Is a leaf a dynamic alias of a versioned resource (`@latest` vs `vN`)? | yes | Version selector as a `Facet` route capture; numbered versions stable, the alias dynamic (arxiv pattern) |
-| Is it a list/discovery route whose upstream payload already carries object fields? | yes | Path-oriented discovery handler that eager-projects the object leaves it can vouch for, deferred files for the rest (github/linear pattern) |
-| Tempted to add an object so something gets cached? | stop | If there is no canonical payload, a fake object corrupts the cache model. Path-oriented + honest stability is correct |
+| Is there ONE canonical upstream payload (an issue, a paper, a PR) serving several derived leaves (`title`, `body`, `item.json`)? | yes | **Object face**: `r.object::<O>(t, \|o\| ..)` with `#[omnifs_sdk::object]` + a `#[path_captures]` key + an inherent `async fn load`; declare `o.file(..).canonical/representation/derive` leaves |
+| Is the object a single cacheable file (one canonical/render/blob), not a directory of leaves (Oura `{day}/{collection}`)? | yes | **File-shaped object**: `r.file_object::<O>(t, \|o\| { o.canonical::<Json>()?; .. })` |
+| Is the data a query result or operational state with no durable object behind it (DNS answer, `docker ps`, a DB row read, live metrics)? | yes | **Direct face** under an object (`o.file(..).direct(method)`), or a raw `r.dir`/`r.file` handler; emit NO canonical-store effects |
+| Are the bytes large or host-cacheable, and should never cross the WIT boundary (a PR diff, a PDF)? | yes | **Blob face** `o.file(..).blob(method)` returning `BlobFile<F>` |
+| Is the leaf ranged or `Live` (pod logs, `tail -f`)? | yes | **Stream face** `o.file(..).stream(method)`; the only face that may be `Live` |
+| Does a directory list child objects (repos under an owner, issues, comments)? | yes | **Collection face** `o.dir(name).collection::<C>(method)` returning `Collection<C, Cur>`; `C` must be its own `r.object::<C>` |
+| Is the subtree a real tree the host can materialize wholesale (git repo, release archive)? | yes | **Tree face** `o.dir(name).tree(method)` returning `TreeRef`, or raw `r.treeref(t).handler(..)` |
+| Is the same object reachable at a second path (by-name and by-id)? | yes | `let h = r.object::<O>(..)?; r.alias(other_template, &h)?;` |
+| Tempted to add an object so something gets cached? | stop | An object earns canonical storage only with a `canonical` face. No canonical payload means a direct face or raw handler, not a fake object |
 
-Smell test from `providers/DESIGN.md`: repeated "load, derive field, build projection" handlers mean the route family wants an object; a one-shot query wrapped in object machinery means it wants a plain handler.
+Smell test from `providers/DESIGN.md`: repeated "load, derive field, build projection" handlers mean the route family wants an object face; a one-shot query wrapped in object machinery wants a direct face or raw handler.
 
 ## Minimal provider skeleton
 
@@ -98,11 +101,13 @@ impl ExampleProvider {
 - Single-segment capture: `/{owner}` (field type's `FromStr` validates)
 - Prefix capture: `/@{resolver}`, `/v{version}` (literal prefix stripped before parse)
 - Trailing rest capture: `/{*path}` (must be last; captures remaining segments as one string)
-- Registration verbs: `r.dir(t).handler(h)`, `r.file(t).handler(h)`, `r.treeref(t).handler(h)`, `r.object::<O>(t, block)`, `r.file_object::<O>(t, block)`, `r.attach(prefix, &handle)` for a detached `object(..)` handle
+- Registration verbs: `r.dir(t).handler(h)`, `r.file(t).handler(h)`, `r.treeref(t).handler(h)`, `r.object::<O>(t, block)`, `r.file_object::<O>(t, block)`, `r.alias(template, &handle)` to mount a detached `object(..)` / `r.object` handle at a second template
 
 Handlers are `async fn(Cx<S>) -> Result<..>`, `async fn(Cx<S>, Key) -> Result<..>` (file/treeref), or `async fn(DirCx<S>) / (DirCx<S>, Key)` (dir). `DirCx` carries the intent: one dir handler serves `Lookup{child}`, `List{cursor}`, and `ReadFile{name}`; check `cx.intent()` when behavior differs, and `cx.page_cursor(1)` for paged listings.
 
 ## The object pattern, end to end
+
+`#[omnifs_sdk::object]` emits the whole `impl Object` (the `Key`/`State`/`Canonical` types, `decode`, `kind`) and forwards `load` to a provider-written inherent `async fn load`. `#[path_captures]` emits the `impl Key`. You write `load` (it has callouts) and any `derive` field fns; everything else is derived.
 
 ```rust
 #[omnifs_sdk::path_captures]
@@ -117,28 +122,56 @@ struct IssueKey {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Issue { /* upstream fields */ }
 
-impl Key for IssueKey {
-    type Object = Issue;
-    type State = State;
-    async fn load(&self, cx: &Cx<State>, since: Option<Validator>) -> Result<Load<Issue>> {
+impl Issue {
+    // The macro forwards Object::load here (default name Self::load; override
+    // with `load = path`). decode defaults to serde_json for a Json canonical.
+    async fn load(cx: &Cx<State>, key: &IssueKey, since: Option<Validator>) -> Result<Load<Self>> {
         cx.endpoint::<Api>()
-            .get(format!("/repos/{}/{}/issues/{}", self.owner, self.repo, self.number))
+            .get(format!("/repos/{}/{}/issues/{}", key.owner, key.repo, key.number))
             .maybe_if_none_match(since.as_ref())
             .load::<Issue>()        // 200 -> Fresh{value, canonical}, 304 -> Unchanged, 404 -> NotFound
             .await
     }
+
+    fn title(&self, _key: &IssueKey) -> Result<FileProjection> { /* eager field */ }
+    fn body(&self, _key: &IssueKey) -> Result<FileProjection> { /* large field */ }
 }
 
+impl Representable<Markdown> for Issue { /* whole-object render */ }
+
 r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
-    o.representations("item", (Markdown,))?;   // item.md (+ item.json from canonical)
-    o.file("title").project(Issue::title)?;    // eager leaf from the loaded object
-    o.file("body").lazy().project(Issue::body)?; // listed, but not eager-preloaded
-    o.dir("comments").handler(IssueKey::comments)?; // dynamic child under the object
+    o.dynamic();                                  // stability is mandatory
+    o.file("item.json").canonical::<Json>()?;     // verbatim stored bytes (== Object::Canonical)
+    o.file("item.md").representation::<Markdown>()?; // render from canonical
+    o.file("title").derive(Issue::title)?;        // eager leaf from the loaded object
+    o.file("body").lazy().derive(Issue::body)?;   // listed, but not eager-preloaded
+    o.dir("comments").collection(Issue::comments)?; // child Comment objects
     Ok(())
 })?;
 ```
 
-The contract that makes caching work: `Load::Fresh` must carry the **verbatim** upstream bytes plus the validator (ETag). The SDK emits the canonical-store effect; the host stores bytes keyed by the logical id and pushes them back into later `read-file` calls so re-rendering costs no upstream fetch. `Load::fresh(value)` (empty canonical) skips durable caching; use it only when there is deliberately nothing to cache. Because `filter` is a `Facet`, `/issues/open/7` and `/issues/all/7` resolve to one cached object, and finite facet choices expand view leaves across all aliases.
+What the faces are: `canonical::<F>()` is the verbatim stored bytes (exactly one per object; `F` must equal `Object::Canonical`); `representation::<F>()` renders the whole object via `Representable<F>`; `derive(method)` is a field leaf (eager by default, `.lazy()` to skip listing-time preload); `direct`/`blob`/`stream` declare their own read contract; `o.dir(name).collection::<C>(method)` lists child `C` objects, `.choices(names)` a fixed finite name set, `.tree(method)` a subtree handoff. An object with no canonical face (Docker `Container`: only `direct` faces) emits no object-cache entry; a representation/derive face requires a canonical to render from (seal-time error otherwise).
+
+The contract that makes caching work: `Load::Fresh` must carry the **verbatim** upstream bytes plus the validator (ETag). The SDK emits the canonical-store effect; the host stores bytes keyed by the logical id and pushes them back into later `read-file` calls so re-rendering costs no upstream fetch. Because `filter` is a `Facet`, `/issues/open/7` and `/issues/all/7` resolve to one cached object, and finite facet choices expand view leaves across all aliases.
+
+## Collections, preloads, file-shaped objects
+
+A collection lists child objects and decides what the list payload can preload. The list method's return type selects the cursor; the host stores cursor bytes opaquely and echoes them back:
+
+```rust
+async fn repos(self_key: OwnerKey, cx: ListCx<GhCursor, State>) -> Result<Collection<Repo, GhCursor>> {
+    let page = list_repos(&cx, &self_key.owner, cx.cursor()).await?;
+    Ok(Collection::page(page.items.into_iter().map(|row| {
+        CollectionEntry::fresh(RepoKey { .. }, Repo::from(row.object), row.canonical)
+    })).next(page.next_cursor))
+}
+```
+
+`CollectionEntry::fresh(key, value, canonical)` stores the child canonical at listing time (use only when the list row satisfies the child's canonical contract byte-for-byte); `::derived(key, files)` projects shallow eager leaves but no canonical; `::key(key)` is discovery only. `Collection::complete` is exhaustive, `::page(..).next(cursor)` has more, `::partial` is intentionally open with no cursor, `::unchanged` matched the listing validator. The list method's key `K` is parsed from the COLLECTION DIR PATH, so a collection under `o.dir("issues/{filter}")` reads `{filter}` from `K`.
+
+`Object::load` can also carry preloads when one fetch materializes siblings (Oura's date-range window): `Load::fresh(value, canonical).preload_object(ObjectEntry::fresh(sibling_key, sibling, sibling_canonical))` (same object type only) and `.preload_file(path, projection)` (inline/deferred sources only). Event handlers return a typed `Invalidation` (`Invalidation::new().listing_path(..).object::<O>(&key)`), which the macro lowers to invalidation effects.
+
+A file-shaped object projects as a single file, not a directory: `r.file_object::<O>(template, |o| { o.dynamic(); o.canonical::<Json>()?; Ok(()) })?` declares exactly one canonical/representation/direct/blob face, and the path itself is the file.
 
 ## HTTP, batching, pagination, rate limits
 
@@ -151,7 +184,7 @@ The contract that makes caching work: `Load::Fresh` must carry the **verbatim** 
 
 ## Events and freshness
 
-`events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Effects>`; emit invalidations there (`Effects` carries `invalidations` for objects and listing paths/prefixes). Non-timer provider events are currently swallowed with empty effects. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
+`events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`; build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
 
 ## Manifest (`omnifs.provider.json`)
 
@@ -172,7 +205,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 ## Top pitfalls
 
 1. Forgetting `Facet` on a filter/alias capture: the same object caches once per alias and invalidation misses siblings.
-2. `Load::fresh(value)` with empty canonical bytes: silently opts out of durable caching; pass the verbatim body.
+2. `canonical::<F>()` whose `F` is not `Object::Canonical`, two canonical faces, or a representation/derive face with no canonical: all are seal-time errors. `Load::fresh(value, canonical)` always carries the verbatim body and validator.
 3. Inventing objects for query-shaped data (DNS answers, process listings): corrupts cache semantics; stay path-oriented.
 4. Inline bytes over 64 KiB or with non-exact size: projection validation rejects it; use deferred reads or blobs.
 5. `MemoryRangeReader` for genuinely large content: it buffers everything; implement a real `RangeReader` over blob ranges.
@@ -181,13 +214,15 @@ For any path-surface change, test whole-shell traversal in the live container, n
 8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched today.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
-11. Put projected-leaf modifiers before `.project()`: `o.file("body").lazy().project(f)` marks `body` lazy; `.project()` is the terminal registration call.
+11. Face modifiers go before the terminal face call: `o.file("body").lazy().derive(f)` marks `body` lazy; `.derive()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or seal fails to resolve it.
 
 ## Where to look
 
 - `crates/omnifs-sdk/src/lib.rs`: the crate-level authoring guide; module map
-- `providers/DESIGN.md`: flavour doctrine and per-provider classification
-- `providers/test/src/lib.rs`: SDK conformance fixture (every feature exercised)
-- `providers/github`, `providers/linear`: object-oriented exemplars; `providers/dns`, `providers/docker`, `providers/db`: path-oriented; `providers/arxiv`: hybrid with version facets
+- `crates/omnifs-sdk/src/object.rs`, `collection.rs`, `invalidation.rs`, `router/object.rs`: the `Object`/`Key`/`Load`/`Collection`/`Invalidation` surface and the face builder
+- `crates/omnifs-sdk/tests/wit_boundary.rs`: canonical end-to-end usage examples (faces driven through the WIT boundary)
+- `providers/DESIGN.md`: route-API doctrine and per-provider classification
+- `providers/test/src/lib.rs`: SDK conformance fixture (every face exercised)
+- `providers/github`: object faces with collections, choices, tree, blob, direct; `providers/arxiv`: blob faces + version facets; `providers/oura`: file-shaped objects with preload; `providers/docker`, `providers/db`, `providers/dns`: direct faces and raw handlers
 - `crates/omnifs-wit/wit/provider.wit`: the wire contract underneath everything
 - AGENTS.md: repo-wide invariants (toolbox compatibility, caching model, build gates)
