@@ -339,11 +339,8 @@ mod tests {
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_mount::mounts::ProviderStore;
-    use omnifs_provider::{
-        AuthManifest, AuthScheme, InitHint, InitInput, PreopenStrategy, ProviderManifest,
-    };
+    use omnifs_provider::{AuthManifest, AuthScheme, ProviderManifest};
     use serde_json::Value;
-    use tempfile::TempDir;
 
     #[test]
     fn generate_mount_config_materializes_schema_defaults() {
@@ -390,10 +387,7 @@ mod tests {
                     "path": {
                         "type": "string",
                         "default": "/data/test.db",
-                        "x-omnifs-init": {
-                            "input": "host-file",
-                            "guestDir": "/data"
-                        }
+                        "x-omnifs-resource": { "kind": "file", "mode": "ro" }
                     }
                 }
             }))
@@ -401,179 +395,6 @@ mod tests {
         );
 
         assert!(MountConfigGenerator::new(&manifest).requires_prompt());
-    }
-
-    #[test]
-    fn host_file_hint_derives_guest_config_and_preopen_capability() {
-        let tmp = TempDir::new().unwrap();
-        let db = tmp.path().join("chinook.db");
-        std::fs::write(&db, "").unwrap();
-        let manifest = provider_manifest();
-        let mut config = serde_json::json!({
-            "path": "/data/test.db",
-            "read_only": true
-        });
-        let mut capabilities = None;
-
-        MountConfigGenerator::new(&manifest)
-            .apply_host_file_hint(
-                "path",
-                &InitHint {
-                    input: Some(InitInput::HostFile),
-                    guest_dir: Some("/data".to_string()),
-                    preopen_mode: PreopenMode::Ro,
-                    preopen_strategy: PreopenStrategy::Append,
-                },
-                &db,
-                &mut config,
-                &mut capabilities,
-            )
-            .unwrap();
-
-        assert_eq!(config["path"], "/data/chinook.db");
-        let capabilities = capabilities.unwrap();
-        let expected_host = tmp.path().canonicalize().unwrap().display().to_string();
-        assert_eq!(
-            capabilities.preopened_paths,
-            Some(Grant::Literal(vec![PreopenedPath {
-                host: expected_host,
-                guest: "/data".to_string(),
-                mode: PreopenMode::Ro,
-            }])),
-        );
-        assert_eq!(capabilities.max_memory_mb, Some(128));
-    }
-
-    #[test]
-    fn host_file_hint_canonicalizes_and_replaces_preopens() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("db");
-        std::fs::create_dir(&dir).unwrap();
-        let db = dir.join("chinook.db");
-        std::fs::write(&db, "").unwrap();
-        let manifest = provider_manifest();
-        let mut config = serde_json::json!({"path": "/data/test.db"});
-        let mut capabilities = None;
-        let noncanonical = dir.join("..").join("db").join("chinook.db");
-
-        MountConfigGenerator::new(&manifest)
-            .apply_host_file_hint(
-                "path",
-                &InitHint {
-                    input: Some(InitInput::HostFile),
-                    guest_dir: Some("/data".to_string()),
-                    preopen_mode: PreopenMode::Ro,
-                    preopen_strategy: PreopenStrategy::Replace,
-                },
-                &noncanonical,
-                &mut config,
-                &mut capabilities,
-            )
-            .unwrap();
-
-        let capabilities = capabilities.unwrap();
-        let expected_host = dir.canonicalize().unwrap().display().to_string();
-        assert_eq!(config["path"], "/data/chinook.db");
-        assert_eq!(
-            capabilities.preopened_paths,
-            Some(Grant::Literal(vec![PreopenedPath {
-                host: expected_host,
-                guest: "/data".to_string(),
-                mode: PreopenMode::Ro,
-            }])),
-        );
-        assert_eq!(capabilities.max_memory_mb, Some(128));
-    }
-
-    /// Regression: a Replace hint must succeed when capabilities were already
-    /// seeded from the manifest's needs (the real `generate()` flow), not only
-    /// when they start as `None`. A manifest that declares any need (e.g. a
-    /// memory limit) plus a Replace host-file hint previously aborted `omnifs
-    /// init` on the very first field because the seed tripped the one-Replace
-    /// guard.
-    #[test]
-    fn host_file_hint_replace_succeeds_with_preseeded_capabilities() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("db");
-        std::fs::create_dir(&dir).unwrap();
-        let db = dir.join("chinook.db");
-        std::fs::write(&db, "").unwrap();
-        let manifest = provider_manifest();
-        let mut config = serde_json::json!({"path": "/data/test.db"});
-        // generate() seeds grants from the manifest's needs before prompting.
-        let mut capabilities = Some(manifest.provider_capabilities());
-
-        MountConfigGenerator::new(&manifest)
-            .apply_host_file_hint(
-                "path",
-                &InitHint {
-                    input: Some(InitInput::HostFile),
-                    guest_dir: Some("/data".to_string()),
-                    preopen_mode: PreopenMode::Ro,
-                    preopen_strategy: PreopenStrategy::Replace,
-                },
-                &db,
-                &mut config,
-                &mut capabilities,
-            )
-            .unwrap();
-
-        let capabilities = capabilities.unwrap();
-        let expected_host = dir.canonicalize().unwrap().display().to_string();
-        assert_eq!(config["path"], "/data/chinook.db");
-        assert_eq!(
-            capabilities.preopened_paths,
-            Some(Grant::Literal(vec![PreopenedPath {
-                host: expected_host,
-                guest: "/data".to_string(),
-                mode: PreopenMode::Ro,
-            }])),
-        );
-        assert_eq!(capabilities.max_memory_mb, Some(128));
-    }
-
-    #[test]
-    fn host_file_hint_dedupes_append_and_rejects_preopen_conflicts() {
-        let first = TempDir::new().unwrap();
-        let second = TempDir::new().unwrap();
-        let first_db = first.path().join("first.db");
-        let second_db = second.path().join("second.db");
-        std::fs::write(&first_db, "").unwrap();
-        std::fs::write(&second_db, "").unwrap();
-        let manifest = provider_manifest();
-        let hint = InitHint {
-            input: Some(InitInput::HostFile),
-            guest_dir: Some("/data".to_string()),
-            preopen_mode: PreopenMode::Ro,
-            preopen_strategy: PreopenStrategy::Append,
-        };
-        let mut config = serde_json::json!({"path": "/data/test.db"});
-        let mut capabilities = None;
-
-        let generator = MountConfigGenerator::new(&manifest);
-
-        generator
-            .apply_host_file_hint("path", &hint, &first_db, &mut config, &mut capabilities)
-            .unwrap();
-
-        let preopens = capabilities
-            .as_ref()
-            .unwrap()
-            .preopened_paths
-            .as_ref()
-            .unwrap();
-        assert_eq!(preopens.literal().len(), 1);
-        assert_eq!(config["path"], "/data/first.db");
-
-        let err = generator
-            .apply_host_file_hint("path", &hint, &second_db, &mut config, &mut capabilities)
-            .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("conflicts with an existing preopen")
-        );
-        assert_eq!(config["path"], "/data/first.db");
     }
 
     #[test]

@@ -26,9 +26,7 @@ pub use auth_wire::{
     OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
     TokenEndpointAuthMethod, TokenValidation,
 };
-pub use config::{
-    ConfigProperty, ConfigSchema, ConfigSchemaType, InitHint, InitInput, PreopenStrategy,
-};
+pub use config::{ConfigProperty, ConfigSchema, ConfigSchemaType, HostResource, HostResourceKind};
 pub use manifest::{
     AuthInject, BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest,
 };

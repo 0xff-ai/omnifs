@@ -493,14 +493,19 @@ impl ProviderManifest {
         }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
-            // Only unix sockets resolve a dynamic value (from the mount
-            // endpoint) at runtime; a dynamic grant of any other kind would pass
-            // the start-time check yet resolve to an empty allowlist, denying the
-            // provider at its first callout. Reject it at the manifest boundary.
-            if entry.is_dynamic() && !matches!(entry, Need::UnixSocket { .. }) {
+            // A dynamic grant is resolved at mount-start from a config field the
+            // provider marks with `x-omnifs-resource`: a unix socket into the
+            // callout allowlist, a preopened path into a WASI preopen. Any other
+            // dynamic kind has no resolver and would resolve to an empty
+            // allowlist, denying the provider at its first callout. Reject those
+            // at the manifest boundary.
+            if entry.is_dynamic()
+                && !matches!(entry, Need::UnixSocket { .. } | Need::PreopenedPath { .. })
+            {
                 return Err(ProviderMetadataError::Validation(
-                    "only unixSocket capabilities may declare `dynamic: true`; \
-                     a non-socket dynamic capability cannot be resolved at runtime"
+                    "only unixSocket and preopenedPath capabilities may declare \
+                     `dynamic: true`; a dynamic capability of another kind cannot be \
+                     resolved at runtime"
                         .to_string(),
                 ));
             }
@@ -845,18 +850,11 @@ mod tests {
         }
         parsed.sort();
 
+        // arxiv and dns author their manifests from `#[provider]` annotations
+        // and carry no `omnifs.provider.json`; the rest are still JSON-authored.
         assert_eq!(
             parsed,
-            [
-                "arxiv",
-                "db",
-                "dns",
-                "docker",
-                "github",
-                "kubernetes",
-                "linear",
-                "oura"
-            ]
+            ["db", "docker", "github", "kubernetes", "linear", "oura"]
         );
     }
 

@@ -2,14 +2,15 @@
 //!
 //! The capability model, the matching rules, and the per-callout decision live
 //! in [`omnifs_caps`]; this module is the enforcement seam: it resolves a
-//! mounted provider's grants into a runtime [`Allowlist`] (resolving dynamic
-//! socket grants from the mount's endpoint) and gates every provider callout
-//! through it.
+//! mounted provider's grants into a runtime [`Allowlist`] (resolving a dynamic
+//! socket grant from the config field the provider marks as a host socket) and
+//! gates every provider callout through it.
 
 use std::path::PathBuf;
 
 use omnifs_caps::{Allowlist, Error, Grant};
 use omnifs_mount::mounts::Resolved;
+use omnifs_provider::{ConfigSchema, HostResourceKind};
 use omnifs_wit::provider::types as wit_types;
 
 /// Default sandbox memory budget when a mount grants no explicit limit.
@@ -29,14 +30,16 @@ impl CapabilityChecker {
 
     /// Build the enforcement allowlist from a resolved mount's grants plus the
     /// provider's runtime-requested capabilities. A dynamic unix-socket grant is
-    /// resolved from the mount's `endpoint` config here; a malformed endpoint
-    /// resolves to no socket, so the provider is simply denied at callout time.
+    /// resolved from the config field the provider marks as a host socket; a
+    /// malformed or missing value resolves to no socket, so the provider is
+    /// simply denied at callout time.
     #[must_use]
     pub fn from_config(
         config: &Resolved,
         provider_caps: &wit_types::RequestedCapabilities,
+        schema: Option<&ConfigSchema>,
     ) -> Self {
-        Self::new(allowlist_from_config(config, provider_caps))
+        Self::new(allowlist_from_config(config, provider_caps, schema))
     }
 
     #[must_use]
@@ -62,16 +65,13 @@ impl CapabilityChecker {
 fn allowlist_from_config(
     config: &Resolved,
     provider_caps: &wit_types::RequestedCapabilities,
+    schema: Option<&ConfigSchema>,
 ) -> Allowlist {
     let grants = config.spec.capabilities.as_ref();
 
     let mut unix_sockets: Vec<PathBuf> = match grants.and_then(|g| g.unix_sockets.as_ref()) {
         Some(Grant::Literal(paths)) => paths.iter().map(PathBuf::from).collect(),
-        Some(Grant::Dynamic(_)) => endpoint(config)
-            .and_then(|endpoint| omnifs_caps::endpoint_socket(endpoint).ok().flatten())
-            .map(PathBuf::from)
-            .into_iter()
-            .collect(),
+        Some(Grant::Dynamic(_)) => dynamic_socket(config, schema).into_iter().collect(),
         None => Vec::new(),
     };
     unix_sockets.extend(provider_caps.unix_sockets.iter().map(PathBuf::from));
@@ -97,11 +97,23 @@ fn literal(grant: Option<&Grant<String>>) -> Vec<String> {
     }
 }
 
-fn endpoint(config: &Resolved) -> Option<&str> {
+/// The host socket a dynamic unix-socket grant resolves to: the `unix://`
+/// endpoint in the config field the provider marks as a host socket.
+fn dynamic_socket(config: &Resolved, schema: Option<&ConfigSchema>) -> Option<PathBuf> {
+    let field = schema?.resource_field(HostResourceKind::Socket)?;
+    let endpoint = config_str(config, field)?;
+    omnifs_caps::endpoint_socket(endpoint)
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+}
+
+/// The string value of a mount config field, if present.
+pub(crate) fn config_str<'a>(config: &'a Resolved, field: &str) -> Option<&'a str> {
     config
         .spec
         .config_raw
         .as_ref()
-        .and_then(|config| config.as_value().get("endpoint"))
+        .and_then(|config| config.as_value().get(field))
         .and_then(serde_json::Value::as_str)
 }

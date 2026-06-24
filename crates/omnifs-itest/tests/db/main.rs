@@ -19,16 +19,16 @@ fn assert_lookup_not_found(lookup: &LookupOutcome) {
     );
 }
 
-fn db_config(host: &str) -> String {
+fn db_config(host_file: &str) -> String {
     format!(
         r#"{{
             "provider": "omnifs_provider_db.wasm",
             "mount": "db",
             "capabilities": {{
-                "preopened_paths": [{{ "host": "{host}", "guest": "/data", "mode": "ro" }}]
+                "preopened_paths": {{ "dynamic": true }}
             }},
             "config": {{
-                "path": "/data/chinook.sqlite",
+                "path": "{host_file}",
                 "read_only": true,
                 "sample_limit": 20
             }}
@@ -38,8 +38,8 @@ fn db_config(host: &str) -> String {
 
 fn db_harness() -> (tempfile::TempDir, RuntimeHarness) {
     let dir = tempfile::tempdir().unwrap();
-    db_fixture::write_chinook_fixture(dir.path());
-    let harness = make_runtime_from_config(&db_config(&dir.path().display().to_string()));
+    let db_path = db_fixture::write_chinook_fixture(dir.path());
+    let harness = make_runtime_from_config(&db_config(&db_path.display().to_string()));
     (dir, harness)
 }
 
@@ -297,7 +297,7 @@ async fn db_sample_served_whole_uncapped() {
 
 #[tokio::test]
 async fn db_meta_direct_files() {
-    let (_dir, harness) = db_harness();
+    let (dir, harness) = db_harness();
 
     let info_bytes = read_bytes(&harness, "/meta/info.json").await;
     let info: FileInfo = serde_json::from_slice(&info_bytes).unwrap();
@@ -306,7 +306,10 @@ async fn db_meta_direct_files() {
     let path = read_bytes(&harness, "/meta/path.txt").await;
 
     assert_eq!(version, format!("{}\n", info.sqlite_version).into_bytes());
-    assert_eq!(path, b"/data/chinook.sqlite\n");
+    // path.txt echoes the configured path verbatim: under guest == host the
+    // provider opens (and reports) the real host file the preopen resolved from.
+    let expected = format!("{}\n", dir.path().join("chinook.sqlite").display());
+    assert_eq!(path, expected.into_bytes());
 }
 
 #[tokio::test]
