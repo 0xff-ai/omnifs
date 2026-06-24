@@ -52,14 +52,26 @@ fn drive<T>(cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> T {
                     !yielded.is_empty(),
                     "future is pending but yielded no callouts: deadlock"
                 );
-                for _ in yielded {
-                    cx.push_delivered(wit_types::CalloutResult::HttpResponse(
-                        wit_types::HttpResponse {
+                for callout in yielded {
+                    let result = match callout {
+                        wit_types::Callout::GitOpenRepo(_) => {
+                            wit_types::CalloutResult::GitRepoOpened(wit_types::GitRepoInfo {
+                                repo: 7,
+                                tree: 7,
+                            })
+                        },
+                        wit_types::Callout::OpenArchive(_) => {
+                            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened {
+                                tree: 7,
+                            })
+                        },
+                        _ => wit_types::CalloutResult::HttpResponse(wit_types::HttpResponse {
                             status: 200,
                             headers: Vec::new(),
                             body: b"callout-body".to_vec(),
-                        },
-                    ));
+                        }),
+                    };
+                    cx.push_delivered(result);
                 }
             },
         }
@@ -564,19 +576,53 @@ impl Issue {
     }
 }
 
+/// The collection-dir key for `issues/{filter}`: it carries the `{filter}`
+/// sub-capture (which `RepoKey` does not), so the list method can read it.
+struct IssueListKey {
+    owner: String,
+    repo: String,
+    filter: Filter,
+}
+impl FromCaptures for IssueListKey {
+    fn from_captures(c: &Captures) -> Result<Self> {
+        Ok(Self {
+            owner: c
+                .get("owner")
+                .ok_or_else(|| ProviderError::invalid_input("missing owner"))?
+                .to_string(),
+            repo: c
+                .get("repo")
+                .ok_or_else(|| ProviderError::invalid_input("missing repo"))?
+                .to_string(),
+            filter: c
+                .get("filter")
+                .ok_or_else(|| ProviderError::invalid_input("missing filter"))?
+                .parse()?,
+        })
+    }
+}
+
 async fn list_issues(
-    key: RepoKey,
+    key: IssueListKey,
     _cx: ListCx<NoCursor, ()>,
 ) -> Result<Collection<Issue, NoCursor>> {
+    // The listed child number varies by the {filter} sub-capture, proving the
+    // method reads the collection-dir captures, not the parent anchor key.
+    let number = match key.filter {
+        Filter::Open => "7",
+        Filter::All => "9",
+    };
     Ok(Collection::complete([CollectionEntry::fresh(
         IssueKey {
             owner: key.owner.clone(),
             repo: key.repo.clone(),
-            number: "7".into(),
-            filter: Facet(Filter::Open),
+            number: number.into(),
+            filter: Facet(key.filter),
         },
-        Issue { number: "7".into() },
-        Canonical::new(br#"{"number":"7"}"#.to_vec(), None),
+        Issue {
+            number: number.into(),
+        },
+        Canonical::new(format!(r#"{{"number":"{number}"}}"#).into_bytes(), None),
     )]))
 }
 
@@ -585,8 +631,7 @@ fn nested_collection_router() -> Router<()> {
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
         o.file("repo.json").canonical::<Json>()?;
-        o.dir("issues/{filter}")
-            .collection::<Issue, _, _>(list_issues)?;
+        o.dir("issues/{filter}").collection(list_issues)?;
         Ok(())
     })
     .unwrap();
@@ -728,7 +773,7 @@ fn anchor_collection_router() -> Router<()> {
     r.object::<Owner>("/{owner}", |o| {
         o.dynamic();
         o.file("owner.json").canonical::<Json>()?;
-        o.dir("{repo}").collection::<Repo, _, _>(list_repos)?;
+        o.dir("{repo}").collection(list_repos)?;
         Ok(())
     })
     .unwrap();
@@ -812,7 +857,7 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
     r.object::<Owner>("/{owner}", |o| {
         o.dynamic();
         o.file("owner.json").canonical::<Json>()?;
-        o.dir("{repo}").collection::<Repo, _, _>(list_repos_paged)?;
+        o.dir("{repo}").collection(list_repos_paged)?;
         Ok(())
     })
     .unwrap();
@@ -894,8 +939,7 @@ fn collection_of_unregistered_child_kind_fails_seal() {
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
         o.file("repo.json").canonical::<Json>()?;
-        o.dir("issues/{filter}")
-            .collection::<Issue, _, _>(list_issues)?;
+        o.dir("issues/{filter}").collection(list_issues)?;
         Ok(())
     })
     .unwrap();
@@ -943,7 +987,7 @@ fn collection_of_child_without_canonical_face_fails_seal() {
     r.object::<Repo>("/{owner}/{repo}", |o| {
         o.dynamic();
         o.file("repo.json").canonical::<Json>()?;
-        o.dir("bare/{id}").collection::<Bare, _, _>(list_bare)?;
+        o.dir("bare/{id}").collection(list_bare)?;
         Ok(())
     })
     .unwrap();
@@ -965,4 +1009,152 @@ fn collection_of_child_without_canonical_face_fails_seal() {
 
 async fn bare_live(_cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
     Ok(FileProjection::body(format!("bare:{}", key.id)).build())
+}
+
+// ===========================================================================
+// Tree face (FIX A): an object dir tree face dispatches the subtree handoff
+// ===========================================================================
+
+/// A tree dir face's method: issue a git-open callout (the drive loop answers
+/// it) and hand the subtree off.
+async fn repo_tree(cx: Cx<()>, key: RepoKey) -> Result<omnifs_sdk::handler::TreeRef> {
+    let opened = cx
+        .git()
+        .open_repo(
+            format!("github.com/{}/{}", key.owner, key.repo),
+            format!("git@github.com:{}/{}.git", key.owner, key.repo),
+        )
+        .await?;
+    Ok(omnifs_sdk::handler::TreeRef::new(opened.tree))
+}
+
+fn tree_face_router() -> Router<()> {
+    let mut r = Router::<()>::new();
+    r.object::<Repo>("/{owner}/{repo}", |o| {
+        o.dynamic();
+        o.file("repo.json").canonical::<Json>()?;
+        o.dir("repo").tree(repo_tree)?;
+        Ok(())
+    })
+    .unwrap();
+    r.seal().unwrap();
+    r
+}
+
+#[test]
+fn object_tree_face_lookup_returns_subtree_handoff() {
+    let r = tree_face_router();
+    let cx = cx();
+    // A lookup at the tree path runs the treeref handler (git-open callout) and
+    // returns the host-resolved subtree handle, not a static dir.
+    let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"));
+    let (out, _effects) = lookup.into_result_and_effects();
+    assert!(
+        matches!(out, wit_types::LookupChildResult::Subtree(7)),
+        "the tree face must dispatch a subtree handoff, got {out:?} (FIX A)"
+    );
+}
+
+#[test]
+fn object_tree_face_list_returns_subtree_handoff() {
+    let r = tree_face_router();
+    let cx = cx();
+    let list = drive(
+        &cx,
+        r.list_children(&cx, "/torvalds/linux/repo", None, None),
+    );
+    let (out, _effects) = list.into_result_and_effects();
+    assert!(
+        matches!(out, wit_types::ListChildrenResult::Subtree(7)),
+        "listing the tree path returns the subtree handoff, got {out:?} (FIX A)"
+    );
+}
+
+// ===========================================================================
+// Collection sub-capture (FIX B): the list method reads the {filter} capture
+// ===========================================================================
+
+#[test]
+fn nested_collection_list_varies_by_subcapture() {
+    let r = nested_collection_router();
+    let cx = cx();
+
+    let open = drive(&cx, r.list_children(&cx, "/o/r/issues/open", None, None));
+    let (open_out, _e) = open.into_result_and_effects();
+    let wit_types::ListChildrenResult::Entries(open_listing) = open_out else {
+        panic!("collection lists entries");
+    };
+    let open_names: Vec<&str> = open_listing
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+
+    let all = drive(&cx, r.list_children(&cx, "/o/r/issues/all", None, None));
+    let (all_out, _e) = all.into_result_and_effects();
+    let wit_types::ListChildrenResult::Entries(all_listing) = all_out else {
+        panic!("collection lists entries");
+    };
+    let all_names: Vec<&str> = all_listing
+        .entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+
+    assert_eq!(
+        open_names,
+        vec!["7"],
+        "the open filter lists issue 7 (method read {{filter}})"
+    );
+    assert_eq!(
+        all_names,
+        vec!["9"],
+        "the all filter lists issue 9 (FIX B: the collection method reads the {{filter}} sub-capture, not the parent anchor key)"
+    );
+}
+
+// ===========================================================================
+// Choices face (FIX C): the choices dir lists its fixed names
+// ===========================================================================
+
+fn choices_router() -> Router<()> {
+    let mut r = Router::<()>::new();
+    r.object::<Repo>("/{owner}/{repo}", |o| {
+        o.dynamic();
+        o.file("repo.json").canonical::<Json>()?;
+        o.dir("issues").choices(&["open", "all"])?;
+        Ok(())
+    })
+    .unwrap();
+    r.seal().unwrap();
+    r
+}
+
+#[test]
+fn choices_face_lists_fixed_dir_entries_exhaustive() {
+    let r = choices_router();
+    let cx = cx();
+    let list = drive(&cx, r.list_children(&cx, "/o/r/issues", None, None));
+    let (out, _effects) = list.into_result_and_effects();
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("the choices dir lists entries, got something else");
+    };
+    let mut names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["all", "open"],
+        "the choices dir lists exactly its fixed names (FIX C)"
+    );
+    assert!(
+        listing.exhaustive,
+        "the choices listing is exhaustive (the fixed name set is the whole story)"
+    );
+    assert!(
+        listing
+            .entries
+            .iter()
+            .all(|e| matches!(e.kind, wit_types::EntryKind::Directory)),
+        "each choice is a directory entry"
+    );
 }

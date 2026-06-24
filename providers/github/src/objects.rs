@@ -22,8 +22,8 @@ pub(crate) struct ItemData {
     pub(crate) user: Option<User>,
     #[serde(default)]
     pub(crate) updated_at: Option<String>,
-    /// Set on issue-list rows that are actually PRs; used by `IssueKey::load`
-    /// to enforce disjointness and by `IssueListKey::list` to filter rows.
+    /// Set on issue-list rows that are actually PRs; used by `Issue::load`
+    /// to enforce disjointness and by `Repo::issues` to filter rows.
     #[serde(default, skip_serializing)]
     pub(crate) pull_request: Option<IgnoredAny>,
 }
@@ -33,28 +33,24 @@ impl ItemData {
         self.pull_request.is_some()
     }
 
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn title(&self) -> Result<FileProjection> {
         Ok(text_projection(self.title.clone()))
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn state(&self) -> Result<FileProjection> {
         Ok(text_projection(self.state.clone()))
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn user(&self) -> Result<FileProjection> {
         let login = self.user.as_ref().map_or("", |u| u.login.as_str());
         Ok(text_projection(login.to_owned()))
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn body(&self) -> Result<FileProjection> {
         let body = self.body.as_deref().unwrap_or("");
         Ok(FileProjection::body(body.to_owned())
             .content_type(ContentType::Markdown)
             .build())
-    }
-
-    fn body_bytes(&self) -> Vec<u8> {
-        self.body.as_deref().unwrap_or("").as_bytes().to_vec()
     }
 
     pub(crate) fn markdown(&self) -> Vec<u8> {
@@ -66,73 +62,6 @@ impl ItemData {
         )
         .into_bytes()
     }
-
-    /// Project an issue/PR directory whose listing fetch already holds the full
-    /// row. `title`/`state`/`user` are tiny and always inline. `body` and
-    /// `item.md` derive entirely from the row via the same code the object's
-    /// `body` field and Markdown render use, so they inline when they fit the
-    /// per-file cap and the shared aggregate `budget` (which the cap enforces
-    /// across the whole listing); otherwise they fall back to a deferred read.
-    /// `item.json` is always deferred: its canonical is the raw single-item API
-    /// body, which the lossy [`ItemData`] cannot reproduce byte-for-byte.
-    pub(crate) fn listed_dir(
-        &self,
-        include_pull_files: bool,
-        budget: &mut usize,
-    ) -> Result<DirProjection> {
-        let login_len = self.user.as_ref().map_or(0, |u| u.login.len());
-        *budget = budget.saturating_sub(self.title.len() + self.state.len() + login_len);
-
-        let body = inline_or_deferred_markdown(self.body_bytes(), budget);
-        let item_md = inline_or_deferred_markdown(self.markdown(), budget);
-        let item_json = FileProjection::deferred(Size::Unknown)
-            .full()
-            .stable()
-            .content_type(ContentType::Json)
-            .build();
-
-        let mut projection = DirProjection::exhaustive(core::iter::empty::<Entry>())
-            .preload_dir(
-                "comments",
-                DirProjection::open(core::iter::empty::<Entry>()),
-            )
-            .preload_file("title", self.title()?)
-            .preload_file("state", self.state()?)
-            .preload_file("user", self.user()?)
-            .preload_file("body", body)
-            .preload_file("item.md", item_md)
-            .preload_file("item.json", item_json);
-
-        if include_pull_files {
-            let diff = FileProjection::deferred(Size::Unknown)
-                .full()
-                .dynamic()
-                .content_type(ContentType::Custom("text/x-diff"))
-                .build();
-            projection = projection.preload_file("diff", diff);
-        }
-
-        Ok(projection)
-    }
-}
-
-/// Inline `bytes` as a Markdown preload when they fit the per-file inline cap
-/// and the shared aggregate budget (decrementing it); otherwise a deferred
-/// Markdown leaf the object render fills on read.
-fn inline_or_deferred_markdown(bytes: Vec<u8>, budget: &mut usize) -> FileProjection {
-    if bytes.len() <= MAX_PROJECTED_BYTES && bytes.len() <= *budget {
-        *budget -= bytes.len();
-        FileProjection::inline(bytes)
-            .dynamic()
-            .content_type(ContentType::Markdown)
-            .build()
-    } else {
-        FileProjection::deferred(Size::Unknown)
-            .full()
-            .dynamic()
-            .content_type(ContentType::Markdown)
-            .build()
-    }
 }
 
 #[omnifs_sdk::object(kind = "github.issue", key = crate::item::IssueKey)]
@@ -141,19 +70,19 @@ fn inline_or_deferred_markdown(bytes: Vec<u8>, budget: &mut usize) -> FileProjec
 pub(crate) struct Issue(pub(crate) ItemData);
 
 impl Issue {
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn title(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
         self.0.title()
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn state(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
         self.0.state()
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn user(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
         self.0.user()
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn body(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
         self.0.body()
     }
 }
@@ -170,19 +99,19 @@ impl Representable<Markdown> for Issue {
 pub(crate) struct PullRequest(pub(crate) ItemData);
 
 impl PullRequest {
-    pub(crate) fn title(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn title(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
         self.0.title()
     }
 
-    pub(crate) fn state(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn state(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
         self.0.state()
     }
 
-    pub(crate) fn user(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn user(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
         self.0.user()
     }
 
-    pub(crate) fn body(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn body(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
         self.0.body()
     }
 }
@@ -193,6 +122,31 @@ impl Representable<Markdown> for PullRequest {
     }
 }
 
+/// A GitHub owner (user or organization) profile. Today the upstream profile
+/// JSON is the canonical payload; `profile.md` renders it.
+#[omnifs_sdk::object(kind = "github.owner", key = crate::item::OwnerKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Owner {
+    #[serde(default)]
+    pub(crate) login: Option<String>,
+    #[serde(rename = "type", default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) bio: Option<String>,
+}
+
+impl Representable<Markdown> for Owner {
+    fn represent(&self) -> Vec<u8> {
+        let login = self.login.as_deref().unwrap_or("");
+        let kind = self.kind.as_deref().unwrap_or("User");
+        let name = self.name.as_deref().unwrap_or("");
+        let bio = self.bio.as_deref().unwrap_or("");
+        format!("# {login}\n\n- Type: {kind}\n- Name: {name}\n\n{bio}\n").into_bytes()
+    }
+}
+
 #[omnifs_sdk::object(kind = "github.repo", key = crate::item::RepoKey)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Repo {
@@ -200,21 +154,57 @@ pub(crate) struct Repo {
     pub(crate) full_name: Option<String>,
 }
 
+/// One issue/PR comment. The list payload carries `id`, so a comment can be
+/// stored fresh at listing time and keyed by its own `comment_id`.
+#[omnifs_sdk::object(kind = "github.comment", key = crate::item::CommentKey)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Comment {
+    pub(crate) id: u64,
+    pub(crate) user: CommentUser,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CommentUser {
+    pub(crate) login: String,
+}
+
+impl Comment {
+    pub(crate) fn body_md(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
+        let body = self.body.as_deref().unwrap_or("");
+        Ok(FileProjection::body(body.to_owned())
+            .content_type(ContentType::Markdown)
+            .build())
+    }
+
+    pub(crate) fn author(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
+        Ok(text_projection(self.user.login.clone()))
+    }
+}
+
+impl Representable<Markdown> for Comment {
+    fn represent(&self) -> Vec<u8> {
+        let body = self.body.as_deref().unwrap_or("");
+        format!("{}:\n{body}\n", self.user.login).into_bytes()
+    }
+}
+
 #[omnifs_sdk::object(kind = "github.run", key = crate::item::RunKey)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct Run {
+pub(crate) struct WorkflowRun {
     pub(crate) id: u64,
     pub(crate) status: String,
     #[serde(default)]
     pub(crate) conclusion: Option<String>,
 }
 
-impl Run {
-    pub(crate) fn status(&self) -> omnifs_sdk::error::Result<FileProjection> {
+impl WorkflowRun {
+    pub(crate) fn status(&self, _key: &crate::item::RunKey) -> Result<FileProjection> {
         Ok(text_projection(self.status.clone()))
     }
 
-    pub(crate) fn conclusion(&self) -> omnifs_sdk::error::Result<FileProjection> {
+    pub(crate) fn conclusion(&self, _key: &crate::item::RunKey) -> Result<FileProjection> {
         let c = self.conclusion.clone().unwrap_or_default();
         Ok(text_projection(c))
     }
