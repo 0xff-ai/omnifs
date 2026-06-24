@@ -21,7 +21,6 @@ use core::str::FromStr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use omnifs_sdk::http::HttpEndpoint;
 use omnifs_sdk::prelude::*;
 
 mod api;
@@ -48,7 +47,9 @@ fn default_endpoint() -> String {
 }
 
 pub(crate) struct State {
-    pub(crate) endpoint: HttpEndpoint,
+    /// The in-cluster API server base URL; re-parsed per request by the
+    /// endpoint URL builder.
+    pub(crate) endpoint: String,
     pub(crate) hide_empty_types: bool,
     pub(crate) discovery: Rc<RefCell<Option<Discovery>>>,
 }
@@ -219,7 +220,7 @@ impl KubernetesProvider {
         })?;
 
         Ok(State {
-            endpoint: HttpEndpoint::parse(&config.endpoint),
+            endpoint: config.endpoint,
             hide_empty_types: config.hide_empty_types,
             discovery: Rc::new(RefCell::new(None)),
         })

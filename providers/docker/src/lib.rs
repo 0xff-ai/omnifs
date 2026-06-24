@@ -9,7 +9,6 @@ use core::fmt;
 use core::str::FromStr;
 
 use hashbrown::HashMap;
-use omnifs_sdk::http::HttpEndpoint;
 use omnifs_sdk::prelude::*;
 use serde::Serialize;
 
@@ -41,7 +40,9 @@ impl Default for Config {
 
 #[derive(Clone)]
 struct State {
-    endpoint: HttpEndpoint,
+    /// The configured Docker daemon base address (a `unix://` socket or TCP
+    /// host); re-parsed per request by the endpoint URL builder.
+    endpoint: String,
 }
 
 fn is_valid_docker_name(value: &str) -> bool {
@@ -318,7 +319,7 @@ impl DockerProvider {
             .handler(container_summary_raw)?;
 
         Ok(State {
-            endpoint: HttpEndpoint::parse(config.endpoint),
+            endpoint: config.endpoint,
         })
     }
 }

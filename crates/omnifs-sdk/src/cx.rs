@@ -113,11 +113,14 @@ impl<S> Cx<S> {
         self.shared.version.as_ref()
     }
 
-    /// A typed handle to a declared outbound [`crate::endpoint::Endpoint`].
-    pub fn endpoint<E: crate::endpoint::Endpoint>(
+    /// A typed handle to an outbound [`crate::endpoint::Endpoint`] value. Pass
+    /// a unit struct for a fixed upstream, or a field-carrying value for a
+    /// runtime-resolved base.
+    pub fn endpoint<E: crate::endpoint::EndpointHooks>(
         &self,
+        endpoint: E,
     ) -> crate::endpoint::EndpointHandle<'_, E, S> {
-        crate::endpoint::EndpointHandle::new(self)
+        crate::endpoint::EndpointHandle::new(self, endpoint)
     }
 
     /// Read the provider state. The closure scopes the `RefCell` borrow so

@@ -174,7 +174,6 @@ pub mod repr;
 pub mod router;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
-pub use crate::rate_limit::note_rate_limited;
 pub use file_attrs::{
     FileAttrs, FileProj, ProjBytes, ReadFileBytes, ReadMode, Size, Stability, VersionToken,
 };

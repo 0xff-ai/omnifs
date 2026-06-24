@@ -117,8 +117,10 @@ impl std::fmt::Display for IssueIdent {
 /// Linear's GraphQL host. Every request POSTs a query to `/graphql`; auth is
 /// injected from the embedded manifest into the `Authorization` header.
 #[derive(omnifs_sdk::Endpoint)]
-#[endpoint(base = "https://api.linear.app")]
-#[endpoint(default_header = "Accept: application/json")]
+#[endpoint(
+    base = "https://api.linear.app",
+    default_header = "Accept: application/json"
+)]
 struct LinearApi;
 
 #[omnifs_sdk::path_captures]
@@ -155,7 +157,7 @@ impl Issue {
         }
         let vars = json!({ "id": key.ident.to_string() });
         let resp: GqlResponse<IssueNodeData> = cx
-            .endpoint::<LinearApi>()
+            .endpoint(LinearApi)
             .post("/graphql")
             .body_json(&gql_request(ISSUE_BY_IDENTIFIER_QUERY, &vars))
             .json()
@@ -249,7 +251,7 @@ async fn fetch_all_teams(cx: &Cx) -> Result<Vec<Team>> {
     loop {
         let vars = json!({ "after": after });
         let data: TeamsData = gql_unwrap(
-            cx.endpoint::<LinearApi>()
+            cx.endpoint(LinearApi)
                 .post("/graphql")
                 .body_json(&gql_request(TEAMS_QUERY, &vars))
                 .json()
@@ -294,7 +296,7 @@ async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Resul
             "after": after,
         });
         let data: IssuesData = gql_unwrap(
-            cx.endpoint::<LinearApi>()
+            cx.endpoint(LinearApi)
                 .post("/graphql")
                 .body_json(&gql_request(ISSUES_QUERY, &vars))
                 .json()

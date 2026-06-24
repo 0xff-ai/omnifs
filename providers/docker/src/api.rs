@@ -5,7 +5,6 @@
 //! itself is manifest-driven (the `unixSocket` capability in
 //! `omnifs.provider.json`), not a `resources(..)` declaration.
 
-use omnifs_sdk::http::{HttpEndpoint, ResponseExt};
 use omnifs_sdk::prelude::*;
 use serde::de::DeserializeOwned;
 
@@ -17,6 +16,20 @@ use crate::State;
 /// satisfy this. A daemon advertising a lower `MinAPIVersion` will
 /// reject these calls; bump deliberately when raising the floor.
 pub(crate) const API_VERSION_PREFIX: &str = "/v1.43";
+
+/// The Docker daemon endpoint. Its base is the configured daemon address (a
+/// `unix://` socket or a TCP host), resolved from provider state at call time,
+/// so it carries a field instead of a `#[derive(Endpoint)]` constant base.
+struct DockerApi {
+    base: String,
+}
+
+impl Endpoint for DockerApi {
+    fn base(&self) -> &str {
+        &self.base
+    }
+}
+impl EndpointHooks for DockerApi {}
 
 /// Fetch a JSON document from `path`, prefixing the pinned API version.
 pub(crate) async fn fetch_json<T>(cx: &Cx<State>, path: &str, query: &[(&str, &str)]) -> Result<T>
@@ -34,14 +47,15 @@ pub(crate) async fn fetch_bytes(
     path: &str,
     query: &[(&str, &str)],
 ) -> Result<Vec<u8>> {
-    let endpoint = cx.state(|state| state.endpoint.clone());
-    let url = docker_url(&endpoint, path, query);
-    let response = cx.http().get(url).send().await?.error_for_status()?;
-    Ok(response.into_body())
-}
-
-fn docker_url(endpoint: &HttpEndpoint, path: &str, query: &[(&str, &str)]) -> String {
-    endpoint.build_url(&format!("{API_VERSION_PREFIX}{path}"), query)
+    let base = cx.state(|state| state.endpoint.clone());
+    let mut request = cx
+        .endpoint(DockerApi { base })
+        .get(format!("{API_VERSION_PREFIX}{path}"));
+    for (key, value) in query {
+        request = request.query(key, value);
+    }
+    let response = request.send_checked().await?;
+    Ok(response.body().to_vec())
 }
 
 // Wire DTOs re-exported from `bollard-stubs` (pinned in `Cargo.toml`).

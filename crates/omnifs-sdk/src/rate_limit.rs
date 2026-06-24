@@ -109,15 +109,6 @@ pub fn clear_breaker() {
     BREAKER.with(RateLimitBreaker::clear);
 }
 
-/// Provider-facing hook to arm the breaker after the provider itself detected
-/// a rate limit the generic 429 path would miss, such as github's
-/// `403 + x-ratelimit-remaining: 0`. Keyed by the request URL's authority.
-pub fn note_rate_limited(url: &str, retry_after: Option<Duration>) {
-    if let Some(authority) = authority_of(url) {
-        with_breaker(|b| b.record_429(&authority, retry_after));
-    }
-}
-
 /// Endpoint authority (`scheme://host[:port]`) used as the breaker key.
 /// Returns None for an unparseable URL (caller then skips breaker logic).
 pub fn authority_of(url: &str) -> Option<String> {
@@ -199,17 +190,6 @@ mod tests {
         with_breaker(|b| b.record_429(auth_a, Some(Duration::from_secs(3))));
 
         assert_eq!(with_breaker(|b| b.check(auth_b)), None);
-    }
-
-    #[test]
-    fn note_rate_limited_arms_breaker() {
-        with_breaker(RateLimitBreaker::clear);
-
-        note_rate_limited("https://hook.test/x", Some(Duration::from_secs(3)));
-        let remaining =
-            with_breaker(|b| b.check("https://hook.test")).expect("breaker should be open");
-
-        assert!(remaining <= Duration::from_secs(3));
     }
 
     #[test]

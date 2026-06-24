@@ -25,8 +25,10 @@ const DATE_FIELDS: &[&str] = &[
 ];
 
 #[derive(omnifs_sdk::Endpoint)]
-#[endpoint(base = "https://api.ouraring.com")]
-#[endpoint(default_header = "Accept: application/json")]
+#[endpoint(
+    base = "https://api.ouraring.com",
+    default_header = "Accept: application/json"
+)]
 struct Api;
 
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
@@ -259,7 +261,7 @@ struct RangeRequest {
 impl RangeRequest {
     async fn fetch(self, cx: &Cx) -> Result<RangeResponse> {
         let mut request = cx
-            .endpoint::<Api>()
+            .endpoint(Api)
             .get(format!("/v2/usercollection/{}", self.collection.endpoint()));
         match self.collection.range_kind() {
             RangeKind::Date => {

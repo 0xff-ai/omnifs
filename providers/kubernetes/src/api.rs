@@ -6,7 +6,7 @@ use hashbrown::HashMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     APIGroup, APIGroupList, APIResource as K8sApiResource, APIResourceList,
 };
-use omnifs_sdk::http::{HttpEndpoint, ResponseExt};
+use omnifs_sdk::error::ProviderErrorKind;
 use omnifs_sdk::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -20,6 +20,20 @@ use crate::State;
 use crate::objects::KubeManifest;
 
 const ACCEPT_JSON: &str = "application/json";
+
+/// The Kubernetes API server endpoint. Its base is the in-cluster API URL
+/// resolved from provider state at call time, so it carries a field rather
+/// than a `#[derive(Endpoint)]` constant base.
+struct KubeEndpoint {
+    base: String,
+}
+
+impl Endpoint for KubeEndpoint {
+    fn base(&self) -> &str {
+        &self.base
+    }
+}
+impl EndpointHooks for KubeEndpoint {}
 
 /// One discovered, browsable Kubernetes resource.
 #[derive(Clone, Debug)]
@@ -138,14 +152,20 @@ fn group_versions_preferred_first(group: &APIGroup) -> Vec<String> {
 /// Omnifs host callouts.
 pub(crate) struct KubeApi<'a> {
     cx: &'a Cx<State>,
-    endpoint: HttpEndpoint,
+    base: String,
 }
 
 impl<'a> KubeApi<'a> {
     pub(crate) fn new(cx: &'a Cx<State>) -> Self {
         Self {
             cx,
-            endpoint: cx.state(|state| state.endpoint.clone()),
+            base: cx.state(|state| state.endpoint.clone()),
+        }
+    }
+
+    fn endpoint(&self) -> KubeEndpoint {
+        KubeEndpoint {
+            base: self.base.clone(),
         }
     }
 
@@ -317,15 +337,15 @@ impl<'a> KubeApi<'a> {
     }
 
     async fn get_bytes(&self, path: &str, query: &[(&str, &str)], accept: &str) -> Result<Vec<u8>> {
-        let url = self.endpoint.build_url(path, query);
-        let response = self
+        let mut request = self
             .cx
-            .http()
-            .get(url)
-            .header("Accept", accept)
-            .send()
-            .await?;
-        Ok(response.error_for_status()?.into_body())
+            .endpoint(self.endpoint())
+            .get(path)
+            .header("Accept", accept);
+        for (key, value) in query {
+            request = request.query(key, value);
+        }
+        Ok(request.send_checked().await?.body().to_vec())
     }
 
     async fn get_bytes_opt(
@@ -334,18 +354,19 @@ impl<'a> KubeApi<'a> {
         query: &[(&str, &str)],
         accept: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let url = self.endpoint.build_url(path, query);
-        let response = self
+        let mut request = self
             .cx
-            .http()
-            .get(url)
-            .header("Accept", accept)
-            .send()
-            .await?;
-        if response.status().as_u16() == 404 {
-            return Ok(None);
+            .endpoint(self.endpoint())
+            .get(path)
+            .header("Accept", accept);
+        for (key, value) in query {
+            request = request.query(key, value);
         }
-        Ok(Some(response.error_for_status()?.into_body()))
+        match request.send_checked().await {
+            Ok(response) => Ok(Some(response.body().to_vec())),
+            Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -377,7 +398,7 @@ const INITIAL_TAIL_LINES: u32 = 2000;
 /// a resume marker, `sinceTime` to bound the fetch) and appends them with the
 /// embedded timestamp stripped.
 pub(crate) struct PodLogReader {
-    endpoint: HttpEndpoint,
+    base: String,
     namespace: String,
     pod: String,
     container: String,
@@ -395,9 +416,9 @@ struct LogBuf {
 }
 
 impl PodLogReader {
-    pub(crate) fn new(endpoint: HttpEndpoint, namespace: &str, pod: &str, container: &str) -> Self {
+    pub(crate) fn new(base: String, namespace: &str, pod: &str, container: &str) -> Self {
         Self {
-            endpoint,
+            base,
             namespace: namespace.to_string(),
             pod: pod.to_string(),
             container: container.to_string(),
@@ -426,16 +447,17 @@ impl PodLogReader {
         if let Some(since) = &since {
             query.push(("sinceTime", since));
         }
-        let url = self.endpoint.build_url(&path, &query);
-        let body = cx
-            .http()
-            .get(url)
-            .header("Accept", "*/*")
-            .send()
-            .await?
-            .error_for_status()?
-            .into_body();
-        self.append(&body);
+        let mut request = cx
+            .endpoint(KubeEndpoint {
+                base: self.base.clone(),
+            })
+            .get(path)
+            .header("Accept", "*/*");
+        for (key, value) in &query {
+            request = request.query(key, value);
+        }
+        let response = request.send_checked().await?;
+        self.append(response.body());
         Ok(())
     }
 

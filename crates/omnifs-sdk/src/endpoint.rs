@@ -15,8 +15,6 @@
 //!   with [`maybe_if_none_match`](RequestBuilder::maybe_if_none_match) so the
 //!   host-pushed validator ([`Cx::version`]) becomes `If-None-Match` and an
 //!   unchanged object costs no body transfer.
-//!   [`conditional_json`](RequestBuilder::conditional_json) is the
-//!   listing-revalidation analogue (no `NotFound` arm).
 //! - Structural layer, 2-state: [`json`](RequestBuilder::json) and
 //!   [`send_checked`](RequestBuilder::send_checked) return the value or error
 //!   on any 4xx/5xx, including 404. Use these when "missing" is not a
@@ -32,16 +30,20 @@
 //! Every send participates in the per-authority rate-limit breaker: a 429
 //! arms a cooldown for the URL's authority (honoring `Retry-After`, else the
 //! endpoint's [`RateLimitPolicy`]), and later sends to that authority
-//! fast-fail in-guest until the window passes.
+//! fast-fail in-guest until the window passes. An upstream that signals
+//! errors off the status line (a 403 rate limit, an error in a 200 body)
+//! overrides [`EndpointHooks::classify`] to map the raw response to a typed
+//! [`ProviderError`] before any terminal sees it; a classified rate limit
+//! arms the breaker just like a native 429.
 //!
 //! ```ignore
 //! #[derive(omnifs_sdk::Endpoint)]
-//! #[endpoint(base = "https://export.arxiv.org")]
-//! #[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+//! #[endpoint(base = "https://export.arxiv.org",
+//!            default_header = "User-Agent: omnifs-provider-arxiv")]
 //! struct ArxivApi;
 //!
 //! let load = cx
-//!     .endpoint::<ArxivApi>()
+//!     .endpoint(ArxivApi)
 //!     .get("/api/query")
 //!     .query("id_list", raw_id)
 //!     .maybe_if_none_match(since.as_ref())
@@ -71,55 +73,79 @@ pub enum RateLimitPolicy {
     Off,
 }
 
-/// An outbound host a provider talks to over HTTP. The `#[derive(Endpoint)]`
-/// macro generates the impl from the `#[endpoint(base = ..)]`,
-/// `#[endpoint(default_header = ..)]`, and `#[endpoint(rate_limit = ..)]`
-/// attributes. Credential headers are never declared here; the host injects
-/// them from the provider's auth manifest (see the module docs).
+/// An outbound host a provider talks to over HTTP, passed by value to
+/// [`Cx::endpoint`]. A unit struct works for a fixed upstream; a struct with
+/// fields carries a runtime-resolved base (a configured daemon socket, an
+/// in-cluster API URL). `#[derive(Endpoint)]` generates this impl from the
+/// `#[endpoint(base = .., default_header = .., rate_limit = ..)]` attributes;
+/// implement it by hand when the base is dynamic.
+///
+/// Credential headers are never declared here; the host injects them from the
+/// provider's auth manifest (see the module docs).
 pub trait Endpoint {
     /// Base URL request paths resolve against, such as
     /// `https://api.example.com`. A `unix:///absolute/socket/path` base
     /// routes through the host's Unix-socket HTTP executor (see
     /// [`crate::http::HttpEndpoint`]).
-    fn base() -> &'static str;
+    fn base(&self) -> &str;
 
     /// Headers applied to every request to this endpoint before any
     /// per-request header, so a builder's `.header(..)` can still override.
     /// Generated from `#[endpoint(default_header = "Name: Value")]`.
-    fn default_headers() -> &'static [(&'static str, &'static str)] {
+    fn default_headers(&self) -> &[(&str, &str)] {
         &[]
     }
 
     /// How a 429 from this endpoint arms the per-authority breaker.
     /// Generated from `#[endpoint(rate_limit = ..)]`; defaults to honoring
     /// `Retry-After` with the breaker's built-in fallback cooldown.
-    fn rate_limit_policy() -> RateLimitPolicy {
+    fn rate_limit(&self) -> RateLimitPolicy {
         RateLimitPolicy::Default
     }
 }
 
-/// A typed handle to a declared [`Endpoint`], obtained from [`Cx::endpoint`].
-pub struct EndpointHandle<'a, E, S = ()> {
-    cx: &'a Cx<S>,
-    _endpoint: core::marker::PhantomData<E>,
+/// Overridable response and error behavior for an [`Endpoint`]. Every method
+/// is defaulted; `#[derive(Endpoint)]` supplies the defaults for the easy
+/// case, and a provider that needs to override marks the derive with
+/// `#[endpoint(hooks)]` and writes its own `impl EndpointHooks`, overriding
+/// only the relevant methods. Future cross-cutting behavior lands here as a
+/// new defaulted method, not a new attribute.
+pub trait EndpointHooks: Endpoint {
+    /// Classify a raw response into a typed [`ProviderError`] before the
+    /// default status mapping runs, for upstreams that signal errors in a
+    /// shape `error_for_status` cannot see: a rate limit returned as `403`
+    /// with `x-ratelimit-remaining: 0` instead of `429`, or an error encoded
+    /// in the body of a `200`. Return `Some(err)` to fail every terminal
+    /// ([`load`](RequestBuilder::load), [`json`](RequestBuilder::json), ...)
+    /// with that error; `None` falls through to the default per-status
+    /// handling. A returned [`RateLimited`](crate::error::ProviderError::rate_limited)
+    /// error arms the per-authority breaker from its `retry_after`, exactly
+    /// as a native `429` would, so a later request to the same host
+    /// fast-fails in-guest. Defaults to no classification.
+    fn classify(&self, _response: &Response<Vec<u8>>) -> Option<ProviderError> {
+        None
+    }
 }
 
-impl<'a, E: Endpoint, S> EndpointHandle<'a, E, S> {
-    pub(crate) fn new(cx: &'a Cx<S>) -> Self {
-        Self {
-            cx,
-            _endpoint: core::marker::PhantomData,
-        }
+/// A typed handle to an [`Endpoint`] value, obtained from [`Cx::endpoint`].
+pub struct EndpointHandle<'a, E, S = ()> {
+    cx: &'a Cx<S>,
+    endpoint: E,
+}
+
+impl<'a, E: EndpointHooks, S> EndpointHandle<'a, E, S> {
+    pub(crate) fn new(cx: &'a Cx<S>, endpoint: E) -> Self {
+        Self { cx, endpoint }
     }
 
-    /// Begin a GET request to `path` (relative to `E::base()`).
-    pub fn get(&self, path: impl Into<String>) -> RequestBuilder<'a, E, S> {
-        RequestBuilder::new(self.cx, http::Method::GET, path.into())
+    /// Begin a GET request to `path` (relative to the endpoint's base).
+    pub fn get(self, path: impl Into<String>) -> RequestBuilder<'a, E, S> {
+        RequestBuilder::new(self.cx, self.endpoint, http::Method::GET, path.into())
     }
 
-    /// Begin a POST request to `path` (relative to `E::base()`).
-    pub fn post(&self, path: impl Into<String>) -> RequestBuilder<'a, E, S> {
-        RequestBuilder::new(self.cx, http::Method::POST, path.into())
+    /// Begin a POST request to `path` (relative to the endpoint's base).
+    pub fn post(self, path: impl Into<String>) -> RequestBuilder<'a, E, S> {
+        RequestBuilder::new(self.cx, self.endpoint, http::Method::POST, path.into())
     }
 }
 
@@ -140,11 +166,11 @@ pub struct RequestBuilder<'a, E, S = ()> {
     /// instead of sending a malformed request.
     body_error: Option<ProviderError>,
     if_none_match: Option<String>,
-    _endpoint: core::marker::PhantomData<E>,
+    endpoint: E,
 }
 
-impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
-    fn new(cx: &'a Cx<S>, method: http::Method, path: String) -> Self {
+impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
+    fn new(cx: &'a Cx<S>, endpoint: E, method: http::Method, path: String) -> Self {
         Self {
             cx,
             method,
@@ -155,7 +181,7 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             body_is_json: false,
             body_error: None,
             if_none_match: None,
-            _endpoint: core::marker::PhantomData,
+            endpoint,
         }
     }
 
@@ -241,10 +267,12 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        HttpEndpoint::parse(E::base()).build_url(&self.path, &query)
+        HttpEndpoint::parse(self.endpoint.base()).build_url(&self.path, &query)
     }
 
-    fn into_http_request(mut self) -> Result<Request<'a, S>> {
+    /// Lower to an HTTP request, returning the endpoint alongside it so a
+    /// caller can still consult [`EndpointHooks`] after the send.
+    fn into_http_request(mut self) -> Result<(Request<'a, S>, E)> {
         if let Some(error) = self.body_error.take() {
             return Err(error);
         }
@@ -256,7 +284,7 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             builder.get(url)
         };
         // Endpoint defaults first, so a per-request `.header(..)` overrides.
-        for (name, value) in E::default_headers() {
+        for (name, value) in self.endpoint.default_headers() {
             req = req.header(name, value);
         }
         // Merge the pre-parsed HeaderMap; extend_headers skips re-parsing.
@@ -270,18 +298,36 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             }
             req = req.body(body);
         }
-        Ok(req)
+        Ok((req, self.endpoint))
     }
 
     /// Send through the breaker: the check happens in `Request::send`; here we
-    /// arm on a 429 and close on a `status < 400` response so the next request
-    /// to a throttled authority fast-fails instead of calling out.
+    /// arm on a 429 (or an [`EndpointHooks::classify`] rate limit) and close
+    /// on a `status < 400` response so the next request to a throttled
+    /// authority fast-fails instead of calling out.
     async fn send_raw(self) -> Result<Response<Vec<u8>>> {
         let authority = crate::rate_limit::authority_of(&self.url());
-        let resp = self.into_http_request()?.send().await?;
+        let policy = self.endpoint.rate_limit();
+        let (request, endpoint) = self.into_http_request()?;
+        let resp = request.send().await?;
+
+        // Provider-specific classification runs first: it can detect error
+        // signals the default status mapping misses (e.g. a 403 rate limit),
+        // and a classified rate limit arms the breaker just like a native 429.
+        if let Some(error) = endpoint.classify(&resp) {
+            if let Some(authority) = &authority
+                && error.kind() == crate::error::ProviderErrorKind::RateLimited
+                && !matches!(policy, RateLimitPolicy::Off)
+            {
+                crate::rate_limit::with_breaker(|b| {
+                    b.record_429(authority, error.retry_after());
+                });
+            }
+            return Err(error);
+        }
+
         if let Some(authority) = authority {
             let status = resp.status();
-            let policy = E::rate_limit_policy();
             if !matches!(policy, RateLimitPolicy::Off) {
                 crate::rate_limit::with_breaker(|b| {
                     if status == StatusCode::TOO_MANY_REQUESTS {
@@ -403,7 +449,7 @@ pub struct BlobRequestBuilder<'a, E, S = ()> {
     cache_key: Option<String>,
 }
 
-impl<'a, E: Endpoint, S> BlobRequestBuilder<'a, E, S> {
+impl<'a, E: EndpointHooks, S> BlobRequestBuilder<'a, E, S> {
     /// Set the provider-scoped deduplication key. Required: [`Self::fetch`]
     /// errors without one. Repeating the key from the same provider returns
     /// the cached blob instead of refetching, so embed everything that
@@ -419,7 +465,8 @@ impl<'a, E: Endpoint, S> BlobRequestBuilder<'a, E, S> {
     /// always refers to a successful response body.
     pub async fn fetch(self) -> Result<BlobHandle> {
         let cache_key = self.cache_key.clone();
-        let mut blob: BlobRequest<'a, S> = self.inner.into_http_request()?.into_blob();
+        let (request, _endpoint) = self.inner.into_http_request()?;
+        let mut blob: BlobRequest<'a, S> = request.into_blob();
         if let Some(key) = cache_key {
             blob = blob.with_cache_key(key);
         }
@@ -455,34 +502,37 @@ mod tests {
     struct TestEp;
 
     impl Endpoint for TestEp {
-        fn base() -> &'static str {
+        fn base(&self) -> &str {
             "https://breaker.test"
         }
     }
+    impl EndpointHooks for TestEp {}
 
     struct TestEpOff;
 
     impl Endpoint for TestEpOff {
-        fn base() -> &'static str {
+        fn base(&self) -> &str {
             "https://off-policy.test"
         }
 
-        fn rate_limit_policy() -> RateLimitPolicy {
+        fn rate_limit(&self) -> RateLimitPolicy {
             RateLimitPolicy::Off
         }
     }
+    impl EndpointHooks for TestEpOff {}
 
     struct TestEpCooldown;
 
     impl Endpoint for TestEpCooldown {
-        fn base() -> &'static str {
+        fn base(&self) -> &str {
             "https://cooldown-policy.test"
         }
 
-        fn rate_limit_policy() -> RateLimitPolicy {
+        fn rate_limit(&self) -> RateLimitPolicy {
             RateLimitPolicy::Cooldown(Duration::from_secs(45))
         }
     }
+    impl EndpointHooks for TestEpCooldown {}
 
     fn drive_once<F: Future>(future: &mut Pin<Box<F>>) -> Poll<F::Output> {
         let waker = Waker::noop();
@@ -512,11 +562,7 @@ mod tests {
         });
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(
-            cx.endpoint::<TestEp>()
-                .get("/x")
-                .json::<serde_json::Value>(),
-        );
+        let mut fut = Box::pin(cx.endpoint(TestEp).get("/x").json::<serde_json::Value>());
 
         let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
             panic!("expected open breaker to fail immediately");
@@ -536,7 +582,7 @@ mod tests {
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(cx.endpoint::<TestEpOff>().get("/x").send_checked());
+        let mut fut = Box::pin(cx.endpoint(TestEpOff).get("/x").send_checked());
 
         assert!(matches!(drive_once(&mut fut), Poll::Pending));
         assert_eq!(cx.take_yielded_callouts().len(), 1);
@@ -560,7 +606,7 @@ mod tests {
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(cx.endpoint::<TestEpCooldown>().get("/x").send_checked());
+        let mut fut = Box::pin(cx.endpoint(TestEpCooldown).get("/x").send_checked());
 
         assert!(matches!(drive_once(&mut fut), Poll::Pending));
         assert_eq!(cx.take_yielded_callouts().len(), 1);

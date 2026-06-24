@@ -1,113 +1,39 @@
-//! GitHub REST transport (`GithubRest`) and the typed `GitHubApi` endpoint.
-
-#[derive(omnifs_sdk::Endpoint)]
-#[endpoint(base = "https://api.github.com")]
-#[endpoint(default_header = "X-GitHub-Api-Version: 2022-11-28")]
-#[endpoint(default_header = "Accept: application/vnd.github+json")]
-pub struct GitHubApi;
+//! The typed `GitHubApi` endpoint and its rate-limit classifier.
+//!
+//! GitHub signals rate limits off the status line (a `403` with
+//! `x-ratelimit-remaining: 0`, or secondary-limit / abuse-detection bodies),
+//! which the SDK's default `429` handling cannot see. [`GitHubApi`] overrides
+//! [`EndpointHooks::classify`] to map those to a typed `RateLimited` error, so
+//! every `cx.endpoint(GitHubApi)` terminal arms the breaker and surfaces the
+//! retry window. Every other status falls through to the SDK's default
+//! `error_for_status` mapping.
 
 use core::time::Duration;
 use http::{Response, StatusCode};
-use omnifs_sdk::Cx;
+use omnifs_sdk::endpoint::EndpointHooks;
 use omnifs_sdk::error::ProviderError;
-use omnifs_sdk::http::{Request, ResponseExt};
-use omnifs_sdk::object::{Canonical, Load, Validator};
-use serde::de::DeserializeOwned;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::Result;
-use crate::{API_BASE, parse_model};
+#[derive(omnifs_sdk::Endpoint)]
+#[endpoint(
+    base = "https://api.github.com",
+    default_header = "X-GitHub-Api-Version: 2022-11-28",
+    default_header = "Accept: application/vnd.github+json",
+    hooks
+)]
+pub struct GitHubApi;
 
-pub(crate) trait GithubRest<S> {
-    fn github_get(&self, path: impl AsRef<str>) -> Request<'_, S>;
-    fn github_json_request(&self, path: impl AsRef<str>) -> Request<'_, S>;
-    fn github_json<T>(
-        &self,
-        path: impl AsRef<str>,
-    ) -> impl core::future::Future<Output = Result<T>>
-    where
-        T: DeserializeOwned;
-    fn github_load<T>(
-        &self,
-        path: impl AsRef<str>,
-        since: Option<Validator>,
-    ) -> impl core::future::Future<Output = Result<Load<T>>>
-    where
-        T: DeserializeOwned;
-}
-
-impl<S> GithubRest<S> for Cx<S> {
-    fn github_get(&self, path: impl AsRef<str>) -> Request<'_, S> {
-        self.http()
-            .get(format!("{API_BASE}{}", path.as_ref()))
-            .header("X-GitHub-Api-Version", "2022-11-28")
-    }
-
-    fn github_json_request(&self, path: impl AsRef<str>) -> Request<'_, S> {
-        self.github_get(path)
-            .header("Accept", "application/vnd.github+json")
-    }
-
-    async fn github_json<T>(&self, path: impl AsRef<str>) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let resp = self.github_json_request(path).send().await?;
-        let resp = github_check_status(resp)?;
-        parse_model(resp.body())
-    }
-
-    async fn github_load<T>(
-        &self,
-        path: impl AsRef<str>,
-        since: Option<Validator>,
-    ) -> Result<Load<T>>
-    where
-        T: DeserializeOwned,
-    {
-        let mut request = self.github_json_request(path);
-        if let Some(validator) = &since {
-            request = request.header("if-none-match", validator.as_str());
+impl EndpointHooks for GitHubApi {
+    /// Map a GitHub rate-limit response to a typed `RateLimited` error so the
+    /// endpoint breaker arms on it; `None` for everything else, leaving the
+    /// SDK's default 4xx/5xx mapping in charge.
+    fn classify(&self, resp: &Response<Vec<u8>>) -> Option<ProviderError> {
+        if !is_rate_limited(resp) {
+            return None;
         }
-        let resp = request.send().await?;
-        match resp.status() {
-            StatusCode::NOT_MODIFIED => Ok(Load::Unchanged),
-            StatusCode::NOT_FOUND => Ok(Load::NotFound),
-            _ => {
-                let resp = github_check_status(resp)?;
-                let value = parse_model(resp.body())?;
-                let validator = resp
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(Validator::from);
-                Ok(Load::fresh(
-                    value,
-                    Canonical {
-                        bytes: resp.body().clone(),
-                        validator,
-                    },
-                ))
-            },
-        }
+        let retry_after = parse_github_retry(resp);
+        Some(ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after))
     }
-}
-
-/// Map a GitHub HTTP response to a typed `ProviderError`. Distinguishes
-/// rate-limit signals (`x-ratelimit-remaining: 0`, secondary-rate-limit
-/// or abuse-detection bodies) from generic 4xx/5xx so callers can retry
-/// rate-limited responses.
-pub(crate) fn github_check_status(resp: Response<Vec<u8>>) -> Result<Response<Vec<u8>>> {
-    if is_rate_limited(&resp) {
-        let retry_after = parse_github_retry(&resp);
-        // GitHub's 403-style limits are not generic 429s, so the SDK send path
-        // cannot classify them. Arm the shared breaker before returning.
-        omnifs_sdk::note_rate_limited(API_BASE, retry_after);
-        return Err(
-            ProviderError::rate_limited(rate_limit_message(&resp)).with_retry_after(retry_after)
-        );
-    }
-    resp.error_for_status()
 }
 
 /// Structured backoff window for a github rate-limit response. Prefers an
