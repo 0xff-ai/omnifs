@@ -6,7 +6,7 @@ Supersedes the postgres-specific draft: the `pg-query` callout idea is deferred 
 
 ## Summary
 
-A generic database provider that mounts a single database (today: a SQLite file; tomorrow: Postgres, DuckDB, others) as a navigable filesystem. The user specifies the database type and connection in instance config; the same path layout applies regardless of backend. v1 ships SQLite-only, read-only, browse-only (schema + counts + a fixed sample); the backend abstraction is structured so adding Postgres later means adding a new backend module without touching the path layout.
+A generic database provider that mounts a single database (today: a SQLite file; tomorrow: Postgres, DuckDB, others) as a navigable filesystem. The user specifies the database file in instance config; the same path layout applies regardless of backend. v1 ships SQLite-only, read-only, browse-only (schema + counts + a fixed sample); the backend abstraction is structured so adding Postgres later means adding a new backend module without touching the path layout.
 
 The implementation runs SQLite **inside the WASM provider sandbox** using `rusqlite` with the `bundled` feature compiled against the wasi-sdk sysroot. The host preopens the database file's parent directory through Wasmtime's WASI ctx with read-only permissions; SQLite's VFS pages on demand through standard WASI `fd_read` / `fd_seek` syscalls. No new WIT callouts, no bytes crossing the WIT boundary, no extra host runtime layer to maintain.
 
@@ -43,8 +43,8 @@ What v1 does not ship and the document below covers as future work:
 /db/tables/                           (lists every table from sqlite_master)
 /db/tables/{name}/                    (direct handlers, name admitted from the
                                        startup table snapshot)
-  ├ /db/tables/{name}/table.json      (canonical table record; field leaves
-                                       are direct reads from it)
+  ├ /db/tables/{name}/table.json      (full table record; a direct read, not
+                                       an object canonical)
   ├ /db/tables/{name}/schema.sql      (CREATE TABLE statement)
   ├ /db/tables/{name}/schema.json     (PRAGMA table_info: columns, types, PK)
   ├ /db/tables/{name}/indexes.json    (PRAGMA index_list + index_info)
@@ -69,7 +69,6 @@ Table names collide with magic segments only inside `tables/`. A table named `me
     ]
   },
   "config": {
-    "database_type": "sqlite",
     "path": "/data/test.db",
     "read_only": true,
     "sample_limit": 20
@@ -85,7 +84,7 @@ Table names collide with magic segments only inside `tables/`. A table named `me
 
 `config.sample_limit` caps `sample.json` row count; default 20.
 
-`database_type` is the backend discriminator. v1 only accepts `"sqlite"`. Future values include `"postgres"`, `"duckdb"`, etc.; each backend module is internal to the provider crate.
+v1 is SQLite-only and the backend is fixed at build time, so the config carries no backend discriminator. A `database_type` key returns when a second backend (Postgres, DuckDB) lands, selecting the per-mount backend module.
 
 ## Capabilities and the sync-wasmtime isolation gotcha
 
@@ -135,7 +134,7 @@ Internally the provider has a `sqlite_backend` module that owns:
 - Query helpers (`columns(table)`, `indexes(table)`, `count(table)`, `sample(table, limit)`).
 - Error translation (`SqliteBackendError` → `ProviderError::not_found / invalid_input / internal`).
 
-The path handlers call into the backend directly through `State`. Adding Postgres later should introduce a real backend trait when there is a second implementation, not before. The provider's `lib.rs` picks the backend at init based on `database_type`.
+The path handlers call into the backend directly through `State`. Adding Postgres later should introduce a real backend trait when there is a second implementation, not before. Today the provider's `lib.rs` opens the SQLite backend directly; a backend-selection step returns with the `database_type` discriminator when a second backend lands.
 
 ## Future shape
 
@@ -268,7 +267,7 @@ This is documented for design coherence only; the read-only mount and mutation m
 ## Open questions
 
 1. **WIT addition for sqlite query offloading?** Today rusqlite runs entirely inside the WASM sandbox. For very large databases (multi-GB), this still works (pages on demand) but every operation incurs a wasmtime trip. Worth measuring; if a synthetic 10 GB benchmark shows tolerable latency, leave it. If not, the same `db-query` WIT extension we'd add for Postgres covers sqlite too (host opens with native rusqlite, provider sends SQL via callout).
-2. **DatabaseType derive ordering.** The agent's report notes the SDK's `#[omnifs_sdk::config]` macro appends derives after user attributes, which triggers a "derive helper attribute used before introduced" lint when combined with `#[serde(rename_all = ...)]`. Track as a small SDK fix (insert derives at the front) so future config enums don't need the workaround.
+2. **Config macro derive ordering.** The SDK's `#[omnifs_sdk::config]` macro appends derives after user attributes, which can trip a "derive helper attribute used before introduced" lint when a config enum combines them with `#[serde(rename_all = ...)]`. Track as a small SDK fix (insert derives at the front) so a future backend-discriminator enum does not need a workaround.
 3. **Multiple databases per mount.** A user might want `/db` to expose a directory of database files at `/db/databases/{name}/...`. Out of scope for v1 (one mount, one database); revisit when there is real demand.
 4. **Sample ordering.** `sample.json` is currently `SELECT * LIMIT n` with no `ORDER BY`. SQLite returns rows in physical order, which is usually rowid-ascending. Deterministic enough for browsing; document the contract.
 5. **Schema change freshness.** A DDL change (`ALTER TABLE`) changes the data returned for `schema.sql` and the related metadata JSON leaves. The current DB provider reads those leaves directly and does not use the canonical object cache.

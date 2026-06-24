@@ -624,52 +624,6 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
     }
 }
 
-/// Generate `Provider::routes() -> RouteSnapshot`: build the router via
-/// `start` (with a `{}` config), seal it, and snapshot the mount. Tolerates a
-/// `start` error (captured into the snapshot's seal verdict) and does not
-/// require `Config: Default`.
-fn generate_routes(
-    type_name: &syn::Ident,
-    config_type: &Type,
-    state_type: &Type,
-    start_kind: StartKind,
-) -> TokenStream2 {
-    let start_call = match start_kind {
-        StartKind::ConfigAndRouter => quote! { #type_name::start(config, &mut router) },
-        StartKind::RouterOnly => quote! {
-            {
-                let _ = config;
-                #type_name::start(&mut router)
-            }
-        },
-    };
-    quote! {
-        impl #type_name {
-            /// The provider's whole route surface: the readable mount tree plus
-            /// the seal verdict. Build a router via `start` (with an empty
-            /// config), seal it, and snapshot. Used by the `routes_are_valid()`
-            /// snapshot test.
-            pub fn routes() -> omnifs_sdk::prelude::RouteSnapshot {
-                let config: #config_type = match omnifs_sdk::serde_json::from_slice(b"{}") {
-                    Ok(config) => config,
-                    Err(error) => {
-                        return omnifs_sdk::prelude::RouteSnapshot::start_error(
-                            omnifs_sdk::error::ProviderError::invalid_input(
-                                format!("routes(): config error: {error}")
-                            ),
-                        );
-                    },
-                };
-                let mut router = omnifs_sdk::prelude::Router::<#state_type>::new();
-                match #start_call {
-                    Ok(_state) => omnifs_sdk::prelude::RouteSnapshot::capture(&mut router),
-                    Err(error) => omnifs_sdk::prelude::RouteSnapshot::start_error(error),
-                }
-            }
-        }
-    }
-}
-
 fn generate_continuation(type_name: &syn::Ident) -> TokenStream2 {
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::continuation::Guest for #type_name {
@@ -798,7 +752,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let namespace = generate_namespace(&type_name, state_type);
     let continuation = generate_continuation(&type_name);
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
-    let routes = generate_routes(&type_name, config_type, state_type, start_kind);
     let metadata_section = manifest.metadata_section;
 
     Ok(quote! {
@@ -815,7 +768,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         #namespace
         #continuation
         #notify
-        #routes
 
         #[cfg(target_arch = "wasm32")]
         omnifs_sdk::export!(#type_name with_types_in omnifs_sdk);

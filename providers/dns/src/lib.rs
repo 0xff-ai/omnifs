@@ -126,7 +126,7 @@ impl DnsProvider {
                 let bytes = read_record_bytes(&cx, None, &key.domain, &key.record).await?;
                 Ok(FileProjection::body(bytes)
                     .dynamic()
-                    .content_type(ContentType::Custom("text/plain"))
+                    .content_type(ContentType::Text)
                     .build())
             })?;
         r.dir("/reverse")
@@ -137,7 +137,7 @@ impl DnsProvider {
                 let bytes = read_reverse_bytes(&cx, None, &ip).await?;
                 Ok(FileProjection::body(bytes)
                     .dynamic()
-                    .content_type(ContentType::Custom("text/plain"))
+                    .content_type(ContentType::Text)
                     .build())
             })?;
 
@@ -155,7 +155,7 @@ impl DnsProvider {
                 let bytes = read_reverse_bytes(&cx, Some(&key.resolver), &ip).await?;
                 Ok(FileProjection::body(bytes)
                     .dynamic()
-                    .content_type(ContentType::Custom("text/plain"))
+                    .content_type(ContentType::Text)
                     .build())
             },
         )?;
@@ -168,7 +168,7 @@ impl DnsProvider {
                     read_record_bytes(&cx, Some(&key.resolver), &key.domain, &key.record).await?;
                 Ok(FileProjection::body(bytes)
                     .dynamic()
-                    .content_type(ContentType::Custom("text/plain"))
+                    .content_type(ContentType::Text)
                     .build())
             },
         )?;

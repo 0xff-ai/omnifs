@@ -142,7 +142,7 @@ impl fmt::Display for ServiceName {
 }
 
 // ---------------------------------------------------------------------------
-// Container object (R3: direct faces only, no canonical)
+// Containers (keyed directories of direct file reads, no canonical bytes)
 // ---------------------------------------------------------------------------
 
 #[omnifs_sdk::path_captures]
@@ -150,48 +150,11 @@ pub struct ContainerKey {
     reference: ContainerRef,
 }
 
-/// A Docker container, loaded from the inspect endpoint.
-///
-/// Per R3 the object has DIRECT faces only and NO canonical face: Docker emits
-/// no object-cache entry, so the SDK never stores canonical bytes and never
-/// calls `load`/`decode` through the object-route machinery. The trait requires
-/// both, so they are implemented as unreachable error stubs (`type Canonical`
-/// defaults to `Json` and is unused). Every container read flows through the
-/// direct-face handlers (`container_inspect`/`state`/`summary`), which fetch the
-/// inspect response themselves via `fetch_inspect`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-#[omnifs_sdk::object(
-    kind = "docker.container",
-    key = ContainerKey,
-    state = State,
-    load = container_load_unreachable,
-    decode = container_decode_unreachable
-)]
+/// A container's inspect response, the data the file-read handlers project from.
+/// Not an object: containers emit no canonical bytes, so `/containers/by-name/`
+/// and `/containers/by-id/` are keyed directories of direct file reads.
+#[derive(Clone, Debug)]
 struct Container(ContainerInspectResponse);
-
-/// R3: the Container object declares no canonical face, so the SDK never loads
-/// it. The trait still requires `load`; this stub asserts that invariant. The
-/// macro forwards `Object::load` here and expects an `impl Future`, so it is
-/// `async` despite having nothing to await.
-#[allow(clippy::unused_async)]
-async fn container_load_unreachable(
-    _cx: &Cx<State>,
-    _key: &ContainerKey,
-    _since: Option<Validator>,
-) -> Result<Load<Container>> {
-    Err(ProviderError::internal(
-        "Container has no canonical face; load must not be called",
-    ))
-}
-
-/// R3: with no canonical face the SDK never decodes Container bytes; the trait
-/// still requires `decode`.
-fn container_decode_unreachable(_bytes: &[u8]) -> Result<Container> {
-    Err(ProviderError::internal(
-        "Container has no canonical face; decode must not be called",
-    ))
-}
 
 impl Container {
     fn state_bytes(&self) -> Vec<u8> {
@@ -243,10 +206,11 @@ impl Container {
     }
 }
 
-// Direct-face handlers for the Container object block.
+// File-read handlers for the container faces (shared by by-name, by-id,
+// running, stopped, and the compose subtree).
 
-/// `inspect.json` direct face: fetches the raw inspect JSON and preloads
-/// `state` and `summary.txt` as inline sibling files.
+/// `inspect.json`: fetches the raw inspect JSON and preloads `state` and
+/// `summary.txt` as inline sibling files.
 async fn container_inspect(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
     let (bytes, container) = fetch_inspect(&cx, &key.reference).await?;
     Ok(FileProjection::body(bytes)
@@ -262,7 +226,7 @@ async fn container_state(cx: Cx<State>, key: ContainerKey) -> Result<FileProject
     let (_, container) = fetch_inspect(&cx, &key.reference).await?;
     Ok(FileProjection::body(container.state_bytes())
         .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .preload_file("summary.txt", summary_leaf(&container))
         .build())
 }
@@ -272,7 +236,7 @@ async fn container_summary(cx: Cx<State>, key: ContainerKey) -> Result<FileProje
     let (_, container) = fetch_inspect(&cx, &key.reference).await?;
     Ok(FileProjection::body(container.summary_bytes())
         .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .preload_file("state", state_leaf(&container))
         .build())
 }
@@ -302,18 +266,21 @@ impl DockerProvider {
         r.file("/containers.json").handler(containers_listing)?;
         r.file("/compose.json").handler(compose_listing)?;
 
-        // Container object: direct faces only (R3 — no canonical, no object cache).
-        // Canonical mount at /containers/by-name/{reference}; by-id is an alias.
-        let container = r.object::<Container>("/containers/by-name/{reference}", |o| {
-            o.dynamic();
-            o.file("inspect.json").direct(container_inspect)?;
-            o.file("state").direct(container_state)?;
-            o.file("summary.txt").direct(container_summary)?;
-            Ok(())
-        })?;
-
-        // by-id is an alias of the same Container object spec.
-        r.alias("/containers/by-id/{reference}", &container)?;
+        // Container faces are direct reads (no canonical, no object cache), so
+        // `by-name` and `by-id` are keyed directories of plain file routes that
+        // share the same three handlers, the way `running`/`stopped` below do.
+        r.file("/containers/by-name/{reference}/inspect.json")
+            .handler(container_inspect)?;
+        r.file("/containers/by-name/{reference}/state")
+            .handler(container_state)?;
+        r.file("/containers/by-name/{reference}/summary.txt")
+            .handler(container_summary)?;
+        r.file("/containers/by-id/{reference}/inspect.json")
+            .handler(container_inspect)?;
+        r.file("/containers/by-id/{reference}/state")
+            .handler(container_state)?;
+        r.file("/containers/by-id/{reference}/summary.txt")
+            .handler(container_summary)?;
 
         // Parent directory listings for by-name and by-id.
         r.dir("/containers/by-name").handler(by_name)?;
@@ -498,14 +465,14 @@ fn snapshot_json(bytes: Vec<u8>) -> FileProjection {
 fn state_leaf(container: &Container) -> FileProjection {
     FileProjection::inline(container.state_bytes())
         .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .build()
 }
 
 fn summary_leaf(container: &Container) -> FileProjection {
     FileProjection::inline(container.summary_bytes())
         .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .build()
 }
 

@@ -20,7 +20,6 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use omnifs_sdk::handler::DirIntent;
-use omnifs_sdk::object::{Load, Object, ObjectKind, Validator};
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::{Deserialize, Serialize};
 
@@ -113,36 +112,6 @@ struct TableKey {
     table: TableName,
 }
 
-/// Marker type for the `/tables/{table}` object. All faces are `direct` (live
-/// `SQLite` reads); there is no canonical because the table data is not
-/// object-cached. The `load`/`decode` implementations are required by the
-/// `Object` trait but are never invoked when only direct faces are declared.
-struct Table;
-
-impl Object for Table {
-    type Key = TableKey;
-    type State = State;
-    type Canonical = Json;
-
-    async fn load(
-        _cx: &Cx<Self::State>,
-        _key: &Self::Key,
-        _since: Option<Validator>,
-    ) -> Result<Load<Self>> {
-        Ok(Load::NotFound)
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self> {
-        Err(ProviderError::internal(
-            "Table::decode: no canonical face; decode is unreachable",
-        ))
-    }
-
-    fn kind() -> ObjectKind {
-        ObjectKind("db.table")
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TableDoc {
     pub name: String,
@@ -178,17 +147,21 @@ impl DbProvider {
         r.file("/meta/version.txt").handler(meta_version)?;
         r.file("/meta/path.txt").handler(meta_path)?;
 
+        // `/tables/{table}` is a keyed directory of direct file reads (live
+        // SQLite, no canonical bytes), not an object. The parent `tables_list`
+        // lists table names; the static file routes below list as its children.
         r.dir("/tables").handler(tables_list)?;
-        r.object::<Table>("/tables/{table}", |o| {
-            o.dynamic();
-            o.file("table.json").direct(table_json)?;
-            o.file("schema.sql").direct(table_schema_sql)?;
-            o.file("schema.json").direct(table_schema_json)?;
-            o.file("indexes.json").direct(table_indexes_json)?;
-            o.file("count.txt").direct(table_count_txt)?;
-            o.file("sample.json").direct(table_sample)?;
-            Ok(())
-        })?;
+        r.file("/tables/{table}/table.json").handler(table_json)?;
+        r.file("/tables/{table}/schema.sql")
+            .handler(table_schema_sql)?;
+        r.file("/tables/{table}/schema.json")
+            .handler(table_schema_json)?;
+        r.file("/tables/{table}/indexes.json")
+            .handler(table_indexes_json)?;
+        r.file("/tables/{table}/count.txt")
+            .handler(table_count_txt)?;
+        r.file("/tables/{table}/sample.json")
+            .handler(table_sample)?;
 
         Ok(state)
     }
@@ -397,6 +370,6 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
 
 fn text_content(bytes: impl Into<Vec<u8>>) -> FileProjection {
     FileProjection::body(bytes)
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .build()
 }

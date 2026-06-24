@@ -572,7 +572,7 @@ fn render_event_list(list: EventList) -> String {
 
 pub(crate) fn text_file(bytes: Vec<u8>) -> FileProjection {
     FileProjection::body(bytes)
-        .content_type(ContentType::Custom("text/plain"))
+        .content_type(ContentType::Text)
         .dynamic()
         .build()
 }

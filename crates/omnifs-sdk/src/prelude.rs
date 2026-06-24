@@ -2,7 +2,7 @@ pub use crate::NoConfig;
 pub use crate::browse::{Effects, EntryKind, ReadOutcome};
 pub use crate::captures::{Captures, FromCaptures, PathSegment};
 pub use crate::collection::{
-    Collection, CollectionEntry, CollectionPage, Cursor as ListCursor, ListCx, NoCursor,
+    Collection, CollectionEntry, CollectionPage, Cursor as ListCursor, ListCx, NoCursor, PageCursor,
 };
 pub use crate::cx::Cx;
 pub use crate::cx::join_all;
@@ -26,11 +26,13 @@ pub use crate::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Preloads,
     Validator,
 };
-pub use crate::projection::{BlobFile, DirProjection, Entry, FileProjection, StreamFile};
+pub use crate::projection::{
+    BlobFile, DirProjection, Entry, FileProjection, StreamFile, TextFormat,
+};
 pub use crate::repr::{Atom, Format, Json, Markdown, RenderSet, RenderTable, Representable, Yaml};
 pub use crate::router::{
     ChildTopology, DirFace, DirRoute, FileFace, FileObjectBlock, FileRoute, ObjectBlock,
-    ObjectHandle, RouteSnapshot, Router, TreeRefRoute, object,
+    ObjectHandle, Router, TreeRefRoute, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

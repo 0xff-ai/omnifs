@@ -15,7 +15,7 @@
 use omnifs_sdk::__wit::provider::types as wit_types;
 use omnifs_sdk::browse::{CachedCanonical, List, ReadOutcome};
 use omnifs_sdk::captures::{Captures, FromCaptures};
-use omnifs_sdk::collection::{Collection, CollectionEntry, Cursor, ListCx, NoCursor};
+use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, PageCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
 use omnifs_sdk::file_attrs::{Size, Stability};
@@ -850,20 +850,6 @@ fn anchor_collection_seals_and_merges_repo_names_with_owner_faces() {
         vec!["/o/gvfs/repo.json".to_string()],
         "anchor-collection child view leaf is the child's canonical leaf path"
     );
-}
-
-// A page cursor that round-trips through the opaque wire token.
-struct PageCursor(u32);
-impl Cursor for PageCursor {
-    fn encode(&self) -> String {
-        self.0.to_string()
-    }
-    fn decode(token: &str) -> Result<Self> {
-        token
-            .parse()
-            .map(Self)
-            .map_err(|_| ProviderError::invalid_input("bad page cursor"))
-    }
 }
 
 async fn list_repos_paged(

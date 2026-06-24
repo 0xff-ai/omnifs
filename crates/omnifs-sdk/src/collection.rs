@@ -9,7 +9,7 @@
 //! echoes back as opaque bytes.
 
 use crate::cx::Cx;
-use crate::error::Result;
+use crate::error::{ProviderError, Result};
 use crate::file_attrs::VersionToken;
 use crate::object::{Canonical, Object};
 use crate::projection::FileProjection;
@@ -38,6 +38,24 @@ impl Cursor for NoCursor {
     }
     fn decode(_token: &str) -> Result<Self> {
         Ok(Self)
+    }
+}
+
+/// An integer page cursor for offset/page-number pagination, carried
+/// host-opaque as its decimal string. The common shape when the upstream pages
+/// by a number rather than an opaque continuation token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageCursor(pub u64);
+
+impl Cursor for PageCursor {
+    fn encode(&self) -> String {
+        self.0.to_string()
+    }
+    fn decode(token: &str) -> Result<Self> {
+        token
+            .parse()
+            .map(Self)
+            .map_err(|_| ProviderError::invalid_input("bad page cursor"))
     }
 }
 

@@ -657,15 +657,15 @@ Aliases are first-class because providers commonly expose the same object in
 more than one place.
 
 ```rust
-let container = r.object::<Container>("/containers/by-name/{name}", |o| {
+let paper = r.object::<Paper>("/papers/{paper}/{version}", |o| {
     o.dynamic();
-    o.file("status.txt").direct(Container::status)?;
-    o.file("logs.txt").stream(Container::logs)?;
+    o.file("paper.atom").canonical::<Atom>()?;
+    o.file("paper.pdf").blob(Paper::pdf)?;
     Ok(())
 })?;
 
-r.alias("/containers/by-id/{id}", &container)?;
-r.dir("/containers/running").collection(&container, Container::running)?;
+// The same Paper, also reachable under each of its categories.
+r.alias("/categories/{category}/papers/{paper}/{version}", &paper)?;
 ```
 
 An alias maps to the same object identity or to an explicit key conversion. If
@@ -709,49 +709,11 @@ Reject:
 
 Error messages should name both contributors and the exact path.
 
-Expose one cheap route snapshot check:
-
-```rust
-#[test]
-fn routes_are_valid() {
-    GitHub::routes().assert_valid();
-}
-```
-
-The printed shape should be enough to see the mount:
-
-```text
-/{owner}
-  owner.json
-  profile.md
-  {repo}
-    repo.json
-    repo/
-    issues/{open,all}/{number}
-      item.json
-      item.md
-      title.txt
-      body.md
-      state.txt
-      user.txt
-      comments/{comment_id}/...
-    pulls/{open,all}/{number}
-      item.json
-      item.md
-      title.txt
-      body.md
-      state.txt
-      user.txt
-      diff
-      comments/{comment_id}/...
-    actions/runs/{run_id}
-      run.json
-      status.txt
-      conclusion.txt
-      log
-```
-
-This is more valuable than provider unit tests that only pin helper names.
+The seal runs at component initialization: a route tree that fails any check
+above aborts the provider's `initialize` with an error naming the offending
+path. The gate is the host integration test `all_providers_initialize_and_seal`
+(`crates/omnifs-host/tests/runtime_test.rs`); per repo convention providers
+carry no in-crate route tests.
 
 ## Provider target shapes
 
@@ -856,8 +818,9 @@ not assume one file read is all-or-nothing across all upstream callouts.
 Docker is route-shaped over operational state, not stable canonical state.
 Containers, images, Compose projects, and Compose services are dynamic route
 anchors. System files, lists, logs, and status leaves are fresh file faces.
-Aliases such as by-name, by-id, running, stopped, and Compose service paths point
-at the same object identities only when a real identity exists.
+Containers carry no canonical bytes, so by-name, by-id, running, and stopped are
+keyed directories of plain file routes that share the same handlers, not object
+aliases; Docker holds no object identities.
 
 Docker should not emit canonical object-cache entries unless an upstream
 response becomes a replayable object contract. Docker daemon access is authority

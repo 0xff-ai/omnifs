@@ -345,8 +345,8 @@ impl Repo {
 impl Issue {
     pub(crate) async fn comments(
         key: IssueKey,
-        cx: ListCx<GitHubPageCursor>,
-    ) -> Result<Collection<Comment, GitHubPageCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<Comment, PageCursor>> {
         let page = cx.cursor().map_or(1, |c| c.0);
         comments_collection(
             &cx,
@@ -364,8 +364,8 @@ impl Issue {
 impl PullRequest {
     pub(crate) async fn comments(
         key: PullKey,
-        cx: ListCx<GitHubPageCursor>,
-    ) -> Result<Collection<Comment, GitHubPageCursor>> {
+        cx: ListCx<PageCursor>,
+    ) -> Result<Collection<Comment, PageCursor>> {
         let page = cx.cursor().map_or(1, |c| c.0);
         comments_collection(
             &cx,
@@ -431,28 +431,10 @@ impl WorkflowRun {
 // Helpers
 // ===========================================================================
 
-/// A typed page cursor for the comment listing (1-based GitHub page number),
-/// carried host-opaque through the wire.
-pub(crate) struct GitHubPageCursor(pub(crate) u64);
-
-impl ListCursor for GitHubPageCursor {
-    fn encode(&self) -> String {
-        self.0.to_string()
-    }
-
-    fn decode(token: &str) -> Result<Self> {
-        token
-            .parse()
-            .map(Self)
-            .map_err(|_| ProviderError::invalid_input("bad comment page cursor"))
-    }
-}
-
+/// A dynamic `text/plain` preload leaf: a mutable upstream field cached at
+/// listing time, so it revalidates rather than pinning a stale value.
 fn inline_text(s: &str) -> FileProjection {
-    FileProjection::inline(s.as_bytes().to_vec())
-        .dynamic()
-        .content_type(ContentType::Custom("text/plain"))
-        .build()
+    FileProjection::text(s, TextFormat::Raw).dynamic().build()
 }
 
 /// The shallow eager leaves an issue/PR listing row can fill without the
@@ -502,7 +484,7 @@ async fn comments_collection(
     filter: StateFilter,
     number: u64,
     page: u64,
-) -> Result<Collection<Comment, GitHubPageCursor>> {
+) -> Result<Collection<Comment, PageCursor>> {
     // The list response is a lossy view: serde_json would re-serialize each row
     // key-sorted and compact, which is NOT byte-identical to the verbatim
     // standalone comment GET that `Comment::load` stores. Storing that as the
@@ -532,7 +514,7 @@ async fn comments_collection(
     if len < COMMENT_PAGE_SIZE {
         Ok(Collection::complete(entries))
     } else {
-        Ok(Collection::page(entries).next(GitHubPageCursor(page + 1)))
+        Ok(Collection::page(entries).next(PageCursor(page + 1)))
     }
 }
 
