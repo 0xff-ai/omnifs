@@ -25,7 +25,7 @@ use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, ProjBytes, Size, Stability, VersionToken};
+use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::handler::OpenedFile;
 use crate::object::{FacetAxis, FacetMetadata, Key, Load, Object, ObjectKind};
 use crate::projection::FileProjection;
@@ -1229,7 +1229,7 @@ where
             self.view_leaves_for_base(&list_path)?,
         );
         self.project_eager_fields(&mut effects, &id, &value, &key, &list_path, stability)?;
-        self.lower_preloads(&mut effects, preloads, &list_path)?;
+        self.lower_preloads(&mut effects, preloads, &list_path, stability)?;
         Ok(ObjectListing {
             effects,
             source: Some(source),
@@ -1317,7 +1317,26 @@ where
             // (consistent with the anchor-listing path).
             self.view_leaves_for_base(&anchor_base)?,
         );
-        self.lower_preloads(&mut effects, preloads, &anchor_base)?;
+        // For a file-shaped anchor, the just-read file must also appear in its
+        // parent directory's listing (the day you read shows up in `ls`),
+        // symmetric with how preloaded siblings are projected.
+        if self.shape == AnchorShape::File {
+            let mut file = FileProj::deferred(
+                Size::Exact(canonical.bytes.len() as u64),
+                ReadMode::Full,
+                stability,
+            );
+            if let Some(v) = &canonical.validator {
+                file = file.with_version(v.clone());
+            }
+            effects.project_file_with_id(&anchor_base, Some(&id), file)?;
+            if let Some((parent, _)) = anchor_base.rsplit_once('/')
+                && !parent.is_empty()
+            {
+                effects.project_dir(parent)?;
+            }
+        }
+        self.lower_preloads(&mut effects, preloads, &anchor_base, stability)?;
         serve_fresh::<O>(
             &value,
             &key,
@@ -1406,20 +1425,44 @@ where
         effects: &mut Effects,
         preloads: crate::object::Preloads,
         anchor_base: &str,
+        stability: Stability,
     ) -> Result<()> {
         let (objects, files) = preloads.into_parts();
+
+        // A preloaded sibling resolves on lookup, but it must also appear in its
+        // parent directory's listing so `ls` of the fetched range shows it (the
+        // SDK derives the directory effect from the preload path; spec Part 5).
+        let mut parent_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         for sibling in objects {
             let sibling_base =
                 self.substitute_identity_captures(anchor_base, &sibling.identity_captures);
+            let validator = sibling.canonical.validator.clone();
+            let bytes_len = sibling.canonical.bytes.len() as u64;
             let id = crate::identity::LogicalId::new(O::kind(), sibling.identity_captures);
             let view_leaves = self.view_leaves_for_base(&sibling_base)?;
-            effects.canonical_store(
-                &id,
-                sibling.canonical.validator.clone(),
-                sibling.canonical.bytes,
-                view_leaves,
-            );
+            match self.shape {
+                AnchorShape::File => {
+                    // A file-shaped sibling projects as a deferred dirent with an
+                    // honest size, listed in its parent dir; reads serve from the
+                    // stored canonical.
+                    let mut file =
+                        FileProj::deferred(Size::Exact(bytes_len), ReadMode::Full, stability);
+                    if let Some(v) = &validator {
+                        file = file.with_version(v.clone());
+                    }
+                    effects.project_file_with_id(&sibling_base, Some(&id), file)?;
+                    if let Some((parent, _)) = sibling_base.rsplit_once('/')
+                        && !parent.is_empty()
+                    {
+                        parent_dirs.insert(parent.to_string());
+                    }
+                },
+                AnchorShape::Dir => {
+                    parent_dirs.insert(sibling_base.clone());
+                },
+            }
+            effects.canonical_store(&id, validator, sibling.canonical.bytes, view_leaves);
         }
 
         for (path, file) in files {
@@ -1428,7 +1471,16 @@ where
                     "preload file {path:?} has a Body/Ranged/Blob source; serve it through its own face"
                 ))
             })?;
+            if let Some((parent, _)) = path.rsplit_once('/')
+                && !parent.is_empty()
+            {
+                parent_dirs.insert(parent.to_string());
+            }
             effects.project_file(&path, proj)?;
+        }
+
+        for dir in parent_dirs {
+            effects.project_dir(&dir)?;
         }
         Ok(())
     }
