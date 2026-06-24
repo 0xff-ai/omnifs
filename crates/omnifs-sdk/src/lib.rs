@@ -163,7 +163,6 @@ pub mod handler;
 pub mod helpers;
 pub mod http;
 pub mod identity;
-pub mod init;
 pub mod invalidation;
 pub mod object;
 pub mod prelude;
@@ -179,7 +178,6 @@ pub use file_attrs::{
 };
 pub use handler::{FileChunk, MemoryRangeReader, RangeReader};
 pub use omnifs_core::ContentType;
-pub use omnifs_sdk_macros::Config;
 pub use omnifs_sdk_macros::Endpoint;
 pub use omnifs_sdk_macros::config;
 pub use omnifs_sdk_macros::object;

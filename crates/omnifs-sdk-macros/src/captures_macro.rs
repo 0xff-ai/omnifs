@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Attribute, Fields, GenericArgument, ItemStruct, LitStr, PathArguments, Type, TypePath};
+use syn::{Fields, GenericArgument, ItemStruct, LitStr, PathArguments, Type, TypePath};
 
 fn option_inner_type(ty: &Type) -> Option<&Type> {
     let Type::Path(type_path) = ty else {
@@ -48,17 +48,12 @@ fn facet_inner_type(ty: &Type) -> Option<&Type> {
     Some(inner)
 }
 
-fn has_flatten_attr(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.path().is_ident("flatten"))
-}
-
 struct FieldSpec {
     ident: syn::Ident,
     name_lit: LitStr,
     ty: Type,
     is_option: bool,
     facet_inner_ty: Option<Type>,
-    is_flatten: bool,
 }
 
 pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2> {
@@ -82,7 +77,6 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
                 ty: field.ty.clone(),
                 is_option: option_inner_type(&field.ty).is_some(),
                 facet_inner_ty,
-                is_flatten: has_flatten_attr(&field.attrs),
             })
         })
         .collect::<syn::Result<Vec<_>>>()?;
@@ -90,11 +84,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
     let field_inits = fields.iter().map(|field| {
         let ident = &field.ident;
         let name_lit = &field.name_lit;
-        if field.is_flatten {
-            quote! {
-                #ident: #ident::from_captures(caps)?,
-            }
-        } else if field.is_option {
+        if field.is_option {
             quote! {
                 #ident: caps.parse_optional(#name_lit)?,
             }
@@ -112,7 +102,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         }
     });
 
-    let present_validations = fields.iter().filter(|f| !f.is_flatten).map(|field| {
+    let present_validations = fields.iter().map(|field| {
         let name_lit = &field.name_lit;
         let ty = &field.ty;
         if let Some(inner_ty) = option_inner_type(&field.ty) {
@@ -139,7 +129,7 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
 
     let identity_fields: Vec<_> = fields
         .iter()
-        .filter(|f| f.facet_inner_ty.is_none() && !f.is_flatten)
+        .filter(|f| f.facet_inner_ty.is_none())
         .collect();
     let identity_captures_body = identity_fields.iter().map(|field| {
         let name_lit = &field.name_lit;
@@ -149,16 +139,9 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         }
     });
 
-    let flatten_identity = fields.iter().filter(|f| f.is_flatten).map(|field| {
-        let ident = &field.ident;
-        quote! {
-            captures.splice(0..0, self.#ident.identity_captures());
-        }
-    });
-
     let facet_fields: Vec<_> = fields
         .iter()
-        .filter(|field| field.facet_inner_ty.is_some() && !field.is_flatten)
+        .filter(|field| field.facet_inner_ty.is_some())
         .collect();
     let facet_axis_pushes = facet_fields.iter().map(|field| {
         let name_lit = &field.name_lit;
@@ -237,7 +220,6 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         {
             fn identity_captures(&self) -> ::std::vec::Vec<(&'static str, ::std::string::String)> {
                 let mut captures = ::std::vec::Vec::new();
-                #(#flatten_identity)*
                 #(#identity_captures_body)*
                 captures
             }

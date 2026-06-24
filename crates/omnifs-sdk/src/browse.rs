@@ -411,23 +411,6 @@ impl Lookup {
         })
     }
 
-    /// A found file with inline bytes, defaulting to
-    /// `Stability::Stable` and no version token; build the [`Entry`]
-    /// yourself when the content can change.
-    pub fn file(name: impl Into<String>, content: impl Into<Vec<u8>>) -> Self {
-        let content = content.into();
-        Self::Entry(LookupEntry {
-            target: Entry::file(name, FileProj::inline(content, Stability::Stable, None)),
-            siblings: Vec::new(),
-            exhaustive: true,
-            effects: Effects::new(),
-        })
-    }
-
-    pub fn dir(name: impl Into<String>) -> Self {
-        Self::entry(Entry::dir(name))
-    }
-
     /// Hand the child off as a host-resolved subtree (a git clone, an
     /// extracted archive). `tree` is the handle a tree-opening callout
     /// returned; dispatch below this point belongs to the host.

@@ -12,15 +12,14 @@ pub use crate::endpoint::{
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::file_attrs::{
-    FileAttrs, FileProj, MAX_EAGER_RESPONSE_BYTES, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES,
-    ProjBytes, ReadFileBytes, ReadMode, Size, Stability, VersionToken,
+    FileAttrs, FileProj, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, ProjBytes, ReadFileBytes,
+    ReadMode, Size, Stability, VersionToken,
 };
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
 };
 pub use crate::helpers::{err, err_step, pretty_json};
 pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
-pub use crate::init::Init;
 pub use crate::invalidation::Invalidation;
 pub use crate::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Preloads,

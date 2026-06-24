@@ -12,15 +12,10 @@
 //!   from a file route; the host reads them without guest involvement.
 //! - `cx.archives().open(blob).format(..).send()`: mount as a directory tree
 //!   (see [`crate::archives`]).
-//! - `cx.blob(blob).read().await`: bring (a range of) the bytes across the
-//!   WIT into guest memory. Use sparingly; each response is capped by host
-//!   policy because those bytes cross into the guest.
 
-use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::http::CalloutFuture;
 use omnifs_wit::provider::types::{
-    BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header, ReadBlobRequest,
+    BlobFetchRequest, BlobFetched, Callout, CalloutResult, Header,
 };
 
 /// Runtime-local handle for a blob stored in the host cache. Valid only for
@@ -33,12 +28,6 @@ impl BlobId {
     /// Return the raw WIT `blob-id` value.
     pub fn raw(self) -> u64 {
         self.0
-    }
-}
-
-impl From<u64> for BlobId {
-    fn from(id: u64) -> Self {
-        Self(id)
     }
 }
 
@@ -65,11 +54,6 @@ pub struct BlobRef {
 }
 
 impl BlobRef {
-    /// Runtime-local id of the cached blob.
-    pub fn id(&self) -> BlobId {
-        self.id
-    }
-
     /// Default 4xx/5xx mapping. Mirrors the inline-HTTP `error_for_status`
     /// so blob fetches participate in the same error flow.
     pub fn error_for_status(self) -> Result<Self> {
@@ -78,14 +62,6 @@ impl BlobRef {
         } else {
             Ok(self)
         }
-    }
-
-    /// Return a response header value by case-insensitive name.
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.response_headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -133,64 +109,3 @@ pub(crate) fn extract_blob(result: CalloutResult) -> Result<BlobRef> {
     )
 }
 
-/// Builder returned by `cx.blob(id)`.
-///
-/// Reads copy cached bytes back into guest memory, so each response is
-/// capped by host policy. Serve large files with
-/// [`crate::projection::FileProjection::blob`] or expose archives as
-/// [`crate::handler::TreeRef`]s when the provider does not need the bytes
-/// in memory; reach for a read only when the provider must parse the
-/// content itself.
-pub struct BlobReader<'cx, S> {
-    cx: &'cx Cx<S>,
-    blob: BlobId,
-}
-
-impl<'cx, S> BlobReader<'cx, S> {
-    pub(crate) fn new(cx: &'cx Cx<S>, blob: BlobId) -> Self {
-        Self { cx, blob }
-    }
-
-    /// Read the whole blob from offset zero to EOF.
-    ///
-    /// This is only suitable for blobs small enough to fit under the
-    /// host's `read-blob` cap.
-    pub fn read(self) -> CalloutFuture<'cx, S, Vec<u8>> {
-        CalloutFuture::new(
-            self.cx,
-            Callout::ReadBlob(ReadBlobRequest {
-                blob: self.blob.0,
-                offset: 0,
-                len: None,
-            }),
-            extract_blob_read,
-        )
-    }
-
-    /// Read at most `len` bytes starting at `offset`.
-    ///
-    /// Offsets past EOF return an empty byte vector. The host cap
-    /// applies to the returned byte count, not to the absolute offset.
-    pub fn read_range(self, offset: u64, len: u32) -> CalloutFuture<'cx, S, Vec<u8>> {
-        CalloutFuture::new(
-            self.cx,
-            Callout::ReadBlob(ReadBlobRequest {
-                blob: self.blob.0,
-                offset,
-                len: Some(len),
-            }),
-            extract_blob_read,
-        )
-    }
-}
-
-fn extract_blob_read(result: CalloutResult) -> Result<Vec<u8>> {
-    crate::http::expect_callout(
-        "read-blob",
-        |r| match r {
-            CalloutResult::BlobRead(bytes) => Some(Ok(bytes)),
-            _ => None,
-        },
-        result,
-    )
-}

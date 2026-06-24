@@ -1373,16 +1373,14 @@ where
                 continue;
             }
             let projection = derive(value, key)?;
-            let mut file = projection.as_file_proj().ok_or_else(|| {
-                ProviderError::internal(format!(
-                    "derived object leaf {leaf_name:?} cannot preload non-inline bytes"
-                ))
-            })?;
-            if !matches!(file.bytes, ProjBytes::Inline(_)) {
+            let Some(mut file) = projection
+                .as_file_proj()
+                .filter(|f| matches!(f.bytes, ProjBytes::Inline(_)))
+            else {
                 return Err(ProviderError::internal(format!(
                     "derived object leaf {leaf_name:?} cannot preload non-inline bytes"
                 )));
-            }
+            };
             file.attrs = FileAttrs::new(file.attrs.size, stability);
             effects.project_file_with_id(format!("{list_path}/{leaf_name}"), Some(id), file)?;
         }

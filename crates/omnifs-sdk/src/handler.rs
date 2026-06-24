@@ -7,8 +7,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-pub use crate::file_attrs::MAX_PROJECTED_BYTES;
-
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
 
 /// A pagination cursor for non-exhaustive listings: an upstream-issued

@@ -7,7 +7,6 @@
 //! a handler or `Object::load` runs.
 
 use crate::error::{ProviderError, Result};
-use crate::router::pattern::Match as PatternMatch;
 use core::fmt::Display;
 use core::str::FromStr;
 
@@ -86,19 +85,6 @@ impl Captures {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
-    }
-
-    /// Build captures from a successful route pattern match.
-    pub fn from_match(matched: &PatternMatch) -> Self {
-        Self::new(
-            matched
-                .captures()
-                .map(|(name, value)| Capture {
-                    name: name.to_string(),
-                    value: value.to_string(),
-                })
-                .collect(),
-        )
     }
 
     /// Parse a named capture through its `FromStr`, mapping a parse failure

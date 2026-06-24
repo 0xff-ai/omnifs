@@ -17,11 +17,6 @@ use omnifs_wit::provider::types as wit_types;
 /// [`FileProj::validate`]. Content larger than this must be a deferred
 /// projection or a blob; it cannot ride inline in a terminal.
 pub const MAX_PROJECTED_BYTES: usize = 64 * 1024;
-/// Aggregate eager byte cap (512 KiB) the host enforces across all inline
-/// payloads of one terminal response. Individual projections can each pass
-/// [`MAX_PROJECTED_BYTES`] yet still overflow this together; trim preloads
-/// rather than splitting one logical answer across refetches.
-pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 /// Maximum [`VersionToken`] length in bytes, enforced by
 /// [`VersionToken::validate`].
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;

@@ -52,7 +52,7 @@ impl<S> Router<S> {
         }
 
         let file_match = shape.file_route(&child_abs);
-        if let Some(dir_route) = shape.direct_dir_route(&child_abs) {
+        if let Some(dir_route) = shape.dir_route(&child_abs) {
             let file_wins = file_match.as_ref().is_some_and(|file_route| {
                 file_route.entry.pattern.precedence_key() > dir_route.entry.pattern.precedence_key()
             });
@@ -78,7 +78,7 @@ impl<S> Router<S> {
             return Ok(shape.static_dir_lookup(&parent_abs, name));
         }
 
-        if let Some(route) = shape.list_dir_route(&parent_abs) {
+        if let Some(route) = shape.dir_route(&parent_abs) {
             let dir_cx = DirCx::new(
                 cx.clone(),
                 DirIntent::Lookup {

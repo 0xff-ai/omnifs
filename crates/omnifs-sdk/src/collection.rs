@@ -224,11 +224,6 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
         }
     }
 
-    #[must_use]
-    pub fn with_validator(mut self, validator: impl Into<VersionToken>) -> Self {
-        self.validator = Some(validator.into());
-        self
-    }
 }
 
 /// Lower a typed [`Collection`] to the [`crate::projection::DirProjection`] the

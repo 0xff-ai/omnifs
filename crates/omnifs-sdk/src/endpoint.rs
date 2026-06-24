@@ -223,13 +223,6 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
         self
     }
 
-    /// Set the `Accept` header. Invalid values follow the same sticky-error
-    /// path as `.header(..)`.
-    #[must_use]
-    pub fn accept(self, content_type: &str) -> Self {
-        self.header("accept", content_type)
-    }
-
     /// Serialize `value` as the JSON request body and set `Content-Type:
     /// application/json`. A serialization failure is recorded and surfaced by
     /// the terminal (no request is sent), rather than smuggled through a header.

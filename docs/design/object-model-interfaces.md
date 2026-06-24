@@ -53,9 +53,9 @@ record id-capture {
 
 **Canonicalization contract (producer = SDK, consumer = host, never re-derived):**
 
-- `captures` are in **declaration order**: the order the key's fields are declared,
-  with a `#[flatten]` parent's captures prepended. The macro emits this order
-  directly (it walks fields top to bottom); there is no sort step.
+- `captures` are in **declaration order**: the order the key's fields are declared.
+  The macro emits this order directly (it walks fields top to bottom); there is no
+  sort step.
 - A capture `value` is the **idempotent `Display`** of the parsed typed value.
   Normalization (e.g. GitHub owner case-folding) happens once in `FromStr`; identity
   never uses the raw path segment. The `#[path_captures]` macro emits a generated
@@ -296,11 +296,11 @@ it. Overlap ⇒ `start()`-time error surfaced through `initialize()`. The same
 
 `crates/omnifs-sdk-macros`.
 
-- `#[path_captures]`: gains `Facet<T>` detection and `#[flatten]` parent embedding
-  (modelled on the existing Option detection). Emits `FromCaptures` (Facet-aware) and
-  `IdentityCaptures::identity_captures()` (declaration order, Facet-excluded, flatten
-  prepends parent), plus the generated round-trip `#[test]`. Does **not** emit
-  `anchor()` (defaulted on `Key`).
+- `#[path_captures]`: gains `Facet<T>` detection (modelled on the existing Option
+  detection). Emits `FromCaptures` (Facet-aware) and
+  `IdentityCaptures::identity_captures()` (declaration order, Facet-excluded), plus
+  the generated round-trip `#[test]`. Does **not** emit `anchor()` (defaulted on
+  `Key`).
 - `#[object(kind = "...", key = KeyType, canonical = ..., parse = ..)]`:
   emits `Object::Key`, `kind`, `canonical_content_type`, and optional custom
   `parse_canonical`. Stability is declared in the object builder, not the
