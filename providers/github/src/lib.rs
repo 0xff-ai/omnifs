@@ -14,13 +14,10 @@ mod api;
 mod item;
 mod objects;
 
-pub(crate) use api::{GithubRest, github_check_status};
+use api::GitHubApi;
 use item::ItemKind;
 pub(crate) use objects::ItemData;
 use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
-
-/// Base URL for the GitHub REST API. Compose with a leading-slash path.
-pub(crate) const API_BASE: &str = "https://api.github.com";
 
 /// Parse a JSON API response body into a model type.
 pub(crate) fn parse_model<T>(body: &[u8]) -> Result<T>
@@ -255,7 +252,11 @@ pub(crate) async fn fetch_owner_repos(
     };
     let base = format!("/{scope}/{owner}/repos?per_page={PAGE_SIZE}&sort=updated");
 
-    let first: Vec<RepoListing> = cx.github_json(format!("{base}&page=1")).await?;
+    let first: Vec<RepoListing> = cx
+        .endpoint(GitHubApi)
+        .get(format!("{base}&page=1"))
+        .json()
+        .await?;
     if first.len() < PAGE_SIZE {
         return Ok(first.into_iter().map(|r| r.name).collect());
     }
@@ -265,8 +266,11 @@ pub(crate) async fn fetch_owner_repos(
 
     while next_page <= MAX_PAGES {
         let batch_end = (next_page + CONCURRENCY - 1).min(MAX_PAGES);
-        let requests = (next_page..=batch_end)
-            .map(|page| cx.github_json::<Vec<RepoListing>>(format!("{base}&page={page}")));
+        let requests = (next_page..=batch_end).map(|page| {
+            cx.endpoint(GitHubApi)
+                .get(format!("{base}&page={page}"))
+                .json::<Vec<RepoListing>>()
+        });
 
         for batch in join_all(requests).await {
             let repos = batch?;
@@ -287,7 +291,9 @@ pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Opt
     use omnifs_sdk::error::ProviderErrorKind;
 
     match cx
-        .github_json::<UserProfile>(format!("/users/{owner}"))
+        .endpoint(GitHubApi)
+        .get(format!("/users/{owner}"))
+        .json::<UserProfile>()
         .await
     {
         Ok(profile) => {
@@ -302,7 +308,9 @@ pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Opt
     }
 
     match cx
-        .github_json::<OrganizationProfile>(format!("/orgs/{owner}"))
+        .endpoint(GitHubApi)
+        .get(format!("/orgs/{owner}"))
+        .json::<OrganizationProfile>()
         .await
     {
         Ok(_) => Ok(Some(OwnerKind::Org)),
@@ -361,7 +369,7 @@ pub(crate) async fn list_items(
          &sort=created&direction=desc&per_page={PAGE_SIZE}"
     );
 
-    let first: SearchResults = match cx.github_json(&search_path).await {
+    let first: SearchResults = match cx.endpoint(GitHubApi).get(search_path).json().await {
         Ok(results) => results,
         Err(err) if is_search_repo_missing(&err) => {
             if repo_exists(cx, owner, repo).await? {
@@ -379,8 +387,11 @@ pub(crate) async fn list_items(
     items.reserve((capped_total as usize).saturating_sub(items.len()));
 
     if page_count > 1 {
-        let page_requests = (2..=page_count)
-            .map(|page| cx.github_json::<Vec<ItemData>>(format!("{rest_path}&page={page}")));
+        let page_requests = (2..=page_count).map(|page| {
+            cx.endpoint(GitHubApi)
+                .get(format!("{rest_path}&page={page}"))
+                .json::<Vec<ItemData>>()
+        });
         for page in join_all(page_requests).await {
             items.extend(page?);
         }
@@ -410,7 +421,9 @@ async fn repo_exists(cx: &Cx, owner: &OwnerName, repo: &RepoName) -> Result<bool
     use omnifs_sdk::error::ProviderErrorKind;
 
     match cx
-        .github_json::<serde::de::IgnoredAny>(format!("/repos/{owner}/{repo}"))
+        .endpoint(GitHubApi)
+        .get(format!("/repos/{owner}/{repo}"))
+        .json::<serde::de::IgnoredAny>()
         .await
     {
         Ok(_) => Ok(true),

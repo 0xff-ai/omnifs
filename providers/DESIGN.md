@@ -741,17 +741,16 @@ but the behavior must preserve host-resident bytes:
 ```rust
 async fn diff(cx: Cx<GitHub>, key: PullRequestKey) -> Result<BlobFile<Diff>> {
     let blob = cx
-        .github_get(format!("/repos/{}/pulls/{}", key.repo(), key.number()))
+        .endpoint(GitHubApi)
+        .get(format!("/repos/{}/pulls/{}", key.repo(), key.number()))
         .header("Accept", "application/vnd.github.diff")
         .into_blob()
-        .with_cache_key(format!("github/pulls/{}/diff", key.id()))
-        .send()
-        .await?
-        .error_for_status()?;
+        .cache_key(format!("github/pulls/{}/diff", key.id()))
+        .fetch()
+        .await?;
 
-    Ok(BlobFile::new(blob.id())
+    Ok(BlobFile::new(blob.id)
         .size(Size::Exact(blob.size))
-        .version(blob.etag)
         .content_type("text/x-diff"))
 }
 ```

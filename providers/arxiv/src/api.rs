@@ -13,13 +13,17 @@ use crate::objects::Paper;
 use crate::{normalize_whitespace, split_versioned_id};
 
 #[derive(omnifs_sdk::Endpoint)]
-#[endpoint(base = "https://export.arxiv.org")]
-#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+#[endpoint(
+    base = "https://export.arxiv.org",
+    default_header = "User-Agent: omnifs-provider-arxiv"
+)]
 pub struct ArxivApi;
 
 #[derive(omnifs_sdk::Endpoint)]
-#[endpoint(base = "https://arxiv.org")]
-#[endpoint(default_header = "User-Agent: omnifs-provider-arxiv")]
+#[endpoint(
+    base = "https://arxiv.org",
+    default_header = "User-Agent: omnifs-provider-arxiv"
+)]
 pub struct ArxivWeb;
 
 const ABS_BASE: &str = "https://arxiv.org/abs";
@@ -41,7 +45,7 @@ pub(crate) async fn load_paper<S>(
     since: Option<Validator>,
 ) -> Result<Load<Paper>> {
     match cx
-        .endpoint::<ArxivApi>()
+        .endpoint(ArxivApi)
         .get("/api/query")
         .query("id_list", raw_id)
         .maybe_if_none_match(since.as_ref())
@@ -66,7 +70,7 @@ pub(crate) async fn fetch_category_page<S>(
     page: u32,
 ) -> Result<Vec<String>> {
     let resp = cx
-        .endpoint::<ArxivApi>()
+        .endpoint(ArxivApi)
         .get("/api/query")
         .query("search_query", format!("cat:{category}"))
         .query("start", page * CATEGORY_PAGE_SIZE)
@@ -130,7 +134,7 @@ pub(crate) async fn download_source<S>(
 }
 
 async fn fetch_blob<S>(cx: &Cx<S>, path: &str, cache_key: String) -> Result<BlobHandle> {
-    cx.endpoint::<ArxivWeb>()
+    cx.endpoint(ArxivWeb)
         .get(path)
         .into_blob()
         .cache_key(cache_key)

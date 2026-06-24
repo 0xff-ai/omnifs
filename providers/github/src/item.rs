@@ -9,11 +9,11 @@ use rc_zip_sync::ReadZip;
 use omnifs_core::ContentType;
 use omnifs_sdk::prelude::*;
 
-use crate::api::GithubRest;
+use crate::api::GitHubApi;
 use crate::objects::{Comment, Issue, ItemData, Owner, PullRequest, Repo, WorkflowRun};
 use crate::{
     COMMENT_PAGE_SIZE, OwnerName, RepoId, RepoName, StateFilter, WorkflowRunsResponse,
-    fetch_owner_repos, github_check_status, list_items, resolve_owner_kind,
+    fetch_owner_repos, list_items, parse_model, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
@@ -142,13 +142,19 @@ impl Owner {
         // GitHub serves user and org profiles at distinct paths; probe the user
         // endpoint first, then orgs, mirroring `resolve_owner_kind`.
         match cx
-            .github_load::<Self>(format!("/users/{}", key.owner), since.clone())
+            .endpoint(GitHubApi)
+            .get(format!("/users/{}", key.owner))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<Self>)
             .await
         {
             Ok(Load::NotFound) => {},
             other => return other,
         }
-        cx.github_load::<Self>(format!("/orgs/{}", key.owner), since)
+        cx.endpoint(GitHubApi)
+            .get(format!("/orgs/{}", key.owner))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<Self>)
             .await
     }
 }
@@ -159,7 +165,10 @@ impl Repo {
         key: &RepoKey,
         since: Option<Validator>,
     ) -> Result<Load<Self>> {
-        cx.github_load::<Self>(format!("/repos/{}/{}", key.owner, key.repo), since)
+        cx.endpoint(GitHubApi)
+            .get(format!("/repos/{}/{}", key.owner, key.repo))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<Self>)
             .await
     }
 }
@@ -172,7 +181,10 @@ impl Issue {
     ) -> Result<Load<Self>> {
         let repo = RepoId::new(&key.owner, &key.repo);
         match cx
-            .github_load::<ItemData>(format!("/repos/{repo}/issues/{}", key.number), since)
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/issues/{}", key.number))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<ItemData>)
             .await?
         {
             Load::Fresh { value, .. } if value.is_pull_request() => Ok(Load::NotFound),
@@ -193,7 +205,10 @@ impl PullRequest {
     ) -> Result<Load<Self>> {
         let repo = RepoId::new(&key.owner, &key.repo);
         match cx
-            .github_load::<ItemData>(format!("/repos/{repo}/pulls/{}", key.number), since)
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/pulls/{}", key.number))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<ItemData>)
             .await?
         {
             Load::Fresh {
@@ -214,11 +229,11 @@ impl Comment {
         let repo = RepoId::new(&key.owner, &key.repo);
         // Comments live under the shared issues endpoint regardless of whether
         // the parent is an issue or a pull.
-        cx.github_load::<Self>(
-            format!("/repos/{repo}/issues/comments/{}", key.comment_id),
-            since,
-        )
-        .await
+        cx.endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/issues/comments/{}", key.comment_id))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<Self>)
+            .await
     }
 }
 
@@ -229,7 +244,10 @@ impl WorkflowRun {
         since: Option<Validator>,
     ) -> Result<Load<Self>> {
         let repo = RepoId::new(&key.owner, &key.repo);
-        cx.github_load::<Self>(format!("/repos/{repo}/actions/runs/{}", key.run_id), since)
+        cx.endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/actions/runs/{}", key.run_id))
+            .maybe_if_none_match(since.as_ref())
+            .load_with(parse_model::<Self>)
             .await
     }
 }
@@ -319,7 +337,9 @@ impl Repo {
     ) -> Result<Collection<WorkflowRun, NoCursor>> {
         let repo_id = RepoId::new(&key.owner, &key.repo);
         let runs: WorkflowRunsResponse = cx
-            .github_json(format!("/repos/{repo_id}/actions/runs?per_page=30"))
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo_id}/actions/runs?per_page=30"))
+            .json()
             .await?;
         let entries = runs.workflow_runs.into_iter().map(|run| {
             let files = vec![
@@ -388,14 +408,14 @@ impl PullRequest {
     pub(crate) async fn diff(cx: Cx, key: PullKey) -> Result<BlobFile<omnifs_sdk::repr::Json>> {
         let repo_id = RepoId::new(&key.owner, &key.repo);
         let blob = cx
-            .github_get(format!("/repos/{repo_id}/pulls/{}", key.number))
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo_id}/pulls/{}", key.number))
             .header("Accept", "application/vnd.github.diff")
             .into_blob()
-            .with_cache_key(format!("github/pulls/{repo_id}/{}/diff", key.number))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(BlobFile::new(blob.id())
+            .cache_key(format!("github/pulls/{repo_id}/{}/diff", key.number))
+            .fetch()
+            .await?;
+        Ok(BlobFile::new(blob.id)
             .size(Size::Exact(blob.size))
             .content_type(ContentType::Custom("text/x-diff")))
     }
@@ -419,11 +439,13 @@ impl WorkflowRun {
     pub(crate) async fn log(cx: Cx, key: RunKey) -> Result<FileProjection> {
         let repo = RepoId::new(&key.owner, &key.repo);
         let resp = cx
-            .github_get(format!("/repos/{repo}/actions/runs/{}/logs", key.run_id))
-            .send()
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo}/actions/runs/{}/logs", key.run_id))
+            .send_checked()
             .await?;
-        let body = github_check_status(resp)?.into_body();
-        Ok(FileProjection::body(unzip_logs(&body)).dynamic().build())
+        Ok(FileProjection::body(unzip_logs(resp.body()))
+            .dynamic()
+            .build())
     }
 }
 
@@ -493,9 +515,11 @@ async fn comments_collection(
     // from any source) and let `comment.json`/`comment.md` load from the
     // verbatim GET on first read, mirroring issues/pulls/runs.
     let comments: Vec<Comment> = cx
-        .github_json(format!(
+        .endpoint(GitHubApi)
+        .get(format!(
             "/repos/{owner}/{repo}/issues/{number}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
         ))
+        .json()
         .await?;
     let len = comments.len() as u64;
     let mut entries = Vec::with_capacity(comments.len());

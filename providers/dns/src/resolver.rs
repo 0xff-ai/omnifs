@@ -11,7 +11,6 @@ use hickory_proto::rr::Name;
 use hickory_proto::rr::RecordType as HickoryRecordType;
 
 use omnifs_sdk::Cx;
-use omnifs_sdk::http::ResponseExt;
 use omnifs_sdk::prelude::*;
 
 use crate::{DnsRecord, State};
@@ -217,15 +216,29 @@ fn builtin_resolver_entries() -> Result<Vec<ResolverEntry>> {
         .collect()
 }
 
+/// The `DoH` resolver endpoint. The base is the fully-formed query URL
+/// (resolver URL plus the `dns=` parameter, built by [`query_url`]), so the
+/// request path is empty and the endpoint URL builder uses the base verbatim.
+/// Routing through the endpoint gives every resolver the rate-limit breaker.
+struct DohEndpoint {
+    base: String,
+}
+
+impl omnifs_sdk::endpoint::Endpoint for DohEndpoint {
+    fn base(&self) -> &str {
+        &self.base
+    }
+}
+impl omnifs_sdk::endpoint::EndpointHooks for DohEndpoint {}
+
 async fn fetch_dns_message(cx: &Cx<State>, url: String) -> Result<Vec<u8>> {
     let response = cx
-        .http()
-        .get(url)
+        .endpoint(DohEndpoint { base: url })
+        .get("")
         .header("Accept", "application/dns-message")
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(response.into_body())
+        .send_checked()
+        .await?;
+    Ok(response.body().to_vec())
 }
 
 /// Validated `DoH` endpoint URL (always HTTPS).

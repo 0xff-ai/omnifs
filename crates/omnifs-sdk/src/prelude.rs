@@ -7,7 +7,8 @@ pub use crate::collection::{
 pub use crate::cx::Cx;
 pub use crate::cx::join_all;
 pub use crate::endpoint::{
-    BlobHandle, BlobRequestBuilder, Endpoint, EndpointHandle, HttpResponse, RequestBuilder,
+    BlobHandle, BlobRequestBuilder, Endpoint, EndpointHandle, EndpointHooks, HttpResponse,
+    RequestBuilder,
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::file_attrs::{

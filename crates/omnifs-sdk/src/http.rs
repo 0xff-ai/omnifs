@@ -674,7 +674,7 @@ impl HttpEndpoint {
         match self {
             Self::Tcp(base) => {
                 let mut url = base.trim_end_matches('/').to_string();
-                if !path.starts_with('/') {
+                if !path.is_empty() && !path.starts_with('/') {
                     url.push('/');
                 }
                 url.push_str(path);
@@ -691,7 +691,7 @@ impl HttpEndpoint {
                 let socket_str = socket.to_string_lossy();
                 let host = hex::encode(socket_str.as_bytes());
                 let mut url = format!("unix://{host}");
-                if !path.starts_with('/') {
+                if !path.is_empty() && !path.starts_with('/') {
                     url.push('/');
                 }
                 url.push_str(path);
