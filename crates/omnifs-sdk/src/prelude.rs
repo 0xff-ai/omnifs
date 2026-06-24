@@ -8,7 +8,6 @@ pub use crate::cx::Cx;
 pub use crate::cx::join_all;
 pub use crate::endpoint::{
     BlobHandle, BlobRequestBuilder, Endpoint, EndpointHandle, HttpResponse, RequestBuilder,
-    Revalidate,
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::file_attrs::{
@@ -29,10 +28,9 @@ pub use crate::object::{
 pub use crate::projection::{
     BlobFile, DirProjection, Entry, FileProjection, StreamFile, TextFormat,
 };
-pub use crate::repr::{Atom, Format, Json, Markdown, RenderSet, RenderTable, Representable, Yaml};
+pub use crate::repr::{Atom, Format, Json, Markdown, RenderTable, Representable, Yaml};
 pub use crate::router::{
-    ChildTopology, DirFace, DirRoute, FileFace, FileObjectBlock, FileRoute, ObjectBlock,
-    ObjectHandle, Router, TreeRefRoute, object,
+    DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router, TreeRefRoute, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

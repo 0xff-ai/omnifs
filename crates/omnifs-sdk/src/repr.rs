@@ -38,40 +38,6 @@ impl Format for Yaml {
     const CT: ContentType = ContentType::Yaml;
 }
 
-/// Build erased render fns from format markers for object `O`.
-///
-/// Implemented only for `()`, `(Markdown,)`, and `(Yaml,)`; each non-unit
-/// element requires `O: Representable<F>`. `()` means the object exposes only
-/// its canonical representation.
-pub trait RenderSet<O: crate::object::Object> {
-    fn register(table: &mut Vec<(ContentType, RenderFn)>);
-}
-
-impl<O: crate::object::Object> RenderSet<O> for () {
-    fn register(_table: &mut Vec<(ContentType, RenderFn)>) {}
-}
-
-macro_rules! impl_render_set {
-    ($($F:ident),+) => {
-        impl<O: crate::object::Object $(+ Representable<$F>)*> RenderSet<O> for ($($F,)+) {
-            fn register(table: &mut Vec<(ContentType, RenderFn)>) {
-                $(table.push((<$F as Format>::CT, render_fn::<O, $F>()));)+
-            }
-        }
-    };
-}
-
-impl_render_set!(Markdown);
-impl_render_set!(Yaml);
-
-fn render_fn<O, F>() -> RenderFn
-where
-    O: crate::object::Object + Representable<F>,
-    F: Format,
-{
-    |canonical| O::decode(canonical).map(|value| value.represent())
-}
-
 /// A value that can render itself into format `F`.
 ///
 /// Rendering is infallible by design: parse failures belong to

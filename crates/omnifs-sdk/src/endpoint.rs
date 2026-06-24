@@ -105,7 +105,7 @@ pub struct EndpointHandle<'a, E, S = ()> {
 }
 
 impl<'a, E: Endpoint, S> EndpointHandle<'a, E, S> {
-    pub fn new(cx: &'a Cx<S>) -> Self {
+    pub(crate) fn new(cx: &'a Cx<S>) -> Self {
         Self {
             cx,
             _endpoint: core::marker::PhantomData,
@@ -224,7 +224,7 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
     }
 
     /// Map the host-pushed validator to `If-None-Match` when present, so a 304
-    /// short-circuits to [`Load::Unchanged`] / [`Revalidate::Unchanged`].
+    /// short-circuits to [`Load::Unchanged`].
     /// Take the validator from [`Cx::version`] or the `since` argument of
     /// `Object::load`; passing `None` is a plain unconditional fetch.
     #[must_use]
@@ -330,24 +330,6 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             .map_err(|e| ProviderError::invalid_input(format!("json decode: {e}")))
     }
 
-    /// Listing-revalidation terminal (OPEN-8): 304 -> `Unchanged`, 200 ->
-    /// `Fresh { value, validator }` where the validator is the response `ETag`.
-    pub async fn conditional_json<T: serde::de::DeserializeOwned>(self) -> Result<Revalidate<T>> {
-        let resp = self.send_raw().await?;
-        if resp.status() == StatusCode::NOT_MODIFIED {
-            return Ok(Revalidate::Unchanged);
-        }
-        let resp = resp.error_for_status()?;
-        let validator = resp
-            .headers()
-            .get("etag")
-            .and_then(|v| v.to_str().ok())
-            .map(VersionToken::from);
-        let value = serde_json::from_slice::<T>(resp.body())
-            .map_err(|e| ProviderError::invalid_input(format!("json decode: {e}")))?;
-        Ok(Revalidate::Fresh { value, validator })
-    }
-
     /// A checked structural fetch returning the raw body.
     pub async fn send_checked(self) -> Result<HttpResponse> {
         let resp = self.send_raw().await?.error_for_status()?;
@@ -364,15 +346,6 @@ impl<'a, E: Endpoint, S> RequestBuilder<'a, E, S> {
             cache_key: None,
         }
     }
-}
-
-/// The listing-revalidation outcome of [`RequestBuilder::conditional_json`].
-pub enum Revalidate<T> {
-    Unchanged,
-    Fresh {
-        value: T,
-        validator: Option<VersionToken>,
-    },
 }
 
 fn load_from_response<T>(

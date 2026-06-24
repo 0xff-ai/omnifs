@@ -941,26 +941,6 @@ impl<'a, O: Object> DirFace<'a, O> {
         });
         Ok(self.block)
     }
-
-    /// Declare a fixed child topology inline (a small static subtree).
-    pub fn children(
-        self,
-        _closure: impl FnOnce(&mut ChildTopology) -> Result<()>,
-    ) -> Result<&'a mut ObjectBlock<O>> {
-        if self.name.starts_with('@') {
-            // `@meta` is allowed as a children root; only collection/choices
-            // child names are reserved.
-        }
-        self.block.claim_leaf(self.name)?;
-        Ok(self.block)
-    }
-}
-
-/// A placeholder for the [`DirFace::children`] inline child topology; reserved
-/// for a future fixed-subtree DSL. Today the dir path is claimed and the actual
-/// children resolve through ordinary route registration in `start()`.
-pub struct ChildTopology {
-    _private: (),
 }
 
 // ===========================================================================
@@ -1719,7 +1699,7 @@ fn serve_derived<O: Object>(
         } = leaf
             && leaf_name == name
         {
-            let content = derive(value, key)?.into_browse_content()?;
+            let content = derive(value, key)?.to_browse_content()?;
             let size = content_size(&content);
             let content = content.with_attrs(FileAttrs::new(Size::Exact(size), ctx.stability));
             return Ok(ReadOutcome::Found(content.with_effects(effects)));

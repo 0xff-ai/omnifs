@@ -8,7 +8,7 @@ use crate::error::{ProviderError, Result};
 use crate::object::{FacetMetadata, Key, Object};
 
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
-use super::object::{AnchorShape, ObjectBlock, ObjectHandle, mount_object, object};
+use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::{Pattern, parse_pattern};
 
 // ===========================================================================
@@ -525,7 +525,3 @@ impl<'r, S> TreeRefRoute<'r, S> {
         Ok(self.router)
     }
 }
-
-// Keep AnchorShape reachable for documentation links.
-#[allow(unused_imports)]
-use AnchorShape as _AnchorShape;

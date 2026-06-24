@@ -267,13 +267,6 @@ impl FileProj {
 
         Ok(())
     }
-
-    pub fn inline_bytes(&self) -> Option<&[u8]> {
-        match &self.bytes {
-            ProjBytes::Inline(bytes) => Some(bytes),
-            ProjBytes::Deferred { .. } => None,
-        }
-    }
 }
 
 /// Byte source for a projected file: bytes carried now, or a promise to

@@ -52,12 +52,6 @@ pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
     WithSyncKeyMethod,
 };
-pub use object::{ChildTopology, DirFace, FileFace, ObjectBlock, ObjectHandle, object};
+pub use object::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
 pub(crate) use object::{EntryView, ResolvedChildView};
 pub use register::{DirRoute, FileRoute, Router, TreeRefRoute};
-
-/// The block builder for a file-shaped object anchor
-/// ([`Router::file_object`]). The anchor projects as a single file (one
-/// canonical/representation/direct/blob face), not a directory; the builder
-/// surface is the same as [`ObjectBlock`].
-pub type FileObjectBlock<O> = ObjectBlock<O>;
