@@ -200,7 +200,7 @@ pub struct CategoryKey {
 #[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
 impl ArxivProvider {
     fn start(r: &mut Router) -> Result<()> {
-        let papers = r.object::<Paper>("/{paper}/{version}", |o| {
+        let papers = r.object::<Paper>("/papers/{paper}/{version}", |o| {
             o.stability(|key| {
                 if key.version.is_numbered() {
                     Stability::Stable
@@ -215,7 +215,6 @@ impl ArxivProvider {
             Ok(())
         })?;
 
-        r.alias("/papers/{paper}/{version}", &papers)?;
         r.alias("/categories/{category}/papers/{paper}/{version}", &papers)?;
 
         r.dir("/papers/{paper}").handler(PaperKey::versions)?;
