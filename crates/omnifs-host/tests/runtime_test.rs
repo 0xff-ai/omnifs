@@ -457,7 +457,14 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     // title/state/body derives), a `log` object stream face, the `comments`
     // child-object collection dir, and `replies` (a Comment alias subtree).
     let expected = vec![
-        "body", "comments", "item.json", "item.md", "log", "replies", "state", "title",
+        "body",
+        "comments",
+        "item.json",
+        "item.md",
+        "log",
+        "replies",
+        "state",
+        "title",
     ];
 
     // Cold `ls` of the object dir lists every leaf.
