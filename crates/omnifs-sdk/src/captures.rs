@@ -7,10 +7,9 @@
 //! a handler or `Object::load` runs.
 
 use crate::error::{ProviderError, Result};
-use crate::router::pattern::{Match as PatternMatch, Pattern};
+use crate::router::pattern::Match as PatternMatch;
 use core::fmt::Display;
 use core::str::FromStr;
-use omnifs_core::path::Path;
 
 /// A capture type: validates one path segment (`FromStr`), renders back
 /// (`Display`), and optionally declares a finite value set.
@@ -81,11 +80,6 @@ impl Captures {
             .map(|c| c.value.as_str())
     }
 
-    /// Raw value for the capture at position `index` (template order).
-    pub fn nth(&self, index: usize) -> Option<&str> {
-        self.items.get(index).map(|c| c.value.as_str())
-    }
-
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -104,17 +98,6 @@ impl Captures {
                     value: value.to_string(),
                 })
                 .collect(),
-        )
-    }
-
-    /// Build captures for a concrete path against a route pattern.
-    pub fn from_pattern_match(pattern: &Pattern, concrete_path: &str) -> Self {
-        let Ok(path) = Path::parse(concrete_path) else {
-            return Self::new(Vec::new());
-        };
-        pattern.match_path(&path).map_or_else(
-            |_| Self::new(Vec::new()),
-            |matched| Self::from_match(&matched),
         )
     }
 

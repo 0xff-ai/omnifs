@@ -68,7 +68,7 @@ pub struct ListCx<C = NoCursor, S = ()> {
 }
 
 impl<C, S> ListCx<C, S> {
-    pub fn new(cx: Cx<S>, cursor: Option<C>) -> Self {
+    pub(crate) fn new(cx: Cx<S>, cursor: Option<C>) -> Self {
         Self { cx, cursor }
     }
 

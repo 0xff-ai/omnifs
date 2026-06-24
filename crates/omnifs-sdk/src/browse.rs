@@ -88,20 +88,8 @@ impl Entry {
         self.kind
     }
 
-    pub fn file_proj(&self) -> Option<&FileProj> {
-        self.file.as_ref()
-    }
-
     pub fn attrs(&self) -> Option<&FileAttrs> {
         self.file.as_ref().map(|file| &file.attrs)
-    }
-}
-
-impl Entry {
-    #[must_use]
-    pub fn with_id(mut self, id: LogicalId) -> Self {
-        self.logical_id = Some(id);
-        self
     }
 }
 
@@ -336,14 +324,6 @@ impl Listing {
         }
     }
 
-    pub fn empty_complete() -> Self {
-        Self::complete([])
-    }
-
-    pub fn empty_partial() -> Self {
-        Self::partial([])
-    }
-
     #[must_use]
     pub fn with_effects(mut self, effects: Effects) -> Self {
         self.effects.extend(effects);
@@ -421,24 +401,6 @@ pub struct LookupEntry {
     effects: Effects,
 }
 
-impl LookupEntry {
-    pub fn target(&self) -> &Entry {
-        &self.target
-    }
-
-    pub fn siblings(&self) -> &[Entry] {
-        &self.siblings
-    }
-
-    pub fn is_exhaustive(&self) -> bool {
-        self.exhaustive
-    }
-
-    pub fn effects(&self) -> &Effects {
-        &self.effects
-    }
-}
-
 impl Lookup {
     pub fn entry(target: Entry) -> Self {
         Self::Entry(LookupEntry {
@@ -475,13 +437,6 @@ impl Lookup {
 
     pub fn not_found() -> Self {
         Self::NotFound { id: None }
-    }
-
-    /// A miss tied to a logical object id, so the host keys the cached
-    /// negative to that object and a later invalidation of the object also
-    /// clears the miss.
-    pub fn not_found_id(id: LogicalId) -> Self {
-        Self::NotFound { id: Some(id) }
     }
 
     pub fn is_found(&self) -> bool {

@@ -39,7 +39,7 @@ pub struct Builder<'cx, S> {
 }
 
 impl<'cx, S> Builder<'cx, S> {
-    pub fn new(cx: &'cx Cx<S>) -> Self {
+    pub(crate) fn new(cx: &'cx Cx<S>) -> Self {
         Self { cx }
     }
 

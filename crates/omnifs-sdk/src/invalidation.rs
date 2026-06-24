@@ -27,13 +27,6 @@ impl Invalidation {
         self
     }
 
-    /// Evict every cached listing under `prefix` (inclusive).
-    #[must_use]
-    pub fn listing_prefix(mut self, prefix: impl AsRef<str>) -> Self {
-        self.effects.invalidate_listing_prefix(prefix);
-        self
-    }
-
     /// Evict an object's canonical bytes and every view leaf derived from it,
     /// keyed by the object's logical id (`key.anchor(O::kind())`).
     #[must_use]

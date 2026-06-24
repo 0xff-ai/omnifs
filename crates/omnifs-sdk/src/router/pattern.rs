@@ -50,16 +50,14 @@ use omnifs_core::path::{Path, Segment};
 
 /// A compiled route template, e.g. `/{owner}/{repo}/issues/{number}`.
 ///
-/// Compilation precomputes the counts that feed [`Self::precedence_key`] and
-/// the per-segment [`Self::specificity`] vector, so matching and ordering are
-/// comparisons over prebuilt data.
+/// Compilation precomputes the counts that feed [`Self::precedence_key`], so
+/// matching and ordering are comparisons over prebuilt data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern {
     segments: Vec<PatternSegment>,
     literal_count: usize,
     prefix_capture_count: usize,
     has_rest: bool,
-    specificity: Vec<(u8, usize)>,
 }
 
 /// Where a named capture lives within a [`Pattern`] and what prefix (if any)
@@ -156,11 +154,6 @@ impl Match {
             .iter()
             .map(|capture| (capture.name.as_str(), capture.value.as_str()))
     }
-
-    #[must_use]
-    pub fn into_path(self) -> Path {
-        self.path
-    }
 }
 
 impl Pattern {
@@ -178,7 +171,6 @@ impl Pattern {
                 literal_count: 0,
                 prefix_capture_count: 0,
                 has_rest: false,
-                specificity: Vec::new(),
             });
         }
         if !template.starts_with('/') || template.ends_with('/') || template.contains("//") {
@@ -244,19 +236,12 @@ impl Pattern {
             segments.push(PatternSegment::Literal(raw.to_string()));
         }
 
-        let specificity = segments.iter().map(segment_specificity).collect();
         Ok(Self {
             segments,
             literal_count,
             prefix_capture_count,
             has_rest,
-            specificity,
         })
-    }
-
-    #[must_use]
-    pub fn has_rest(&self) -> bool {
-        self.has_rest
     }
 
     /// The route-ordering key, compared descending by dispatch: non-rest
@@ -319,11 +304,6 @@ impl Pattern {
         })
     }
 
-    #[must_use]
-    pub fn matches_path(&self, path: &Path) -> bool {
-        self.match_path(path).is_ok()
-    }
-
     /// Whether `parent_segments` is a proper ancestor of paths this pattern
     /// can match, i.e. the pattern extends at least one segment below it.
     /// This is the candidacy test for auto-navigable intermediate
@@ -331,30 +311,6 @@ impl Pattern {
     #[must_use]
     pub fn accepts_as_strict_ancestor(&self, parent_segments: &[&str]) -> bool {
         parent_segments.len() < self.segments.len() && self.matches_prefix_segments(parent_segments)
-    }
-
-    /// Whether `path` is the immediate parent of a path this pattern matches.
-    /// For a rest pattern any path at or below the fixed prefix qualifies,
-    /// because the rest tail makes every descendant a potential child.
-    #[must_use]
-    pub fn matches_parent_path(&self, path: &Path) -> bool {
-        let segments: Vec<&str> = path.segments().collect();
-        if self.has_rest {
-            let fixed = self.fixed_prefix_len();
-            segments.len() >= fixed && self.matches_prefix_segments(&segments[..fixed])
-        } else {
-            segments.len() + 1 == self.segments.len() && self.matches_prefix_segments(&segments)
-        }
-    }
-
-    /// The final segment's literal name, or `None` when the leaf is dynamic
-    /// (a capture or rest segment).
-    #[must_use]
-    pub fn static_child(&self) -> Option<&str> {
-        match self.segments.last()? {
-            PatternSegment::Literal(name) => Some(name),
-            PatternSegment::Capture { .. } | PatternSegment::Rest { .. } => None,
-        }
     }
 
     /// The literal child name this pattern contributes directly under
@@ -404,33 +360,6 @@ impl Pattern {
             .join("/")
     }
 
-    /// The pattern-length prefix of `concrete_path` when this pattern matches
-    /// that prefix: the anchor path of the route instance a descendant path
-    /// belongs to. A rest pattern returns the whole path (the tail is part of
-    /// the match).
-    #[must_use]
-    pub fn concrete_path_for(&self, concrete_path: &Path) -> Option<Path> {
-        let segments: Vec<&str> = concrete_path.segments().collect();
-        if self.has_rest {
-            let fixed = self.fixed_prefix_len();
-            if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
-                return None;
-            }
-            Some(join_absolute_path(&segments))
-        } else {
-            if self.segments.len() > segments.len() || !self.matches_prefix_segments(&segments) {
-                return None;
-            }
-            Some(join_absolute_path(&segments[..self.segments.len()]))
-        }
-    }
-
-    #[must_use]
-    pub fn matches_exact_path(&self, concrete_path: &Path) -> bool {
-        self.concrete_path_for(concrete_path)
-            .is_some_and(|matched| matched == *concrete_path)
-    }
-
     #[must_use]
     pub fn pattern_len(&self) -> usize {
         self.segments.len()
@@ -466,15 +395,6 @@ impl Pattern {
         } else {
             self.segments.len()
         }
-    }
-
-    /// Per-segment specificity: literal `(2, len)` beats prefix capture
-    /// `(1, prefix len)` beats bare capture and rest `(0, 0)`. Lexicographic
-    /// slice comparison gives a segmentwise ordering finer than
-    /// [`Self::precedence_key`].
-    #[must_use]
-    pub fn specificity(&self) -> &[(u8, usize)] {
-        &self.specificity
     }
 
     /// Whether two leaf claims can bind the same concrete path with equal
@@ -514,22 +434,6 @@ impl Pattern {
                         .all(|(left, right)| segments_overlap(left, right))
             },
         }
-    }
-
-    /// The trailing segments a rest pattern captures from `path`, joined by
-    /// `/` (empty string when the path ends at the fixed prefix). `None` for
-    /// non-rest patterns or non-matching paths.
-    #[must_use]
-    pub fn rest_of(&self, path: &Path) -> Option<String> {
-        if !self.has_rest {
-            return None;
-        }
-        let segments: Vec<&str> = path.segments().collect();
-        let fixed = self.fixed_prefix_len();
-        if segments.len() < fixed || !self.matches_prefix_segments(&segments[..fixed]) {
-            return None;
-        }
-        Some(segments[fixed..].join("/"))
     }
 
     fn captures_from_segments(&self, concrete: &[&str]) -> Vec<Capture> {
@@ -595,25 +499,6 @@ fn validate_capture_name(name: &str) -> core::result::Result<(), Error> {
         Ok(())
     } else {
         Err(format!("invalid capture name {name:?}").into())
-    }
-}
-
-fn join_absolute_path(segments: &[&str]) -> Path {
-    if segments.is_empty() {
-        Path::root()
-    } else {
-        Path::from_validated(format!("/{}", segments.join("/")))
-    }
-}
-
-fn segment_specificity(segment: &PatternSegment) -> (u8, usize) {
-    match segment {
-        PatternSegment::Literal(value) => (2, value.len()),
-        PatternSegment::Capture {
-            prefix: Some(prefix),
-            ..
-        } => (1, prefix.len()),
-        PatternSegment::Capture { prefix: None, .. } | PatternSegment::Rest { .. } => (0, 0),
     }
 }
 
@@ -795,34 +680,6 @@ mod pattern_tests {
     use super::{Path, Pattern};
 
     #[test]
-    fn pattern_matches_and_prefers_literals() {
-        let repo = Pattern::parse("/{owner}/{repo}").unwrap();
-        let issue = Pattern::parse("/{owner}/{repo}/issues/open/{number}").unwrap();
-        let resolver = Pattern::parse("/@{resolver}/{segment}").unwrap();
-        let literal = Pattern::parse("/resolvers").unwrap();
-        let capture = Pattern::parse("/{segment}").unwrap();
-        let concrete = Path::parse("/openai/gvfs/issues/open/7").unwrap();
-
-        assert_eq!(
-            repo.concrete_path_for(&concrete),
-            Some(Path::parse("/openai/gvfs").unwrap())
-        );
-        assert_eq!(
-            issue.concrete_path_for(&Path::parse("/openai/gvfs/issues/open/7/comments/1").unwrap()),
-            Some(Path::parse("/openai/gvfs/issues/open/7").unwrap())
-        );
-        assert_eq!(
-            resolver.concrete_path_for(&Path::parse("/@google/example.com").unwrap()),
-            Some(Path::parse("/@google/example.com").unwrap())
-        );
-        assert_eq!(
-            resolver.concrete_path_for(&Path::parse("/@google").unwrap()),
-            None
-        );
-        assert!(literal.specificity() > capture.specificity());
-    }
-
-    #[test]
     fn match_path_decodes_captures() {
         let pattern = Pattern::parse("/@{resolver}/{segment}/{*tail}").unwrap();
         let matched = pattern
@@ -859,34 +716,29 @@ mod pattern_tests {
     #[test]
     fn rest_capture_matches_zero_or_more_trailing_segments() {
         let pat = Pattern::parse("/ipfs/{cid}/{*path}").unwrap();
-        assert!(pat.matches_path(&Path::parse("/ipfs/Qm123").unwrap()));
-        assert!(pat.matches_path(&Path::parse("/ipfs/Qm123/a").unwrap()));
-        assert!(pat.matches_path(&Path::parse("/ipfs/Qm123/a/b/c").unwrap()));
-        assert!(!pat.matches_path(&Path::parse("/ipfs").unwrap()));
-        assert!(!pat.matches_path(&Path::parse("/other/Qm123").unwrap()));
-
-        assert_eq!(
-            pat.rest_of(&Path::parse("/ipfs/Qm123").unwrap()),
-            Some(String::new())
+        assert!(pat.match_path(&Path::parse("/ipfs/Qm123").unwrap()).is_ok());
+        assert!(
+            pat.match_path(&Path::parse("/ipfs/Qm123/a").unwrap())
+                .is_ok()
         );
-        assert_eq!(
-            pat.rest_of(&Path::parse("/ipfs/Qm123/a").unwrap()),
-            Some("a".to_string())
+        assert!(
+            pat.match_path(&Path::parse("/ipfs/Qm123/a/b/c").unwrap())
+                .is_ok()
         );
-        assert_eq!(
-            pat.rest_of(&Path::parse("/ipfs/Qm123/a/b/c").unwrap()),
-            Some("a/b/c".to_string())
+        assert!(pat.match_path(&Path::parse("/ipfs").unwrap()).is_err());
+        assert!(
+            pat.match_path(&Path::parse("/other/Qm123").unwrap())
+                .is_err()
         );
     }
 
     #[test]
-    fn rest_capture_has_no_static_child_and_lowest_precedence() {
+    fn rest_capture_has_lowest_precedence() {
         let rest = Pattern::parse("/ipfs/{cid}/{*path}").unwrap();
         let bare = Pattern::parse("/ipfs/{cid}/{leaf}").unwrap();
         let prefix = Pattern::parse("/ipfs/{cid}/v{version}").unwrap();
         let exact = Pattern::parse("/ipfs/{cid}/versions").unwrap();
 
-        assert!(rest.static_child().is_none());
         assert!(exact.precedence_key() > prefix.precedence_key());
         assert!(prefix.precedence_key() > bare.precedence_key());
         assert!(bare.precedence_key() > rest.precedence_key());

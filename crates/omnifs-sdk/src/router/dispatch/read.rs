@@ -42,12 +42,12 @@ impl<S> Router<S> {
         match shape.read_route(&abs) {
             Some(ReadRoute::File(route)) => {
                 let proj = (route.entry.handler)(cx.clone(), route.captures).await?;
-                proj.into_browse_content().map(ReadOutcome::Found)
+                proj.to_browse_content().map(ReadOutcome::Found)
             },
             Some(ReadRoute::Object { route, target }) => match target {
                 ObjectReadTarget::Direct(name) => {
                     let proj = route.entry.read_face(cx, &name, route.captures).await?;
-                    proj.into_browse_content().map(ReadOutcome::Found)
+                    proj.to_browse_content().map(ReadOutcome::Found)
                 },
                 ObjectReadTarget::Stream(_) => Err(ProviderError::invalid_input(format!(
                     "stream face at {path:?} must be read through open-file, not read-file"

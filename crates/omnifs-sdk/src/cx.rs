@@ -120,24 +120,6 @@ impl<S> Cx<S> {
         crate::endpoint::EndpointHandle::new(self)
     }
 
-    /// Create a new context seeded from a provider event. The event payload
-    /// no longer carries context the `Cx` needs, so this is equivalent to
-    /// [`Cx::new`]; the signature is kept for the provider macro's `on_event`
-    /// glue.
-    pub fn from_event(
-        id: u64,
-        state: Rc<RefCell<S>>,
-        _event: &omnifs_wit::provider::types::ProviderEvent,
-    ) -> Self {
-        Self::new(id, state)
-    }
-
-    /// The host-assigned operation id; the correlation key the host uses to
-    /// resume this operation after a callout batch.
-    pub fn id(&self) -> u64 {
-        self.shared.id
-    }
-
     /// Read the provider state. The closure scopes the `RefCell` borrow so
     /// it can never be held across an `.await`; do not call [`Self::state`]
     /// or [`Self::state_mut`] reentrantly from inside `f`.
@@ -199,14 +181,6 @@ impl<S> Cx<S> {
 
     pub(crate) fn pop_delivered(&self) -> Option<CalloutResult> {
         self.shared.delivered.borrow_mut().pop_front()
-    }
-
-    /// Clone the underlying state handle. For storing state alongside data
-    /// that outlives this `Cx` borrow; the closure-based [`Self::state`] and
-    /// [`Self::state_mut`] are the normal access path because they cannot
-    /// leak a borrow across a suspension point.
-    pub fn state_handle(&self) -> Rc<RefCell<S>> {
-        Rc::clone(&self.state)
     }
 }
 

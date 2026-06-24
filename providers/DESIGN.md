@@ -307,7 +307,6 @@ o.file("x.bin").direct(Object::read)           // provider/upstream on read
 o.file("x.tar").blob(Object::asset)            // host-resident bytes
 o.file("x.log").stream(Object::open)           // ranged or live bytes
 o.dir("repo").tree(Object::checkout)           // tree handoff
-o.dir("@meta").children(...)                   // fixed child topology
 ```
 
 The same model must support file-shaped object anchors directly:
@@ -346,7 +345,7 @@ The main face categories are:
 - **Stream.** A ranged read face. `Live` belongs here, not on the object as a
   whole.
 - **Tree.** A host-materialized subtree handoff.
-- **Directory.** Fixed children or a collection of child object entries.
+- **Directory.** A collection of child object entries.
 
 ## Attributes, stability, and mutability
 

@@ -161,7 +161,7 @@ impl FileProjection {
     /// `project`-effect channels accept (`Inline`, `Deferred`). `Body`, `Ranged`,
     /// and `Blob` have no `FileProj` lowering and return `None`; the router
     /// serves them through `read-file`/range/blob terminals instead.
-    pub fn as_file_proj(&self) -> Option<FileProj> {
+    pub(crate) fn as_file_proj(&self) -> Option<FileProj> {
         let bytes = match &self.source {
             FileSource::Inline(bytes) => ProjBytes::Inline(bytes.clone()),
             FileSource::Deferred(read) => ProjBytes::Deferred { read: *read },
@@ -175,7 +175,7 @@ impl FileProjection {
     }
 
     /// Lower this projection to a browse [`crate::browse::FileContent`] terminal.
-    pub fn into_browse_content(&self) -> Result<crate::browse::FileContent> {
+    pub(crate) fn to_browse_content(&self) -> Result<crate::browse::FileContent> {
         let ct = self.content_type();
         let attrs = self.attrs().clone();
         let content = match self.source() {
@@ -381,7 +381,7 @@ struct ExtraCanonical {
 /// the router maps to the WIT `list-children-result::unchanged`; the
 /// `Entries` variant carries the entries, an exhaustiveness flag, and an
 /// optional resume cursor.
-pub enum DirOutcome {
+pub(crate) enum DirOutcome {
     Entries {
         entries: Vec<Entry>,
         exhaustive: bool,
@@ -502,7 +502,7 @@ impl DirProjection {
         self
     }
 
-    pub fn outcome(&self) -> &DirOutcome {
+    pub(crate) fn outcome(&self) -> &DirOutcome {
         &self.outcome
     }
 
@@ -586,7 +586,7 @@ impl Entry {
 
     /// Lower to a v1 browse [`Entry`]. A file lowers to the default
     /// deferred-Full-Stable projection.
-    pub fn to_browse_entry(&self) -> BrowseEntry {
+    pub(crate) fn to_browse_entry(&self) -> BrowseEntry {
         match self.kind {
             EntryKind::Dir => BrowseEntry::dir(&self.name),
             EntryKind::File => BrowseEntry::file(&self.name, FileProj::listing_shape()),
@@ -667,7 +667,7 @@ impl<F: Format> BlobFile<F> {
 
     /// Lower to the [`FileProjection`] the router serves through the blob
     /// terminal.
-    pub fn into_projection(self) -> FileProjection {
+    pub(crate) fn into_projection(self) -> FileProjection {
         let ct = self.content_type.unwrap_or(F::CT);
         let mut builder = FileProjection::blob(self.id)
             .size(self.size)
@@ -753,10 +753,6 @@ impl StreamFile {
     /// The reader serving chunks.
     pub fn reader(&self) -> Rc<dyn RangeReader> {
         self.reader.clone()
-    }
-
-    pub fn content_type_value(&self) -> Option<ContentType> {
-        self.content_type
     }
 }
 
