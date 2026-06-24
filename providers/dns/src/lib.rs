@@ -119,25 +119,22 @@ impl DnsProvider {
             });
             Ok(FileProjection::body(body.into_bytes()).build())
         })?;
-        // `reverse` is registered before `/{domain}` so its literal segment outranks the
-        // `/{domain}` capture dir at lookup. Keep this ordering until per-segment validator
-        // candidacy makes literal precedence automatic (out of scope here).
+        r.dir("/{domain}")
+            .handler(|_cx: DirCx<State>, _key: DomainKey| async move { Ok(record_projection()) })?;
+        r.file("/{domain}/{record}")
+            .handler(|cx: Cx<State>, key: DomainRecordKey| async move {
+                let bytes = read_record_bytes(&cx, None, &key.domain, &key.record).await?;
+                Ok(FileProjection::body(bytes)
+                    .dynamic()
+                    .content_type(ContentType::Custom("text/plain"))
+                    .build())
+            })?;
         r.dir("/reverse")
             .handler(|_cx: DirCx<State>| async move { Ok(open_dir()) })?;
         r.file("/reverse/{ip}")
             .handler(|cx: Cx<State>, key: ReverseKey| async move {
                 let ip = key.ip.to_string();
                 let bytes = read_reverse_bytes(&cx, None, &ip).await?;
-                Ok(FileProjection::body(bytes)
-                    .dynamic()
-                    .content_type(ContentType::Custom("text/plain"))
-                    .build())
-            })?;
-        r.dir("/{domain}")
-            .handler(|_cx: DirCx<State>, _key: DomainKey| async move { Ok(record_projection()) })?;
-        r.file("/{domain}/{record}")
-            .handler(|cx: Cx<State>, key: DomainRecordKey| async move {
-                let bytes = read_record_bytes(&cx, None, &key.domain, &key.record).await?;
                 Ok(FileProjection::body(bytes)
                     .dynamic()
                     .content_type(ContentType::Custom("text/plain"))

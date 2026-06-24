@@ -11,9 +11,9 @@
 //! Kubernetes token.
 //!
 //! ```text
-//! /namespaces/<ns>/<type>/<name>/{manifest.yaml,manifest.json,status.yaml,events.txt}
+//! /namespaces/<ns>/<type>/<name>/{manifest.json,manifest.yaml,status.yaml,events.txt}
 //! /namespaces/<ns>/pods/<name>/logs/<container>.log
-//! /cluster/<type>/<name>/{manifest.yaml,manifest.json,status.yaml}
+//! /cluster/<type>/<name>/{manifest.json,manifest.yaml,status.yaml}
 //! ```
 
 use core::fmt;
@@ -27,7 +27,7 @@ use omnifs_sdk::prelude::*;
 mod api;
 mod objects;
 
-use crate::api::{Discovery, KubeApi, PodLogReader, text_file};
+use crate::api::{Discovery, KubeApi, PodLogReader};
 use crate::objects::{ClusterResource, NamespacedResource};
 
 #[derive(Clone)]
@@ -147,15 +147,15 @@ struct NsTypeKey {
 
 #[omnifs_sdk::path_captures]
 pub(crate) struct NamespacedResourceKey {
-    ns: Namespace,
-    rtype: ResourceType,
-    name: ResourceName,
+    pub(crate) ns: Namespace,
+    pub(crate) rtype: ResourceType,
+    pub(crate) name: ResourceName,
 }
 
 #[omnifs_sdk::path_captures]
 pub(crate) struct ClusterResourceKey {
-    rtype: ResourceType,
-    name: ResourceName,
+    pub(crate) rtype: ResourceType,
+    pub(crate) name: ResourceName,
 }
 
 #[omnifs_sdk::path_captures]
@@ -190,13 +190,18 @@ impl KubernetesProvider {
             .handler(ns_resources_dir)?;
         r.object::<NamespacedResource>("/namespaces/{ns}/{rtype}/{name}", |o| {
             o.dynamic();
-            o.representations("manifest", (Yaml,))?;
+            o.file("manifest.json").canonical::<Json>()?;
+            o.file("manifest.yaml").representation::<Yaml>()?;
             o.file("status.yaml")
-                .project(|value: &NamespacedResource, _key| value.status_yaml())?;
+                .derive(NamespacedResource::status_yaml)?;
+            o.file("events.txt")
+                .direct(NamespacedResource::events_txt)?;
             Ok(())
         })?;
-        r.file("/namespaces/{ns}/{rtype}/{name}/events.txt")
-            .handler(namespaced_events_txt)?;
+        // Pod logs stay on raw routes: `logs/` is a dynamic directory
+        // (enumerates containers from a pod fetch) and `logs/{logfile}` is a
+        // live-ranged stream, both requiring the `{rtype}` == "pods" gate that
+        // `PodType`'s parser enforces on capture.
         r.dir("/namespaces/{ns}/{rtype}/{name}/logs")
             .handler(pod_logs_dir)?;
         r.file("/namespaces/{ns}/{rtype}/{name}/logs/{logfile}")
@@ -207,9 +212,9 @@ impl KubernetesProvider {
         r.dir("/cluster/{rtype}").handler(cluster_resources_dir)?;
         r.object::<ClusterResource>("/cluster/{rtype}/{name}", |o| {
             o.dynamic();
-            o.representations("manifest", (Yaml,))?;
-            o.file("status.yaml")
-                .project(|value: &ClusterResource, _key| value.status_yaml())?;
+            o.file("manifest.json").canonical::<Json>()?;
+            o.file("manifest.yaml").representation::<Yaml>()?;
+            o.file("status.yaml").derive(ClusterResource::status_yaml)?;
             Ok(())
         })?;
 
@@ -265,51 +270,6 @@ async fn ns_resources_dir(cx: DirCx<State>, key: NsTypeKey) -> Result<DirProject
     key.resources(cx).await
 }
 
-impl NamespacedResourceKey {
-    async fn events(self, cx: Cx<State>) -> Result<FileProjection> {
-        let api = KubeApi::new(&cx);
-        let resource = api.resource(self.rtype.as_str()).await?;
-        if !resource.namespaced {
-            return Err(ProviderError::not_found(format!(
-                "resource type {} is not namespaced",
-                self.rtype.as_str()
-            )));
-        }
-        let loaded = api
-            .load_manifest(
-                self.rtype.as_str(),
-                Some(self.ns.as_str()),
-                self.name.as_str(),
-            )
-            .await?;
-        let Load::Fresh { value, .. } = loaded else {
-            return Err(ProviderError::not_found(format!(
-                "{} {} not found in namespace {}",
-                self.rtype.as_str(),
-                self.name.as_str(),
-                self.ns.as_str()
-            )));
-        };
-        let uid = NamespacedResource::new(value).uid().map(str::to_string);
-        let text = api
-            .events_text(
-                self.ns.as_str(),
-                resource.kind(),
-                self.name.as_str(),
-                uid.as_deref(),
-            )
-            .await?;
-        Ok(text_file(text.into_bytes()))
-    }
-}
-
-async fn namespaced_events_txt(
-    cx: Cx<State>,
-    key: NamespacedResourceKey,
-) -> Result<FileProjection> {
-    key.events(cx).await
-}
-
 async fn pod_logs_dir(cx: DirCx<State>, key: PodLogsKey) -> Result<DirProjection> {
     let containers = KubeApi::new(&cx)
         .pod_containers(key.ns.as_str(), key.name.as_str())
@@ -335,34 +295,6 @@ async fn pod_log_read(cx: Cx<State>, key: PodLogKey) -> Result<FileProjection> {
         .build())
 }
 
-impl Key for NamespacedResourceKey {
-    type Object = NamespacedResource;
-    type State = State;
-
-    async fn load(&self, cx: &Cx<State>, _since: Option<Validator>) -> Result<Load<Self::Object>> {
-        match KubeApi::new(cx)
-            .load_manifest(
-                self.rtype.as_str(),
-                Some(self.ns.as_str()),
-                self.name.as_str(),
-            )
-            .await?
-        {
-            Load::Fresh {
-                value,
-                canonical,
-                effects,
-            } => Ok(Load::Fresh {
-                value: NamespacedResource::new(value),
-                canonical,
-                effects,
-            }),
-            Load::Unchanged => Ok(Load::Unchanged),
-            Load::NotFound => Ok(Load::NotFound),
-        }
-    }
-}
-
 async fn cluster_types_dir(cx: DirCx<State>) -> Result<DirProjection> {
     let api = KubeApi::new(&cx);
     Ok(dir_listing(api.list_types_for_listing(None).await?))
@@ -383,28 +315,4 @@ impl ClusterTypeKey {
 
 async fn cluster_resources_dir(cx: DirCx<State>, key: ClusterTypeKey) -> Result<DirProjection> {
     key.resources(cx).await
-}
-
-impl Key for ClusterResourceKey {
-    type Object = ClusterResource;
-    type State = State;
-
-    async fn load(&self, cx: &Cx<State>, _since: Option<Validator>) -> Result<Load<Self::Object>> {
-        match KubeApi::new(cx)
-            .load_manifest(self.rtype.as_str(), None, self.name.as_str())
-            .await?
-        {
-            Load::Fresh {
-                value,
-                canonical,
-                effects,
-            } => Ok(Load::Fresh {
-                value: ClusterResource::new(value),
-                canonical,
-                effects,
-            }),
-            Load::Unchanged => Ok(Load::Unchanged),
-            Load::NotFound => Ok(Load::NotFound),
-        }
-    }
 }

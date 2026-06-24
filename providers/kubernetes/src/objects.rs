@@ -5,6 +5,9 @@ use omnifs_sdk::repr::{Representable, Yaml};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::State;
+use crate::api::KubeApi;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct KubeManifest(Value);
@@ -35,15 +38,16 @@ impl KubeManifest {
         yaml_bytes(&self.0)
     }
 
-    fn status_yaml(&self) -> Result<FileProjection> {
+    pub(crate) fn status_yaml_bytes(&self) -> Result<Vec<u8>> {
         let status = self.0.get("status").cloned().unwrap_or(Value::Null);
-        Ok(FileProjection::inline(yaml_bytes(&status)?)
-            .content_type(ContentType::Custom("application/yaml"))
-            .build())
+        yaml_bytes(&status)
     }
 }
 
-#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey)]
+/// Namespaced Kubernetes resource (e.g. pods, deployments).
+///
+/// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
+#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey, state = State)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct NamespacedResource(KubeManifest);
@@ -53,12 +57,73 @@ impl NamespacedResource {
         Self(manifest)
     }
 
-    pub(crate) fn status_yaml(&self) -> Result<FileProjection> {
-        self.0.status_yaml()
-    }
-
     pub(crate) fn uid(&self) -> Option<&str> {
         self.0.uid()
+    }
+
+    /// Derive: `status.yaml` leaf from the manifest's status stanza.
+    pub(crate) fn status_yaml(
+        &self,
+        _key: &crate::NamespacedResourceKey,
+    ) -> Result<FileProjection> {
+        Ok(FileProjection::inline(self.0.status_yaml_bytes()?)
+            .content_type(ContentType::Custom("application/yaml"))
+            .build())
+    }
+
+    /// Direct face: `events.txt` — requires two callouts (manifest fetch for UID,
+    /// then events fetch). Invoked on every read; not cached as canonical.
+    pub(crate) async fn events_txt(
+        cx: Cx<State>,
+        key: crate::NamespacedResourceKey,
+    ) -> Result<FileProjection> {
+        let api = KubeApi::new(&cx);
+        let resource = api.resource(key.rtype.as_str()).await?;
+        if !resource.namespaced {
+            return Err(ProviderError::not_found(format!(
+                "resource type {} is not namespaced",
+                key.rtype.as_str()
+            )));
+        }
+        let loaded = api
+            .load_manifest(key.rtype.as_str(), Some(key.ns.as_str()), key.name.as_str())
+            .await?;
+        let Load::Fresh { value, .. } = loaded else {
+            return Err(ProviderError::not_found(format!(
+                "{} {} not found in namespace {}",
+                key.rtype.as_str(),
+                key.name.as_str(),
+                key.ns.as_str()
+            )));
+        };
+        let uid = NamespacedResource::new(value).uid().map(str::to_string);
+        let text = api
+            .events_text(
+                key.ns.as_str(),
+                resource.kind(),
+                key.name.as_str(),
+                uid.as_deref(),
+            )
+            .await?;
+        Ok(crate::api::text_file(text.into_bytes()))
+    }
+
+    /// Inherent load forwarded to by the `#[object]` macro's `Object::load`.
+    pub(crate) async fn load(
+        cx: &Cx<State>,
+        key: &crate::NamespacedResourceKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        match KubeApi::new(cx)
+            .load_manifest(key.rtype.as_str(), Some(key.ns.as_str()), key.name.as_str())
+            .await?
+        {
+            Load::Fresh {
+                value, canonical, ..
+            } => Ok(Load::fresh(NamespacedResource::new(value), canonical)),
+            Load::Unchanged => Ok(Load::Unchanged),
+            Load::NotFound => Ok(Load::NotFound),
+        }
     }
 }
 
@@ -68,7 +133,11 @@ impl Representable<Yaml> for NamespacedResource {
     }
 }
 
-#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey)]
+/// Cluster-scoped Kubernetes resource (e.g. nodes, namespaces,
+/// clusterrolebindings).
+///
+/// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
+#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey, state = State)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ClusterResource(KubeManifest);
@@ -78,8 +147,29 @@ impl ClusterResource {
         Self(manifest)
     }
 
-    pub(crate) fn status_yaml(&self) -> Result<FileProjection> {
-        self.0.status_yaml()
+    /// Derive: `status.yaml` leaf from the manifest's status stanza.
+    pub(crate) fn status_yaml(&self, _key: &crate::ClusterResourceKey) -> Result<FileProjection> {
+        Ok(FileProjection::inline(self.0.status_yaml_bytes()?)
+            .content_type(ContentType::Custom("application/yaml"))
+            .build())
+    }
+
+    /// Inherent load forwarded to by the `#[object]` macro's `Object::load`.
+    pub(crate) async fn load(
+        cx: &Cx<State>,
+        key: &crate::ClusterResourceKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        match KubeApi::new(cx)
+            .load_manifest(key.rtype.as_str(), None, key.name.as_str())
+            .await?
+        {
+            Load::Fresh {
+                value, canonical, ..
+            } => Ok(Load::fresh(ClusterResource::new(value), canonical)),
+            Load::Unchanged => Ok(Load::Unchanged),
+            Load::NotFound => Ok(Load::NotFound),
+        }
     }
 }
 

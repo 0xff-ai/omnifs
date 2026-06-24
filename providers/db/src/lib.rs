@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use omnifs_sdk::handler::DirIntent;
+use omnifs_sdk::object::{Load, Object, ObjectKind, Validator};
 use omnifs_sdk::prelude::*;
 use omnifs_sdk::serde::{Deserialize, Serialize};
 
@@ -112,6 +113,36 @@ struct TableKey {
     table: TableName,
 }
 
+/// Marker type for the `/tables/{table}` object. All faces are `direct` (live
+/// `SQLite` reads); there is no canonical because the table data is not
+/// object-cached. The `load`/`decode` implementations are required by the
+/// `Object` trait but are never invoked when only direct faces are declared.
+struct Table;
+
+impl Object for Table {
+    type Key = TableKey;
+    type State = State;
+    type Canonical = Json;
+
+    async fn load(
+        _cx: &Cx<Self::State>,
+        _key: &Self::Key,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        Ok(Load::NotFound)
+    }
+
+    fn decode(_bytes: &[u8]) -> Result<Self> {
+        Err(ProviderError::internal(
+            "Table::decode: no canonical face; decode is unreachable",
+        ))
+    }
+
+    fn kind() -> ObjectKind {
+        ObjectKind("db.table")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct TableDoc {
     pub name: String,
@@ -129,6 +160,9 @@ impl DbProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         let backend = SqliteBackend::open(&config.path, config.read_only)
             .map_err(|e| ProviderError::internal(format!("open sqlite database: {e}")))?;
+        // Seed the admissibility set before registering routes so that any
+        // `TableName::from_str` called during route registration sees the full
+        // table list.
         install_known_tables(
             backend
                 .list_tables()
@@ -145,18 +179,16 @@ impl DbProvider {
         r.file("/meta/path.txt").handler(meta_path)?;
 
         r.dir("/tables").handler(tables_list)?;
-        r.dir("/tables/{table}").handler(table_dir)?;
-        r.file("/tables/{table}/table.json").handler(table_json)?;
-        r.file("/tables/{table}/schema.sql")
-            .handler(table_schema_sql)?;
-        r.file("/tables/{table}/schema.json")
-            .handler(table_schema_json)?;
-        r.file("/tables/{table}/indexes.json")
-            .handler(table_indexes_json)?;
-        r.file("/tables/{table}/count.txt")
-            .handler(table_count_txt)?;
-        r.file("/tables/{table}/sample.json")
-            .handler(table_sample)?;
+        r.object::<Table>("/tables/{table}", |o| {
+            o.dynamic();
+            o.file("table.json").direct(table_json)?;
+            o.file("schema.sql").direct(table_schema_sql)?;
+            o.file("schema.json").direct(table_schema_json)?;
+            o.file("indexes.json").direct(table_indexes_json)?;
+            o.file("count.txt").direct(table_count_txt)?;
+            o.file("sample.json").direct(table_sample)?;
+            Ok(())
+        })?;
 
         Ok(state)
     }
@@ -190,46 +222,11 @@ impl TableDoc {
     }
 }
 
-#[derive(Clone, Copy)]
-enum TableLeaf {
-    SchemaSql,
-    SchemaJson,
-    IndexesJson,
-    Count,
-}
-
-impl TableLeaf {
-    fn content(self, doc: &TableDoc) -> Result<FileProjection> {
-        match self {
-            Self::SchemaSql => Ok(doc.schema_sql()),
-            Self::SchemaJson => doc.schema_json(),
-            Self::IndexesJson => doc.indexes_json(),
-            Self::Count => Ok(doc.count()),
-        }
-    }
-
-    fn read(self, cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-        let doc = read_table_doc(&cx, &key)?;
-        self.content(&doc)
-    }
-}
-
 async fn meta_dir(_cx: DirCx<State>) -> Result<DirProjection> {
     Ok(DirProjection::exhaustive([
         Entry::file("info.json"),
         Entry::file("version.txt"),
         Entry::file("path.txt"),
-    ]))
-}
-
-async fn table_dir(_cx: DirCx<State>, _key: TableKey) -> Result<DirProjection> {
-    Ok(DirProjection::exhaustive([
-        Entry::file("table.json"),
-        Entry::file("schema.sql"),
-        Entry::file("schema.json"),
-        Entry::file("indexes.json"),
-        Entry::file("count.txt"),
-        Entry::file("sample.json"),
     ]))
 }
 
@@ -306,19 +303,23 @@ async fn table_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
 }
 
 async fn table_schema_sql(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    TableLeaf::SchemaSql.read(cx, key)
+    let doc = read_table_doc(&cx, &key)?;
+    Ok(doc.schema_sql())
 }
 
 async fn table_schema_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    TableLeaf::SchemaJson.read(cx, key)
+    let doc = read_table_doc(&cx, &key)?;
+    doc.schema_json()
 }
 
 async fn table_indexes_json(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    TableLeaf::IndexesJson.read(cx, key)
+    let doc = read_table_doc(&cx, &key)?;
+    doc.indexes_json()
 }
 
 async fn table_count_txt(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
-    TableLeaf::Count.read(cx, key)
+    let doc = read_table_doc(&cx, &key)?;
+    Ok(doc.count())
 }
 
 impl FileInfo {

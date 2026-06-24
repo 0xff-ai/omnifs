@@ -14,7 +14,6 @@ use time::{Date, Duration, Time};
 
 const PRELOAD_RADIUS: Duration = Duration::days(15);
 const JSON_SUFFIX: &str = ".json";
-const DAILY_COLLECTION_KIND: ObjectKind = ObjectKind("daily_collection");
 const DATE_FIELDS: &[&str] = &[
     "day",
     "timestamp",
@@ -35,8 +34,11 @@ impl OuraProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/").handler(root)?;
         r.dir("/{day}").handler(DayKey::entries)?;
-        r.file("/{day}/{collection}")
-            .handler(DailyCollectionKey::read)?;
+        r.file_object::<DailyCollection>("/{day}/{collection}", |o| {
+            o.dynamic();
+            o.file("collection.json").canonical::<Json>()?;
+            Ok(())
+        })?;
         Ok(())
     }
 }
@@ -217,73 +219,33 @@ struct DailyCollectionKey {
     collection: Collection,
 }
 
-impl DailyCollectionKey {
-    fn path(self) -> String {
-        format!("/{}/{}", self.day, self.collection)
-    }
+/// One day's slice of an Oura usercollection, served as a single JSON file at
+/// `/{day}/{collection}`. A single ranged fetch materializes a whole window of
+/// neighboring days; the requested day is the object's canonical and the rest
+/// ride along as same-type sibling preloads.
+#[omnifs_sdk::object(
+    kind = "daily_collection",
+    key = DailyCollectionKey,
+    canonical = Json
+)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+struct DailyCollection(Value);
 
-    fn day_path(self) -> String {
-        format!("/{}", self.day)
-    }
-
-    fn anchor(self) -> LogicalId {
-        LogicalId::new(DAILY_COLLECTION_KIND, self.identity_captures())
-    }
-
-    fn project_entry(
-        self,
-        effects: &mut Effects,
-        size: Size,
-        validator: Option<Validator>,
-    ) -> Result<()> {
-        let mut file = FileProj::deferred(size, ReadMode::Full, Stability::Dynamic)
-            .with_content_type(ContentType::Json);
-        if let Some(validator) = validator {
-            file = file.with_version(validator);
-        }
-        effects.project_dir(self.day_path())?;
-        effects.project_file_with_id(self.path(), Some(&self.anchor()), file)?;
-        Ok(())
-    }
-
-    async fn read(self, cx: Cx) -> Result<FileProjection> {
-        let CollectionLoad { canonical, effects } = self.load(&cx).await?;
-        let validator = canonical.validator.clone();
-        let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
-        let mut all_effects = Effects::new();
-        all_effects.canonical_store(
-            &self.anchor(),
-            validator.clone(),
-            canonical.bytes.clone(),
-            vec![self.path()],
-        );
-        all_effects.extend(effects);
-
-        let mut file = FileProjection::body(canonical.bytes)
-            .size(size)
-            .dynamic()
-            .content_type(ContentType::Json)
-            .with_effects(all_effects);
-        if let Some(validator) = validator {
-            file = file.version(validator);
-        }
-        Ok(file.build())
-    }
-
-    async fn load(self, cx: &Cx) -> Result<CollectionLoad> {
-        RangeRequest {
-            collection: self.collection,
-            range: self.day.preload_range()?,
+impl DailyCollection {
+    async fn load(
+        cx: &Cx,
+        key: &DailyCollectionKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let response = RangeRequest {
+            collection: key.collection,
+            range: key.day.preload_range()?,
         }
         .fetch(cx)
-        .await?
-        .load(self)
+        .await?;
+        response.into_load(key.day)
     }
-}
-
-struct CollectionLoad {
-    canonical: Canonical,
-    effects: Effects,
 }
 
 #[derive(Debug)]
@@ -331,40 +293,41 @@ struct RangeResponse {
 }
 
 impl RangeResponse {
-    fn load(self, requested: DailyCollectionKey) -> Result<CollectionLoad> {
+    /// Assemble the requested day as the loaded object's canonical and ride the
+    /// neighboring days back as same-type sibling preloads (R5): one fetch warms
+    /// the whole window's canonical cache, so reading an adjacent day is a warm
+    /// hit. Every day's slice is materialized exactly once from the partitioned
+    /// rows.
+    fn into_load(self, requested: Day) -> Result<Load<DailyCollection>> {
         let mut grouping = self.group_by_day();
-        let mut effects = Effects::new();
-        let mut requested_canonical = None;
-        // Each day's canonical bytes are materialized here anyway (to store the
-        // non-requested days), so project the directory entry with its exact
-        // size rather than Size::Unknown: the listing reports honest sizes cold.
+        let (value, canonical) = self.day_canonical(&mut grouping, requested)?;
+        let mut load = Load::fresh(value, canonical);
         for day in self.range.start().through(*self.range.end()) {
-            let key = DailyCollectionKey {
-                day,
-                collection: self.collection,
-            };
-            let value = grouping.take(day);
-            let canonical = self.canonical(&value)?;
-            let size = Size::Exact(u64::try_from(canonical.bytes.len()).unwrap_or(u64::MAX));
-            key.project_entry(&mut effects, size, self.validator.clone())?;
-            if day == requested.day {
-                requested_canonical = Some(canonical);
+            if day == requested {
                 continue;
             }
-            effects.canonical_store(
-                &key.anchor(),
-                canonical.validator.clone(),
-                canonical.bytes,
-                vec![key.path()],
-            );
+            let (sibling, canonical) = self.day_canonical(&mut grouping, day)?;
+            load = load.preload_object(ObjectEntry::fresh(
+                DailyCollectionKey {
+                    day,
+                    collection: self.collection,
+                },
+                sibling,
+                canonical,
+            ));
         }
-        let canonical = if let Some(canonical) = requested_canonical {
-            canonical
-        } else {
-            let value = grouping.take(requested.day);
-            self.canonical(&value)?
-        };
-        Ok(CollectionLoad { canonical, effects })
+        Ok(load)
+    }
+
+    /// Materialize one day's slice and its verbatim canonical bytes.
+    fn day_canonical(
+        &self,
+        grouping: &mut DayGrouping,
+        day: Day,
+    ) -> Result<(DailyCollection, Canonical)> {
+        let value = grouping.take(day);
+        let canonical = self.canonical(&value)?;
+        Ok((DailyCollection(value), canonical))
     }
 
     fn canonical(&self, value: &Value) -> Result<Canonical> {

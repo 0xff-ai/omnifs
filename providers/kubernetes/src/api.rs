@@ -234,7 +234,7 @@ impl<'a> KubeApi<'a> {
             bytes: manifest.canonical_json_bytes()?,
             validator,
         };
-        Ok(Load::fresh_from(manifest, canonical))
+        Ok(Load::fresh(manifest, canonical))
     }
 
     pub(crate) async fn events_text(
