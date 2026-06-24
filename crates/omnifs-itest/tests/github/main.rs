@@ -2,17 +2,15 @@
 
 mod support;
 
-use omnifs_cache::RecordKind;
 use omnifs_core::path::Path;
-use omnifs_core::view::DirentsPayload;
 use omnifs_host::LookupOutcome;
 use omnifs_wit::provider::types::{
     CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     OpResult, ReadFileOutcome, Stability,
 };
 use support::{
-    TestOpExt, github_harness, project_file_inline_bytes, project_file_is_deferred_full,
-    project_file_stability, project_paths, seed_github_repo_cache,
+    TestOpExt, github_harness, project_file_inline_bytes, project_file_stability, project_paths,
+    seed_github_repo_cache,
 };
 
 fn parse_path(s: &str) -> Path {
@@ -148,10 +146,12 @@ fn github_issue_list_projects_files() {
         })])
         .unwrap();
 
-    // Listing preloads the issue directory shape and cheap fields already
-    // present in the list row. Body-derived leaves inline when they fit the
-    // shared aggregate preload budget; item.json stays deferred because the
-    // row cannot reconstruct the single-item response byte-for-byte.
+    // The issue listing projects each row as a `CollectionEntry::derived`: the
+    // eager derived leaves (title/state/user) that the lossy list row can fill
+    // are projected as inline files under the issue anchor. The item canonical
+    // (item.json/item.md/body) is NOT seeded from the list row, because the row
+    // cannot reproduce the single-item GET byte-for-byte; those load on first
+    // read from the standalone object.
     assert!(
         response.callouts().is_empty(),
         "list terminal should carry no callouts, got {:?}",
@@ -159,20 +159,17 @@ fn github_issue_list_projects_files() {
     );
     match response.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
-            let mut preloaded = project_paths(response.effects().unwrap());
+            let effects = response.effects().unwrap();
+            let mut preloaded = project_paths(effects);
             preloaded.sort_unstable();
             assert_eq!(
                 preloaded,
                 vec![
-                    "/octocat/Hello-World/issues/open/7",
-                    "/octocat/Hello-World/issues/open/7/body",
-                    "/octocat/Hello-World/issues/open/7/comments",
-                    "/octocat/Hello-World/issues/open/7/item.json",
-                    "/octocat/Hello-World/issues/open/7/item.md",
                     "/octocat/Hello-World/issues/open/7/state",
                     "/octocat/Hello-World/issues/open/7/title",
                     "/octocat/Hello-World/issues/open/7/user",
-                ]
+                ],
+                "list should project only the derived leaves, not seed the item"
             );
             let names: Vec<&str> = listing
                 .entries
@@ -180,74 +177,28 @@ fn github_issue_list_projects_files() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names, vec!["7"]);
-            let effects = response.effects().unwrap();
-            let issue_body_path = "/octocat/Hello-World/issues/open/7/body";
-            let issue_md_path = "/octocat/Hello-World/issues/open/7/item.md";
-            let issue_json_path = "/octocat/Hello-World/issues/open/7/item.json";
+            // Derived leaves carry the cheap list-row fields inline.
             assert_eq!(
-                project_file_inline_bytes(effects, issue_body_path),
-                Some(b"Issue body".as_slice()),
-                "{:?}",
-                effects
-                    .fs
-                    .iter()
-                    .find(|write| write.path == issue_body_path)
+                project_file_inline_bytes(effects, "/octocat/Hello-World/issues/open/7/title"),
+                Some(b"Issue title".as_slice()),
             );
             assert_eq!(
-                project_file_inline_bytes(effects, issue_md_path),
-                Some(
-                    b"# Issue title\n\n- Number: 7\n- State: open\n- User: \n\nIssue body\n"
-                        .as_slice()
-                ),
-                "{:?}",
-                effects.fs.iter().find(|write| write.path == issue_md_path)
+                project_file_inline_bytes(effects, "/octocat/Hello-World/issues/open/7/state"),
+                Some(b"open".as_slice()),
             );
+            assert_eq!(
+                project_file_inline_bytes(effects, "/octocat/Hello-World/issues/open/7/user"),
+                Some(b"".as_slice()),
+            );
+            // The single-item canonical (item.json) is NOT seeded by the list.
             assert!(
-                project_file_is_deferred_full(effects, issue_json_path),
-                "{:?}",
-                effects
-                    .fs
-                    .iter()
-                    .find(|write| write.path == issue_json_path)
+                effects.canonical.is_empty(),
+                "list must not seed item canonical, got {:?}",
+                effects.canonical
             );
         },
         other => panic!("expected issue listing terminal, got {other:?}"),
     }
-
-    let harness = github_harness();
-    harness
-        .runtime
-        .apply_effects_for_test(response.effects().unwrap(), harness.current_generation());
-    let dirents = harness
-        .cache_get(
-            "/octocat/Hello-World/issues/open/7",
-            RecordKind::Dirents,
-            None,
-        )
-        .and_then(|record| DirentsPayload::deserialize(&record.payload))
-        .expect("issue list preload should materialize hot issue dirents");
-    assert!(
-        dirents.exhaustive,
-        "issue dirents should be exhaustive after list preload"
-    );
-    let mut child_names: Vec<_> = dirents
-        .entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect();
-    child_names.sort_unstable();
-    assert_eq!(
-        child_names,
-        vec![
-            "body",
-            "comments",
-            "item.json",
-            "item.md",
-            "state",
-            "title",
-            "user"
-        ]
-    );
 }
 
 #[test]
@@ -430,23 +381,23 @@ fn github_pr_list_projects_files() {
         "list terminal should carry no callouts, got {:?}",
         response.callouts()
     );
+    // Like issues, a PR row projects only its eager derived leaves
+    // (title/state/user). The item canonical (item.json/item.md/body) and the
+    // diff blob are object faces that load on first read; the list does not
+    // seed them.
     match response.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
-            let mut preloaded = project_paths(response.effects().unwrap());
+            let effects = response.effects().unwrap();
+            let mut preloaded = project_paths(effects);
             preloaded.sort_unstable();
             assert_eq!(
                 preloaded,
                 vec![
-                    "/octocat/Hello-World/pulls/open/7",
-                    "/octocat/Hello-World/pulls/open/7/body",
-                    "/octocat/Hello-World/pulls/open/7/comments",
-                    "/octocat/Hello-World/pulls/open/7/diff",
-                    "/octocat/Hello-World/pulls/open/7/item.json",
-                    "/octocat/Hello-World/pulls/open/7/item.md",
                     "/octocat/Hello-World/pulls/open/7/state",
                     "/octocat/Hello-World/pulls/open/7/title",
                     "/octocat/Hello-World/pulls/open/7/user",
-                ]
+                ],
+                "PR list should project only the derived leaves, not seed the item or diff"
             );
             let names: Vec<&str> = listing
                 .entries
@@ -454,29 +405,22 @@ fn github_pr_list_projects_files() {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names, vec!["7"]);
-            let effects = response.effects().unwrap();
-            let pull_body_path = "/octocat/Hello-World/pulls/open/7/body";
-            let pull_md_path = "/octocat/Hello-World/pulls/open/7/item.md";
-            let pull_json_path = "/octocat/Hello-World/pulls/open/7/item.json";
             assert_eq!(
-                project_file_inline_bytes(effects, pull_body_path),
-                Some(b"PR body".as_slice()),
-                "{:?}",
-                effects.fs.iter().find(|write| write.path == pull_body_path)
+                project_file_inline_bytes(effects, "/octocat/Hello-World/pulls/open/7/title"),
+                Some(b"PR title".as_slice()),
             );
             assert_eq!(
-                project_file_inline_bytes(effects, pull_md_path),
-                Some(
-                    b"# PR title\n\n- Number: 7\n- State: open\n- User: octocat\n\nPR body\n"
-                        .as_slice()
-                ),
-                "{:?}",
-                effects.fs.iter().find(|write| write.path == pull_md_path)
+                project_file_inline_bytes(effects, "/octocat/Hello-World/pulls/open/7/state"),
+                Some(b"open".as_slice()),
+            );
+            assert_eq!(
+                project_file_inline_bytes(effects, "/octocat/Hello-World/pulls/open/7/user"),
+                Some(b"octocat".as_slice()),
             );
             assert!(
-                project_file_is_deferred_full(effects, pull_json_path),
-                "{:?}",
-                effects.fs.iter().find(|write| write.path == pull_json_path)
+                effects.canonical.is_empty(),
+                "PR list must not seed item canonical, got {:?}",
+                effects.canonical
             );
         },
         other => panic!("expected PR listing terminal, got {other:?}"),
@@ -618,9 +562,11 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
 
 #[test]
 fn github_owner_listing_tracks_browsed_repos() {
-    // State is empty; there is no active-path tracking. The test now just
-    // verifies that (a) listing a repo dir triggers the repo_gate fetch, and
-    // (b) listing an owner dir fetches the user/org profile then the repos.
+    // The owner is an OBJECT at `/{owner}`: listing it MERGES the owner's own
+    // faces (owner.json canonical, profile.md representation) with the repo
+    // names yielded by the `Owner::repos` anchor collection. The repo names ARE
+    // the child `Repo` anchors (`/{owner}/{repo}`). This test pins that merge:
+    // a browsed repo surfaces under the owner alongside the owner's own faces.
     let harness = github_harness();
     // listing /{owner}/{repo} triggers repo_gate which fetches the repo API.
     let mut repo_listing = harness.list("/octocat/Hello-World").unwrap();
@@ -642,12 +588,28 @@ fn github_owner_listing_tracks_browsed_repos() {
         "expected repo listing after gate, got {repo_listing:?}"
     );
 
+    // Listing the owner anchor fetches (1) the owner profile to load its own
+    // canonical (owner.json/profile.md faces), (2) the same profile again to
+    // classify user-vs-org for the repos endpoint, then (3) the repos page.
     let mut owner_listing = harness.list("/octocat").unwrap();
-    let user_fetch = owner_listing.expect_single_fetch();
+    let owner_load = owner_listing.expect_single_fetch();
     assert!(
-        user_fetch.url.ends_with("/users/octocat"),
-        "expected owner user lookup first, got {}",
-        user_fetch.url
+        owner_load.url.ends_with("/users/octocat"),
+        "expected owner profile load first, got {}",
+        owner_load.url
+    );
+    owner_listing
+        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
+        })])
+        .unwrap();
+    let classify_fetch = owner_listing.expect_single_fetch();
+    assert!(
+        classify_fetch.url.ends_with("/users/octocat"),
+        "expected owner classification fetch, got {}",
+        classify_fetch.url
     );
     owner_listing
         .resume(vec![CalloutResult::HttpResponse(HttpResponse {
@@ -679,9 +641,18 @@ fn github_owner_listing_tracks_browsed_repos() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
+            // The merge: owner faces AND the browsed repo name share one listing.
             assert!(
                 names.contains(&"Hello-World"),
-                "expected Hello-World in owner listing, got {names:?}"
+                "expected browsed repo in owner listing, got {names:?}"
+            );
+            assert!(
+                names.contains(&"owner.json"),
+                "expected owner.json face in owner listing, got {names:?}"
+            );
+            assert!(
+                names.contains(&"profile.md"),
+                "expected profile.md face in owner listing, got {names:?}"
             );
         },
         other => panic!("expected owner listing, got {other:?}"),
@@ -726,11 +697,24 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     }
 
     let mut owner_listing = harness.list("/open").unwrap();
-    let user_fetch = owner_listing.expect_single_fetch();
+    let owner_load = owner_listing.expect_single_fetch();
     assert!(
-        user_fetch.url.ends_with("/users/open"),
-        "expected owner user lookup first, got {}",
-        user_fetch.url
+        owner_load.url.ends_with("/users/open"),
+        "expected owner profile load first, got {}",
+        owner_load.url
+    );
+    owner_listing
+        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::<Header>::new(),
+            body: br#"{"login":"open","type":"User"}"#.to_vec(),
+        })])
+        .unwrap();
+    let classify_fetch = owner_listing.expect_single_fetch();
+    assert!(
+        classify_fetch.url.ends_with("/users/open"),
+        "expected owner classification fetch, got {}",
+        classify_fetch.url
     );
     owner_listing
         .resume(vec![CalloutResult::HttpResponse(HttpResponse {
@@ -762,9 +746,19 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
+            // The owner listing is its own faces merged with the API-reported
+            // repos (here none). The earlier browsed `/open/source` path must
+            // NOT surface as a phantom repo child: unclassified scaffolding does
+            // not bind. Only the object's own faces remain.
+            let mut repo_children: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|name| *name != "owner.json" && *name != "profile.md")
+                .collect();
+            repo_children.sort_unstable();
             assert!(
-                names.is_empty(),
-                "unexpected owner names after uncached repo traversal: {names:?}"
+                repo_children.is_empty(),
+                "unexpected repo children after uncached repo traversal: {repo_children:?}"
             );
         },
         other => panic!("expected owner listing, got {other:?}"),
@@ -822,7 +816,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
 
 #[test]
 fn github_provider_missing_item_resources_validate_on_lookup() {
-    use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
+    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 
     // Issue item dirs resolve structurally; existence is validated on read.
     let harness = github_harness();
@@ -850,17 +844,19 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
         other => panic!("expected issue diff lookup to be NotFound, got {other:?}"),
     }
 
-    // Reading a structural file under the anchor triggers a fetch; a 404 from
-    // GitHub propagates as NotFound. Use comments/1 (structural handler).
+    // Reading a face under a missing comment object triggers a fetch; a 404
+    // from GitHub propagates as NotFound. A comment is a `{comment_id}` object
+    // dir, so the fetchable leaf is `comments/1/comment.json`, which loads the
+    // standalone comment GET keyed by comment id.
     let mut issued = harness
-        .read("/octocat/Hello-World/issues/open/999999999/comments/1")
+        .read("/octocat/Hello-World/issues/open/999999999/comments/1/comment.json")
         .unwrap();
     let fetch = issued.expect_single_fetch();
     assert!(
         fetch
             .url
-            .contains("/repos/octocat/Hello-World/issues/999999999/comments"),
-        "unexpected issue comments fetch URL: {}",
+            .ends_with("/repos/octocat/Hello-World/issues/comments/1"),
+        "unexpected comment fetch URL: {}",
         fetch.url
     );
 
@@ -872,11 +868,11 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
         })])
         .unwrap();
 
+    // A 404 on the comment object load resolves the object as not-found, keyed
+    // to the comment anchor.
     match issued.result().unwrap() {
-        OpResult::Error(error) => {
-            assert_eq!(error.kind, ErrorKind::NotFound);
-        },
-        other => panic!("expected ProviderErr(NotFound) on 404 read, got {other:?}"),
+        OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+        other => panic!("expected ReadFile NotFound on 404 read, got {other:?}"),
     }
 }
 
@@ -1164,13 +1160,16 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
     // previous directory listing to preload content into the host cache.
     let cases = [
         Case {
+            // A comment is a `{comment_id}` object dir; `comment.md` renders the
+            // standalone comment GET. Reading it fetches the comment from
+            // upstream rather than serving a provider-side cache.
             name: "issue comment",
-            path: "/octocat/Hello-World/issues/open/1/comments/1",
+            path: "/octocat/Hello-World/issues/open/1/comments/1/comment.md",
             ok_headers: vec![Header {
                 name: "etag".to_string(),
                 value: "\"comment-1\"".to_string(),
             }],
-            ok_body: br#"[{"user":{"login":"octocat"},"body":"A comment"}]"#,
+            ok_body: br#"{"id":1,"user":{"login":"octocat"},"body":"A comment"}"#,
             expected_content: b"octocat:\nA comment\n",
         },
         Case {
@@ -1256,168 +1255,201 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
     }
 }
 
+/// Comments are `{comment_id}` object dirs (a DEPARTURE from the old indexed
+/// `comments/{idx}` files; the "zero index" concept no longer exists). The
+/// collection lists each comment as a directory keyed by its own id, and each
+/// comment's `comment.json` / `comment.md` faces load from the standalone
+/// comment GET. This test pins (a) the id-keyed dir model, (b) the refetch
+/// invariant: a comment face read fetches upstream and a reread refetches
+/// (never serves a provider-side cache), and (c) reject: a face under a missing
+/// comment validates to not-found on read.
 #[test]
 #[allow(clippy::too_many_lines)]
-fn github_provider_comment_routes_refetch_and_reject_zero_index() {
-    use omnifs_wit::provider::types::{Callout, CalloutError, CalloutResult, ErrorKind};
+fn github_provider_comment_routes_id_dirs_and_refetch() {
+    use omnifs_wit::provider::types::{CalloutError, CalloutResult, Header};
 
     fn ok_body(body: &[u8]) -> Vec<CalloutResult> {
         vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![Header {
+                name: "etag".to_string(),
+                value: "\"c\"".to_string(),
+            }],
             body: body.to_vec(),
         })]
     }
 
-    fn network_error() -> Vec<CalloutResult> {
-        vec![CalloutResult::CalloutError(CalloutError {
-            kind: ErrorKind::Network,
-            message: "network down".to_string(),
-            retryable: true,
-        })]
-    }
-
-    fn expect_network_error_on_refetch(op: &mut omnifs_host::TestOp<'_>) {
-        assert!(
-            op.is_suspended(),
-            "expected fetch callout on refetch, got {op:?}"
-        );
-        op.resume(network_error()).unwrap();
-        match op.result().unwrap() {
-            OpResult::Error(error) => {
-                assert_eq!(error.kind, ErrorKind::Network);
-            },
-            other => panic!("expected Network error on refetch, got {other:?}"),
-        }
-    }
-
-    fn expect_not_found(response: &omnifs_host::TestOp<'_>) {
-        match response.result().unwrap() {
-            OpResult::Error(error) => {
-                assert_eq!(error.kind, ErrorKind::NotFound);
-            },
-            other => panic!("expected NotFound error, got {other:?}"),
-        }
-    }
-
-    fn expect_fetch_url(response: &omnifs_host::TestOp<'_>) -> String {
-        let [Callout::Fetch(request)] = response.callouts() else {
-            panic!(
-                "expected single fetch callout, got {:?}",
-                response.callouts()
-            );
-        };
-        request.url.clone()
-    }
-
     let harness = github_harness();
-    // filter segment dropped; path is /{owner}/{repo}/issues/{number}/comments.
-    // Issue comments surface through list_children.
+
+    // The issue comment collection lists each comment as an id-keyed DIR. The
+    // listing fetches the comments page and emits one directory per comment id.
     let issue_list_path = "/octocat/Hello-World/issues/open/1/comments";
-    let mut issue_first = harness.list(issue_list_path).unwrap();
-    assert!(issue_first.is_suspended());
-    issue_first
+    let mut issue_list = harness.list(issue_list_path).unwrap();
+    let list_fetch = issue_list.expect_single_fetch();
+    assert!(
+        list_fetch
+            .url
+            .contains("/repos/octocat/Hello-World/issues/1/comments?per_page=100&page=1"),
+        "unexpected comment listing URL: {}",
+        list_fetch.url
+    );
+    issue_list
         .resume(ok_body(
-            br#"[{"user":{"login":"octocat"},"body":"first issue comment"}]"#,
+            br#"[{"id":42,"user":{"login":"octocat"},"body":"first issue comment"}]"#,
         ))
         .unwrap();
-    match issue_first.result().unwrap() {
+    match issue_list.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["1"]);
-            let EntryKind::File(file) = &listing.entries[0].kind else {
-                panic!("expected comment entry to be a file");
-            };
-            // comment listing entries use the default Stable stability;
-            // the Dynamic stability is carried on the read result from comment_read.
-            assert_eq!(file.attrs.stability, Stability::Stable);
+            // The child name is the comment id, not a positional index.
+            assert_eq!(names, vec!["42"]);
+            assert!(
+                matches!(listing.entries[0].kind, EntryKind::Directory),
+                "a comment is an object dir, got {:?}",
+                listing.entries[0].kind
+            );
         },
         other => panic!("expected issue comment listing, got {other:?}"),
     }
-    let mut issue_refetch = harness.list(issue_list_path).unwrap();
-    expect_network_error_on_refetch(&mut issue_refetch);
-    let issue_zero = harness
-        .read("/octocat/Hello-World/issues/open/1/comments/0")
-        .unwrap();
-    expect_not_found(&issue_zero);
 
-    let mut issue_page_two = harness
-        .read("/octocat/Hello-World/issues/open/1/comments/101")
-        .unwrap();
-    let issue_page_two_url = expect_fetch_url(&issue_page_two);
-    assert!(
-        issue_page_two_url.contains("/issues/1/comments?per_page=100&page=2"),
-        "expected second-page issue comment fetch, got {issue_page_two_url}"
-    );
-    issue_page_two
-        .resume(ok_body(
-            br#"[{"user":{"login":"octocat"},"body":"page two issue comment"}]"#,
-        ))
-        .unwrap();
-    match issue_page_two.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Dynamic);
+    // Listing the comment object dir itself enumerates its faces. Regression
+    // guard: the comment's `body.md` derive face is lazy, so the eager-leaf
+    // projection on the anchor-listing path does not reject its non-inline body.
+    let comment_dir = "/octocat/Hello-World/issues/open/1/comments/42";
+    let mut dir = harness.list(comment_dir).unwrap();
+    let _ = dir.expect_single_fetch();
+    dir.resume(ok_body(
+        br#"{"id":42,"user":{"login":"octocat"},"body":"first issue comment"}"#,
+    ))
+    .unwrap();
+    match dir.result().unwrap() {
+        OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
+            let mut names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            names.sort_unstable();
             assert_eq!(
-                omnifs_itest::expect_inline(file),
-                b"octocat:\npage two issue comment\n"
+                names,
+                vec!["author", "body.md", "comment.json", "comment.md"]
             );
         },
-        other => panic!("expected issue comment page-two content, got {other:?}"),
+        other => panic!("expected comment dir listing, got {other:?}"),
     }
 
-    // PR comments surface through read_file at a specific index.
-    // filter segment dropped; path is /{owner}/{repo}/pulls/{number}/comments/{idx}.
-    let pr_read_path = "/octocat/Hello-World/pulls/open/7/comments/1";
-    let mut pr_first = harness.read(pr_read_path).unwrap();
-    assert!(pr_first.is_suspended());
-    pr_first
+    // `comment.md` renders the standalone comment GET, keyed by comment id.
+    let comment_md = "/octocat/Hello-World/issues/open/1/comments/42/comment.md";
+    let mut first = harness.read(comment_md).unwrap();
+    let first_fetch = first.expect_single_fetch();
+    assert!(
+        first_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/issues/comments/42"),
+        "unexpected comment fetch URL: {}",
+        first_fetch.url
+    );
+    first
         .resume(ok_body(
-            br#"[{"user":{"login":"hubot"},"body":"first pr comment"}]"#,
+            br#"{"id":42,"user":{"login":"octocat"},"body":"A comment"}"#,
         ))
         .unwrap();
-    match pr_first.result().unwrap() {
+    match first.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
-            assert_eq!(
-                omnifs_itest::expect_inline(file),
-                b"hubot:\nfirst pr comment\n"
-            );
+            assert_eq!(omnifs_itest::expect_inline(file), b"octocat:\nA comment\n");
+        },
+        other => panic!("expected comment.md content, got {other:?}"),
+    }
+
+    // Refetch invariant: a reread does NOT serve a provider-side cache; it
+    // fetches again. A network error on the refetch surfaces as Network.
+    let mut reread = harness.read(comment_md).unwrap();
+    assert!(
+        reread.is_suspended(),
+        "comment reread should refetch, got {reread:?}"
+    );
+    reread
+        .resume(vec![CalloutResult::CalloutError(CalloutError {
+            kind: omnifs_wit::provider::types::ErrorKind::Network,
+            message: "network down".to_string(),
+            retryable: true,
+        })])
+        .unwrap();
+    match reread.result().unwrap() {
+        OpResult::Error(error) => {
+            assert_eq!(error.kind, omnifs_wit::provider::types::ErrorKind::Network);
+        },
+        other => panic!("expected Network error on comment refetch, got {other:?}"),
+    }
+
+    // `comment.json` serves the canonical comment bytes verbatim and refetches
+    // identically on a cold reread.
+    let comment_json = "/octocat/Hello-World/issues/open/1/comments/42/comment.json";
+    let mut json_read = harness.read(comment_json).unwrap();
+    assert!(json_read.is_suspended());
+    json_read
+        .resume(ok_body(
+            br#"{"id":42,"user":{"login":"octocat"},"body":"A comment"}"#,
+        ))
+        .unwrap();
+    match json_read.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(_)) => {},
+        other => panic!("expected comment.json read, got {other:?}"),
+    }
+
+    // PR comments use the same id-keyed dir model and the same standalone
+    // comment GET (comments live under the shared issues endpoint).
+    let pr_comment_md = "/octocat/Hello-World/pulls/open/7/comments/9/comment.md";
+    let mut pr_read = harness.read(pr_comment_md).unwrap();
+    let pr_fetch = pr_read.expect_single_fetch();
+    assert!(
+        pr_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/issues/comments/9"),
+        "unexpected PR comment fetch URL: {}",
+        pr_fetch.url
+    );
+    pr_read
+        .resume(ok_body(
+            br#"{"id":9,"user":{"login":"hubot"},"body":"a pr comment"}"#,
+        ))
+        .unwrap();
+    match pr_read.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
+            assert_eq!(file.attrs.stability, Stability::Dynamic);
+            assert_eq!(omnifs_itest::expect_inline(file), b"hubot:\na pr comment\n");
         },
         other => panic!("expected PR comment content, got {other:?}"),
     }
-    let mut pr_refetch = harness.read(pr_read_path).unwrap();
-    expect_network_error_on_refetch(&mut pr_refetch);
-    let pr_zero = harness
-        .read("/octocat/Hello-World/pulls/open/7/comments/0")
-        .unwrap();
-    expect_not_found(&pr_zero);
 
-    let mut pr_page_two = harness
-        .read("/octocat/Hello-World/pulls/open/7/comments/101")
+    // Reject: a face under a missing comment id validates on read. A 404 on the
+    // comment object load resolves the object as not-found.
+    let mut missing = harness
+        .read("/octocat/Hello-World/issues/open/1/comments/999/comment.json")
         .unwrap();
-    let pr_page_two_url = expect_fetch_url(&pr_page_two);
+    let missing_fetch = missing.expect_single_fetch();
     assert!(
-        pr_page_two_url.contains("/issues/7/comments?per_page=100&page=2"),
-        "expected second-page PR comment fetch, got {pr_page_two_url}"
+        missing_fetch
+            .url
+            .ends_with("/repos/octocat/Hello-World/issues/comments/999"),
+        "unexpected missing-comment fetch URL: {}",
+        missing_fetch.url
     );
-    pr_page_two
-        .resume(ok_body(
-            br#"[{"user":{"login":"hubot"},"body":"page two pr comment"}]"#,
-        ))
+    missing
+        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: b"{\"message\":\"Not Found\"}".to_vec(),
+        })])
         .unwrap();
-    match pr_page_two.result().unwrap() {
-        OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
-            assert_eq!(file.attrs.stability, Stability::Dynamic);
-            assert_eq!(
-                omnifs_itest::expect_inline(file),
-                b"hubot:\npage two pr comment\n"
-            );
-        },
-        other => panic!("expected PR comment page-two content, got {other:?}"),
+    match missing.result().unwrap() {
+        OpResult::ReadFile(ReadFileOutcome::NotFound(_)) => {},
+        other => panic!("expected NotFound on missing comment, got {other:?}"),
     }
 }
 
@@ -1570,14 +1602,16 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         other => panic!("expected immediate Dir entry for owner, got {other:?}"),
     }
 
-    // list_children does classify the owner (user vs org) to pick the right
-    // repos endpoint. Test the org-fallback path.
+    // Listing the owner object first LOADS its canonical (owner.json/profile.md
+    // faces): `Owner::load` probes `/users` then falls back to `/orgs`. Then the
+    // `Owner::repos` collection classifies the owner again (user-vs-org) to pick
+    // the repos endpoint. Both rounds probe users(404) then orgs(200) here.
     let mut listing = harness.list("/openai").unwrap();
-    let first = listing.expect_single_fetch();
+    let load_user = listing.expect_single_fetch();
     assert!(
-        first.url.ends_with("/users/openai"),
-        "expected user profile lookup first, got {}",
-        first.url
+        load_user.url.ends_with("/users/openai"),
+        "expected owner load user probe first, got {}",
+        load_user.url
     );
 
     listing
@@ -1590,13 +1624,47 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
             body: Vec::new(),
         })])
         .unwrap();
-    let second = listing.expect_single_fetch();
+    let load_org = listing.expect_single_fetch();
     assert!(
-        second.url.ends_with("/orgs/openai"),
-        "expected org profile fallback, got {}",
-        second.url
+        load_org.url.ends_with("/orgs/openai"),
+        "expected owner load org fallback, got {}",
+        load_org.url
     );
 
+    listing
+        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{
+                "login": "openai",
+                "public_repos": 42
+            }"#
+            .to_vec(),
+        })])
+        .unwrap();
+    // Collection classification: probe users again, fall back to orgs again.
+    let classify_user = listing.expect_single_fetch();
+    assert!(
+        classify_user.url.ends_with("/users/openai"),
+        "expected collection classification user probe, got {}",
+        classify_user.url
+    );
+    listing
+        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 404,
+            headers: vec![Header {
+                name: "etag".to_string(),
+                value: "\"miss\"".to_string(),
+            }],
+            body: Vec::new(),
+        })])
+        .unwrap();
+    let classify_org = listing.expect_single_fetch();
+    assert!(
+        classify_org.url.ends_with("/orgs/openai"),
+        "expected collection classification org fallback, got {}",
+        classify_org.url
+    );
     listing
         .resume(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
@@ -1660,16 +1728,17 @@ fn github_provider_polls_events_and_invalidates_caches() {
     // This test verifies that the issue read path still works with issue.json,
     // and that timer ticks are no-ops (no callouts, no invalidations).
     let harness = github_harness();
-    // per-field files dropped; use a structural file route (issue comment).
-    let issue_path = "/octocat/Hello-World/issues/open/1/comments/1";
+    // Read a comment object face: a `{comment_id}` dir's `comment.json` loads the
+    // standalone comment GET.
+    let comment_path = "/octocat/Hello-World/issues/open/1/comments/1/comment.json";
 
-    let mut issue_cached = harness.read(issue_path).unwrap();
+    let mut issue_cached = harness.read(comment_path).unwrap();
     let issue_fetch = issue_cached.expect_single_fetch();
     assert!(
         issue_fetch
             .url
-            .contains("/repos/octocat/Hello-World/issues/1/comments"),
-        "unexpected issue comment fetch URL: {}",
+            .ends_with("/repos/octocat/Hello-World/issues/comments/1"),
+        "unexpected comment fetch URL: {}",
         issue_fetch.url
     );
     issue_cached
@@ -1679,12 +1748,12 @@ fn github_provider_polls_events_and_invalidates_caches() {
                 name: "etag".to_string(),
                 value: "\"comment-1\"".to_string(),
             }],
-            body: br#"[{"user":{"login":"octocat"},"body":"A comment"}]"#.to_vec(),
+            body: br#"{"id":1,"user":{"login":"octocat"},"body":"A comment"}"#.to_vec(),
         })])
         .unwrap();
     match issue_cached.result().unwrap() {
         OpResult::ReadFile(_) => {},
-        other => panic!("expected issue comment ReadFile result, got {other:?}"),
+        other => panic!("expected comment ReadFile result, got {other:?}"),
     }
     // the event poller (events_etags, active_paths, timer handler) is
     // removed. State is empty. TimerTick returns immediately with no callouts
