@@ -60,7 +60,7 @@ This avoids surprising users with mounts they did not configure while preserving
 
 ## Provider metadata and templates
 
-Provider metadata is shipped by the provider wasm and mirrored in the CLI's built-in catalog. It describes the provider, credential requirements, validation hints, default auth scheme, and default non-secret config. The provider-owned source is `providers/<name>/omnifs.provider.json`; its `auth` block is what the CLI uses for host-side login, and what the provider build embeds into the wasm `omnifs.provider-metadata.v1` section.
+Provider metadata is shipped inside the provider wasm and mirrored in the CLI's built-in catalog. It describes the provider, credential requirements, validation hints, default auth scheme, and default non-secret config. The provider authors this metadata from `#[omnifs_sdk::provider]` annotations; the build tool assembles it into the wasm `omnifs.provider-metadata.v1` section. The CLI uses the extracted auth block for host-side login.
 
 Enabled mount config is separate. It records the user's chosen mount name, provider component, and chosen auth scheme. It may override non-secret settings, but it must not be treated as the source of provider capability metadata.
 
@@ -143,7 +143,7 @@ Current shipped flow:
 2. `omnifs init linear` writes a `[[mounts]]` entry in `~/.omnifs/config.toml` and runs the Linear OAuth flow.
 3. `omnifs up` materializes the selected credentials and starts the container.
 
-Future docs should keep this distinction clear: `init` owns mount generation for normal users; provider-owned defaults live in the CLI catalog and wasm metadata, both derived from `providers/<name>/omnifs.provider.json`; `omnifs dev` is the contributor sandbox path, synthesizing mount configs from the built-in provider manifests and launching the dev container directly.
+Future docs should keep this distinction clear: `init` owns mount generation for normal users; provider-owned defaults live in the CLI catalog and wasm metadata, both derived from `#[omnifs_sdk::provider]` annotations at build time; `omnifs dev` is the contributor sandbox path, synthesizing mount configs from the built-in provider manifests and launching the dev container directly.
 
 ## Non-goals
 

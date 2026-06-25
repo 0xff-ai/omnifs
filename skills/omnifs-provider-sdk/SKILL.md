@@ -19,7 +19,7 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 6. **Captures validate syntax only.** Existence is decided by handlers, lookup intent, or `Object::load`. Exception: a finite `choices()` set when the universe is truly static or a dynamic route would otherwise synthesize false anchors (the DB provider's table-name case).
 7. **Attribute honesty.** Inline bytes require `Size::Exact(len)` and are capped at 64 KiB (`MAX_PROJECTED_BYTES`); bigger or unknown content is deferred. `Stability::Live` requires `Deferred { read: Ranged }` (the validator rejects anything else). Dynamic upstream = dynamic projection; versioned upstream = stable projection.
 8. **Identity vs facets.** A key's non-`Facet` fields, in declaration order, ARE the object's identity (its logical id and cache key). Route-context captures that must not split the cache (list filter, version selector, team alias) are `Facet<T>`. Changing an object's `kind` string or identity captures orphans every cached object.
-9. **Auth never appears in provider code.** Credentials are declared in `omnifs.provider.json` and materialized into requests by the host. `#[endpoint(auth = ..)]` is rejected at compile time by design.
+9. **Auth never appears in provider code.** Credentials are declared via the `auth = ..` argument to `#[omnifs_sdk::provider]` and materialized into requests by the host. `#[endpoint(auth = ..)]` is rejected at compile time by design.
 10. **Reuse the SDK, stdlib, and imported crates before writing plumbing.** Check `omnifs-sdk` projections, endpoint helpers, object/load APIs, typed captures, `time`, `url`, `serde_json`, `strum`, and other already-present workspace dependencies before adding local parsers, date math, enum tables, HTTP glue, cache shims, or projection helpers.
 11. **Use `strum` for finite enum path segments.** Derive `EnumString`, `AsRefStr`, `Display`, and usually `VariantArray` with `serialize_all = "snake_case"` instead of hand-writing parse/display ladders or parallel `&[&str]` tables. Put the single universe on the enum (`VariantArray::VARIANTS` or an enum-owned `ALL`), and derive filenames, entries, and `PathSegment::choices` from that one list.
 12. **Use `hashbrown::HashMap`** (re-exported by the SDK) for provider-internal maps.
@@ -68,7 +68,8 @@ struct ItemKey {
 }
 
 #[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
+    id = "example",
+    capabilities(domain("api.example.com", "fetch items")),
     resources(endpoints = [Api]),
 )]
 impl ExampleProvider {
@@ -186,9 +187,17 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 `events(timer(Duration::from_secs(n), Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`; build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
 
-## Manifest (`omnifs.provider.json`)
+## Manifest (provider metadata)
 
-Lives at the crate root, named in `metadata = "omnifs.provider.json"`, validated at compile time, embedded as the `omnifs.provider-metadata.v1` custom section. It declares: `id`, `displayName`, `defaultMount`, `capabilities` (each domain with a `why` string; private IPs are blocked by default; plain HTTP is always denied), and `auth` (scheme, flows). Editing the JSON alone is safe: the macro tracks it as a build input.
+The manifest (identity, capabilities, config schema, auth) is authored entirely from `#[omnifs_sdk::provider(...)]` arguments and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers-build`. There is no hand-written `omnifs.provider.json`.
+
+- `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
+- `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"), memory_mb(<int>,"why"))` declare capability needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
+- `auth = <expr>` splices a typed `omnifs_sdk::auth::Auth` builder value (covering `StaticToken`, `OAuth` device-code/PKCE/client-side-token flows, and `Validation`) into the manifest auth block.
+- The config schema is derived automatically from `type Config` (via `#[omnifs_sdk::config]`, which now also derives `schemars::JsonSchema`); no manifest argument is needed.
+- Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file → read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket); their `JsonSchema` emits an `x-omnifs-resource` marker on the property.
+
+The compact auth wire form (the shape serialized into the embedded section) is unchanged from the former JSON file format; it is now produced from Rust builder expressions instead.
 
 ## Build and verify
 

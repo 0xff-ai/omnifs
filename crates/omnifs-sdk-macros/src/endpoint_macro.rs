@@ -103,7 +103,7 @@ pub(crate) fn endpoint_derive_impl(input: &syn::DeriveInput) -> syn::Result<Toke
                 "auth" => {
                     return Err(syn::Error::new(
                         mnv.path.span(),
-                        "auth is declared in omnifs.provider.json, not #[endpoint]",
+                        "auth is declared via `auth = ..` on `#[omnifs_sdk::provider]`, not #[endpoint]",
                     ));
                 },
                 "rate_limit" => {

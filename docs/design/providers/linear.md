@@ -4,7 +4,7 @@ The Linear provider projects teams and issues from Linear's GraphQL API at `http
 
 ## Authentication schemes
 
-The provider declares two host-managed HTTP auth schemes in `auth` inside `providers/linear/omnifs.provider.json`; the provider build embeds that metadata as the wasm `omnifs.provider-metadata.v1` section.
+The provider declares two host-managed HTTP auth schemes via the `auth = ..` argument to `#[omnifs_sdk::provider]`; the provider build embeds that metadata as the wasm `omnifs.provider-metadata.v1` section.
 
 `staticToken` with key `pat` covers Linear personal access tokens and API keys. The host injects the raw token into the `Authorization` header for `api.linear.app`; Linear PATs are not prefixed with `Bearer `.
 
@@ -33,7 +33,7 @@ OAuth is the default supported auth scheme; the manifest sets `auth.default` to 
 
 ## Validation
 
-A host test reads the checked-in `providers/linear/omnifs.provider.json` through `ProviderManifest::from_bytes`, asserts `auth.default` is `oauth`, and asserts the derived wasm auth manifest exposes a non-empty set of schemes; it does not assert the product client id. The generic host OAuth path is tested separately with fake OAuth and HTTPS API servers, including the BYO `clientId` override, but that test is provider-agnostic and does not reference Linear. No live Linear OAuth flow is part of CI.
+A host integration test initializes the Linear provider wasm, extracts its embedded `ProviderManifest`, asserts `auth.default` is `oauth`, and asserts the derived wasm auth manifest exposes a non-empty set of schemes; it does not assert the product client id. The generic host OAuth path is tested separately with fake OAuth and HTTPS API servers, including the BYO `clientId` override, but that test is provider-agnostic and does not reference Linear. No live Linear OAuth flow is part of CI.
 
 References:
 

@@ -21,9 +21,9 @@
 //!   meaningful outcome for the route.
 //!
 //! Never set `Authorization` or any other credential header here. Auth is
-//! host-managed: the provider's `omnifs.provider.json` manifest declares the
-//! scheme and inject domains, and the host materializes the header into
-//! matching requests after the callout leaves the guest. Endpoint
+//! host-managed: the provider's `auth = ..` argument to `#[omnifs_sdk::provider]`
+//! declares the scheme and inject domains, and the host materializes the header
+//! into matching requests after the callout leaves the guest. Endpoint
 //! `default_header` attributes are for static metadata such as `User-Agent`
 //! and `Accept`.
 //!

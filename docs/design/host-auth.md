@@ -1,7 +1,7 @@
 # Host authentication, OAuth, and credential storage
 
 Status: accepted; current implementation covers static-token auth, generic OAuth plumbing, GitHub device-code OAuth, and Linear PKCE OAuth.
-Scope: `omnifs.provider-metadata.v1` custom section (`auth` block in `omnifs.provider.json`), `crates/omnifs-mount`, `crates/omnifs-provider`, `crates/omnifs-sdk`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/http.rs`, `crates/omnifs-cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
+Scope: `omnifs.provider-metadata.v1` wasm custom section (carries the `auth` block), `crates/omnifs-mount`, `crates/omnifs-provider`, `crates/omnifs-sdk`, `crates/omnifs-host/src/auth.rs`, `crates/omnifs-host/src/http.rs`, `crates/omnifs-cli`, `crates/omnifs-auth`, `crates/omnifs-creds`.
 
 ## Context
 
@@ -75,7 +75,7 @@ Treat the omnifs host runtime as trusted: the host CLI, `omnifsd`, and its Docke
 
 ## Where vendor knowledge lives: the auth manifest
 
-The provider declares its HTTP authentication needs in the `auth` block of `providers/<name>/omnifs.provider.json`, embedded in the wasm `omnifs.provider-metadata.v1` section. The host extracts provider metadata once at provider load, derives the runtime `AuthManifest` via `ProviderManifest::wasm_auth_manifest()`, and caches the result for the lifetime of the mount.
+The provider declares its HTTP authentication needs via the `auth = <expr>` argument to `#[omnifs_sdk::provider]`, which is assembled at build time into the `auth` block of the wasm `omnifs.provider-metadata.v1` section. The host extracts provider metadata once at provider load, derives the runtime `AuthManifest` via `ProviderManifest::wasm_auth_manifest()`, and caches the result for the lifetime of the mount.
 
 ```text
 auth manifest:
