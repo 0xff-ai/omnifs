@@ -43,6 +43,17 @@ pub struct HostSocket(pub String);
 
 macro_rules! host_resource_field {
     ($ty:ty, $name:literal, $marker:tt) => {
+        impl $ty {
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.0
+            }
+        }
         impl Deref for $ty {
             type Target = str;
             fn deref(&self) -> &str {
@@ -67,6 +78,12 @@ macro_rules! host_resource_field {
         impl schemars::JsonSchema for $ty {
             fn schema_name() -> std::borrow::Cow<'static, str> {
                 $name.into()
+            }
+            // Inline at the use site so the `x-omnifs-resource` marker lands
+            // directly on the config property; a `$ref` into `$defs` would hide
+            // it from the host's per-field resource lookup.
+            fn inline_schema() -> bool {
+                true
             }
             fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
                 schemars::json_schema!({

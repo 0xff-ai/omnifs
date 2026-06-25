@@ -22,12 +22,13 @@ use crate::api::{
 #[derive(Clone)]
 #[omnifs_sdk::config]
 pub struct Config {
+    /// Docker daemon endpoint.
     #[serde(default = "default_endpoint")]
-    endpoint: String,
+    endpoint: omnifs_sdk::HostSocket,
 }
 
-fn default_endpoint() -> String {
-    "unix:///var/run/docker.sock".to_string()
+fn default_endpoint() -> omnifs_sdk::HostSocket {
+    omnifs_sdk::HostSocket("unix:///var/run/docker.sock".to_string())
 }
 
 impl Default for Config {
@@ -253,7 +254,21 @@ struct ProjectServiceKey {
     service: ServiceName,
 }
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+#[omnifs_sdk::provider(
+    id = "docker",
+    display_name = "Docker",
+    mount = "docker",
+    capabilities(
+        unix_socket(
+            dynamic,
+            "Talk to the configured Docker daemon socket for container, image, and compose reads."
+        ),
+        memory_mb(
+            64,
+            "Keep Docker metadata browsing bounded; responses are streamed from the daemon."
+        ),
+    )
+)]
 impl DockerProvider {
     type Config = Config;
     type State = State;
@@ -319,7 +334,7 @@ impl DockerProvider {
             .handler(container_summary_raw)?;
 
         Ok(State {
-            endpoint: config.endpoint,
+            endpoint: config.endpoint.into(),
         })
     }
 }

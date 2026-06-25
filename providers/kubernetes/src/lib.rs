@@ -35,15 +35,15 @@ pub struct Config {
     /// API endpoint. A `unix://` socket served by `kubectl proxy --unix-socket`
     /// is the supported transport.
     #[serde(default = "default_endpoint")]
-    endpoint: String,
+    endpoint: omnifs_sdk::HostSocket,
     /// When true, type listings show only resource types with at least one
     /// current instance. Empty types remain directly navigable by lookup.
     #[serde(default)]
     hide_empty_types: bool,
 }
 
-fn default_endpoint() -> String {
-    "unix:///run/omnifs/k8s.sock".to_string()
+fn default_endpoint() -> omnifs_sdk::HostSocket {
+    omnifs_sdk::HostSocket("unix:///run/omnifs/k8s.sock".to_string())
 }
 
 pub(crate) struct State {
@@ -179,7 +179,21 @@ struct PodLogKey {
     logfile: LogFile,
 }
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+#[omnifs_sdk::provider(
+    id = "kubernetes",
+    display_name = "Kubernetes",
+    mount = "k8s",
+    capabilities(
+        unix_socket(
+            dynamic,
+            "Talk to the Kubernetes API server through a local `kubectl proxy --unix-socket` endpoint. kubectl terminates TLS and injects the active-context credentials, so the provider issues plain HTTP over the socket and never handles a token."
+        ),
+        memory_mb(
+            256,
+            "Leave room for API discovery across all groups plus large list and manifest payloads."
+        ),
+    )
+)]
 impl KubernetesProvider {
     type Config = Config;
     type State = State;
@@ -220,7 +234,7 @@ impl KubernetesProvider {
         })?;
 
         Ok(State {
-            endpoint: config.endpoint,
+            endpoint: config.endpoint.into(),
             hide_empty_types: config.hide_empty_types,
             discovery: Rc::new(RefCell::new(None)),
         })

@@ -91,11 +91,17 @@ impl Parse for ProviderArgs {
     }
 }
 
-/// Parse `capabilities(domain("v", "why"), memory_mb(32, "why"), ...)` into the
-/// manifest's declared `Need`s. String-valued kinds take `("value", "why")`;
-/// scalar kinds take `(<int>, "why")`. All are static (non-dynamic) here; a
-/// dynamic value (e.g. a docker socket resolved at init) is declared by the
-/// provider through config, not the manifest annotation.
+/// Placeholder value for a dynamic capability. The concrete value is resolved at
+/// mount-start from the config field marked with the matching host-resource, so
+/// the manifest value is descriptive only and never read.
+const DYNAMIC_PLACEHOLDER: &str = "resolved from config at mount-start";
+
+/// Parse `capabilities(domain("v", "why"), unix_socket(dynamic, "why"),
+/// preopened_path(dynamic, "why"), memory_mb(32, "why"), ...)` into the
+/// manifest's declared `Need`s. Literal string kinds take `("value", "why")`;
+/// `memory_mb` takes `(<int>, "why")`; `unix_socket` and `preopened_path` are
+/// `dynamic`, resolved at mount-start from the `HostSocket`/`HostFile` config
+/// field (see `HostResource`).
 fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::Need>> {
     let mut needs = Vec::new();
     while !content.is_empty() {
@@ -103,28 +109,38 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
         let inner;
         syn::parenthesized!(inner in content);
         let need = match kind.to_string().as_str() {
-            "domain" | "git_repo" | "unix_socket" => {
+            "domain" | "git_repo" => {
                 let value: LitStr = inner.parse()?;
                 let _: Token![,] = inner.parse()?;
                 let why: LitStr = inner.parse()?;
                 let (value, why) = (value.value(), why.value());
-                match kind.to_string().as_str() {
-                    "domain" => omnifs_caps::Need::Domain {
+                if kind == "domain" {
+                    omnifs_caps::Need::Domain {
                         value,
                         why,
                         dynamic: false,
-                    },
-                    "git_repo" => omnifs_caps::Need::GitRepo {
+                    }
+                } else {
+                    omnifs_caps::Need::GitRepo {
                         value,
                         why,
                         dynamic: false,
-                    },
-                    _ => omnifs_caps::Need::UnixSocket {
-                        value,
-                        why,
-                        dynamic: false,
-                    },
+                    }
                 }
+            },
+            "unix_socket" => omnifs_caps::Need::UnixSocket {
+                value: DYNAMIC_PLACEHOLDER.to_string(),
+                why: parse_dynamic_why(&inner, &kind)?,
+                dynamic: true,
+            },
+            "preopened_path" => omnifs_caps::Need::PreopenedPath {
+                value: omnifs_caps::PreopenedPath {
+                    host: DYNAMIC_PLACEHOLDER.to_string(),
+                    guest: DYNAMIC_PLACEHOLDER.to_string(),
+                    mode: omnifs_caps::PreopenMode::Ro,
+                },
+                why: parse_dynamic_why(&inner, &kind)?,
+                dynamic: true,
             },
             "memory_mb" => {
                 let amount: LitInt = inner.parse()?;
@@ -140,7 +156,7 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
                 return Err(syn::Error::new(
                     kind.span(),
                     format!(
-                        "unsupported capability `{other}`; expected `domain`, `git_repo`, `unix_socket`, or `memory_mb`"
+                        "unsupported capability `{other}`; expected `domain`, `git_repo`, `unix_socket`, `preopened_path`, or `memory_mb`"
                     ),
                 ));
             },
@@ -151,6 +167,24 @@ fn parse_capabilities(content: ParseStream<'_>) -> syn::Result<Vec<omnifs_caps::
         }
     }
     Ok(needs)
+}
+
+/// Parse a `(dynamic, "why")` capability body. Only the dynamic form is
+/// supported for sockets and preopens; the value resolves from a host-resource
+/// config field at mount-start.
+fn parse_dynamic_why(inner: ParseStream<'_>, kind: &syn::Ident) -> syn::Result<String> {
+    let marker: syn::Ident = inner.parse()?;
+    if marker != "dynamic" {
+        return Err(syn::Error::new(
+            marker.span(),
+            format!(
+                "`{kind}` must be declared `dynamic`; its value resolves at mount-start from the matching host-resource config field"
+            ),
+        ));
+    }
+    let _: Token![,] = inner.parse()?;
+    let why: LitStr = inner.parse()?;
+    Ok(why.value())
 }
 
 fn parse_resources(content: ParseStream<'_>, args: &mut ProviderArgs) -> syn::Result<()> {
