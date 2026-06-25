@@ -53,7 +53,62 @@ impl PathSegment for StateFilter {
 
 const STATE_FILTERS: &[&str] = &["open", "all"];
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json", resources(git = true))]
+fn auth() -> omnifs_sdk::auth::Auth {
+    use omnifs_sdk::auth::{Auth, OAuth, StaticToken, Validation};
+    Auth::new(["api.github.com"], "device")
+        .scheme(
+            "pat",
+            StaticToken::new("GitHub personal access token")
+                .creation_url(
+                    "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
+                )
+                .summary(
+                    "A classic personal access token; the create link pre-selects the read:user scope.",
+                )
+                .setup([
+                    "Add the repo scope as well if you want to browse private repositories and their issues or pull requests.",
+                ])
+                .docs_url(
+                    "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
+                )
+                .validation(Validation::get("https://api.github.com/user").extract("identity", "/login")),
+        )
+        .scheme(
+            "device",
+            OAuth::device_code(
+                "GitHub OAuth device flow",
+                "https://github.com/login/oauth/authorize",
+                "https://github.com/login/device/code",
+                "https://github.com/login/oauth/access_token",
+            )
+            .client_id("Ov23licogxMDzS47s9sF")
+            .summary(
+                "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",
+            ),
+        )
+}
+
+#[omnifs_sdk::provider(
+    id = "github",
+    display_name = "GitHub",
+    mount = "github",
+    capabilities(
+        domain(
+            "api.github.com",
+            "Fetch GitHub API resources such as repository metadata, issues, pull requests, actions, and events."
+        ),
+        git_repo(
+            "git@github.com:*",
+            "Clone repository contents over SSH when browsing repo paths."
+        ),
+        memory_mb(
+            256,
+            "Leave room for larger GitHub API payloads and repository tree projections."
+        ),
+    ),
+    auth = auth(),
+    resources(git = true)
+)]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.object::<Owner>("/{owner}", |o| {

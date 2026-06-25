@@ -26,6 +26,7 @@ use omnifs_sdk::prelude::*;
 #[derive(Clone)]
 #[config]
 struct Config {
+    /// Expose a provider-backed mount-root .gitignore for FUSE regression tests.
     #[serde(default)]
     root_ignore: bool,
 }
@@ -330,7 +331,16 @@ async fn item_comments(
 // ===========================================================================
 
 #[omnifs_sdk::provider(
-    metadata = "omnifs.provider.json",
+    id = "test-provider",
+    display_name = "A test provider with canned data",
+    mount = "test",
+    capabilities(
+        domain(
+            "httpbin.org",
+            "Synthetic fixture endpoint exercised by host guest-loader tests."
+        ),
+        memory_mb(16, "Canned-data fixture needs only a small heap."),
+    ),
     events(timer(Duration::from_mins(1), Self::on_tick))
 )]
 impl TestProvider {

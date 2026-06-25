@@ -797,63 +797,18 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_oauth_provider_manifests_have_well_formed_auth() {
-        for (provider_id, default_scheme) in [("github", "device"), ("linear", "oauth")] {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../providers")
-                .join(provider_id)
-                .join("omnifs.provider.json");
-            let bytes = std::fs::read(&path).unwrap_or_else(|error| {
-                panic!("read {}: {error}", path.display());
-            });
-            let manifest = ProviderManifest::from_bytes(&bytes)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            let auth = manifest.auth.as_ref().unwrap_or_else(|| {
-                panic!("{provider_id} manifest must declare auth");
-            });
-            assert_eq!(auth.default, default_scheme);
-            assert!(
-                auth.schemes.contains_key(default_scheme),
-                "{provider_id} auth must declare default scheme `{default_scheme}`"
-            );
-            let wasm_auth = auth.wasm_auth_manifest();
-            assert!(
-                !wasm_auth.schemes.is_empty(),
-                "{provider_id} wasm auth manifest must expose schemes"
-            );
-        }
-    }
-
-    #[test]
-    fn checked_in_provider_manifest_contract() {
+    fn checked_in_provider_manifest_schema_matches_model() {
+        // Every provider now authors its manifest from `#[provider]` annotations
+        // (no `omnifs.provider.json`), so the checked-in JSON Schema is a pure
+        // drift guard for the `ProviderManifest` model. Provider auth blocks are
+        // exercised end-to-end by the `all_providers_initialize_and_seal` host
+        // integration test, which loads every embedded manifest.
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("schema/omnifs.provider.schema.json");
         let checked_in: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
         let generated = serde_json::to_value(crate::provider_manifest_json()).unwrap();
         assert_eq!(checked_in, generated);
-
-        let providers_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../providers");
-        let mut parsed = Vec::new();
-        for entry in std::fs::read_dir(providers_dir).unwrap() {
-            let path = entry.unwrap().path().join("omnifs.provider.json");
-            if !path.exists() {
-                continue;
-            }
-            let bytes = std::fs::read(&path).unwrap();
-            let manifest = ProviderManifest::from_bytes(&bytes)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            if manifest.id != "test-provider" {
-                parsed.push(manifest.id);
-            }
-        }
-        parsed.sort();
-
-        // Only the auth providers still author their manifest from a hand-written
-        // `omnifs.provider.json`; the rest build it from `#[provider]`
-        // annotations and carry no JSON.
-        assert_eq!(parsed, ["github", "linear", "oura"]);
     }
 
     #[test]
