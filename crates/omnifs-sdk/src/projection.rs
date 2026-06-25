@@ -102,6 +102,19 @@ impl FileProjection {
         FileProjBuilder::new(FileSource::Body(bytes), size)
     }
 
+    /// A whole-file body with an SDK-supplied content type.
+    pub fn body_with_type(bytes: impl Into<Vec<u8>>, content_type: ContentType) -> Self {
+        Self::body(bytes).content_type(content_type).build()
+    }
+
+    /// A dynamic whole-file body with an SDK-supplied content type.
+    pub fn dynamic_body_with_type(bytes: impl Into<Vec<u8>>, content_type: ContentType) -> Self {
+        Self::body(bytes)
+            .content_type(content_type)
+            .dynamic()
+            .build()
+    }
+
     /// Read on demand; resolve the read mode with `.full()` or `.ranged()`
     /// before `.build()`.
     pub fn deferred(size: Size) -> FileProjBuilder<Deferred> {

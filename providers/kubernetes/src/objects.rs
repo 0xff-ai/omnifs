@@ -14,9 +14,7 @@ pub(crate) struct KubeManifest(Value);
 
 impl KubeManifest {
     pub(crate) fn from_upstream_bytes(bytes: &[u8]) -> Result<Self> {
-        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
-            ProviderError::internal(format!("kubernetes: parse object: {error}"))
-        })?;
+        let value: Value = decode_json(bytes)?;
         Ok(Self(clean_manifest(value)))
     }
 
@@ -105,7 +103,10 @@ impl NamespacedResource {
                 uid.as_deref(),
             )
             .await?;
-        Ok(crate::api::text_file(text.into_bytes()))
+        Ok(FileProjection::dynamic_body_with_type(
+            text.into_bytes(),
+            ContentType::Text,
+        ))
     }
 
     /// Inherent load forwarded to by the `#[object]` macro's `Object::load`.

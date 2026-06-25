@@ -23,7 +23,7 @@ pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
 pub use crate::invalidation::Invalidation;
 pub use crate::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Preloads,
-    Validator,
+    Validator, decode_json,
 };
 pub use crate::projection::{
     BlobFile, DirProjection, Entry, FileProjection, StreamFile, TextFormat,

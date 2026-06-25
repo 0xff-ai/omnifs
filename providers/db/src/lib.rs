@@ -184,7 +184,10 @@ impl DbProvider {
 
 impl TableDoc {
     fn schema_sql(&self) -> FileProjection {
-        text_content(self.create_sql.as_deref().unwrap_or("").as_bytes().to_vec())
+        FileProjection::body_with_type(
+            self.create_sql.as_deref().unwrap_or("").as_bytes().to_vec(),
+            ContentType::Text,
+        )
     }
 
     fn schema_json(&self) -> Result<FileProjection> {
@@ -206,7 +209,7 @@ impl TableDoc {
     }
 
     fn count(&self) -> FileProjection {
-        text_content(format!("{}\n", self.row_count))
+        FileProjection::body_with_type(format!("{}\n", self.row_count), ContentType::Text)
     }
 }
 
@@ -312,11 +315,17 @@ async fn table_count_txt(cx: Cx<State>, key: TableKey) -> Result<FileProjection>
 
 impl FileInfo {
     fn version(info: &Self) -> Result<FileProjection> {
-        Ok(text_content(format!("{}\n", info.sqlite_version)))
+        Ok(FileProjection::body_with_type(
+            format!("{}\n", info.sqlite_version),
+            ContentType::Text,
+        ))
     }
 
     fn path(info: &Self) -> Result<FileProjection> {
-        Ok(text_content(format!("{}\n", info.path)))
+        Ok(FileProjection::body_with_type(
+            format!("{}\n", info.path),
+            ContentType::Text,
+        ))
     }
 }
 
@@ -381,10 +390,4 @@ async fn table_sample(cx: Cx<State>, key: TableKey) -> Result<FileProjection> {
         builder = builder.version(v);
     }
     Ok(builder.build())
-}
-
-fn text_content(bytes: impl Into<Vec<u8>>) -> FileProjection {
-    FileProjection::body(bytes)
-        .content_type(ContentType::Text)
-        .build()
 }

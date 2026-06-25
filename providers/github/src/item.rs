@@ -13,7 +13,7 @@ use crate::api::GitHubApi;
 use crate::objects::{Comment, Issue, ItemData, Owner, PullRequest, Repo, WorkflowRun};
 use crate::{
     COMMENT_PAGE_SIZE, OwnerName, RepoId, RepoName, StateFilter, WorkflowRunsResponse,
-    fetch_owner_repos, list_items, parse_model, resolve_owner_kind,
+    fetch_owner_repos, list_items, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
@@ -145,7 +145,7 @@ impl Owner {
             .endpoint(GitHubApi)
             .get(format!("/users/{}", key.owner))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<Self>)
+            .load_with(decode_json::<Self>)
             .await
         {
             Ok(Load::NotFound) => {},
@@ -154,7 +154,7 @@ impl Owner {
         cx.endpoint(GitHubApi)
             .get(format!("/orgs/{}", key.owner))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<Self>)
+            .load_with(decode_json::<Self>)
             .await
     }
 }
@@ -168,7 +168,7 @@ impl Repo {
         cx.endpoint(GitHubApi)
             .get(format!("/repos/{}/{}", key.owner, key.repo))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<Self>)
+            .load_with(decode_json::<Self>)
             .await
     }
 }
@@ -184,7 +184,7 @@ impl Issue {
             .endpoint(GitHubApi)
             .get(format!("/repos/{repo}/issues/{}", key.number))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<ItemData>)
+            .load_with(decode_json::<ItemData>)
             .await?
         {
             Load::Fresh { value, .. } if value.is_pull_request() => Ok(Load::NotFound),
@@ -208,7 +208,7 @@ impl PullRequest {
             .endpoint(GitHubApi)
             .get(format!("/repos/{repo}/pulls/{}", key.number))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<ItemData>)
+            .load_with(decode_json::<ItemData>)
             .await?
         {
             Load::Fresh {
@@ -232,7 +232,7 @@ impl Comment {
         cx.endpoint(GitHubApi)
             .get(format!("/repos/{repo}/issues/comments/{}", key.comment_id))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<Self>)
+            .load_with(decode_json::<Self>)
             .await
     }
 }
@@ -247,7 +247,7 @@ impl WorkflowRun {
         cx.endpoint(GitHubApi)
             .get(format!("/repos/{repo}/actions/runs/{}", key.run_id))
             .maybe_if_none_match(since.as_ref())
-            .load_with(parse_model::<Self>)
+            .load_with(decode_json::<Self>)
             .await
     }
 }

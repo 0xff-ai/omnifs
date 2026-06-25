@@ -48,12 +48,10 @@ pub(crate) async fn fetch_bytes(
     query: &[(&str, &str)],
 ) -> Result<Vec<u8>> {
     let base = cx.state(|state| state.endpoint.clone());
-    let mut request = cx
+    let request = cx
         .endpoint(DockerApi { base })
-        .get(format!("{API_VERSION_PREFIX}{path}"));
-    for (key, value) in query {
-        request = request.query(key, value);
-    }
+        .get(format!("{API_VERSION_PREFIX}{path}"))
+        .query_pairs(query.iter().copied());
     let response = request.send_checked().await?;
     Ok(response.body().to_vec())
 }
