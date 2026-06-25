@@ -507,6 +507,14 @@ interface lifecycle {
     /// changed later.
     initialize: func(config: list<u8>) -> provider-return;
     shutdown: func();
+
+    /// The provider's self-describing manifest as a JSON string, built from
+    /// the same annotations the macro authors. Unlike `initialize`, it needs
+    /// no config and runs no `start`, so a build tool can call it on a config
+    /// or auth-gated provider to harvest `config-schema`/`auth` (which the
+    /// proc-macro cannot evaluate) and inject the `omnifs.provider-metadata.v1`
+    /// custom section the host reads pre-instantiation.
+    manifest-json: func() -> string;
 }
 
 interface namespace {

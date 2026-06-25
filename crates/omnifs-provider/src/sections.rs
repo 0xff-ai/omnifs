@@ -115,6 +115,80 @@ pub fn read_provider_metadata_section(
     ProviderManifest::from_bytes(&section).map(Some)
 }
 
+/// Embed `metadata_json` as the `omnifs.provider-metadata.v1` custom section,
+/// returning the rewritten component bytes. Any existing top-level section with
+/// that name is replaced, so re-embedding is idempotent (the reader rejects
+/// duplicates). The build-time embed tool harvests `metadata_json` from a
+/// provider's `manifest_json()` export; the host reads the result
+/// pre-instantiation.
+pub fn embed_provider_metadata_section(
+    wasm: &[u8],
+    metadata_json: &[u8],
+) -> Result<Vec<u8>, ProviderMetadataError> {
+    let mut out = Vec::with_capacity(wasm.len() + metadata_json.len() + 64);
+    let mut parser = Parser::new(0);
+    let mut offset = 0;
+    loop {
+        let start = offset;
+        let (consumed, payload) = match parser.parse(&wasm[offset..], true)? {
+            wasmparser::Chunk::NeedMoreData(_) => {
+                return Err(ProviderMetadataError::Truncated { offset });
+            },
+            wasmparser::Chunk::Parsed { consumed, payload } => (consumed, payload),
+        };
+        offset += consumed;
+        match payload {
+            // Replace any existing top-level metadata section: copy nothing.
+            Payload::CustomSection(reader) if reader.name() == PROVIDER_METADATA_SECTION_NAME => {},
+            // A nested module/component is one opaque span at this level; copy it
+            // whole and skip past its body rather than descending into it (whose
+            // wasm magic would otherwise look like a stray top-level section).
+            Payload::ModuleSection {
+                unchecked_range, ..
+            }
+            | Payload::ComponentSection {
+                unchecked_range, ..
+            } => {
+                out.extend_from_slice(&wasm[start..unchecked_range.end]);
+                offset = unchecked_range.end;
+            },
+            Payload::End(_) => {
+                out.extend_from_slice(&wasm[start..offset]);
+                break;
+            },
+            _ => out.extend_from_slice(&wasm[start..offset]),
+        }
+    }
+    append_custom_section(&mut out, PROVIDER_METADATA_SECTION_NAME, metadata_json);
+    Ok(out)
+}
+
+/// Append a wasm custom section (id `0`, encoded identically in the core and
+/// component layers) to a finished binary.
+fn append_custom_section(wasm: &mut Vec<u8>, name: &str, data: &[u8]) {
+    let mut body = Vec::with_capacity(5 + name.len() + data.len());
+    write_uleb128(&mut body, name.len() as u64);
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(data);
+    wasm.push(0x00);
+    write_uleb128(wasm, body.len() as u64);
+    wasm.extend_from_slice(&body);
+}
+
+fn write_uleb128(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderMetadataError {
     #[error("parsing wasm: {0}")]

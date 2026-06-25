@@ -3248,6 +3248,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-sdk-macros",
  "omnifs-wit",
+ "schemars",
  "serde",
  "serde_json",
  "url",

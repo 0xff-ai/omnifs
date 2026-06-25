@@ -283,23 +283,26 @@ fn classify_start(func: &ImplItemFn) -> syn::Result<StartKind> {
 
 /// The compile-time manifest facts: the embedded custom section plus the
 /// provider name/description used to derive [`ProviderInfo`].
+/// The facts the macro needs to emit a provider's `manifest_json()` export. The
+/// manifest is a JSON string built at compile time except for `config_schema`
+/// (and, later, `auth`), which the proc-macro cannot evaluate; `splice_config`
+/// asks the generated export to splice the runtime `ProvidesConfigSchema` value
+/// into `configSchema` before returning. `cargo_tracking` is an
+/// `include_bytes!` of the source `omnifs.provider.json` so an edit invalidates
+/// the build (annotation-authored providers have no such file).
 struct ManifestFacts {
-    metadata_section: TokenStream2,
+    base_json: String,
+    splice_config: bool,
+    cargo_tracking: TokenStream2,
     name: Option<String>,
     description: Option<String>,
 }
 
 fn read_manifest_facts(
     type_name: &syn::Ident,
-    metadata_path: Option<&LitStr>,
+    metadata_path: &LitStr,
 ) -> syn::Result<ManifestFacts> {
-    let Some(metadata_path) = metadata_path else {
-        return Ok(ManifestFacts {
-            metadata_section: TokenStream2::new(),
-            name: None,
-            description: None,
-        });
-    };
+    let _ = type_name;
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|error| {
         syn::Error::new(
             metadata_path.span(),
@@ -333,50 +336,26 @@ fn read_manifest_facts(
     manifest.version = std::env::var("CARGO_PKG_VERSION").ok();
     let name = manifest.id.clone();
     let description = manifest.display_name.clone();
-    let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+    let base_json = serde_json::to_string(&manifest).map_err(|error| {
         syn::Error::new(
             metadata_path.span(),
-            format!("failed to encode provider metadata custom section: {error}"),
+            format!("failed to encode provider manifest: {error}"),
         )
     })?;
 
     // Force Cargo to track the manifest as a build input; without it an edit to
-    // `omnifs.provider.json` alone leaves a stale custom section in incremental
-    // and Docker-layer-cached builds. `include_bytes!` is a tracked compile-time
-    // dep at zero runtime cost (the const is dropped by the linker).
+    // `omnifs.provider.json` alone leaves a stale `manifest_json()` in
+    // incremental and Docker-layer-cached builds. `include_bytes!` is a tracked
+    // compile-time dep at zero runtime cost (the const is dropped by the linker).
     let path_lit = syn::LitStr::new(&path.display().to_string(), metadata_path.span());
-    let section = metadata_section_tokens(type_name, &metadata_bytes);
-    let metadata_section = quote! {
-        const _: &[u8] = include_bytes!(#path_lit);
-        #section
-    };
     Ok(ManifestFacts {
-        metadata_section,
+        base_json,
+        // The hand-authored JSON already carries `configSchema`/`auth`.
+        splice_config: false,
+        cargo_tracking: quote! { const _: &[u8] = include_bytes!(#path_lit); },
         name: Some(name),
         description: Some(description),
     })
-}
-
-/// Emit the embedded provider-metadata custom section (the static global the
-/// host reads before instantiation) plus the `#[cfg(test)]` const mirror.
-fn metadata_section_tokens(type_name: &syn::Ident, metadata_bytes: &[u8]) -> TokenStream2 {
-    let metadata_len = metadata_bytes.len();
-    let bytes = metadata_bytes.iter();
-    let bytes_test = metadata_bytes.iter();
-    let metadata_ident = format_ident!(
-        "__OMNIFS_PROVIDER_METADATA_{}",
-        type_name.to_string().to_uppercase()
-    );
-    quote! {
-        #[cfg(all(target_arch = "wasm32", not(test)))]
-        #[unsafe(link_section = "omnifs.provider-metadata.v1")]
-        #[used]
-        static #metadata_ident: [u8; #metadata_len] = [ #(#bytes),* ];
-
-        #[cfg(test)]
-        #[allow(non_upper_case_globals)]
-        pub(crate) const #metadata_ident: [u8; #metadata_len] = [ #(#bytes_test),* ];
-    }
 }
 
 /// Build the embedded manifest from `#[provider(..)]` annotations rather than a
@@ -420,14 +399,19 @@ fn build_manifest_facts_from_args(
         auth: None,
         config_schema: None,
     };
-    let metadata_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+    let _ = type_name;
+    let base_json = serde_json::to_string(&manifest).map_err(|error| {
         syn::Error::new(
             Span::call_site(),
-            format!("failed to encode provider metadata custom section: {error}"),
+            format!("failed to encode provider manifest: {error}"),
         )
     })?;
     Ok(ManifestFacts {
-        metadata_section: metadata_section_tokens(type_name, &metadata_bytes),
+        base_json,
+        // `config_schema` (and later `auth`) are runtime values the macro cannot
+        // evaluate; the generated `manifest_json()` splices them in.
+        splice_config: true,
+        cargo_tracking: TokenStream2::new(),
         name: Some(id),
         description: Some(display_name),
     })
@@ -480,7 +464,36 @@ fn generate_lifecycle(
     start_kind: StartKind,
     info_tokens: &TokenStream2,
     caps_tokens: &TokenStream2,
+    base_json: &str,
+    splice_config: bool,
 ) -> TokenStream2 {
+    // The config-less manifest export the build tool calls to harvest the full
+    // manifest (incl. `config_schema`) and inject the custom section.
+    let manifest_json_fn = if splice_config {
+        quote! {
+            fn manifest_json() -> String {
+                const BASE: &str = #base_json;
+                let mut value: omnifs_sdk::serde_json::Value =
+                    omnifs_sdk::serde_json::from_str(BASE)
+                        .expect("provider manifest base is valid JSON");
+                if let Some(schema) =
+                    <#config_type as omnifs_sdk::ProvidesConfigSchema>::config_schema()
+                {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("configSchema".to_string(), schema);
+                    }
+                }
+                omnifs_sdk::serde_json::to_string(&value)
+                    .expect("provider manifest serializes")
+            }
+        }
+    } else {
+        quote! {
+            fn manifest_json() -> String {
+                #base_json.to_string()
+            }
+        }
+    };
     let start_call = match start_kind {
         StartKind::ConfigAndRouter => quote! { #type_name::start(config, &mut router) },
         StartKind::RouterOnly => quote! {
@@ -531,6 +544,8 @@ fn generate_lifecycle(
                 RANGE_HANDLES.with(|handles| handles.clear());
                 omnifs_sdk::__internal::clear_breaker();
             }
+
+            #manifest_json_fn
         }
     }
 }
@@ -852,8 +867,8 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
 
     // Two manifest sources: annotation-authored (`id = ".."` + `capabilities(..)`)
     // or the transitional hand-authored `metadata = "omnifs.provider.json"`.
-    let manifest = if args.metadata_path.is_some() {
-        read_manifest_facts(&type_name, args.metadata_path.as_ref())?
+    let manifest = if let Some(metadata_path) = args.metadata_path.as_ref() {
+        read_manifest_facts(&type_name, metadata_path)?
     } else if args.id.is_some() {
         build_manifest_facts_from_args(&type_name, args)?
     } else {
@@ -873,17 +888,19 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         start_kind,
         &info_tokens,
         &caps_tokens,
+        &manifest.base_json,
+        manifest.splice_config,
     );
     let namespace = generate_namespace(&type_name, state_type);
     let continuation = generate_continuation(&type_name);
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
-    let metadata_section = manifest.metadata_section;
+    let cargo_tracking = manifest.cargo_tracking;
 
     Ok(quote! {
         struct #type_name;
 
         #state_management
-        #metadata_section
+        #cargo_tracking
 
         impl #type_name {
             #(#methods)*

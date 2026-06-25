@@ -9,6 +9,10 @@ description = "Host runtime for the omnifs virtual filesystem with WASM provider
 categories = ["filesystem", "wasm"]
 keywords = ["omnifs", "fuse", "wasm", "wasmtime", "filesystem"]
 
+[[bin]]
+name = "omnifs-embed-manifest"
+path = "src/bin/embed_manifest.rs"
+
 [dependencies]
 wasmtime = { workspace = true }
 tokio = { workspace = true }
