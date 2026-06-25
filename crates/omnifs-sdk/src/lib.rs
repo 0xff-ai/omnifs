@@ -152,6 +152,7 @@ macro_rules! export {
 
 pub mod archives;
 mod async_runtime;
+pub mod auth;
 pub mod blob;
 pub mod browse;
 pub mod captures;

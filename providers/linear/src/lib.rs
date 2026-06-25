@@ -173,7 +173,55 @@ impl Issue {
     }
 }
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+fn auth() -> omnifs_sdk::auth::Auth {
+    use omnifs_sdk::auth::{Auth, OAuth, StaticToken, Validation};
+    Auth::new(["api.linear.app"], "oauth")
+        .prefix("")
+        .scheme(
+            "pat",
+            StaticToken::new("Linear personal access token or API key")
+                .creation_url("https://linear.app/settings/api")
+                .summary("A personal API key created in Linear's API settings.")
+                .validation(
+                    Validation::post(
+                        "https://api.linear.app/graphql",
+                        "{\"query\":\"query { viewer { id name email organization { name urlKey } } }\"}",
+                    )
+                    .json_pointer("/data/viewer/id")
+                    .extract("identity", "/data/viewer/email")
+                    .extract("workspace", "/data/viewer/organization/urlKey"),
+                ),
+        )
+        .scheme(
+            "oauth",
+            OAuth::pkce_loopback(
+                "Linear OAuth",
+                "https://linear.app/oauth/authorize",
+                "https://api.linear.app/oauth/token",
+                "http://127.0.0.1:{port}/callback",
+            )
+            .client_id("4dc7b7c05f651306a318de6f9f963b40")
+            .scopes(["read"])
+            .summary("Browser sign-in through omnifs's Linear app, granting read access to your workspace."),
+        )
+}
+
+#[omnifs_sdk::provider(
+    id = "linear",
+    display_name = "Linear",
+    mount = "linear",
+    capabilities(
+        domain(
+            "api.linear.app",
+            "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."
+        ),
+        memory_mb(
+            128,
+            "Leave room for GraphQL response decoding and issue tree projections."
+        ),
+    ),
+    auth = auth()
+)]
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/teams").handler(teams_list)?;

@@ -20,11 +20,11 @@ struct TimerSpec {
 }
 
 pub struct ProviderArgs {
-    metadata_path: Option<LitStr>,
     id: Option<LitStr>,
     display_name: Option<LitStr>,
     mount: Option<LitStr>,
     capabilities: Vec<omnifs_caps::Need>,
+    auth: Option<syn::Expr>,
     git: bool,
     timer: Option<TimerSpec>,
 }
@@ -32,11 +32,11 @@ pub struct ProviderArgs {
 impl Parse for ProviderArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
-            metadata_path: None,
             id: None,
             display_name: None,
             mount: None,
             capabilities: Vec::new(),
+            auth: None,
             git: false,
             timer: None,
         };
@@ -44,10 +44,6 @@ impl Parse for ProviderArgs {
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             match key.to_string().as_str() {
-                "metadata" => {
-                    let _: Token![=] = input.parse()?;
-                    args.metadata_path = Some(input.parse()?);
-                },
                 "id" => {
                     let _: Token![=] = input.parse()?;
                     args.id = Some(input.parse()?);
@@ -65,6 +61,10 @@ impl Parse for ProviderArgs {
                     syn::parenthesized!(content in input);
                     args.capabilities = parse_capabilities(&content)?;
                 },
+                "auth" => {
+                    let _: Token![=] = input.parse()?;
+                    args.auth = Some(input.parse()?);
+                },
                 "resources" => {
                     let content;
                     syn::parenthesized!(content in input);
@@ -78,7 +78,7 @@ impl Parse for ProviderArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `id`/`display_name`/`mount`, `capabilities(...)`, `resources(...)`, `events(...)`, and (transitional) `metadata = \"...\"`",
+                        "supported provider arguments are `id`/`display_name`/`mount`, `capabilities(...)`, `auth = ...`, `resources(...)`, and `events(...)`",
                     ));
                 },
             }
@@ -317,89 +317,18 @@ fn classify_start(func: &ImplItemFn) -> syn::Result<StartKind> {
 
 /// The compile-time manifest facts: the embedded custom section plus the
 /// provider name/description used to derive [`ProviderInfo`].
-/// The facts the macro needs to emit a provider's `manifest_json()` export. The
-/// manifest is a JSON string built at compile time except for `config_schema`
-/// (and, later, `auth`), which the proc-macro cannot evaluate; `splice_config`
-/// asks the generated export to splice the runtime `ProvidesConfigSchema` value
-/// into `configSchema` before returning. `cargo_tracking` is an
-/// `include_bytes!` of the source `omnifs.provider.json` so an edit invalidates
-/// the build (annotation-authored providers have no such file).
+/// The facts the macro needs to emit a provider's `manifest_json()` export: the
+/// manifest as a JSON string with `config_schema` and `auth` absent. The
+/// proc-macro cannot evaluate those (a runtime schema and a typed value), so the
+/// generated export splices them in.
 struct ManifestFacts {
     base_json: String,
-    splice_config: bool,
-    cargo_tracking: TokenStream2,
-    name: Option<String>,
-    description: Option<String>,
+    name: String,
+    description: String,
 }
 
-fn read_manifest_facts(
-    type_name: &syn::Ident,
-    metadata_path: &LitStr,
-) -> syn::Result<ManifestFacts> {
-    let _ = type_name;
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|error| {
-        syn::Error::new(
-            metadata_path.span(),
-            format!("CARGO_MANIFEST_DIR is not set: {error}"),
-        )
-    })?;
-    let path = std::path::PathBuf::from(manifest_dir).join(metadata_path.value());
-    let bytes = std::fs::read(&path).map_err(|error| {
-        syn::Error::new(
-            metadata_path.span(),
-            format!(
-                "failed to read provider metadata {}: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    let mut manifest = omnifs_provider::ProviderManifest::from_bytes(&bytes).map_err(|error| {
-        syn::Error::new(
-            metadata_path.span(),
-            format!("invalid provider manifest {}: {error}", path.display()),
-        )
-    })?;
-    // `env!` here captures the *sdk-macros* crate version at the time this macro
-    // was compiled, which is correctly `BuildEvidence.sdk`.
-    manifest.build_evidence = Some(omnifs_provider::BuildEvidence::current(env!(
-        "CARGO_PKG_VERSION"
-    )));
-    // `std::env::var` reads the cargo-set env at *expansion* time, i.e. the
-    // version of the provider crate currently being compiled. Do not switch this
-    // to `env!`: that would capture sdk-macros' version instead.
-    manifest.version = std::env::var("CARGO_PKG_VERSION").ok();
-    let name = manifest.id.clone();
-    let description = manifest.display_name.clone();
-    let base_json = serde_json::to_string(&manifest).map_err(|error| {
-        syn::Error::new(
-            metadata_path.span(),
-            format!("failed to encode provider manifest: {error}"),
-        )
-    })?;
-
-    // Force Cargo to track the manifest as a build input; without it an edit to
-    // `omnifs.provider.json` alone leaves a stale `manifest_json()` in
-    // incremental and Docker-layer-cached builds. `include_bytes!` is a tracked
-    // compile-time dep at zero runtime cost (the const is dropped by the linker).
-    let path_lit = syn::LitStr::new(&path.display().to_string(), metadata_path.span());
-    Ok(ManifestFacts {
-        base_json,
-        // The hand-authored JSON already carries `configSchema`/`auth`.
-        splice_config: false,
-        cargo_tracking: quote! { const _: &[u8] = include_bytes!(#path_lit); },
-        name: Some(name),
-        description: Some(description),
-    })
-}
-
-/// Build the embedded manifest from `#[provider(..)]` annotations rather than a
-/// hand-authored `omnifs.provider.json`. The full manifest is known at macro
-/// expansion for a provider with no config and no auth (`config_schema` and
-/// `auth` are `None`); config/auth providers will fill those at build time.
-fn build_manifest_facts_from_args(
-    type_name: &syn::Ident,
-    args: &ProviderArgs,
-) -> syn::Result<ManifestFacts> {
+/// Build the manifest base from `#[provider(..)]` annotations.
+fn build_manifest_facts_from_args(args: &ProviderArgs) -> syn::Result<ManifestFacts> {
     let id = args
         .id
         .as_ref()
@@ -433,7 +362,6 @@ fn build_manifest_facts_from_args(
         auth: None,
         config_schema: None,
     };
-    let _ = type_name;
     let base_json = serde_json::to_string(&manifest).map_err(|error| {
         syn::Error::new(
             Span::call_site(),
@@ -442,31 +370,19 @@ fn build_manifest_facts_from_args(
     })?;
     Ok(ManifestFacts {
         base_json,
-        // `config_schema` (and later `auth`) are runtime values the macro cannot
-        // evaluate; the generated `manifest_json()` splices them in.
-        splice_config: true,
-        cargo_tracking: TokenStream2::new(),
-        name: Some(id),
-        description: Some(display_name),
+        name: id,
+        description: display_name,
     })
 }
 
-fn provider_info_tokens(type_name: &syn::Ident, manifest: &ManifestFacts) -> TokenStream2 {
-    let name = if let Some(name) = &manifest.name {
-        quote! { #name.to_string() }
-    } else {
-        quote! { stringify!(#type_name).to_string() }
-    };
-    let description = if let Some(desc) = &manifest.description {
-        quote! { #desc.to_string() }
-    } else {
-        quote! { String::new() }
-    };
+fn provider_info_tokens(manifest: &ManifestFacts) -> TokenStream2 {
+    let name = &manifest.name;
+    let description = &manifest.description;
     quote! {
         omnifs_sdk::prelude::ProviderInfo {
-            name: #name,
+            name: #name.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            description: #description,
+            description: #description.to_string(),
         }
     }
 }
@@ -491,6 +407,9 @@ fn requested_capabilities_tokens(args: &ProviderArgs) -> TokenStream2 {
     }
 }
 
+// Codegen aggregator: each argument is a distinct token source for the lifecycle
+// export block; bundling them would only move the destructuring elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn generate_lifecycle(
     type_name: &syn::Ident,
     config_type: &Type,
@@ -499,33 +418,36 @@ fn generate_lifecycle(
     info_tokens: &TokenStream2,
     caps_tokens: &TokenStream2,
     base_json: &str,
-    splice_config: bool,
+    auth: Option<&syn::Expr>,
 ) -> TokenStream2 {
     // The config-less manifest export the build tool calls to harvest the full
-    // manifest (incl. `config_schema`) and inject the custom section.
-    let manifest_json_fn = if splice_config {
+    // manifest (incl. the `config_schema` and `auth` the proc-macro cannot
+    // evaluate) and inject the custom section.
+    let auth_splice = auth.map(|auth| {
         quote! {
-            fn manifest_json() -> String {
-                const BASE: &str = #base_json;
-                let mut value: omnifs_sdk::serde_json::Value =
-                    omnifs_sdk::serde_json::from_str(BASE)
-                        .expect("provider manifest base is valid JSON");
-                if let Some(schema) =
-                    <#config_type as omnifs_sdk::ProvidesConfigSchema>::config_schema()
-                {
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert("configSchema".to_string(), schema);
-                    }
-                }
-                omnifs_sdk::serde_json::to_string(&value)
-                    .expect("provider manifest serializes")
+            let auth_value = omnifs_sdk::serde_json::to_value(#auth)
+                .expect("provider auth serializes");
+            if let Some(object) = value.as_object_mut() {
+                object.insert("auth".to_string(), auth_value);
             }
         }
-    } else {
-        quote! {
-            fn manifest_json() -> String {
-                #base_json.to_string()
+    });
+    let manifest_json_fn = quote! {
+        fn manifest_json() -> String {
+            const BASE: &str = #base_json;
+            let mut value: omnifs_sdk::serde_json::Value =
+                omnifs_sdk::serde_json::from_str(BASE)
+                    .expect("provider manifest base is valid JSON");
+            if let Some(schema) =
+                <#config_type as omnifs_sdk::ProvidesConfigSchema>::config_schema()
+            {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("configSchema".to_string(), schema);
+                }
             }
+            #auth_splice
+            omnifs_sdk::serde_json::to_string(&value)
+                .expect("provider manifest serializes")
         }
     };
     let start_call = match start_kind {
@@ -899,19 +821,14 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
     let start_kind = classified.start_kind;
     let methods = &classified.methods;
 
-    // Two manifest sources: annotation-authored (`id = ".."` + `capabilities(..)`)
-    // or the transitional hand-authored `metadata = "omnifs.provider.json"`.
-    let manifest = if let Some(metadata_path) = args.metadata_path.as_ref() {
-        read_manifest_facts(&type_name, metadata_path)?
-    } else if args.id.is_some() {
-        build_manifest_facts_from_args(&type_name, args)?
-    } else {
+    if args.id.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "provider needs an `id = \"...\"` annotation (or the transitional `metadata = \"...\"`)",
+            "provider needs an `id = \"...\"` annotation",
         ));
-    };
-    let info_tokens = provider_info_tokens(&type_name, &manifest);
+    }
+    let manifest = build_manifest_facts_from_args(args)?;
+    let info_tokens = provider_info_tokens(&manifest);
     let caps_tokens = requested_capabilities_tokens(args);
 
     let state_management = generate_state_management(state_type);
@@ -923,18 +840,16 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         &info_tokens,
         &caps_tokens,
         &manifest.base_json,
-        manifest.splice_config,
+        args.auth.as_ref(),
     );
     let namespace = generate_namespace(&type_name, state_type);
     let continuation = generate_continuation(&type_name);
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
-    let cargo_tracking = manifest.cargo_tracking;
 
     Ok(quote! {
         struct #type_name;
 
         #state_management
-        #cargo_tracking
 
         impl #type_name {
             #(#methods)*

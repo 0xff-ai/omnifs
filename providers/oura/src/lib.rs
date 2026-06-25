@@ -31,7 +31,39 @@ const DATE_FIELDS: &[&str] = &[
 )]
 struct Api;
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+fn auth() -> omnifs_sdk::auth::Auth {
+    use omnifs_sdk::auth::{Auth, OAuth};
+    Auth::new(["api.ouraring.com"], "oauth").scheme(
+        "oauth",
+        OAuth::client_side_token(
+            "Oura OAuth",
+            "https://cloud.ouraring.com/oauth/authorize",
+            "https://api.ouraring.com/oauth/token",
+            "http://localhost:58880/",
+        )
+        .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
+        .scopes([
+            "email", "personal", "daily", "heartrate", "workout", "tag", "session", "spo2Daily",
+        ])
+        .summary(
+            "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
+        ),
+    )
+}
+
+#[omnifs_sdk::provider(
+    id = "oura",
+    display_name = "Oura",
+    mount = "oura",
+    capabilities(
+        domain(
+            "api.ouraring.com",
+            "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
+        ),
+        memory_mb(128, "Leave room for date-range and time-series JSON responses."),
+    ),
+    auth = auth()
+)]
 impl OuraProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.dir("/").handler(root)?;
