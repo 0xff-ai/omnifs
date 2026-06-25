@@ -1,6 +1,6 @@
 # OAuth authentication
 
-omnifs ships product OAuth client ids in each provider's `providers/<name>/omnifs.provider.json` manifest, under `auth`. The CLI embeds those provider manifests for first-run setup, and the provider build embeds the same metadata in the wasm `omnifs.provider-metadata.v1` section. These ids are public OAuth application identifiers, not secrets. The sensitive values are user access tokens, refresh tokens, and any client secrets required by a provider that cannot use a public-client flow.
+omnifs ships product OAuth client ids in each provider's `#[omnifs_sdk::provider(auth = ..)]` declaration, embedded at build time into the wasm `omnifs.provider-metadata.v1` section and mirrored in the CLI's built-in catalog for first-run setup. These ids are public OAuth application identifiers, not secrets. The sensitive values are user access tokens, refresh tokens, and any client secrets required by a provider that cannot use a public-client flow.
 
 GitHub uses OAuth device authorization with client id `Ov23licogxMDzS47s9sF` and no default scopes. GitHub treats no-scope OAuth tokens as read-only for public information; do not add `repo` unless you explicitly accept GitHub OAuth's broad private-repository read/write grant.
 

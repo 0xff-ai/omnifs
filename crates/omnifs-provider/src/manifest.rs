@@ -1,4 +1,4 @@
-//! Typed `omnifs.provider.json` manifest.
+//! Typed provider manifest embedded in the `omnifs.provider-metadata.v1` wasm custom section.
 
 use crate::auth_wire::{
     AuthManifest, AuthScheme, ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme,
@@ -64,7 +64,7 @@ impl BuildEvidence {
     }
 }
 
-/// Provider auth block from `omnifs.provider.json`.
+/// Provider auth block from the `omnifs.provider-metadata.v1` embedded section.
 ///
 /// Deserialization applies the `inject` block to every scheme so that
 /// `schemes` holds fully-resolved [`AuthScheme`] values ready for runtime use.
@@ -137,7 +137,7 @@ impl ProviderAuthManifest {
 // preserved.
 // ---------------------------------------------------------------------------
 
-/// On-disk compact form of an OAuth scheme inside `omnifs.provider.json`.
+/// Compact wire form of an OAuth scheme in the `omnifs.provider-metadata.v1` section.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "ManifestOauthScheme")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -198,7 +198,7 @@ enum RawOAuthFlow {
     },
 }
 
-/// On-disk compact form of a static-token scheme inside `omnifs.provider.json`.
+/// Compact wire form of a static-token scheme in the `omnifs.provider-metadata.v1` section.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "ManifestStaticTokenScheme")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -228,7 +228,7 @@ enum RawAuthScheme {
     Oauth(RawOauthScheme),
 }
 
-/// Wire form of the whole auth block as it appears in `omnifs.provider.json`.
+/// Wire form of the whole auth block as it appears in the `omnifs.provider-metadata.v1` section.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "AuthBlock")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

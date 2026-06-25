@@ -64,7 +64,7 @@ ready. If credentials are missing, status prints the matching
 
 Linear personal access tokens (`lin_api_...`) go in the `Authorization`
 header without the `Bearer ` prefix. Use a `static-token` mount auth entry
-with scheme `pat` (see `providers/linear/omnifs.provider.json`):
+with scheme `pat` (the `pat` scheme is declared in the provider's `auth = ..` argument):
 
 ```json
 {

@@ -21,7 +21,8 @@
 //! pub struct State { /* parsed config, adapters, route policy */ }
 //!
 //! #[omnifs_sdk::provider(
-//!     metadata = "omnifs.provider.json",
+//!     id = "my-provider",
+//!     capabilities(domain("api.example.com", "Fetch API resources.")),
 //! )]
 //! impl MyProvider {
 //!     type Config = Config;   // defaults to NoConfig when omitted

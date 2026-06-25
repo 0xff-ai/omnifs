@@ -1,6 +1,6 @@
 //! The `#[provider]` attribute macro.
 //!
-//! It backs `#[omnifs_sdk::provider(resources(..), events(..), metadata = "..")]`
+//! It backs `#[omnifs_sdk::provider(id = "..", capabilities(..), auth = .., resources(..), events(..))]`
 //! on a provider impl block whose optional associated `type Config/State`
 //! aliases and a synchronous `start(..)` method define the provider.
 

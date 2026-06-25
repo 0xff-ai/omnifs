@@ -2,7 +2,7 @@
   "$defs": {
     "AuthBlock": {
       "additionalProperties": false,
-      "description": "Wire form of the whole auth block as it appears in `omnifs.provider.json`.",
+      "description": "Wire form of the whole auth block as it appears in the `omnifs.provider-metadata.v1` section.",
       "properties": {
         "default": {
           "description": "Key of the scheme used by `omnifs init` when no explicit choice.",
@@ -70,7 +70,7 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "On-disk compact form of a static-token scheme inside `omnifs.provider.json`.",
+          "description": "Compact wire form of a static-token scheme in the `omnifs.provider-metadata.v1` section.",
           "properties": {
             "creationUrl": {
               "type": [
@@ -125,7 +125,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "On-disk compact form of an OAuth scheme inside `omnifs.provider.json`.",
+          "description": "Compact wire form of an OAuth scheme in the `omnifs.provider-metadata.v1` section.",
           "properties": {
             "clientId": {
               "type": [
@@ -292,7 +292,7 @@
       ]
     },
     "Need": {
-      "description": "One capability a provider *needs*, declared in its manifest\n(`omnifs.provider.json`, embedded). A need is never a grant: the host checks\na mount's [`Grants`] against these, it never grants from them at runtime.",
+      "description": "One capability a provider *needs*, declared via `capabilities(..)` in\n`#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`\nsection. A need is never a grant: the host checks a mount's [`Grants`]\nagainst these, it never grants from them at runtime.",
       "oneOf": [
         {
           "additionalProperties": false,

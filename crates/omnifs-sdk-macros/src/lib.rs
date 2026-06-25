@@ -29,14 +29,28 @@ mod provider_macro;
 /// methods. `start` takes either `(config, &mut Router<State>)` or just
 /// `(&mut Router<State>)` and returns `Result<State>`.
 ///
-/// Arguments (all optional unless noted):
+/// The manifest (identity, capabilities, config schema, auth) is authored from
+/// these arguments and assembled into the `omnifs.provider-metadata.v1` custom
+/// section at build: the macro emits a config-less `manifest_json()` lifecycle
+/// export that the build tool (`just providers-build`) runs and injects. There
+/// is no hand-written `omnifs.provider.json`.
 ///
-/// - `metadata = "omnifs.provider.json"`: path relative to the crate root.
-///   The manifest is validated at compile time, stamped with SDK/WIT contract
-///   evidence, embedded in the `omnifs.provider-metadata.v1` custom section,
-///   and supplies the provider name/description (overridable with
-///   `name = ".."` / `description = ".."`; `version = ".."` overrides the
-///   crate version).
+/// Arguments:
+///
+/// - `id = ".."` (required): the provider id (mount default and credential
+///   namespace). `display_name = ".."` and `mount = ".."` default to `id`. The
+///   wasm filename comes from `CARGO_PKG_NAME` and the version from
+///   `CARGO_PKG_VERSION`.
+/// - `capabilities(domain("v", "why"), git_repo("v", "why"),
+///   unix_socket(dynamic, "why"), preopened_path(dynamic, "why"),
+///   memory_mb(<int>, "why"))`: the declared capability needs. `unix_socket` and
+///   `preopened_path` are dynamic, resolved at mount-start from the
+///   [`HostSocket`](../omnifs_sdk/struct.HostSocket.html) /
+///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field.
+/// - `auth = <expr>`: a typed [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
+///   value spliced into the manifest's `auth` block.
+/// - The config schema is derived from `type Config` (via `#[config]`) and
+///   spliced in automatically; no argument is needed.
 /// - `resources(git = <bool>, memory_mb = <int>)`: requested capabilities
 ///   exported during initialization.
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
@@ -129,8 +143,8 @@ pub fn path_captures(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `base = "https://api.example.com"` (required)
 /// - `default_header = "Name: Value"` (repeatable; e.g. `Accept`,
 ///   `User-Agent`). Auth headers are NOT declared here: credentials are
-///   host-managed and declared in `omnifs.provider.json`; the host
-///   materializes them into requests.
+///   host-managed and declared via `auth = ..` on `#[omnifs_sdk::provider]`;
+///   the host materializes them into requests.
 /// - `rate_limit = "off"` or `rate_limit = "<seconds>"`: the per-authority
 ///   429 breaker policy (default cooldown applies when omitted).
 ///

@@ -108,9 +108,10 @@ pub struct Grants {
     pub max_read_blob_bytes: Option<u64>,
 }
 
-/// One capability a provider *needs*, declared in its manifest
-/// (`omnifs.provider.json`, embedded). A need is never a grant: the host checks
-/// a mount's [`Grants`] against these, it never grants from them at runtime.
+/// One capability a provider *needs*, declared via `capabilities(..)` in
+/// `#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`
+/// section. A need is never a grant: the host checks a mount's [`Grants`]
+/// against these, it never grants from them at runtime.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Need {

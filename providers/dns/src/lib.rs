@@ -90,8 +90,8 @@ struct ResolverReverseKey {
 }
 
 // ===========================================================================
-// Provider. Capabilities (resolver domains, memory) are declared in
-// `omnifs.provider.json`; no runtime `resources(..)` or `events(..)` needed.
+// Provider. Capabilities (resolver domains, memory) are declared via
+// `capabilities(..)` in `#[omnifs_sdk::provider]`; no `events(..)` needed.
 // ===========================================================================
 
 #[omnifs_sdk::provider(

@@ -2,8 +2,8 @@
 //!
 //! The provider talks v1.43 against the configured endpoint. `unix:` endpoint
 //! bases are decoded by the host's existing callout path; the socket grant
-//! itself is manifest-driven (the `unixSocket` capability in
-//! `omnifs.provider.json`), not a `resources(..)` declaration.
+//! itself is manifest-driven (the `unix_socket` capability declared via
+//! `#[omnifs_sdk::provider(capabilities(..))]`), not a `resources(..)` declaration.
 
 use omnifs_sdk::prelude::*;
 use serde::de::DeserializeOwned;
