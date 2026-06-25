@@ -30,9 +30,10 @@ use backend::{FileInfo, SqliteBackend};
 #[derive(Clone)]
 #[omnifs_sdk::config]
 pub(crate) struct Config {
-    /// Absolute path to the database file, as seen by the WASM
-    /// component (i.e. through a preopened WASI directory).
-    pub path: String,
+    /// Host path to the database file. The host resolves a read-only WASI
+    /// preopen of its parent directory at mount-start (guest == host), so the
+    /// provider opens this path unchanged.
+    pub path: omnifs_sdk::HostFile,
     /// Open the database read-only. Defaults to true. The host
     /// preopen mode should match: read-only providers receive
     /// `DirPerms::READ + FilePerms::READ` preopens.
@@ -121,13 +122,27 @@ pub(crate) struct TableDoc {
     pub row_count: i64,
 }
 
-#[omnifs_sdk::provider(metadata = "omnifs.provider.json")]
+#[omnifs_sdk::provider(
+    id = "db",
+    display_name = "Database",
+    mount = "db",
+    capabilities(
+        memory_mb(
+            128,
+            "Leave room for SQLite schema inspection and bounded sample result encoding."
+        ),
+        preopened_path(
+            dynamic,
+            "Expose the configured database file to the sandbox as a read-only WASI preopen, resolved from the `path` config field at mount-start."
+        ),
+    )
+)]
 impl DbProvider {
     type Config = Config;
     type State = State;
 
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
-        let backend = SqliteBackend::open(&config.path, config.read_only)
+        let backend = SqliteBackend::open(config.path.as_str(), config.read_only)
             .map_err(|e| ProviderError::internal(format!("open sqlite database: {e}")))?;
         // Seed the admissibility set before registering routes so that any
         // `TableName::from_str` called during route registration sees the full

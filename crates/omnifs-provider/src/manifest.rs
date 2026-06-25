@@ -850,12 +850,10 @@ mod tests {
         }
         parsed.sort();
 
-        // arxiv and dns author their manifests from `#[provider]` annotations
-        // and carry no `omnifs.provider.json`; the rest are still JSON-authored.
-        assert_eq!(
-            parsed,
-            ["db", "docker", "github", "kubernetes", "linear", "oura"]
-        );
+        // Only the auth providers still author their manifest from a hand-written
+        // `omnifs.provider.json`; the rest build it from `#[provider]`
+        // annotations and carry no JSON.
+        assert_eq!(parsed, ["github", "linear", "oura"]);
     }
 
     #[test]
