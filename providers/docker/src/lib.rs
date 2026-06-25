@@ -373,17 +373,26 @@ async fn container_summary_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileP
 
 async fn system_info(cx: Cx<State>) -> Result<FileProjection> {
     let info: SystemInfo = fetch_json(&cx, "/info", &[]).await?;
-    Ok(snapshot_json(pretty_json(&info)?))
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&info)?,
+        ContentType::Json,
+    ))
 }
 
 async fn system_version(cx: Cx<State>) -> Result<FileProjection> {
     let version: SystemVersion = fetch_json(&cx, "/version", &[]).await?;
-    Ok(snapshot_json(pretty_json(&version)?))
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&version)?,
+        ContentType::Json,
+    ))
 }
 
 async fn system_df(cx: Cx<State>) -> Result<FileProjection> {
     let usage: SystemDataUsageResponse = fetch_json(&cx, "/system/df", &[]).await?;
-    Ok(snapshot_json(pretty_json(&usage)?))
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&usage)?,
+        ContentType::Json,
+    ))
 }
 
 async fn system_ping(cx: Cx<State>) -> Result<FileProjection> {
@@ -391,12 +400,15 @@ async fn system_ping(cx: Cx<State>) -> Result<FileProjection> {
     if !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
     }
-    Ok(snapshot_body(bytes))
+    Ok(FileProjection::body(bytes).dynamic().build())
 }
 
 async fn containers_listing(cx: Cx<State>) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
-    Ok(snapshot_json(pretty_json(&summaries)?))
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&summaries)?,
+        ContentType::Json,
+    ))
 }
 
 async fn by_name(cx: DirCx<State>) -> Result<DirProjection> {
@@ -460,18 +472,10 @@ where
 async fn compose_listing(cx: Cx<State>) -> Result<FileProjection> {
     let summaries = list_containers(&cx).await?;
     let listing = ComposeListing::from(&summaries);
-    Ok(snapshot_json(pretty_json(&listing)?))
-}
-
-fn snapshot_body(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::body(bytes).dynamic().build()
-}
-
-fn snapshot_json(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::body(bytes)
-        .dynamic()
-        .content_type(ContentType::Json)
-        .build()
+    Ok(FileProjection::dynamic_body_with_type(
+        pretty_json(&listing)?,
+        ContentType::Json,
+    ))
 }
 
 // `state` and `summary.txt` are derived from the same container inspect and are

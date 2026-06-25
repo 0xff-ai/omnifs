@@ -192,6 +192,22 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
         self
     }
 
+    /// Append several query pairs, stringifying each value through [`Display`].
+    #[must_use]
+    pub fn query_pairs<I, K, V>(mut self, pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Display,
+    {
+        self.query.extend(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.as_ref().to_string(), value.to_string())),
+        );
+        self
+    }
+
     /// Append a request header. Invalid names or values are recorded as a
     /// sticky error so the chainable builder stays infallible; the error is
     /// surfaced by the terminal.

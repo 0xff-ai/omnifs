@@ -331,21 +331,13 @@ impl<'a> KubeApi<'a> {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
-        let bytes = self.get_bytes(path, query, ACCEPT_JSON).await?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| ProviderError::internal(format!("kubernetes: parse {path}: {error}")))
-    }
-
-    async fn get_bytes(&self, path: &str, query: &[(&str, &str)], accept: &str) -> Result<Vec<u8>> {
-        let mut request = self
-            .cx
+        self.cx
             .endpoint(self.endpoint())
             .get(path)
-            .header("Accept", accept);
-        for (key, value) in query {
-            request = request.query(key, value);
-        }
-        Ok(request.send_checked().await?.body().to_vec())
+            .header("Accept", ACCEPT_JSON)
+            .query_pairs(query.iter().copied())
+            .json()
+            .await
     }
 
     async fn get_bytes_opt(
@@ -354,14 +346,12 @@ impl<'a> KubeApi<'a> {
         query: &[(&str, &str)],
         accept: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let mut request = self
+        let request = self
             .cx
             .endpoint(self.endpoint())
             .get(path)
-            .header("Accept", accept);
-        for (key, value) in query {
-            request = request.query(key, value);
-        }
+            .header("Accept", accept)
+            .query_pairs(query.iter().copied());
         match request.send_checked().await {
             Ok(response) => Ok(Some(response.body().to_vec())),
             Err(err) if err.kind() == ProviderErrorKind::NotFound => Ok(None),
@@ -447,15 +437,13 @@ impl PodLogReader {
         if let Some(since) = &since {
             query.push(("sinceTime", since));
         }
-        let mut request = cx
+        let request = cx
             .endpoint(KubeEndpoint {
                 base: self.base.clone(),
             })
             .get(path)
-            .header("Accept", "*/*");
-        for (key, value) in &query {
-            request = request.query(key, value);
-        }
+            .header("Accept", "*/*")
+            .query_pairs(query.iter().copied());
         let response = request.send_checked().await?;
         self.append(response.body());
         Ok(())
@@ -590,11 +578,4 @@ fn render_event_list(list: EventList) -> String {
         );
     }
     out
-}
-
-pub(crate) fn text_file(bytes: Vec<u8>) -> FileProjection {
-    FileProjection::body(bytes)
-        .content_type(ContentType::Text)
-        .dynamic()
-        .build()
 }

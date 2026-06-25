@@ -19,15 +19,6 @@ use item::ItemKind;
 pub(crate) use objects::ItemData;
 use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
 
-/// Parse a JSON API response body into a model type.
-pub(crate) fn parse_model<T>(body: &[u8]) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    serde_json::from_slice(body)
-        .map_err(|error| ProviderError::invalid_input(format!("JSON parse error: {error}")))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerKind {
     User,
