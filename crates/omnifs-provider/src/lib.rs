@@ -38,8 +38,8 @@ pub use records::{
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
-    ProviderMetadataError, provider_manifest_json, read_manifest_section,
-    read_provider_metadata_section,
+    ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,
+    read_manifest_section, read_provider_metadata_section,
 };
 pub use validation::{SchemaError, validate_config};
 pub use wasm::{ProviderWasm, ProviderWasmError};
