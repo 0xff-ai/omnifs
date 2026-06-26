@@ -168,6 +168,11 @@ pub enum Error {
         mount: String,
         source: mount::NameError,
     },
+    #[error(
+        "mount spec {} declares mount `{mount}` but must be named `{mount}.json`",
+        path.display()
+    )]
+    FilenameMismatch { path: PathBuf, mount: String },
     #[error("failed to scan mount config directory {}: {source}", path.display())]
     ScanMounts {
         path: PathBuf,
@@ -359,22 +364,49 @@ impl Registry {
             source,
         })?;
         for path in paths {
-            match Spec::from_file(&path) {
-                Ok(spec) => match mount::Name::new(spec.mount.clone()) {
-                    Ok(name) => {
-                        self.specs.insert(name, spec);
-                    },
-                    Err(source) => self.failures.push(SpecLoadFailure {
+            let spec = match Spec::from_file(&path) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    self.failures.push(SpecLoadFailure { path, error });
+                    continue;
+                },
+            };
+            let name = match mount::Name::new(spec.mount.clone()) {
+                Ok(name) => name,
+                Err(source) => {
+                    self.failures.push(SpecLoadFailure {
                         error: Error::MountName {
                             path: path.clone(),
                             mount: spec.mount,
                             source,
                         },
                         path,
-                    }),
+                    });
+                    continue;
                 },
-                Err(error) => self.failures.push(SpecLoadFailure { path, error }),
+            };
+            // The file name carries the mount identity: a spec lives at
+            // `<mount>.json`. Enforcing that here keeps the read side consistent
+            // with `spec_path`/`put`/`remove` (which derive the file from the
+            // name), so a misnamed file -- or a second file declaring an
+            // already-claimed mount -- surfaces as a loud failure instead of
+            // being silently mis-served or leaving `rm`/`upgrade` to act on the
+            // wrong path.
+            let stem_matches = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| spec.mount == stem);
+            if !stem_matches {
+                self.failures.push(SpecLoadFailure {
+                    error: Error::FilenameMismatch {
+                        path: path.clone(),
+                        mount: spec.mount,
+                    },
+                    path,
+                });
+                continue;
             }
+            self.specs.insert(name, spec);
         }
         Ok(())
     }
@@ -662,6 +694,79 @@ mod tests {
                 .failures()
                 .iter()
                 .any(|f| matches!(f.error, Error::MountName { .. }))
+        );
+    }
+
+    #[test]
+    fn registry_rejects_filename_mount_mismatch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mounts = dir.path();
+        // Well-named spec: served.
+        write_spec(
+            mounts,
+            "github.json",
+            &spec_with_provider("github", r#"{ "mount": "github" }"#),
+        );
+        // A second file declaring the same mount (file stem != mount name): it is
+        // rejected as a loud failure instead of silently shadowing the first or
+        // leaving `rm github` to act on a non-existent `github.json`.
+        write_spec(
+            mounts,
+            "github-backup.json",
+            &spec_with_provider("github", r#"{ "mount": "github" }"#),
+        );
+
+        let registry = Registry::load(mounts).expect("scan succeeds");
+
+        let names: Vec<_> = registry.iter().map(|(name, _)| name.to_string()).collect();
+        assert_eq!(
+            names,
+            ["github"],
+            "only the canonically-named file is served"
+        );
+        assert!(
+            registry
+                .failures()
+                .iter()
+                .any(|failure| matches!(failure.error, Error::FilenameMismatch { .. })),
+            "the misnamed duplicate surfaces as a FilenameMismatch failure"
+        );
+    }
+
+    #[test]
+    fn registry_reload_reflects_on_disk_changes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mounts = dir.path();
+        write_spec(
+            mounts,
+            "alpha.json",
+            &spec_with_provider("alpha", r#"{ "mount": "alpha" }"#),
+        );
+        let mut registry = Registry::load(mounts).expect("scan succeeds");
+        assert_eq!(
+            registry
+                .iter()
+                .map(|(n, _)| n.to_string())
+                .collect::<Vec<_>>(),
+            ["alpha"]
+        );
+
+        // Add one spec and remove the original on disk, then reload the mirror.
+        write_spec(
+            mounts,
+            "beta.json",
+            &spec_with_provider("beta", r#"{ "mount": "beta" }"#),
+        );
+        std::fs::remove_file(mounts.join("alpha.json")).unwrap();
+        registry.reload().expect("reload");
+
+        assert_eq!(
+            registry
+                .iter()
+                .map(|(n, _)| n.to_string())
+                .collect::<Vec<_>>(),
+            ["beta"],
+            "reload drops removed specs and picks up added ones"
         );
     }
 

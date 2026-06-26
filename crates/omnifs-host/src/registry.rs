@@ -491,15 +491,10 @@ impl<'a> ReconcilePass<'a> {
             },
         };
         let mount = materialized.mount.clone();
-        // Distinct mount names are required: two specs claiming one name would
-        // race in the parallel load, and it is a misconfiguration regardless.
-        if !self.desired.insert(mount.clone()) {
-            self.outcome.failed.push(MountFailure {
-                mount,
-                reason: format!("duplicate mount name from {}", path.display()),
-            });
-            return None;
-        }
+        // The mount Registry guarantees one spec per mount name (a spec must live
+        // at `<mount>.json`, and a duplicate or misnamed file is a load failure),
+        // so `desired` only tracks the set of names for stale-mount removal.
+        self.desired.insert(mount.clone());
 
         let wasm_path = self
             .registry
