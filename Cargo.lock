@@ -2987,6 +2987,7 @@ dependencies = [
  "omnifs-host",
  "omnifs-inspector",
  "omnifs-mount",
+ "omnifs-provider",
  "omnifs-tree",
  "omnifs-wit",
  "parking_lot",
@@ -3092,7 +3093,6 @@ name = "omnifs-mount"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "fs2",
  "omnifs-caps",
  "omnifs-core",
  "omnifs-provider",
@@ -3113,6 +3113,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-host",
  "omnifs-mount",
+ "omnifs-provider",
  "omnifs-tree",
  "serde",
  "serde_json",
@@ -3127,6 +3128,7 @@ name = "omnifs-provider"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "fs2",
  "hex",
  "indexmap",
  "jsonschema",

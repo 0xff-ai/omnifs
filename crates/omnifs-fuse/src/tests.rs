@@ -103,7 +103,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");
     let id = omnifs_core::ProviderId::from_wasm_bytes(&test_bytes);
-    let store = omnifs_mount::mounts::ProviderStore::new(providers_dir.path());
+    let store = omnifs_provider::ProviderStore::new(providers_dir.path());
     store
         .put_if_absent(&id, &test_bytes)
         .expect("put test provider");

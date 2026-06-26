@@ -54,7 +54,7 @@ impl<'a> Launcher<'a> {
 
         crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
 
-        crate::upgrade::run_upgrade_check(&paths.mounts_dir, &paths.providers_dir, &configs)?;
+        crate::upgrade::run_upgrade_check(&paths.providers_dir, &configs)?;
 
         anstream::println!("Using mount configs from {}", paths.mounts_dir.display());
         launch_runtime(

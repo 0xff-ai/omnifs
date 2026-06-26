@@ -25,6 +25,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 omnifs-cache = { workspace = true }
 omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 omnifs-home = { workspace = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
 tempfile = { workspace = true }

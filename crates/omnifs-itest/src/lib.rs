@@ -4,7 +4,8 @@ use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderV
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
-use omnifs_mount::mounts::{Catalog, ProviderStore, Spec};
+use omnifs_mount::mounts::Spec;
+use omnifs_provider::{Catalog, ProviderStore};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
@@ -60,10 +61,10 @@ impl RuntimeHarness {
         // uses in production.
         let spec = pin_spec_from_json(config_json, providers_dir.path())?;
 
-        let catalog = Catalog::new(&paths.mounts_dir, providers_dir.path());
+        let catalog = Catalog::open(providers_dir.path());
         let resolved = omnifs_mount::mounts::resolve(&catalog, &spec, false)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        let wasm_path = catalog.provider_path(&resolved);
+        let wasm_path = catalog.provider_path_by_id(&resolved.spec.provider.id);
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
         let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
             path: cache_dir.path().to_path_buf(),

@@ -337,7 +337,8 @@ mod tests {
     use crate::catalog::ProviderCatalog;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_mount::mounts::{ProviderStore, Registry};
+    use omnifs_mount::mounts::Registry;
+    use omnifs_provider::ProviderStore;
     use omnifs_provider::{AuthManifest, AuthScheme, ProviderManifest};
     use serde_json::Value;
 

@@ -82,7 +82,7 @@ pub(crate) fn install_fixture_provider(
     name: &str,
 ) -> omnifs_core::ProviderRef {
     use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_mount::mounts::ProviderStore;
+    use omnifs_provider::ProviderStore;
 
     let file = format!("omnifs_provider_{name}.wasm");
     let bytes = wasm_with_provider_metadata(name, &file);

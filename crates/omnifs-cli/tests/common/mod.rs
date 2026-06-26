@@ -124,7 +124,7 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
     let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
         .expect("read test provider wasm");
     let id = omnifs_core::ProviderId::from_wasm_bytes(&bytes);
-    let store = omnifs_mount::mounts::ProviderStore::new(providers_dir);
+    let store = omnifs_provider::ProviderStore::new(providers_dir);
     store.put_if_absent(&id, &bytes).expect("put test provider");
     store
         .install(

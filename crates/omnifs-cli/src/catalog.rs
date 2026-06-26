@@ -7,8 +7,8 @@
 //! need the list accept it as a parameter.
 
 use omnifs_core::{MountName, ProviderRef};
-use omnifs_mount::mounts::{Catalog as MountCatalog, Resolved, Spec};
-use omnifs_provider::{AuthManifest, ProviderAuthManifest, ProviderManifest};
+use omnifs_mount::mounts::{Resolved, Spec};
+use omnifs_provider::{AuthManifest, Catalog, ProviderAuthManifest, ProviderManifest};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -16,23 +16,20 @@ use crate::session::MountConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderCatalog {
-    mounts: MountCatalog,
-    providers_dir: PathBuf,
+    providers: Catalog,
 }
 
 impl ProviderCatalog {
     pub(crate) fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
-        let providers_dir = providers_dir.as_ref();
         Self {
-            mounts: MountCatalog::for_providers(providers_dir),
-            providers_dir: providers_dir.to_path_buf(),
+            providers: Catalog::open(providers_dir),
         }
     }
 
-    /// The underlying mount catalog, for callers that drive the shared
+    /// The underlying provider catalog, for callers that drive the shared
     /// materializer (`omnifs_mount::materialize`) directly.
-    pub(crate) fn inner(&self) -> &MountCatalog {
-        &self.mounts
+    pub(crate) fn inner(&self) -> &Catalog {
+        &self.providers
     }
 
     /// Resolve runtime-ready mount, optionally requiring provider metadata.
@@ -41,44 +38,33 @@ impl ProviderCatalog {
         spec: &Spec,
         require_metadata: bool,
     ) -> anyhow::Result<Resolved> {
-        omnifs_mount::mounts::resolve(&self.mounts, spec, require_metadata).map_err(Into::into)
+        omnifs_mount::mounts::resolve(&self.providers, spec, require_metadata).map_err(Into::into)
     }
 
     pub(crate) fn provider_path(&self, mount: &Resolved) -> PathBuf {
-        self.mounts.provider_path(mount)
+        self.providers.provider_path_by_id(&mount.spec.provider.id)
     }
 
     pub(crate) fn auth_manifest_for(
         &self,
         mount: &Resolved,
     ) -> anyhow::Result<Option<AuthManifest>> {
-        self.mounts.auth_manifest_for(mount).map_err(Into::into)
+        omnifs_mount::mounts::auth_manifest_for(&self.providers, mount).map_err(Into::into)
     }
 
     pub(crate) fn provider_auth_manifest_for(
         &self,
         mount: &Resolved,
     ) -> anyhow::Result<Option<ProviderAuthManifest>> {
-        self.mounts
-            .provider_auth_manifest_for(mount)
-            .map_err(Into::into)
+        omnifs_mount::mounts::provider_auth_manifest_for(&self.providers, mount).map_err(Into::into)
     }
 
     /// The authoring/selection templates: one per provider name, drawn from the
-    /// latest installed artifact in the content-addressed store. Replaces the
-    /// former builtin-manifest index plus filename scan with the single store.
+    /// latest installed artifact in the content-addressed store.
     pub(crate) fn provider_templates(&self) -> anyhow::Result<ProviderTemplates> {
         let mut by_name = BTreeMap::new();
-        for provider in self.mounts.list()? {
+        for provider in self.providers.installable()? {
             let name = provider.meta.name.clone();
-            // Only the latest artifact per name surfaces as a template; older
-            // retained versions are upgrade history, not authoring choices.
-            let Some(latest) = self.mounts.latest_by_name(&name)? else {
-                continue;
-            };
-            if latest.id != provider.id {
-                continue;
-            }
             // A corrupt artifact must not brick catalog enumeration; skip it
             // with a warning and let the rest resolve.
             let manifest = match provider.manifest() {
@@ -108,10 +94,10 @@ impl ProviderCatalog {
     }
 
     pub(crate) fn provider_dir_status(&self) -> ProviderDirStatus {
-        if !self.providers_dir.exists() {
+        if !self.providers.providers_dir().exists() {
             return ProviderDirStatus::Missing;
         }
-        match self.mounts.store().read_index() {
+        match self.providers.store().read_index() {
             Ok(index) => ProviderDirStatus::Present {
                 wasm_count: index.providers.len(),
             },
@@ -199,7 +185,7 @@ mod tests {
     use super::*;
     use crate::test_support::{wasm_with_metadata_section, wasm_with_provider_metadata};
     use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_mount::mounts::ProviderStore;
+    use omnifs_provider::ProviderStore;
 
     fn meta(name: &str) -> ProviderMeta {
         ProviderMeta {

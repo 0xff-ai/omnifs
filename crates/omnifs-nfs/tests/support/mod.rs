@@ -110,7 +110,7 @@ pub fn test_provider_spec(mount: &str) -> omnifs_mount::mounts::Spec {
 
 /// Install the test provider into the content-addressed store at `providers_dir`.
 fn install_test_provider(providers_dir: &Path) {
-    use omnifs_mount::mounts::ProviderStore;
+    use omnifs_provider::ProviderStore;
     let reference = test_provider_reference();
     let bytes =
         std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
