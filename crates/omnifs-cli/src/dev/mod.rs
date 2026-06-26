@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
 use omnifs_home::WorkspaceLayout;
-use omnifs_mount::mounts::Spec;
+use omnifs_mount::mounts::{Registry, Spec};
 use tokio::signal;
 
 use crate::auth::AuthSelection;
@@ -398,12 +398,11 @@ fn confirm_session(
 }
 
 fn write_dev_mounts(mounts_dir: &Path, configs: &[MountConfig]) -> Result<()> {
-    fs::create_dir_all(mounts_dir).with_context(|| format!("create {}", mounts_dir.display()))?;
+    let mut registry = Registry::load(mounts_dir)?;
     for config in configs {
-        let path = mounts_dir.join(format!("{}.json", config.name));
-        let json = serde_json::to_vec_pretty(&config.config)
-            .with_context(|| format!("serialize dev mount `{}`", config.name))?;
-        fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+        registry
+            .put(&config.config)
+            .with_context(|| format!("write dev mount `{}`", config.name))?;
     }
     Ok(())
 }

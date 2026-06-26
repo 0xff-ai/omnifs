@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use omnifs_core::MountName;
 use omnifs_creds::{CredentialStore, FileStore};
+use omnifs_mount::mounts::Registry;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -117,8 +118,7 @@ pub async fn rm(
     let store = FileStore::new(&layout.credentials_file);
     delete_credentials(&store, &credential_target, keep_credentials, name.as_str())?;
 
-    std::fs::remove_file(&config_path)
-        .with_context(|| format!("remove {}", config_path.display()))?;
+    Registry::load(&layout.mounts_dir)?.remove(&name)?;
     anstream::println!(
         "Removed mount `{name}` ({})",
         WorkspaceLayout::display(&config_path)
