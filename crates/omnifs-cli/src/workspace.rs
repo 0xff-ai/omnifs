@@ -4,11 +4,10 @@
 //! for command-scoped handles derived from that layout: config, provider
 //! catalog, daemon client, and configured mounts.
 
-use anyhow::Context as _;
 use omnifs_home::{Cli as CliRole, Workspace as HomeWorkspace, WorkspaceLayout};
 use omnifs_mount::mounts::Registry;
 use omnifs_provider::Catalog;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::client::DaemonClient;
 use crate::config::Config;
@@ -88,59 +87,55 @@ impl Workspace {
 
     /// Build removal targets tolerantly, for use by `omnifs reset`.
     ///
-    /// Enumerates the per-file spec paths directly and tolerates unparsable
-    /// files: a broken JSON file still produces a removal target with
+    /// Reads through the shared [`Registry`]: resolvable specs yield a target
+    /// plus their stored credential; files that failed to load (broken JSON,
+    /// name/filename mismatch) still produce a target with
     /// `CredentialTarget::None` so reset can nuke broken state.
     pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
-        use omnifs_mount::mounts::Spec as MountSpec;
-
+        let registry = Registry::load(self.home.mounts_dir())?;
         let mut targets = Vec::new();
-        let paths = per_file_mount_paths(self.home.mounts_dir())?;
-        for path in paths {
-            let Some(name) = path
+
+        for (name, spec) in registry.iter() {
+            let credential = match crate::catalog::resolve_mount_spec(&self.catalog, spec, false) {
+                Ok(resolved) => CredentialTarget::for_mount(&resolved),
+                Err(error) => {
+                    tracing::warn!(
+                        mount = %name,
+                        %error,
+                        "unresolvable mount config; will remove the file but cannot drop credentials"
+                    );
+                    CredentialTarget::None
+                },
+            };
+            targets.push(MountRemovalTarget {
+                name: name.to_string(),
+                path: registry.spec_path(name),
+                credential,
+            });
+        }
+
+        for failure in registry.failures() {
+            let Some(name) = failure
+                .path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .map(str::to_owned)
             else {
                 continue;
             };
-            let credential = match MountSpec::from_file(&path) {
-                Ok(spec) => match crate::catalog::resolve_mount_spec(&self.catalog, &spec, false) {
-                    Ok(resolved) => CredentialTarget::for_mount(&resolved),
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            %error,
-                            "unresolvable mount config; will remove the file but cannot drop credentials"
-                        );
-                        CredentialTarget::None
-                    },
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "unparsable mount config; will remove the file but cannot drop credentials"
-                    );
-                    CredentialTarget::None
-                },
-            };
+            tracing::warn!(
+                path = %failure.path.display(),
+                error = %failure.error,
+                "unparsable mount config; will remove the file but cannot drop credentials"
+            );
             targets.push(MountRemovalTarget {
                 name,
-                path,
-                credential,
+                path: failure.path.clone(),
+                credential: CredentialTarget::None,
             });
         }
 
         targets.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(targets)
     }
-}
-
-/// Read the per-file mount spec paths from `mounts_dir`.
-///
-/// Returns an empty list when the directory does not exist (not an error).
-pub(crate) fn per_file_mount_paths(mounts_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    omnifs_mount::mounts::spec_paths_in(mounts_dir)
-        .with_context(|| format!("read mount config directory {}", mounts_dir.display()))
 }
