@@ -3,11 +3,6 @@
 release-check:
     bun scripts/release.ts check
 
-# Emit the text release plan used by the Release workflow.
-[group('release')]
-release-plan:
-    @bun scripts/release.ts plan
-
 # Emit the JSON release plan used by automation.
 [group('release')]
 release-plan-json:

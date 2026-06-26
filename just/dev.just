@@ -35,10 +35,6 @@ host-clippy:
       --all-targets \
       -- -D warnings
 
-# Build provider WASM, then run the host test suite.
-[group('dev')]
-test: providers-build ci-host
-
 # Run the bun script tests.
 [group('dev')]
 scripts-test:
@@ -48,10 +44,11 @@ scripts-test:
 [group('dev')]
 docs-check:
     bash scripts/ci/check-doc-links.sh
+    bash scripts/ci/check-doc-contracts.sh
 
-# Run the full local validation path for broad changes.
+# Run the CI-shaped local validation path for broad changes.
 [group('dev')]
-check: fmt-check openapi-check host-clippy test providers-check npm-validate scripts-test docs-check
+check: ci-preflight-fast ci-preflight-policy openapi-check ci-wasm ci-host
 
 # Regenerate the provider JSON schema.
 [group('dev')]
@@ -72,8 +69,3 @@ openapi-check:
 [group('dev')]
 dev:
     omnifs dev
-
-# Launch the supported contributor runtime without prompting.
-[group('dev')]
-dev-y:
-    omnifs dev -y
