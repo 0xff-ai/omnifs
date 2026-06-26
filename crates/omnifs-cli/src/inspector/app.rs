@@ -6,9 +6,8 @@ use omnifs_inspector::{InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
-use super::palette::MountPalette;
 use super::source::SourceMessage;
-use super::trace_state::{MAX_RECENT_TRACES, Operation, TraceReducer};
+use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest};
 
 const EVENT_WINDOW: usize = 128;
@@ -33,13 +32,10 @@ pub struct App {
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
-    pub tick: u64,
     pub now_mono: u64,
     pub quit: bool,
     pub dropped_events: u64,
-    pub events_total: u64,
     pub events_per_sec: f64,
-    pub status_message: String,
     traces: TraceReducer,
     event_times: VecDeque<u64>,
 }
@@ -85,13 +81,10 @@ impl App {
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
-            tick: 0,
             now_mono: 0,
             quit: false,
             dropped_events: 0,
-            events_total: 0,
             events_per_sec: 0.0,
-            status_message: String::new(),
             traces: TraceReducer::default(),
             event_times: VecDeque::new(),
         }
@@ -167,17 +160,11 @@ impl App {
             },
             SourceMessage::Connected => {
                 self.connected = true;
-                self.status_message = "connected".into();
             },
             SourceMessage::Disconnected => {
                 self.connected = false;
-                self.status_message = "disconnected, reconnecting…".into();
             },
         }
-    }
-
-    pub fn animate(&mut self) {
-        self.tick += 1;
     }
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -294,7 +281,6 @@ impl App {
     }
 
     fn tick_event_window(&mut self, mono_us: u64) {
-        self.events_total += 1;
         self.event_times.push_back(mono_us);
         while self.event_times.len() > EVENT_WINDOW {
             self.event_times.pop_front();
@@ -321,7 +307,6 @@ impl App {
 
     fn reset_recent(&mut self) {
         self.traces.reset_recent(&self.filter);
-        self.status_message = "recent activity cleared".into();
     }
 
     fn select_next(&mut self) {

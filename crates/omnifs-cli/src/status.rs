@@ -246,15 +246,10 @@ pub(crate) fn write_configured_providers(out: &mut String, providers: &[Provider
             ProviderConfigStatus::Ready(provider) => {
                 let _ = write!(
                     out,
-                    "- {}: provider={} present={} metadata={} auth={} domains={} git_repos={}",
+                    "- {}: provider={} present={} auth={} domains={} git_repos={}",
                     provider.mount,
                     provider.provider,
                     if provider.provider_present {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                    if provider.metadata_available {
                         "yes"
                     } else {
                         "no"

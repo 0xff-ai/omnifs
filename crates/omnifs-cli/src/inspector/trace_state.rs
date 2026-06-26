@@ -11,10 +11,10 @@ use omnifs_inspector::{
 };
 
 use super::filter::ViewFilter;
+use super::format;
 use super::metrics::MountWindow;
-use super::palette::MountPalette;
-use super::scene;
 use super::tree::MountForest;
+use ratatui::style::Color;
 
 /// Hard cap on retained per-trace operation records. The previous
 /// value (256) was sized for a quiet observability stream and got
@@ -23,6 +23,46 @@ use super::tree::MountForest;
 /// KB each is still trivial in absolute memory but covers a typical
 /// debugging session without GC pressure.
 pub const MAX_RECENT_TRACES: usize = 4096;
+
+/// Eight visually distinct colors for mount accents. Chosen for legible
+/// contrast on both light and dark terminal themes.
+const PALETTE: &[Color] = &[
+    Color::Cyan,
+    Color::Yellow,
+    Color::LightGreen,
+    Color::LightMagenta,
+    Color::LightBlue,
+    Color::LightRed,
+    Color::LightCyan,
+    Color::LightYellow,
+];
+
+/// Mount color palette. First-sight assignment from a curated list; cycles
+/// deterministically when exceeded so screenshots remain stable across
+/// reorderings.
+#[derive(Debug, Default, Clone)]
+pub struct MountPalette {
+    assignments: HashMap<String, Color>,
+    next_index: usize,
+}
+
+impl MountPalette {
+    /// Return the stable color for this mount, allocating on first sight.
+    pub fn color_for(&mut self, mount: &str) -> Color {
+        if let Some(color) = self.assignments.get(mount) {
+            return *color;
+        }
+        let color = PALETTE[self.next_index % PALETTE.len()];
+        self.next_index += 1;
+        self.assignments.insert(mount.to_string(), color);
+        color
+    }
+
+    /// Look up without allocating (useful for render-only paths).
+    pub fn peek(&self, mount: &str) -> Option<Color> {
+        self.assignments.get(mount).copied()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationStatus {
@@ -498,7 +538,7 @@ impl TraceReducer {
         if let Some(operation) = self.operations.get_mut(&trace_id) {
             operation.stages.push(Stage {
                 kind: StageKind::Cache(kind),
-                detail: scene::shorten_path(path, 48),
+                detail: format::shorten_path(path, 48),
                 elapsed_us,
                 outcome: Some(InspectorOutcome::Ok),
                 in_flight: false,

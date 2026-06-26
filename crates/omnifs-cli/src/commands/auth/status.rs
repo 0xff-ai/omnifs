@@ -6,7 +6,7 @@ use omnifs_creds::{CredentialStore, Refreshability};
 
 use super::shared::format_scopes;
 use crate::auth::explain::AuthMode;
-use crate::auth::{AuthReadiness, AuthReadinessJson, MountAuth};
+use crate::auth::{AuthReadiness, MountAuth};
 use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 use omnifs_home::WorkspaceLayout;
@@ -18,7 +18,7 @@ pub(super) fn status(
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
-    let rows = AuthStatus::new(catalog, store).load(mounts)?;
+    let rows = load_auth_rows(catalog, store, mounts)?;
     anstream::println!("backend: {}", store.backend_label());
     if rows.is_empty() {
         anstream::println!("no mount configs found in {}", layout.config_file.display());
@@ -41,7 +41,7 @@ pub(super) struct AuthStatusJson {
 #[derive(serde::Serialize)]
 struct AuthEntryJson {
     key: String,
-    auth: AuthReadinessJson,
+    auth: AuthReadiness,
     available_schemes: Vec<String>,
 }
 
@@ -50,8 +50,7 @@ pub(super) fn status_json(
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
-    let entries = AuthStatus::new(catalog, store)
-        .load(mounts)?
+    let entries = load_auth_rows(catalog, store, mounts)?
         .into_iter()
         .map(AuthStatusRow::into_json)
         .collect();
@@ -60,39 +59,33 @@ pub(super) fn status_json(
     Ok(())
 }
 
-pub(super) struct AuthStatus<'a> {
-    catalog: &'a ProviderCatalog,
-    store: &'a dyn CredentialStore,
+fn load_auth_rows(
+    catalog: &ProviderCatalog,
+    store: &dyn CredentialStore,
+    mounts: Vec<MountConfig>,
+) -> anyhow::Result<Vec<AuthStatusRow>> {
+    let auth_mounts = catalog.load_all_mount_auth_tolerating_manifest_errors(mounts)?;
+    Ok(auth_mounts
+        .iter()
+        .map(|mount| row_for(catalog, store, mount))
+        .collect())
 }
 
-impl<'a> AuthStatus<'a> {
-    fn new(catalog: &'a ProviderCatalog, store: &'a dyn CredentialStore) -> Self {
-        Self { catalog, store }
-    }
-
-    fn load(&self, mounts: Vec<MountConfig>) -> anyhow::Result<Vec<AuthStatusRow>> {
-        let auth_mounts = self
-            .catalog
-            .load_all_mount_auth_tolerating_manifest_errors(mounts)?;
-        Ok(auth_mounts
-            .iter()
-            .map(|mount| self.row_for(mount))
-            .collect())
-    }
-
-    fn row_for(&self, mount: &MountAuth) -> AuthStatusRow {
-        let available = self
-            .catalog
-            .provider_auth_manifest_for(mount.config())
-            .ok()
-            .flatten()
-            .map(|auth| scheme_options(&auth))
-            .unwrap_or_default();
-        AuthStatusRow {
-            mount: mount.config().spec.mount.clone(),
-            readiness: mount.readiness(self.store),
-            available,
-        }
+fn row_for(
+    catalog: &ProviderCatalog,
+    store: &dyn CredentialStore,
+    mount: &MountAuth,
+) -> AuthStatusRow {
+    let available = catalog
+        .provider_auth_manifest_for(mount.config())
+        .ok()
+        .flatten()
+        .map(|auth| scheme_options(&auth))
+        .unwrap_or_default();
+    AuthStatusRow {
+        mount: mount.config().spec.mount.clone(),
+        readiness: mount.readiness(store),
+        available,
     }
 }
 
@@ -153,7 +146,7 @@ impl AuthStatusRow {
                     self.mount, self.mount
                 )
             },
-            AuthReadiness::Error(error) => format!("error: {error}"),
+            AuthReadiness::Error { message } => format!("error: {message}"),
             AuthReadiness::Ready {
                 kind,
                 scopes,
@@ -183,7 +176,7 @@ impl AuthStatusRow {
         let available_schemes = self.available.iter().map(|opt| opt.key.clone()).collect();
         AuthEntryJson {
             key: self.mount,
-            auth: AuthReadinessJson::from(&self.readiness),
+            auth: self.readiness,
             available_schemes,
         }
     }

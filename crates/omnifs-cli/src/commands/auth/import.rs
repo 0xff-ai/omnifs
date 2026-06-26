@@ -6,7 +6,7 @@ use omnifs_creds::{CredentialEntry, CredentialStore};
 use secrecy::SecretString;
 use time::OffsetDateTime;
 
-use super::shared::format_rfc3339;
+use crate::auth::format_rfc3339;
 use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 

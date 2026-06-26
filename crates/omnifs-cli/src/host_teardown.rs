@@ -379,19 +379,26 @@ fn pid_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
-/// needs a beat to unmount after SIGTERM). Uses the cross-platform live
-/// mount-table check from omnifs-nfs (`/proc/mounts` on Linux, `mount` on macOS).
-fn mount_settled(mount_point: &Path) -> bool {
-    for attempt in 0..12 {
+/// Poll the OS mount table at `cadence` until `mount_point` is no longer active,
+/// up to `attempts` checks. Uses the cross-platform live mount-table check from
+/// omnifs-nfs (`/proc/mounts` on Linux, `mount` on macOS). Returns true once the
+/// mount is gone.
+pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attempts: usize) -> bool {
+    for attempt in 0..attempts {
         if !omnifs_nfs::mount_is_active(mount_point) {
             return true;
         }
-        if attempt + 1 < 12 {
-            std::thread::sleep(Duration::from_millis(500));
+        if attempt + 1 < attempts {
+            std::thread::sleep(cadence);
         }
     }
     false
+}
+
+/// Poll until `mount_point` leaves the OS mount table, up to ~6s (a live daemon
+/// needs a beat to unmount after SIGTERM).
+fn mount_settled(mount_point: &Path) -> bool {
+    poll_until_unmounted(mount_point, Duration::from_millis(500), 12)
 }
 
 #[cfg(not(target_os = "linux"))]

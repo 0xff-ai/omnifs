@@ -121,8 +121,7 @@ impl SetupArgs {
         );
         anstream::print!("{report}");
 
-        let any_succeeded = results.iter().any(|r| r.outcome.is_ok());
-        let any_ready = any_succeeded || !configured.is_empty();
+        let any_ready = report.any_ready();
         if self.no_up {
             anstream::println!("\nSkipping daemon launch (--no-up).");
         } else if !any_ready {

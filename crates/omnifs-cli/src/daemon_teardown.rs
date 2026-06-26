@@ -135,30 +135,18 @@ impl<'a> DaemonTeardown<'a> {
 /// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
 /// shortly after answering shutdown), at a 100ms cadence for up to ~3s.
 fn wait_unmounted(mount_point: &Path, force: bool) -> anyhow::Result<()> {
-    if poll_unmounted(mount_point) {
+    let poll =
+        || crate::host_teardown::poll_until_unmounted(mount_point, Duration::from_millis(100), 30);
+    if poll() {
         return Ok(());
     }
     if force {
         crate::host_teardown::force_unmount_host_native(mount_point);
-        if poll_unmounted(mount_point) {
+        if poll() {
             return Ok(());
         }
     }
     Err(StillMounted::inspect(mount_point, force).into())
-}
-
-/// Poll the OS mount table at a 100ms cadence for up to ~3s. Returns true once
-/// `mount_point` is no longer active.
-fn poll_unmounted(mount_point: &Path) -> bool {
-    for attempt in 0..30 {
-        if !omnifs_nfs::mount_is_active(mount_point) {
-            return true;
-        }
-        if attempt + 1 < 30 {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    false
 }
 
 #[derive(Debug)]

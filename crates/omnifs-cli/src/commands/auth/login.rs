@@ -37,24 +37,17 @@ pub(super) async fn login(
         .unwrap_or_default();
     print_oauth_consent_summary(mount, &request, &guidance);
     let client = OAuthClient::new()?;
+    let client = if no_browser {
+        client.with_opener(Arc::new(PrintOpener))
+    } else {
+        client.with_system_browser()
+    };
     let entry = match request.into_login_request() {
-        LoginRequest::Loopback(request) if no_browser => client
-            .with_opener(Arc::new(PrintOpener))
-            .login_loopback(request)
-            .await
-            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
         LoginRequest::Loopback(request) => client
-            .with_system_browser()
             .login_loopback(request)
-            .await
-            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
-        LoginRequest::ClientSideToken(request) if no_browser => client
-            .with_opener(Arc::new(PrintOpener))
-            .login_client_side_token(request)
             .await
             .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
         LoginRequest::ClientSideToken(request) => client
-            .with_system_browser()
             .login_client_side_token(request)
             .await
             .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,

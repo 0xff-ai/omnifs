@@ -1,11 +1,10 @@
 use std::fmt;
 
-use anyhow::Context;
-use omnifs_core::{AccountId, AuthSchemeId, CredentialId, IdError, ProviderName};
+use anyhow::{Context, anyhow};
+use omnifs_core::{AccountId, AuthSchemeId, CredentialId, ProviderName};
 use omnifs_creds::{CredentialEntry, CredentialStore};
 use omnifs_mount::Auth;
 use omnifs_mount::mounts::Resolved;
-use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CredentialTarget {
@@ -20,21 +19,13 @@ pub(crate) enum ExternalCredentialSource {
     TokenEnv(String),
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub(crate) enum CredentialTargetError {
-    #[error("missing auth.scheme")]
-    MissingScheme,
-    #[error(transparent)]
-    InvalidKey(#[from] IdError),
-}
-
 impl CredentialTarget {
     pub(crate) fn for_scheme(
         config: &Resolved,
         auth: Option<&Auth>,
         scheme: &str,
         account: Option<&str>,
-    ) -> Result<Self, CredentialTargetError> {
+    ) -> anyhow::Result<Self> {
         Self::internal_from_parts(config, auth, scheme, account)
     }
 
@@ -42,7 +33,7 @@ impl CredentialTarget {
         provider_id: &str,
         scheme: &str,
         account: Option<&str>,
-    ) -> Result<Self, CredentialTargetError> {
+    ) -> anyhow::Result<Self> {
         let provider_id = ProviderName::new(provider_id)?;
         let scheme = AuthSchemeId::new(scheme)?;
         let account = account
@@ -106,7 +97,7 @@ impl CredentialTarget {
         auth: &Auth,
         scheme: Option<&str>,
         account: Option<&str>,
-    ) -> Result<Self, CredentialTargetError> {
+    ) -> anyhow::Result<Self> {
         if let Some(token_file) = auth.token_file() {
             return Ok(Self::External(ExternalCredentialSource::TokenFile(
                 token_file.to_owned(),
@@ -117,7 +108,7 @@ impl CredentialTarget {
                 token_env.to_owned(),
             )));
         }
-        let scheme = scheme.ok_or(CredentialTargetError::MissingScheme)?;
+        let scheme = scheme.ok_or_else(|| anyhow!("missing auth.scheme"))?;
         Self::internal_from_parts(config, Some(auth), scheme, account)
     }
 
@@ -126,7 +117,7 @@ impl CredentialTarget {
         auth: Option<&Auth>,
         scheme: &str,
         account: Option<&str>,
-    ) -> Result<Self, CredentialTargetError> {
+    ) -> anyhow::Result<Self> {
         let provider_id = ProviderName::new(&config.provider_name)?;
         let account = account
             .or_else(|| auth.and_then(Auth::account))

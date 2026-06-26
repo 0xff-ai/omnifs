@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod completions;
 pub mod debug;
-pub mod dev;
 pub mod doctor;
 pub mod down;
 pub mod init;

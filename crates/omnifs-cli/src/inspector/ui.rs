@@ -12,8 +12,8 @@ use omnifs_inspector::InspectorOutcome;
 
 use super::app::{App, ConnectionMode, PaneFocus};
 use super::filter::FilterMode;
+use super::format;
 use super::metrics::{MountWindow, render_sparkline};
-use super::scene;
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
 
@@ -24,7 +24,7 @@ const SPARK_MOUNT_CAP: usize = 8;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if scene::compact_mode(area.width, area.height) {
+    if format::compact_mode(area.width, area.height) {
         render_compact(frame, app, area);
         return;
     }
@@ -129,7 +129,7 @@ fn sparkline_line(mount: &str, window: &MountWindow, color: Color, now_mono: u64
         .map_or_else(|| "  —".to_string(), |r| format!("{:>3.0}%", r * 100.0));
     let p95 = window
         .p95_latency_us()
-        .map_or_else(|| "—".to_string(), scene::format_latency_us);
+        .map_or_else(|| "—".to_string(), format::format_latency_us);
     let idle_label = window.is_empty();
     let mount_styled = Span::styled(
         format!("  {mount:<10}"),
@@ -259,7 +259,7 @@ impl TreeRowView<'_> {
         }
         if let Some(us) = row.last_latency_us {
             spans.push(Span::styled(
-                format!("  {}", scene::format_latency_us(us)),
+                format!("  {}", format::format_latency_us(us)),
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -372,7 +372,7 @@ impl OperationBlockView<'_> {
     fn into_lines(self) -> Vec<Line<'static>> {
         let Self { op, app, width } = self;
         let mount_color = app.palette().peek(&op.mount).unwrap_or(Color::White);
-        let path = scene::shorten_path(&op.path, width.saturating_sub(16).max(8));
+        let path = format::shorten_path(&op.path, width.saturating_sub(16).max(8));
         let marker = if op.status == OperationStatus::Running {
             "▦"
         } else {
@@ -415,7 +415,7 @@ impl OperationBlockView<'_> {
                         .fg(outcome_color)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!("  {}", scene::format_latency_us(elapsed))),
+                Span::raw(format!("  {}", format::format_latency_us(elapsed))),
             ]));
         } else if op.status == OperationStatus::Running {
             lines.push(Line::from(vec![
@@ -512,9 +512,9 @@ impl StageView<'_> {
                     } else {
                         Color::LightRed
                     };
-                    (scene::format_latency_us(us), Some(o.to_string()), color)
+                    (format::format_latency_us(us), Some(o.to_string()), color)
                 },
-                (Some(us), None, _) => (scene::format_latency_us(us), None, Color::DarkGray),
+                (Some(us), None, _) => (format::format_latency_us(us), None, Color::DarkGray),
                 (None, _, true) => (String::new(), Some("…".into()), Color::DarkGray),
                 (None, _, false) => (String::new(), None, Color::DarkGray),
             };

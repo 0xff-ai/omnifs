@@ -183,21 +183,8 @@ fn install_artifact(
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     if name == ARCHIVE_TOOL_WASM {
-        let target = providers_dir.join(name);
-        if target.is_file() && std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
-            return Ok(());
-        }
-        let mut temp = target.clone();
-        temp.set_file_name(format!("{name}.tmp-{}", std::process::id()));
-        std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
-        std::fs::rename(&temp, &target).with_context(|| {
-            format!(
-                "move provider bundle file {} to {}",
-                temp.display(),
-                target.display()
-            )
-        })?;
-        return Ok(());
+        // The archive tool stays flat, never content-addressed or indexed.
+        return write_if_changed(providers_dir, name, bytes);
     }
 
     let id = ProviderId::from_wasm_bytes(bytes);

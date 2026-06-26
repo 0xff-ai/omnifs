@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::credential_target::CredentialTarget;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum AuthReadiness {
     None,
     Ready {
@@ -24,7 +25,9 @@ pub(crate) enum AuthReadiness {
     ConfiguredExternally {
         source: String,
     },
-    Error(String),
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +78,9 @@ impl AuthReadiness {
         match target.lookup(store) {
             Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
             Ok(None) => Self::Missing { command },
-            Err(error) => Self::Error(error.to_string()),
+            Err(error) => Self::Error {
+                message: error.to_string(),
+            },
         }
     }
 
@@ -132,9 +137,9 @@ impl AuthReadiness {
                 severity: AuthProbeSeverity::Warn,
                 message: format!("run `{command}`"),
             },
-            Self::Error(error) => AuthProbeSummary {
+            Self::Error { message } => AuthProbeSummary {
                 severity: AuthProbeSeverity::Err,
-                message: error.clone(),
+                message: message.clone(),
             },
         }
     }
@@ -178,72 +183,11 @@ impl AuthReadiness {
                 kind: AuthTerminalKind::Missing,
                 summary: format!("missing — run `{command}`"),
             },
-            Self::Error(error) => AuthTerminalRow {
+            Self::Error { message } => AuthTerminalRow {
                 kind: AuthTerminalKind::Error,
-                summary: format!("error: {error}"),
+                summary: format!("error: {message}"),
             },
         }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum AuthReadinessJson {
-    None,
-    Ready {
-        kind: String,
-        scopes: Vec<String>,
-        expires_at: Option<String>,
-        refreshability: Refreshability,
-        notices: Vec<String>,
-    },
-    ConfiguredExternally {
-        source: String,
-    },
-    Missing {
-        command: String,
-    },
-    Error {
-        message: String,
-    },
-}
-
-impl From<&AuthReadiness> for AuthReadinessJson {
-    fn from(auth: &AuthReadiness) -> Self {
-        match auth {
-            AuthReadiness::None => Self::None,
-            AuthReadiness::Ready {
-                kind,
-                scopes,
-                expires_at,
-                refreshability,
-                notices,
-            } => Self::Ready {
-                kind: kind.clone(),
-                scopes: scopes.clone(),
-                expires_at: expires_at.clone(),
-                refreshability: *refreshability,
-                notices: notices.clone(),
-            },
-            AuthReadiness::ConfiguredExternally { source } => Self::ConfiguredExternally {
-                source: source.clone(),
-            },
-            AuthReadiness::Missing { command } => Self::Missing {
-                command: command.clone(),
-            },
-            AuthReadiness::Error(error) => Self::Error {
-                message: error.clone(),
-            },
-        }
-    }
-}
-
-impl Serialize for AuthReadiness {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        AuthReadinessJson::from(self).serialize(serializer)
     }
 }
 
@@ -264,7 +208,7 @@ pub(crate) fn credential_notices(
     vec!["not refreshable; re-authentication will be required after expiry".to_owned()]
 }
 
-fn format_rfc3339(value: time::OffsetDateTime) -> String {
+pub(crate) fn format_rfc3339(value: time::OffsetDateTime) -> String {
     value
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| value.to_string())
@@ -346,7 +290,9 @@ mod tests {
 
     #[test]
     fn probe_and_terminal_projections_cover_error_state() {
-        let auth = AuthReadiness::Error("boom".into());
+        let auth = AuthReadiness::Error {
+            message: "boom".into(),
+        };
         assert_eq!(
             auth.probe_summary(),
             AuthProbeSummary {

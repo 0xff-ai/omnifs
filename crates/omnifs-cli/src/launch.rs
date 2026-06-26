@@ -9,12 +9,11 @@ use omnifs_creds::{CredentialStore, FileStore};
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
 
-use crate::backend::LaunchParams;
 use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
-use crate::launch_backend::{DockerTarget, LaunchBackend};
+use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
 use crate::launch_record::LaunchRecord;
-use crate::runtime::{ContainerExtras, Runtime};
+use crate::runtime::Runtime;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
 
@@ -65,7 +64,7 @@ impl<'a> Launcher<'a> {
                 store: Box::new(FileStore::new(&paths.credentials_file)),
                 verb: self.verb,
                 configs,
-                extras: ContainerExtras::default(),
+                extra_binds: Vec::new(),
             },
             self.workspace.catalog(),
         )
@@ -89,7 +88,7 @@ pub(crate) struct LaunchSpec<'a> {
     /// Mount configs to materialize and push to the daemon.
     pub configs: Vec<MountConfig>,
     /// Extra binds layered on top of materialized preopens.
-    pub extras: ContainerExtras,
+    pub extra_binds: Vec<String>,
 }
 
 /// Docker-specific mount materialization for launch-time container binds.
@@ -153,7 +152,7 @@ pub(crate) async fn launch_runtime(
         store,
         verb,
         configs,
-        mut extras,
+        extra_binds,
     } = spec;
 
     std::fs::create_dir_all(&paths.config_dir)
@@ -167,11 +166,10 @@ pub(crate) async fn launch_runtime(
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
         DockerMountMaterializer::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
-    let extra_binds = std::mem::take(&mut extras.binds);
-    extras.binds = preopen_binds.into_iter().chain(extra_binds).collect();
+    let all_binds: Vec<String> = preopen_binds.into_iter().chain(extra_binds).collect();
 
     let rt = Runtime::connect_ready(&target, verb).await?;
-    rt.launch_container(&paths.config_dir, extras).await?;
+    rt.launch_container(&paths.config_dir, all_binds).await?;
 
     match finish_docker_launch(&rt, paths, &target).await {
         Ok(outcome) => Ok(outcome),
@@ -206,16 +204,8 @@ async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Resu
     reject_existing_host_daemon(paths, verb).await?;
     anstream::println!("Starting omnifs daemon (host-native)");
 
-    // Build the params and delegate spawn+wait to the backend abstraction so
-    // the native path and Docker path share the same argument generator.
     let addr = resolve_control_addr();
-    let params = LaunchParams {
-        paths: paths.clone(),
-        control_addr: addr,
-        mount_point: None, // the daemon resolves its default
-        backend: LaunchBackend::Native,
-    };
-    crate::backend::launch_native(&params).await?;
+    crate::launch_backend::launch_native(&paths.cache_dir, addr).await?;
 
     let client = DaemonClient::new();
     match client.reconcile().await {
@@ -230,7 +220,6 @@ async fn launch_host_native(paths: &WorkspaceLayout, verb: &str) -> anyhow::Resu
     if let Some(status) = &status {
         report_launch_status(status);
         let record_params = LaunchParams {
-            paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
             backend: LaunchBackend::Native,
@@ -285,8 +274,14 @@ impl ExistingDaemon {
             .ok()
     }
 
+    /// True when the running daemon's API major or build version differs from
+    /// this CLI's, i.e. an upgrade boundary rather than a duplicate launch.
+    fn version_skew(&self) -> bool {
+        self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION")
+    }
+
     fn title(&self) -> &'static str {
-        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION") {
+        if self.version_skew() {
             "A different omnifs daemon is already running"
         } else if !self.paths_match() {
             "An omnifs daemon is already running for a different home"
@@ -324,7 +319,7 @@ impl std::fmt::Display for ExistingDaemon {
         writeln!(f, "  daemon cache   {}", self.status.cache_dir.display())?;
         writeln!(f, "  this cache     {}", self.paths.cache_dir.display())?;
         writeln!(f)?;
-        if self.status.api_major != API_MAJOR || self.status.version != env!("CARGO_PKG_VERSION") {
+        if self.version_skew() {
             writeln!(
                 f,
                 "This looks like an upgrade boundary. Stop the running daemon, then rerun `{}`:",
@@ -394,7 +389,6 @@ async fn finish_docker_launch(
             .parse()
             .expect("static address is valid");
         let record_params = LaunchParams {
-            paths: paths.clone(),
             control_addr: addr,
             mount_point: Some(status.mount_point.clone()),
             backend: LaunchBackend::Docker(target.clone()),

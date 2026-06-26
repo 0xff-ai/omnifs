@@ -55,7 +55,6 @@ pub fn run_tui(mode: ConnectionMode, container: String, source: SourceKind) -> a
             for message in event_source.drain() {
                 app.apply_source_message(message);
             }
-            app.animate();
             last_tick = std::time::Instant::now();
         }
     }

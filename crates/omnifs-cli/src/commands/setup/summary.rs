@@ -42,7 +42,9 @@ impl<'a> SetupSummary<'a> {
         }
     }
 
-    fn any_ready(&self) -> bool {
+    /// True when at least one mount is configured or freshly succeeded, i.e.
+    /// there is something to launch and browse.
+    pub fn any_ready(&self) -> bool {
         !self.configured.is_empty() || self.results.iter().any(|r| r.outcome.is_ok())
     }
 }
