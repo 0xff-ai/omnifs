@@ -7,14 +7,14 @@ use omnifs_creds::{CredentialStore, Refreshability};
 use super::shared::format_scopes;
 use crate::auth::explain::AuthMode;
 use crate::auth::{AuthReadiness, MountAuth};
-use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 use omnifs_home::WorkspaceLayout;
+use omnifs_provider::Catalog;
 use omnifs_provider::ProviderAuthManifest;
 
 pub(super) fn status(
     layout: &WorkspaceLayout,
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
@@ -46,7 +46,7 @@ struct AuthEntryJson {
 }
 
 pub(super) fn status_json(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
@@ -60,24 +60,19 @@ pub(super) fn status_json(
 }
 
 fn load_auth_rows(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     store: &dyn CredentialStore,
     mounts: Vec<MountConfig>,
 ) -> anyhow::Result<Vec<AuthStatusRow>> {
-    let auth_mounts = catalog.load_all_mount_auth_tolerating_manifest_errors(mounts)?;
+    let auth_mounts = crate::auth::load_all_mount_auth(catalog, mounts)?;
     Ok(auth_mounts
         .iter()
         .map(|mount| row_for(catalog, store, mount))
         .collect())
 }
 
-fn row_for(
-    catalog: &ProviderCatalog,
-    store: &dyn CredentialStore,
-    mount: &MountAuth,
-) -> AuthStatusRow {
-    let available = catalog
-        .provider_auth_manifest_for(mount.config())
+fn row_for(catalog: &Catalog, store: &dyn CredentialStore, mount: &MountAuth) -> AuthStatusRow {
+    let available = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount.config())
         .ok()
         .flatten()
         .map(|auth| scheme_options(&auth))

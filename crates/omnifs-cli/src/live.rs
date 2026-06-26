@@ -4,12 +4,12 @@
 //! config so changes take effect without a container restart. Both degrade
 //! gracefully: no running daemon means config-only, exactly as before.
 
-use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
 use crate::launch::DockerMountMaterializer;
 use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_creds::CredentialStore;
+use omnifs_provider::Catalog;
 
 pub(crate) enum LiveApply {
     /// No daemon answered on the control port; the change is config-only.
@@ -28,7 +28,7 @@ pub(crate) enum LiveApply {
 /// reconcile is left for the next `omnifs up`.
 pub(crate) async fn add_mount(
     client: &DaemonClient,
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     store: &dyn CredentialStore,
     config: MountConfig,
     backend: &LaunchBackend,

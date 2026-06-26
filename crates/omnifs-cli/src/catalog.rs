@@ -1,183 +1,82 @@
-//! Shared discovery for configured mounts and provider templates.
+//! Discovery helpers over the provider [`Catalog`] and the configured mounts.
 //!
-//! `ProviderCatalog` owns `Spec`-to-`Resolved` resolution. `ProviderTemplates`
-//! owns the indexed provider-template surface derived from built-in manifests
-//! and provider wasm metadata. Mount enumeration (per-file specs from the
-//! `mounts/` directory) lives in `Workspace::mounts()`; catalog surfaces that
-//! need the list accept it as a parameter.
+//! Spec-to-`Resolved` resolution is the free `omnifs_mount::mounts::resolve`
+//! join; these helpers wrap the CLI-facing shapes around it (the picker's
+//! installed-provider list, the already-configured set, and the provider-dir
+//! status). Mount enumeration lives in `Workspace::mounts()`.
 
-use omnifs_core::{MountName, ProviderRef};
+use std::collections::{BTreeMap, HashSet};
+
+use omnifs_core::MountName;
 use omnifs_mount::mounts::{Resolved, Spec};
-use omnifs_provider::{AuthManifest, Catalog, ProviderAuthManifest, ProviderManifest};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use omnifs_provider::{Catalog, Provider, ProviderManifest};
 
 use crate::session::MountConfig;
 
-#[derive(Debug, Clone)]
-pub(crate) struct ProviderCatalog {
-    providers: Catalog,
+/// Resolve a runtime-ready mount, optionally requiring provider metadata.
+pub(crate) fn resolve_mount_spec(
+    catalog: &Catalog,
+    spec: &Spec,
+    require_metadata: bool,
+) -> anyhow::Result<Resolved> {
+    omnifs_mount::mounts::resolve(catalog, spec, require_metadata).map_err(Into::into)
 }
 
-impl ProviderCatalog {
-    pub(crate) fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
-        Self {
-            providers: Catalog::open(providers_dir),
-        }
-    }
-
-    /// The underlying provider catalog, for callers that drive the shared
-    /// materializer (`omnifs_mount::materialize`) directly.
-    pub(crate) fn inner(&self) -> &Catalog {
-        &self.providers
-    }
-
-    /// Resolve runtime-ready mount, optionally requiring provider metadata.
-    pub(crate) fn resolve_mount_spec(
-        &self,
-        spec: &Spec,
-        require_metadata: bool,
-    ) -> anyhow::Result<Resolved> {
-        omnifs_mount::mounts::resolve(&self.providers, spec, require_metadata).map_err(Into::into)
-    }
-
-    pub(crate) fn provider_path(&self, mount: &Resolved) -> PathBuf {
-        self.providers.provider_path_by_id(&mount.spec.provider.id)
-    }
-
-    pub(crate) fn auth_manifest_for(
-        &self,
-        mount: &Resolved,
-    ) -> anyhow::Result<Option<AuthManifest>> {
-        omnifs_mount::mounts::auth_manifest_for(&self.providers, mount).map_err(Into::into)
-    }
-
-    pub(crate) fn provider_auth_manifest_for(
-        &self,
-        mount: &Resolved,
-    ) -> anyhow::Result<Option<ProviderAuthManifest>> {
-        omnifs_mount::mounts::provider_auth_manifest_for(&self.providers, mount).map_err(Into::into)
-    }
-
-    /// The authoring/selection templates: one per provider name, drawn from the
-    /// latest installed artifact in the content-addressed store.
-    pub(crate) fn provider_templates(&self) -> anyhow::Result<ProviderTemplates> {
-        let mut by_name = BTreeMap::new();
-        for provider in self.providers.installable()? {
-            let name = provider.meta.name.clone();
-            // A corrupt artifact must not brick catalog enumeration; skip it
-            // with a warning and let the rest resolve.
-            let manifest = match provider.manifest() {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    anstream::eprintln!(
-                        "{}",
-                        crate::style::warn(format!(
-                            "skipping provider `{name}`: its embedded manifest failed to load; reinstall it. Re-run with `-vv` for details."
-                        ))
-                    );
-                    tracing::debug!(provider = %name, error = ?error, "skipping provider with unreadable manifest");
-                    continue;
-                },
-            };
-            let auth_manifest = manifest.wasm_auth_manifest();
-            by_name.insert(
-                name.to_string(),
-                ProviderTemplate {
-                    reference: provider.reference(),
-                    manifest,
-                    auth_manifest,
-                },
-            );
-        }
-        Ok(ProviderTemplates::new(by_name))
-    }
-
-    pub(crate) fn provider_dir_status(&self) -> ProviderDirStatus {
-        if !self.providers.providers_dir().exists() {
-            return ProviderDirStatus::Missing;
-        }
-        match self.providers.store().read_index() {
-            Ok(index) => ProviderDirStatus::Present {
-                wasm_count: index.providers.len(),
+/// The latest installed artifact per provider name, each paired with its loaded
+/// manifest, for the `init` and `setup` provider pickers. A corrupt artifact is
+/// skipped with a warning rather than bricking enumeration.
+pub(crate) fn installed_providers(
+    catalog: &Catalog,
+) -> anyhow::Result<Vec<(Provider, ProviderManifest)>> {
+    let mut providers = Vec::new();
+    for provider in catalog.installable()? {
+        match provider.manifest() {
+            Ok(manifest) => providers.push((provider, manifest)),
+            Err(error) => {
+                let name = &provider.meta.name;
+                anstream::eprintln!(
+                    "{}",
+                    crate::style::warn(format!(
+                        "skipping provider `{name}`: its embedded manifest failed to load; reinstall it. Re-run with `-vv` for details."
+                    ))
+                );
+                tracing::debug!(provider = %name, error = ?error, "skipping provider with unreadable manifest");
             },
-            Err(error) => ProviderDirStatus::Unreadable(error.into()),
         }
     }
+    Ok(providers)
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ProviderTemplates {
-    by_name: BTreeMap<String, ProviderTemplate>,
-}
-
-impl ProviderTemplates {
-    fn new(by_name: BTreeMap<String, ProviderTemplate>) -> Self {
-        Self { by_name }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-
-    /// Look up a template by its provider name slug (e.g. `github`).
-    pub(crate) fn by_id(&self, name: &str) -> Option<&ProviderTemplate> {
-        self.by_name.get(name)
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &ProviderTemplate)> + '_ {
-        self.by_name
-            .iter()
-            .map(|(name, template)| (name.as_str(), template))
-    }
-
-    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> + '_ {
-        self.by_name.keys().map(String::as_str)
-    }
-
-    /// Map of provider name to the mount that already configures it, so the
-    /// picker can hide already-configured providers.
-    pub(crate) fn configured_mounts(
-        &self,
-        catalog: &ProviderCatalog,
-        mounts: &[MountConfig],
-    ) -> BTreeMap<String, String> {
-        let mut by_provider = BTreeMap::new();
-        for configured in mounts {
-            let mount = match catalog.resolve_mount_spec(&configured.config, true) {
-                Ok(mount) => mount,
-                Err(error) => {
-                    tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
-                    continue;
-                },
-            };
-            if self.by_name.contains_key(&mount.provider_name) {
+/// Map of provider name to the mount that already configures it, so the picker
+/// can hide already-configured providers. Intersects the installable provider
+/// names with the configured mount specs.
+pub(crate) fn configured_mounts(
+    catalog: &Catalog,
+    mounts: &[MountConfig],
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let installable: HashSet<String> = catalog
+        .installable()?
+        .iter()
+        .map(|provider| provider.meta.name.to_string())
+        .collect();
+    let mut by_provider = BTreeMap::new();
+    for configured in mounts {
+        match resolve_mount_spec(catalog, &configured.config, true) {
+            Ok(mount) if installable.contains(&mount.provider_name) => {
                 by_provider.insert(mount.provider_name.clone(), mount.spec.mount);
-            }
+            },
+            Ok(_) => {},
+            Err(error) => {
+                tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
+            },
         }
-        by_provider
     }
+    Ok(by_provider)
 }
 
 /// Returns `true` when a mount with `name` appears in `mounts`.
 pub(crate) fn mount_exists(mounts: &[MountConfig], name: &MountName) -> bool {
     mounts.iter().any(|m| &m.name == name)
-}
-
-#[derive(Debug)]
-pub(crate) enum ProviderDirStatus {
-    Missing,
-    Present { wasm_count: usize },
-    Unreadable(anyhow::Error),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ProviderTemplate {
-    /// The pinned reference for this provider, written into a mount spec when
-    /// the CLI authors a mount against this template.
-    pub(crate) reference: ProviderRef,
-    pub(crate) manifest: ProviderManifest,
-    pub(crate) auth_manifest: Option<AuthManifest>,
 }
 
 #[cfg(test)]
@@ -197,7 +96,7 @@ mod tests {
     /// A corrupt artifact already in the store must not brick catalog
     /// enumeration: the valid providers alongside it still surface.
     #[test]
-    fn provider_templates_skips_unreadable_artifact() {
+    fn installed_providers_skips_unreadable_artifact() {
         let tmp = tempfile::tempdir().unwrap();
         let providers_dir = tmp.path().join("providers");
         let store = ProviderStore::new(&providers_dir);
@@ -223,16 +122,19 @@ mod tests {
             )
             .unwrap();
 
-        let templates = ProviderCatalog::for_providers(&providers_dir)
-            .provider_templates()
+        let providers = installed_providers(&Catalog::open(&providers_dir))
             .expect("a broken artifact must not fail catalog enumeration");
 
         assert!(
-            templates.by_id("demo").is_some(),
+            providers
+                .iter()
+                .any(|(provider, _)| provider.meta.name.as_str() == "demo"),
             "the valid provider should surface despite the broken sibling"
         );
         assert!(
-            templates.by_id("broken").is_none(),
+            !providers
+                .iter()
+                .any(|(provider, _)| provider.meta.name.as_str() == "broken"),
             "the broken provider should be skipped"
         );
     }

@@ -68,12 +68,10 @@ fn ls() -> anyhow::Result<()> {
     let store = FileStore::new(&layout.credentials_file);
     for mount in &mounts {
         let name = crate::style::bold(mount.name.as_str());
-        match workspace.catalog().resolve_mount_spec(&mount.config, false) {
+        match crate::catalog::resolve_mount_spec(workspace.catalog(), &mount.config, false) {
             Ok(resolved) => {
                 let provider = resolved.provider_name.clone();
-                let auth = workspace
-                    .catalog()
-                    .resolve_mount_auth_tolerating_manifest_errors(resolved)
+                let auth = crate::auth::mount_auth(workspace.catalog(), resolved)
                     .readiness(&store)
                     .terminal_row()
                     .summary;
@@ -101,8 +99,7 @@ pub async fn rm(
         missing_mount_error(&layout.config_file, &mounts, name.as_str()).unwrap_err()
     })?;
     let config_path = mount.source.clone();
-    let resolved = catalog
-        .resolve_mount_spec(&mount.config, false)
+    let resolved = crate::catalog::resolve_mount_spec(catalog, &mount.config, false)
         .with_context(|| format!("resolve mount config for `{name}`"))?;
     let credential_target = CredentialTarget::for_mount(&resolved);
 

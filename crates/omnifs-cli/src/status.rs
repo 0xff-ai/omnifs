@@ -3,9 +3,9 @@
 use omnifs_creds::FileStore;
 use std::fmt::Write as _;
 
-use crate::catalog::ProviderCatalog;
 use omnifs_api::{DaemonHealth, DaemonStatus, DaemonSubsystem, HealthState, SubsystemHealth};
 use omnifs_home::WorkspaceLayout;
+use omnifs_provider::Catalog;
 
 use crate::auth::AuthTerminalKind;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};
@@ -21,7 +21,7 @@ pub(crate) struct StatusReport {
 }
 
 pub(crate) fn collect_status(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     paths: WorkspaceLayout,
     runtime: Option<DaemonStatus>,
     mounts: Vec<crate::session::MountConfig>,
@@ -29,8 +29,8 @@ pub(crate) fn collect_status(
     let store = FileStore::new(&paths.credentials_file);
     StatusReport {
         runtime,
-        user_mounts: catalog.scan_user_mount_configs(mounts.clone(), &store),
-        providers: catalog.scan_provider_configs(mounts),
+        user_mounts: crate::mount_report::scan_user_mount_configs(catalog, mounts.clone(), &store),
+        providers: crate::mount_report::scan_provider_configs(catalog, mounts),
         paths,
     }
 }

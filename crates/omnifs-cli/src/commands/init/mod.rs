@@ -75,12 +75,12 @@ impl InitArgs {
         let interactive = !self.no_input;
         let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
-        let templates = catalog.provider_templates()?;
-        if templates.is_empty() {
+        let installed = crate::catalog::installed_providers(catalog)?;
+        if installed.is_empty() {
             anyhow::bail!("no built-in or disk providers are available");
         }
 
-        let provider_selection = ProviderSelection::new(&mounts, &templates);
+        let provider_selection = ProviderSelection::new(&mounts, &installed);
         let (provider_name, mount_name) = provider_selection.resolve(
             self.provider.as_deref(),
             self.as_name.as_deref(),
@@ -88,8 +88,9 @@ impl InitArgs {
             self.yes,
         )?;
 
-        let template = templates
-            .by_id(&provider_name)
+        let (provider, manifest) = installed
+            .iter()
+            .find(|(provider, _)| provider.meta.name.as_str() == provider_name)
             .ok_or_else(|| {
                 anyhow!(
                     "provider `{provider_name}` not found; available: {}",
@@ -101,16 +102,18 @@ impl InitArgs {
                 "Or place a provider wasm in {}",
                 paths.providers_dir.display()
             ))?;
-        let default_auth = AuthSelection::from_provider_default(&template.manifest);
+        let reference = provider.reference();
+        let auth_manifest = manifest.wasm_auth_manifest();
+        let default_auth = AuthSelection::from_provider_default(manifest);
         if interactive {
-            print_capability_justifications(&template.manifest);
+            print_capability_justifications(manifest);
         }
         if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
             anyhow::bail!(
                 "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively, or create the mount and run `omnifs auth login {mount_name}`."
             );
         }
-        let config_generator = MountConfigGenerator::new(&template.manifest);
+        let config_generator = MountConfigGenerator::new(manifest);
         if self.no_input && config_generator.requires_prompt() {
             anyhow::bail!(
                 "`omnifs init --no-input` cannot complete provider config prompts for `{provider_name}`. Run `omnifs init {provider_name}` interactively."
@@ -128,7 +131,7 @@ impl InitArgs {
         // no header prefix.
         let import_outcome = AuthImportDecision::new(
             default_auth,
-            template.auth_manifest.as_ref(),
+            auth_manifest.as_ref(),
             &provider_name,
             interactive,
             self.yes,
@@ -138,7 +141,7 @@ impl InitArgs {
 
         let mount_file = MountFile::new(
             &mount_name,
-            &template.reference,
+            &reference,
             effective_auth.as_ref(),
             &self.scopes,
             generated,
@@ -151,7 +154,7 @@ impl InitArgs {
         if let Some(auth) = effective_auth.as_ref() {
             if let Some(token) = import_outcome.token {
                 run_static_token_init(
-                    &template.manifest,
+                    manifest,
                     auth,
                     token,
                     &paths.credentials_file,
@@ -174,14 +177,11 @@ impl InitArgs {
                     );
                 })?;
             } else {
-                if interactive
-                    && let Ok((scheme, _inject)) = auth.static_token_scheme(&template.manifest)
-                {
-                    let guidance = template
-                        .manifest
+                if interactive && let Ok((scheme, _inject)) = auth.static_token_scheme(manifest) {
+                    let guidance = manifest
                         .auth
                         .as_ref()
-                        .map(|manifest| manifest.guidance_for(&scheme.key))
+                        .map(|auth| auth.guidance_for(&scheme.key))
                         .unwrap_or_default();
                     anstream::println!();
                     anstream::println!("Authenticating `{mount_name}` with a static token:");
@@ -197,7 +197,7 @@ impl InitArgs {
                 )?;
                 let token = source.read()?;
                 run_static_token_init(
-                    &template.manifest,
+                    manifest,
                     auth,
                     token,
                     &paths.credentials_file,
@@ -334,12 +334,10 @@ mod tests {
     use super::config_generation::{GeneratedMountConfig, MountConfigGenerator};
     use super::{AuthImportDecision, MountFile};
     use crate::auth::AuthSelection;
-    use crate::catalog::ProviderCatalog;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_mount::mounts::Registry;
-    use omnifs_provider::ProviderStore;
-    use omnifs_provider::{AuthManifest, AuthScheme, ProviderManifest};
+    use omnifs_provider::{AuthManifest, AuthScheme, Catalog, ProviderManifest, ProviderStore};
     use serde_json::Value;
 
     #[test]
@@ -527,7 +525,7 @@ mod tests {
     /// content-addressed store: install one and assert it surfaces with its
     /// embedded manifest and a pinnable reference.
     #[test]
-    fn load_provider_templates_reads_installed_artifacts() {
+    fn installed_providers_reads_latest_artifact() {
         let dir = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
 
@@ -551,25 +549,26 @@ mod tests {
             )
             .unwrap();
 
-        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
-            .provider_templates()
-            .unwrap();
+        let installed =
+            crate::catalog::installed_providers(&Catalog::open(&paths.providers_dir)).unwrap();
 
-        let linear = templates.by_id("linear").expect("linear template");
-        assert_eq!(linear.manifest.default_mount, "linear-dev");
-        assert_eq!(linear.reference.id, id);
-        assert_eq!(linear.reference.meta.name.as_str(), "linear");
+        let (provider, manifest) = installed
+            .iter()
+            .find(|(provider, _)| provider.meta.name.as_str() == "linear")
+            .expect("linear provider");
+        assert_eq!(manifest.default_mount, "linear-dev");
+        assert_eq!(provider.reference().id, id);
+        assert_eq!(provider.reference().meta.name.as_str(), "linear");
     }
 
     /// An empty store yields no templates: there is no built-in fallback set.
     #[test]
-    fn load_provider_templates_empty_without_installed_providers() {
+    fn installed_providers_empty_without_installed_providers() {
         let dir = tempfile::tempdir().unwrap();
         let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
-        let templates = ProviderCatalog::for_providers(&paths.providers_dir)
-            .provider_templates()
-            .unwrap();
-        assert!(templates.is_empty());
+        let installed =
+            crate::catalog::installed_providers(&Catalog::open(&paths.providers_dir)).unwrap();
+        assert!(installed.is_empty());
     }
 
     fn provider_manifest() -> ProviderManifest {

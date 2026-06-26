@@ -8,9 +8,8 @@ mod status;
 
 use clap::{Args, Subcommand};
 use omnifs_creds::FileStore;
-use omnifs_provider::ProviderManifest;
+use omnifs_provider::{Catalog, Provider, ProviderManifest};
 
-use crate::catalog::{ProviderCatalog, ProviderTemplates};
 use crate::cli::OutputFormat;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
@@ -129,13 +128,13 @@ impl AuthArgs {
 }
 
 fn run_explain(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: &[MountConfig],
     target: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let templates = catalog.provider_templates()?;
-    let manifest = resolve_target_manifest(&templates, mounts, target)?;
+    let installed = crate::catalog::installed_providers(catalog)?;
+    let manifest = resolve_target_manifest(&installed, mounts, target)?;
 
     if json {
         match manifest.wasm_auth_manifest() {
@@ -155,22 +154,31 @@ fn run_explain(
 /// Resolve an `auth explain` target, which may be a provider id or a configured
 /// mount name, to the owning provider manifest.
 fn resolve_target_manifest<'a>(
-    templates: &'a ProviderTemplates,
+    installed: &'a [(Provider, ProviderManifest)],
     mounts: &[MountConfig],
     target: &str,
 ) -> anyhow::Result<&'a ProviderManifest> {
-    if let Some(template) = templates.by_id(target) {
-        return Ok(&template.manifest);
+    let by_name = |name: &str| {
+        installed
+            .iter()
+            .find(|(provider, _)| provider.meta.name.as_str() == name)
+            .map(|(_, manifest)| manifest)
+    };
+    if let Some(manifest) = by_name(target) {
+        return Ok(manifest);
     }
-    if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target) {
-        let provider_name = mount.config.provider.meta.name.as_str();
-        if let Some(template) = templates.by_id(provider_name) {
-            return Ok(&template.manifest);
-        }
+    if let Some(mount) = mounts.iter().find(|m| m.name.as_str() == target)
+        && let Some(manifest) = by_name(mount.config.provider.meta.name.as_str())
+    {
+        return Ok(manifest);
     }
     anyhow::bail!(
         "no provider or mount named `{target}`; known providers: {}",
-        templates.ids().collect::<Vec<_>>().join(", ")
+        installed
+            .iter()
+            .map(|(provider, _)| provider.meta.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 

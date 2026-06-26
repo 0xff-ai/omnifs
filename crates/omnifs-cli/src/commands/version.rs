@@ -3,9 +3,9 @@
 use anyhow::Result;
 use clap::Args;
 
-use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::workspace::Workspace;
 use omnifs_home::WorkspaceLayout;
+use omnifs_provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct VersionArgs {
@@ -74,10 +74,10 @@ impl VersionArgs {
     }
 }
 
-fn provider_dir_summary(catalog: &ProviderCatalog) -> String {
-    match catalog.provider_dir_status() {
-        ProviderDirStatus::Missing => "provider dir missing".to_string(),
-        ProviderDirStatus::Present { wasm_count } => format!("{wasm_count} on disk"),
-        ProviderDirStatus::Unreadable(error) => format!("provider dir unreadable: {error}"),
+fn provider_dir_summary(catalog: &Catalog) -> String {
+    match catalog.dir_status() {
+        DirStatus::Missing => "provider dir missing".to_string(),
+        DirStatus::Present { wasm_count } => format!("{wasm_count} on disk"),
+        DirStatus::Unreadable(error) => format!("provider dir unreadable: {error}"),
     }
 }

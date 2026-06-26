@@ -9,13 +9,13 @@ use omnifs_creds::{CredentialStore, FileStore};
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
 
-use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
 use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
 use crate::launch_record::LaunchRecord;
 use crate::runtime::Runtime;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
+use omnifs_provider::Catalog;
 
 /// Command-owned daemon launcher.
 ///
@@ -98,30 +98,26 @@ pub(crate) struct LaunchSpec<'a> {
 /// preopen directories must be known before `docker create`, while credential
 /// failures should still surface before the daemon starts.
 pub(crate) struct DockerMountMaterializer<'a> {
-    catalog: &'a ProviderCatalog,
+    catalog: &'a Catalog,
     store: &'a dyn CredentialStore,
 }
 
 impl<'a> DockerMountMaterializer<'a> {
-    pub(crate) fn new(catalog: &'a ProviderCatalog, store: &'a dyn CredentialStore) -> Self {
+    pub(crate) fn new(catalog: &'a Catalog, store: &'a dyn CredentialStore) -> Self {
         Self { catalog, store }
     }
 
     pub(crate) fn materialize(&self, config: &MountConfig) -> anyhow::Result<MaterializedMount> {
         let materialized = materialize::materialize(
             config.config.clone(),
-            self.catalog.inner(),
+            self.catalog,
             MaterializationMode::Docker,
         )
         .with_context(|| format!("materialize mount {}", config.source.display()))?;
 
-        let resolved = self
-            .catalog
-            .resolve_mount_spec(materialized.spec(), false)
+        let resolved = crate::catalog::resolve_mount_spec(self.catalog, materialized.spec(), false)
             .with_context(|| format!("resolve mount config for {}", config.source.display()))?;
-        let mount_auth = self
-            .catalog
-            .resolve_mount_auth_tolerating_manifest_errors(resolved);
+        let mount_auth = crate::auth::mount_auth(self.catalog, resolved);
         config.validate_host_managed_credentials(&mount_auth, self.store)?;
 
         Ok(materialized)
@@ -144,7 +140,7 @@ impl<'a> DockerMountMaterializer<'a> {
 /// Run the full materialize → connect → launch → wait → push sequence.
 pub(crate) async fn launch_runtime(
     spec: LaunchSpec<'_>,
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
 ) -> anyhow::Result<LaunchOutcome> {
     let LaunchSpec {
         backend,

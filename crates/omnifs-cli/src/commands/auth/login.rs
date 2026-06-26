@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use super::shared::format_scopes;
 use crate::auth::explain::{self, AuthMode};
-use crate::catalog::ProviderCatalog;
 use crate::style;
 use crate::workspace::Workspace;
+use omnifs_provider::Catalog;
 use omnifs_provider::SchemeGuidance;
 
 pub(super) async fn login(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: &[crate::session::MountConfig],
     store: Box<dyn CredentialStore>,
     mount: &str,
@@ -27,10 +27,9 @@ pub(super) async fn login(
     no_browser: bool,
     scopes: &[String],
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
+    let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
-    let guidance = catalog
-        .provider_auth_manifest_for(mount_auth.config())
+    let guidance = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount_auth.config())
         .ok()
         .flatten()
         .map(|auth| auth.guidance_for(&request.scheme().key))

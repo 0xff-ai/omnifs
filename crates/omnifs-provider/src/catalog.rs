@@ -124,6 +124,32 @@ impl Catalog {
     pub fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
         self.store().by_hash_path(id)
     }
+
+    /// The state of the backing providers directory: absent, present with a
+    /// retained-artifact count, or present but with an unreadable index.
+    #[must_use]
+    pub fn dir_status(&self) -> DirStatus {
+        if !self.providers_dir.exists() {
+            return DirStatus::Missing;
+        }
+        match self.store().read_index() {
+            Ok(index) => DirStatus::Present {
+                wasm_count: index.providers.len(),
+            },
+            Err(error) => DirStatus::Unreadable(error),
+        }
+    }
+}
+
+/// The state of a provider directory, reported by [`Catalog::dir_status`].
+#[derive(Debug)]
+pub enum DirStatus {
+    /// The directory does not exist.
+    Missing,
+    /// The directory exists and its index lists `wasm_count` retained artifacts.
+    Present { wasm_count: usize },
+    /// The directory exists but its index could not be read.
+    Unreadable(StoreError),
 }
 
 /// A retained provider artifact resolved from the store: content id, catalog/UI

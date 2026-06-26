@@ -15,9 +15,8 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_provider::ProviderManifest;
+use omnifs_provider::{Provider, ProviderManifest};
 
-use crate::catalog::{ProviderTemplate, ProviderTemplates};
 use crate::commands::{init, up};
 use crate::config::ConfiguredBackend;
 use crate::error::WithHint;
@@ -82,14 +81,14 @@ impl SetupArgs {
 
         let catalog = workspace.catalog();
         let mounts = workspace.mounts()?;
-        let templates = catalog.provider_templates()?;
-        if templates.is_empty() {
+        let installed = crate::catalog::installed_providers(catalog)?;
+        if installed.is_empty() {
             anyhow::bail!("no built-in or plugin providers are available");
         }
-        let configured = templates.configured_mounts(catalog, &mounts);
+        let configured = crate::catalog::configured_mounts(catalog, &mounts)?;
 
-        let selected = resolve_selection(&self, &templates, &configured)?;
-        let results = run_init_loop(&selected, &self, &templates, &workspace).await;
+        let selected = resolve_selection(&self, &installed, &configured)?;
+        let results = run_init_loop(&selected, &self, &installed, &workspace).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
             // The daemon resolves its own mount point; we preview the expected
@@ -173,11 +172,11 @@ async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Ru
 /// otherwise an interactive `inquire::MultiSelect` over unconfigured providers.
 fn resolve_selection(
     args: &SetupArgs,
-    templates: &ProviderTemplates,
+    installed: &[(Provider, ProviderManifest)],
     configured: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<String>> {
     if !args.providers.is_empty() {
-        return validate_preselected(&args.providers, templates, configured);
+        return validate_preselected(&args.providers, installed, configured);
     }
 
     if !configured.is_empty() {
@@ -188,10 +187,10 @@ fn resolve_selection(
         anstream::println!();
     }
 
-    let mut selectable: Vec<&ProviderTemplate> = templates
+    let mut selectable: Vec<&ProviderManifest> = installed
         .iter()
-        .map(|(_, tmpl)| tmpl)
-        .filter(|tmpl| !configured.contains_key(&tmpl.manifest.id))
+        .map(|(_, manifest)| manifest)
+        .filter(|manifest| !configured.contains_key(&manifest.id))
         .collect();
     if selectable.is_empty() {
         anstream::println!("All providers already configured. Nothing to add.");
@@ -201,13 +200,13 @@ fn resolve_selection(
     // the bottom of the picker and uncheck them by default so the smoke path
     // for a fresh setup only enables providers that work with ambient or
     // browser-based auth.
-    selectable.sort_by_key(|tmpl| (default_off(&tmpl.manifest.id), tmpl.manifest.id.clone()));
+    selectable.sort_by_key(|manifest| (default_off(&manifest.id), manifest.id.clone()));
 
     let options: Vec<ProviderOption> = selectable
         .iter()
-        .map(|tmpl| ProviderOption {
-            id: tmpl.manifest.id.clone(),
-            line: option_line(&tmpl.manifest),
+        .map(|manifest| ProviderOption {
+            id: manifest.id.clone(),
+            line: option_line(manifest),
         })
         .collect();
     let default_indices: Vec<usize> = options
@@ -278,16 +277,23 @@ impl fmt::Display for ProviderOption {
 
 fn validate_preselected(
     requested: &[String],
-    templates: &ProviderTemplates,
+    installed: &[(Provider, ProviderManifest)],
     configured: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<String>> {
+    let known = || {
+        installed
+            .iter()
+            .map(|(provider, _)| provider.meta.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let mut out = Vec::new();
     for id in requested {
-        if templates.by_id(id).is_none() {
-            anyhow::bail!(
-                "provider `{id}` is not available; known: {}",
-                templates.ids().collect::<Vec<_>>().join(", ")
-            );
+        if !installed
+            .iter()
+            .any(|(provider, _)| provider.meta.name.as_str() == id)
+        {
+            anyhow::bail!("provider `{id}` is not available; known: {}", known());
         }
         if configured.contains_key(id) {
             anstream::println!(
@@ -304,12 +310,15 @@ fn validate_preselected(
 async fn run_init_loop(
     selected: &[String],
     args: &SetupArgs,
-    templates: &ProviderTemplates,
+    installed: &[(Provider, ProviderManifest)],
     workspace: &Workspace,
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
     for provider_name in selected {
-        let Some(template) = templates.by_id(provider_name) else {
+        let Some((_, manifest)) = installed
+            .iter()
+            .find(|(provider, _)| provider.meta.name.as_str() == provider_name)
+        else {
             out.push(InitResult {
                 provider_name: provider_name.clone(),
                 mount_name: provider_name.clone(),
@@ -317,7 +326,7 @@ async fn run_init_loop(
             });
             continue;
         };
-        let mount_name = template.manifest.default_mount.clone();
+        let mount_name = manifest.default_mount.clone();
 
         anstream::println!();
         anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
