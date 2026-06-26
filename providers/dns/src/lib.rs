@@ -114,9 +114,6 @@ struct ResolverReverseKey {
     )
 )]
 impl DnsProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         let resolvers = ResolverConfig::from_config(config.default_resolver, config.resolvers)?;
 

@@ -132,8 +132,12 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
         ));
     };
 
-    // `state` defaults to `()`.
-    let state_type: Type = args.state.clone().unwrap_or_else(|| syn::parse_quote!(()));
+    // Provider crates get this alias from `#[provider]`; standalone object
+    // fixtures can still pass `state = ..` explicitly.
+    let state_type: Type = args
+        .state
+        .clone()
+        .unwrap_or_else(|| syn::parse_quote!(crate::__OmnifsProviderState));
 
     // `load` forwards to a provider-written inherent async fn; defaults to
     // `Self::load`.

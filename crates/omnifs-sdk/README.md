@@ -33,7 +33,7 @@ Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component
 ## Concepts
 
 - **Router registration**: `Router::dir`, `Router::file`, `Router::treeref`, `Router::object::<Object>()`, and reusable object handles register path families at `start`. Literal path prefixes are auto-navigable directories; you do not write stub `dir` handlers for intermediate segments.
-- **Provider lifecycle**: providers with no config or state can omit both associated type aliases and use `fn start(r: &mut Router) -> Result<()>`. Add `type Config = Config` or `type State = State` only when the provider actually needs them.
+- **Provider lifecycle**: the `#[provider]` macro infers config and state from `start`. Use `fn start(r: &mut Router) -> Result<()>` for stateless providers, or `fn start(config: Config, r: &mut Router<State>) -> Result<State>` when config or state exists.
 - **Handlers**: async functions taking `Cx`, `DirCx`, state-bearing `Cx<State>` / `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirProjection`, `TreeRef`, or `Effects` (for timer/event handlers).
 - **Objects**: `#[object]` types implement `Object::load` / `Object::render`; `bind` mounts them at a path template. The host caches canonical bytes and pushes them on later reads.
 - **Endpoints**: `#[derive(Endpoint)]` plus `cx.endpoint::<E>()` for typed HTTP (and rate-limit policy) against declared bases.

@@ -261,8 +261,7 @@ struct DailyCollectionKey {
 /// ride along as same-type sibling preloads.
 #[omnifs_sdk::object(
     kind = "daily_collection",
-    key = DailyCollectionKey,
-    canonical = Json
+    key = DailyCollectionKey
 )]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]

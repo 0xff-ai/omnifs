@@ -1,16 +1,16 @@
 //! The `#[provider]` attribute macro.
 //!
 //! It backs `#[omnifs_sdk::provider(id = "..", capabilities(..), auth = .., resources(..), events(..))]`
-//! on a provider impl block whose optional associated `type Config/State`
-//! aliases and a synchronous `start(..)` method define the provider.
+//! on a provider impl block whose synchronous `start(..)` method defines the
+//! provider config, state, and routes.
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Expr, FnArg, ImplItem, ImplItemFn, ItemImpl, LitBool, LitInt, LitStr, Path, Token, Type,
-    parse_quote,
+    Expr, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, LitBool, LitInt, LitStr, Path,
+    PathArguments, Token, Type, parse_quote,
 };
 
 /// A `timer(Duration, Self::method)` event declaration.
@@ -244,6 +244,12 @@ struct ClassifiedImpl {
     methods: Vec<ImplItemFn>,
 }
 
+struct StartSpec {
+    kind: StartKind,
+    config_type: Option<Type>,
+    state_type: Option<Type>,
+}
+
 #[derive(Clone, Copy)]
 enum StartKind {
     ConfigAndRouter,
@@ -253,7 +259,7 @@ enum StartKind {
 fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
     let mut config_type = None;
     let mut state_type = None;
-    let mut start_kind = None;
+    let mut start_spec = None;
     let mut methods = Vec::new();
 
     for item in items {
@@ -270,7 +276,7 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
             },
             ImplItem::Fn(func) => {
                 if func.sig.ident == "start" {
-                    start_kind = Some(classify_start(&func)?);
+                    start_spec = Some(classify_start(&func)?);
                 }
                 methods.push(func);
             },
@@ -283,7 +289,7 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
         }
     }
 
-    let Some(start_kind) = start_kind else {
+    let Some(start_spec) = start_spec else {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "missing required `fn start(..)`",
@@ -291,27 +297,63 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
     };
 
     Ok(ClassifiedImpl {
-        config_type: config_type.unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
-        state_type: state_type.unwrap_or_else(|| parse_quote!(())),
-        start_kind,
+        config_type: config_type
+            .or(start_spec.config_type)
+            .unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
+        state_type: state_type
+            .or(start_spec.state_type)
+            .unwrap_or_else(|| parse_quote!(())),
+        start_kind: start_spec.kind,
         methods,
     })
 }
 
-fn classify_start(func: &ImplItemFn) -> syn::Result<StartKind> {
-    let inputs = func
+fn classify_start(func: &ImplItemFn) -> syn::Result<StartSpec> {
+    let inputs: Vec<_> = func
         .sig
         .inputs
         .iter()
-        .filter(|arg| matches!(arg, FnArg::Typed(_)))
-        .count();
-    match inputs {
-        1 => Ok(StartKind::RouterOnly),
-        2 => Ok(StartKind::ConfigAndRouter),
+        .filter_map(|arg| match arg {
+            FnArg::Typed(input) => Some(input),
+            FnArg::Receiver(_) => None,
+        })
+        .collect();
+    match inputs.as_slice() {
+        [router] => Ok(StartSpec {
+            kind: StartKind::RouterOnly,
+            config_type: None,
+            state_type: router_state_type(router.ty.as_ref()),
+        }),
+        [config, router] => Ok(StartSpec {
+            kind: StartKind::ConfigAndRouter,
+            config_type: Some(config.ty.as_ref().clone()),
+            state_type: router_state_type(router.ty.as_ref()),
+        }),
         _ => Err(syn::Error::new(
             func.sig.span(),
             "`start` must be `fn start(r: &mut Router<..>) -> Result<..>` or `fn start(config, r: &mut Router<..>) -> Result<..>`",
         )),
+    }
+}
+
+fn router_state_type(ty: &Type) -> Option<Type> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    let Type::Path(path) = reference.elem.as_ref() else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Router" {
+        return None;
+    }
+    match &segment.arguments {
+        PathArguments::AngleBracketed(args) => args.args.iter().find_map(|arg| match arg {
+            GenericArgument::Type(ty) => Some(ty.clone()),
+            _ => None,
+        }),
+        PathArguments::None => Some(parse_quote!(())),
+        PathArguments::Parenthesized(_) => None,
     }
 }
 
@@ -848,6 +890,8 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
 
     Ok(quote! {
         struct #type_name;
+        #[doc(hidden)]
+        pub(crate) type __OmnifsProviderState = #state_type;
 
         #state_management
 

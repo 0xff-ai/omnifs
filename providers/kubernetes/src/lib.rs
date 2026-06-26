@@ -195,9 +195,6 @@ struct PodLogKey {
     )
 )]
 impl KubernetesProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         r.dir("/namespaces").handler(namespaces_dir)?;
         r.dir("/namespaces/{ns}").handler(ns_types_dir)?;
