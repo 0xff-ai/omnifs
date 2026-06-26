@@ -13,9 +13,7 @@ use std::path::{Path, PathBuf};
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 
 use crate::store::{IndexEntry, ProviderStore, StoreError};
-use crate::{
-    AuthManifest, ProviderManifest, ProviderMetadataError, read_provider_metadata_section,
-};
+use crate::{ProviderManifest, ProviderMetadataError, read_provider_metadata_section};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -49,14 +47,8 @@ impl Catalog {
         }
     }
 
-    #[must_use]
-    pub fn providers_dir(&self) -> &Path {
-        &self.providers_dir
-    }
-
     /// The content-addressed store backing this catalog.
-    #[must_use]
-    pub fn store(&self) -> ProviderStore {
+    fn store(&self) -> ProviderStore {
         ProviderStore::new(&self.providers_dir)
     }
 
@@ -94,16 +86,6 @@ impl Catalog {
             .iter()
             .find(|entry| &entry.id == id)
             .map(|entry| self.provider_from_entry(entry)))
-    }
-
-    /// Every installed artifact, including superseded versions.
-    pub fn list(&self) -> Result<Vec<Provider>, CatalogError> {
-        let index = self.store().read_index()?;
-        Ok(index
-            .providers
-            .iter()
-            .map(|entry| self.provider_from_entry(entry))
-            .collect())
     }
 
     /// The latest installed artifact per provider name, in name order: the
@@ -184,11 +166,6 @@ impl Provider {
                 path: self.wasm_path.clone(),
             }
         })
-    }
-
-    /// The injection-only auth manifest derived from this artifact's manifest.
-    pub fn auth_manifest(&self) -> Result<Option<AuthManifest>, CatalogError> {
-        Ok(self.manifest()?.wasm_auth_manifest())
     }
 }
 

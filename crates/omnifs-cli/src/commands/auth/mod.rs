@@ -158,12 +158,8 @@ fn resolve_target_manifest<'a>(
     mounts: &[MountConfig],
     target: &str,
 ) -> anyhow::Result<&'a ProviderManifest> {
-    let by_name = |name: &str| {
-        installed
-            .iter()
-            .find(|(provider, _)| provider.meta.name.as_str() == name)
-            .map(|(_, manifest)| manifest)
-    };
+    let by_name =
+        |name: &str| crate::catalog::find_installed(installed, name).map(|(_, manifest)| manifest);
     if let Some(manifest) = by_name(target) {
         return Ok(manifest);
     }

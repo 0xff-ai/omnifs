@@ -88,9 +88,7 @@ impl InitArgs {
             self.yes,
         )?;
 
-        let (provider, manifest) = installed
-            .iter()
-            .find(|(provider, _)| provider.meta.name.as_str() == provider_name)
+        let (provider, manifest) = crate::catalog::find_installed(&installed, &provider_name)
             .ok_or_else(|| {
                 anyhow!(
                     "provider `{provider_name}` not found; available: {}",

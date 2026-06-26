@@ -30,12 +30,9 @@ impl<'a> ProviderSelection<'a> {
             .collect()
     }
 
-    /// The pinned provider for a name slug, if installed.
+    /// The pinned provider's manifest for a name slug, if installed.
     fn manifest_for(&self, name: &str) -> Option<&ProviderManifest> {
-        self.installed
-            .iter()
-            .find(|(provider, _)| provider.meta.name.as_str() == name)
-            .map(|(_, manifest)| manifest)
+        crate::catalog::find_installed(self.installed, name).map(|(_, manifest)| manifest)
     }
 
     pub(super) fn resolve(
