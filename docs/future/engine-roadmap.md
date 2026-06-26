@@ -2,7 +2,7 @@
 
 Status: roadmap (none of this is shipped)
 Scope: concrete engine, SDK, and provider opportunities that are deferred but coherent with the current architecture. Each entry states what it is, why it waits, and the open piece. Market and product strategy live elsewhere; this is the technical backlog.
-Related: `architecture.md` (the invariants these must respect), `async-http.md`, `mutations-via-git.md`.
+Related: `docs/architecture/00-overview.md` (the invariants these must respect), `async-http.md`, `mutations-via-git.md`.
 
 These items were consolidated from the SDK-redesign design corpus once that redesign shipped. They survive here because they are real, scoped, and still wanted; the planning documents that carried them did not, because their vocabulary had gone stale against the implemented system.
 

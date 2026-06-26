@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Control API types shared by the omnifs CLI and the omnifsd daemon"
+description = "Control API types shared by the omnifs CLI and daemon runtime"
 categories = ["filesystem", "api-bindings"]
 keywords = ["omnifs", "daemon", "api"]
 

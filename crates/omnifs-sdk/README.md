@@ -40,7 +40,7 @@ Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component
 - **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes the batch and calls `resume`; there are no fire-and-forget callouts.
 - **Projections**: `FileProjection` / `DirProjection` encode size, stability, byte source, and additional file, directory, and canonical effects that should be materialized with the accepted result. Listings use `FileProj::listing_shape()` for file entries named before content is fetched.
 
-See [path-dispatch-and-listing](https://github.com/0xff-ai/omnifs/blob/main/docs/design/path-dispatch-and-listing.md) and [file-attributes](https://github.com/0xff-ai/omnifs/blob/main/docs/design/file-attributes.md) for routing precedence, pagination (`@next` / `@all`), and attribute rules.
+See the [provider SDK contract](https://github.com/0xff-ai/omnifs/blob/main/docs/contracts/20-provider-sdk.md) and [projection tree contract](https://github.com/0xff-ai/omnifs/blob/main/docs/contracts/30-projection-tree.md) for routing precedence, pagination (`@next` / `@all`), and attribute rules.
 
 ## Install
 

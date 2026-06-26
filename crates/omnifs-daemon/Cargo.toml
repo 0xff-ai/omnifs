@@ -35,8 +35,8 @@ omnifs-fuse = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 
-# Not a cargo-dist target: omnifsd ships in the npm CLI platform packages
-# (staged beside omnifs by release.yml), and in the runtime image.
+# Not a cargo-dist target: the daemon runtime ships in the npm CLI platform
+# packages (staged beside omnifs by release.yml), and in the runtime image.
 [package.metadata.dist]
 dist = false
 

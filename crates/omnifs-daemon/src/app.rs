@@ -4,7 +4,7 @@
 //! entrypoint); there is no standalone `omnifsd` binary. The daemon still
 //! runs as its own process and speaks the HTTP control API; it must stay
 //! free of container assumptions so it can later run host-native (see
-//! `docs/design/daemon-cli-split.md`).
+//! `docs/contracts/50-control-plane.md`).
 
 use clap::{Args, ValueEnum};
 use omnifs_host::cloner::GitCloner;
