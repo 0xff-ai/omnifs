@@ -524,23 +524,28 @@ fn read_provider_metadata_file(path: &Path) -> Result<Option<ProviderManifest>, 
 mod tests {
     use super::*;
 
-    const LINEAR_METADATA_JSON: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../providers/linear/omnifs.provider.json"
-    ));
-    const GITHUB_METADATA_JSON: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../providers/github/omnifs.provider.json"
-    ));
-
     fn linear_manifest() -> omnifs_provider::ProviderManifest {
-        omnifs_provider::ProviderManifest::from_bytes(LINEAR_METADATA_JSON.as_bytes())
-            .expect("linear manifest must parse")
+        provider_manifest_from_wasm("omnifs_provider_linear.wasm")
     }
 
     fn github_manifest() -> omnifs_provider::ProviderManifest {
-        omnifs_provider::ProviderManifest::from_bytes(GITHUB_METADATA_JSON.as_bytes())
-            .expect("github manifest must parse")
+        provider_manifest_from_wasm("omnifs_provider_github.wasm")
+    }
+
+    fn provider_manifest_from_wasm(file: &str) -> omnifs_provider::ProviderManifest {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/wasm32-wasip2/release")
+            .join(file);
+        read_provider_metadata_file(&path)
+            .unwrap_or_else(|source| {
+                panic!("read provider metadata from {}: {source}", path.display())
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "provider metadata missing from {}; run `just providers-build`",
+                    path.display()
+                )
+            })
     }
 
     fn provider_ref(name: &str) -> ProviderRef {
