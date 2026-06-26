@@ -34,7 +34,8 @@ ci-host-test:
     #!/usr/bin/env bash
     set -euo pipefail
     test -f dist/host-tests/host-tests.tar.zst
-    cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
+    OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 \
+      cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
 
 # Build a Linux CLI artifact for the requested Rust target.
 [group('ci')]
