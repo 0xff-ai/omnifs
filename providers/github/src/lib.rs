@@ -276,9 +276,6 @@ struct UserProfile {
 }
 
 #[derive(Debug, Deserialize)]
-struct OrganizationProfile {}
-
-#[derive(Debug, Deserialize)]
 struct RepoListing {
     name: String,
 }
@@ -356,7 +353,7 @@ pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Opt
     match cx
         .endpoint(GitHubApi)
         .get(format!("/orgs/{owner}"))
-        .json::<OrganizationProfile>()
+        .json::<serde::de::IgnoredAny>()
         .await
     {
         Ok(_) => Ok(Some(OwnerKind::Org)),

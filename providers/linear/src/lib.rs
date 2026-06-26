@@ -306,13 +306,10 @@ async fn fetch_all_teams(cx: &Cx) -> Result<Vec<Team>> {
                 .await?,
         )?;
         out.extend(data.teams.nodes);
-        if !data.teams.page_info.has_next_page {
+        let Some(cursor) = data.teams.page_info.next_cursor() else {
             break;
-        }
-        match data.teams.page_info.end_cursor {
-            Some(cursor) => after = Some(cursor),
-            None => break,
-        }
+        };
+        after = Some(cursor);
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(out)
@@ -351,13 +348,10 @@ async fn fetch_all_issues(cx: &Cx, team: &TeamKey, filter: StateFilter) -> Resul
                 .await?,
         )?;
         items.extend(data.issues.nodes);
-        if !data.issues.page_info.has_next_page {
+        let Some(cursor) = data.issues.page_info.next_cursor() else {
             break;
-        }
-        match data.issues.page_info.end_cursor {
-            Some(cursor) => after = Some(cursor),
-            None => break,
-        }
+        };
+        after = Some(cursor);
         if items.len() >= 2000 {
             truncated = true;
             break;

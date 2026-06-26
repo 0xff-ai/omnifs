@@ -164,26 +164,26 @@ fn paper_source_path(raw_id: &str, version: Option<u32>) -> String {
 
 fn paper_resource_path(base: &str, raw_id: &str, version: Option<u32>, suffix: &str) -> String {
     let mut path = base.trim_end_matches('/').to_string();
-    let (prefix, tail) = raw_id
-        .rsplit_once('/')
-        .map_or(("", raw_id), |(prefix, tail)| (prefix, tail));
-    let mut tail = tail.to_string();
-    if let Some(v) = version {
-        tail.push('v');
-        tail.push_str(&v.to_string());
-    }
-    tail.push_str(suffix);
-    for part in prefix.split('/').filter(|part| !part.is_empty()) {
+    for part in paper_resource_segments(raw_id, version, suffix) {
         path.push('/');
-        path.push_str(part);
+        path.push_str(&part);
     }
-    path.push('/');
-    path.push_str(&tail);
     path
 }
 
 fn paper_resource_url(base: &Url, raw_id: &str, version: Option<u32>, suffix: &str) -> String {
     let mut url = base.clone();
+    let parts = paper_resource_segments(raw_id, version, suffix);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .expect("https URLs support path segments");
+        segments.extend(parts.iter().map(String::as_str));
+    }
+    url.into()
+}
+
+fn paper_resource_segments(raw_id: &str, version: Option<u32>, suffix: &str) -> Vec<String> {
     let (prefix, tail) = raw_id
         .rsplit_once('/')
         .map_or(("", raw_id), |(prefix, tail)| (prefix, tail));
@@ -193,16 +193,12 @@ fn paper_resource_url(base: &Url, raw_id: &str, version: Option<u32>, suffix: &s
         tail.push_str(&v.to_string());
     }
     tail.push_str(suffix);
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .expect("https URLs support path segments");
-        for part in prefix.split('/').filter(|part| !part.is_empty()) {
-            segments.push(part);
-        }
-        segments.push(&tail);
-    }
-    url.into()
+    prefix
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .chain(std::iter::once(tail))
+        .collect()
 }
 
 fn parse_paper_atom_or_not_found(feed_xml: &[u8]) -> Result<Paper> {

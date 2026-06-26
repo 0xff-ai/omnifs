@@ -111,6 +111,12 @@ pub(crate) struct PageInfo {
     pub(crate) end_cursor: Option<String>,
 }
 
+impl PageInfo {
+    pub(crate) fn next_cursor(self) -> Option<String> {
+        self.has_next_page.then_some(self.end_cursor).flatten()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TeamsConnection {

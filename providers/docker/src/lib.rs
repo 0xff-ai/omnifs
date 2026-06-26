@@ -31,14 +31,6 @@ fn default_endpoint() -> omnifs_sdk::HostSocket {
     omnifs_sdk::HostSocket("unix:///var/run/docker.sock".to_string())
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            endpoint: default_endpoint(),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct State {
     /// The configured Docker daemon base address (a `unix://` socket or TCP
@@ -89,59 +81,39 @@ impl fmt::Display for ContainerRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProjectName(String);
+macro_rules! name_segment {
+    ($ty:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $ty(String);
 
-impl ProjectName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for ProjectName {
-    type Err = ();
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        if is_valid_docker_name(value) {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(())
+        impl $ty {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
         }
-    }
-}
 
-impl fmt::Display for ProjectName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+        impl FromStr for $ty {
+            type Err = ();
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ServiceName(String);
-
-impl ServiceName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for ServiceName {
-    type Err = ();
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        if is_valid_docker_name(value) {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(())
+            fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+                if is_valid_docker_name(value) {
+                    Ok(Self(value.to_string()))
+                } else {
+                    Err(())
+                }
+            }
         }
-    }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
 }
 
-impl fmt::Display for ServiceName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+name_segment!(ProjectName);
+name_segment!(ServiceName);
 
 // ---------------------------------------------------------------------------
 // Containers (keyed directories of direct file reads, no canonical bytes)
@@ -327,11 +299,11 @@ impl DockerProvider {
         r.dir("/compose/{project}/services/{service}/containers")
             .handler(service_containers)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/inspect.json")
-            .handler(container_inspect_raw)?;
+            .handler(container_inspect)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/state")
-            .handler(container_state_raw)?;
+            .handler(container_state)?;
         r.file("/compose/{project}/services/{service}/containers/{reference}/summary.txt")
-            .handler(container_summary_raw)?;
+            .handler(container_summary)?;
 
         Ok(State {
             endpoint: config.endpoint.into(),
@@ -354,21 +326,6 @@ async fn service_containers(cx: DirCx<State>, key: ProjectServiceKey) -> Result<
     let summaries = list_containers(&cx).await?;
     let names = containers_for_service(&summaries, key.project.as_str(), key.service.as_str());
     Ok(DirProjection::exhaustive(names.into_iter().map(Entry::dir)))
-}
-
-// Raw file handlers for the Compose subtree (shares logic with the object
-// direct-face handlers but takes `ContainerKey` directly from path captures).
-
-async fn container_inspect_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    container_inspect(cx, key).await
-}
-
-async fn container_state_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    container_state(cx, key).await
-}
-
-async fn container_summary_raw(cx: Cx<State>, key: ContainerKey) -> Result<FileProjection> {
-    container_summary(cx, key).await
 }
 
 async fn system_info(cx: Cx<State>) -> Result<FileProjection> {

@@ -74,7 +74,7 @@ impl Issue {
 
     pub(crate) fn description(&self, _key: &IssueKey) -> crate::Result<FileProjection> {
         let body = self.description.as_deref().unwrap_or("");
-        Ok(FileProjection::body(newline(body))
+        Ok(FileProjection::text(body, TextFormat::Newline)
             .content_type(ContentType::Markdown)
             .build())
     }
@@ -93,12 +93,4 @@ impl Representable<Markdown> for Issue {
         )
         .into_bytes()
     }
-}
-
-pub(crate) fn newline(text: &str) -> Vec<u8> {
-    let mut bytes = text.as_bytes().to_vec();
-    if !bytes.ends_with(b"\n") {
-        bytes.push(b'\n');
-    }
-    bytes
 }
