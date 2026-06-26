@@ -2,7 +2,6 @@
 
 use crate::manifest::ProviderManifest;
 use crate::records::{DecodeError, ManifestRecord, ManifestRecordIter};
-use crate::resolve::{ResolveError, ResolvedManifest, resolve_manifest};
 use crate::sections::{
     ManifestSectionError, ProviderMetadataError, read_manifest_section,
     read_provider_metadata_section,
@@ -18,8 +17,6 @@ pub enum ProviderWasmError {
     Section(#[from] ManifestSectionError),
     #[error(transparent)]
     Decode(#[from] DecodeError),
-    #[error(transparent)]
-    Resolve(#[from] ResolveError),
 }
 
 impl ProviderWasm {
@@ -39,10 +36,6 @@ impl ProviderWasm {
     pub fn manifest_records(&self) -> Result<Vec<ManifestRecord>, ProviderWasmError> {
         let section_bytes = self.manifest_section()?;
         Ok(collect_manifest_records(&section_bytes)?)
-    }
-
-    pub fn resolved_manifest(&self) -> Result<ResolvedManifest, ProviderWasmError> {
-        Ok(resolve_manifest(self.manifest_records()?)?)
     }
 }
 

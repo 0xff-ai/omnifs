@@ -462,13 +462,6 @@ impl ProviderManifest {
         Ok(manifest)
     }
 
-    pub fn from_path(path: &std::path::Path) -> Result<Self, ProviderMetadataError> {
-        let bytes = std::fs::read(path).map_err(|error| {
-            ProviderMetadataError::Validation(format!("read {}: {error}", path.display()))
-        })?;
-        Self::from_bytes(&bytes)
-    }
-
     #[must_use]
     pub fn default_scheme(&self) -> Option<(&str, &AuthScheme)> {
         self.auth.as_ref()?.default_scheme()

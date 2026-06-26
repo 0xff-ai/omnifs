@@ -368,9 +368,6 @@ impl Object for Day {
                     day: sibling_day.into(),
                     collection: collection.clone(),
                 },
-                Day {
-                    day: sibling_day.into(),
-                },
                 Canonical::new(format!(r#"{{"day":"{sibling_day}"}}"#).into_bytes(), None),
             );
             Ok(Load::fresh(
