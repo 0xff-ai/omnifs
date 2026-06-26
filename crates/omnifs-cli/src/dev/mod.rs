@@ -284,7 +284,9 @@ fn pin_dev_mounts(
 ) -> Result<Vec<MountConfig>> {
     let mut configs = Vec::new();
     for mount in discovered {
-        let Some((provider, manifest)) = find_installed(installed, &mount.provider_name) else {
+        let Some((provider, manifest)) =
+            crate::catalog::find_installed(installed, &mount.provider_name)
+        else {
             anstream::eprintln!(
                 "  ! dev mount `{}` references provider `{}`, which is not installed; skipping",
                 mount.mount_name,
@@ -311,16 +313,6 @@ fn pin_dev_mounts(
     Ok(configs)
 }
 
-/// Find an installed provider by its name slug.
-fn find_installed<'a>(
-    installed: &'a [(Provider, ProviderManifest)],
-    name: &str,
-) -> Option<&'a (Provider, ProviderManifest)> {
-    installed
-        .iter()
-        .find(|(provider, _)| provider.meta.name.as_str() == name)
-}
-
 async fn provision_dev_mounts(
     configs: Vec<MountConfig>,
     installed: &[(Provider, ProviderManifest)],
@@ -329,7 +321,8 @@ async fn provision_dev_mounts(
     let mut ready = Vec::new();
     for config in configs {
         let provider_name = config.config.provider.meta.name.clone();
-        let Some((_, manifest)) = find_installed(installed, provider_name.as_str()) else {
+        let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name.as_str())
+        else {
             anstream::eprintln!(
                 "  ! mount `{}` references unknown provider `{}`; skipping",
                 config.name,

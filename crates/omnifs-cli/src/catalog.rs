@@ -47,6 +47,17 @@ pub(crate) fn installed_providers(
     Ok(providers)
 }
 
+/// Find an installed provider (and its loaded manifest) by its name slug, within
+/// a list produced by [`installed_providers`].
+pub(crate) fn find_installed<'a>(
+    installed: &'a [(Provider, ProviderManifest)],
+    name: &str,
+) -> Option<&'a (Provider, ProviderManifest)> {
+    installed
+        .iter()
+        .find(|(provider, _)| provider.meta.name.as_str() == name)
+}
+
 /// Map of provider name to the mount that already configures it, so the picker
 /// can hide already-configured providers. Intersects the installable provider
 /// names with the configured mount specs.

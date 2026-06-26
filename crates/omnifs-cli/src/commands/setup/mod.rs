@@ -289,10 +289,7 @@ fn validate_preselected(
     };
     let mut out = Vec::new();
     for id in requested {
-        if !installed
-            .iter()
-            .any(|(provider, _)| provider.meta.name.as_str() == id)
-        {
+        if crate::catalog::find_installed(installed, id).is_none() {
             anyhow::bail!("provider `{id}` is not available; known: {}", known());
         }
         if configured.contains_key(id) {
@@ -315,10 +312,7 @@ async fn run_init_loop(
 ) -> Vec<InitResult> {
     let mut out = Vec::new();
     for provider_name in selected {
-        let Some((_, manifest)) = installed
-            .iter()
-            .find(|(provider, _)| provider.meta.name.as_str() == provider_name)
-        else {
+        let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name) else {
             out.push(InitResult {
                 provider_name: provider_name.clone(),
                 mount_name: provider_name.clone(),
