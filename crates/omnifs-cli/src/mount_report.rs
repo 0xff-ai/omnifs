@@ -55,7 +55,7 @@ impl ProviderCatalog {
             .iter()
             .find(|m| &m.name == name)
             .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
-        self.resolve_mount_spec(mount.config.clone(), true)
+        self.resolve_mount_spec(&mount.config, true)
     }
 
     pub(crate) fn scan_provider_configs(
@@ -65,7 +65,7 @@ impl ProviderCatalog {
         let mut providers = Vec::with_capacity(mounts.len());
         for configured in mounts {
             let config_path = configured.source.clone();
-            match self.resolve_mount_spec(configured.config, true) {
+            match self.resolve_mount_spec(&configured.config, true) {
                 Ok(config) => {
                     let provider_path = self.provider_path(&config);
                     let provider_present = provider_path.exists();
@@ -108,7 +108,7 @@ impl ProviderCatalog {
         let mut statuses = Vec::with_capacity(mounts.len());
         for configured in mounts {
             let config_path = configured.source.clone();
-            match self.read_user_mount_status(configured, store) {
+            match self.read_user_mount_status(&configured, store) {
                 Ok(status) => statuses.push(UserMountStatus::Ready(status)),
                 Err(error) => statuses.push(UserMountStatus::Invalid {
                     config_path,
@@ -121,11 +121,11 @@ impl ProviderCatalog {
 
     fn read_user_mount_status(
         &self,
-        configured: MountConfig,
+        configured: &MountConfig,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<UserMountReadyStatus> {
         let config_path = configured.source.clone();
-        let config = self.resolve_mount_spec(configured.config, true)?;
+        let config = self.resolve_mount_spec(&configured.config, true)?;
         let provider_path = self.provider_path(&config);
         let provider_present = provider_path.exists();
         let auth = self

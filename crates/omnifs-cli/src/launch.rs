@@ -117,7 +117,7 @@ impl<'a> DockerMountMaterializer<'a> {
 
         let resolved = self
             .catalog
-            .resolve_mount_spec(materialized.spec().clone(), false)
+            .resolve_mount_spec(materialized.spec(), false)
             .with_context(|| format!("resolve mount config for {}", config.source.display()))?;
         let mount_auth = self
             .catalog

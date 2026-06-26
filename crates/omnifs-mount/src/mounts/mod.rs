@@ -235,22 +235,8 @@ impl Catalog {
         })
     }
 
-    pub fn resolve(&self, spec_path: &Path) -> Result<Resolved, Error> {
-        Resolver::new(self).resolve(spec_path)
-    }
-
-    pub fn resolve_by_name(&self, name: &mount::Name) -> Result<Resolved, Error> {
-        self.resolve(&self.spec_path(name))
-    }
-
     pub fn load_spec(&self, config_path: &Path) -> Result<Spec, Error> {
         load_spec(config_path)
-    }
-
-    pub fn resolve_spec(&self, spec: Spec, require_metadata: bool) -> Result<Resolved, Error> {
-        Resolver::new(self)
-            .with_required_metadata(require_metadata)
-            .resolve_spec(spec)
     }
 
     pub fn apply_metadata(&self, config: &mut Spec) -> Result<bool, Error> {
@@ -434,40 +420,26 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Resolver<'a> {
-    catalog: &'a Catalog,
-    require_metadata: bool,
-}
-
-impl<'a> Resolver<'a> {
-    #[must_use]
-    pub fn new(catalog: &'a Catalog) -> Self {
-        Self {
-            catalog,
-            require_metadata: true,
-        }
+/// Resolve a raw [`Spec`] against the provider index: fill manifest defaults
+/// into unset fields and attach the provider name slug, yielding a [`Resolved`].
+///
+/// `require_metadata` selects strict (the pinned artifact must be retained, so
+/// its manifest can hydrate the spec; serving and auth paths) versus best-effort
+/// (skip hydration when the artifact is gone; delete/reset/ls display paths).
+///
+/// This is the explicit join. It belongs to neither catalog: it is the point
+/// where a held `&Catalog` and a `&Spec` meet, which is also where pinning
+/// already forces the two together. [`materialize`](crate::materialize::materialize)
+/// is the deeper join that additionally extracts capability needs and rewrites
+/// preopens.
+pub fn resolve(catalog: &Catalog, spec: &Spec, require_metadata: bool) -> Result<Resolved, Error> {
+    let mut config = spec.clone();
+    // Best-effort for delete/reset paths; strict when metadata is required.
+    let applied = catalog.apply_metadata(&mut config);
+    if require_metadata {
+        applied?;
     }
-
-    #[must_use]
-    pub fn with_required_metadata(mut self, require_metadata: bool) -> Self {
-        self.require_metadata = require_metadata;
-        self
-    }
-
-    pub fn resolve(&self, spec_path: &Path) -> Result<Resolved, Error> {
-        let spec = load_spec(spec_path)?;
-        self.resolve_spec(spec)
-    }
-
-    pub fn resolve_spec(&self, mut config: Spec) -> Result<Resolved, Error> {
-        // Best-effort for delete/reset paths; strict when metadata is required.
-        let applied = self.catalog.apply_metadata(&mut config);
-        if self.require_metadata {
-            applied?;
-        }
-        config.into_resolved(None).map_err(Error::Resolve)
-    }
+    config.into_resolved(None).map_err(Error::Resolve)
 }
 
 fn load_spec(path: &Path) -> Result<Spec, Error> {

@@ -38,12 +38,10 @@ impl ProviderCatalog {
     /// Resolve runtime-ready mount, optionally requiring provider metadata.
     pub(crate) fn resolve_mount_spec(
         &self,
-        spec: Spec,
+        spec: &Spec,
         require_metadata: bool,
     ) -> anyhow::Result<Resolved> {
-        self.mounts
-            .resolve_spec(spec, require_metadata)
-            .map_err(Into::into)
+        omnifs_mount::mounts::resolve(&self.mounts, spec, require_metadata).map_err(Into::into)
     }
 
     pub(crate) fn provider_path(&self, mount: &Resolved) -> PathBuf {
@@ -160,7 +158,7 @@ impl ProviderTemplates {
     ) -> BTreeMap<String, String> {
         let mut by_provider = BTreeMap::new();
         for configured in mounts {
-            let mount = match catalog.resolve_mount_spec(configured.config.clone(), true) {
+            let mount = match catalog.resolve_mount_spec(&configured.config, true) {
                 Ok(mount) => mount,
                 Err(error) => {
                     tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");

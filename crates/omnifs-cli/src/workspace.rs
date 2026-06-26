@@ -96,7 +96,7 @@ impl Workspace {
                 continue;
             };
             let credential = match MountSpec::from_file(&path) {
-                Ok(spec) => match self.catalog.resolve_mount_spec(spec, false) {
+                Ok(spec) => match self.catalog.resolve_mount_spec(&spec, false) {
                     Ok(resolved) => CredentialTarget::for_mount(&resolved),
                     Err(error) => {
                         tracing::warn!(

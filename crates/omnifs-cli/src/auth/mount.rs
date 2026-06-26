@@ -123,7 +123,7 @@ impl ProviderCatalog {
             .into_iter()
             .map(|m| {
                 let resolved = self
-                    .resolve_mount_spec(m.config, true)
+                    .resolve_mount_spec(&m.config, true)
                     .with_context(|| format!("load mount config `{}`", m.name))?;
                 Ok(self.resolve_mount_auth_tolerating_manifest_errors(resolved))
             })
