@@ -82,7 +82,7 @@ impl PathSegment for StateFilter {
     }
 }
 
-#[omnifs_sdk::object(kind = "test.item", key = ItemKey, state = State)]
+#[omnifs_sdk::object(kind = "test.item", key = ItemKey)]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Item {
     number: u64,
@@ -237,7 +237,7 @@ async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection>
 // Object family: `Comment` (child-object collection under an item)
 // ===========================================================================
 
-#[omnifs_sdk::object(kind = "test.comment", key = ItemCommentKey, state = State)]
+#[omnifs_sdk::object(kind = "test.comment", key = ItemCommentKey)]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Comment {
     idx: u64,
@@ -343,9 +343,6 @@ async fn item_comments(
     events(timer(Duration::from_mins(1), Self::on_tick))
 )]
 impl TestProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         if config.root_ignore {
             r.file("/.gitignore").handler(root_ignore)?;

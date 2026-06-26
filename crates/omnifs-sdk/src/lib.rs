@@ -25,9 +25,6 @@
 //!     capabilities(domain("api.example.com", "Fetch API resources.")),
 //! )]
 //! impl MyProvider {
-//!     type Config = Config;   // defaults to NoConfig when omitted
-//!     type State = State;     // defaults to () when omitted
-//!
 //!     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
 //!         r.dir("/").handler(root_list)?;
 //!         r.file("/items/{id}/title").handler(read_title)?;
@@ -37,9 +34,10 @@
 //! ```
 //!
 //! `start` registers routes imperatively on a [`router::Router`] and returns
-//! the provider state. There are no per-route attribute macros; the route
-//! topology lives in `start`, readable top to bottom. After `start` returns,
-//! the generated glue seals the router (overlapping routes fail
+//! the provider state. The `#[provider]` macro infers the config and state
+//! types from that signature. There are no per-route attribute macros; the
+//! route topology lives in `start`, readable top to bottom. After `start`
+//! returns, the generated glue seals the router (overlapping routes fail
 //! initialization loudly) and wires the WIT exports.
 //!
 //! # The two provider flavours

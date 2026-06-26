@@ -73,9 +73,6 @@ struct ItemKey {
     resources(endpoints = [Api]),
 )]
 impl ExampleProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         r.dir("/").handler(|_cx: DirCx<State>| async move {
             Ok(DirProjection::exhaustive([Entry::dir("items")]))
@@ -94,7 +91,7 @@ impl ExampleProvider {
 }
 ```
 
-`type Config` defaults to `NoConfig`, `type State` to `()`; `start` may omit the config parameter. The macro seals the router after `start`: overlapping route claims fail initialization with a named-routes error.
+`#[provider]` infers config and state from `start`; stateless providers use `fn start(r: &mut Router) -> Result<()>`. The macro seals the router after `start`: overlapping route claims fail initialization with a named-routes error.
 
 ## Route template grammar
 

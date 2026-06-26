@@ -23,11 +23,11 @@ mod provider_macro;
 /// The provider entrypoint: lowers one impl block onto the full WIT export
 /// surface (lifecycle, namespace, continuation, notify).
 ///
-/// The impl block may contain `type Config = ..` (default
-/// [`NoConfig`](../omnifs_sdk/struct.NoConfig.html)), `type State = ..`
-/// (default `()`), a required synchronous `fn start`, and any helper
+/// The impl block contains a required synchronous `fn start` and any helper
 /// methods. `start` takes either `(config, &mut Router<State>)` or just
-/// `(&mut Router<State>)` and returns `Result<State>`.
+/// `(&mut Router<State>)` and returns `Result<State>`. `Config` and `State`
+/// are inferred from the `start` signature; explicit `type Config = ..` /
+/// `type State = ..` aliases are still accepted when needed.
 ///
 /// The manifest (identity, capabilities, config schema, auth) is authored from
 /// these arguments and assembled into the `omnifs.provider-metadata.v1` custom
@@ -49,8 +49,8 @@ mod provider_macro;
 ///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field.
 /// - `auth = <expr>`: a typed [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
 ///   value spliced into the manifest's `auth` block.
-/// - The config schema is derived from `type Config` (via `#[config]`) and
-///   spliced in automatically; no argument is needed.
+/// - The config schema is derived from the inferred or explicit config type
+///   (via `#[config]`) and spliced in automatically; no argument is needed.
 /// - `resources(git = <bool>, memory_mb = <int>)`: requested capabilities
 ///   exported during initialization.
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
@@ -85,8 +85,9 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   e.g. `"github.issue"`. Stable; changing it orphans cached objects.
 /// - `key = KeyType` (required): the `#[path_captures]` struct that identifies
 ///   this object (`KeyType: Key`).
-/// - `state = StateType` (default `()`): the provider state threaded through
-///   `load`.
+/// - `state = StateType`: override the provider state threaded through `load`.
+///   In provider crates this defaults to the state inferred by `#[provider]`;
+///   standalone object fixtures should pass it explicitly.
 /// - `canonical = Json | Markdown | Atom | Yaml` (default `Json`): the format
 ///   of the verbatim canonical bytes (`type Canonical`). Non-JSON canonicals
 ///   require `decode`.

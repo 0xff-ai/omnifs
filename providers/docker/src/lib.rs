@@ -242,9 +242,6 @@ struct ProjectServiceKey {
     )
 )]
 impl DockerProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         r.file("/system/info.json").handler(system_info)?;
         r.file("/system/version.json").handler(system_version)?;

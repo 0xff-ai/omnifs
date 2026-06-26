@@ -45,7 +45,7 @@ impl KubeManifest {
 /// Namespaced Kubernetes resource (e.g. pods, deployments).
 ///
 /// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
-#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey, state = State)]
+#[omnifs_sdk::object(kind = "kubernetes.namespaced-resource", key = crate::NamespacedResourceKey)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct NamespacedResource(KubeManifest);
@@ -138,7 +138,7 @@ impl Representable<Yaml> for NamespacedResource {
 /// clusterrolebindings).
 ///
 /// Canonical = JSON (cleaned manifest); decode round-trips via `serde_json`.
-#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey, state = State)]
+#[omnifs_sdk::object(kind = "kubernetes.cluster-resource", key = crate::ClusterResourceKey)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ClusterResource(KubeManifest);

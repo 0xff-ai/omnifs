@@ -29,10 +29,8 @@ use std::rc::Rc;
 ///
 /// `Cx` separates the op-level callout machinery ([`CxShared`]: the id, the
 /// yield/deliver queues, the host-pushed validator) from the typed provider
-/// `State`. The shared part is reference-counted so a state-erased view
-/// ([`Cx::erase_state`]) drives callouts on the *same* operation; this is
-/// how `Object::load`, which takes `&Cx<()>`, issues fetches through the
-/// operation's queue while the router holds `Cx<S>`.
+/// `State`. The shared part is reference-counted so cloned contexts and
+/// state-erased range readers drive callouts on the same operation.
 pub struct Cx<S = ()> {
     shared: Rc<CxShared>,
     state: Rc<RefCell<S>>,
@@ -93,10 +91,9 @@ impl<S> Cx<S> {
         }
     }
 
-    /// A state-erased view sharing this operation's callout machinery. Used to
-    /// call `Object::load(&Cx<()>, ..)` from a state-bearing router: the erased
-    /// context issues callouts on the same yield/deliver queue, so object loads
-    /// suspend and resume on the operation the runtime is driving.
+    /// A state-erased view sharing this operation's callout machinery. Used by
+    /// ranged readers, whose handle type is state-erased but whose callouts
+    /// still suspend and resume on the operation the runtime is driving.
     #[doc(hidden)]
     pub fn erase_state(&self) -> Cx<()> {
         Cx {

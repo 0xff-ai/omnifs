@@ -138,9 +138,6 @@ pub(crate) struct TableDoc {
     )
 )]
 impl DbProvider {
-    type Config = Config;
-    type State = State;
-
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
         let backend = SqliteBackend::open(config.path.as_str(), config.read_only)
             .map_err(|e| ProviderError::internal(format!("open sqlite database: {e}")))?;
