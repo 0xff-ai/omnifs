@@ -40,6 +40,7 @@ use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
 use crate::captures::{Capture, Captures};
 use crate::error::{ProviderError, Result};
 use omnifs_core::path::{Path, Segment};
+use std::cmp::Reverse;
 
 // ===========================================================================
 // Pattern types
@@ -549,22 +550,19 @@ where
     E: RoutedEntry + 'a,
     I: IntoIterator<Item = &'a E>,
 {
-    let mut candidates: Vec<(&E, Captures)> = routes
+    routes
         .into_iter()
+        .enumerate()
         .filter_map(|route| {
+            let (index, route) = route;
             let caps = route.route_pattern().match_path(abs).ok()?;
             route
                 .route_validator()
                 .accepts(&caps)
-                .then_some((route, caps))
+                .then_some((index, route, caps))
         })
-        .collect();
-    candidates.sort_by(|a, b| {
-        b.0.route_pattern()
-            .precedence_key()
-            .cmp(&a.0.route_pattern().precedence_key())
-    });
-    candidates.into_iter().next()
+        .max_by_key(|(index, route, _)| (route.route_pattern().precedence_key(), Reverse(*index)))
+        .map(|(_, route, caps)| (route, caps))
 }
 
 pub(crate) fn parse_pattern(template: &str) -> Result<Pattern> {

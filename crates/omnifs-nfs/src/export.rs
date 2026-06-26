@@ -408,8 +408,4 @@ pub trait ReadOnlyExport: Send + Sync {
     fn parent(&self, id: u64) -> StatusResult<u64> {
         Ok(self.attr(id)?.parent)
     }
-
-    fn materialize_for_open(&self, id: u64) -> StatusResult<Vec<u8>> {
-        self.read(id)
-    }
 }

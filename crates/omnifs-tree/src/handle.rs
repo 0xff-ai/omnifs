@@ -10,12 +10,15 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use omnifs_core::path::Path;
 use omnifs_core::view as view_types;
 use omnifs_core::view::FileAttrsCache;
+use omnifs_host::registry::ProviderRegistry;
 use omnifs_host::wit_protocol::{file_size_from_wit, stability_from_wit};
 use omnifs_host::{Error, Runtime};
+use tokio::runtime::Handle;
 
 use crate::error::{Result, TreeError};
 use crate::node::Node;
@@ -252,6 +255,34 @@ pub async fn probe_live_growth(
     let new_end = known_end.saturating_add(advanced);
     observed_end.fetch_max(new_end, Ordering::Relaxed);
     Ok(Some(new_end))
+}
+
+/// Spawn the shared live-file growth probe loop. Renderers own the reported
+/// size table, so `record_growth` is frontend-specific.
+pub fn spawn_live_follow_pump(
+    rt: &Handle,
+    registry: Arc<ProviderRegistry>,
+    mount_name: String,
+    provider_handle: u64,
+    observed_end: Arc<AtomicU64>,
+    mut record_growth: impl FnMut(u64) + Send + 'static,
+) -> tokio::task::AbortHandle {
+    const PROBE_LEN: u32 = 64 * 1024;
+    const INTERVAL: Duration = Duration::from_secs(1);
+    let task = rt.spawn(async move {
+        loop {
+            tokio::time::sleep(INTERVAL).await;
+            let Some(runtime) = registry.get(&mount_name) else {
+                break;
+            };
+            match probe_live_growth(&runtime, provider_handle, &observed_end, PROBE_LEN).await {
+                Ok(Some(new_end)) => record_growth(new_end),
+                Ok(None) => {},
+                Err(_) => break,
+            }
+        }
+    });
+    task.abort_handle()
 }
 
 /// Derive the opened ranged handle's attrs from the provider's `open_file`

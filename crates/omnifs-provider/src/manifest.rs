@@ -111,7 +111,7 @@ impl ProviderAuthManifest {
             )));
         }
         for (key, scheme) in &self.schemes {
-            validate_scheme(key, scheme, &self.inject)?;
+            validate_scheme(key, scheme)?;
             // A bring-your-own-app OAuth scheme (no shipped client id) forces the
             // user to create their own app; it must say how.
             if let AuthScheme::Oauth(oauth) = scheme
@@ -524,11 +524,7 @@ impl ProviderManifest {
     }
 }
 
-fn validate_scheme(
-    key: &str,
-    scheme: &AuthScheme,
-    inject: &AuthInject,
-) -> Result<(), ProviderMetadataError> {
+fn validate_scheme(key: &str, scheme: &AuthScheme) -> Result<(), ProviderMetadataError> {
     match scheme {
         AuthScheme::None => {
             return Err(ProviderMetadataError::Validation(format!(
@@ -552,7 +548,6 @@ fn validate_scheme(
             validate_oauth_flow(key, oauth)?;
         },
     }
-    let _ = inject;
     Ok(())
 }
 

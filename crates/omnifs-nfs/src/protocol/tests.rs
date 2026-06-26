@@ -185,7 +185,7 @@ impl ReadOnlyExport for StaticExport {
         clientid: u64,
         access: u32,
     ) -> StatusResult<OpenResult> {
-        let data = self.materialize_for_open(id)?;
+        let data = self.read(id)?;
         let attr = self.attr(id)?;
         let stateid = self.opens.open(OpenSeed {
             generation,
@@ -212,10 +212,6 @@ impl ReadOnlyExport for StaticExport {
     fn renew_client(&self, clientid: u64) -> StatusResult<()> {
         self.opens.renew_client(clientid);
         Ok(())
-    }
-
-    fn materialize_for_open(&self, id: u64) -> StatusResult<Vec<u8>> {
-        self.read(id)
     }
 }
 
