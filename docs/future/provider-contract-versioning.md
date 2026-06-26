@@ -180,7 +180,7 @@ it, preserving the user's ability to grant capabilities beyond the manifest. A
 later slice should decide the over-grant surface (the confused-deputy-risky
 preopen/socket/auth surface is the first candidate; network egress may stay
 user-grantable) and add the check. Until then the gap is recorded in
-`architecture.md` section 10.
+`docs/architecture/00-overview.md`.
 
 ## Open implementation details
 

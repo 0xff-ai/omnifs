@@ -2,7 +2,7 @@
 //!
 //! Serves daemon runtime facts, mount reconciliation and shutdown, and the
 //! inspector event stream over HTTP on the control listener. See
-//! `docs/design/daemon-cli-split.md`.
+//! `docs/contracts/50-control-plane.md`.
 
 use axum::Router;
 use axum::body::Body;

@@ -179,7 +179,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - Cross-listing PR preload and hybrid issue/PR pagination in the GitHub provider.
 - HTTP SDK gains POST + raw / JSON bodies and adopts `http` crate request/response types.
 - Docker Compose dev workflow (`compose.yaml`, `just dev`, `just shell`) with self-starting published image.
-- `docs/design/path-dispatch-and-listing.md` as the perennial reference for routing precedence, listing semantics, and the `lookup`/`readdir` authority split; `docs/design/projected-file-sizes.md` documenting the `direct_io` redesign.
+- `docs/contracts/20-provider-sdk.md` and `docs/contracts/30-projection-tree.md` now carry the routing precedence, listing semantics, `lookup`/`readdir` authority split, and projected file-size contracts.
 
 ### Changed
 

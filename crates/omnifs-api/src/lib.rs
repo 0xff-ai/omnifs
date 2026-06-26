@@ -1,8 +1,8 @@
-//! Control API types shared by the `omnifs` CLI and the `omnifsd` daemon.
+//! Control API types shared by the `omnifs` CLI and daemon runtime.
 //!
 //! The daemon serves these under `/v1/` on its control listener (TCP
 //! loopback through the container port forward today; a Unix socket in the
-//! future host-native mode). See `docs/design/daemon-cli-split.md`.
+//! future host-native mode). See `docs/contracts/50-control-plane.md`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ pub const API_MAJOR: u16 = 1;
 pub const API_MINOR: u16 = 1;
 
 /// Default control port. The container publishes it on the host loopback;
-/// both binaries default to it so `omnifs` finds `omnifsd` with zero config.
+/// both binaries default to it so `omnifs` finds the daemon with zero config.
 pub const DEFAULT_PORT: u16 = 7878;
 
 /// `GET /v1/ready`: 200 with `ready: true` once the filesystem is

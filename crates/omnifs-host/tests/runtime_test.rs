@@ -740,7 +740,7 @@ async fn test_list_projects_adjacent_files_into_cache() {
         }
     "#,
     );
-    // path-dispatch-and-listing: a bare `lookup` is light and does not warm
+    // Projection-tree contract: a bare `lookup` is light and does not warm
     // a child's adjacent shape; the preload a dir handler attaches with
     // `preload_*` lands when the directory is actually *listed*. Listing
     // `hello/bundle` runs the `bundle` handler, whose projection preloads
