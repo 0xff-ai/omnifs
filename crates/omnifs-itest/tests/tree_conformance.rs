@@ -19,7 +19,7 @@
 //! exact bytes, a ranged file, a cursored/paginated listing, a not-found, and
 //! the write-fence/invalidation coherence `Tree::read` carries.
 //!
-//! Precondition: `just providers-build` has produced
+//! Precondition: `just providers build` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
 //! asserts this through the harness).
 

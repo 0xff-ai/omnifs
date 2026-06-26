@@ -1547,7 +1547,7 @@ mod tests {
         let src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
         assert!(
             src.exists(),
-            "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers-build` first.",
+            "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers build` first.",
             src.display()
         );
         std::fs::copy(&src, providers_dir.path().join(ARCHIVE_TOOL_WASM)).expect("copy wasm");

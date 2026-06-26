@@ -173,9 +173,9 @@ cargo nextest run
 Use the right wider gate for the change:
 
 - **Before a push or PR handoff.** Run `just check`. It delegates to the CI-shaped lanes and avoids hand-assembling a near miss.
-- **WASM toolchain.** Provider and tool WASM builds need wasi-sdk. Install the pinned version with `just wasi-sdk`.
-- **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers-build` before treating missing provider artifacts as product failures.
-- **Host gate.** Use `just host-clippy` or `just ci-host`; those intentionally exclude provider/tool/test-provider WASM crates from host-target builds.
+- **WASM toolchain.** Provider and tool WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
+- **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers build` before treating missing provider artifacts as product failures.
+- **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/tool/test-provider WASM crates from host-target builds.
 - **Provider or broad-surface change.** Run `just check`.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `omnifs dev -y`, `docker exec omnifs /bin/zsh -lc 'omnifs status'`, and the smoke path in `CONTRIBUTING.md`.
 - **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.
@@ -187,11 +187,11 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 
 ## Footguns
 
-- **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just providers-build` and `just providers-check`.
+- **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just providers build` and `just providers check`.
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
-- **Provider rebuild contention under nextest.** Some `omnifs-host` integration tests shell out to `just providers-build`. Reliable flow: `just wasi-sdk`, `just providers-build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...`.
+- **Provider rebuild contention under nextest.** Some `omnifs-host` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
 - **Host checks may need generated provider artifacts.** If a host check fails because provider WASM is missing, build providers first or point the check at an existing artifact directory.
-- **Bare provider builds miss injected metadata.** A plain `cargo build --target wasm32-wasip2` can produce component bytes, but `just providers-build` is what injects `omnifs.provider-metadata.v1` with evaluated config schema.
+- **Bare provider builds miss injected metadata.** A plain `cargo build --target wasm32-wasip2` can produce component bytes, but `just providers build` is what injects `omnifs.provider-metadata.v1` with evaluated config schema.
 - **Provider metadata section rewriting must stay shallow.** `embed_provider_metadata_section` replaces top-level metadata sections and copies nested module/component spans verbatim. Do not parse into nested spans while rewriting.
 - **Host resource schema markers must inline.** `HostFile` and `HostSocket` schemas must keep `x-omnifs-resource` directly on the config property; hiding it behind `$ref` makes host resource lookup miss it.
 - **Raw mount specs are not strict today.** CLI config and mount auth/config blocks are strict, but raw top-level mount `Spec` parsing currently allows unknown keys. Do not claim strict mount-spec parsing unless the code and tests change.

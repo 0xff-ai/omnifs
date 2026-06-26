@@ -1,5 +1,7 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set working-directory := '..'
+
 # Install the pinned WASI SDK into .cache/wasi-sdk.
-[group('providers')]
 wasi-sdk:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -33,8 +35,7 @@ wasi-sdk:
     printf '%s\n' "$release" > "$home/.version"
 
 # Check provider and tool WASM crates.
-[group('providers')]
-providers-check: wasi-sdk
+check: wasi-sdk
     #!/usr/bin/env bash
     set -euo pipefail
     cargo check --target wasm32-wasip2 \
@@ -52,8 +53,7 @@ providers-check: wasi-sdk
       --no-run
 
 # Build provider and tool WASM components and embed provider metadata.
-[group('providers')]
-providers-build: wasi-sdk
+build: wasi-sdk
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --target wasm32-wasip2 --release -p 'omnifs-tool-*'
@@ -73,8 +73,7 @@ providers-build: wasi-sdk
     target/release/omnifs-embed-manifest "${wasms[@]}"
 
 # Validate built WASM components.
-[group('providers')]
-wasm-validate:
+validate:
     #!/usr/bin/env bash
     set -euo pipefail
     shopt -s nullglob

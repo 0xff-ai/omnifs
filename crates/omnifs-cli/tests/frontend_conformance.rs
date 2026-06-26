@@ -102,7 +102,7 @@ fn start() -> Option<Daemon> {
     let test_wasm = wasm_dir.join("test_provider.wasm");
     if !test_wasm.exists() {
         eprintln!(
-            "skip: {} missing (run `just providers-build`)",
+            "skip: {} missing (run `just providers build`)",
             test_wasm.display()
         );
         return None;

@@ -542,7 +542,7 @@ mod tests {
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "provider metadata missing from {}; run `just providers-build`",
+                    "provider metadata missing from {}; run `just providers build`",
                     path.display()
                 )
             })

@@ -140,7 +140,7 @@ impl Fixture {
     fn up_and_wait(&mut self) -> Option<()> {
         let wasm_dir = release_wasm_dir();
         if !wasm_dir.join("test_provider.wasm").exists() {
-            eprintln!("skip: test_provider.wasm missing (run `just providers-build`)");
+            eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
             return None;
         }
         if !platform_can_mount() {
@@ -331,7 +331,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     }
     let wasm_dir = release_wasm_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers-build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
         return;
     }
     if !platform_can_mount() {
@@ -559,7 +559,7 @@ fn scenario_8_failed_mount_surfaced() {
     }
     let wasm_dir = release_wasm_dir();
     if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just providers-build`)");
+        eprintln!("skip: test_provider.wasm missing (run `just providers build`)");
         return;
     }
     if !platform_can_mount() {

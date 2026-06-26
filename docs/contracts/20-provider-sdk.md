@@ -29,9 +29,9 @@ Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object
 
 ### Provider metadata
 
-Provider manifests are generated from `#[omnifs_sdk::provider]` annotations and each component's `manifest_json()` export, then injected as `omnifs.provider-metadata.v1` during `just providers-build`.
+Provider manifests are generated from `#[omnifs_sdk::provider]` annotations and each component's `manifest_json()` export, then injected as `omnifs.provider-metadata.v1` during `just providers build`.
 
-Use `just providers-build` when artifacts need embedded metadata. Keep section rewriting idempotent and copy nested module/component spans verbatim when rewriting top-level metadata.
+Use `just providers build` when artifacts need embedded metadata. Keep section rewriting idempotent and copy nested module/component spans verbatim when rewriting top-level metadata.
 
 ### Host resource config fields
 
@@ -83,9 +83,9 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 
 ## Validation
 
-- `just providers-check`
-- `just providers-build`
-- `just wasm-validate`
+- `just providers check`
+- `just providers build`
+- `just providers validate`
 - Provider initialization/seal tests after route-surface changes.
 - WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
 - Schema generation/checks when provider config schemas change.
