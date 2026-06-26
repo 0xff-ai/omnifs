@@ -40,7 +40,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::runtime::{Handle, RuntimeFlavor};
 
 /// Per-inode renderer state. This is the NFS analogue of the FUSE `NodeEntry`:
@@ -330,8 +330,10 @@ impl Export {
                         entry.size_exact = size_exact;
                     }
                     if let Some(incoming_attrs) = attrs_for_update.clone()
-                        && let Some(merged_attrs) =
-                            merge_file_attrs(entry.attrs.as_ref(), Some(incoming_attrs))
+                        && let Some(merged_attrs) = FileAttrsCache::merge_preserving_learned_size(
+                            entry.attrs.as_ref(),
+                            Some(incoming_attrs),
+                        )
                     {
                         entry.size = merged_attrs.st_size();
                         entry.size_exact =
@@ -1074,31 +1076,15 @@ impl Export {
         provider_handle: u64,
         observed_end: Arc<AtomicU64>,
     ) -> tokio::task::AbortHandle {
-        const PROBE_LEN: u32 = 64 * 1024;
-        const INTERVAL: Duration = Duration::from_secs(1);
-        let registry = Arc::clone(&self.registry);
         let follow_sizes = Arc::clone(&self.follow_sizes);
-        let task = self.rt.spawn(async move {
-            loop {
-                tokio::time::sleep(INTERVAL).await;
-                let Some(runtime) = registry.get(&mount_name) else {
-                    break;
-                };
-                match omnifs_tree::probe_live_growth(
-                    &runtime,
-                    provider_handle,
-                    &observed_end,
-                    PROBE_LEN,
-                )
-                .await
-                {
-                    Ok(Some(new_end)) => follow_sizes.grow(ino, new_end),
-                    Ok(None) => {},
-                    Err(_) => break,
-                }
-            }
-        });
-        task.abort_handle()
+        omnifs_tree::spawn_live_follow_pump(
+            &self.rt,
+            Arc::clone(&self.registry),
+            mount_name,
+            provider_handle,
+            observed_end,
+            move |new_end| follow_sizes.grow(ino, new_end),
+        )
     }
 }
 
@@ -1417,7 +1403,7 @@ impl ReadOnlyExport for Export {
             return Ok(OpenResult { stateid, attr });
         }
 
-        let data = self.materialize_for_open(id)?;
+        let data = self.read(id)?;
         // Belt-and-braces guard: providers that declared non-exact sizes can
         // still return arbitrarily large payloads. The pre-check above only
         // catches declared exact sizes.
@@ -1517,20 +1503,6 @@ impl ReadOnlyExport for Export {
         self.opens.renew_client(clientid);
         Ok(())
     }
-
-    fn materialize_for_open(&self, id: u64) -> StatusResult<Vec<u8>> {
-        self.read(id)
-    }
-}
-
-/// Keep a learned exact size on the NFS inode across an origin-agnostic refresh:
-/// a re-listing that projects a kind-derived placeholder must not erase a size
-/// learned from a complete read.
-fn merge_file_attrs(
-    existing: Option<&FileAttrsCache>,
-    incoming: Option<FileAttrsCache>,
-) -> Option<FileAttrsCache> {
-    FileAttrsCache::merge_preserving_learned_size(existing, incoming)
 }
 
 #[cfg(test)]

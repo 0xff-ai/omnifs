@@ -83,46 +83,19 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
 
     let field_inits = fields.iter().map(|field| {
         let ident = &field.ident;
-        let name_lit = &field.name_lit;
-        if field.is_option {
-            quote! {
-                #ident: caps.parse_optional(#name_lit)?,
-            }
-        } else if field.facet_inner_ty.is_some() {
-            // Construct the Facet newtype by inference: writing `#ty(..)` would
-            // emit `Facet<T>(..)`, which parses as a chained comparison in
-            // expression position. The inner type is inferred from the field.
-            quote! {
-                #ident: omnifs_sdk::identity::Facet(caps.parse(#name_lit)?),
-            }
-        } else {
-            quote! {
-                #ident: caps.parse(#name_lit)?,
-            }
+        let value = field_capture_value(field);
+        quote! {
+            #ident: #value,
         }
     });
 
     let present_validations = fields.iter().map(|field| {
         let name_lit = &field.name_lit;
         let ty = &field.ty;
-        if let Some(inner_ty) = option_inner_type(&field.ty) {
-            quote! {
-                if caps.get(#name_lit).is_some() {
-                    let _: core::option::Option<#inner_ty> =
-                        caps.parse_optional(#name_lit)?;
-                }
-            }
-        } else if field.facet_inner_ty.is_some() {
-            quote! {
-                if caps.get(#name_lit).is_some() {
-                    let _: #ty = omnifs_sdk::identity::Facet(caps.parse(#name_lit)?);
-                }
-            }
-        } else {
-            quote! {
-                if caps.get(#name_lit).is_some() {
-                    let _: #ty = caps.parse(#name_lit)?;
-                }
+        let value = field_capture_value(field);
+        quote! {
+            if caps.get(#name_lit).is_some() {
+                let _: #ty = #value;
             }
         }
     });
@@ -232,4 +205,18 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         {
         }
     })
+}
+
+fn field_capture_value(field: &FieldSpec) -> TokenStream2 {
+    let name_lit = &field.name_lit;
+    if field.is_option {
+        quote! { caps.parse_optional(#name_lit)? }
+    } else if field.facet_inner_ty.is_some() {
+        // Construct the Facet newtype by inference: writing `#ty(..)` would emit
+        // `Facet<T>(..)`, which parses as a chained comparison in expression
+        // position. The inner type is inferred from the field.
+        quote! { omnifs_sdk::identity::Facet(caps.parse(#name_lit)?) }
+    } else {
+        quote! { caps.parse(#name_lit)? }
+    }
 }

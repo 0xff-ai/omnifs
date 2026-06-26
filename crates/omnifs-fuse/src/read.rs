@@ -14,7 +14,6 @@ use omnifs_inspector::TraceId;
 use omnifs_tree::{Node, ReadResult, RequestCtx};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::Duration;
 use tracing::warn;
 
 impl Frontend {
@@ -338,35 +337,20 @@ impl Frontend {
         provider_handle: u64,
         observed_end: Arc<AtomicU64>,
     ) {
-        const PROBE_LEN: u32 = 64 * 1024;
-        const INTERVAL: Duration = Duration::from_secs(1);
-        let registry = self.registry.clone();
         let follow_sizes = self.follow_sizes.clone();
-        let task = self.rt.spawn(async move {
-            loop {
-                tokio::time::sleep(INTERVAL).await;
-                let Some(runtime) = registry.get(&mount_name) else {
-                    break;
-                };
-                match omnifs_tree::probe_live_growth(
-                    &runtime,
-                    provider_handle,
-                    &observed_end,
-                    PROBE_LEN,
-                )
-                .await
-                {
-                    Ok(Some(new_end)) => {
-                        follow_sizes
-                            .entry(ino)
-                            .and_modify(|current| *current = (*current).max(new_end))
-                            .or_insert(new_end);
-                    },
-                    Ok(None) => {},
-                    Err(_) => break,
-                }
-            }
-        });
-        self.follow_pumps.insert(fh, task.abort_handle());
+        let pump = omnifs_tree::spawn_live_follow_pump(
+            &self.rt,
+            self.registry.clone(),
+            mount_name,
+            provider_handle,
+            observed_end,
+            move |new_end| {
+                follow_sizes
+                    .entry(ino)
+                    .and_modify(|current| *current = (*current).max(new_end))
+                    .or_insert(new_end);
+            },
+        );
+        self.follow_pumps.insert(fh, pump);
     }
 }

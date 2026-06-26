@@ -19,45 +19,16 @@ pub const PROVIDER_METADATA_SECTION_NAME: &str = "omnifs.provider-metadata.v1";
 /// surface their guest module's section.
 pub fn read_manifest_section(bytes: &[u8]) -> Result<Vec<u8>, ManifestSectionError> {
     let mut out = Vec::new();
-    let mut work: Vec<(Parser, Range<usize>)> = vec![(Parser::new(0), 0..bytes.len())];
-
-    while let Some((mut parser, range)) = work.pop() {
-        let mut offset = range.start;
-        while offset < range.end {
-            let input = &bytes[offset..range.end];
-            match parser.parse(input, true)? {
-                wasmparser::Chunk::NeedMoreData(_) => {
-                    return Err(ManifestSectionError::Truncated { offset });
-                },
-                wasmparser::Chunk::Parsed { consumed, payload } => {
-                    offset += consumed;
-                    match payload {
-                        Payload::CustomSection(reader)
-                            if reader.name() == MANIFEST_SECTION_NAME =>
-                        {
-                            out.extend_from_slice(reader.data());
-                        },
-                        Payload::ModuleSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        }
-                        | Payload::ComponentSection {
-                            parser: sub,
-                            unchecked_range,
-                            ..
-                        } => {
-                            offset = offset.max(unchecked_range.end);
-                            work.push((sub, unchecked_range));
-                        },
-                        Payload::End(_) => break,
-                        _ => {},
-                    }
-                },
+    visit_custom_sections(
+        bytes,
+        |name, data| {
+            if name == MANIFEST_SECTION_NAME {
+                out.extend_from_slice(data);
             }
-        }
-    }
-
+            Ok(())
+        },
+        |offset| ManifestSectionError::Truncated { offset },
+    )?;
     Ok(out)
 }
 
@@ -69,6 +40,31 @@ pub fn read_provider_metadata_section(
     bytes: &[u8],
 ) -> Result<Option<ProviderManifest>, ProviderMetadataError> {
     let mut section = None;
+    visit_custom_sections(
+        bytes,
+        |name, data| {
+            if name == PROVIDER_METADATA_SECTION_NAME && section.replace(data.to_vec()).is_some() {
+                return Err(ProviderMetadataError::DuplicateSection);
+            }
+            Ok(())
+        },
+        |offset| ProviderMetadataError::Truncated { offset },
+    )?;
+
+    let Some(section) = section else {
+        return Ok(None);
+    };
+    ProviderManifest::from_bytes(&section).map(Some)
+}
+
+fn visit_custom_sections<E>(
+    bytes: &[u8],
+    mut on_custom: impl FnMut(&str, &[u8]) -> Result<(), E>,
+    truncated: impl Fn(usize) -> E,
+) -> Result<(), E>
+where
+    E: From<wasmparser::BinaryReaderError>,
+{
     let mut work: Vec<(Parser, Range<usize>)> = vec![(Parser::new(0), 0..bytes.len())];
 
     while let Some((mut parser, range)) = work.pop() {
@@ -77,17 +73,12 @@ pub fn read_provider_metadata_section(
             let input = &bytes[offset..range.end];
             match parser.parse(input, true)? {
                 wasmparser::Chunk::NeedMoreData(_) => {
-                    return Err(ProviderMetadataError::Truncated { offset });
+                    return Err(truncated(offset));
                 },
                 wasmparser::Chunk::Parsed { consumed, payload } => {
                     offset += consumed;
                     match payload {
-                        Payload::CustomSection(reader)
-                            if reader.name() == PROVIDER_METADATA_SECTION_NAME
-                                && section.replace(reader.data().to_vec()).is_some() =>
-                        {
-                            return Err(ProviderMetadataError::DuplicateSection);
-                        },
+                        Payload::CustomSection(reader) => on_custom(reader.name(), reader.data())?,
                         Payload::ModuleSection {
                             parser: sub,
                             unchecked_range,
@@ -108,11 +99,7 @@ pub fn read_provider_metadata_section(
             }
         }
     }
-
-    let Some(section) = section else {
-        return Ok(None);
-    };
-    ProviderManifest::from_bytes(&section).map(Some)
+    Ok(())
 }
 
 /// Embed `metadata_json` as the `omnifs.provider-metadata.v1` custom section,

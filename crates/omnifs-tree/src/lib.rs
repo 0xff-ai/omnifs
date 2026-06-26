@@ -45,7 +45,7 @@ use omnifs_host::registry::ProviderRegistry;
 use omnifs_inspector::TraceId;
 
 pub use crate::error::{Result, TreeError, TreeErrorKind};
-pub use crate::handle::{RangedHandle, probe_live_growth};
+pub use crate::handle::{RangedHandle, probe_live_growth, spawn_live_follow_pump};
 pub use crate::invalidate::InvalidationReport;
 pub use crate::list::{Cursor, ListOutcome, Listing};
 pub use crate::node::{
