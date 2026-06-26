@@ -22,7 +22,7 @@ Documentation types:
 
 - `AGENTS.md`: always-loaded operating guide.
 - `docs/contracts/`: binding rules by task area.
-- `docs/architecture/`: current explanatory model and rationale.
+- `docs/architecture/`: current explanatory model and rationale, loaded only when a task needs subsystem context.
 - `docs/future/`: proposals and non-current direction.
 
 ## Must not

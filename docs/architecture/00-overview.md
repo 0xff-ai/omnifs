@@ -105,5 +105,10 @@ These directions were explicitly ruled out and should not return without a new g
 ## Where to go next
 
 - Binding task-area rules: `docs/contracts/00-index.md`
+- File attribute rationale: `docs/architecture/10-file-attributes.md`
+- Route dispatch rationale: `docs/architecture/20-route-dispatch-and-listing.md`
+- Cache and effects rationale: `docs/architecture/30-cache-and-effects.md`
+- Auth boundary rationale: `docs/architecture/40-auth-boundary.md`
+- NFS frontend rationale: `docs/architecture/50-nfs-frontend.md`
 - Provider authoring: `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md`
 - Roadmap and non-current ideas: `docs/future/`
