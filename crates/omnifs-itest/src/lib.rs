@@ -61,8 +61,7 @@ impl RuntimeHarness {
         let spec = pin_spec_from_json(config_json, providers_dir.path())?;
 
         let catalog = Catalog::new(&paths.mounts_dir, providers_dir.path());
-        let resolved = catalog
-            .resolve_spec(spec, false)
+        let resolved = omnifs_mount::mounts::resolve(&catalog, &spec, false)
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let wasm_path = catalog.provider_path(&resolved);
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
