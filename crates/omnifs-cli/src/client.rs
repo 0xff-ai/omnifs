@@ -85,7 +85,7 @@ impl DaemonClient {
     /// A compatible daemon has the same control API major. Minor skew is
     /// reported as a note because it is additive. Incompatible and sick daemons
     /// are returned as typed states so callers do not re-create probe policy.
-    pub(crate) async fn probe(&self) -> DaemonControlState {
+    async fn probe(&self) -> DaemonControlState {
         let response = match self.get_optional("/v1/status", "query daemon status").await {
             Ok(Some(response)) => response,
             Ok(None) => return DaemonControlState::Absent,

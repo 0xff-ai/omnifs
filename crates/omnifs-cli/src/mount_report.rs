@@ -15,7 +15,6 @@ pub(crate) struct ProviderReadyStatus {
     pub(crate) mount: String,
     pub(crate) provider: String,
     pub(crate) provider_present: bool,
-    pub(crate) metadata_available: bool,
     pub(crate) root_mount: bool,
     pub(crate) auth_count: usize,
     pub(crate) domain_count: usize,
@@ -43,7 +42,6 @@ pub(crate) struct UserMountReadyStatus {
     pub(crate) mount: String,
     pub(crate) provider: String,
     pub(crate) provider_present: bool,
-    pub(crate) metadata_available: bool,
     pub(crate) auth: AuthReadiness,
 }
 
@@ -71,13 +69,11 @@ impl ProviderCatalog {
                 Ok(config) => {
                     let provider_path = self.provider_path(&config);
                     let provider_present = provider_path.exists();
-                    let metadata_available = true;
                     providers.push(ProviderConfigStatus::Ready(ProviderReadyStatus {
                         config_path,
                         mount: config.spec.mount,
                         provider: config.provider_name.clone(),
                         provider_present,
-                        metadata_available,
                         root_mount: config.spec.root_mount,
                         auth_count: config.spec.auth.len(),
                         domain_count: config
@@ -132,7 +128,6 @@ impl ProviderCatalog {
         let config = self.resolve_mount_spec(configured.config, true)?;
         let provider_path = self.provider_path(&config);
         let provider_present = provider_path.exists();
-        let metadata_available = true;
         let auth = self
             .resolve_mount_auth_tolerating_manifest_errors(config.clone())
             .readiness(store);
@@ -141,7 +136,6 @@ impl ProviderCatalog {
             mount: config.spec.mount,
             provider: config.provider_name.clone(),
             provider_present,
-            metadata_available,
             auth,
         })
     }

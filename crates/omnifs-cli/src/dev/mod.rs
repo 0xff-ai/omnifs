@@ -22,7 +22,6 @@ use crate::dev_support::{DevImageTag, WorkspaceRoot, contributor_layout};
 use crate::launch::{LaunchSpec, launch_runtime};
 use crate::launch_backend::{DockerTarget, LaunchBackend};
 use crate::provider_bundle;
-use crate::runtime::ContainerExtras;
 use crate::session::{
     CONTAINER_NAME, ENV_CONTAINER_NAME, GUEST_FUSE_MOUNT, GUEST_SHELL, MountConfig, env_string,
     set_private_dir,
@@ -198,9 +197,7 @@ impl DevArgs {
                 store,
                 verb: "omnifs dev",
                 configs,
-                extras: ContainerExtras {
-                    binds: fixture_binds.binds,
-                },
+                extra_binds: fixture_binds.binds,
             },
             workspace_home.catalog(),
         )

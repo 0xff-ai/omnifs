@@ -29,14 +29,6 @@ const LAUNCH_PROTOCOL_LABEL: &str = "ai.0xff.omnifs.launch-protocol";
 /// A unit test in this module verifies the string matches the numeric constant.
 const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v1";
 
-/// Extras layered on top of the canonical runtime wiring.
-/// `omnifs dev` uses this for the GitHub token secret file and DB fixture;
-/// both `omnifs dev` and `omnifs up` expose the inspector TCP port.
-#[derive(Debug, Default)]
-pub(crate) struct ContainerExtras {
-    pub(crate) binds: Vec<String>,
-}
-
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {
     /// Daemon responded to ping; the connected `Runtime` is returned for reuse.
@@ -252,7 +244,7 @@ impl Runtime {
     pub(crate) async fn launch_container(
         &self,
         runtime_home: &Path,
-        extras: ContainerExtras,
+        extra_binds: Vec<String>,
     ) -> Result<()> {
         self.ensure_image().await?;
         self.verify_launcher_compat().await?;
@@ -288,7 +280,7 @@ impl Runtime {
         if docker_sock.exists() {
             binds.push("/var/run/docker.sock:/var/run/docker.sock:ro".to_string());
         }
-        binds.extend(extras.binds);
+        binds.extend(extra_binds);
 
         anstream::println!(
             "Creating container `{}` from image `{}`",

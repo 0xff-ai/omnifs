@@ -195,7 +195,11 @@ impl MountAuth {
     pub(crate) fn readiness(&self, store: &dyn CredentialStore) -> AuthReadiness {
         let target = match self.status_target() {
             Ok(target) => target,
-            Err(error) => return AuthReadiness::Error(error.to_string()),
+            Err(error) => {
+                return AuthReadiness::Error {
+                    message: error.to_string(),
+                };
+            },
         };
         AuthReadiness::from_target(&self.config.spec.mount, target, store)
     }
@@ -245,7 +249,6 @@ impl MountAuth {
                 })?
         };
         CredentialTarget::for_configured_auth(&self.config, auth, Some(&scheme), auth.account())
-            .map_err(anyhow::Error::from)
     }
 
     fn target_for_scheme(
@@ -255,7 +258,6 @@ impl MountAuth {
         account: Option<&str>,
     ) -> anyhow::Result<CredentialTarget> {
         CredentialTarget::for_scheme(&self.config, auth, scheme, account)
-            .map_err(anyhow::Error::from)
     }
 
     fn manifest_view(&self) -> AuthManifestView<'_> {

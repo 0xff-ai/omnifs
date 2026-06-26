@@ -4,7 +4,6 @@
 //! as well as provider introspection utilities.
 
 mod auth;
-mod backend;
 mod capability;
 mod catalog;
 mod cli;

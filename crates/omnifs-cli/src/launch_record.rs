@@ -14,8 +14,7 @@ use anyhow::{Context as _, Result};
 use omnifs_api::DaemonBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::LaunchParams;
-use crate::launch_backend::{DockerTarget, LaunchBackend};
+use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
 use crate::session::{CONTAINER_NAME, IMAGE};
 
 /// Schema version this CLI understands. A bump here means the CLI writing the

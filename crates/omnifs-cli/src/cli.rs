@@ -40,7 +40,7 @@ pub enum Commands {
     /// and opens an interactive shell at `/omnifs` inside it (exit tears down).
     ///
     /// For normal use run `omnifs setup` (first run) or `omnifs up`.
-    Dev(commands::dev::DevArgs),
+    Dev(crate::dev::DevArgs),
     /// Stop and remove the omnifs container and clean up the session dir.
     Down(commands::down::DownArgs),
     /// Tail the daemon log inside the container.
