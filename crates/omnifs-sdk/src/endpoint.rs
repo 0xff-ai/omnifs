@@ -511,7 +511,7 @@ mod tests {
     struct TestEp;
 
     impl Endpoint for TestEp {
-        fn base(&self) -> &str {
+        fn base(&self) -> &'static str {
             "https://breaker.test"
         }
     }
@@ -520,7 +520,7 @@ mod tests {
     struct TestEpOff;
 
     impl Endpoint for TestEpOff {
-        fn base(&self) -> &str {
+        fn base(&self) -> &'static str {
             "https://off-policy.test"
         }
 
@@ -533,7 +533,7 @@ mod tests {
     struct TestEpCooldown;
 
     impl Endpoint for TestEpCooldown {
-        fn base(&self) -> &str {
+        fn base(&self) -> &'static str {
             "https://cooldown-policy.test"
         }
 
