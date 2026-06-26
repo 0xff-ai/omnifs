@@ -229,10 +229,7 @@ omnifs shell
 Core checks:
 
 ```bash
-cargo fmt
-cargo nextest run
-just providers-check
-just providers-build
+just check
 ```
 
 For runtime behavior, validate through the container:

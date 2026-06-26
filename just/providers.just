@@ -1,10 +1,10 @@
-# Install the pinned WASI SDK into .cache/wasi-sdk (version from tools/versions.toml).
-# The build env (WASI_SYSROOT, CC) lives in .cargo/config.toml; this only fetches
-# the toolchain the config points at. Idempotent: a matching .version stamp skips.
+# Install the pinned WASI SDK into .cache/wasi-sdk.
 [group('providers')]
 wasi-sdk:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The build env lives in .cargo/config.toml. This only fetches the toolchain
+    # that config points at. Idempotent: a matching .version stamp skips.
     version="$(sed -nE 's/^wasi_sdk[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' tools/versions.toml)"
     release="$(sed -nE 's/^wasi_sdk_release[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' tools/versions.toml)"
     if [[ -z "$version" || -z "$release" ]]; then
@@ -51,8 +51,7 @@ providers-check: wasi-sdk
       -p test-provider \
       --no-run
 
-# Build provider and tool WASM components, then embed each provider's
-# self-reported manifest as the `omnifs.provider-metadata.v1` custom section.
+# Build provider and tool WASM components and embed provider metadata.
 [group('providers')]
 providers-build: wasi-sdk
     #!/usr/bin/env bash
