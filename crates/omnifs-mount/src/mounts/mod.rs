@@ -7,6 +7,7 @@ pub mod store;
 
 pub use store::{Index, IndexEntry, ProviderStore, StoreError};
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -442,6 +443,112 @@ pub fn resolve(catalog: &Catalog, spec: &Spec, require_metadata: bool) -> Result
     config.into_resolved(None).map_err(Error::Resolve)
 }
 
+/// In-memory mirror of the on-disk mount-spec directory, and the sole owner of
+/// mount specs.
+///
+/// `Registry` reads every `mounts/*.json` once into memory and serves lookups;
+/// it replaces the two duplicated scan-and-parse pipelines (the CLI's
+/// `Workspace::mounts` and the host reconcile scan). Parsing is tolerant: a file
+/// that fails to parse or carries an invalid mount name is recorded in
+/// [`failures`](Self::failures) rather than aborting the load, so one malformed
+/// file cannot hide every other mount. Callers that want strict behavior inspect
+/// `failures` themselves.
+///
+/// A `Registry` is a per-process snapshot, not a shared singleton; disk stays
+/// the source of truth across the CLI and daemon processes. The CLI mutates
+/// through its `Registry` then triggers a daemon reconcile, which rebuilds its
+/// own `Registry` from disk via [`reload`](Self::reload).
+#[derive(Debug)]
+pub struct Registry {
+    mounts_dir: PathBuf,
+    specs: BTreeMap<mount::Name, Spec>,
+    failures: Vec<SpecLoadFailure>,
+}
+
+/// A `mounts/*.json` file that failed to load, retained so a tolerant reader
+/// (host reconcile, `omnifs reset`) can still account for it.
+#[derive(Debug)]
+pub struct SpecLoadFailure {
+    pub path: PathBuf,
+    pub error: Error,
+}
+
+impl Registry {
+    /// Read and parse every `*.json` under `mounts_dir`. Errors only on a
+    /// directory-scan I/O failure; per-file parse and mount-name errors land in
+    /// [`failures`](Self::failures).
+    pub fn load(mounts_dir: impl AsRef<Path>) -> Result<Self, Error> {
+        let mut registry = Self {
+            mounts_dir: mounts_dir.as_ref().to_path_buf(),
+            specs: BTreeMap::new(),
+            failures: Vec::new(),
+        };
+        registry.scan()?;
+        Ok(registry)
+    }
+
+    fn scan(&mut self) -> Result<(), Error> {
+        self.specs.clear();
+        self.failures.clear();
+        let paths = spec_paths_in(&self.mounts_dir).map_err(|source| Error::ScanMounts {
+            path: self.mounts_dir.clone(),
+            source,
+        })?;
+        for path in paths {
+            match Spec::from_file(&path) {
+                Ok(spec) => match mount::Name::new(spec.mount.clone()) {
+                    Ok(name) => {
+                        self.specs.insert(name, spec);
+                    },
+                    Err(source) => self.failures.push(SpecLoadFailure {
+                        error: Error::MountName {
+                            path: path.clone(),
+                            mount: spec.mount,
+                            source,
+                        },
+                        path,
+                    }),
+                },
+                Err(error) => self.failures.push(SpecLoadFailure { path, error }),
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-read the directory from disk (daemon reconcile, post-write refresh).
+    pub fn reload(&mut self) -> Result<(), Error> {
+        self.scan()
+    }
+
+    /// The pinned spec for `name`, if loaded.
+    #[must_use]
+    pub fn get(&self, name: &mount::Name) -> Option<&Spec> {
+        self.specs.get(name)
+    }
+
+    /// Every loaded spec, in mount-name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&mount::Name, &Spec)> + '_ {
+        self.specs.iter()
+    }
+
+    /// The files that failed to load, in directory-scan order.
+    #[must_use]
+    pub fn failures(&self) -> &[SpecLoadFailure] {
+        &self.failures
+    }
+
+    #[must_use]
+    pub fn mounts_dir(&self) -> &Path {
+        &self.mounts_dir
+    }
+
+    /// The on-disk path a mount's spec occupies: `mounts_dir/<name>.json`.
+    #[must_use]
+    pub fn spec_path(&self, name: &mount::Name) -> PathBuf {
+        self.mounts_dir.join(format!("{name}.json"))
+    }
+}
+
 fn load_spec(path: &Path) -> Result<Spec, Error> {
     let config = Spec::from_file(path)?;
     if let Err(source) = mount::Name::new(config.mount.clone()) {
@@ -590,5 +697,71 @@ mod tests {
         let catalog = Catalog::new(dir.path(), dir.path());
         let error = catalog.load_spec(&path).expect_err("invalid mount name");
         assert!(matches!(error, Error::MountName { .. }));
+    }
+
+    fn write_spec(dir: &Path, file: &str, spec: &Spec) {
+        std::fs::write(dir.join(file), serde_json::to_string(spec).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn registry_loads_specs_in_name_order_and_isolates_bad_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mounts = dir.path();
+        // Two valid specs, written out of name order.
+        write_spec(
+            mounts,
+            "zeta.json",
+            &spec_with_provider("zeta", r#"{ "mount": "zeta" }"#),
+        );
+        write_spec(
+            mounts,
+            "alpha.json",
+            &spec_with_provider("alpha", r#"{ "mount": "alpha" }"#),
+        );
+        // An unparseable file, and a file whose mount name is a path traversal.
+        std::fs::write(mounts.join("broken.json"), b"{ not json").unwrap();
+        write_spec(
+            mounts,
+            "poison.json",
+            &spec_with_provider("p", r#"{ "mount": "../../../tmp/poison" }"#),
+        );
+
+        let registry = Registry::load(mounts).expect("scan succeeds");
+
+        // Valid specs are served in mount-name order.
+        let names: Vec<_> = registry.iter().map(|(name, _)| name.to_string()).collect();
+        assert_eq!(names, ["alpha", "zeta"]);
+        assert!(
+            registry
+                .get(&mount::Name::new("alpha".to_owned()).unwrap())
+                .is_some()
+        );
+
+        // Both malformed files are recorded as failures and never served; a path
+        // traversal in the mount name is rejected, not turned into a key.
+        assert_eq!(registry.failures().len(), 2);
+        assert!(
+            registry
+                .failures()
+                .iter()
+                .any(|f| matches!(f.error, Error::ParseSpec { .. }))
+        );
+        assert!(
+            registry
+                .failures()
+                .iter()
+                .any(|f| matches!(f.error, Error::MountName { .. }))
+        );
+    }
+
+    #[test]
+    fn registry_tolerates_missing_dir_and_derives_spec_path() {
+        let registry = Registry::load("/no/such/mounts").expect("missing dir is not an error");
+        assert!(registry.iter().next().is_none());
+        let name = mount::Name::new("github".to_owned()).unwrap();
+        assert_eq!(
+            registry.spec_path(&name),
+            Path::new("/no/such/mounts/github.json")
+        );
     }
 }

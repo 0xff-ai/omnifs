@@ -36,12 +36,6 @@ pub(crate) struct MountConfig {
 }
 
 impl MountConfig {
-    pub(crate) fn from_path(path: &Path) -> anyhow::Result<Self> {
-        let config = Spec::from_file(path)
-            .with_context(|| format!("load mount config {}", path.display()))?;
-        Self::from_parsed(config, path.to_path_buf())
-    }
-
     pub(crate) fn from_parsed(config: Spec, source: PathBuf) -> anyhow::Result<Self> {
         let name = MountName::new(config.mount.clone()).with_context(|| {
             format!(
@@ -130,9 +124,7 @@ mod tests {
 
     use crate::catalog::ProviderCatalog;
     use crate::launch::DockerMountMaterializer;
-    use crate::test_support::{
-        install_fixture_provider, provider_ref_value, spec_with_provider, spec_with_reference,
-    };
+    use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
 
     fn sample_entry(value: &str) -> CredentialEntry {
         CredentialEntry::static_token(
@@ -184,24 +176,6 @@ mod tests {
             .materialize(&config)
             .unwrap();
         assert!(mount.preopen_binds().is_empty());
-    }
-
-    #[test]
-    fn from_path_rejects_invalid_mount_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("bad.json");
-        let spec = serde_json::json!({
-            "provider": provider_ref_value("p"),
-            "mount": "../../../tmp/poison"
-        });
-        fs::write(&path, serde_json::to_string(&spec).unwrap()).unwrap();
-
-        let err = MountConfig::from_path(&path).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("invalid mount name"),
-            "expected invalid mount name, got: {chain}"
-        );
     }
 
     #[test]
