@@ -25,8 +25,8 @@ use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_mount::ProviderConfig;
-use omnifs_mount::mounts::{ProviderStore, Resolved};
-use omnifs_provider::{ConfigSchema, HostResource};
+use omnifs_mount::mounts::Resolved;
+use omnifs_provider::{ConfigSchema, HostResource, ProviderStore};
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;

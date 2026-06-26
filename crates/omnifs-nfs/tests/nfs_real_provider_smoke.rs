@@ -1,7 +1,7 @@
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_mount::mounts::ProviderStore;
 use omnifs_nfs::{Export, ReadOnlyExport};
+use omnifs_provider::ProviderStore;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;

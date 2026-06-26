@@ -21,6 +21,7 @@ indexmap = { workspace = true }
 wasmparser = "0.246"
 thiserror = { workspace = true }
 hex = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

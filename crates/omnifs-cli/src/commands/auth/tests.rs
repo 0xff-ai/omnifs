@@ -7,7 +7,7 @@ use crate::workspace::Workspace;
 use omnifs_core::{CredentialId, ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_creds::{CredentialStore, MemoryStore};
 use omnifs_home::WorkspaceLayout;
-use omnifs_mount::mounts::ProviderStore;
+use omnifs_provider::ProviderStore;
 use omnifs_provider::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;

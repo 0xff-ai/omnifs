@@ -3,22 +3,18 @@
 //! `Spec` represents the raw mount JSON. `Resolved` is the runtime-ready
 //! mount after provider metadata has been applied.
 
-pub mod store;
-
-pub use store::{Index, IndexEntry, ProviderStore, StoreError};
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, mount};
+use omnifs_core::{ProviderRef, mount};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{Auth, OAuth, ProviderConfig, StaticToken};
 use omnifs_caps::{Grants, Need};
-use omnifs_provider::{AuthManifest, ProviderAuthManifest, ProviderManifest};
+use omnifs_provider::{AuthManifest, Catalog, CatalogError, ProviderAuthManifest};
 
 /// Raw user-authored mount JSON.
 ///
@@ -177,11 +173,6 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to read provider metadata from {}: {source}", path.display())]
-    ReadProviderMetadata {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     #[error("failed to extract provider metadata from {}: {source}", path.display())]
     ExtractProviderMetadata {
         path: PathBuf,
@@ -194,10 +185,8 @@ pub enum Error {
     },
     #[error("failed to resolve mount: {0}")]
     Resolve(serde_json::Error),
-    #[error("provider store error: {0}")]
-    Store(#[from] StoreError),
-    #[error("provider artifact at {} has no embedded metadata section", path.display())]
-    MissingProviderMetadata { path: PathBuf },
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
     #[error("failed to serialize mount spec for {}: {source}", path.display())]
     SerializeSpec {
         path: PathBuf,
@@ -215,12 +204,6 @@ pub enum Error {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct Catalog {
-    mounts_dir: PathBuf,
-    providers_dir: PathBuf,
-}
-
 /// What materialization reads from a pinned manifest: the capability needs (the
 /// oracle for the required-capabilities check) and the parsed config schema,
 /// which names the host-resource config fields a dynamic grant resolves from.
@@ -229,250 +212,99 @@ pub struct AppliedMetadata {
     pub config_schema: Option<omnifs_provider::ConfigSchema>,
 }
 
-impl Catalog {
-    #[must_use]
-    pub fn new(mounts_dir: impl AsRef<Path>, providers_dir: impl AsRef<Path>) -> Self {
-        Self {
-            mounts_dir: mounts_dir.as_ref().to_path_buf(),
-            providers_dir: providers_dir.as_ref().to_path_buf(),
-        }
-    }
-
-    #[must_use]
-    pub fn for_providers(providers_dir: impl AsRef<Path>) -> Self {
-        Self {
-            mounts_dir: PathBuf::new(),
-            providers_dir: providers_dir.as_ref().to_path_buf(),
-        }
-    }
-
-    #[must_use]
-    pub fn mounts_dir(&self) -> &Path {
-        &self.mounts_dir
-    }
-
-    #[must_use]
-    pub fn providers_dir(&self) -> &Path {
-        &self.providers_dir
-    }
-
-    #[must_use]
-    pub fn spec_path(&self, name: &mount::Name) -> PathBuf {
-        self.mounts_dir.join(format!("{name}.json"))
-    }
-
-    pub fn spec_paths(&self) -> Result<Vec<PathBuf>, Error> {
-        spec_paths_in(&self.mounts_dir).map_err(|source| Error::ScanMounts {
-            path: self.mounts_dir.clone(),
-            source,
-        })
-    }
-
-    pub fn load_spec(&self, config_path: &Path) -> Result<Spec, Error> {
-        load_spec(config_path)
-    }
-
-    pub fn apply_metadata(&self, config: &mut Spec) -> Result<bool, Error> {
-        let Some(provider) = self.get(&config.provider.id)? else {
-            return Ok(false);
-        };
-        let manifest = provider.manifest()?;
-        config
-            .apply_provider_metadata(&manifest)
-            .map_err(|source| Error::ApplyProviderMetadata {
-                path: provider.wasm_path().to_path_buf(),
-                source,
-            })?;
-        Ok(true)
-    }
-
-    /// Apply the pinned manifest's metadata to `spec` and return what
-    /// materialization checks against it, loading the artifact once. `None` when
-    /// the artifact is not retained (metadata is not applied and the checks are
-    /// skipped; the missing-artifact error surfaces elsewhere).
-    pub fn apply_metadata_and_needs(
-        &self,
-        spec: &mut Spec,
-    ) -> Result<Option<AppliedMetadata>, Error> {
-        let Some(provider) = self.get(&spec.provider.id)? else {
-            return Ok(None);
-        };
-        let manifest = provider.manifest()?;
-        spec.apply_provider_metadata(&manifest)
-            .map_err(|source| Error::ApplyProviderMetadata {
-                path: provider.wasm_path().to_path_buf(),
-                source,
-            })?;
-        let config_schema = manifest
-            .config_schema
-            .as_ref()
-            .map(omnifs_provider::ConfigSchema::parse)
-            .transpose()
-            .map_err(|source| Error::ExtractProviderMetadata {
-                path: provider.wasm_path().to_path_buf(),
-                source,
-            })?;
-        Ok(Some(AppliedMetadata {
-            needs: manifest.capabilities,
-            config_schema,
-        }))
-    }
-
-    pub fn auth_manifest_for(&self, config: &Resolved) -> Result<Option<AuthManifest>, Error> {
-        let Some(provider) = self.get(&config.spec.provider.id)? else {
-            return Ok(None);
-        };
-        Ok(provider.manifest()?.wasm_auth_manifest())
-    }
-
-    /// The full auth block (including display guidance) for a single mount's
-    /// provider. Unlike [`auth_manifest_for`](Self::auth_manifest_for), which
-    /// returns the injection-only wire form, this carries the per-scheme setup
-    /// guidance. Loads only this mount's pinned artifact.
-    pub fn provider_auth_manifest_for(
-        &self,
-        config: &Resolved,
-    ) -> Result<Option<ProviderAuthManifest>, Error> {
-        let Some(provider) = self.get(&config.spec.provider.id)? else {
-            return Ok(None);
-        };
-        Ok(provider.manifest()?.auth)
-    }
-
-    /// The serving path for a resolved mount: `by-hash/<hex>.wasm` for its
-    /// pinned [`ProviderId`].
-    #[must_use]
-    pub fn provider_path(&self, config: &Resolved) -> PathBuf {
-        self.provider_path_by_id(&config.spec.provider.id)
-    }
-
-    /// The content-addressed store rooted at this catalog's providers dir.
-    #[must_use]
-    pub fn store(&self) -> ProviderStore {
-        ProviderStore::new(&self.providers_dir)
-    }
-
-    fn provider_from_entry(&self, entry: &IndexEntry) -> Provider {
-        Provider {
-            id: entry.id,
-            meta: ProviderMeta {
-                name: entry.name.clone(),
-                version: entry.version.clone(),
-            },
-            artifact: ProviderArtifact {
-                wasm_path: self.store().by_hash_path(&entry.id),
-            },
-        }
-    }
-
-    /// Resolve a pinned id to its retained artifact. `None` means the artifact is
-    /// not retained (the use site raises `ArtifactMissing`).
-    pub fn get(&self, id: &ProviderId) -> Result<Option<Provider>, Error> {
-        let index = self.store().read_index()?;
-        let Some(entry) = index.providers.iter().find(|entry| &entry.id == id) else {
-            return Ok(None);
-        };
-        let provider = self.provider_from_entry(entry);
-        Ok(provider.wasm_path().exists().then_some(provider))
-    }
-
-    /// The most recently installed artifact for a name. Init and upgrade only,
-    /// never serving.
-    pub fn latest_by_name(&self, name: &ProviderName) -> Result<Option<Provider>, Error> {
-        let index = self.store().read_index()?;
-        let Some(id) = index.latest.get(name.as_str()) else {
-            return Ok(None);
-        };
-        Ok(index
-            .providers
-            .iter()
-            .find(|entry| &entry.id == id)
-            .map(|entry| self.provider_from_entry(entry)))
-    }
-
-    /// All installed providers (picker / `omnifs init` listing).
-    pub fn list(&self) -> Result<Vec<Provider>, Error> {
-        let index = self.store().read_index()?;
-        Ok(index
-            .providers
-            .iter()
-            .map(|entry| self.provider_from_entry(entry))
-            .collect())
-    }
-
-    /// `by-hash/<hex>.wasm` for a pinned id (the serving path).
-    #[must_use]
-    pub fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
-        self.store().by_hash_path(id)
-    }
-
-    /// The host-internal archive tool, installed flat (never in by-hash/index).
-    #[must_use]
-    pub fn archive_tool_path(&self, file: &str) -> PathBuf {
-        self.providers_dir.join(file)
-    }
-}
-
-/// A retained provider artifact resolved from the store: content id, catalog/UI
-/// meta, and a lazily-read handle to the by-hash WASM.
-#[derive(Debug, Clone)]
-pub struct Provider {
-    pub id: ProviderId,
-    pub meta: ProviderMeta,
-    artifact: ProviderArtifact,
-}
-
-#[derive(Debug, Clone)]
-struct ProviderArtifact {
-    wasm_path: PathBuf,
-}
-
-impl Provider {
-    /// The pinned reference the CLI writes into a mount spec.
-    #[must_use]
-    pub fn reference(&self) -> ProviderRef {
-        ProviderRef {
-            id: self.id,
-            meta: self.meta.clone(),
-        }
-    }
-
-    /// `by-hash/<hex>.wasm` path of this artifact.
-    #[must_use]
-    pub fn wasm_path(&self) -> &Path {
-        &self.artifact.wasm_path
-    }
-
-    /// The provider manifest embedded in the artifact's metadata section.
-    pub fn manifest(&self) -> Result<ProviderManifest, Error> {
-        read_provider_metadata_file(&self.artifact.wasm_path)?.ok_or_else(|| {
-            Error::MissingProviderMetadata {
-                path: self.artifact.wasm_path.clone(),
-            }
-        })
-    }
-}
-
-/// Resolve a raw [`Spec`] against the provider index: fill manifest defaults
-/// into unset fields and attach the provider name slug, yielding a [`Resolved`].
+/// Resolve a raw [`Spec`] against the provider [`Catalog`]: fill manifest
+/// defaults into unset fields and attach the provider name slug, yielding a
+/// [`Resolved`].
 ///
 /// `require_metadata` selects strict (the pinned artifact must be retained, so
 /// its manifest can hydrate the spec; serving and auth paths) versus best-effort
 /// (skip hydration when the artifact is gone; delete/reset/ls display paths).
 ///
-/// This is the explicit join. It belongs to neither catalog: it is the point
-/// where a held `&Catalog` and a `&Spec` meet, which is also where pinning
-/// already forces the two together. [`materialize`](crate::materialize::materialize)
-/// is the deeper join that additionally extracts capability needs and rewrites
-/// preopens.
+/// This is the explicit join. It belongs to neither the provider catalog nor the
+/// spec [`Registry`]: it is the point where a held `&Catalog` and a `&Spec` meet,
+/// which is also where pinning already forces the two together.
+/// [`materialize`](crate::materialize::materialize) is the deeper join that
+/// additionally extracts capability needs and rewrites preopens.
 pub fn resolve(catalog: &Catalog, spec: &Spec, require_metadata: bool) -> Result<Resolved, Error> {
     let mut config = spec.clone();
     // Best-effort for delete/reset paths; strict when metadata is required.
-    let applied = catalog.apply_metadata(&mut config);
+    let applied = apply_metadata(catalog, &mut config);
     if require_metadata {
         applied?;
     }
     config.into_resolved(None).map_err(Error::Resolve)
+}
+
+/// Fill the pinned manifest's auth-scheme and config defaults into `spec`,
+/// loading the artifact once. Returns whether the artifact was retained; `false`
+/// leaves the spec unhydrated (best-effort delete/reset/display paths).
+pub fn apply_metadata(catalog: &Catalog, spec: &mut Spec) -> Result<bool, Error> {
+    let Some(provider) = catalog.get(&spec.provider.id)? else {
+        return Ok(false);
+    };
+    let manifest = provider.manifest()?;
+    spec.apply_provider_metadata(&manifest)
+        .map_err(|source| Error::ApplyProviderMetadata {
+            path: provider.wasm_path().to_path_buf(),
+            source,
+        })?;
+    Ok(true)
+}
+
+/// Apply the pinned manifest's metadata to `spec` and return what materialization
+/// checks against it, loading the artifact once. `None` when the artifact is not
+/// retained (metadata is not applied and the checks are skipped; the
+/// missing-artifact error surfaces elsewhere).
+pub fn apply_metadata_and_needs(
+    catalog: &Catalog,
+    spec: &mut Spec,
+) -> Result<Option<AppliedMetadata>, Error> {
+    let Some(provider) = catalog.get(&spec.provider.id)? else {
+        return Ok(None);
+    };
+    let manifest = provider.manifest()?;
+    spec.apply_provider_metadata(&manifest)
+        .map_err(|source| Error::ApplyProviderMetadata {
+            path: provider.wasm_path().to_path_buf(),
+            source,
+        })?;
+    let config_schema = manifest
+        .config_schema
+        .as_ref()
+        .map(omnifs_provider::ConfigSchema::parse)
+        .transpose()
+        .map_err(|source| Error::ExtractProviderMetadata {
+            path: provider.wasm_path().to_path_buf(),
+            source,
+        })?;
+    Ok(Some(AppliedMetadata {
+        needs: manifest.capabilities,
+        config_schema,
+    }))
+}
+
+/// The injection-only auth manifest for a resolved mount's pinned provider.
+pub fn auth_manifest_for(
+    catalog: &Catalog,
+    config: &Resolved,
+) -> Result<Option<AuthManifest>, Error> {
+    let Some(provider) = catalog.get(&config.spec.provider.id)? else {
+        return Ok(None);
+    };
+    Ok(provider.manifest()?.wasm_auth_manifest())
+}
+
+/// The full auth block (including display guidance) for a resolved mount's
+/// provider. Unlike [`auth_manifest_for`], which returns the injection-only wire
+/// form, this carries the per-scheme setup guidance.
+pub fn provider_auth_manifest_for(
+    catalog: &Catalog,
+    config: &Resolved,
+) -> Result<Option<ProviderAuthManifest>, Error> {
+    let Some(provider) = catalog.get(&config.spec.provider.id)? else {
+        return Ok(None);
+    };
+    Ok(provider.manifest()?.auth)
 }
 
 /// In-memory mirror of the on-disk mount-spec directory, and the sole owner of
@@ -645,18 +477,6 @@ fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(),
     })
 }
 
-fn load_spec(path: &Path) -> Result<Spec, Error> {
-    let config = Spec::from_file(path)?;
-    if let Err(source) = mount::Name::new(config.mount.clone()) {
-        return Err(Error::MountName {
-            path: path.to_path_buf(),
-            mount: config.mount.clone(),
-            source,
-        });
-    }
-    Ok(config)
-}
-
 pub fn spec_paths_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
@@ -676,28 +496,10 @@ pub fn spec_paths_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn read_provider_metadata_file(path: &Path) -> Result<Option<ProviderManifest>, Error> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::ReadProviderMetadata {
-                path: path.to_path_buf(),
-                source,
-            });
-        },
-    };
-    omnifs_provider::read_provider_metadata_section(&bytes).map_err(|source| {
-        Error::ExtractProviderMetadata {
-            path: path.to_path_buf(),
-            source,
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
 
     fn linear_manifest() -> omnifs_provider::ProviderManifest {
         provider_manifest_from_wasm("omnifs_provider_linear.wasm")
@@ -711,9 +513,14 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/wasm32-wasip2/release")
             .join(file);
-        read_provider_metadata_file(&path)
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|source| panic!("read provider wasm {}: {source}", path.display()));
+        omnifs_provider::read_provider_metadata_section(&bytes)
             .unwrap_or_else(|source| {
-                panic!("read provider metadata from {}: {source}", path.display())
+                panic!(
+                    "extract provider metadata from {}: {source}",
+                    path.display()
+                )
             })
             .unwrap_or_else(|| {
                 panic!(
@@ -786,13 +593,21 @@ mod tests {
     #[test]
     fn loader_rejects_invalid_mount_name_in_file() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("bad.json");
-        let spec = spec_with_provider("p", r#"{ "mount": "Bad-Name", "config": {} }"#);
-        std::fs::write(&path, serde_json::to_string(&spec).unwrap()).expect("write config");
+        write_spec(
+            dir.path(),
+            "bad.json",
+            &spec_with_provider("p", r#"{ "mount": "Bad-Name", "config": {} }"#),
+        );
 
-        let catalog = Catalog::new(dir.path(), dir.path());
-        let error = catalog.load_spec(&path).expect_err("invalid mount name");
-        assert!(matches!(error, Error::MountName { .. }));
+        let registry = Registry::load(dir.path()).expect("scan succeeds");
+        assert!(
+            registry.iter().next().is_none(),
+            "an invalid-name spec is never served"
+        );
+        assert!(matches!(
+            registry.failures().first().map(|failure| &failure.error),
+            Some(Error::MountName { .. })
+        ));
     }
 
     fn write_spec(dir: &Path, file: &str, spec: &Spec) {

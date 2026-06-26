@@ -9,7 +9,8 @@ use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAUL
 use crate::{Artifact, BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
 use omnifs_mount::materialize::{MaterializationMode, materialize};
-use omnifs_mount::mounts::{Catalog, Registry, Resolved, Spec};
+use omnifs_mount::mounts::{Registry, Resolved, Spec};
+use omnifs_provider::Catalog;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -399,7 +400,7 @@ struct ReconcilePass<'a> {
     registry: &'a Arc<ProviderRegistry>,
     handle: &'a tokio::runtime::Handle,
     mode: MaterializationMode,
-    catalog: Catalog,
+    providers: Catalog,
     desired: HashSet<String>,
     outcome: ReconcileOutcome,
     started: Instant,
@@ -415,10 +416,7 @@ impl<'a> ReconcilePass<'a> {
             registry,
             handle,
             mode,
-            catalog: Catalog::new(
-                registry.context.mounts_dir(),
-                registry.context.providers_dir(),
-            ),
+            providers: Catalog::open(registry.context.providers_dir()),
             desired: HashSet::new(),
             outcome: ReconcileOutcome::default(),
             started: Instant::now(),
@@ -429,11 +427,11 @@ impl<'a> ReconcilePass<'a> {
         // Desired state is read fresh from disk each pass through the shared
         // mount Registry; the reconcile_lock serializes passes so this snapshot
         // is coherent for the duration of the pass.
-        let registry = match Registry::load(self.catalog.mounts_dir()) {
+        let registry = match Registry::load(self.registry.context.mounts_dir()) {
             Ok(registry) => registry,
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
-                    mount: self.catalog.mounts_dir().display().to_string(),
+                    mount: self.registry.context.mounts_dir().display().to_string(),
                     reason: format!("scan mounts dir: {error}"),
                 });
                 return self.outcome;
@@ -482,7 +480,7 @@ impl<'a> ReconcilePass<'a> {
     /// `LoadWork` only for mounts that must be (re)compiled. `path` is the
     /// spec's on-disk file, used only for failure messages.
     fn plan_spec(&mut self, spec: Spec, path: &Path) -> Option<LoadWork> {
-        let materialized = match materialize(spec, &self.catalog, self.mode) {
+        let materialized = match materialize(spec, &self.providers, self.mode) {
             Ok(materialized) => materialized.into_spec(),
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
@@ -760,7 +758,8 @@ mod tests {
     use crate::tools::archive::ARCHIVE_TOOL_WASM;
     use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
     use omnifs_mount::materialize::MaterializationMode;
-    use omnifs_mount::mounts::{ProviderStore, Spec};
+    use omnifs_mount::mounts::Spec;
+    use omnifs_provider::ProviderStore;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 

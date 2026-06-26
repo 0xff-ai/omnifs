@@ -15,9 +15,9 @@
 use std::path::{Path, PathBuf};
 
 use omnifs_caps::{Grant, PreopenMode};
-use omnifs_provider::{ConfigSchema, HostResourceKind};
+use omnifs_provider::{Catalog, ConfigSchema, HostResourceKind};
 
-use crate::mounts::{Catalog, Error as MountError, Spec};
+use crate::mounts::{Error as MountError, Spec, apply_metadata_and_needs};
 
 /// Guest directory each container preopen is rewritten under, as
 /// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
@@ -168,9 +168,8 @@ pub fn materialize(
     // under-granted mount fails here rather than at the provider's first denied
     // callout. Over-granting beyond the manifest is allowed; the over-grant
     // check is deliberately not enforced (docs/future/provider-contract-versioning.md).
-    if let Some(applied) = catalog
-        .apply_metadata_and_needs(&mut spec)
-        .map_err(MaterializeError::Metadata)?
+    if let Some(applied) =
+        apply_metadata_and_needs(catalog, &mut spec).map_err(MaterializeError::Metadata)?
     {
         let missing = spec
             .capabilities
@@ -384,10 +383,10 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    /// A catalog over empty dirs. `apply_metadata` finds no retained artifact and
-    /// returns `Ok(false)`, leaving the user-authored spec fields as-is.
+    /// A catalog over an empty providers dir. `apply_metadata` finds no retained
+    /// artifact and returns `Ok(false)`, leaving the user-authored spec as-is.
     fn builtin_catalog(root: &std::path::Path) -> Catalog {
-        Catalog::new(root.join("mounts"), root.join("providers"))
+        Catalog::open(root.join("providers"))
     }
 
     #[test]

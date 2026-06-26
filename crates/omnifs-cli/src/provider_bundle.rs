@@ -12,7 +12,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
-use omnifs_mount::mounts::ProviderStore;
+use omnifs_provider::ProviderStore;
 
 const ARCHIVE_TOOL_WASM: &str = "omnifs_tool_archive.wasm";
 const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];

@@ -24,6 +24,7 @@ getrandom = "0.3"
 
 [dev-dependencies]
 omnifs-mount = { workspace = true }
+omnifs-provider = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

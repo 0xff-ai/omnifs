@@ -22,8 +22,9 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use omnifs_core::ProviderRef;
-use omnifs_mount::mounts::{Catalog, Registry, Spec};
+use omnifs_mount::mounts::{Registry, Spec};
 use omnifs_mount::{ProviderConfig, UpgradePlan};
+use omnifs_provider::Catalog;
 
 use crate::session::MountConfig;
 
@@ -31,11 +32,10 @@ use crate::session::MountConfig;
 /// in-place and warning (without blocking the other mounts) on any per-mount
 /// problem. Returns the names of the mounts that were auto-migrated.
 pub(crate) fn run_upgrade_check(
-    mounts_dir: &Path,
     providers_dir: &Path,
     configs: &[MountConfig],
 ) -> anyhow::Result<Vec<String>> {
-    let catalog = Catalog::new(mounts_dir, providers_dir);
+    let catalog = Catalog::open(providers_dir);
     let mut migrated = Vec::new();
 
     for config in configs {

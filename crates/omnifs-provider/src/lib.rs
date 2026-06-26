@@ -12,11 +12,13 @@
 
 mod auth_resolve;
 mod auth_wire;
+mod catalog;
 mod config;
 mod manifest;
 mod records;
 mod resolve;
 mod sections;
+mod store;
 mod validation;
 mod wasm;
 
@@ -26,6 +28,7 @@ pub use auth_wire::{
     OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
     TokenEndpointAuthMethod, TokenValidation,
 };
+pub use catalog::{Catalog, CatalogError, Provider};
 pub use config::{ConfigProperty, ConfigSchema, ConfigSchemaType, HostResource, HostResourceKind};
 pub use manifest::{
     AuthInject, BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest,
@@ -41,5 +44,6 @@ pub use sections::{
     ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,
     read_manifest_section, read_provider_metadata_section,
 };
+pub use store::{Index, IndexEntry, ProviderStore, StoreError};
 pub use validation::{SchemaError, validate_config};
 pub use wasm::{ProviderWasm, ProviderWasmError};
