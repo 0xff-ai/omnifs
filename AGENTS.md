@@ -74,8 +74,8 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-core`: path, content type, auth, mount, provider, and view primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
-- `crates/omnifs-provider`: provider manifests, config schemas, validation, resolution, and WASM metadata.
-- `crates/omnifs-mount`: mount specs, config materialization, resolved mount data, and mount storage.
+- `crates/omnifs-provider`: provider manifests, config schemas, validation, the provider index over the content-addressed store, and WASM metadata.
+- `crates/omnifs-mount`: the mount-spec registry (sole owner of on-disk specs), spec resolution against the provider index, config materialization, and resolved mount data.
 - `crates/omnifs-host`: trusted runtime, callouts, auth, namespace, cache access, pagination, and archive execution.
 - `crates/omnifs-tree`: shared projection semantics consumed by every frontend.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
@@ -114,6 +114,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`.
 - The CLI owns setup, credentials, lifecycle, and user-facing commands. It talks to the daemon through the REST API and the on-disk workspace under `OMNIFS_HOME`.
 - The REST API schema lives in `omnifs-api`. Credentials are never transmitted on the wire.
+- Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. `mount::Registry` (in `omnifs-mount`) is the sole spec owner: the CLI is the only author and writes through it atomically, the daemon reads through it on reconcile. `provider::Catalog` (in `omnifs-provider`) is the provider index over the content-addressed store. Resolving a spec is the free `resolve(&provider::Catalog, &Spec, ...)` join that hydrates it with its provider manifest.
 - Runtime modes are host-native and Docker. Docker runs the Linux daemon and exposes FUSE inside the container.
 - Linux defaults to FUSE. macOS defaults to read-only NFSv4.0 loopback through `omnifs-nfs`.
 - `omnifs dev` is the contributor runtime: it builds or copies provider WASM, starts profile-selected fixtures, launches the FUSE runtime container, and opens a shell at `/omnifs`.

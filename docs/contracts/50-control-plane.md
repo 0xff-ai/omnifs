@@ -17,7 +17,9 @@ The daemon exposes a REST API whose schema lives in `omnifs-api` and whose check
 
 ### Mount delivery
 
-Current mount delivery is disk reconcile. CLI commands write specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`.
+Current mount delivery is disk reconcile. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`.
+
+Specs are one file per mount, and a spec file's stem is its mount name: `mount::Registry` (in `omnifs-mount`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. Resolving a spec is a read-only join against the provider index (`resolve(&provider::Catalog, &Spec, ...)`), owned by neither catalog.
 
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 
@@ -40,6 +42,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 ## Must not
 
 - Claim mount specs are POSTed over the control API today.
+- Add a second spec read or write path that bypasses `mount::Registry`, or write a spec to a file whose stem is not its mount name.
 - Add more direct workspace coupling when a REST API extension fits.
 - Infer launch backend only from config when daemon status or launch records identify the running backend.
 - Hand-edit `crates/omnifs-api/openapi/daemon.json`.
@@ -57,6 +60,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/server.rs`
 - `crates/omnifs-cli/src/live.rs`
+- `crates/omnifs-mount/src/mounts/mod.rs`
 - `crates/omnifs-cli/src/launch.rs`
 - `crates/omnifs-cli/src/runtime.rs`
 - `crates/omnifs-cli/src/dev_support.rs`
