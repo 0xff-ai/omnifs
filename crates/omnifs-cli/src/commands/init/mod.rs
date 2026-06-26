@@ -7,7 +7,7 @@
 
 mod auth_import;
 mod config_generation;
-pub mod detect;
+mod detect;
 mod mount_file;
 mod provider_selection;
 mod token_validation;

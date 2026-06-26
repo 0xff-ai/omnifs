@@ -19,7 +19,7 @@ pub(crate) fn capability_value(entry: &Need) -> String {
         Need::Domain { value, .. }
         | Need::GitRepo { value, .. }
         | Need::UnixSocket { value, .. } => value.clone(),
-        Need::PreopenedPath { value, .. } => preopen_summary(std::slice::from_ref(value)),
+        Need::PreopenedPath { value, .. } => preopen_summary(value),
         Need::MemoryMb { value, .. } => format!("{value} MiB"),
         Need::FetchBlobBytes { value, .. } | Need::ReadBlobBytes { value, .. } => value.to_string(),
     };
@@ -30,16 +30,10 @@ pub(crate) fn capability_value(entry: &Need) -> String {
     }
 }
 
-fn preopen_summary(entries: &[PreopenedPath]) -> String {
-    entries
-        .iter()
-        .map(|entry| {
-            let mode = match entry.mode {
-                PreopenMode::Ro => "ro",
-                PreopenMode::Rw => "rw",
-            };
-            format!("{} -> {} ({mode})", entry.host, entry.guest)
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+fn preopen_summary(entry: &PreopenedPath) -> String {
+    let mode = match entry.mode {
+        PreopenMode::Ro => "ro",
+        PreopenMode::Rw => "rw",
+    };
+    format!("{} -> {} ({mode})", entry.host, entry.guest)
 }

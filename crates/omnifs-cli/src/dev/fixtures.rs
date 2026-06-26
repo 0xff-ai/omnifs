@@ -11,12 +11,6 @@ const K8S_COMPOSE_PROJECT: &str = "omnifs-devcluster";
 const GUEST_DB_DIR: &str = "/data";
 const GUEST_SOCK_DIR: &str = "/run/omnifs";
 
-/// Host bind strings to layer onto the omnifs runtime container.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FixtureBinds {
-    pub(crate) binds: Vec<String>,
-}
-
 /// Running fixture containers. Teardown is explicit via [`FixtureSession::down`]
 /// or [`DevSessionRecord::teardown_all`]; detached sessions keep fixtures alive
 /// until `omnifs down`.
@@ -33,11 +27,11 @@ impl FixtureSession {
         profile_mounts: &[String],
         dev_home: &Path,
         workspace: &Path,
-    ) -> Result<(Self, FixtureBinds)> {
+    ) -> Result<(Self, Vec<String>)> {
         let wants_db = profile_mounts.iter().any(|name| name == "db");
         let wants_k8s = profile_mounts.iter().any(|name| name == "k8s");
 
-        let mut binds = FixtureBinds::default();
+        let mut binds: Vec<String> = Vec::new();
         let mut db_container_id = None;
         let mut k8s = false;
         let mut k8s_sock_dir = None;
@@ -47,9 +41,7 @@ impl FixtureSession {
             std::fs::create_dir_all(&db_dir)
                 .with_context(|| format!("create {}", db_dir.display()))?;
             db_container_id = Some(start_db_fixture(workspace, &db_dir)?);
-            binds
-                .binds
-                .push(format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()));
+            binds.push(format!("{}:{GUEST_DB_DIR}:ro", db_dir.display()));
         }
 
         if wants_k8s {
@@ -59,9 +51,7 @@ impl FixtureSession {
             start_k8s_fixture(workspace, &sock_dir)?;
             k8s = true;
             k8s_sock_dir = Some(sock_dir.clone());
-            binds
-                .binds
-                .push(format!("{}:{GUEST_SOCK_DIR}", sock_dir.display()));
+            binds.push(format!("{}:{GUEST_SOCK_DIR}", sock_dir.display()));
         }
 
         Ok((
@@ -100,6 +90,16 @@ impl FixtureSession {
             remove_container(container_id, "db fixture container")?;
         }
         Ok(())
+    }
+}
+
+/// Remove `dev_home/<name>` if present, tolerating an already-absent file.
+fn remove_file_if_present(dev_home: &Path, name: &str) -> Result<()> {
+    let path = dev_home.join(name);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
 }
 
@@ -267,21 +267,11 @@ impl DevSessionRecord {
     }
 
     pub(crate) fn clear(dev_home: &Path) -> Result<()> {
-        let path = dev_home.join("session.json");
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
-        }
+        remove_file_if_present(dev_home, "session.json")
     }
 
     pub(crate) fn clear_launch_record(dev_home: &Path) -> Result<()> {
-        let path = dev_home.join("launch.json");
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
-        }
+        remove_file_if_present(dev_home, "launch.json")
     }
 
     /// Full dev session teardown: runtime container, fixtures, session and launch records.

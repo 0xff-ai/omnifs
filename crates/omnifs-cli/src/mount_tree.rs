@@ -19,12 +19,8 @@ pub struct Views {
 }
 
 impl Views {
-    pub fn any_set(&self) -> bool {
-        self.tree || self.paths || self.by_type
-    }
-
     pub fn with_defaults(self) -> Self {
-        if self.any_set() {
+        if self.tree || self.paths || self.by_type {
             self
         } else {
             Self {
@@ -62,13 +58,9 @@ impl MountTreeData {
     }
 }
 
-fn load_provider_wasm(path: &Path) -> Result<mts::ProviderWasm> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(mts::ProviderWasm::from_bytes(bytes))
-}
-
 pub fn read_from_wasm(path: &Path) -> Result<MountTreeData> {
-    let wasm = load_provider_wasm(path)?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let wasm = mts::ProviderWasm::from_bytes(bytes);
 
     let section_bytes = wasm
         .manifest_section()
@@ -139,9 +131,14 @@ fn path_tail(path: &str) -> &str {
     }
 }
 
-fn render_tree(data: &MountTreeData) -> String {
+fn sorted_handlers(data: &MountTreeData) -> Vec<&mts::HandlerRecord> {
     let mut handlers: Vec<&mts::HandlerRecord> = data.handlers.iter().collect();
     handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
+    handlers
+}
+
+fn render_tree(data: &MountTreeData) -> String {
+    let handlers = sorted_handlers(data);
 
     let mut body = String::new();
     for handler in &handlers {
@@ -159,8 +156,7 @@ fn render_tree(data: &MountTreeData) -> String {
 }
 
 fn render_paths(data: &MountTreeData) -> String {
-    let mut handlers: Vec<&mts::HandlerRecord> = data.handlers.iter().collect();
-    handlers.sort_by(|left, right| left.path_template.cmp(&right.path_template));
+    let handlers = sorted_handlers(data);
 
     let col_width = handlers
         .iter()

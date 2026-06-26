@@ -29,7 +29,7 @@ use crate::session::{
 use crate::workspace::Workspace;
 
 pub(crate) use fixtures::DevSessionRecord;
-use fixtures::{DevSessionFixtures, FixtureBinds, FixtureSession};
+use fixtures::{DevSessionFixtures, FixtureSession};
 
 #[derive(Args, Debug, Clone)]
 pub struct DevArgs {
@@ -163,7 +163,7 @@ impl DevArgs {
         image: &str,
         container_name: &str,
         discovered_mounts: Vec<discover::DiscoveredMount>,
-        fixture_binds: FixtureBinds,
+        fixture_binds: Vec<String>,
     ) -> Result<()> {
         if self.image.is_none() {
             build_image(workspace.path(), image)?;
@@ -197,7 +197,7 @@ impl DevArgs {
                 store,
                 verb: "omnifs dev",
                 configs,
-                extra_binds: fixture_binds.binds,
+                extra_binds: fixture_binds,
             },
             workspace_home.catalog(),
         )

@@ -46,15 +46,6 @@ enum RecordedBackend {
     },
 }
 
-impl RecordedBackend {
-    fn mode_label(&self) -> &'static str {
-        match self {
-            Self::Native { .. } => "native",
-            Self::Docker { .. } => "container",
-        }
-    }
-}
-
 impl LaunchRecord {
     /// Build a record from launch params. `daemon_pid` is the PID of the
     /// spawned daemon on the native path; pass `None` for Docker.
@@ -150,7 +141,10 @@ impl LaunchRecord {
     /// Human label for the backend the daemon was launched with, read straight
     /// from the run-state file so callers learn the mode without probing.
     pub(crate) fn mode_label(&self) -> &'static str {
-        self.backend.mode_label()
+        match self.backend {
+            RecordedBackend::Native { .. } => "native",
+            RecordedBackend::Docker { .. } => "container",
+        }
     }
 
     /// Reconstruct the backend variant from the record so `down`/`reset` can
