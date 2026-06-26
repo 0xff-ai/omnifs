@@ -191,7 +191,7 @@ The manifest (identity, capabilities, config schema, auth) is authored entirely 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
 - `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"), memory_mb(<int>,"why"))` declare capability needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
 - `auth = <expr>` splices a typed `omnifs_sdk::auth::Auth` builder value (covering `StaticToken`, `OAuth` device-code/PKCE/client-side-token flows, and `Validation`) into the manifest auth block.
-- The config schema is derived automatically from `type Config` (via `#[omnifs_sdk::config]`, which now also derives `schemars::JsonSchema`); no manifest argument is needed.
+- The config schema is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which now also derives `schemars::JsonSchema`); no manifest argument is needed.
 - Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file → read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket); their `JsonSchema` emits an `x-omnifs-resource` marker on the property.
 
 The compact auth wire form (the shape serialized into the embedded section) is unchanged from the former JSON file format; it is now produced from Rust builder expressions instead.

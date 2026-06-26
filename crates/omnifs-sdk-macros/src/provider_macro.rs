@@ -257,23 +257,11 @@ enum StartKind {
 }
 
 fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
-    let mut config_type = None;
-    let mut state_type = None;
     let mut start_spec = None;
     let mut methods = Vec::new();
 
     for item in items {
         match item {
-            ImplItem::Type(ty) => match ty.ident.to_string().as_str() {
-                "Config" => config_type = Some(ty.ty),
-                "State" => state_type = Some(ty.ty),
-                _ => {
-                    return Err(syn::Error::new(
-                        ty.ident.span(),
-                        "only `type Config` and `type State` are recognized",
-                    ));
-                },
-            },
             ImplItem::Fn(func) => {
                 if func.sig.ident == "start" {
                     start_spec = Some(classify_start(&func)?);
@@ -283,7 +271,7 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
             other => {
                 return Err(syn::Error::new(
                     other.span(),
-                    "unsupported item in #[provider] impl; expected `type` aliases and methods",
+                    "unsupported item in #[provider] impl; expected methods only",
                 ));
             },
         }
@@ -297,12 +285,10 @@ fn classify_impl(items: Vec<ImplItem>) -> syn::Result<ClassifiedImpl> {
     };
 
     Ok(ClassifiedImpl {
-        config_type: config_type
-            .or(start_spec.config_type)
+        config_type: start_spec
+            .config_type
             .unwrap_or_else(|| parse_quote!(omnifs_sdk::NoConfig)),
-        state_type: state_type
-            .or(start_spec.state_type)
-            .unwrap_or_else(|| parse_quote!(())),
+        state_type: start_spec.state_type.unwrap_or_else(|| parse_quote!(())),
         start_kind: start_spec.kind,
         methods,
     })
