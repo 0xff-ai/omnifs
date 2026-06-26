@@ -7,9 +7,9 @@
 use anyhow::Context as _;
 use omnifs_home::{Cli as CliRole, Workspace as HomeWorkspace, WorkspaceLayout};
 use omnifs_mount::mounts::Registry;
+use omnifs_provider::Catalog;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::ProviderCatalog;
 use crate::client::DaemonClient;
 use crate::config::Config;
 use crate::credential_target::CredentialTarget;
@@ -18,7 +18,7 @@ use crate::session::MountConfig;
 /// Resolved local omnifs home for one CLI command.
 pub(crate) struct Workspace {
     home: HomeWorkspace<CliRole>,
-    catalog: ProviderCatalog,
+    catalog: Catalog,
     daemon: DaemonClient,
 }
 
@@ -40,7 +40,7 @@ impl Workspace {
     }
 
     pub(crate) fn from_home(home: HomeWorkspace<CliRole>) -> Self {
-        let catalog = ProviderCatalog::for_providers(home.providers_dir());
+        let catalog = Catalog::open(home.providers_dir());
         let daemon = DaemonClient::new();
         Self {
             home,
@@ -57,7 +57,7 @@ impl Workspace {
         Config::load(self.home.config_file())
     }
 
-    pub(crate) fn catalog(&self) -> &ProviderCatalog {
+    pub(crate) fn catalog(&self) -> &Catalog {
         &self.catalog
     }
 
@@ -105,7 +105,7 @@ impl Workspace {
                 continue;
             };
             let credential = match MountSpec::from_file(&path) {
-                Ok(spec) => match self.catalog.resolve_mount_spec(&spec, false) {
+                Ok(spec) => match crate::catalog::resolve_mount_spec(&self.catalog, &spec, false) {
                     Ok(resolved) => CredentialTarget::for_mount(&resolved),
                     Err(error) => {
                         tracing::warn!(

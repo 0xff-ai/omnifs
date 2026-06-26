@@ -7,12 +7,12 @@ use std::path::Path;
 use omnifs_creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
-use crate::catalog::{ProviderCatalog, ProviderDirStatus};
 use crate::launch_backend::{DockerTarget, ImageRef};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
 use omnifs_home::WorkspaceLayout;
+use omnifs_provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}
@@ -86,7 +86,7 @@ impl ProbeResult {
 
 pub async fn run(
     paths: &WorkspaceLayout,
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: Vec<crate::session::MountConfig>,
     docker_target: Result<DockerTarget, String>,
 ) -> anyhow::Result<DoctorVerdict> {
@@ -191,15 +191,15 @@ async fn probe_image_cached(runtime: &Runtime, image: &ImageRef) -> ProbeResult 
     }
 }
 
-fn probe_providers_discovered(catalog: &ProviderCatalog) -> ProbeResult {
-    match catalog.provider_dir_status() {
-        ProviderDirStatus::Present { wasm_count } if wasm_count > 0 => {
+fn probe_providers_discovered(catalog: &Catalog) -> ProbeResult {
+    match catalog.dir_status() {
+        DirStatus::Present { wasm_count } if wasm_count > 0 => {
             ProbeResult::Ok(format!("{wasm_count} provider(s) installed"))
         },
-        ProviderDirStatus::Missing | ProviderDirStatus::Present { .. } => {
+        DirStatus::Missing | DirStatus::Present { .. } => {
             ProbeResult::Warn("no providers installed (run `omnifs up` or `omnifs setup`)".into())
         },
-        ProviderDirStatus::Unreadable(error) => {
+        DirStatus::Unreadable(error) => {
             ProbeResult::Err(format!("provider store unreadable: {error}"))
         },
     }
@@ -256,11 +256,11 @@ fn probe_result_from_summary(summary: AuthProbeSummary) -> ProbeResult {
 
 fn probe_mount_configs(
     paths: &WorkspaceLayout,
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: Vec<crate::session::MountConfig>,
 ) -> (ProbeResult, Vec<(String, ProbeResult)>) {
     let store = FileStore::new(&paths.credentials_file);
-    let mounts = catalog.scan_user_mount_configs(mounts, &store);
+    let mounts = crate::mount_report::scan_user_mount_configs(catalog, mounts, &store);
     let invalid: Vec<_> = mounts
         .iter()
         .filter_map(|m| match m {

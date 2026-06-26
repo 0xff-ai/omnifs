@@ -16,7 +16,6 @@ use omnifs_mount::mounts::{Registry, Spec};
 use tokio::signal;
 
 use crate::auth::AuthSelection;
-use crate::catalog::ProviderTemplates;
 use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_support::{DevImageTag, WorkspaceRoot, contributor_layout};
 use crate::launch::{LaunchSpec, launch_runtime};
@@ -27,6 +26,7 @@ use crate::session::{
     set_private_dir,
 };
 use crate::workspace::Workspace;
+use omnifs_provider::{Provider, ProviderManifest};
 
 pub(crate) use fixtures::DevSessionRecord;
 use fixtures::{DevSessionFixtures, FixtureSession};
@@ -184,9 +184,9 @@ impl DevArgs {
             provider_bundle::install_target_bundle(workspace.path(), &layout.providers_dir)?;
         }
 
-        let templates = workspace_home.catalog().provider_templates()?;
-        let pinned = pin_dev_mounts(discovered_mounts, &templates)?;
-        let configs = provision_dev_mounts(pinned, &templates, &layout.credentials_file).await?;
+        let installed = crate::catalog::installed_providers(workspace_home.catalog())?;
+        let pinned = pin_dev_mounts(discovered_mounts, &installed)?;
+        let configs = provision_dev_mounts(pinned, &installed, &layout.credentials_file).await?;
         write_dev_mounts(&layout.mounts_dir, &configs)?;
 
         let store = Box::new(FileStore::new(&layout.credentials_file));
@@ -280,11 +280,11 @@ async fn run_container_shell(container_name: &str) -> Result<()> {
 /// deserialization. A mount whose provider is not installed is skipped.
 fn pin_dev_mounts(
     discovered: Vec<discover::DiscoveredMount>,
-    templates: &ProviderTemplates,
+    installed: &[(Provider, ProviderManifest)],
 ) -> Result<Vec<MountConfig>> {
     let mut configs = Vec::new();
     for mount in discovered {
-        let Some(template) = templates.by_id(&mount.provider_name) else {
+        let Some((provider, manifest)) = find_installed(installed, &mount.provider_name) else {
             anstream::eprintln!(
                 "  ! dev mount `{}` references provider `{}`, which is not installed; skipping",
                 mount.mount_name,
@@ -293,7 +293,7 @@ fn pin_dev_mounts(
             continue;
         };
         let mut value = mount.raw;
-        value["provider"] = serde_json::to_value(&template.reference)
+        value["provider"] = serde_json::to_value(provider.reference())
             .context("serialize pinned provider reference")?;
         let mut spec: Spec = serde_json::from_value(value)
             .with_context(|| format!("resolve dev mount `{}`", mount.mount_name))?;
@@ -302,8 +302,8 @@ fn pin_dev_mounts(
         // own grants or the host's required-capabilities check rejects it at
         // materialize time. An explicit grant authored in the dev `mount.json`
         // wins.
-        if spec.capabilities.is_none() && !template.manifest.capabilities.is_empty() {
-            spec.capabilities = Some(template.manifest.provider_capabilities());
+        if spec.capabilities.is_none() && !manifest.capabilities.is_empty() {
+            spec.capabilities = Some(manifest.provider_capabilities());
         }
         let source = PathBuf::from(format!("{}.json", mount.mount_name));
         configs.push(MountConfig::from_parsed(spec, source)?);
@@ -311,15 +311,25 @@ fn pin_dev_mounts(
     Ok(configs)
 }
 
+/// Find an installed provider by its name slug.
+fn find_installed<'a>(
+    installed: &'a [(Provider, ProviderManifest)],
+    name: &str,
+) -> Option<&'a (Provider, ProviderManifest)> {
+    installed
+        .iter()
+        .find(|(provider, _)| provider.meta.name.as_str() == name)
+}
+
 async fn provision_dev_mounts(
     configs: Vec<MountConfig>,
-    templates: &ProviderTemplates,
+    installed: &[(Provider, ProviderManifest)],
     credentials_file: &Path,
 ) -> Result<Vec<MountConfig>> {
     let mut ready = Vec::new();
     for config in configs {
         let provider_name = config.config.provider.meta.name.clone();
-        let Some(template) = templates.by_id(provider_name.as_str()) else {
+        let Some((_, manifest)) = find_installed(installed, provider_name.as_str()) else {
             anstream::eprintln!(
                 "  ! mount `{}` references unknown provider `{}`; skipping",
                 config.name,
@@ -328,15 +338,16 @@ async fn provision_dev_mounts(
             continue;
         };
 
-        let default_auth = AuthSelection::from_provider_default(&template.manifest);
+        let default_auth = AuthSelection::from_provider_default(manifest);
         if default_auth.is_none() {
             ready.push(config);
             continue;
         }
 
+        let auth_manifest = manifest.wasm_auth_manifest();
         let outcome = AuthImportDecision::new(
             default_auth,
-            template.auth_manifest.as_ref(),
+            auth_manifest.as_ref(),
             provider_name.as_str(),
             true,
             true,
@@ -345,7 +356,7 @@ async fn provision_dev_mounts(
 
         if let (Some(auth), Some(token)) = (outcome.auth, outcome.token) {
             run_static_token_init(
-                &template.manifest,
+                manifest,
                 &auth,
                 token,
                 credentials_file,

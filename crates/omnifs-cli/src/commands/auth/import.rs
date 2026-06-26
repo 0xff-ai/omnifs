@@ -7,17 +7,17 @@ use secrecy::SecretString;
 use time::OffsetDateTime;
 
 use crate::auth::format_rfc3339;
-use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
+use omnifs_provider::Catalog;
 
 pub(super) async fn refresh(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: &[MountConfig],
     store: Box<dyn CredentialStore>,
     mount: &str,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
+    let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, &[])?;
     let entry = target
         .lookup(store.as_ref())?
@@ -39,13 +39,13 @@ pub(super) async fn refresh(
 }
 
 pub(super) fn scopes(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: &[MountConfig],
     store: &dyn CredentialStore,
     mount: &str,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_auth = catalog.load_mount_auth(mounts, mount)?;
+    let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, &[])?;
     let entry = target.lookup(store)?;
     anstream::println!("declared: {}", request.scheme().default_scopes.join(", "));
@@ -57,7 +57,7 @@ pub(super) fn scopes(
 }
 
 pub(super) fn import_static_token_value(
-    catalog: &ProviderCatalog,
+    catalog: &Catalog,
     mounts: &[MountConfig],
     store: &dyn CredentialStore,
     mount: &str,
@@ -65,7 +65,7 @@ pub(super) fn import_static_token_value(
     scheme: Option<&str>,
     account: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mount_config = catalog.load_mount_auth_tolerating_manifest_errors(mounts, mount)?;
+    let mount_config = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let target = mount_config.static_token_target(scheme, account)?;
     let key = target
         .primary_key()

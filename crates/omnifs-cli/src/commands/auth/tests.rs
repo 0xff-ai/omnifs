@@ -1,12 +1,12 @@
 use super::import::import_static_token_value;
 use super::login::manual_code_from_input;
 use super::status::status;
-use crate::catalog::ProviderCatalog;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
 use omnifs_core::{CredentialId, ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_creds::{CredentialStore, MemoryStore};
 use omnifs_home::WorkspaceLayout;
+use omnifs_provider::Catalog;
 use omnifs_provider::ProviderStore;
 use omnifs_provider::{AuthManifest, AuthScheme, OAuthFlow, OauthScheme, StaticTokenScheme};
 use secrecy::{ExposeSecret, SecretString};
@@ -31,7 +31,7 @@ fn static_token_import_stores_typed_entry() {
             }"#,
     );
     let store = MemoryStore::new();
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
 
     import_static_token_value(
@@ -68,7 +68,7 @@ fn status_does_not_require_store_listing() {
         &reference,
         r#"{"mount":"github","auth":{"type":"static-token","scheme":"pat"}}"#,
     );
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
     status(
         &paths,
@@ -102,11 +102,10 @@ fn schemes_reads_manifest_from_provider() {
         r#"{"mount":"github","auth":{"type":"static-token"}}"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount_auth = catalog.load_mount_auth(&mounts, "github").unwrap();
-    let loaded = catalog
-        .auth_manifest_for(mount_auth.config())
+    let mount_auth = crate::auth::load_mount_auth(&catalog, &mounts, "github").unwrap();
+    let loaded = omnifs_mount::mounts::auth_manifest_for(&catalog, mount_auth.config())
         .unwrap()
         .unwrap();
 
@@ -146,9 +145,9 @@ fn oauth_request_reads_device_flow_from_installed_provider() {
         r#"{"mount":"github","auth":{"type":"oauth","scheme":"device"}}"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount = catalog.load_mount_auth(&mounts, "github").unwrap();
+    let mount = crate::auth::load_mount_auth(&catalog, &mounts, "github").unwrap();
     let (request, target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(target.primary_key().unwrap().provider_name(), "github");
@@ -202,9 +201,9 @@ fn oauth_request_uses_configured_client_id_when_manifest_has_no_default() {
             }"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
+    let mount = crate::auth::load_mount_auth(&catalog, &mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(request.client_id(), Some("byo-client"));
@@ -253,9 +252,9 @@ fn oauth_request_uses_provider_default_client_id_when_config_omits_it() {
             }"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
+    let mount = crate::auth::load_mount_auth(&catalog, &mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(request.client_id(), None);
@@ -306,9 +305,9 @@ fn oauth_request_cli_scopes_override_config_scopes() {
             }"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
+    let mount = crate::auth::load_mount_auth(&catalog, &mounts, "example").unwrap();
     let (request, _target) = mount.oauth_request(None, &["repo".to_owned()]).unwrap();
 
     assert_eq!(request.scheme().default_scopes, vec!["repo".to_owned()]);
@@ -353,9 +352,9 @@ fn oauth_request_uses_provider_metadata_id_for_credential_id() {
             }"#,
     );
 
-    let catalog = ProviderCatalog::for_providers(&paths.providers_dir);
+    let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
-    let mount = catalog.load_mount_auth(&mounts, "example").unwrap();
+    let mount = crate::auth::load_mount_auth(&catalog, &mounts, "example").unwrap();
     let (_request, target) = mount.oauth_request(None, &[]).unwrap();
 
     assert_eq!(target.primary_key().unwrap().provider_name(), "github-real");

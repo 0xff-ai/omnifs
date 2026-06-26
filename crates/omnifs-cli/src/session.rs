@@ -122,9 +122,9 @@ mod tests {
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
-    use crate::catalog::ProviderCatalog;
     use crate::launch::DockerMountMaterializer;
     use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
+    use omnifs_provider::Catalog;
 
     fn sample_entry(value: &str) -> CredentialEntry {
         CredentialEntry::static_token(
@@ -144,9 +144,9 @@ mod tests {
         )
     }
 
-    fn test_catalog(root: &Path) -> ProviderCatalog {
+    fn test_catalog(root: &Path) -> Catalog {
         let paths = omnifs_home::WorkspaceLayout::under_root(root);
-        ProviderCatalog::for_providers(paths.providers_dir)
+        Catalog::open(paths.providers_dir)
     }
 
     #[test]

@@ -1,29 +1,41 @@
-use crate::catalog::{ProviderTemplate, ProviderTemplates, mount_exists};
+use crate::catalog::mount_exists;
 use crate::session::MountConfig;
 use anyhow::anyhow;
 use omnifs_core::MountName;
+use omnifs_provider::{Provider, ProviderManifest};
 
 pub(super) struct ProviderSelection<'a> {
     mounts: &'a [MountConfig],
-    templates: &'a ProviderTemplates,
+    installed: &'a [(Provider, ProviderManifest)],
 }
 
 impl<'a> ProviderSelection<'a> {
-    pub(super) fn new(mounts: &'a [MountConfig], templates: &'a ProviderTemplates) -> Self {
-        Self { mounts, templates }
+    pub(super) fn new(
+        mounts: &'a [MountConfig],
+        installed: &'a [(Provider, ProviderManifest)],
+    ) -> Self {
+        Self { mounts, installed }
     }
 
     pub(super) fn provider_names(&self) -> Vec<String> {
-        let mut providers: Vec<&ProviderTemplate> = self
-            .templates
+        let mut manifests: Vec<&ProviderManifest> = self
+            .installed
             .iter()
-            .map(|(_, template)| template)
+            .map(|(_, manifest)| manifest)
             .collect();
-        providers.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
-        providers
+        manifests.sort_by(|a, b| a.id.cmp(&b.id));
+        manifests
             .into_iter()
-            .map(|template| template.manifest.id.clone())
+            .map(|manifest| manifest.id.clone())
             .collect()
+    }
+
+    /// The pinned provider for a name slug, if installed.
+    fn manifest_for(&self, name: &str) -> Option<&ProviderManifest> {
+        self.installed
+            .iter()
+            .find(|(provider, _)| provider.meta.name.as_str() == name)
+            .map(|(_, manifest)| manifest)
     }
 
     pub(super) fn resolve(
@@ -34,13 +46,11 @@ impl<'a> ProviderSelection<'a> {
         yes: bool,
     ) -> anyhow::Result<(String, MountName)> {
         let provider = self.resolve_provider(provider_arg, interactive)?;
-        let template = self
-            .templates
-            .by_id(&provider)
+        let manifest = self
+            .manifest_for(&provider)
             .ok_or_else(|| anyhow!("provider `{provider}` not found"))?;
 
-        let proposed =
-            explicit_name.map_or_else(|| template.manifest.default_mount.clone(), str::to_string);
+        let proposed = explicit_name.map_or_else(|| manifest.default_mount.clone(), str::to_string);
         let proposed_name = MountName::new(proposed.as_str())?;
 
         // Explicit --as collisions always error, regardless of --yes.

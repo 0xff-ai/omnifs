@@ -7,12 +7,14 @@ use omnifs_core::AuthKind;
 use omnifs_creds::CredentialStore;
 use omnifs_mount::Auth;
 use omnifs_mount::mounts::Resolved;
-use omnifs_provider::{AuthInject, AuthManifest, AuthScheme, ProviderManifest, StaticTokenScheme};
+use omnifs_provider::{
+    AuthInject, AuthManifest, AuthScheme, Catalog, ProviderManifest, StaticTokenScheme,
+};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
-use crate::catalog::ProviderCatalog;
 use crate::credential_target::CredentialTarget;
+use crate::session::MountConfig;
 use omnifs_core::MountName;
 
 /// Auth mode chosen during `omnifs init` before a mount config exists on disk.
@@ -96,65 +98,51 @@ pub(crate) struct MountAuth {
     manifest: Option<AuthManifest>,
 }
 
-impl ProviderCatalog {
-    pub(crate) fn load_mount_auth(
-        &self,
-        mounts: &[crate::session::MountConfig],
-        mount: &str,
-    ) -> anyhow::Result<MountAuth> {
-        let config = self.load_mount_auth_config(mounts, mount)?;
-        self.resolve_mount_auth(config)
-    }
+pub(crate) fn load_mount_auth(
+    catalog: &Catalog,
+    mounts: &[MountConfig],
+    mount: &str,
+) -> anyhow::Result<MountAuth> {
+    let config = load_mount_auth_config(catalog, mounts, mount)?;
+    Ok(mount_auth(catalog, config))
+}
 
-    pub(crate) fn load_mount_auth_tolerating_manifest_errors(
-        &self,
-        mounts: &[crate::session::MountConfig],
-        mount: &str,
-    ) -> anyhow::Result<MountAuth> {
-        let config = self.load_mount_auth_config(mounts, mount)?;
-        Ok(self.resolve_mount_auth_tolerating_manifest_errors(config))
-    }
+pub(crate) fn load_all_mount_auth(
+    catalog: &Catalog,
+    mounts: Vec<MountConfig>,
+) -> anyhow::Result<Vec<MountAuth>> {
+    let mut results = mounts
+        .into_iter()
+        .map(|m| {
+            let resolved = crate::catalog::resolve_mount_spec(catalog, &m.config, true)
+                .with_context(|| format!("load mount config `{}`", m.name))?;
+            Ok(mount_auth(catalog, resolved))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    results.sort_by(|a, b| a.config.spec.mount.cmp(&b.config.spec.mount));
+    Ok(results)
+}
 
-    pub(crate) fn load_all_mount_auth_tolerating_manifest_errors(
-        &self,
-        mounts: Vec<crate::session::MountConfig>,
-    ) -> anyhow::Result<Vec<MountAuth>> {
-        let mut results = mounts
-            .into_iter()
-            .map(|m| {
-                let resolved = self
-                    .resolve_mount_spec(&m.config, true)
-                    .with_context(|| format!("load mount config `{}`", m.name))?;
-                Ok(self.resolve_mount_auth_tolerating_manifest_errors(resolved))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        results.sort_by(|a, b| a.config.spec.mount.cmp(&b.config.spec.mount));
-        Ok(results)
-    }
+fn load_mount_auth_config(
+    catalog: &Catalog,
+    mounts: &[MountConfig],
+    mount: &str,
+) -> anyhow::Result<Resolved> {
+    let name = MountName::new(mount.to_owned())
+        .with_context(|| format!("invalid mount name `{mount}`"))?;
+    crate::mount_report::load_mount_by_name(catalog, mounts, &name)
+        .with_context(|| format!("load mount config `{mount}`"))
+}
 
-    fn load_mount_auth_config(
-        &self,
-        mounts: &[crate::session::MountConfig],
-        mount: &str,
-    ) -> anyhow::Result<Resolved> {
-        let name = MountName::new(mount.to_owned())
-            .with_context(|| format!("invalid mount name `{mount}`"))?;
-        self.load_mount_by_name(mounts, &name)
-            .with_context(|| format!("load mount config `{mount}`"))
-    }
-
-    pub(crate) fn resolve_mount_auth(&self, config: Resolved) -> anyhow::Result<MountAuth> {
-        let manifest = self.auth_manifest_for(&config)?;
-        Ok(MountAuth { config, manifest })
-    }
-
-    pub(crate) fn resolve_mount_auth_tolerating_manifest_errors(
-        &self,
-        config: Resolved,
-    ) -> MountAuth {
-        let manifest = self.auth_manifest_for(&config).ok().flatten();
-        MountAuth { config, manifest }
-    }
+/// Build the auth view for an already-resolved mount. The provider's auth
+/// manifest is best-effort: a missing or unreadable artifact leaves `manifest`
+/// as `None`, and the auth helpers surface a clear error at the point a scheme is
+/// actually needed (login, import) rather than failing the whole listing here.
+pub(crate) fn mount_auth(catalog: &Catalog, config: Resolved) -> MountAuth {
+    let manifest = omnifs_mount::mounts::auth_manifest_for(catalog, &config)
+        .ok()
+        .flatten();
+    MountAuth { config, manifest }
 }
 
 impl MountAuth {
