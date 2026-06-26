@@ -3,12 +3,11 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Ident, ItemStruct, LitStr, Path, Token, Type};
+use syn::{Ident, ItemStruct, LitStr, Path, Token};
 
 pub(crate) struct ObjectArgs {
     pub kind: LitStr,
     pub key: Path,
-    pub state: Option<Type>,
     pub canonical: Option<Ident>,
     pub decode: Option<Path>,
     pub load: Option<Path>,
@@ -18,7 +17,6 @@ impl Parse for ObjectArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut kind: Option<LitStr> = None;
         let mut object_key: Option<Path> = None;
-        let mut state: Option<Type> = None;
         let mut canonical: Option<Ident> = None;
         let mut decode: Option<Path> = None;
         let mut load: Option<Path> = None;
@@ -39,13 +37,6 @@ impl Parse for ObjectArgs {
                     }
                     let _: Token![=] = input.parse()?;
                     object_key = Some(input.parse()?);
-                },
-                "state" => {
-                    if state.is_some() {
-                        return Err(syn::Error::new(key.span(), "duplicate `state` argument"));
-                    }
-                    let _: Token![=] = input.parse()?;
-                    state = Some(input.parse()?);
                 },
                 "canonical" => {
                     if canonical.is_some() {
@@ -74,7 +65,7 @@ impl Parse for ObjectArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported object arguments are `kind = \"...\"`, `key = Type`, `state = Type`, `canonical = Ident`, `decode = path::to::function`, and `load = path::to::function`",
+                        "supported object arguments are `kind = \"...\"`, `key = Type`, `canonical = Ident`, `decode = path::to::function`, and `load = path::to::function`",
                     ));
                 },
             }
@@ -99,7 +90,6 @@ impl Parse for ObjectArgs {
         Ok(Self {
             kind,
             key: object_key,
-            state,
             canonical,
             decode,
             load,
@@ -132,13 +122,6 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
         ));
     };
 
-    // Provider crates get this alias from `#[provider]`; standalone object
-    // fixtures can still pass `state = ..` explicitly.
-    let state_type: Type = args
-        .state
-        .clone()
-        .unwrap_or_else(|| syn::parse_quote!(crate::__OmnifsProviderState));
-
     // `load` forwards to a provider-written inherent async fn; defaults to
     // `Self::load`.
     let load_path: TokenStream2 = if let Some(path) = &args.load {
@@ -152,7 +135,7 @@ pub(crate) fn object_item_impl(args: &ObjectArgs, item: &ItemStruct) -> syn::Res
 
         impl #impl_generics omnifs_sdk::object::Object for #struct_ident #ty_generics #where_clause {
             type Key = #object_key;
-            type State = #state_type;
+            type State = crate::__OmnifsProviderState;
             type Canonical = omnifs_sdk::repr::#canonical_ident;
 
             fn load(

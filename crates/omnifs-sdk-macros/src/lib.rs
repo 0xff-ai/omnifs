@@ -26,8 +26,7 @@ mod provider_macro;
 /// The impl block contains a required synchronous `fn start` and any helper
 /// methods. `start` takes either `(config, &mut Router<State>)` or just
 /// `(&mut Router<State>)` and returns `Result<State>`. `Config` and `State`
-/// are inferred from the `start` signature; explicit `type Config = ..` /
-/// `type State = ..` aliases are still accepted when needed.
+/// are inferred from the `start` signature.
 ///
 /// The manifest (identity, capabilities, config schema, auth) is authored from
 /// these arguments and assembled into the `omnifs.provider-metadata.v1` custom
@@ -85,9 +84,6 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   e.g. `"github.issue"`. Stable; changing it orphans cached objects.
 /// - `key = KeyType` (required): the `#[path_captures]` struct that identifies
 ///   this object (`KeyType: Key`).
-/// - `state = StateType`: override the provider state threaded through `load`.
-///   In provider crates this defaults to the state inferred by `#[provider]`;
-///   standalone object fixtures should pass it explicitly.
 /// - `canonical = Json | Markdown | Atom | Yaml` (default `Json`): the format
 ///   of the verbatim canonical bytes (`type Canonical`). Non-JSON canonicals
 ///   require `decode`.
@@ -164,7 +160,8 @@ pub fn endpoint_derive(item: TokenStream) -> TokenStream {
 /// Adds `Debug` + `Deserialize` (through the SDK's re-exported serde) and
 /// `deny_unknown_fields`, so a typo in mount JSON fails initialization
 /// loudly instead of being silently ignored. Mount config arrives as raw
-/// JSON bytes; the provider macro deserializes it into `type Config`.
+/// JSON bytes; the provider macro deserializes it into the config type inferred
+/// from `start`.
 #[proc_macro_attribute]
 pub fn config(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as Item);
