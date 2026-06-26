@@ -13,7 +13,7 @@ The product contract is simple: the projected tree must behave like real files f
 `AGENTS.md` is the always-loaded operating guide. It carries universal rules, routing instructions, validation defaults, and active footguns.
 
 - `docs/contracts/`: binding rules by task area. Read only the contract relevant to the code you are touching.
-- `docs/architecture/`: current explanatory model and rationale. Read when you need to understand how the system fits together or why a boundary exists.
+- `docs/architecture/`: current explanatory model and rationale. Read only the architecture note relevant to the subsystem or boundary you need to understand.
 - `docs/future/`: proposals and non-current direction.
 
 If a rule here and a contract disagree, follow current code plus the relevant contract, then update this file in the same change. If architecture prose disagrees with code or contracts, treat it as stale explanation and fix it when practical.
@@ -58,6 +58,16 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | CLI, daemon, REST API, runtime modes, workspace layout, mount delivery, dev home | `docs/contracts/50-control-plane.md` |
 | CI, validation commands, provider artifacts, generated OpenAPI/schema, docs checks | `docs/contracts/60-build-validation.md` |
 | System model or rationale | `docs/architecture/00-overview.md` |
+
+## Load architecture detail when needed
+
+| If you need rationale for | Read |
+|---|---|
+| File attrs, stat/read behavior, learned sizes, live files, real-tool compatibility | `docs/architecture/10-file-attributes.md` |
+| Route precedence, capture validation, lookup/listing authority, exhaustive listings | `docs/architecture/20-route-dispatch-and-listing.md` |
+| Object/view/blob cache roles, canonical push, effects, invalidation fences | `docs/architecture/30-cache-and-effects.md` |
+| Auth trust boundary, OAuth ownership, credential injection, grants versus needs | `docs/architecture/40-auth-boundary.md` |
+| NFSv4 loopback filehandles, stateids, leases, attrs, mount lifecycle | `docs/architecture/50-nfs-frontend.md` |
 
 ## Orientation
 
