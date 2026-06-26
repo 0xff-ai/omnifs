@@ -371,17 +371,6 @@ impl Catalog {
             .map(|entry| self.provider_from_entry(entry)))
     }
 
-    /// Every retained artifact for a name (upgrade discovery / debug).
-    pub fn versions_by_name(&self, name: &ProviderName) -> Result<Vec<Provider>, Error> {
-        let index = self.store().read_index()?;
-        Ok(index
-            .providers
-            .iter()
-            .filter(|entry| &entry.name == name)
-            .map(|entry| self.provider_from_entry(entry))
-            .collect())
-    }
-
     /// All installed providers (picker / `omnifs init` listing).
     pub fn list(&self) -> Result<Vec<Provider>, Error> {
         let index = self.store().read_index()?;

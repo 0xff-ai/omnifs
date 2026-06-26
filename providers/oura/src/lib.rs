@@ -342,13 +342,12 @@ impl RangeResponse {
             if day == requested {
                 continue;
             }
-            let (sibling, canonical) = self.day_canonical(&mut grouping, day)?;
+            let (_, canonical) = self.day_canonical(&mut grouping, day)?;
             load = load.preload_object(ObjectEntry::fresh(
                 DailyCollectionKey {
                     day,
                     collection: self.collection,
                 },
-                sibling,
                 canonical,
             ));
         }

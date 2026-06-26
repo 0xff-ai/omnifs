@@ -132,13 +132,12 @@ impl Item {
         if key.number == 7 {
             // Same-type sibling preload (Oura-shaped): one fetch materializes a
             // neighboring item's canonical at its own anchor.
-            let (sibling, sibling_canonical) = canned_item(8)?;
+            let (_, sibling_canonical) = canned_item(8)?;
             load = load.preload_object(ObjectEntry::fresh(
                 ItemKey {
                     filter: Facet::<StateFilter>(key.filter.0),
                     number: 8,
                 },
-                sibling,
                 sibling_canonical,
             ));
         }

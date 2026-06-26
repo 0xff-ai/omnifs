@@ -149,23 +149,16 @@ pub(crate) struct ObjectPreload {
     pub(crate) canonical: Canonical,
 }
 
-/// A sibling object entry for [`Load::preload_object`]: the sibling key, value,
-/// and its canonical bytes. The value mirrors [`crate::collection::CollectionEntry`]
-/// for symmetry; lowering uses the key (for identity) and the canonical bytes.
+/// A sibling object entry for [`Load::preload_object`]: the sibling key and its
+/// canonical bytes.
 pub struct ObjectEntry<O: Object> {
     pub(crate) key: O::Key,
-    #[allow(dead_code)]
-    pub(crate) value: O,
     pub(crate) canonical: Canonical,
 }
 
 impl<O: Object> ObjectEntry<O> {
-    pub fn fresh(key: O::Key, value: O, canonical: Canonical) -> Self {
-        Self {
-            key,
-            value,
-            canonical,
-        }
+    pub fn fresh(key: O::Key, canonical: Canonical) -> Self {
+        Self { key, canonical }
     }
 }
 
