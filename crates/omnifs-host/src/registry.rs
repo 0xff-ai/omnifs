@@ -9,7 +9,7 @@ use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAUL
 use crate::{Artifact, BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
 use omnifs_mount::materialize::{MaterializationMode, materialize};
-use omnifs_mount::mounts::{Catalog, Resolved, Spec, spec_paths_in};
+use omnifs_mount::mounts::{Catalog, Registry, Resolved, Spec};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -426,8 +426,11 @@ impl<'a> ReconcilePass<'a> {
     }
 
     fn run(mut self) -> ReconcileOutcome {
-        let paths = match spec_paths_in(self.catalog.mounts_dir()) {
-            Ok(paths) => paths,
+        // Desired state is read fresh from disk each pass through the shared
+        // mount Registry; the reconcile_lock serializes passes so this snapshot
+        // is coherent for the duration of the pass.
+        let registry = match Registry::load(self.catalog.mounts_dir()) {
+            Ok(registry) => registry,
             Err(error) => {
                 self.outcome.failed.push(MountFailure {
                     mount: self.catalog.mounts_dir().display().to_string(),
@@ -437,12 +440,22 @@ impl<'a> ReconcilePass<'a> {
             },
         };
 
+        // A spec that fails to parse or carries an invalid mount name is
+        // recorded and skipped; it never aborts the pass or disturbs a running
+        // mount.
+        for failure in registry.failures() {
+            self.outcome.failed.push(MountFailure {
+                mount: failure.path.display().to_string(),
+                reason: failure.error.to_string(),
+            });
+        }
+
         // Phase 1 (serial, cheap): materialize, fingerprint, and decide. Settles
         // unchanged mounts and materialize/duplicate failures here; only the
         // compile-heavy loads carry into phase 2.
         let mut work = Vec::new();
-        for path in &paths {
-            if let Some(item) = self.plan_path(path) {
+        for (name, spec) in registry.iter() {
+            if let Some(item) = self.plan_spec(spec.clone(), &registry.spec_path(name)) {
                 work.push(item);
             }
         }
@@ -464,11 +477,21 @@ impl<'a> ReconcilePass<'a> {
         self.outcome
     }
 
-    /// Decide what a spec path needs. Records unchanged mounts and
+    /// Decide what a desired spec needs. Records unchanged mounts and
     /// materialize/duplicate failures into the outcome directly; returns a
-    /// `LoadWork` only for mounts that must be (re)compiled.
-    fn plan_path(&mut self, path: &Path) -> Option<LoadWork> {
-        let materialized = self.materialized_spec(path)?;
+    /// `LoadWork` only for mounts that must be (re)compiled. `path` is the
+    /// spec's on-disk file, used only for failure messages.
+    fn plan_spec(&mut self, spec: Spec, path: &Path) -> Option<LoadWork> {
+        let materialized = match materialize(spec, &self.catalog, self.mode) {
+            Ok(materialized) => materialized.into_spec(),
+            Err(error) => {
+                self.outcome.failed.push(MountFailure {
+                    mount: path.display().to_string(),
+                    reason: error.to_string(),
+                });
+                return None;
+            },
+        };
         let mount = materialized.mount.clone();
         // Distinct mount names are required: two specs claiming one name would
         // race in the parallel load, and it is a misconfiguration regardless.
@@ -609,29 +632,6 @@ impl<'a> ReconcilePass<'a> {
             },
             LoadResult::Failed { mount, reason } => {
                 self.outcome.failed.push(MountFailure { mount, reason });
-            },
-        }
-    }
-
-    fn materialized_spec(&mut self, path: &Path) -> Option<Spec> {
-        let spec = match Spec::from_file(path) {
-            Ok(spec) => spec,
-            Err(error) => {
-                self.outcome.failed.push(MountFailure {
-                    mount: path.display().to_string(),
-                    reason: error.to_string(),
-                });
-                return None;
-            },
-        };
-        match materialize(spec, &self.catalog, self.mode) {
-            Ok(materialized) => Some(materialized.into_spec()),
-            Err(error) => {
-                self.outcome.failed.push(MountFailure {
-                    mount: path.display().to_string(),
-                    reason: error.to_string(),
-                });
-                None
             },
         }
     }

@@ -6,6 +6,7 @@
 
 use anyhow::Context as _;
 use omnifs_home::{Cli as CliRole, Workspace as HomeWorkspace, WorkspaceLayout};
+use omnifs_mount::mounts::Registry;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::ProviderCatalog;
@@ -66,15 +67,23 @@ impl Workspace {
 
     /// The single mount-enumeration funnel used by every command.
     ///
-    /// Reads one `Spec` per JSON file in the `mounts/` directory and returns
-    /// the list sorted by mount name.
+    /// Reads one `Spec` per JSON file in the `mounts/` directory through the
+    /// shared [`Registry`] and returns the list sorted by mount name. Strict by
+    /// design: a malformed spec aborts enumeration rather than being silently
+    /// skipped, matching the former per-file loader.
     pub(crate) fn mounts(&self) -> anyhow::Result<Vec<MountConfig>> {
-        let mut configs = per_file_mount_paths(self.home.mounts_dir())?
-            .into_iter()
-            .map(|path| MountConfig::from_path(&path))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        configs.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(configs)
+        let registry = Registry::load(self.home.mounts_dir())?;
+        if let Some(failure) = registry.failures().first() {
+            return Err(anyhow::anyhow!("{}", failure.error));
+        }
+        Ok(registry
+            .iter()
+            .map(|(name, spec)| MountConfig {
+                name: name.clone(),
+                config: spec.clone(),
+                source: registry.spec_path(name),
+            })
+            .collect())
     }
 
     /// Build removal targets tolerantly, for use by `omnifs reset`.
