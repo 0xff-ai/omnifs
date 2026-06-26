@@ -31,6 +31,7 @@ pub(crate) use auth_import::AuthImportDecision;
 use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
 use omnifs_home::WorkspaceLayout;
+use omnifs_mount::mounts::Registry;
 use provider_selection::ProviderSelection;
 use token_validation::StaticTokenValidator;
 
@@ -142,11 +143,9 @@ impl InitArgs {
             &self.scopes,
             generated,
         );
-        std::fs::create_dir_all(&paths.mounts_dir)
-            .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
-        let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
-        mount_file.write_to(&mount_path)?;
         let spec = mount_file.into_spec();
+        let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
+        Registry::load(&paths.mounts_dir)?.put(&spec)?;
         anstream::println!("✓ Wrote {}", WorkspaceLayout::display(&mount_path));
 
         if let Some(auth) = effective_auth.as_ref() {
@@ -338,7 +337,7 @@ mod tests {
     use crate::catalog::ProviderCatalog;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_mount::mounts::ProviderStore;
+    use omnifs_mount::mounts::{ProviderStore, Registry};
     use omnifs_provider::{AuthManifest, AuthScheme, ProviderManifest};
     use serde_json::Value;
 
@@ -400,9 +399,9 @@ mod tests {
     #[test]
     fn mount_file_includes_generated_config_and_capabilities() {
         let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("db.json");
+        let mounts = dir.path();
 
-        MountFile::new(
+        let spec = MountFile::new(
             &MountName::try_from("db").unwrap(),
             &provider_ref("db"),
             None,
@@ -419,11 +418,13 @@ mod tests {
                 }),
             },
         )
-        .write_to(&out)
-        .unwrap();
+        .into_spec();
 
-        let written: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        Registry::load(mounts).unwrap().put(&spec).unwrap();
 
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(mounts.join("db.json")).unwrap())
+                .unwrap();
         assert_eq!(written["config"]["path"], "/data/chinook.db");
         assert_eq!(
             written["capabilities"]["preopened_paths"][0]["host"],

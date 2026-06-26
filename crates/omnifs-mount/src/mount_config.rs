@@ -168,3 +168,16 @@ where
         Some(OneOrMany::Many(vec)) => Ok(vec),
     }
 }
+
+/// Symmetric with [`deserialize_auth`]: a lone auth entry serializes as a single
+/// object (the common authored form), more than one as an array. The empty case
+/// is handled by the field's `skip_serializing_if`, so it is never reached here.
+pub fn serialize_auth<S>(auth: &[Auth], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match auth {
+        [single] => single.serialize(serializer),
+        many => many.serialize(serializer),
+    }
+}

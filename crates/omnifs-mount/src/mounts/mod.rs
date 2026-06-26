@@ -30,13 +30,30 @@ pub struct Spec {
     /// Serving resolves the artifact by `provider.id`, never by name.
     pub provider: ProviderRef,
     pub mount: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub root_mount: bool,
-    #[serde(default, deserialize_with = "crate::deserialize_mount_auth")]
+    #[serde(
+        default,
+        deserialize_with = "crate::deserialize_mount_auth",
+        serialize_with = "crate::serialize_mount_auth",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub auth: Vec<Auth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Grants>,
-    #[serde(rename = "config")]
+    #[serde(rename = "config", skip_serializing_if = "Option::is_none")]
     pub config_raw: Option<ProviderConfig>,
+}
+
+/// `skip_serializing_if` predicate: omit a `bool` field when it is `false`, so a
+/// `Registry`-written spec matches the compact authored form (no `root_mount`
+/// key unless the mount is a root mount).
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate ABI"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Runtime-ready provider mount.
@@ -181,6 +198,21 @@ pub enum Error {
     Store(#[from] StoreError),
     #[error("provider artifact at {} has no embedded metadata section", path.display())]
     MissingProviderMetadata { path: PathBuf },
+    #[error("failed to serialize mount spec for {}: {source}", path.display())]
+    SerializeSpec {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("failed to write mount spec {}: {source}", path.display())]
+    WriteSpec {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to remove mount spec {}: {source}", path.display())]
+    RemoveSpec {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -547,6 +579,70 @@ impl Registry {
     pub fn spec_path(&self, name: &mount::Name) -> PathBuf {
         self.mounts_dir.join(format!("{name}.json"))
     }
+
+    /// Persist `spec` and update the in-memory mirror. The spec's mount name
+    /// (validated here) names the file `mounts_dir/<name>.json`; the write is
+    /// atomic (a same-directory temp file renamed into place), so a concurrent
+    /// reader (the daemon reconcile) sees either the old file or the new one,
+    /// never a torn write.
+    ///
+    /// Specs are one file per mount with no shared mutable index, so atomic
+    /// per-file rename is sufficient; unlike the provider store's `index.json`
+    /// read-modify-write, no advisory lock is needed.
+    pub fn put(&mut self, spec: &Spec) -> Result<(), Error> {
+        let name = mount::Name::new(spec.mount.clone()).map_err(|source| Error::MountName {
+            path: self.mounts_dir.clone(),
+            mount: spec.mount.clone(),
+            source,
+        })?;
+        let path = self.spec_path(&name);
+        let mut json =
+            serde_json::to_string_pretty(spec).map_err(|source| Error::SerializeSpec {
+                path: path.clone(),
+                source,
+            })?;
+        json.push('\n');
+        write_spec_atomic(&self.mounts_dir, &path, json.as_bytes())?;
+        self.specs.insert(name, spec.clone());
+        Ok(())
+    }
+
+    /// Remove a mount's spec file and drop it from the mirror. Returns whether a
+    /// file was present (a missing file is not an error).
+    pub fn remove(&mut self, name: &mount::Name) -> Result<bool, Error> {
+        self.specs.remove(name);
+        let path = self.spec_path(name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(Error::RemoveSpec { path, source }),
+        }
+    }
+}
+
+/// Write `bytes` to `path` atomically: serialize to a same-directory temp file,
+/// then rename over the target. `rename(2)` is atomic on a single filesystem, so
+/// a concurrent reader never observes a partial spec. The temp name is dot-hidden
+/// and lacks a `.json` extension, so [`spec_paths_in`] skips it even if a crash
+/// leaves it behind.
+fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    fs::create_dir_all(mounts_dir).map_err(|source| Error::WriteSpec {
+        path: mounts_dir.to_path_buf(),
+        source,
+    })?;
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("spec.json");
+    let tmp = mounts_dir.join(format!(".{file}.tmp-{}", std::process::id()));
+    fs::write(&tmp, bytes).map_err(|source| Error::WriteSpec {
+        path: tmp.clone(),
+        source,
+    })?;
+    fs::rename(&tmp, path).map_err(|source| Error::WriteSpec {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn load_spec(path: &Path) -> Result<Spec, Error> {
@@ -762,6 +858,56 @@ mod tests {
         assert_eq!(
             registry.spec_path(&name),
             Path::new("/no/such/mounts/github.json")
+        );
+    }
+
+    #[test]
+    fn registry_put_writes_compact_spec_and_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The mounts directory does not exist yet: `put` must create it.
+        let mounts = dir.path().join("mounts");
+        let mut registry = Registry::load(&mounts).expect("load empty");
+
+        let spec = spec_with_provider(
+            "github",
+            r#"{ "mount": "github", "auth": { "type": "static-token", "scheme": "pat" } }"#,
+        );
+        registry.put(&spec).expect("put");
+
+        let path = mounts.join("github.json");
+        let written = std::fs::read_to_string(&path).expect("spec written");
+        // Compact authored shape: a lone auth entry stays a single object (not an
+        // array), default `root_mount`/absent `capabilities`/`config` are omitted,
+        // and the file ends in a trailing newline.
+        assert!(written.ends_with("}\n"), "trailing newline: {written:?}");
+        assert!(
+            !written.contains("root_mount"),
+            "default root_mount omitted: {written}"
+        );
+        assert!(
+            !written.contains("capabilities"),
+            "absent capabilities omitted: {written}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(
+            value["auth"].is_object(),
+            "a single auth serializes as one object, got {}",
+            value["auth"]
+        );
+        assert_eq!(value["auth"]["type"], "static-token");
+
+        // The mirror and a fresh load both observe the written spec.
+        let name = mount::Name::new("github".to_owned()).unwrap();
+        assert!(registry.get(&name).is_some());
+        assert!(Registry::load(&mounts).unwrap().get(&name).is_some());
+
+        // Remove clears both the file and the mirror; a second remove is Ok(false).
+        assert!(registry.remove(&name).expect("remove"));
+        assert!(registry.get(&name).is_none());
+        assert!(!path.exists());
+        assert!(
+            !registry.remove(&name).expect("remove absent"),
+            "removing an absent mount is Ok(false)"
         );
     }
 }

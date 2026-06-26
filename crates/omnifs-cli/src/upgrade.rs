@@ -22,8 +22,8 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use omnifs_core::ProviderRef;
-use omnifs_mount::UpgradePlan;
-use omnifs_mount::mounts::Catalog;
+use omnifs_mount::mounts::{Catalog, Registry, Spec};
+use omnifs_mount::{ProviderConfig, UpgradePlan};
 
 use crate::session::MountConfig;
 
@@ -128,43 +128,28 @@ fn apply_additive_upgrade(
     reference: &ProviderRef,
     added: &[omnifs_mount::AddedField],
 ) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(spec_path)
-        .with_context(|| format!("read spec {}", spec_path.display()))?;
-    let mut doc: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parse spec {}", spec_path.display()))?;
+    let mut spec =
+        Spec::from_file(spec_path).with_context(|| format!("read spec {}", spec_path.display()))?;
 
-    if let Some(obj) = doc
-        .get_mut("config")
-        .and_then(|value| value.as_object_mut())
-    {
-        for field in added {
-            if !obj.contains_key(&field.name)
-                && let Some(default) = &field.default
-            {
-                obj.insert(field.name.clone(), default.clone());
-            }
-        }
-    } else {
-        let mut config_map = serde_json::Map::new();
-        for field in added {
-            if let Some(default) = &field.default {
-                config_map.insert(field.name.clone(), default.clone());
-            }
-        }
-        if !config_map.is_empty() {
-            doc["config"] = serde_json::Value::Object(config_map);
+    // Fill new optional fields with their defaults, never overwriting an existing
+    // key. A config object survives even when nothing was added; it is dropped
+    // only when it was absent and no default applied.
+    let mut config = match spec.config_raw.take().map(ProviderConfig::into_value) {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    for field in added {
+        if !config.contains_key(&field.name)
+            && let Some(default) = &field.default
+        {
+            config.insert(field.name.clone(), default.clone());
         }
     }
+    spec.config_raw =
+        (!config.is_empty()).then(|| ProviderConfig::from_value(serde_json::Value::Object(config)));
+    spec.provider = reference.clone();
 
-    doc["provider"] = serde_json::to_value(reference).context("serialize provider ref")?;
-
-    let new_content = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&doc).context("serialize spec")?
-    );
-    let tmp_path = spec_path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &new_content)
-        .with_context(|| format!("write temp spec {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, spec_path)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), spec_path.display()))
+    let mounts_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    Registry::load(mounts_dir)?.put(&spec)?;
+    Ok(())
 }
