@@ -6,6 +6,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 
 ## [Unreleased]
 ### Providers & projected paths
+- **Feature:** The provider SDK now centers object-shaped routes and collections: providers register objects, file objects, aliases, collection captures, choice-backed captures, preloads, invalidations, and typed object render faces through the SDK instead of hand-assembling path handlers. The built-in providers have been migrated onto that model, including GitHub, arXiv, db, DNS, Docker, Kubernetes, Linear, Oura, and the test provider.
+- **Breaking:** Provider manifests are now authored from provider annotations and embedded into the WASM component at build time, replacing the checked-in `omnifs.provider.json` files. Auth modes, endpoints, host resources, provider config schema, and provider metadata now flow through the SDK macros and build-time manifest assembly.
 - **Feature:** A read-only Kubernetes provider projects a cluster as a filesystem: namespaces, resource types, and objects are browsable under `namespaces/<ns>/<kind>/<name>/`, each object renders its `manifest.yaml`, and pods expose live `logs/<container>.log` that stream with `tail -f`. The provider holds no cluster credential and reaches the API server through a `kubectl proxy`, so all auth and TLS stay host-side.
 - **Feature:** A read-only Oura provider projects Oura Ring health data as a filesystem: each day is a directory (`<day>/`) holding per-collection JSON files such as `daily_sleep.json`, `daily_activity.json`, `daily_readiness.json`, `heart_rate.json`, and `workout.json`. It authenticates with Oura's client-side-token OAuth flow, and reading any day preloads the surrounding ±15-day window so neighboring days are already warm.
 - **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
@@ -51,6 +53,8 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Security:** Path segments now reject control characters, making the internal delimiter used in view cache keys safe from accidental collisions. (#140)
 
 ### Internal & maintenance
+- **Improvement:** Provider SDK guidance and system rationale have been split into binding `docs/contracts/` rules, focused `docs/architecture/` notes, and the provider-authoring skill, replacing the stale `docs/design/` stack with current ownership and validation rules.
+- **Test:** The SDK now has a WIT-boundary harness for provider exports and route behavior, and provider initialization tests assert that generated manifests seal through the host path instead of only compiling as guest code.
 - **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
 - **Test:** Removed or merged narrow tests across many crates, folding useful coverage into broader behavior-oriented cases. (#147)
 
@@ -179,7 +183,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - Cross-listing PR preload and hybrid issue/PR pagination in the GitHub provider.
 - HTTP SDK gains POST + raw / JSON bodies and adopts `http` crate request/response types.
 - Docker Compose dev workflow (`compose.yaml`, `just dev`, `just shell`) with self-starting published image.
-- `docs/contracts/20-provider-sdk.md` and `docs/contracts/30-projection-tree.md` now carry the routing precedence, listing semantics, `lookup`/`readdir` authority split, and projected file-size contracts.
+- `docs/design/path-dispatch-and-listing.md` as the perennial reference for routing precedence, listing semantics, and the `lookup`/`readdir` authority split; `docs/design/projected-file-sizes.md` documenting the `direct_io` redesign.
 
 ### Changed
 
