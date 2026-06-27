@@ -37,11 +37,11 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 ### CI and release builds
 
-CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build` with WASI SDK pins from `tools/versions.toml`.
+CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build`; WASI SDK pins live at their install sites, such as `just/providers.just` for local builds and `Dockerfile` for container stages.
 
 `Dockerfile` remains the contributor image path for `omnifs dev`. `just dev` installs the already-built provider/tool WASM into `~/.omnifs-dev/providers` and passes that directory as the `provider-wasm` build context, so the image embeds those bytes instead of compiling providers again inside Docker. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider/tool WASM bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
-CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery and `version_pin()`, a `sed` reader for quoted string pins in `tools/versions.toml`. The `cargo xtask` crate (`crates/xtask`) owns npm version sync/validation and OpenAPI generate/check. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
+CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync and OpenAPI generation are just recipes. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
 ## Validate through the live runtime
 

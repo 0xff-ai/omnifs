@@ -13,8 +13,8 @@ case "$target_root" in
   *) target_root="$root/$target_root" ;;
 esac
 
-cargo_zigbuild_version="$(version_pin cargo_zigbuild)"
-zig_version="$(version_pin zig)"
+cargo_zigbuild_version="0.22.3"
+zig_version="0.15.2"
 
 if ! command -v zig >/dev/null 2>&1; then
   echo "zig is not installed; install Zig $zig_version before running this script" >&2

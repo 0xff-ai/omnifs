@@ -7,12 +7,8 @@ wasi-sdk:
     set -euo pipefail
     # The build env lives in .cargo/config.toml. This only fetches the toolchain
     # that config points at. Idempotent: a matching .version stamp skips.
-    version="$(sed -nE 's/^wasi_sdk[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' tools/versions.toml)"
-    release="$(sed -nE 's/^wasi_sdk_release[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' tools/versions.toml)"
-    if [[ -z "$version" || -z "$release" ]]; then
-      printf 'tools/versions.toml must define wasi_sdk and wasi_sdk_release\n' >&2
-      exit 1
-    fi
+    version="33"
+    release="33.0"
     home=".cache/wasi-sdk"
     if [[ "$(cat "$home/.version" 2>/dev/null)" == "$release" ]]; then
       exit 0
