@@ -58,7 +58,7 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 | Subcommand | When | What it does |
 |------------|------|----------------|
 | **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the workspace version through `npm pkg set` (`cargo xtask npm sync`) |
-| **`just npm validate`** | `just check`, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` (`cargo xtask npm validate`) |
+| **`just npm validate`** | `just check`, ship | Cross-check `platforms.json`, the platform package.json manifests, and the inlined `resolve-binary.js` map (`cargo xtask npm validate`) |
 | **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
 Day-to-day dev uses `just check`, `just providers build`, and `omnifs dev`.

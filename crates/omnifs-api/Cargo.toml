@@ -13,8 +13,5 @@ keywords = ["omnifs", "daemon", "api"]
 serde = { workspace = true }
 utoipa = { workspace = true }
 
-[package.metadata.dist]
-dist = false
-
 [lints]
 workspace = true

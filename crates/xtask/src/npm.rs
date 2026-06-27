@@ -14,8 +14,6 @@ const ROOT_PACKAGE: &str = "@0xff-ai/omnifs";
 #[derive(Deserialize)]
 struct PlatformSpec {
     package: String,
-    #[serde(rename = "rustTarget")]
-    rust_target: String,
     os: String,
     cpu: String,
 }
@@ -53,9 +51,8 @@ pub fn sync(root: &Path, version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate platform metadata, root `optionalDependencies`, the cargo-dist
-/// macOS target set, and the inlined runtime platform map. On any mismatch,
-/// print every error and exit non-zero.
+/// Validate platform metadata, root `optionalDependencies`, and the inlined
+/// runtime platform map. On any mismatch, print every error and exit non-zero.
 pub fn validate(root: &Path, version: &str) -> Result<()> {
     let catalog = match load_catalog(root) {
         Ok(catalog) => catalog,
@@ -69,7 +66,6 @@ pub fn validate(root: &Path, version: &str) -> Result<()> {
     let mut errors = Vec::new();
     validate_packages(version, &catalog, &layout, &mut errors);
     validate_root_optional_dependencies(version, &layout, &catalog, &mut errors);
-    validate_dist_targets(root, &catalog, &mut errors);
     validate_resolve_binary_inline(root, &catalog, &mut errors);
 
     if !errors.is_empty() {
@@ -216,49 +212,6 @@ fn validate_root_optional_dependencies(
             ));
         }
     }
-}
-
-fn validate_dist_targets(root: &Path, catalog: &Catalog, errors: &mut Vec<String>) {
-    #[derive(Deserialize)]
-    struct DistWorkspace {
-        dist: Option<Dist>,
-    }
-    #[derive(Deserialize)]
-    struct Dist {
-        #[serde(default)]
-        targets: Vec<String>,
-    }
-
-    let path = root.join("dist-workspace.toml");
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            errors.push(format!("parse {}: {error}", path.display()));
-            return;
-        }
-    };
-    let parsed: DistWorkspace = match toml::from_str(&text) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            errors.push(format!("parse {}: {error}", path.display()));
-            return;
-        }
-    };
-
-    let mut actual: Vec<String> = parsed.dist.map(|d| d.targets).unwrap_or_default();
-    actual.sort();
-    let mut expected: Vec<String> = catalog
-        .values()
-        .filter(|spec| spec.os == "darwin")
-        .map(|spec| spec.rust_target.clone())
-        .collect();
-    expected.sort();
-    assert_set_equal(
-        &actual,
-        &expected,
-        "dist-workspace.toml targets (macOS only; Linux CLI is built by native CI)",
-        errors,
-    );
 }
 
 fn validate_resolve_binary_inline(root: &Path, catalog: &Catalog, errors: &mut Vec<String>) {
