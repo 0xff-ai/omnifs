@@ -307,6 +307,16 @@ fn pin_dev_mounts(
         if spec.capabilities.is_none() && !manifest.capabilities.is_empty() {
             spec.capabilities = Some(manifest.provider_capabilities());
         }
+        // Bake the manifest's auth-scheme and config defaults into the spec, the
+        // same creation-time inheritance `omnifs init` performs, so the dev spec
+        // written to disk is complete: serving reads it as-is, with no read-time
+        // resolution step.
+        spec.apply_provider_metadata(manifest).with_context(|| {
+            format!(
+                "apply provider defaults to dev mount `{}`",
+                mount.mount_name
+            )
+        })?;
         let source = PathBuf::from(format!("{}.json", mount.mount_name));
         configs.push(MountConfig::from_parsed(spec, source)?);
     }

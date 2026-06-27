@@ -143,7 +143,7 @@ fn mount_enumeration_root_change_tracks_loaded_mounts() {
 
     harness
         .registry
-        .add_mount(test_provider_spec("other"), harness.runtime.handle())
+        .add_mount(&test_provider_spec("other"), harness.runtime.handle())
         .expect("load second test mount");
 
     let after = export.attr(root).expect("root attr after mount add").change;

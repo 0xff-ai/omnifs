@@ -56,7 +56,7 @@ impl MountConfig {
         mount_auth: &MountAuth,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<()> {
-        for auth in &mount_auth.config().spec.auth {
+        for auth in &mount_auth.spec().auth {
             if auth.token_file().is_some() || auth.token_env().is_some() {
                 continue;
             }

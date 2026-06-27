@@ -1,14 +1,16 @@
-//! Host mount spec loading and resolution.
+//! Host mount spec loading.
 //!
-//! `Spec` represents the raw mount JSON. `Resolved` is the runtime-ready
-//! mount after provider metadata has been applied.
+//! `Spec` represents the mount JSON. Provider-manifest defaults (the auth scheme
+//! and config defaults) are baked into the spec at creation time by the CLI's
+//! spec creator, so loading a spec is a plain parse: there is no read-time
+//! resolution step and no separate runtime-ready type.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use omnifs_core::{ProviderRef, mount};
+use omnifs_core::{ProviderName, ProviderRef, mount};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -52,19 +54,17 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Runtime-ready provider mount.
-///
-/// Wraps a [`Spec`] with the provider name slug taken from `spec.provider.meta`.
-#[derive(Debug, Clone)]
-pub struct Resolved {
-    pub spec: Spec,
-    /// Provider NAME slug (e.g. "github", "linear"), from `spec.provider.meta.name`.
-    pub provider_name: String,
-}
-
 impl Spec {
     pub fn parse(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
+    }
+
+    /// The provider NAME slug (e.g. "github", "linear"), pinned in
+    /// `provider.meta.name`. Credentials key on this slug, not the content id, so
+    /// they survive provider upgrades.
+    #[must_use]
+    pub fn provider_name(&self) -> &ProviderName {
+        &self.provider.meta.name
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self, Error> {
@@ -126,28 +126,6 @@ impl Spec {
         }
         Ok(())
     }
-
-    pub fn into_resolved(
-        mut self,
-        manifest: Option<&omnifs_provider::ProviderManifest>,
-    ) -> Result<Resolved, serde_json::Error> {
-        if let Some(manifest) = manifest {
-            self.apply_provider_metadata(manifest)?;
-        }
-        let provider_name = self.provider.meta.name.to_string();
-        Ok(Resolved {
-            spec: self,
-            provider_name,
-        })
-    }
-}
-
-impl Resolved {
-    /// Convenience delegate for callers that need the raw config bytes.
-    #[must_use]
-    pub fn config_bytes(&self) -> Vec<u8> {
-        self.spec.config_bytes()
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,13 +161,6 @@ pub enum Error {
         path: PathBuf,
         source: omnifs_provider::ProviderMetadataError,
     },
-    #[error("failed to apply provider metadata from {}: {source}", path.display())]
-    ApplyProviderMetadata {
-        path: PathBuf,
-        source: serde_json::Error,
-    },
-    #[error("failed to resolve mount: {0}")]
-    Resolve(serde_json::Error),
     #[error(transparent)]
     Catalog(#[from] CatalogError),
     #[error("failed to serialize mount spec for {}: {source}", path.display())]
@@ -212,67 +183,24 @@ pub enum Error {
 /// What materialization reads from a pinned manifest: the capability needs (the
 /// oracle for the required-capabilities check) and the parsed config schema,
 /// which names the host-resource config fields a dynamic grant resolves from.
-pub struct AppliedMetadata {
+pub struct ManifestRequirements {
     pub needs: Vec<Need>,
     pub config_schema: Option<omnifs_provider::ConfigSchema>,
 }
 
-/// Resolve a raw [`Spec`] against the provider [`Catalog`]: fill manifest
-/// defaults into unset fields and attach the provider name slug, yielding a
-/// [`Resolved`].
-///
-/// `require_metadata` selects strict (the pinned artifact must be retained, so
-/// its manifest can hydrate the spec; serving and auth paths) versus best-effort
-/// (skip hydration when the artifact is gone; delete/reset/ls display paths).
-///
-/// This is the explicit join. It belongs to neither the provider catalog nor the
-/// spec [`Registry`]: it is the point where a held `&Catalog` and a `&Spec` meet,
-/// which is also where pinning already forces the two together.
-/// [`materialize`](crate::materialize::materialize) is the deeper join that
-/// additionally extracts capability needs and rewrites preopens.
-pub fn resolve(catalog: &Catalog, spec: &Spec, require_metadata: bool) -> Result<Resolved, Error> {
-    let mut config = spec.clone();
-    // Best-effort for delete/reset paths; strict when metadata is required.
-    let applied = apply_metadata(catalog, &mut config);
-    if require_metadata {
-        applied?;
-    }
-    config.into_resolved(None).map_err(Error::Resolve)
-}
-
-/// Fill the pinned manifest's auth-scheme and config defaults into `spec`,
-/// loading the artifact once. Returns whether the artifact was retained; `false`
-/// leaves the spec unhydrated (best-effort delete/reset/display paths).
-pub fn apply_metadata(catalog: &Catalog, spec: &mut Spec) -> Result<bool, Error> {
-    let Some(provider) = catalog.get(&spec.provider.id)? else {
-        return Ok(false);
-    };
-    let manifest = provider.manifest()?;
-    spec.apply_provider_metadata(&manifest)
-        .map_err(|source| Error::ApplyProviderMetadata {
-            path: provider.wasm_path().to_path_buf(),
-            source,
-        })?;
-    Ok(true)
-}
-
-/// Apply the pinned manifest's metadata to `spec` and return what materialization
-/// checks against it, loading the artifact once. `None` when the artifact is not
-/// retained (metadata is not applied and the checks are skipped; the
-/// missing-artifact error surfaces elsewhere).
-pub fn apply_metadata_and_needs(
+/// Read what materialization checks a spec against from its pinned manifest: the
+/// capability needs and the parsed config schema. Loads the artifact once and
+/// never mutates the spec (defaults are baked in at creation time, not here).
+/// `None` when the artifact is not retained; the missing-artifact error then
+/// surfaces at build time.
+pub fn manifest_requirements(
     catalog: &Catalog,
-    spec: &mut Spec,
-) -> Result<Option<AppliedMetadata>, Error> {
+    spec: &Spec,
+) -> Result<Option<ManifestRequirements>, Error> {
     let Some(provider) = catalog.get(&spec.provider.id)? else {
         return Ok(None);
     };
     let manifest = provider.manifest()?;
-    spec.apply_provider_metadata(&manifest)
-        .map_err(|source| Error::ApplyProviderMetadata {
-            path: provider.wasm_path().to_path_buf(),
-            source,
-        })?;
     let config_schema = manifest
         .config_schema
         .as_ref()
@@ -282,31 +210,28 @@ pub fn apply_metadata_and_needs(
             path: provider.wasm_path().to_path_buf(),
             source,
         })?;
-    Ok(Some(AppliedMetadata {
+    Ok(Some(ManifestRequirements {
         needs: manifest.capabilities,
         config_schema,
     }))
 }
 
-/// The injection-only auth manifest for a resolved mount's pinned provider.
-pub fn auth_manifest_for(
-    catalog: &Catalog,
-    config: &Resolved,
-) -> Result<Option<AuthManifest>, Error> {
-    let Some(provider) = catalog.get(&config.spec.provider.id)? else {
+/// The injection-only auth manifest for a mount's pinned provider.
+pub fn auth_manifest_for(catalog: &Catalog, spec: &Spec) -> Result<Option<AuthManifest>, Error> {
+    let Some(provider) = catalog.get(&spec.provider.id)? else {
         return Ok(None);
     };
     Ok(provider.manifest()?.wasm_auth_manifest())
 }
 
-/// The full auth block (including display guidance) for a resolved mount's
-/// provider. Unlike [`auth_manifest_for`], which returns the injection-only wire
-/// form, this carries the per-scheme setup guidance.
+/// The full auth block (including display guidance) for a mount's provider.
+/// Unlike [`auth_manifest_for`], which returns the injection-only wire form, this
+/// carries the per-scheme setup guidance.
 pub fn provider_auth_manifest_for(
     catalog: &Catalog,
-    config: &Resolved,
+    spec: &Spec,
 ) -> Result<Option<ProviderAuthManifest>, Error> {
-    let Some(provider) = catalog.get(&config.spec.provider.id)? else {
+    let Some(provider) = catalog.get(&spec.provider.id)? else {
         return Ok(None);
     };
     Ok(provider.manifest()?.auth)
@@ -612,14 +537,14 @@ mod tests {
     #[test]
     fn thin_config_inherits_provider_metadata_defaults() {
         let manifest = linear_manifest();
-        let cfg = spec_with_provider("linear", r#"{ "mount": "linear" }"#);
+        let mut cfg = spec_with_provider("linear", r#"{ "mount": "linear" }"#);
 
-        let cfg = cfg.into_resolved(Some(&manifest)).unwrap();
+        cfg.apply_provider_metadata(&manifest).unwrap();
 
-        assert_eq!(cfg.provider_name, "linear");
-        assert_eq!(cfg.spec.auth.len(), 1);
-        assert!(cfg.spec.auth[0].is_oauth());
-        assert_eq!(cfg.spec.auth[0].scheme(), Some("oauth"));
+        assert_eq!(cfg.provider_name().as_str(), "linear");
+        assert_eq!(cfg.auth.len(), 1);
+        assert!(cfg.auth[0].is_oauth());
+        assert_eq!(cfg.auth[0].scheme(), Some("oauth"));
     }
 
     #[test]

@@ -5,27 +5,27 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct GeneratedMountConfig {
+pub(super) struct CreatedMountSpec {
     pub(super) config: Option<Value>,
     pub(super) capabilities: Option<Grants>,
 }
 
-pub(super) struct MountConfigGenerator<'a> {
+pub(super) struct MountSpecCreator<'a> {
     manifest: &'a ProviderManifest,
 }
 
-impl<'a> MountConfigGenerator<'a> {
+impl<'a> MountSpecCreator<'a> {
     pub(super) fn new(manifest: &'a ProviderManifest) -> Self {
         Self { manifest }
     }
 
-    pub(super) fn generate(&self, interactive: bool) -> anyhow::Result<GeneratedMountConfig> {
+    pub(super) fn create(&self, interactive: bool) -> anyhow::Result<CreatedMountSpec> {
         // Seed explicit grants from the manifest's declared needs. The manifest
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
             (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
         let Some(schema) = self.manifest.config_schema.as_ref() else {
-            return Ok(GeneratedMountConfig {
+            return Ok(CreatedMountSpec {
                 config: None,
                 capabilities,
             });
@@ -36,7 +36,7 @@ impl<'a> MountConfigGenerator<'a> {
             prompt_host_files(&schema, &mut config)?;
         }
         self.validate(&config)?;
-        Ok(GeneratedMountConfig {
+        Ok(CreatedMountSpec {
             config: Some(config),
             capabilities,
         })

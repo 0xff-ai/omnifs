@@ -33,7 +33,7 @@ pub fn load_registry_from_mount_dir(
         let bytes = std::fs::read(&path).expect("read mount spec");
         let spec = serde_json::from_slice::<Spec>(&bytes).expect("parse mount spec");
         registry
-            .add_mount(spec, handle)
+            .add_mount(&spec, handle)
             .unwrap_or_else(|error| panic!("load mount {}: {error}", path.display()));
     }
 

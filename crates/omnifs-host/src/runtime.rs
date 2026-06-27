@@ -25,7 +25,7 @@ use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_mount::ProviderConfig;
-use omnifs_mount::mounts::Resolved;
+use omnifs_mount::mounts::Spec;
 use omnifs_provider::{ConfigSchema, HostResource, ProviderStore};
 use omnifs_wit::provider::types as wit_types;
 
@@ -275,13 +275,13 @@ impl Runtime {
     pub fn new(
         engine: &wasmtime::Engine,
         wasm_path: &StdPath,
-        config: &Resolved,
+        config: &Spec,
         cloner: Arc<GitCloner>,
         context: &HostContext,
         extractor: Arc<ArchiveExtractorComponent>,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
-        let mount_name = config.spec.mount.as_str();
+        let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
         // Load the pinned artifact's manifest once: capability/config-schema
         // validation, preopen resolution, and auth all read it, and enforcement
@@ -319,15 +319,15 @@ impl Runtime {
         let auth_manifest = manifest
             .as_ref()
             .and_then(omnifs_provider::ProviderManifest::wasm_auth_manifest);
-        let auth = if config.spec.auth.is_empty() {
+        let auth = if config.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
             let store = credential_store_for_file(context.credentials_file());
             Arc::new(
                 AuthManager::from_configs_manifest_store_with_store(
-                    &config.spec.auth,
+                    &config.auth,
                     auth_manifest.as_ref(),
-                    &config.provider_name,
+                    config.provider_name().as_str(),
                     store,
                 )
                 .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?,
@@ -355,7 +355,7 @@ impl Runtime {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
-            provider_name: config.provider_name.clone(),
+            provider_name: config.provider_name().to_string(),
             next_operation_id: AtomicU64::new(1),
             http,
             git,
@@ -641,9 +641,8 @@ fn finish_initialize_return(
 /// provider marks as host files: the file's parent directory is preopened at the
 /// same path (guest == host), so the provider opens the configured path
 /// unchanged. The mode comes from the field's `HostResource::File` marker.
-fn resolve_preopens(config: &Resolved, schema: Option<&ConfigSchema>) -> Vec<PreopenedPath> {
+fn resolve_preopens(config: &Spec, schema: Option<&ConfigSchema>) -> Vec<PreopenedPath> {
     match config
-        .spec
         .capabilities
         .as_ref()
         .and_then(|capabilities| capabilities.preopened_paths.as_ref())
@@ -671,7 +670,7 @@ fn resolve_preopens(config: &Resolved, schema: Option<&ConfigSchema>) -> Vec<Pre
 
 fn validate_instance_config(
     schema: Option<&serde_json::Value>,
-    config: &Resolved,
+    config: &Spec,
     mount_name: &str,
 ) -> std::result::Result<(), BuildError> {
     let Some(schema) = schema else {
@@ -680,7 +679,6 @@ fn validate_instance_config(
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
     let config_value = config
-        .spec
         .config_raw
         .as_ref()
         .map_or(&empty_config, ProviderConfig::as_value);

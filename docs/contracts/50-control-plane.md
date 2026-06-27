@@ -19,7 +19,7 @@ The daemon exposes a REST API whose schema lives in `omnifs-api` and whose check
 
 Current mount delivery is disk reconcile. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`.
 
-Specs are one file per mount, and a spec file's stem is its mount name: `mount::Registry` (in `omnifs-mount`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. Resolving a spec is a read-only join against the provider index (`resolve(&provider::Catalog, &Spec, ...)`), owned by neither catalog.
+Specs are one file per mount, and a spec file's stem is its mount name: `mount::Registry` (in `omnifs-mount`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
 
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 

@@ -93,7 +93,10 @@ impl AuthArgs {
             },
             AuthCommand::Status { json } => match OutputFormat::from(json) {
                 OutputFormat::Json => status::status_json(catalog, mounts, store.as_ref()),
-                OutputFormat::Text => status::status(layout, catalog, mounts, store.as_ref()),
+                OutputFormat::Text => {
+                    status::status(layout, catalog, mounts, store.as_ref());
+                    Ok(())
+                },
             },
             AuthCommand::Refresh { mount } => {
                 import::refresh(catalog, &mounts, store, &mount, None).await
