@@ -15,7 +15,7 @@ bin="${OMNIFS_BIN:-omnifs}"
 # /usr/local/rustup so we never shadow the image's toolchain.
 rustup_home="${DARWIN_RUSTUP_HOME:-$root/.cache/darwin-rustup}"
 
-image="$(version_pin cargo_zigbuild_container)"
+image="ghcr.io/rust-cross/cargo-zigbuild:0.22.3@sha256:b66e2a5063921aca74fc53248d75d187b7499fe1e076d78eb7d87ab1dbc52f6a"
 
 mkdir -p "$target_dir" "$cargo_home" "$rustup_home"
 docker pull "$image"

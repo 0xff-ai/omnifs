@@ -171,8 +171,7 @@ Gates that must be in place:
 | `cliff.toml` | git-cliff config: changelog areas, filters, and the version-bump policy |
 | `npm/package.json` | private npm workspace root for the CLI and platform packages |
 | `just/providers.just` | WASI SDK install (`wasi-sdk` recipe) and provider/tool WASM builds |
-| `scripts/ci/common.sh` | Repo-root discovery and `version_pin()`, the string-pin reader for `tools/versions.toml` |
-| `tools/versions.toml` | Pinned Zig, cargo-zigbuild, WASI SDK, and cargo tool versions used by CI |
+| `scripts/ci/common.sh` | Repo-root discovery shared by CI helper scripts |
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
 | `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin cross-link helper |
