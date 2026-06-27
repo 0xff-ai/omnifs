@@ -8,8 +8,8 @@ use omnifs_host::clock::now_millis;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::{HostContext, LookupOutcome, Runtime};
 use omnifs_itest::{
-    inline_content, make_engine, make_extractor, make_initialized_runtime, make_runtime,
-    provider_wasm_path, spec_with_test_provider,
+    inline_content, make_engine, make_initialized_runtime, make_runtime, provider_wasm_path,
+    spec_with_test_provider,
 };
 use omnifs_wit::provider::types::{EntryKind, FileSize, ListChildrenResult, OpResult, Stability};
 
@@ -952,7 +952,6 @@ async fn test_cache_isolated_by_mount_name() {
     let cache_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
     let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
-    let extractor = make_extractor();
     let wasm_path = provider_wasm_path("test_provider.wasm");
     let mut config_a = config.clone();
     config_a.mount = "mount-a".to_string();
@@ -979,14 +978,11 @@ async fn test_cache_isolated_by_mount_name() {
         &config_a,
         cloner.clone(),
         &context_a,
-        extractor.clone(),
         &caches,
     )
     .unwrap();
-    let runtime_b = Runtime::new(
-        &engine, &wasm_path, &config_b, cloner, &context_b, extractor, &caches,
-    )
-    .unwrap();
+    let runtime_b =
+        Runtime::new(&engine, &wasm_path, &config_b, cloner, &context_b, &caches).unwrap();
 
     let result = runtime_a
         .namespace()

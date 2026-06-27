@@ -2,9 +2,8 @@
 //!
 //! Each provider WASM is hashed to its [`ProviderId`], written under
 //! `providers_dir/by-hash/<hex>.wasm`, and recorded in `index.json` (advancing
-//! `latest[name]`). The host-internal archive tool is written flat, never hashed
-//! or indexed. Content addressing makes installation idempotent: an artifact
-//! already present under `by-hash/` is skipped.
+//! `latest[name]`). Content addressing makes installation idempotent: an
+//! artifact already present under `by-hash/` is skipped.
 
 use anyhow::Context as _;
 use std::collections::BTreeSet;
@@ -14,7 +13,6 @@ use std::path::{Path, PathBuf};
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
 use omnifs_provider::ProviderStore;
 
-const ARCHIVE_TOOL_WASM: &str = "omnifs_tool_archive.wasm";
 const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];
 
 static EMBEDDED_PROVIDER_BUNDLE: &[u8] =
@@ -46,7 +44,7 @@ pub(crate) fn ensure_providers_installed(providers_dir: &Path) -> anyhow::Result
         entry
             .read_to_end(&mut bytes)
             .with_context(|| format!("read embedded provider bundle file `{name}`"))?;
-        install_artifact(&store, providers_dir, &name, &bytes)?;
+        install_artifact(&store, &name, &bytes)?;
     }
     Ok(())
 }
@@ -88,9 +86,9 @@ pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> a
 }
 
 /// The provider WASM filenames `omnifs dev` expects in the workspace build
-/// output: each non-fixture provider's `provider` artifact plus the host
-/// archive tool. Derived by scanning the checkout's `providers/` directory,
-/// the same source the build script bundles from.
+/// output: each non-fixture provider's `provider` artifact. Derived by scanning
+/// the checkout's `providers/` directory, the same source the build script
+/// bundles from.
 fn expected_files(workspace: &Path) -> anyhow::Result<BTreeSet<String>> {
     let provider_root = workspace.join("providers");
     let mut files = BTreeSet::new();
@@ -114,13 +112,11 @@ fn expected_files(workspace: &Path) -> anyhow::Result<BTreeSet<String>> {
             dir_name.replace('-', "_")
         ));
     }
-    files.insert(ARCHIVE_TOOL_WASM.to_string());
     Ok(files)
 }
 
 /// Ingest the flat WASM files copied into `providers_dir` into the
-/// content-addressed store. The archive tool stays flat; every other WASM is
-/// hashed and indexed.
+/// content-addressed store: every WASM is hashed and indexed.
 fn ingest_exported_artifacts(providers_dir: &Path) -> anyhow::Result<()> {
     let store = ProviderStore::new(providers_dir);
     let read = std::fs::read_dir(providers_dir)
@@ -135,11 +131,8 @@ fn ingest_exported_artifacts(providers_dir: &Path) -> anyhow::Result<()> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if name == ARCHIVE_TOOL_WASM {
-            continue;
-        }
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        install_artifact(&store, providers_dir, name, &bytes)?;
+        install_artifact(&store, name, &bytes)?;
     }
     Ok(())
 }
@@ -173,20 +166,9 @@ fn temp_path(target: &Path) -> PathBuf {
     temp
 }
 
-/// Install one bundle entry. The archive tool is written flat; a provider is
-/// hashed into `by-hash/` and recorded in the index with the name and version
-/// from its embedded manifest.
-fn install_artifact(
-    store: &ProviderStore,
-    providers_dir: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> anyhow::Result<()> {
-    if name == ARCHIVE_TOOL_WASM {
-        // The archive tool stays flat, never content-addressed or indexed.
-        return write_if_changed(providers_dir, name, bytes);
-    }
-
+/// Install one bundle entry: hash it into `by-hash/` and record it in the index
+/// with the name and version from its embedded manifest.
+fn install_artifact(store: &ProviderStore, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let id = ProviderId::from_wasm_bytes(bytes);
     store
         .put_if_absent(&id, bytes)
@@ -215,18 +197,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_providers_installed_populates_store_and_archive_tool() {
+    fn ensure_providers_installed_populates_store() {
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
 
         ensure_providers_installed(providers_dir.path()).expect("install providers");
         // Second call is a content-addressed no-op success.
         ensure_providers_installed(providers_dir.path()).expect("reinstall providers");
-
-        // The archive tool lives flat, never in the content-addressed store.
-        assert!(
-            providers_dir.path().join(ARCHIVE_TOOL_WASM).is_file(),
-            "archive tool must be installed flat"
-        );
 
         let store = ProviderStore::new(providers_dir.path());
         let index = store.read_index().expect("read index");
@@ -246,12 +222,5 @@ mod tests {
                 "the test fixture provider must not ship in the embedded bundle"
             );
         }
-        assert!(
-            index
-                .providers
-                .iter()
-                .all(|entry| entry.file != ARCHIVE_TOOL_WASM),
-            "the archive tool must not be indexed"
-        );
     }
 }

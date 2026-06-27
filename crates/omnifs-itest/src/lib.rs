@@ -2,7 +2,6 @@ use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
 use omnifs_host::cloner::GitCloner;
-use omnifs_host::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
 use omnifs_mount::mounts::Spec;
 use omnifs_provider::{Catalog, ProviderStore};
@@ -92,7 +91,6 @@ impl RuntimeHarness {
                 providers_dir.path(),
                 &paths.credentials_file,
             ),
-            make_extractor(),
             &caches,
         )?;
 
@@ -221,17 +219,6 @@ impl TestOpExt for TestOp<'_> {
             ))),
         }
     }
-}
-
-pub fn make_extractor() -> Arc<ArchiveExtractorComponent> {
-    Arc::new(
-        ArchiveExtractorComponent::from_path(
-            provider_wasm_path(ARCHIVE_TOOL_WASM),
-            DEFAULT_LIMITS,
-            Some(&itest_wasm_cache_dir()),
-        )
-        .expect("build extractor"),
-    )
 }
 
 /// Stable on-disk wasm artifact cache shared across test processes. nextest

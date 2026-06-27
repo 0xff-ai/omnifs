@@ -61,10 +61,6 @@ GitHub fetches objects via the endpoint path (no rate-limit detection) while str
 
 `@pages` was a sketched explicit-pagination control namespace, parked in favour of listing honesty plus `@next` / `@all`. It is recorded here as a deliberately-deferred idea, not an active plan; revisit only if the control-file model proves insufficient.
 
-## Archive world convergence
-
-`omnifs:tool-archive` is a separate WIT world from `omnifs:provider`. Whether the archive extraction tool should converge with the provider world (one contract, one sandbox model) rather than stay a sibling is an open structural question, low priority while the two surfaces are stable.
-
 ## Native mount frontends
 
 The detailed design for additional frontends (NFSv4 loopback, FSKit on macOS) and the distributed frontend-runtime split lives in the internal design notes; the architecture already keeps FUSE as one frontend of the projected tree behind the `omnifs_host::Namespace` seam, so no provider-facing API depends on the frontend. This is product-gated, not technically blocked.

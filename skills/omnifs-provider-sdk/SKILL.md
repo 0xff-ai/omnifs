@@ -200,7 +200,7 @@ The compact auth wire form (the shape serialized into the embedded section) is u
 
 ```bash
 cargo build -p <provider-crate> --target wasm32-wasip2          # the component artifact
-cargo clippy -p 'omnifs-provider-*' -p 'omnifs-tool-*' -p test-provider --target wasm32-wasip2 -- -D warnings
+cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 just providers check                                             # the repo gate
 omnifs dev -y                                                    # live container with all builtin providers
 docker exec omnifs /bin/zsh -lc 'omnifs status'

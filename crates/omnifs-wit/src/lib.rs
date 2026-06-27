@@ -3,16 +3,10 @@
 use std::path::Path;
 
 const PROVIDER_WORLD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
-const EXTRACTOR_WORLD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/extractor");
 
 /// Return the directory containing the `omnifs:provider` WIT package.
 pub fn provider_world_path() -> &'static Path {
     Path::new(PROVIDER_WORLD_DIR)
-}
-
-/// Return the directory containing the `omnifs:tool-archive` WIT package.
-pub fn extractor_world_path() -> &'static Path {
-    Path::new(EXTRACTOR_WORLD_DIR)
 }
 
 /// Generated bindings for the `omnifs:provider` package.
@@ -159,27 +153,4 @@ pub mod provider {
             }
         }
     }
-}
-
-/// Generated bindings for the `omnifs:tool-archive` package.
-#[allow(clippy::same_length_and_capacity)]
-pub mod extractor {
-    #[cfg(not(feature = "host-bindings"))]
-    wit_bindgen::generate!({
-        world: "extractor",
-        path: "wit/extractor",
-        pub_export_macro: true,
-    });
-
-    #[cfg(not(feature = "host-bindings"))]
-    pub use exports::omnifs::tool_archive::extract;
-
-    #[cfg(feature = "host-bindings")]
-    wasmtime::component::bindgen!({
-        path: "wit/extractor",
-        world: "extractor",
-    });
-
-    #[cfg(feature = "host-bindings")]
-    pub use exports::omnifs::tool_archive::extract;
 }

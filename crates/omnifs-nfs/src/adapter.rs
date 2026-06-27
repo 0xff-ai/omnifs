@@ -1510,8 +1510,6 @@ mod tests {
     use super::*;
     use omnifs_host::HostContext;
     use omnifs_host::cloner::GitCloner;
-    use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
-    use std::path::Path as StdPath;
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -1523,19 +1521,6 @@ mod tests {
         _providers_dir: TempDir,
     }
 
-    fn wasm_artifact_path(file_name: &str) -> PathBuf {
-        let workspace_root = StdPath::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crate must have a workspace parent")
-            .parent()
-            .expect("workspace root must exist");
-        workspace_root
-            .join("target")
-            .join("wasm32-wasip2")
-            .join("release")
-            .join(file_name)
-    }
-
     /// Build an `Export` over a `ProviderRegistry` with no mounts. Provider round
     /// trips therefore short-circuit on a missing mount (`runtime_for_mount`
     /// returns `None`), so these tests drive only the renderer-side budget /
@@ -1544,13 +1529,6 @@ mod tests {
         let cache_dir = tempfile::tempdir().expect("cache dir");
         let config_dir = tempfile::tempdir().expect("config dir");
         let providers_dir = tempfile::tempdir().expect("providers dir");
-        let src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
-        assert!(
-            src.exists(),
-            "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers build` first.",
-            src.display()
-        );
-        std::fs::copy(&src, providers_dir.path().join(ARCHIVE_TOOL_WASM)).expect("copy wasm");
         let credentials_file = config_dir.path().join("credentials.json");
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = ProviderRegistry::new(

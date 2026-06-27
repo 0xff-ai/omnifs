@@ -22,14 +22,14 @@ Do not add alternate local mount recipes unless explicitly requested.
 
 ## Build and validate
 
-Package selection uses cargo `-p` / `--exclude` globs (`omnifs-provider-*`, `omnifs-tool-*`, `test-provider`), not a hand-maintained crate list.
+Package selection uses cargo `-p` / `--exclude` globs (`omnifs-provider-*`, `test-provider`), not a hand-maintained crate list.
 
 Host crates such as `omnifs-cli` and `omnifs-host` build for the native target. Providers build directly as components with the Rust `wasm32-wasip2` target. `cargo build --target wasm32-wasip2` emits provider component artifacts directly; WIT bindings are generated through the SDK.
 
 Provider clippy and test commands must include `--target wasm32-wasip2` and `-p` globs:
 
 ```bash
-cargo clippy -p 'omnifs-provider-*' -p 'omnifs-tool-*' -p test-provider --target wasm32-wasip2 -- -D warnings
+cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 cargo test -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 --no-run
 ```
 

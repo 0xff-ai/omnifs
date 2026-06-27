@@ -1,22 +1,19 @@
-//! Mount a stored blob as a directory tree by extracting it via the
-//! sandboxed Wasmtime extractor component.
+//! Mount a stored blob as a directory tree by extracting it on the host.
 //!
 //! The provider issues `open-archive(blob, format, strip-prefix)`; the
-//! host hands the blob and a fresh extraction directory to the
-//! archive extractor tool and, on success, registers the resulting
+//! host extracts the blob into a fresh directory via
+//! [`crate::tools::archive`] and, on success, registers the resulting
 //! directory in the shared [`TreeRefs`]. The provider returns the
 //! resulting `tree-ref`, which the host serves through the same FUSE
 //! bind-mount path that already serves git clones. There are no
-//! per-file callouts; extraction happens inside the WASI sandbox.
+//! per-file callouts; extraction runs once, directly on the host.
 
 #[cfg(test)]
 use crate::blob_cache::BlobMetadata;
 use crate::blob_cache::{BlobCache, BlobRecord};
 use crate::callouts::{callout_error, callout_internal, callout_not_found, record_outcome};
 use crate::sandbox::publish;
-#[cfg(test)]
-use crate::tools::archive as archive_tool;
-use crate::tools::archive::{ArchiveExtractorComponent, ArchiveFormat, ExtractError, ExtractStats};
+use crate::tools::archive::{self, ArchiveFormat, ExtractError, ExtractStats};
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_wit::provider::types as wit_types;
@@ -28,9 +25,8 @@ use tracing::{debug, warn};
 
 /// Per-provider archive extractor. Owns the on-disk extraction root and
 /// shares a [`TreeRefs`] with the git executor so a returned
-/// `tree-ref` resolves identically regardless of source. All actual
-/// extraction is delegated to the sandboxed
-/// [`ArchiveExtractorComponent`].
+/// `tree-ref` resolves identically regardless of source. Extraction
+/// itself is performed on the host by [`crate::tools::archive::extract`].
 ///
 /// Cached extraction directories are keyed by the full `(cache-key,
 /// format, strip-prefix)` view and published with a temporary directory
@@ -41,7 +37,6 @@ pub(crate) struct ArchiveExecutor {
     trees: Arc<TreeRefs>,
     trees_by_key: DashMap<ExtractKey, u64>,
     locks: DashMap<ExtractKey, Arc<Mutex<()>>>,
-    extractor: Arc<ArchiveExtractorComponent>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -113,12 +108,7 @@ impl From<ArchiveError> for wit_types::CalloutResult {
 }
 
 impl ArchiveExecutor {
-    pub(crate) fn new(
-        cache: Arc<BlobCache>,
-        trees: Arc<TreeRefs>,
-        extract_root: PathBuf,
-        extractor: Arc<ArchiveExtractorComponent>,
-    ) -> Self {
+    pub(crate) fn new(cache: Arc<BlobCache>, trees: Arc<TreeRefs>, extract_root: PathBuf) -> Self {
         // Startup cleanup is best-effort; later writes report concrete
         // filesystem errors when the cache root is unusable.
         let _ = publish::sweep_temp_publish_dirs(&extract_root);
@@ -128,7 +118,6 @@ impl ArchiveExecutor {
             trees,
             trees_by_key: DashMap::new(),
             locks: DashMap::new(),
-            extractor,
         }
     }
 
@@ -284,17 +273,19 @@ impl ArchiveExecutor {
         record: &BlobRecord,
     ) -> Result<ExtractStats, ArchiveError> {
         let blob_path = self.cache.blob_path(&record.cache_key);
-        let stats =
-            match self
-                .extractor
-                .extract(key.format, &blob_path, tmp, key.strip_prefix.as_deref())
-            {
-                Ok(stats) => stats,
-                Err(e) => {
-                    warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
-                    return Err(e.into());
-                },
-            };
+        let stats = match archive::extract(
+            key.format,
+            &blob_path,
+            tmp,
+            key.strip_prefix.as_deref(),
+            archive::DEFAULT_LIMITS,
+        ) {
+            Ok(stats) => stats,
+            Err(e) => {
+                warn!(cache_key = %key.cache_key, error = %e, "archive extraction failed");
+                return Err(e.into());
+            },
+        };
         Ok(stats)
     }
 }
@@ -436,15 +427,7 @@ mod tests {
         let blob_id = insert_archive_blob(&cache, "pkg-1.0.crate", &blob_path, &synthesize_targz());
 
         let trees = Arc::new(TreeRefs::new());
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
-        );
-        let executor = Arc::new(ArchiveExecutor::new(
-            cache,
-            trees.clone(),
-            archive_root,
-            extractor,
-        ));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
 
         let response = executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))
@@ -476,15 +459,7 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
-        );
-        let executor = Arc::new(ArchiveExecutor::new(
-            cache,
-            trees.clone(),
-            archive_root,
-            extractor,
-        ));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
 
         let alpha = match executor.open(&open_request_targz(blob_id, "alpha/")).await {
             wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened { tree }) => tree,
@@ -534,15 +509,7 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
-        );
-        let executor = Arc::new(ArchiveExecutor::new(
-            cache,
-            trees.clone(),
-            archive_root,
-            extractor,
-        ));
+        let executor = Arc::new(ArchiveExecutor::new(cache, trees.clone(), archive_root));
 
         let tree = match executor
             .open(&open_request_targz(blob_id, "pkg-1.0/"))
@@ -578,10 +545,7 @@ mod tests {
 
         let cache = Arc::new(BlobCache::new(blob_cache_dir));
         let trees = Arc::new(TreeRefs::new());
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
-        );
-        let _executor = ArchiveExecutor::new(cache, trees, archive_root, extractor);
+        let _executor = ArchiveExecutor::new(cache, trees, archive_root);
 
         assert!(!stale.exists());
         assert!(keep.exists());
@@ -604,14 +568,10 @@ mod tests {
         );
 
         let trees = Arc::new(TreeRefs::new());
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::new(archive_tool::DEFAULT_LIMITS).expect("build extractor"),
-        );
         let executor = Arc::new(ArchiveExecutor::new(
             cache.clone(),
             trees.clone(),
             archive_root.clone(),
-            extractor.clone(),
         ));
 
         let tree = match executor
@@ -630,7 +590,6 @@ mod tests {
             cache,
             second_trees.clone(),
             archive_root.clone(),
-            extractor,
         ));
 
         let tree = match second_executor

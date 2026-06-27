@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];
-const ARCHIVE_TOOL_WASM: &str = "omnifs_tool_archive.wasm";
 const PROVIDER_BUNDLE_ARCHIVE: &str = "provider-bundle.tar.zst";
 const PROVIDER_BUNDLE_DIR_ENV: &str = "OMNIFS_PROVIDER_BUNDLE_DIR";
 
@@ -51,7 +50,6 @@ fn write_provider_bundle(
     out_dir: &std::path::Path,
     mut files: Vec<String>,
 ) {
-    files.push(ARCHIVE_TOOL_WASM.to_string());
     files.sort();
     files.dedup();
 

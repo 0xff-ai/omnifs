@@ -18,6 +18,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** When browsing a listing, many files are now served directly from the data already fetched, so reads don't need to refetch from upstream. (#146)
 
 ### Runtime & mounts
+- **Improvement:** Archive extraction (mounting a stored `tar.gz`/`tar`/`zip` blob as a directory tree) now runs directly on the host instead of inside a WASM sandbox component. The `omnifs-tool-archive` component and the `omnifs:tool-archive` WIT world are removed; path sanitization and the entry/size/total-byte caps are unchanged, with a wall-clock deadline replacing the sandbox fuel limit. The `open-archive` provider callout is unchanged, so providers and consumers see no behavior change.
 - **Feature:** The daemon can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
 - **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
 - **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
