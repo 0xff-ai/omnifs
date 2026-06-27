@@ -9,7 +9,6 @@ use axum::body::Body;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
 use omnifs_api::{
     DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
     MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
@@ -25,6 +24,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracing::{info, warn};
 use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::context::DaemonContext;
 use crate::frontends::Frontend;
@@ -32,15 +33,6 @@ use crate::frontends::Frontend;
 #[derive(OpenApi)]
 #[openapi(
     info(title = "omnifs daemon control API", version = env!("CARGO_PKG_VERSION")),
-    paths(
-        ready,
-        status,
-        mounts_list,
-        mount_inspect,
-        reconcile,
-        shutdown,
-        events
-    ),
     components(schemas(
         ReadyInfo,
         DaemonStatus,
@@ -265,21 +257,28 @@ impl Daemon {
         }
     }
 
+    fn api_router() -> OpenApiRouter<Arc<Self>> {
+        OpenApiRouter::new()
+            .routes(routes!(ready))
+            .routes(routes!(status))
+            .routes(routes!(mounts_list))
+            .routes(routes!(mount_inspect))
+            .routes(routes!(reconcile))
+            .routes(routes!(shutdown))
+            .routes(routes!(events))
+    }
+
     fn router(state: Arc<Self>) -> Router {
-        Router::new()
-            .route("/v1/ready", get(ready))
-            .route("/v1/status", get(status))
-            .route("/v1/mounts", get(mounts_list))
-            .route("/v1/mounts/{name}", get(mount_inspect))
-            .route("/v1/reconcile", axum::routing::post(reconcile))
-            .route("/v1/shutdown", axum::routing::post(shutdown))
-            .route("/v1/events", get(events))
-            .with_state(state)
+        let (router, _) = Self::api_router().with_state(state).split_for_parts();
+        router
     }
 }
 
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let mut openapi = ApiDoc::openapi();
+    let (_, paths) = Daemon::api_router().split_for_parts();
+    openapi.merge(paths);
+    openapi
 }
 
 pub fn openapi_json() -> String {

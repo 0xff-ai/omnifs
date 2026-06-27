@@ -31,9 +31,6 @@ tempfile = { workspace = true }
 name = "dump-provider"
 path = "src/bin/dump_provider.rs"
 
-[package.metadata.dist]
-dist = false
-
 [lints.rust]
 unsafe_code = "deny"
 

@@ -44,28 +44,30 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
-      - uses: ./.github/actions/omnifs-just
-
       - name: Decide whether to ship
         id: plan
         run: |
           set -euo pipefail
-          plan="$(just release plan)"
-          echo "$plan"
-          version="$(jq -r '.version' <<< "$plan")"
-          # Semver prerelease: any version with a hyphen (e.g. 0.2.0-dev.0, 1.0.0-rc.1).
-          if [[ "$version" == *-* ]]; then
-            is_prerelease=true
-          else
-            is_prerelease=false
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          # release-pr.yml tags the merge commit when a release PR lands; a v* tag
+          # on this commit is the signal to ship.
+          tag="$(git tag --points-at "$sha" --list 'v[0-9]*' | sort -V | tail -1)"
+          if [ -z "$tag" ]; then
+            echo "no release tag on $sha; nothing to ship"
+            echo "should_ship=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          version="${tag#v}"
+          # Semver prerelease: any version with a hyphen (e.g. 0.3.0-rc.1).
+          case "$version" in *-*) is_prerelease=true ;; *) is_prerelease=false ;; esac
+          # Release notes = the changelog section for this version.
+          awk -v h="## [$version]" 'index($0,h)==1{g=1;next} g&&/^## \[/{exit} g' CHANGELOG.md > release-notes.md
           {
-            echo "should_ship=$(jq -r '.should_ship' <<< "$plan")"
-            echo "tag=$(jq -r '.tag' <<< "$plan")"
+            echo "should_ship=true"
+            echo "tag=$tag"
             echo "version=$version"
             echo "is_prerelease=$is_prerelease"
           } >> "$GITHUB_OUTPUT"
-          jq -r '.release_notes // empty' <<< "$plan" > release-notes.md
 
       - name: Upload release notes
         if: steps.plan.outputs.should_ship == 'true'
@@ -206,6 +208,8 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
+      - uses: dtolnay/rust-toolchain@1.95.0
+
       - name: Resolve CI workflow run
         id: ci_run
         env:
@@ -249,8 +253,9 @@ jobs:
           set -euo pipefail
           just npm sync
 
-          mapfile -t platforms < <(jq -r 'keys[]' npm/platforms.json)
-          for platform in "${platforms[@]}"; do
+          for pkg in npm/platform/*; do
+            [[ -d "$pkg" ]] || continue
+            platform="$(basename "$pkg")"
             archive="$(find dist-download -type f -name "omnifs-cli-${platform}.tar.xz" | head -n 1)"
             if [[ -z "$archive" ]]; then
               echo "missing CLI archive for $platform" >&2
@@ -278,7 +283,6 @@ jobs:
               fi
             fi
 
-            pkg="./npm/platform/$platform"
             mkdir -p "$pkg/bin"
             cp "$binary" "$pkg/bin/omnifs"
             chmod 755 "$pkg/bin/omnifs"
@@ -304,15 +308,15 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
+      - uses: dtolnay/rust-toolchain@1.95.0
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Sync and validate npm metadata
-        run: |
-          just npm sync
-          just npm validate
+      - name: Sync npm metadata
+        run: just npm sync
 
       - name: Stage root package
         run: just npm pack "$RUNNER_TEMP"

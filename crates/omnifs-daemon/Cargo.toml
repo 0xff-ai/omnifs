@@ -27,6 +27,7 @@ tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 
 # FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -34,11 +35,6 @@ omnifs-fuse = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-
-# Not a cargo-dist target: the daemon runtime ships in the npm CLI platform
-# packages (staged beside omnifs by release.yml), and in the runtime image.
-[package.metadata.dist]
-dist = false
 
 [lints]
 workspace = true

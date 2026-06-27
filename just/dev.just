@@ -18,20 +18,25 @@ just-check:
       just --fmt --check --justfile "$justfile" --working-directory .
     done
 
-# Run the bun script tests.
-[group('dev')]
-scripts-test:
-    bun test scripts
-
 # Check that docs do not reference nonexistent docs paths.
 [group('dev')]
 docs-check:
     bash scripts/ci/check-doc-links.sh
     bash scripts/ci/check-doc-contracts.sh
 
-# Run the CI-shaped local validation path for broad changes.
+# Refresh generated and formatted repository artifacts.
 [group('dev')]
-check: fmt-check just-check docs-check scripts-test npm::validate openapi-check providers::check providers::build providers::validate host::clippy host::test
+refresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fmt --all
+    just --fmt
+    for justfile in just/*.just; do
+      just --fmt --justfile "$justfile" --working-directory .
+    done
+    just npm sync
+    just schema
+    just openapi
 
 # Regenerate the provider JSON schema.
 [group('dev')]
@@ -41,12 +46,7 @@ schema:
 # Regenerate the control API OpenAPI spec from the daemon implementation.
 [group('dev')]
 openapi:
-    bun scripts/openapi.ts generate
-
-# Check that the checked-in OpenAPI spec matches the implementation.
-[group('dev')]
-openapi-check:
-    bun scripts/openapi.ts check
+    cargo run -p omnifs-daemon --bin omnifsd-openapi --quiet > crates/omnifs-api/openapi/daemon.json
 
 # Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]

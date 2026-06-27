@@ -67,13 +67,13 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `crates/omnifs-home/src/lib.rs`
 - `Dockerfile`
-- `scripts/openapi.ts`
+- `crates/omnifs-daemon/src/bin/openapi.rs`
 - `scripts/ci/build-runtime-image.sh`
 - `CONTRIBUTING.md`
 
 ## Validation
 
-- Control API changes need daemon API tests and `just openapi-check`.
+- Control API changes need daemon API tests after `just openapi` regenerates the checked-in spec.
 - API shape changes run `just openapi` and keep generated OpenAPI synchronized.
 - Runtime-mode changes need targeted CLI/daemon tests and live runtime validation for the affected launch path.
 - Contributor workflow changes need CLI tests and, when touching runtime behavior, `just dev -y` plus the smoke path in `CONTRIBUTING.md`.

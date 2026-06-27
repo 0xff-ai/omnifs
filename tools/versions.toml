@@ -15,9 +15,6 @@ wasm_tools = "1.246.2"
 # renovate: datasource=github-releases depName=casey/just
 just = "1.51.0"
 
-# renovate: datasource=github-releases depName=oven-sh/bun
-bun = "1.3.10"
-
 # renovate: datasource=github-releases depName=WebAssembly/wasi-sdk
 wasi_sdk = "33"
 wasi_sdk_release = "33.0"

@@ -22,9 +22,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tempfile = { workspace = true }
 
-[package.metadata.dist]
-dist = false
-
 [lints.rust]
 unsafe_code = "deny"
 
