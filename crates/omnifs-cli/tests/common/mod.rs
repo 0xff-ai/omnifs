@@ -106,19 +106,7 @@ pub fn nfs_serial_lock() -> TcpListener {
     }
 }
 
-pub fn copy_release_wasm_into(providers_dir: &Path) {
-    for entry in std::fs::read_dir(release_wasm_dir())
-        .expect("read release wasm dir")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "wasm") {
-            std::fs::copy(&path, providers_dir.join(path.file_name().unwrap())).expect("copy wasm");
-        }
-    }
-}
-
-/// Install the test provider into the by-hash store under `providers_dir` and
+/// Install the test provider into the provider store under `providers_dir` and
 /// return its content id.
 pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
     let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))

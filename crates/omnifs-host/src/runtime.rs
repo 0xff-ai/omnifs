@@ -96,10 +96,10 @@ impl HostContext {
         self.cache_dir.join("wasm")
     }
 
-    /// `by-hash/<hex>.wasm` for a pinned provider id: the serving path the
+    /// `<hex>.wasm` for a pinned provider id: the serving path the
     /// daemon loads. Identity is the content hash, never a filename.
     pub(crate) fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
-        ProviderStore::new(&self.providers_dir).by_hash_path(id)
+        ProviderStore::new(&self.providers_dir).artifact_path(id)
     }
 }
 

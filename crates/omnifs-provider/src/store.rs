@@ -3,16 +3,15 @@
 //! Layout under the store root (today `~/.omnifs/providers/`):
 //!
 //! ```text
-//! by-hash/<64hex>.wasm   immutable provider artifacts, write-if-absent
-//! index.json             name index + latest pointers
-//! <archive tool>.wasm    host-internal tools: flat path, never in by-hash/index
+//! <64hex>.wasm   immutable provider artifacts, write-if-absent
+//! index.json     name index + latest pointers
 //! ```
 //!
 //! Artifacts are keyed by [`ProviderId`] (BLAKE3 of the exact WASM bytes), so a
-//! present `by-hash/<id>.wasm` is always the correct content. The CLI is the only
-//! writer; `install` advances `latest[name]` under an advisory lock (same pattern
-//! as the credentials `FileStore`) so two concurrent CLI processes do not lose an
-//! update in the read-modify-write.
+//! present `<id>.wasm` is always the correct content. The CLI is the only writer;
+//! `install` advances `latest[name]` under an advisory lock (same pattern as the
+//! credentials `FileStore`) so two concurrent CLI processes do not lose an update
+//! in the read-modify-write.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -23,7 +22,8 @@ use fs2::FileExt;
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
 use serde::{Deserialize, Serialize};
 
-const BY_HASH_DIR: &str = "by-hash";
+use crate::Artifact;
+
 const INDEX_FILE: &str = "index.json";
 const LOCK_FILE: &str = ".index.lock";
 const INDEX_VERSION: u32 = 1;
@@ -89,36 +89,46 @@ impl ProviderStore {
         &self.root
     }
 
+    /// `root/<hex>.wasm`.
     #[must_use]
-    pub fn by_hash_dir(&self) -> PathBuf {
-        self.root.join(BY_HASH_DIR)
-    }
-
-    /// `root/by-hash/<hex>.wasm`.
-    #[must_use]
-    pub fn by_hash_path(&self, id: &ProviderId) -> PathBuf {
-        self.by_hash_dir().join(format!("{id}.wasm"))
+    pub fn artifact_path(&self, id: &ProviderId) -> PathBuf {
+        self.root.join(format!("{id}.wasm"))
     }
 
     fn index_path(&self) -> PathBuf {
         self.root.join(INDEX_FILE)
     }
 
-    /// Write `bytes` under `by-hash/<id>.wasm`, atomically, only if absent.
+    /// Write `bytes` under `<id>.wasm`, atomically, only if absent.
     /// Content addressing makes a present file always correct, so a hit is a skip.
     pub fn put_if_absent(&self, id: &ProviderId, bytes: &[u8]) -> Result<(), StoreError> {
-        let dir = self.by_hash_dir();
-        create_dir_all(&dir)?;
-        let final_path = self.by_hash_path(id);
+        create_dir_all(&self.root)?;
+        let final_path = self.artifact_path(id);
         if final_path.exists() {
             return Ok(());
         }
-        let tmp = dir.join(format!(".{id}.wasm.tmp-{}", std::process::id()));
+        let tmp = self
+            .root
+            .join(format!(".{id}.wasm.tmp-{}", std::process::id()));
         write_file(&tmp, bytes)?;
         fs::rename(&tmp, &final_path).map_err(|source| StoreError::Io {
             path: final_path,
             source,
         })
+    }
+
+    /// Retain one validated provider artifact and advance its provider-name
+    /// latest pointer.
+    pub fn add_artifact(&self, artifact: Artifact) -> Result<IndexEntry, StoreError> {
+        let entry = IndexEntry {
+            id: artifact.id,
+            name: artifact.meta.name.clone(),
+            version: artifact.meta.version.clone(),
+            file: artifact.file.clone(),
+        };
+        self.put_if_absent(&artifact.id, &artifact.bytes)?;
+        self.install(artifact.id, artifact.meta, artifact.file)?;
+        Ok(entry)
     }
 
     /// Read the index, or an empty (version-stamped) one if it does not exist yet.
@@ -221,13 +231,51 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Artifact;
+    use crate::sections::embed_provider_metadata_section;
     use tempfile::tempdir;
+
+    const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
 
     fn meta(name: &str, version: Option<&str>) -> ProviderMeta {
         ProviderMeta {
             name: ProviderName::new(name).unwrap(),
             version: version.map(ProviderVersion::new),
         }
+    }
+
+    fn artifact(file: &str, name: &str) -> (ProviderId, Artifact) {
+        let metadata = serde_json::json!({
+            "id": name,
+            "displayName": name,
+            "provider": file,
+            "defaultMount": name
+        });
+        let bytes = embed_provider_metadata_section(
+            EMPTY_WASM,
+            serde_json::to_vec(&metadata).unwrap().as_slice(),
+        )
+        .unwrap();
+        let id = ProviderId::from_wasm_bytes(&bytes);
+        (id, Artifact::from_bytes(file, bytes).unwrap())
+    }
+
+    #[test]
+    fn add_artifact_writes_root_hash_file_and_indexes_metadata() {
+        let dir = tempdir().unwrap();
+        let store = ProviderStore::new(dir.path());
+        let (id, artifact) = artifact("omnifs_provider_demo.wasm", "demo");
+
+        let entry = store.add_artifact(artifact).unwrap();
+
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.name.as_str(), "demo");
+        assert_eq!(entry.file, "omnifs_provider_demo.wasm");
+        assert!(store.artifact_path(&id).is_file());
+        assert!(!dir.path().join("by-hash").exists());
+        let index = store.read_index().unwrap();
+        assert_eq!(index.providers.len(), 1);
+        assert_eq!(index.latest.get("demo"), Some(&id));
     }
 
     #[test]
@@ -238,8 +286,8 @@ mod tests {
         let id = ProviderId::from_wasm_bytes(bytes);
 
         store.put_if_absent(&id, bytes).unwrap();
-        assert!(store.by_hash_path(&id).exists());
-        assert_eq!(std::fs::read(store.by_hash_path(&id)).unwrap(), bytes);
+        assert!(store.artifact_path(&id).exists());
+        assert_eq!(std::fs::read(store.artifact_path(&id)).unwrap(), bytes);
         // Second call is a no-op skip (already present).
         store.put_if_absent(&id, bytes).unwrap();
     }

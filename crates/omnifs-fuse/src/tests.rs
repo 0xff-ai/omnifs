@@ -84,7 +84,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let config_dir = tempfile::tempdir().expect("config dir");
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
-    // The test provider goes into the by-hash store.
+    // The test provider goes into the provider store.
     let test_src = wasm_artifact_path("test_provider.wasm");
     assert!(
         test_src.exists(),

@@ -117,9 +117,9 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. `mount::Registry` (in `omnifs-mount`) is the sole spec owner: the CLI is the only author and writes through it atomically, the daemon reads through it on reconcile. `provider::Catalog` (in `omnifs-provider`) is the provider index over the content-addressed store. A spec inherits its provider-manifest defaults (auth scheme and config) at creation time, so it is self-contained: reading or serving it is a plain parse, with no read-time resolution step.
 - Runtime modes are host-native and Docker. Docker runs the Linux daemon and exposes FUSE inside the container.
 - Linux defaults to FUSE. macOS defaults to read-only NFSv4.0 loopback through `omnifs-nfs`.
-- `just dev` is the supported contributor runtime entrypoint: it builds provider/tool WASM once, then runs the source CLI's `dev` command to install those bytes, write pinned dev mounts, start profile-selected fixtures, launch the FUSE runtime container, and open a shell at `/omnifs`.
+- `just dev` is the supported contributor runtime entrypoint: it builds provider WASM once, then runs the source CLI's `dev` command to install those bytes, write pinned dev mounts, start profile-selected fixtures, launch the FUSE runtime container, and open a shell at `/omnifs`.
 - Inside a source checkout, contributor commands use `~/.omnifs-dev` unless `OMNIFS_HOME` is explicit. Outside a checkout, normal `~/.omnifs` applies.
-- `Dockerfile` is the contributor image path for `omnifs dev`. The dev image consumes the host-built provider/tool WASM from the dev provider store instead of compiling providers inside the image. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`; release CLI binaries embed the provider/tool bundle and unpack it into `OMNIFS_HOME/providers`.
+- `Dockerfile` is the contributor image path for `omnifs dev`. The dev image consumes host-built provider WASM from `target/wasm32-wasip2/release` instead of compiling providers inside the image, while the dev provider store retains artifacts by content id for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`; release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
 - A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
 
 ## Product contract
@@ -174,9 +174,9 @@ cargo nextest run
 Use the right wider gate for the change:
 
 - **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/docs/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
-- **WASM toolchain.** Provider and tool WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
+- **WASM toolchain.** Provider WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
 - **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers build` before treating missing provider artifacts as product failures.
-- **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/tool/test-provider WASM crates from host-target builds.
+- **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/test-provider WASM crates from host-target builds.
 - **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `docker exec omnifs /bin/zsh -lc 'omnifs status'`, and the smoke path in `CONTRIBUTING.md`.
 - **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.

@@ -91,7 +91,7 @@ pub fn test_provider_reference() -> omnifs_core::ProviderRef {
     }
 }
 
-/// A mount `Spec` for the test provider, pinned to the by-hash store any
+/// A mount `Spec` for the test provider, pinned to the provider store any
 /// `TestExport` installs it into.
 #[allow(dead_code)]
 pub fn test_provider_spec(mount: &str) -> omnifs_mount::mounts::Spec {

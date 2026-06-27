@@ -97,7 +97,7 @@ impl InitArgs {
             })
             .with_hint("Run `omnifs init` (no args) to see the picker of available providers")
             .with_hint(format!(
-                "Or place a provider wasm in {}",
+                "Or run `omnifs providers add <wasm-or-dir>` to install provider artifacts into {}",
                 paths.providers_dir.display()
             ))?;
         let reference = provider.reference();

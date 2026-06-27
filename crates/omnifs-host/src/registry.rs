@@ -729,7 +729,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    /// Lay `src` WASM into a by-hash store under `providers_dir` and return a
+    /// Lay `src` WASM into the provider store under `providers_dir` and return a
     /// `Spec` (built from `body`, which omits `provider`) pinned to the content
     /// id. Mirrors how the CLI pins a `ProviderRef` after installing an artifact.
     fn pin_spec(providers_dir: &Path, src: &Path, name: &str, mut body: serde_json::Value) -> Spec {
@@ -799,7 +799,7 @@ mod tests {
             .expect("registry init"),
         );
 
-        // Pin the test provider into the by-hash store, then mount it with an
+        // Pin the test provider into the provider store, then mount it with an
         // out-of-schema config field the provider's configSchema forbids.
         let spec = pin_spec(
             providers_dir.path(),
@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// The daemon serve-time backstop: a mount pinning a `ProviderId` whose
-    /// artifact is not retained in the by-hash store is refused at reconcile and
+    /// artifact is not retained in the provider store is refused at reconcile and
     /// surfaces as a `MountFailure`, never served. Guards "the daemon never
     /// serves a provider it cannot resolve by content id."
     #[tokio::test(flavor = "multi_thread")]
@@ -830,7 +830,7 @@ mod tests {
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
         let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
 
-        // A mount pinning a content id with no matching by-hash artifact.
+        // A mount pinning a content id with no matching retained artifact.
         let mounts_dir = paths.config_dir.join("mounts");
         std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
         let missing_id = "a".repeat(64);

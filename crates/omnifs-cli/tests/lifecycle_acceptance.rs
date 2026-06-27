@@ -29,15 +29,15 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{
-    copy_release_wasm_into, free_port, install_test_provider, live_acceptance_enabled,
-    nfs_serial_lock, omnifs_bin, platform_can_mount, release_wasm_dir, test_mount_spec,
+    free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
+    platform_can_mount, release_wasm_dir, test_mount_spec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// A broken spec: pins a content id with no installed by-hash artifact.
+/// A broken spec: pins a content id with no installed artifact.
 fn broken_mount_spec() -> String {
     let bogus = "0".repeat(64);
     format!(
@@ -53,7 +53,7 @@ struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
     daemon_addr: String,
-    /// Content id of the test provider installed into the by-hash store.
+    /// Content id of the test provider installed into the provider store.
     test_provider_id: omnifs_core::ProviderId,
     /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
     /// than the daemon subcommand directly.
@@ -61,16 +61,13 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Allocate a fresh fixture with providers copied in. Does NOT write any
+    /// Allocate a fresh fixture with the test provider installed. Does NOT write any
     /// mount spec; callers write what they need.
     fn new() -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
         let providers_dir = home.path().join("providers");
         std::fs::create_dir_all(&providers_dir).expect("providers dir");
 
-        copy_release_wasm_into(&providers_dir);
-        // The daemon serves by content id, so the test provider must be
-        // installed into the by-hash store, not just copied in flat.
         let test_provider_id = install_test_provider(&providers_dir);
 
         let mounts_dir = home.path().join("mounts");
