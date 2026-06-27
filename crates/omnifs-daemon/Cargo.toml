@@ -27,6 +27,7 @@ tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 
 # FUSE links fuser, which is Linux-only; the host-native NFS frontend builds on macOS without it.
 [target.'cfg(target_os = "linux")'.dependencies]

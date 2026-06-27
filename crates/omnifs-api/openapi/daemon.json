@@ -12,7 +12,6 @@
   "paths": {
     "/v1/events": {
       "get": {
-        "tags": [],
         "summary": "Stream the inspector history snapshot followed by live records as\nnewline-framed JSON using the same wire format the raw TCP listener used to\nspeak, now chunk-encoded by HTTP. A lagged subscriber gets a\n`# dropped N events` comment line and resumes from the newest record.",
         "operationId": "events",
         "responses": {
@@ -41,7 +40,6 @@
     },
     "/v1/mounts": {
       "get": {
-        "tags": [],
         "operationId": "mounts_list",
         "responses": {
           "200": {
@@ -62,7 +60,6 @@
     },
     "/v1/mounts/{name}": {
       "get": {
-        "tags": [],
         "operationId": "mount_inspect",
         "parameters": [
           {
@@ -101,7 +98,6 @@
     },
     "/v1/ready": {
       "get": {
-        "tags": [],
         "operationId": "ready",
         "responses": {
           "200": {
@@ -129,7 +125,6 @@
     },
     "/v1/reconcile": {
       "post": {
-        "tags": [],
         "summary": "`POST /v1/reconcile`: converge the running mount set to `mounts/*.json`.",
         "operationId": "reconcile",
         "responses": {
@@ -148,7 +143,6 @@
     },
     "/v1/shutdown": {
       "post": {
-        "tags": [],
         "summary": "`POST /v1/shutdown`: unmount the frontend and exit. The daemon holds the\nfrontend handle, so it tears itself down; `omnifs down` no longer infers the\nteardown from configuration.",
         "operationId": "shutdown",
         "responses": {
@@ -167,7 +161,6 @@
     },
     "/v1/status": {
       "get": {
-        "tags": [],
         "operationId": "status",
         "responses": {
           "200": {
