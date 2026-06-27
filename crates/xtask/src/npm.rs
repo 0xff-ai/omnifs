@@ -2,15 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-const ROOT_PACKAGE: &str = "@0xff-ai/omnifs";
-
-/// One platform entry from `npm/platforms.json`. Extra keys (e.g. `runner`)
-/// are ignored; only the fields the sync/validate policy reads are modeled.
+/// One platform entry from `npm/platforms.json`. Extra keys such as `runner`
+/// and `rustTarget` are ignored; validation reads only npm package metadata.
 #[derive(Deserialize)]
 struct PlatformSpec {
     package: String,
@@ -35,20 +32,6 @@ struct PackageJson {
 struct NpmLayout {
     root_package: PackageJson,
     platform_packages: BTreeMap<String, PackageJson>,
-}
-
-/// Sync the root, platform, and root `optionalDependencies` versions via
-/// `npm pkg set`, which preserves each manifest's key order rather than
-/// reserializing JSON.
-pub fn sync(root: &Path, version: &str) -> Result<()> {
-    let catalog = load_catalog(root)?;
-    let layout = discover_layout(root, &catalog)?;
-    write_version(root, &layout.root_package, version)?;
-    for pkg in layout.platform_packages.values() {
-        write_version(root, pkg, version)?;
-    }
-    println!("synced npm packages to version {version}");
-    Ok(())
 }
 
 /// Validate platform metadata, root `optionalDependencies`, and the inlined
@@ -112,34 +95,6 @@ fn load_package_json(path: PathBuf) -> Result<PackageJson> {
         serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     pkg.path = path;
     Ok(pkg)
-}
-
-fn write_version(root: &Path, pkg: &PackageJson, version: &str) -> Result<()> {
-    let mut args = vec![
-        "pkg".to_string(),
-        "set".to_string(),
-        format!("version={version}"),
-    ];
-    if pkg.name == ROOT_PACKAGE {
-        for dep in pkg.optional_dependencies.keys() {
-            args.push(format!("optionalDependencies.{dep}={version}"));
-        }
-    }
-    let dir = pkg
-        .path
-        .parent()
-        .with_context(|| format!("{} has no parent directory", pkg.path.display()))?;
-    let status = Command::new("npm")
-        .args(&args)
-        .arg("--prefix")
-        .arg(dir)
-        .current_dir(root)
-        .status()
-        .context("run `npm pkg set`")?;
-    if !status.success() {
-        bail!("npm pkg set failed for {}", pkg.path.display());
-    }
-    Ok(())
 }
 
 fn validate_packages(

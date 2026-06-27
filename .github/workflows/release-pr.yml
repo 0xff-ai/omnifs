@@ -34,6 +34,8 @@ jobs:
         with:
           node-version: 22
 
+      - uses: ./.github/actions/omnifs-just
+
       - name: Maintain release PR, or tag a merged release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,7 +77,7 @@ jobs:
           git checkout -B release-pr
           cargo set-version "${next#v}"
           cargo update --workspace
-          cargo xtask npm sync
+          just npm sync
 
           # Regenerate the pending changelog section, preserving curated released
           # history (everything from the first `## [X.Y.Z]` heading downward).

@@ -38,11 +38,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum NpmCommand {
-    /// Sync npm package versions from the Cargo workspace version.
-    Sync {
-        /// Version to sync to (defaults to the Cargo workspace version).
-        version: Option<String>,
-    },
     /// Validate npm platform metadata and package manifests.
     Validate,
 }
@@ -58,9 +53,6 @@ fn run() -> Result<()> {
     let root = repo_root();
     match Cli::parse().command {
         Command::Npm { command } => match command {
-            NpmCommand::Sync { version } => {
-                npm::sync(root, version.as_deref().unwrap_or(WORKSPACE_VERSION))
-            },
             NpmCommand::Validate => npm::validate(root, WORKSPACE_VERSION),
         },
     }

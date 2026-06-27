@@ -7,7 +7,7 @@ How omnifs ships: conventional commits drive an always-open release PR; merging 
 | Phase | Who / what | What runs | Outcome |
 |-------|------------|-----------|---------|
 | 1. Development | You + feature PRs (conventional commits) | CI verify | Work lands on `main` |
-| 2. Standing release PR | `release-pr.yml`, every push to `main` | git-cliff next version + changelog; `cargo set-version`; `cargo xtask npm sync` | An open `chore(release): vX.Y.Z` PR, always current |
+| 2. Standing release PR | `release-pr.yml`, every push to `main` | git-cliff next version + changelog; `cargo set-version`; `just npm sync` | An open `chore(release): vX.Y.Z` PR, always current |
 | 3. Ship it | You merge the release PR | `release-pr.yml` tags the merge commit `vX.Y.Z` | `main` carries the bump; tag created |
 | 4. Build | **CI** on the merge commit | native CLI archives + runtime image | four `omnifs-cli-*` tarballs, `sha-<commit>` image |
 | 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
@@ -28,7 +28,7 @@ CI builds artifacts ──► release.yml (after CI, gated on the tag): GH relea
 
 On every push to `main`, the workflow does one of:
 
-- **Accumulating.** Computes the next version from conventional commits since the last tag (git-cliff), rebuilds the `release-pr` branch with `cargo set-version`, `cargo update`, `cargo xtask npm sync`, and a regenerated changelog, then force-updates the standing PR.
+- **Accumulating.** Computes the next version from conventional commits since the last tag (git-cliff), rebuilds the `release-pr` branch with `cargo set-version`, `cargo update`, `just npm sync`, and a regenerated changelog, then force-updates the standing PR.
 - **Merged.** When the release PR has landed (the workspace version is ahead of the last tag), it creates the `vX.Y.Z` tag, which `release.yml` ships off after CI.
 
 The PR is the always-current preview of the next release. **Edit the changelog in the PR before merging** to polish wording; the version commit and PR body are yours to adjust. The PR itself does not run CI (it is created by `GITHUB_TOKEN`); validation runs on merge to `main`, and `release.yml` is gated on that CI succeeding.
@@ -57,11 +57,11 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 
 | Subcommand | When | What it does |
 |------------|------|----------------|
-| **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the workspace version through `npm pkg set` (`cargo xtask npm sync`) |
-| **`just npm validate`** | `just check`, ship | Cross-check `platforms.json`, the platform package.json manifests, and the inlined `resolve-binary.js` map (`cargo xtask npm validate`) |
+| **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the Cargo workspace version through npm workspace-aware `npm pkg set` |
+| **`just npm validate`** | preflight, ship | Cross-check `platforms.json`, the platform package.json manifests, and the inlined `resolve-binary.js` map (`cargo xtask npm validate`) |
 | **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
-Day-to-day dev uses `just check`, `just providers build`, and `omnifs dev`.
+Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, and `omnifs dev`.
 
 ## What gets released
 
@@ -73,7 +73,7 @@ Day-to-day dev uses `just check`, `just providers build`, and `omnifs dev`.
 
 `npm/platforms.json` is the single source of truth for platform npm packages. Each entry defines the platform package name, Rust target triple, and npm `os`/`cpu` metadata. The Release workflow reads this file with `jq` while staging the four platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`.
 
-`just npm sync` updates package versions by calling `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the workspace version. The npm sync/validate policy lives in `cargo xtask` (`crates/xtask/src/npm.rs`).
+`npm/package.json` declares the private npm workspace that contains the root CLI package and the platform packages. `just npm sync` updates package versions by calling workspace-aware `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the Cargo workspace version. The repo-specific validation policy lives in `cargo xtask` (`crates/xtask/src/npm.rs`).
 
 The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work entirely from files inside the `@0xff-ai/omnifs` package directory. `npm/platforms.json` lives at the workspace root and is **not** included in the published tarball; if `resolve-binary.js` ever needs that data it must be inlined, with `just npm validate` cross-checking against `npm/platforms.json`.
 
@@ -170,7 +170,8 @@ Gates that must be in place:
 |------|---------|
 | `justfile`, `just/` | Maintainer command surface used locally and in CI |
 | `cliff.toml` | git-cliff config: changelog areas, filters, and the version-bump policy |
-| `crates/xtask` | npm version sync/validation and OpenAPI generate/check (run via `cargo xtask`) |
+| `crates/xtask` | repo-specific npm package validation (run via `cargo xtask npm validate`) |
+| `npm/package.json` | private npm workspace root for the CLI and platform packages |
 | `just/providers.just` | WASI SDK install (`wasi-sdk` recipe) and provider/tool WASM builds |
 | `scripts/ci/common.sh` | Repo-root discovery and `version_pin()`, the string-pin reader for `tools/versions.toml` |
 | `npm/platforms.json` | Source of truth for npm platform packages |
@@ -186,4 +187,4 @@ Gates that must be in place:
 ## Related docs
 
 - `CHANGELOG.md`
-- `AGENTS.md`: `omnifs dev`, `just check`
+- `AGENTS.md`: `omnifs dev`, validation lanes

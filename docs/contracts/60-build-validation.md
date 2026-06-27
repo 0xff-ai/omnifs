@@ -57,6 +57,7 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 - `just/host.just`
 - `just/providers.just`
 - `just/npm.just`
+- `npm/package.json`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
 - `crates/xtask/src/npm.rs`
