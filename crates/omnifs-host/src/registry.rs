@@ -814,13 +814,13 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers-build` first.",
+            "test provider missing at {}. Run `just providers build` first.",
             base_wasm.display()
         );
         let archive_tool_wasm = archive_tool_wasm_path();
         assert!(
             archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers-build` first.",
+            "archive tool missing at {}. Run `just providers build` first.",
             archive_tool_wasm.display()
         );
         std::fs::copy(
@@ -878,7 +878,7 @@ mod tests {
         let archive_tool_wasm = archive_tool_wasm_path();
         assert!(
             archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers-build` first.",
+            "archive tool missing at {}. Run `just providers build` first.",
             archive_tool_wasm.display()
         );
         std::fs::copy(
@@ -954,13 +954,13 @@ mod tests {
         let base_wasm = test_provider_wasm_path();
         assert!(
             base_wasm.exists(),
-            "test provider missing at {}. Run `just providers-build` first.",
+            "test provider missing at {}. Run `just providers build` first.",
             base_wasm.display()
         );
         let archive_tool_wasm = archive_tool_wasm_path();
         assert!(
             archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers-build` first.",
+            "archive tool missing at {}. Run `just providers build` first.",
             archive_tool_wasm.display()
         );
         std::fs::copy(

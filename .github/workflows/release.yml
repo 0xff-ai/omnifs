@@ -50,7 +50,7 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
-          plan="$(just release-plan-json)"
+          plan="$(just release plan)"
           echo "$plan"
           version="$(jq -r '.version' <<< "$plan")"
           # Semver prerelease: any version with a hyphen (e.g. 0.2.0-dev.0, 1.0.0-rc.1).
@@ -247,7 +247,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          just npm-sync
+          just npm sync
 
           mapfile -t platforms < <(jq -r 'keys[]' npm/platforms.json)
           for platform in "${platforms[@]}"; do
@@ -311,11 +311,11 @@ jobs:
 
       - name: Sync and validate npm metadata
         run: |
-          just npm-sync
-          just npm-validate
+          just npm sync
+          just npm validate
 
       - name: Stage root package
-        run: just npm-pack-root "$RUNNER_TEMP"
+        run: just npm pack "$RUNNER_TEMP"
 
       - name: Publish root package
         if: >-

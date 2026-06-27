@@ -186,7 +186,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## Manifest (provider metadata)
 
-The manifest (identity, capabilities, config schema, auth) is authored entirely from `#[omnifs_sdk::provider(...)]` arguments and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers-build`. There is no hand-written `omnifs.provider.json`.
+The manifest (identity, capabilities, config schema, auth) is authored entirely from `#[omnifs_sdk::provider(...)]` arguments and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers build`. There is no hand-written `omnifs.provider.json`.
 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
 - `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"), memory_mb(<int>,"why"))` declare capability needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
@@ -201,7 +201,7 @@ The compact auth wire form (the shape serialized into the embedded section) is u
 ```bash
 cargo build -p <provider-crate> --target wasm32-wasip2          # the component artifact
 cargo clippy -p 'omnifs-provider-*' -p 'omnifs-tool-*' -p test-provider --target wasm32-wasip2 -- -D warnings
-just providers-check                                             # the repo gate
+just providers check                                             # the repo gate
 omnifs dev -y                                                    # live container with all builtin providers
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 ```

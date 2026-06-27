@@ -65,7 +65,7 @@ pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> a
         .collect::<Vec<_>>();
     anyhow::ensure!(
         missing.is_empty(),
-        "provider WASM artifacts missing in {}; run `just providers-build` first (missing: {})",
+        "provider WASM artifacts missing in {}; run `just providers build` first (missing: {})",
         artifact_dir.display(),
         missing.join(", ")
     );

@@ -31,7 +31,7 @@ mod provider_macro;
 /// The manifest (identity, capabilities, config schema, auth) is authored from
 /// these arguments and assembled into the `omnifs.provider-metadata.v1` custom
 /// section at build: the macro emits a config-less `manifest_json()` lifecycle
-/// export that the build tool (`just providers-build`) runs and injects. There
+/// export that the build tool (`just providers build`) runs and injects. There
 /// is no hand-written `omnifs.provider.json`.
 ///
 /// Arguments:

@@ -11,9 +11,9 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider and tool WASM artifacts are built with the pinned wasi-sdk. `just providers-build` compiles providers/tools and injects provider metadata.
+Provider and tool WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers/tools and injects provider metadata.
 
-Install the pinned wasi-sdk with `just wasi-sdk` when needed. Run `just providers-build` before host tests that need generated provider/tool artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend.
+Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider/tool artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 
 ### Generated OpenAPI and schemas
 
@@ -31,7 +31,7 @@ Use `omnifs dev -y` for the supported contributor runtime path. Check status ins
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/tool/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Use `just check` before a push or PR handoff. It delegates to `ci-preflight-fast`, `ci-preflight-policy`, `ci-wasm`, and `ci-host`, plus the local OpenAPI drift check. Use `just host-clippy` or `just ci-host` for host-target iteration. Use `just providers-check`, `just providers-build`, and `just wasm-validate` for WASM iteration.
+Use `just check` before a push or PR handoff. It runs the formatting, policy, OpenAPI, provider WASM, and host gates in one pass. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 
 ### Documentation checks
 
@@ -54,8 +54,10 @@ Use `just check` before a push or PR handoff. It delegates to `ci-preflight-fast
 ## Code
 
 - `just/dev.just`
-- `just/ci.just`
+- `just/host.just`
 - `just/providers.just`
+- `just/npm.just`
+- `just/release.just`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
 - `scripts/openapi.ts`
@@ -67,12 +69,12 @@ Use `just check` before a push or PR handoff. It delegates to `ci-preflight-fast
 
 ## Validation
 
-- `just wasi-sdk`
-- `just providers-build`
-- `just providers-check`
-- `just wasm-validate`
-- `just host-clippy`
-- `just ci-host`
+- `just providers wasi-sdk`
+- `just providers build`
+- `just providers check`
+- `just providers validate`
+- `just host clippy`
+- `just host test`
 - `just check`
 - `just openapi-check`
 - `just schema`

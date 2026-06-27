@@ -5,7 +5,7 @@ const path = require("node:path");
 
 // Inlined from npm/platforms.json. The platforms.json file lives at the
 // workspace root (npm/platforms.json), outside this package directory, so it
-// cannot be required at runtime from the published tarball. `just npm-validate`
+// cannot be required at runtime from the published tarball. `just npm validate`
 // cross-checks this map against npm/platforms.json to prevent drift.
 const PACKAGES = {
   "linux:x64": "@0xff-ai/omnifs-cli-linux-x64",

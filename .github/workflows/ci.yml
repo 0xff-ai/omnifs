@@ -85,14 +85,17 @@ jobs:
       - name: Run preflight checks
         run: |
           set -euo pipefail
-          just ci-preflight-fast
-          just ci-preflight-policy
+          just fmt-check
+          just just-check
+          just docs-check
+          just scripts-test
+          just npm validate
 
       - name: Check release metadata
         if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/')
         run: |
           set -euo pipefail
-          just release-check
+          just release check
 
   components:
     name: components
@@ -121,7 +124,11 @@ jobs:
           tool: wasm-tools@1.246.2
 
       - name: Check, build, and validate WASM components
-        run: just ci-wasm
+        run: |
+          set -euo pipefail
+          just providers check
+          just providers build
+          just providers validate
 
       - name: Stage WASM components
         run: |
@@ -183,7 +190,16 @@ jobs:
           path: target/wasm32-wasip2/release
 
       - name: Lint and archive host tests
-        run: just ci-host-build
+        run: |
+          set -euo pipefail
+          rm -rf dist/host-tests
+          mkdir -p dist/host-tests
+          just host clippy
+          cargo nextest archive --profile ci --workspace \
+            --exclude 'omnifs-provider-*' \
+            --exclude 'omnifs-tool-*' \
+            --exclude test-provider \
+            --archive-file dist/host-tests/host-tests.tar.zst
 
       - name: Isolate host test archive inputs
         run: |
@@ -218,8 +234,10 @@ jobs:
 
       - name: Run host tests
         run: |
+          set -euo pipefail
           unset CARGO_TARGET_DIR
-          just ci-host-test
+          test -f dist/host-tests/host-tests.tar.zst
+          cargo nextest run --profile ci --archive-file dist/host-tests/host-tests.tar.zst
 
       - name: Restore host build cache inputs
         if: always()
@@ -277,10 +295,10 @@ jobs:
         id: build
         env:
           OMNIFS_BUILD_DAEMON: "1"
-        run: just ci-build-linux x86_64-unknown-linux-gnu.2.17
+        run: scripts/ci/build-linux-zigbuild.sh x86_64-unknown-linux-gnu.2.17
 
       - name: Package Linux x64 CLI
-        run: just ci-package-cli linux-x64 "${{ steps.build.outputs.artifact }}"
+        run: scripts/ci/package-cli.sh linux-x64 "${{ steps.build.outputs.artifact }}"
 
       - name: Attest Linux x64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -338,10 +356,10 @@ jobs:
         id: build
         env:
           OMNIFS_BUILD_DAEMON: "1"
-        run: just ci-build-linux aarch64-unknown-linux-gnu.2.17
+        run: scripts/ci/build-linux-zigbuild.sh aarch64-unknown-linux-gnu.2.17
 
       - name: Package Linux arm64 CLI
-        run: just ci-package-cli linux-arm64 "${{ steps.build.outputs.artifact }}"
+        run: scripts/ci/package-cli.sh linux-arm64 "${{ steps.build.outputs.artifact }}"
 
       - name: Attest Linux arm64 CLI archive
         if: env.CI_MAIN_PUSH == 'true'
@@ -399,13 +417,13 @@ jobs:
         id: build
         env:
           DARWIN_RUSTUP_HOME: ${{ github.workspace }}/.cache/darwin-rustup
-        run: just ci-build-darwin
+        run: scripts/ci/build-darwin-zigbuild.sh
 
       - name: Package Darwin CLI archives
         run: |
           set -euo pipefail
-          just ci-package-cli darwin-x64 "${{ steps.build.outputs.x64_artifact }}"
-          just ci-package-cli darwin-arm64 "${{ steps.build.outputs.arm64_artifact }}"
+          scripts/ci/package-cli.sh darwin-x64 "${{ steps.build.outputs.x64_artifact }}"
+          scripts/ci/package-cli.sh darwin-arm64 "${{ steps.build.outputs.arm64_artifact }}"
 
       - name: Attest Darwin CLI archives
         if: env.CI_MAIN_PUSH == 'true'
@@ -444,8 +462,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/omnifs-just
-
       - uses: ./.github/actions/omnifs-docker
 
       - name: Download Linux x64 CLI archive
@@ -468,7 +484,7 @@ jobs:
           PLATFORM: linux/amd64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
-        run: just ci-build-runtime
+        run: scripts/ci/build-runtime-image.sh
 
       - name: Export amd64 image digest
         run: |
@@ -503,8 +519,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/omnifs-just
-
       - uses: ./.github/actions/omnifs-docker
 
       - name: Download Linux arm64 CLI archive
@@ -527,7 +541,7 @@ jobs:
           PLATFORM: linux/arm64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-cli/bin/omnifs
-        run: just ci-build-runtime
+        run: scripts/ci/build-runtime-image.sh
 
       - name: Export arm64 image digest
         run: |
@@ -564,8 +578,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/omnifs-just
-
       - uses: ./.github/actions/omnifs-docker
 
       - name: Download amd64 image digest
@@ -591,7 +603,7 @@ jobs:
       - name: Run container smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: just ci-smoke-container
+        run: scripts/ci/smoke-container.sh
 
   smoke-arm64:
     name: smoke arm64
@@ -611,8 +623,6 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}:smoke
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/omnifs-just
 
       - uses: ./.github/actions/omnifs-docker
 
@@ -639,7 +649,7 @@ jobs:
       - name: Run container smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: just ci-smoke-container
+        run: scripts/ci/smoke-container.sh
 
   publish:
     name: publish

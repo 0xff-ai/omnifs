@@ -275,7 +275,7 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
 /// shared target dir. Running tests against a stale build silently exercises
 /// old provider logic (a pagination change that never took effect, say), which
 /// surfaces as a confusing test failure unrelated to the edit in hand. Rather
-/// than require a manual `just providers-build`, refresh the components on
+/// than require a manual `just providers build`, refresh the components on
 /// demand.
 ///
 /// This runs at test *runtime*, after cargo's build phase has released the
@@ -284,7 +284,7 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
 /// no second build tree) without deadlocking against the build that produced
 /// this test binary.
 ///
-/// It delegates to `just providers-build` rather than invoking cargo directly:
+/// It delegates to `just providers build` rather than invoking cargo directly:
 /// that recipe is the single source of truth for the build, including the WASI
 /// SDK toolchain env (the db provider compiles `sqlite3.c` for
 /// `wasm32-wasip2` through cc-rs and needs the wasi sysroot), the package
@@ -301,13 +301,13 @@ fn ensure_providers_built() {
             return;
         }
         let status = Command::new("just")
-            .arg("providers-build")
+            .args(["providers", "build"])
             .current_dir(workspace_root())
             .status()
-            .expect("spawn `just providers-build`");
+            .expect("spawn `just providers build`");
         assert!(
             status.success(),
-            "`just providers-build` failed; run it directly to see the error",
+            "`just providers build` failed; run it directly to see the error",
         );
     });
 }

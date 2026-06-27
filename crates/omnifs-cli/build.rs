@@ -68,7 +68,7 @@ fn write_provider_bundle(
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = fs::read(&path).unwrap_or_else(|error| {
             panic!(
-                "read provider bundle artifact {}: {error}\nrun `just providers-build` first, or set {PROVIDER_BUNDLE_DIR_ENV} to a directory containing the built provider WASM artifacts",
+                "read provider bundle artifact {}: {error}\nrun `just providers build` first, or set {PROVIDER_BUNDLE_DIR_ENV} to a directory containing the built provider WASM artifacts",
                 path.display()
             )
         });
@@ -119,7 +119,7 @@ fn find_artifact_dir(workspace_root: &std::path::Path, files: &[String]) -> Path
         .collect::<Vec<_>>()
         .join("\n");
     panic!(
-        "provider bundle artifacts are missing; searched:\n{searched}\nrun `just providers-build` first, or set {PROVIDER_BUNDLE_DIR_ENV} to the built WASM directory"
+        "provider bundle artifacts are missing; searched:\n{searched}\nrun `just providers build` first, or set {PROVIDER_BUNDLE_DIR_ENV} to the built WASM directory"
     );
 }
 

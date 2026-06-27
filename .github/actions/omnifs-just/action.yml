@@ -5,7 +5,7 @@ runs:
   steps:
     - uses: taiki-e/install-action@v2
       with:
-        tool: just@1.51.0
+        tool: just@1.54.0
 
     - uses: oven-sh/setup-bun@v2
       with:

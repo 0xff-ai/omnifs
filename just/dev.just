@@ -18,23 +18,6 @@ just-check:
       just --fmt --check --justfile "$justfile" --working-directory .
     done
 
-# Lint native host crates with warnings denied.
-[group('dev')]
-host-clippy:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    wasm_dir="target/wasm32-wasip2/release"
-    if [[ ! -f "$wasm_dir/omnifs_tool_archive.wasm" ]] ||
-       [[ -z "$(find "$wasm_dir" -maxdepth 1 -name 'omnifs_provider_*.wasm' -print -quit 2>/dev/null)" ]]; then
-      just providers-build
-    fi
-    cargo clippy --workspace \
-      --exclude 'omnifs-provider-*' \
-      --exclude 'omnifs-tool-*' \
-      --exclude test-provider \
-      --all-targets \
-      -- -D warnings
-
 # Run the bun script tests.
 [group('dev')]
 scripts-test:
@@ -48,7 +31,7 @@ docs-check:
 
 # Run the CI-shaped local validation path for broad changes.
 [group('dev')]
-check: ci-preflight-fast ci-preflight-policy openapi-check ci-wasm ci-host
+check: fmt-check just-check docs-check scripts-test npm::validate openapi-check providers::check providers::build providers::validate host::clippy host::test
 
 # Regenerate the provider JSON schema.
 [group('dev')]

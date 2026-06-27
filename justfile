@@ -6,7 +6,7 @@ default:
     @just --justfile '{{ justfile() }}' --list --unsorted
 
 import 'just/dev.just'
-import 'just/providers.just'
-import 'just/npm.just'
-import 'just/release.just'
-import 'just/ci.just'
+mod providers 'just/providers.just'
+mod host 'just/host.just'
+mod npm 'just/npm.just'
+mod release 'just/release.just'

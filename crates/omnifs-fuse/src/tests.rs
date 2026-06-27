@@ -89,7 +89,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let archive_src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
     assert!(
         archive_src.exists(),
-        "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers-build` first.",
+        "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers build` first.",
         archive_src.display()
     );
     std::fs::copy(&archive_src, providers_dir.path().join(ARCHIVE_TOOL_WASM))
@@ -98,7 +98,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let test_src = wasm_artifact_path("test_provider.wasm");
     assert!(
         test_src.exists(),
-        "test_provider.wasm missing at {}. Run `just providers-build` first.",
+        "test_provider.wasm missing at {}. Run `just providers build` first.",
         test_src.display()
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");
