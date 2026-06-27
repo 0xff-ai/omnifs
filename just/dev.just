@@ -51,4 +51,4 @@ openapi-check:
 # Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]
 dev *args: providers::build
-    omnifs dev {{ args }}
+    cargo run -p omnifs-cli -- dev {{ args }}

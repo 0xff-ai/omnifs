@@ -3,6 +3,7 @@
   "mount": "github",
   "auth": {
     "type": "static-token",
-    "scheme": "pat"
+    "scheme": "pat",
+    "token_env": "GITHUB_TOKEN"
   }
 }

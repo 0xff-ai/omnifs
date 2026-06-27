@@ -99,8 +99,8 @@ mkdir -p providers/db/testdata
 curl -sL -o providers/db/testdata/chinook.sqlite \
   https://github.com/lerocha/chinook-database/raw/master/ChinookDatabase/DataSources/Chinook_Sqlite.sqlite
 
-# Contributor path: omnifs dev mounts the db provider with this fixture — see AGENTS.md
-omnifs dev -y
+# Contributor path: just dev mounts the db provider with this fixture.
+just dev -y
 docker exec omnifs /bin/zsh -lc 'ls /omnifs/db/tables'
 docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/table.json'
 docker exec omnifs /bin/zsh -lc 'cat /omnifs/db/tables/Album/schema.sql'

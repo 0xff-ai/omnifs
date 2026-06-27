@@ -54,12 +54,14 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
-# --- Build providers ---
+# --- Build providers for explicit artifact export ---
 #
 # Discovers every crate under `providers/` whose package name starts
 # with `omnifs-provider-` and builds them in a single cargo invocation.
 # Adding a new provider is therefore just `providers/<name>/...` with
-# its provider manifest.
+# its provider manifest. The normal contributor runtime image no longer depends
+# on this stage; `omnifs dev` passes host-built WASM as the `provider-wasm`
+# named build context so the Docker image does not compile providers again.
 
 FROM toolchain AS providers
 WORKDIR /src
@@ -85,11 +87,11 @@ COPY --from=providers /out/wasm/*.wasm /
 FROM deps AS builder
 WORKDIR /src
 COPY . .
+COPY --from=provider-wasm / /provider-wasm/
 RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=omnifs-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
-    cargo build --release --target wasm32-wasip2 -p 'omnifs-provider-*' \
-    && cargo build --release -p omnifs-cli \
+    OMNIFS_PROVIDER_BUNDLE_DIR=/provider-wasm cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
 
 # --- Lint and test (CI targets) ---

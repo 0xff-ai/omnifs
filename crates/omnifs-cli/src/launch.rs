@@ -65,6 +65,8 @@ impl<'a> Launcher<'a> {
                 verb: self.verb,
                 configs,
                 extra_binds: Vec::new(),
+                extra_env: Vec::new(),
+                reuse_existing_container: true,
             },
             self.workspace.catalog(),
         )
@@ -89,6 +91,10 @@ pub(crate) struct LaunchSpec<'a> {
     pub configs: Vec<MountConfig>,
     /// Extra binds layered on top of materialized preopens.
     pub extra_binds: Vec<String>,
+    /// Extra environment variables for the runtime container.
+    pub extra_env: Vec<String>,
+    /// Whether a same-image running container may be reused.
+    pub reuse_existing_container: bool,
 }
 
 /// Docker-specific mount materialization for launch-time container binds.
@@ -147,6 +153,8 @@ pub(crate) async fn launch_runtime(
         verb,
         configs,
         extra_binds,
+        extra_env,
+        reuse_existing_container,
     } = spec;
 
     std::fs::create_dir_all(&paths.config_dir)
@@ -163,7 +171,13 @@ pub(crate) async fn launch_runtime(
     let all_binds: Vec<String> = preopen_binds.into_iter().chain(extra_binds).collect();
 
     let rt = Runtime::connect_ready(&target, verb).await?;
-    rt.launch_container(&paths.config_dir, all_binds).await?;
+    rt.launch_container(
+        &paths.config_dir,
+        all_binds,
+        extra_env,
+        reuse_existing_container,
+    )
+    .await?;
 
     match finish_docker_launch(&rt, paths, &target).await {
         Ok(outcome) => Ok(outcome),

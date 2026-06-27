@@ -11,7 +11,7 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider and tool WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers/tools and injects provider metadata.
+Provider and tool WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers/tools and injects provider metadata. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built WASM bytes.
 
 Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider/tool artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 
@@ -25,7 +25,7 @@ Run `just openapi` after daemon API changes. Run `just schema` after provider ma
 
 Mount, provider, clone, traversal, frontend, or runtime behavior changes need live runtime validation. Rust checks alone are not enough.
 
-Use `omnifs dev -y` for the supported contributor runtime path. Check status inside the container. Exercise shell traversal and real file tools for path-surface changes.
+Use `just dev -y` for the supported contributor runtime path. Check status inside the container. Exercise shell traversal and real file tools for path-surface changes.
 
 ### CI gates
 
@@ -65,6 +65,7 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 - `crates/omnifs-provider/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
+- `Dockerfile`
 - `CONTRIBUTING.md`
 
 ## Validation
@@ -83,7 +84,7 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 Live runtime path:
 
 ```bash
-omnifs dev -y
+just dev -y
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
 docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'

@@ -3,6 +3,7 @@
   "mount": "linear",
   "auth": {
     "type": "static-token",
-    "scheme": "pat"
+    "scheme": "pat",
+    "token_env": "LINEAR_API_KEY"
   }
 }

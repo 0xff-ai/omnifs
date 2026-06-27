@@ -1,3 +1,3 @@
 # GitHub dev mount
 
-Embedded in `omnifs dev --profile default`. Requires a host credential from `gh auth token` or `GITHUB_TOKEN`.
+Embedded in `omnifs dev --profile default`. Set `GITHUB_TOKEN` on the host to authenticate this mount.
