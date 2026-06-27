@@ -26,12 +26,14 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
-libc = { workspace = true }
 futures = "0.3"
 url = "2"
 wasmtime-wasi = { version = "43", default-features = false, features = ["p2"] }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-caps = { workspace = true }
 omnifs-home = { workspace = true }
@@ -53,9 +55,6 @@ http = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }
 wasmtime = { workspace = true }
-flate2 = { workspace = true }
-tar = { workspace = true }
-zip = { workspace = true }
 rcgen = "0.13"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 omnifs-itest = { path = "../omnifs-itest" }

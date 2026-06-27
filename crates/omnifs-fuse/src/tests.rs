@@ -14,7 +14,6 @@ use omnifs_host::cloner::GitCloner;
 use omnifs_host::pagination;
 use omnifs_host::path_key::PathKey;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_host::tools::archive::ARCHIVE_TOOL_WASM;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_wit::provider::types::ListChildrenResult;
 use std::path::{Path as StdPath, PathBuf};
@@ -85,16 +84,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let config_dir = tempfile::tempdir().expect("config dir");
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
-    // The archive tool stays flat; the test provider goes into the by-hash store.
-    let archive_src = wasm_artifact_path(ARCHIVE_TOOL_WASM);
-    assert!(
-        archive_src.exists(),
-        "{ARCHIVE_TOOL_WASM} missing at {}. Run `just providers build` first.",
-        archive_src.display()
-    );
-    std::fs::copy(&archive_src, providers_dir.path().join(ARCHIVE_TOOL_WASM))
-        .expect("copy archive tool");
-
+    // The test provider goes into the by-hash store.
     let test_src = wasm_artifact_path("test_provider.wasm");
     assert!(
         test_src.exists(),

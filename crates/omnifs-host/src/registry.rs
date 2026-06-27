@@ -1,11 +1,10 @@
 //! Provider registry: dynamic loading and lifecycle management for WASM providers.
 //!
-//! Owns the shared engine, extractor, and caches. Mounts are added and
+//! Owns the shared engine and caches. Mounts are added and
 //! removed at runtime through [`ProviderRegistry::add_mount`] and
 //! [`ProviderRegistry::remove_mount`]; there is no startup directory scan.
 
 use crate::cloner::GitCloner;
-use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
 use omnifs_mount::materialize::{MaterializationMode, materialize};
@@ -24,7 +23,6 @@ use tracing::{debug, info, warn};
 /// per-mount timer-driven refresh tasks.
 pub struct ProviderRegistry {
     engine: wasmtime::Engine,
-    extractor: Arc<ArchiveExtractorComponent>,
     caches: Arc<Caches>,
     cloner: Arc<GitCloner>,
     context: HostContext,
@@ -42,8 +40,8 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Build an empty registry: engine, archive extractor, and cache handles
-    /// are created once here and shared across every mount added later.
+    /// Build an empty registry: engine and cache handles are created once
+    /// here and shared across every mount added later.
     pub fn new(context: HostContext, cloner: Arc<GitCloner>) -> Result<Self, RegistryError> {
         // Compiled component artifacts live with the rest of the host's state,
         // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
@@ -55,19 +53,6 @@ impl ProviderRegistry {
         })
         .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
 
-        // One extractor (engine + parsed component + linker pre) shared
-        // across every mount; the per-call sandbox lives on a fresh
-        // `wasmtime::Store`. Shares the same on-disk artifact cache.
-        let archive_tool_path = context.archive_tool_path(ARCHIVE_TOOL_WASM);
-        let extractor = Arc::new(
-            ArchiveExtractorComponent::from_path(
-                &archive_tool_path,
-                DEFAULT_LIMITS,
-                Some(&wasm_cache),
-            )
-            .map_err(|e| RegistryError::RuntimeError(format!("extractor init: {e}")))?,
-        );
-
         // Global cache handles: a durable object database and a disposable view
         // database cleared + reopened on startup (Codex #5). Shared across all
         // provider runtimes; the object tier isolates mounts by keyspace, the
@@ -78,7 +63,6 @@ impl ProviderRegistry {
         let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             engine,
-            extractor,
             caches,
             cloner,
             context,
@@ -125,7 +109,6 @@ impl ProviderRegistry {
             spec,
             self.cloner.clone(),
             &self.context,
-            self.extractor.clone(),
             &self.caches,
         )
         .map_err(|error| registry_error(&mount, error))?;
@@ -739,7 +722,6 @@ mod tests {
     use super::{ProviderRegistry, RegistryError};
     use crate::HostContext;
     use crate::cloner::GitCloner;
-    use crate::tools::archive::ARCHIVE_TOOL_WASM;
     use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
     use omnifs_mount::materialize::MaterializationMode;
     use omnifs_mount::mounts::Spec;
@@ -786,10 +768,6 @@ mod tests {
         wasm_artifact_path("test_provider.wasm")
     }
 
-    fn archive_tool_wasm_path() -> PathBuf {
-        wasm_artifact_path(ARCHIVE_TOOL_WASM)
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn add_mount_rejects_invalid_provider_config() {
         // The test provider's embedded manifest declares a configSchema
@@ -806,17 +784,6 @@ mod tests {
             "test provider missing at {}. Run `just providers build` first.",
             base_wasm.display()
         );
-        let archive_tool_wasm = archive_tool_wasm_path();
-        assert!(
-            archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers build` first.",
-            archive_tool_wasm.display()
-        );
-        std::fs::copy(
-            &archive_tool_wasm,
-            providers_dir.path().join(ARCHIVE_TOOL_WASM),
-        )
-        .expect("copy archive tool");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
         let registry = Arc::new(
@@ -862,19 +829,6 @@ mod tests {
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
         let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
-
-        // `ProviderRegistry::new` builds the archive extractor from this WASM.
-        let archive_tool_wasm = archive_tool_wasm_path();
-        assert!(
-            archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers build` first.",
-            archive_tool_wasm.display()
-        );
-        std::fs::copy(
-            &archive_tool_wasm,
-            providers_dir.path().join(ARCHIVE_TOOL_WASM),
-        )
-        .expect("copy archive tool");
 
         // A mount pinning a content id with no matching by-hash artifact.
         let mounts_dir = paths.config_dir.join("mounts");
@@ -946,17 +900,6 @@ mod tests {
             "test provider missing at {}. Run `just providers build` first.",
             base_wasm.display()
         );
-        let archive_tool_wasm = archive_tool_wasm_path();
-        assert!(
-            archive_tool_wasm.exists(),
-            "archive tool missing at {}. Run `just providers build` first.",
-            archive_tool_wasm.display()
-        );
-        std::fs::copy(
-            &archive_tool_wasm,
-            providers_dir.path().join(ARCHIVE_TOOL_WASM),
-        )
-        .expect("copy archive tool");
 
         let mounts_dir = paths.config_dir.join("mounts");
         std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");

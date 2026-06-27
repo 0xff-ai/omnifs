@@ -34,17 +34,15 @@ wasi-sdk:
     tar -xzf "$tmp/wasi-sdk.tar.gz" -C "$home" --strip-components=1
     printf '%s\n' "$release" > "$home/.version"
 
-# Check provider and tool WASM crates.
+# Check provider WASM crates.
 check: wasi-sdk
     #!/usr/bin/env bash
     set -euo pipefail
     cargo check --target wasm32-wasip2 \
       -p 'omnifs-provider-*' \
-      -p 'omnifs-tool-*' \
       -p test-provider
     cargo clippy --target wasm32-wasip2 \
       -p 'omnifs-provider-*' \
-      -p 'omnifs-tool-*' \
       -p test-provider \
       -- -D warnings
     cargo test --target wasm32-wasip2 \
@@ -52,11 +50,10 @@ check: wasi-sdk
       -p test-provider \
       --no-run
 
-# Build provider and tool WASM components and embed provider metadata.
+# Build provider WASM components and embed provider metadata.
 build: wasi-sdk
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --target wasm32-wasip2 --release -p 'omnifs-tool-*'
     cargo build --target wasm32-wasip2 --release \
       -p 'omnifs-provider-*' \
       -p test-provider

@@ -136,7 +136,6 @@ jobs:
           mkdir -p dist-wasm
           cp target/wasm32-wasip2/release/*.wasm dist-wasm/
           test -n "$(find dist-wasm -maxdepth 1 -name 'omnifs_provider_*.wasm' -print -quit)"
-          test -f dist-wasm/omnifs_tool_archive.wasm
           test -f dist-wasm/test_provider.wasm
 
       - name: Attest WASM components
@@ -197,7 +196,6 @@ jobs:
           just host clippy
           cargo nextest archive --profile ci --workspace \
             --exclude 'omnifs-provider-*' \
-            --exclude 'omnifs-tool-*' \
             --exclude test-provider \
             --archive-file dist/host-tests/host-tests.tar.zst
 

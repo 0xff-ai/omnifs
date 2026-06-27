@@ -1,12 +1,11 @@
 //! Shared Wasmtime component-host primitives.
 //!
-//! Providers and embedded sandboxed tools have different lifecycles, but
-//! they both need the same lower-level Wasm setup: component-model
-//! engines, WASI linkers, store limits, and consistent error messages.
+//! The provider runtime needs lower-level Wasm setup: component-model
+//! engines, a WASI linker, and consistent error messages.
 
 use std::path::Path;
 
-use wasmtime::{Cache, CacheConfig, Config, Engine, StoreLimits, StoreLimitsBuilder, Strategy};
+use wasmtime::{Cache, CacheConfig, Config, Engine, Strategy};
 use wasmtime_wasi::WasiView;
 
 /// Build a Wasmtime engine configured for the component model.
@@ -17,9 +16,8 @@ use wasmtime_wasi::WasiView;
 /// rest of its state rather than in a global per-user directory. `None`
 /// disables the on-disk cache (tests that don't want a shared artifact dir).
 ///
-/// Callers receive a chance to apply lifecycle-specific options. The provider
-/// runtime uses the base component configuration; one-shot sandboxed tools
-/// enable fuel consumption on top.
+/// Callers receive a chance to apply lifecycle-specific options, such as the
+/// provider compiler strategy.
 pub fn component_engine(
     cache_dir: Option<&Path>,
     configure: impl FnOnce(&mut Config),
@@ -27,10 +25,10 @@ pub fn component_engine(
     let mut config = Config::new();
     config.wasm_component_model(true);
     // Persist compiled component artifacts under the host cache so engine
-    // creation (each provider engine, the archive extractor) doesn't re-codegen
-    // identical wasm on every run. Silently degrade if the cache can't be
-    // initialised (read-only dir, locked-down host): the compile still works,
-    // just uncached. `Cache::new` creates the directory itself.
+    // creation doesn't re-codegen identical wasm on every run. Silently
+    // degrade if the cache can't be initialised (read-only dir, locked-down
+    // host): the compile still works, just uncached. `Cache::new` creates the
+    // directory itself.
     if let Some(dir) = cache_dir {
         let mut cache_config = CacheConfig::new();
         cache_config.with_directory(dir);
@@ -50,8 +48,7 @@ pub fn component_engine(
 ///
 /// Providers suspend on host callouts rather than running hot loops, so Winch's
 /// execution penalty barely touches them while its compile speed unblocks cold
-/// startup. The archive extractor must not use this: it enables fuel metering,
-/// which Winch does not support, and its decompression work wants Cranelift.
+/// startup.
 pub fn provider_compiler_strategy() -> Option<Strategy> {
     let raw = std::env::var("OMNIFS_WASM_COMPILER").ok()?;
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -76,11 +73,4 @@ where
     T: WasiView + 'static,
 {
     wasmtime_wasi::p2::add_to_linker_sync::<T>(linker)
-}
-
-/// Build store limits for a sandboxed component invocation.
-pub(crate) fn store_limits(max_memory_bytes: usize) -> StoreLimits {
-    StoreLimitsBuilder::new()
-        .memory_size(max_memory_bytes)
-        .build()
 }

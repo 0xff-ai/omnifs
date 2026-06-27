@@ -208,7 +208,6 @@ fn copy_real_providers(providers_dir: &Path, linear_enabled: bool) {
         "omnifs_provider_dns.wasm",
         "omnifs_provider_docker.wasm",
         "omnifs_provider_github.wasm",
-        "omnifs_tool_archive.wasm",
     ] {
         copy_provider(providers_dir, wasm);
     }
@@ -304,12 +303,6 @@ fn read_path(export: &Export, path: &[&str]) -> Vec<u8> {
 }
 
 fn copy_provider(providers_dir: &Path, wasm: &str) {
-    // The archive tool stays flat; providers go into the by-hash store.
-    if wasm == "omnifs_tool_archive.wasm" {
-        std::fs::copy(provider_wasm_path(wasm), providers_dir.join(wasm))
-            .unwrap_or_else(|error| panic!("copy archive tool {wasm}: {error}"));
-        return;
-    }
     let bytes = std::fs::read(provider_wasm_path(wasm))
         .unwrap_or_else(|error| panic!("read provider {wasm}: {error}"));
     let reference = provider_reference(wasm);

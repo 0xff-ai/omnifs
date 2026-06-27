@@ -17,7 +17,6 @@ use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::manifest::Artifact;
-use crate::tools::archive::ArchiveExtractorComponent;
 use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{Caches, Store};
@@ -101,12 +100,6 @@ impl HostContext {
     /// daemon loads. Identity is the content hash, never a filename.
     pub(crate) fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
         ProviderStore::new(&self.providers_dir).by_hash_path(id)
-    }
-
-    /// Host-internal tools (the archive extractor) live flat in `providers_dir`,
-    /// not in the content-addressed `by-hash/` store.
-    pub(crate) fn archive_tool_path(&self, file: &str) -> PathBuf {
-        self.providers_dir.join(file)
     }
 }
 
@@ -278,7 +271,6 @@ impl Runtime {
         config: &Spec,
         cloner: Arc<GitCloner>,
         context: &HostContext,
-        extractor: Arc<ArchiveExtractorComponent>,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
         let mount_name = config.mount.as_str();
@@ -343,7 +335,6 @@ impl Runtime {
             blob_cache.clone(),
             trees.clone(),
             cache_dirs.archive_root,
-            extractor,
         ));
 
         // Per-mount facade: scopes all cache keys with "{mount}\x1f".

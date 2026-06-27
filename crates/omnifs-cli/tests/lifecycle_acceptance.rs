@@ -4,9 +4,9 @@
 //! with its own temp dir, mount point, and control port. No test touches the
 //! user's real `~/.omnifs`, `~/omnifs`, or port 7878.
 //!
-//! The fixture writes `test_provider.wasm` and `omnifs_tool_archive.wasm` into
-//! `<OMNIFS_HOME>/providers/` and writes the no-auth test mount spec to
-//! `<OMNIFS_HOME>/mounts/test.json`. The mount serves `test/hello/message`.
+//! The fixture writes `test_provider.wasm` into `<OMNIFS_HOME>/providers/` and
+//! writes the no-auth test mount spec to `<OMNIFS_HOME>/mounts/test.json`. The
+//! mount serves `test/hello/message`.
 //!
 //! A `Drop` guard on `Fixture` force-unmounts the mount point and kills any
 //! surviving daemon, so a panicking or interrupted test still cleans up.
@@ -69,8 +69,8 @@ impl Fixture {
         std::fs::create_dir_all(&providers_dir).expect("providers dir");
 
         copy_release_wasm_into(&providers_dir);
-        // The daemon serves by content id, so the test provider must be in the
-        // by-hash store (the flat copy above only satisfies the archive tool).
+        // The daemon serves by content id, so the test provider must be
+        // installed into the by-hash store, not just copied in flat.
         let test_provider_id = install_test_provider(&providers_dir);
 
         let mounts_dir = home.path().join("mounts");

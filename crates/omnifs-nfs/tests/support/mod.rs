@@ -40,12 +40,6 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
     let providers_dir = config_dir.path().join("providers");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
     std::fs::create_dir_all(&providers_dir).expect("providers dir");
-    // The archive tool stays flat; the test provider goes into the by-hash store.
-    std::fs::copy(
-        provider_wasm_path("omnifs_tool_archive.wasm"),
-        providers_dir.join("omnifs_tool_archive.wasm"),
-    )
-    .expect("copy archive tool");
     install_test_provider(&providers_dir);
     let reference = serde_json::to_string(&test_provider_reference()).expect("provider ref json");
     let provider_config = format!(

@@ -3017,7 +3017,6 @@ dependencies = [
  "futures",
  "hex",
  "http",
- "libc",
  "omnifs-auth",
  "omnifs-cache",
  "omnifs-caps",
@@ -3266,16 +3265,6 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
-]
-
-[[package]]
-name = "omnifs-tool-archive"
-version = "0.2.1"
-dependencies = [
- "flate2",
- "omnifs-wit",
- "tar",
- "zip",
 ]
 
 [[package]]
