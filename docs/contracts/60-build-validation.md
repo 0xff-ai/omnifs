@@ -31,7 +31,7 @@ Use `just dev -y` for the supported contributor runtime path. Check status insid
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/tool/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Use `just check` before a push or PR handoff. It runs the formatting, policy, OpenAPI, provider WASM, and host gates in one pass. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
+Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check`, `just just-check`, `just docs-check`, and `just npm validate` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 
 ### Documentation checks
 
@@ -43,11 +43,11 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 - Use `cargo check --workspace --all-targets` as a host gate.
 - Assume bare provider builds contain injected metadata.
 - Hand-edit generated OpenAPI or schema files as the primary fix.
-- Change API/model code without running the corresponding generation check.
+- Change API/model code without regenerating the corresponding checked-in artifact and running its focused parity test.
 - Validate only the intended leaf path when parent traversal changed.
 - Treat compile-time route validity as enough for seal-time behavior.
 - Ignore runtime logs when the mount returns `Input/output error`.
-- Assemble a pre-push gate from ad hoc Cargo commands when `just check` is available.
+- Treat a local aggregate command as the source of truth when CI runs the lanes directly.
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
 - Treat `just docs-check` as code-symbol validation.
 
@@ -60,7 +60,7 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
 - `crates/xtask/src/npm.rs`
-- `crates/xtask/src/openapi.rs`
+- `crates/omnifs-daemon/src/bin/openapi.rs`
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-provider/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
@@ -76,9 +76,9 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 - `just providers validate`
 - `just host clippy`
 - `just host test`
-- `just check`
-- `just openapi-check`
+- `just refresh`
 - `just schema`
+- `just openapi`
 - `just docs-check`
 
 Live runtime path:

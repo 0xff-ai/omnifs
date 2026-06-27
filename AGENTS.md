@@ -173,14 +173,14 @@ cargo nextest run
 
 Use the right wider gate for the change:
 
-- **Before a push or PR handoff.** Run `just check`. It delegates to the CI-shaped lanes and avoids hand-assembling a near miss.
+- **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/docs/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
 - **WASM toolchain.** Provider and tool WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
 - **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers build` before treating missing provider artifacts as product failures.
 - **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/tool/test-provider WASM crates from host-target builds.
-- **Provider or broad-surface change.** Run `just check`.
+- **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
 - **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `docker exec omnifs /bin/zsh -lc 'omnifs status'`, and the smoke path in `CONTRIBUTING.md`.
 - **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.
-- **Control API change.** Run `just openapi` to regenerate, then `just openapi-check`.
+- **Control API change.** Run `just openapi` to regenerate the checked-in spec, then run the daemon OpenAPI parity test.
 - **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
 - **Documentation-heavy change.** Run `just docs-check`.
 

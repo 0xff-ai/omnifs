@@ -226,10 +226,10 @@ omnifs dev -y
 omnifs shell
 ```
 
-Core checks:
+Refresh generated and formatted artifacts:
 
 ```bash
-just check
+just refresh
 ```
 
 For runtime behavior, validate through the container:

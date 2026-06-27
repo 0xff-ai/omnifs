@@ -1,8 +1,7 @@
 //! omnifs repository tasks. Invoke via the `cargo xtask` alias, e.g.
-//! `cargo xtask npm validate` or `cargo xtask openapi check`.
+//! `cargo xtask npm validate`.
 
 mod npm;
-mod openapi;
 
 use std::path::Path;
 
@@ -35,11 +34,6 @@ enum Command {
         #[command(subcommand)]
         command: NpmCommand,
     },
-    /// OpenAPI spec tasks.
-    Openapi {
-        #[command(subcommand)]
-        command: OpenapiCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -51,14 +45,6 @@ enum NpmCommand {
     },
     /// Validate npm platform metadata and package manifests.
     Validate,
-}
-
-#[derive(Subcommand)]
-enum OpenapiCommand {
-    /// Regenerate the checked-in OpenAPI spec from the daemon.
-    Generate,
-    /// Check the checked-in OpenAPI spec matches the daemon.
-    Check,
 }
 
 fn main() {
@@ -76,10 +62,6 @@ fn run() -> Result<()> {
                 npm::sync(root, version.as_deref().unwrap_or(WORKSPACE_VERSION))
             },
             NpmCommand::Validate => npm::validate(root, WORKSPACE_VERSION),
-        },
-        Command::Openapi { command } => match command {
-            OpenapiCommand::Generate => openapi::generate(root),
-            OpenapiCommand::Check => openapi::check(root),
         },
     }
 }
