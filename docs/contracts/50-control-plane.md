@@ -67,7 +67,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `crates/omnifs-home/src/lib.rs`
 - `Dockerfile`
-- `scripts/openapi.ts`
+- `crates/xtask/src/openapi.rs`
 - `scripts/ci/build-runtime-image.sh`
 - `CONTRIBUTING.md`
 

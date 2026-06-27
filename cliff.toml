@@ -1,0 +1,45 @@
+# git-cliff configuration for omnifs.
+#
+# release-pr.yml uses git-cliff to compute the next version (`--bumped-version`)
+# and to render the pending release section it splices into CHANGELOG.md above
+# the existing released history. Entries are grouped by product area (derived
+# from the conventional-commit scope) and only user-facing types (feat/fix/perf)
+# appear; refactor/docs/chore/ci are skipped. The area headings match the set
+# the project has always used in CHANGELOG.md.
+
+[changelog]
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+"""
+body = """
+{% if version %}## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}{% else %}## [Unreleased]{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}- {{ commit.message | upper_first }}
+{% endfor %}{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+tag_pattern = "v[0-9]*"
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^(chore|ci|style|test|build|refactor|docs)", skip = true },
+  { message = "\\((auth|creds|credential|credentials|oauth)\\)", group = "Auth & credentials" },
+  { message = "\\((cache|caching|perf|performance)\\)", group = "Caching & performance" },
+  { message = "^perf", group = "Caching & performance" },
+  { message = "\\((sdk|provider|providers|arxiv|db|github|dns|docker|kubernetes|linear|oura|tree|path|stability)\\)", group = "Providers & projected paths" },
+  { message = "\\((mount|host|daemon|nfs|fuse|runtime|caps)\\)", group = "Runtime & mounts" },
+  { message = "\\((cli|dev|shell)\\)", group = "CLI & workflow" },
+  { message = "\\((npm|release|packaging|just|image|ghcr|install)\\)", group = "Packaging & release" },
+  { message = ".*", group = "Other" },
+]
+
+[bump]
+# omnifs is pre-1.0 (alpha): a breaking change bumps the minor, not to 1.0.0.
+# Flip to true (the git-cliff default) when you want strict semver / the 1.0 cut.
+breaking_always_bump_major = false
+features_always_bump_minor = true

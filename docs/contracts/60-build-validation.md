@@ -57,10 +57,10 @@ Use `just check` before a push or PR handoff. It runs the formatting, policy, Op
 - `just/host.just`
 - `just/providers.just`
 - `just/npm.just`
-- `just/release.just`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
-- `scripts/openapi.ts`
+- `crates/xtask/src/npm.rs`
+- `crates/xtask/src/openapi.rs`
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-provider/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`

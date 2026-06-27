@@ -41,7 +41,7 @@ CI builds Rust artifacts natively and uses Docker only to assemble the runtime i
 
 `Dockerfile` remains the contributor image path for `omnifs dev`. `just dev` installs the already-built provider/tool WASM into `~/.omnifs-dev/providers` and passes that directory as the `provider-wasm` build context, so the image embeds those bytes instead of compiling providers again inside Docker. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider/tool WASM bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
-CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery and `version_pin()` (a thin wrapper over `scripts/toolchain/versions.ts`). Toolchain bootstrap (wasi-sdk, version pin lookup) is at `scripts/toolchain/`. The Bun script tree under `scripts/` is layered: thin bins at `scripts/{npm,release}.ts` parse CLI args and dispatch to `scripts/lib/`.
+CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery and `version_pin()`, a `sed` reader for quoted string pins in `tools/versions.toml`. The `cargo xtask` crate (`crates/xtask`) owns npm version sync/validation and OpenAPI generate/check. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
 ## Validate through the live runtime
 

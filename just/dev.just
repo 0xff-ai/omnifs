@@ -18,11 +18,6 @@ just-check:
       just --fmt --check --justfile "$justfile" --working-directory .
     done
 
-# Run the bun script tests.
-[group('dev')]
-scripts-test:
-    bun test scripts
-
 # Check that docs do not reference nonexistent docs paths.
 [group('dev')]
 docs-check:
@@ -31,7 +26,7 @@ docs-check:
 
 # Run the CI-shaped local validation path for broad changes.
 [group('dev')]
-check: fmt-check just-check docs-check scripts-test npm::validate openapi-check providers::check providers::build providers::validate host::clippy host::test
+check: fmt-check just-check docs-check npm::validate openapi-check providers::check providers::build providers::validate host::clippy host::test
 
 # Regenerate the provider JSON schema.
 [group('dev')]
@@ -41,12 +36,12 @@ schema:
 # Regenerate the control API OpenAPI spec from the daemon implementation.
 [group('dev')]
 openapi:
-    bun scripts/openapi.ts generate
+    cargo xtask openapi generate
 
 # Check that the checked-in OpenAPI spec matches the implementation.
 [group('dev')]
 openapi-check:
-    bun scripts/openapi.ts check
+    cargo xtask openapi check
 
 # Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]

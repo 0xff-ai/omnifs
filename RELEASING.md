@@ -1,159 +1,102 @@
 # Releasing omnifs
 
-How omnifs ships: one maintainer command surface (`just`), two workflows (`ci.yml` + `release.yml`), no compile at ship time.
+How omnifs ships: conventional commits drive an always-open release PR; merging it tags and ships. Three workflows (`ci.yml`, `release-pr.yml`, `release.yml`), git-cliff for the changelog, no application recompile at ship time.
 
 ## What happens (end to end)
 
 | Phase | Who / what | What runs | Outcome |
 |-------|------------|-----------|---------|
-| 1. Development | You + feature PRs | CI `verify`; `changelog.yml` (0xff-ai/bot) drafts an entry | Sticky proposal; `/changelog` commits it to the PR branch; merge gated on an entry |
-| 2. Cut release | You on `origin/main` | `just release cut` | Branch `release/vX.Y.Z`, version bump, changelog finalized, release PR opened |
-| 3. Review | You + release PR CI | CI verify; `just release check` | Release PR shape validated |
-| 4. Merge | Merge to `main` | **CI** factory | four embedded-bundle `omnifs-cli-*` tarballs, runtime image `sha-<commit>` |
-| 5. Ship | **Release** workflow after green CI | `just release plan` → softprops → promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
+| 1. Development | You + feature PRs (conventional commits) | CI verify | Work lands on `main` |
+| 2. Standing release PR | `release-pr.yml`, every push to `main` | git-cliff next version + changelog; `cargo set-version`; `cargo xtask npm sync` | An open `chore(release): vX.Y.Z` PR, always current |
+| 3. Ship it | You merge the release PR | `release-pr.yml` tags the merge commit `vX.Y.Z` | `main` carries the bump; tag created |
+| 4. Build | **CI** on the merge commit | native CLI archives + runtime image | four `omnifs-cli-*` tarballs, `sha-<commit>` image |
+| 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promote → npm | GitHub Release `vX.Y.Z`, GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
 
-Nothing in phase 5 recompiles. Release downloads artifacts from the CI run that triggered it (`workflow_run`).
-
-```text
-feature PR ──► changelog.yml (0xff-ai/bot): LLM drafts entry → /changelog commits it to the PR branch
-                    │
-main + notes ──► release cut (local) ──► release/v* PR ──► release check
-                    │
-              merge to main ──► CI factory (artifacts + image)
-                    │
-              CI success ──► Release workflow (plan → GH release → promote → npm)
-```
-
-## Automated changelog
-
-The changelog is written by the [0xff-ai/bot](https://github.com/0xff-ai/bot) reusable workflow, wired in via `.github/workflows/changelog.yml` and configured in `.github/bot.yml` (the product line, maintainers, and the area headings). An LLM proposes each entry, a human accepts or rewrites it with a `/changelog` comment, and the entry is committed to the PR's own branch under its area heading, so it merges with the change that introduced it. `CHANGELOG.md` is versioned in git as before; nothing else (no manifest, no standing branch) is added.
-
-**Propose.** On each feature PR, unless the PR already edits `CHANGELOG.md`, the LLM drafts one entry in three lengths (short / medium / long) and posts a sticky proposal comment. A PR with no user-facing change is labeled `no-changelog` automatically.
-
-**Apply.** The author or a maintainer replies with a command and the bot commits the entry to the PR branch under its area:
-
-- `/changelog apply` — add the medium entry
-- `/changelog apply short` or `long` — pick another length
-- `/changelog <area>: your wording` — custom text
-- `/changelog skip` — label `no-changelog`, no entry needed
-
-Appends are additive: existing lines are never rewritten, so hand-edits to `CHANGELOG.md` survive and re-applying the same entry is a no-op. Fork PRs can't be pushed to, so the bot posts the exact commands to add the entry locally instead. Maintainers default to `raulk` (set `maintainers` in `.github/bot.yml`).
-
-**Gate.** A required `changelog` check blocks merge until `CHANGELOG.md` changes or the `no-changelog` label is present. It reports an `action_required` conclusion, so a missing entry shows as an orange "action required" state rather than a red failure, and still blocks. Add `changelog` to the branch's required status checks for it to take effect.
+Phase 5 recompiles nothing: `release.yml` downloads the artifacts from the CI run for the tagged commit.
 
 ```text
-feature PR ──► changelog.yml: LLM drafts → sticky proposal
-                    │
-              /changelog apply ──► entry committed to the PR branch (additive, by area)
-                    │
-              merge to main ──► [Unreleased] already carries the entry
-                    │
-              just release cut ──► finalize [Unreleased] → release/v* PR ──► Release workflow (ship)
+conventional-commit PRs ──► merge to main
+        │
+release-pr.yml ──► standing "chore(release): vX.Y.Z" PR (version + changelog + npm sync), refreshed each push
+        │
+you merge it ──► release-pr.yml tags vX.Y.Z
+        │
+CI builds artifacts ──► release.yml (after CI, gated on the tag): GH release → promote → npm
 ```
 
-Requirements:
+## The release coordinator (`release-pr.yml`)
 
-- `OPENAI_API_KEY` secret for drafting (an org-level secret is cleanest; it reaches the bot via `secrets: inherit`). Override `OPENAI_BASE_URL` / `OPENAI_MODEL` to retarget the gateway or model.
-- The apply job pushes a commit to the PR branch (`contents: write`), not to `main`; nothing is pushed to `main` by the bot.
-- Fork PRs can't read the secret or be pushed to, so the bot posts manual instructions for a maintainer to add the entry.
+On every push to `main`, the workflow does one of:
 
-## Maintainer commands
+- **Accumulating.** Computes the next version from conventional commits since the last tag (git-cliff), rebuilds the `release-pr` branch with `cargo set-version`, `cargo update`, `cargo xtask npm sync`, and a regenerated changelog, then force-updates the standing PR.
+- **Merged.** When the release PR has landed (the workspace version is ahead of the last tag), it creates the `vX.Y.Z` tag, which `release.yml` ships off after CI.
 
-Maintainer commands are exposed through the root **`justfile`**. Run `just` to list the grouped command surface. The release and npm recipes call policy-heavy Bun scripts at `scripts/{npm,release}.ts`, which dispatch to `scripts/lib/`.
+The PR is the always-current preview of the next release. **Edit the changelog in the PR before merging** to polish wording; the version commit and PR body are yours to adjust. The PR itself does not run CI (it is created by `GITHUB_TOKEN`); validation runs on merge to `main`, and `release.yml` is gated on that CI succeeding.
 
-| Subcommand | When | What it does |
-|------------|------|----------------|
-| **`just release cut`** | Local, on clean `main` | Bump versions, finalize CHANGELOG, commit on `release/vX.Y.Z`, push, open PR |
-| **`just release cut-local`** | Local, on clean `main` | Prepare the release branch without pushing |
-| **`just release check`** | Release PR (CI) | On `release/*` branches, validate the release PR (finalized changelog, version, npm sync) |
-| **`just release plan`** | CI only, after green `main` | If workspace version > latest tag: emit ship metadata; else no-op |
-| **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from workspace (or `version`) through `npm pkg set` |
-| **`just npm validate`** | `just check`, release PR, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` |
+## Changelog
 
-Examples:
+git-cliff generates the pending changelog section from conventional commits (`cliff.toml`). Entries are grouped by product area (Providers & projected paths, Runtime & mounts, CLI & workflow, Caching & performance, Auth & credentials, Packaging & release) derived from the commit scope, and only user-facing types appear — `feat`, `fix`, `perf`; `refactor`/`docs`/`chore`/`ci`/`test`/`style` are filtered out. Curated released history (the `## [X.Y.Z]` sections already in `CHANGELOG.md`) is preserved; only the pending section is regenerated.
 
-```bash
-# Cut a release (interactive patch bump)
-git fetch origin && git checkout main && git reset --hard origin/main
-just release cut
+The **commit message is the changelog source**: write `feat(cli): ...`, `fix(mount): ...`, `feat(sdk)!: ...` (`!` marks a breaking change). An unscoped or unrecognized scope lands under "Other"; tighten the scope to place it. Polish the rendered entries in the release PR when you want prose over commit subjects.
 
-# Pin version or prepare without pushing
-just release cut 0.2.0
-just release cut-local 0.2.0
-```
+## Versioning
 
-Day-to-day dev uses `just check`, `just providers build`, and `omnifs dev`.
+The next version is computed from conventional commits since the last tag: `feat` → minor, `fix` → patch, breaking (`!`) → minor (omnifs is pre-1.0; `breaking_always_bump_major = false` in `cliff.toml`). To cut `1.0.0`, flip that flag. Prereleases are not produced automatically; to cut one (e.g. `0.3.0-rc.1`), set the version in the release PR by hand — `release.yml` detects the hyphen and marks the GitHub Release `prerelease=true, make_latest=false`, publishes npm with dist-tag `dev`, and still tags GHCR with `X.Y.Z` and `vX.Y.Z`.
 
 ## Workflows
 
 | Workflow | Trigger | Role |
 |----------|---------|------|
-| `ci.yml` | push / PR to `main` | Fast preflight, native host/WASM verification, and on `main`/`ci-full`: Linux + Darwin CLI archives, runtime images, smoke, and the `sha-<commit>` manifest |
-| `release.yml` | `workflow_run` after successful **CI** on `main` `push` | `just release plan` → GitHub Release + assets → GHCR promote → npm; platform npm packages are staged from `npm/platforms.json` |
+| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, and on `main`: Linux + Darwin CLI archives, runtime images, smoke, the `sha-<commit>` manifest |
+| `release-pr.yml` | push to `main` | maintain the standing release PR; tag `vX.Y.Z` when it merges |
+| `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: GitHub Release + assets → GHCR promote → npm; platform npm packages staged from `npm/platforms.json` |
 
-Prerelease versions (anything containing `-`, e.g. `0.2.0-dev.0`) are auto-detected: the GitHub Release is marked `prerelease=true, make_latest=false`, npm publishes with dist-tag `dev`, and GHCR still gets both `X.Y.Z` and `vX.Y.Z` tags.
+## Maintainer commands
 
-## Release authority
+The `just` surface for release-adjacent tasks is npm-only; the release itself is driven by merging the standing PR, not a local command.
 
-- **`just release cut`**: version bump in the release PR only (Cargo, lockfile, npm, CHANGELOG).
-- **`just release plan`**: ship gating (version vs latest tag, changelog/npm validation, release notes for softprops).
-- **CI**: single factory; builds all binaries and images.
-- **`release.yml`**: attach CI artifacts, promote `sha-*` → semver tags, publish npm.
+| Subcommand | When | What it does |
+|------------|------|----------------|
+| **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the workspace version through `npm pkg set` (`cargo xtask npm sync`) |
+| **`just npm validate`** | `just check`, ship | Cross-check `platforms.json`, package.json, and `dist-workspace.toml` (`cargo xtask npm validate`) |
+| **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
-## Branch hygiene
-
-**Always treat `origin/main` as the release base**, not local `main`.
-
-```bash
-git fetch origin
-git checkout main
-git reset --hard origin/main   # only when local main has diverged
-```
-
-When reviewing a release branch: `git diff origin/main --stat`, not `git diff main` if local `main` drifted.
-
-## Changelog policy
-
-Entries in `## [Unreleased]` are grouped by product area, and each is tagged with a type (`**Feature:**`, `**Fix:**`, `**Improvement:**`, `**Performance:**`, `**Breaking:**`, `**Deprecation:**`, `**Removal:**`, `**Security:**`). They are drafted per PR by the changelog bot and committed to the PR branch via `/changelog` (see [Automated changelog](#automated-changelog)); the merge gate requires an entry (or the `no-changelog` label). Edit `CHANGELOG.md` directly any time to fix wording or move an entry between areas.
-
-- Release PR: `just release cut` moves `[Unreleased]` into `## [X.Y.Z] - date` and leaves an empty `[Unreleased]`.
+Day-to-day dev uses `just check`, `just providers build`, and `omnifs dev`.
 
 ## What gets released
 
 - **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. These binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
-- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; CLI default uses unprefixed tag). The runtime image stages the same Linux CLI binary; the launcher seeds the bind-mounted home before startup.
-- **npm**: `@0xff-ai/omnifs` + four platform packages
+- **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; the CLI default uses the unprefixed tag). The runtime image stages the same Linux CLI binary.
+- **npm**: `@0xff-ai/omnifs` + four platform packages.
 
 ## npm platform catalog
 
 `npm/platforms.json` is the single source of truth for platform npm packages. Each entry defines the platform package name, Rust target triple, and npm `os`/`cpu` metadata. The Release workflow reads this file with `jq` while staging the four platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`.
 
-`just npm sync` updates package versions by calling `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the workspace version. The npm policy implementation lives in `scripts/lib/npm-workspace.ts`, consumed by both `scripts/npm.ts` and the Release workflow.
+`just npm sync` updates package versions by calling `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the workspace version. The npm sync/validate policy lives in `cargo xtask` (`crates/xtask/src/npm.rs`).
 
-The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work entirely from files inside the `@0xff-ai/omnifs` package directory. `npm/platforms.json` lives at the workspace root and is **not** included in the published tarball; if `resolve-binary.js` ever needs that data it must be inlined, with `just npm validate` cross-checking against `npm/platforms.json`. The same rule applies to any future runtime helper added to the published package.
+The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work entirely from files inside the `@0xff-ai/omnifs` package directory. `npm/platforms.json` lives at the workspace root and is **not** included in the published tarball; if `resolve-binary.js` ever needs that data it must be inlined, with `just npm validate` cross-checking against `npm/platforms.json`.
 
 ## Version coupling
 
-For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all share the **same unprefixed semver** (`0.2.0`, not `v0.2.0`):
+For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default runtime image tag all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
 - CLI default image: `ghcr.io/0xff-ai/omnifs:X.Y.Z` (`crates/omnifs-cli/src/session.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (the `v` prefix is used only here)
 - GHCR promote publishes both `X.Y.Z` and `vX.Y.Z`; the CLI default uses the unprefixed tag
 
-npm installs the native CLI binary only. Docker is pulled on `omnifs up`, not at `npm install`.
-
-Do not bump npm/Cargo versions outside `just release cut`. Do not change the embedded default image ref without going through a full release.
+`cargo set-version` owns the bump: it sets `[workspace.package].version`, every crate that inherits it, and the workspace path-dependency requirements. Do not bump npm/Cargo versions outside the release PR, and do not change the embedded default image ref without going through a full release.
 
 ## Step-by-step (maintainer)
 
 ### 1. Land work on `main`
 
-Merge features with changelog updates. Green `main` CI publishes `sha-<commit>` and (on `main` only) release artifacts.
+Merge feature PRs with conventional-commit messages (`type(scope): description`). The scope and type decide the changelog area and the version bump. Green `main` CI publishes `sha-<commit>`.
 
 ### 2. Verify the npm package locally (mandatory)
 
-The publish pipeline cannot catch install-time failures, so verify before cutting. Pack the root package as it would publish, install it into a scratch prefix both with and without scripts, and run the bin shim each time:
+The publish pipeline cannot catch install-time failures, so verify before merging the release PR. Pack the root package as it would publish, install it into a scratch prefix both with and without scripts, and run the bin shim each time:
 
 ```bash
 # 1. Pack the root npm package as it would publish.
@@ -169,35 +112,23 @@ npm install --prefix "$prefix" "$scratch"/0xff-ai-omnifs-*.tgz         # postins
 node "$prefix/node_modules/@0xff-ai/omnifs/bin/omnifs.js" --version    # must succeed
 ```
 
-If either invocation fails (MODULE_NOT_FOUND, missing platform binary, postinstall crash), the published package will fail the same way for every user. Fix before cutting.
+If either invocation fails (MODULE_NOT_FOUND, missing platform binary, postinstall crash), the published package will fail the same way for every user. Fix before releasing.
 
-### 3. Cut the release PR
+### 3. Merge the standing release PR
 
-Prerequisites: clean `main` = `origin/main`, `gh` auth, `[Unreleased]` populated (merged PRs carry their entries; hand-edit to add any missing ones), `just`, and `cargo install cargo-edit` for `cargo set-version`.
+Find the open `chore(release): vX.Y.Z` PR that `release-pr.yml` keeps current. Review the version bump and the regenerated changelog; edit the changelog in the PR if you want to polish wording or override the version (e.g. a prerelease). Merge it.
 
-```bash
-just release cut
-```
+### 4. Wait for ship (automatic)
 
-`just release cut` creates `release/vX.Y.Z`, bumps workspace + npm, finalizes CHANGELOG, commits, pushes, opens PR.
+1. **`release-pr.yml`** on the merge commit tags `vX.Y.Z`.
+2. **CI** on the merge commit: the artifact factory must go green.
+3. **`release.yml`** fires after that CI, sees the tag on the commit, and ships. Watch **Actions → Release** for plan / github-release / promote / npm.
 
-### 4. Merge the release PR
-
-Wait for PR CI (including `just release check`). Merge via squash and delete branch.
-
-### 5. Wait for ship (automatic)
-
-1. **CI** on merge commit: factory must go green.
-2. **Release** workflow: `workflow_run` fires only after that CI succeeds.
-3. Watch **Actions → Release** for plan / github-release / promote / npm.
-
-Re-run a failed **Release** job after fixing CI; do not re-run compile steps in ship.
-
-After publish, verify:
+Re-run a failed **Release** job after fixing CI; do not re-run compile steps in ship. After publish, verify:
 
 ```bash
 gh release view vX.Y.Z --json isPrerelease,assets
-npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'    # dev tag should point at the new version for a prerelease
+npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'
 docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs:X.Y.Z
 ```
 
@@ -205,60 +136,50 @@ docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs:X.Y.Z
 
 | Secret | Used for |
 |--------|----------|
-| `GITHUB_TOKEN` | Releases, artifacts, GHCR |
+| `GITHUB_TOKEN` | Release PR, tag, releases, artifacts, GHCR |
 | `NPM_TOKEN` | npm publish; Automation type, bypasses 2FA, passed to the npm-platforms and npm-root jobs as `NODE_AUTH_TOKEN` |
 
 Migrate `NPM_TOKEN` to npm Trusted Publishers (OIDC) per package after the first publish to remove the long-lived secret.
 
-Gates that must be in place before any cut:
+Gates that must be in place:
 
-- `id-token: write` permission on the publish jobs (already set) for `--provenance`.
-- The `release` label must exist on the GitHub repo; `release.ts publishReleasePr` attaches it to the cut PR and fails if missing.
-- `release-cut` requires `cargo set-version`; install with `cargo install cargo-edit` if missing.
-
-Local **`just release cut`**: requires `cargo-edit` (`cargo set-version`) so Cargo owns workspace version and path dependency updates.
+- `id-token: write` on the publish jobs (already set) for `--provenance`.
+- The `release` label must exist on the GitHub repo; `release-pr.yml` attaches it to the release PR.
+- `release-pr.yml` installs `git-cliff` and `cargo-edit` (`cargo set-version`) via `taiki-e/install-action`.
 
 ## What not to do
 
-- Manual `git tag` / `git push --tags`
-- Version bumps outside `just release cut`
+- Manual `git tag` / `git push --tags` (`release-pr.yml` owns tagging)
+- Version bumps outside the release PR
 - Rebuild image/WASM/CLI during ship
-- `prepare` from a stale local `main`
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| Changelog proposal missing on a PR | Fork PR (no secret access) or LLM error; comment `/changelog <area>: text` or edit `CHANGELOG.md` directly, then the gate passes |
-| Release PR check failed | Ensure `## [version]` exists, `[Unreleased]` empty, versions synced |
-| Release workflow did not run | CI must succeed on `main` push first |
+| No release PR appears | `release-pr.yml` only opens one when there are releasable (`feat`/`fix`/`perf`) commits since the last tag |
+| Wrong version computed | Check the conventional-commit types since the last tag; a stray `feat`/`!` changes the bump. Override by editing the version in the PR |
+| Release workflow did not run | CI must succeed on the `main` push first |
+| Ship ran but skipped | `release.yml` only ships when a `v*` tag points at the built commit; confirm `release-pr.yml` tagged the merge |
 | Missing GH assets | CI must upload four `omnifs-cli-*` archives; re-run CI then Release |
-| npm failed | Check **promote** job; npm needs GHCR tag + CI CLI artifacts |
-| No ship after merge | `just release plan` no-ops if version ≤ latest tag; run `just release cut` again |
-
-### Failure modes seen in practice
-
-Record new ones here when they happen so the next cut avoids them.
-
-- **Race against main's CI**: when a PR merges and you immediately `release-cut`, the resulting `release/vX.Y.Z` PR starts CI before main's post-merge CI has saved its caches under `refs/heads/main`. PR CI then runs cold on lanes like `cli (linux-x64, darwin)`. Mitigation: wait for the prior main CI to complete before cutting, or accept one cold cycle.
-- **Branch name collision**: if a non-versioned branch named `release` exists (locally or remotely), git refuses to create `release/vX.Y.Z` (`cannot lock ref ... 'refs/heads/release' exists`). Delete or rename the conflicting branch first. The PR branch from the last release cleanup is the usual culprit; delete the remote (`gh pr merge --delete-branch` or `git push origin --delete release`) and `git remote prune origin` locally.
+| npm failed | Check the **promote** job; npm needs the GHCR tag + CI CLI artifacts |
 
 ## Configuration reference
 
 | Path | Purpose |
 |------|---------|
 | `justfile`, `just/` | Maintainer command surface used locally and in CI |
-| `scripts/npm.ts` | npm platform catalog, package sync, and package validation (logic in `scripts/lib/npm-workspace.ts`) |
-| `scripts/release.ts` | release cut, release check, release plan, and release-note prompt (logic in `scripts/lib/release-workflow.ts`) |
-| `scripts/toolchain/wasi-env.ts` | WASI SDK bootstrap and env export for provider builds |
-| `scripts/toolchain/versions.ts` | Read a scalar pin from `tools/versions.toml` |
+| `cliff.toml` | git-cliff config: changelog areas, filters, and the version-bump policy |
+| `crates/xtask` | npm version sync/validation and OpenAPI generate/check (run via `cargo xtask`) |
+| `just/providers.just` | WASI SDK install (`wasi-sdk` recipe) and provider/tool WASM builds |
+| `scripts/ci/common.sh` | Repo-root discovery and `version_pin()`, the string-pin reader for `tools/versions.toml` |
 | `npm/platforms.json` | Source of truth for npm platform packages |
 | `tools/versions.toml` | Pinned Zig, cargo-zigbuild, WASI SDK, and cargo tool versions used by CI |
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
 | `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin cross-link helper |
 | `scripts/ci/build-runtime-image.sh` | Runtime image assembly from prebuilt CLI and WASM artifacts |
-| `.github/workflows/ci.yml` | Factory + `sha-*` image + PR release checks |
+| `.github/workflows/release-pr.yml` | Release coordinator: standing PR + tag |
 | `.github/workflows/release.yml` | Post-CI ship |
 | `scripts/ci/promote-image.sh` | `sha-*` → semver GHCR tags |
 
