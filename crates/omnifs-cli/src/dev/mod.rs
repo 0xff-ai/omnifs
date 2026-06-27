@@ -186,7 +186,8 @@ impl DevArgs {
 
         let installed = crate::catalog::installed_providers(workspace_home.catalog())?;
         let pinned = pin_dev_mounts(discovered_mounts, &installed)?;
-        let configs = provision_dev_mounts(pinned, &installed, &layout.credentials_file).await?;
+        let configs =
+            provision_dev_mounts(pinned, &installed, &layout.credentials_file, self.yes).await?;
         write_dev_mounts(&layout.mounts_dir, &configs)?;
 
         let store = Box::new(FileStore::new(&layout.credentials_file));
@@ -327,6 +328,7 @@ async fn provision_dev_mounts(
     configs: Vec<MountConfig>,
     installed: &[(Provider, ProviderManifest)],
     credentials_file: &Path,
+    yes: bool,
 ) -> Result<Vec<MountConfig>> {
     let mut ready = Vec::new();
     for config in configs {
@@ -353,7 +355,7 @@ async fn provision_dev_mounts(
             auth_manifest.as_ref(),
             provider_name.as_str(),
             true,
-            true,
+            yes,
         )
         .resolve()?;
 

@@ -48,7 +48,7 @@ openapi:
 openapi-check:
     bun scripts/openapi.ts check
 
-# Launch the supported contributor runtime.
+# Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]
-dev:
-    omnifs dev
+dev *args: providers::build
+    omnifs dev {{ args }}
