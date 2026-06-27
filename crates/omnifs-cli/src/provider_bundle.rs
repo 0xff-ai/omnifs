@@ -51,8 +51,8 @@ pub(crate) fn ensure_providers_installed(providers_dir: &Path) -> anyhow::Result
 
 /// Install freshly-built provider WASM from the workspace's
 /// `target/wasm32-wasip2/release` into the content-addressed store. Used by
-/// `omnifs dev`, which rebuilds providers from the source checkout and wants
-/// the just-built WASM rather than the bundle embedded at CLI compile time.
+/// `omnifs dev`, which consumes the host-built WASM rather than the bundle
+/// embedded at CLI compile time.
 pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> anyhow::Result<()> {
     let artifact_dir = workspace.join("target/wasm32-wasip2/release");
     let expected = expected_files(workspace)?;

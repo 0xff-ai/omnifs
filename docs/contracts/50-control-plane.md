@@ -37,7 +37,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 
 ### Provider bundles
 
-`Dockerfile` is the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider/tool bundle and unpack it into `OMNIFS_HOME/providers`.
+`Dockerfile` is the contributor image path for `omnifs dev`. Dev image builds consume host-built provider/tool WASM from the dev provider store as a named Docker build context; the normal runtime image stage must not compile providers again. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider/tool bundle and unpack it into `OMNIFS_HOME/providers`.
 
 ## Must not
 
@@ -66,6 +66,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - `crates/omnifs-cli/src/dev_support.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `crates/omnifs-home/src/lib.rs`
+- `Dockerfile`
 - `scripts/openapi.ts`
 - `scripts/ci/build-runtime-image.sh`
 - `CONTRIBUTING.md`
@@ -75,4 +76,4 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - Control API changes need daemon API tests and `just openapi-check`.
 - API shape changes run `just openapi` and keep generated OpenAPI synchronized.
 - Runtime-mode changes need targeted CLI/daemon tests and live runtime validation for the affected launch path.
-- Contributor workflow changes need CLI tests and, when touching runtime behavior, `omnifs dev -y` plus the smoke path in `CONTRIBUTING.md`.
+- Contributor workflow changes need CLI tests and, when touching runtime behavior, `just dev -y` plus the smoke path in `CONTRIBUTING.md`.

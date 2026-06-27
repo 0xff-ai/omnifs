@@ -4,6 +4,7 @@ mod discover;
 pub(crate) mod fixtures;
 mod profiles;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,8 +16,6 @@ use omnifs_home::WorkspaceLayout;
 use omnifs_mount::mounts::{Registry, Spec};
 use tokio::signal;
 
-use crate::auth::AuthSelection;
-use crate::commands::init::{AuthImportDecision, TokenValidationMode, run_static_token_init};
 use crate::dev_support::{DevImageTag, WorkspaceRoot, contributor_layout};
 use crate::launch::{LaunchSpec, launch_runtime};
 use crate::launch_backend::{DockerTarget, LaunchBackend};
@@ -165,10 +164,6 @@ impl DevArgs {
         discovered_mounts: Vec<discover::DiscoveredMount>,
         fixture_binds: Vec<String>,
     ) -> Result<()> {
-        if self.image.is_none() {
-            build_image(workspace.path(), image)?;
-        }
-
         let layout = WorkspaceLayout::under_root(dev_home);
         let workspace_home = Workspace::from_layout(layout.clone());
         let config = workspace_home.config()?;
@@ -178,16 +173,16 @@ impl DevArgs {
             &config,
         )?;
 
-        if self.image.is_some() {
-            provider_bundle::ensure_providers_installed(&layout.providers_dir)?;
-        } else {
+        if self.image.is_none() {
             provider_bundle::install_target_bundle(workspace.path(), &layout.providers_dir)?;
+            build_image(workspace.path(), image, &layout.providers_dir)?;
+        } else {
+            provider_bundle::ensure_providers_installed(&layout.providers_dir)?;
         }
 
         let installed = crate::catalog::installed_providers(workspace_home.catalog())?;
-        let pinned = pin_dev_mounts(discovered_mounts, &installed)?;
-        let configs =
-            provision_dev_mounts(pinned, &installed, &layout.credentials_file, self.yes).await?;
+        let configs = pin_dev_mounts(discovered_mounts, &installed)?;
+        let container_env = dev_container_env(&configs);
         write_dev_mounts(&layout.mounts_dir, &configs)?;
 
         let store = Box::new(FileStore::new(&layout.credentials_file));
@@ -199,6 +194,8 @@ impl DevArgs {
                 verb: "omnifs dev",
                 configs,
                 extra_binds: fixture_binds,
+                extra_env: container_env,
+                reuse_existing_container: false,
             },
             workspace_home.catalog(),
         )
@@ -324,59 +321,35 @@ fn pin_dev_mounts(
     Ok(configs)
 }
 
-async fn provision_dev_mounts(
-    configs: Vec<MountConfig>,
-    installed: &[(Provider, ProviderManifest)],
-    credentials_file: &Path,
-    yes: bool,
-) -> Result<Vec<MountConfig>> {
-    let mut ready = Vec::new();
-    for config in configs {
-        let provider_name = config.config.provider.meta.name.clone();
-        let Some((_, manifest)) = crate::catalog::find_installed(installed, provider_name.as_str())
-        else {
-            anstream::eprintln!(
-                "  ! mount `{}` references unknown provider `{}`; skipping",
-                config.name,
-                provider_name.as_str()
-            );
-            continue;
-        };
-
-        let default_auth = AuthSelection::from_provider_default(manifest);
-        if default_auth.is_none() {
-            ready.push(config);
-            continue;
-        }
-
-        let auth_manifest = manifest.wasm_auth_manifest();
-        let outcome = AuthImportDecision::new(
-            default_auth,
-            auth_manifest.as_ref(),
-            provider_name.as_str(),
-            true,
-            yes,
-        )
-        .resolve()?;
-
-        if let (Some(auth), Some(token)) = (outcome.auth, outcome.token) {
-            run_static_token_init(
-                manifest,
-                &auth,
-                token,
-                credentials_file,
-                TokenValidationMode::Skip,
-            )
-            .await?;
-            ready.push(config);
-        } else {
-            anstream::eprintln!(
-                "  ! no host credential found for `{}`; skipping its dev mount (authenticate it and rerun `omnifs dev`)",
-                provider_name.as_str()
-            );
+fn dev_container_env(configs: &[MountConfig]) -> Vec<String> {
+    let names = configs
+        .iter()
+        .flat_map(|config| {
+            config
+                .config
+                .auth
+                .iter()
+                .filter_map(omnifs_mount::Auth::token_env)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut values = Vec::new();
+    let mut missing = Vec::new();
+    for name in names {
+        match std::env::var(name) {
+            Ok(value) if !value.is_empty() => values.push(format!("{name}={value}")),
+            _ => missing.push(name.to_string()),
         }
     }
-    Ok(ready)
+    if !missing.is_empty() {
+        anstream::eprintln!(
+            "  ! missing host env var(s) for dev auth: {}",
+            missing.join(", ")
+        );
+        anstream::eprintln!(
+            "    referenced mounts will start, but authenticated requests may fail"
+        );
+    }
+    values
 }
 
 fn confirm_session(
@@ -423,7 +396,7 @@ fn write_dev_mounts(mounts_dir: &Path, configs: &[MountConfig]) -> Result<()> {
     Ok(())
 }
 
-fn build_image(workspace: &Path, image: &str) -> Result<()> {
+fn build_image(workspace: &Path, image: &str, provider_context: &Path) -> Result<()> {
     anstream::println!("Building image `{image}` (cached layers reused)");
     let min_launcher = env!("CARGO_PKG_VERSION");
     let status = Command::new("docker")
@@ -431,6 +404,8 @@ fn build_image(workspace: &Path, image: &str) -> Result<()> {
             "build",
             "-t",
             image,
+            "--build-context",
+            &format!("provider-wasm={}", provider_context.display()),
             "--build-arg",
             &format!("OMNIFS_MIN_LAUNCHER_VERSION={min_launcher}"),
             ".",

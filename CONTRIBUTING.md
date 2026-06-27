@@ -4,17 +4,17 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `omnifs dev`, implemented in `crates/omnifs-cli/src/commands/dev.rs`. It builds the dev image, synthesizes mount configs from built-in provider manifests, validates stored credentials, materializes fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `just dev`, which builds provider and tool WASM once with `just providers build`, then runs the source CLI's `dev` command. The Rust launcher builds the dev image from the host-built WASM, pins dev mount specs to the exact installed provider bytes, materializes fixtures, and launches the container directly through the Docker API.
 
 ```bash
-omnifs dev          # build dev image, materialize fixtures, launch container
+just dev            # build providers, build dev image, materialize fixtures, launch container
 omnifs shell        # omnifs-aware shell for exploring the tree
 omnifs logs -f      # follow container output
 omnifs status       # inspect mounts, providers, auth state
 omnifs down         # stop and remove the container
 ```
 
-`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, resolves a dedicated dev home at `~/.omnifs-dev`, provisions each built-in dev mount's credential from your host (`gh auth token`, or a provider env var such as `LINEAR_API_KEY`) into `~/.omnifs-dev/credentials.json`, downloads the Chinook SQLite fixture into `~/.omnifs-dev/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with the mounts it could provision under `/omnifs/<mount>`. Nothing is written into the checkout; a mount whose credential is missing is skipped with a warning.
+`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, resolves a dedicated dev home at `~/.omnifs-dev`, installs host-built provider WASM into `~/.omnifs-dev/providers`, downloads the Chinook SQLite fixture into `~/.omnifs-dev/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with dev mounts under `/omnifs/<mount>`. Dev auth uses `token_env` mount specs: set `GITHUB_TOKEN` or `LINEAR_API_KEY` on the host before `just dev` to pass them into the runtime container. Missing env vars are reported as warnings; mounts still start, but authenticated requests may fail.
 
 When run from inside the source checkout, the whole contributor command family (`omnifs shell`, `status`, `logs`, `down`) defaults to the same `~/.omnifs-dev` home, so a session started by `omnifs dev` is visible to them with no `OMNIFS_HOME` prefix. An explicit `OMNIFS_HOME` always overrides this; outside a checkout the normal `~/.omnifs` applies.
 
@@ -39,7 +39,7 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build` with WASI SDK pins from `tools/versions.toml`.
 
-`Dockerfile` remains the contributor image path for `omnifs dev`. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider/tool WASM bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `omnifs dev` working when changing Docker-related files.
+`Dockerfile` remains the contributor image path for `omnifs dev`. `just dev` installs the already-built provider/tool WASM into `~/.omnifs-dev/providers` and passes that directory as the `provider-wasm` build context, so the image embeds those bytes instead of compiling providers again inside Docker. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider/tool WASM bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
 CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery and `version_pin()` (a thin wrapper over `scripts/toolchain/versions.ts`). Toolchain bootstrap (wasi-sdk, version pin lookup) is at `scripts/toolchain/`. The Bun script tree under `scripts/` is layered: thin bins at `scripts/{npm,release}.ts` parse CLI args and dispatch to `scripts/lib/`.
 
@@ -48,7 +48,7 @@ CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` facto
 For mount, provider, clone, traversal, or runtime behavior changes, do not stop at Rust-only checks. Validate through the supported runtime path:
 
 ```bash
-omnifs dev -y
+just dev -y
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
 docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'

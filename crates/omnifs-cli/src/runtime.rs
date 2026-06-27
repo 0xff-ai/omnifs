@@ -245,15 +245,16 @@ impl Runtime {
         &self,
         runtime_home: &Path,
         extra_binds: Vec<String>,
+        extra_env: Vec<String>,
+        reuse_existing: bool,
     ) -> Result<()> {
         self.ensure_image().await?;
         self.verify_launcher_compat().await?;
 
-        // Non-destructive: if a container with our name is already running on
-        // the desired image, skip remove+recreate and let the caller reconcile.
-        // This makes `omnifs up` on an unchanged, healthy setup a no-op that
-        // does not tear down and restart the container.
-        if self.running_container_matches_image().await? {
+        // Non-destructive callers can reuse a matching running container and
+        // let reconcile handle config changes. Dev launches force recreation so
+        // env vars and fixture binds always match the requested session.
+        if reuse_existing && self.running_container_matches_image().await? {
             anstream::println!(
                 "Container `{}` is already running on image `{}`; skipping recreate",
                 self.container_name,
@@ -287,7 +288,7 @@ impl Runtime {
             self.container_name,
             self.image
         );
-        let create = Self::build_container_body(&self.image, binds);
+        let create = Self::build_container_body(&self.image, binds, extra_env);
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -512,7 +513,11 @@ impl Runtime {
         )
     }
 
-    fn build_container_body(image: &ImageRef, binds: Vec<String>) -> ContainerCreateBody {
+    fn build_container_body(
+        image: &ImageRef,
+        binds: Vec<String>,
+        extra_env: Vec<String>,
+    ) -> ContainerCreateBody {
         let mut port_bindings = HashMap::new();
         let port = omnifs_api::DEFAULT_PORT;
         let port_key = format!("{port}/tcp");
@@ -537,13 +542,18 @@ impl Runtime {
             ..Default::default()
         };
 
+        let env = vec![
+            format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
+            "SSH_AUTH_SOCK=/ssh-agent".to_string(),
+            "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
+        ]
+        .into_iter()
+        .chain(extra_env)
+        .collect();
+
         ContainerCreateBody {
             image: Some(image.as_str().to_string()),
-            env: Some(vec![
-                format!("{OMNIFS_HOME_ENV}={OMNIFS_HOME}"),
-                "SSH_AUTH_SOCK=/ssh-agent".to_string(),
-                "GIT_SSH_COMMAND=ssh -F /dev/null -o StrictHostKeyChecking=accept-new".to_string(),
-            ]),
+            env: Some(env),
             exposed_ports: Some(vec![port_key]),
             host_config: Some(host_config),
             ..Default::default()
@@ -735,7 +745,8 @@ mod tests {
             format!("{}:{OMNIFS_HOME}", paths.config_dir.display()),
             "/extra:/extra:ro".to_string(),
         ];
-        let body = Runtime::build_container_body(&image, binds);
+        let body =
+            Runtime::build_container_body(&image, binds, vec!["GITHUB_TOKEN=secret".to_string()]);
         let host_config = body.host_config.expect("host config");
         let binds = host_config.binds.expect("binds");
 
@@ -758,6 +769,10 @@ mod tests {
         assert!(
             env.iter().any(|e| e == "SSH_AUTH_SOCK=/ssh-agent"),
             "SSH_AUTH_SOCK must be forwarded inside container"
+        );
+        assert!(
+            env.iter().any(|e| e == "GITHUB_TOKEN=secret"),
+            "dev env values must be forwarded inside container"
         );
 
         assert_eq!(body.image.as_deref(), Some("ghcr.io/0xff-ai/omnifs:test"));
