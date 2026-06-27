@@ -57,6 +57,7 @@ Entries are grouped by product area; each is tagged with a type (Feature, Fix, I
 - **Improvement:** Provider SDK guidance and system rationale have been split into binding `docs/contracts/` rules, focused `docs/architecture/` notes, and the provider-authoring skill, replacing the stale `docs/design/` stack with current ownership and validation rules.
 - **Test:** The SDK now has a WIT-boundary harness for provider exports and route behavior, and provider initialization tests assert that generated manifests seal through the host path instead of only compiling as guest code.
 - **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
+- **Improvement:** CI runner labels can now switch between Blacksmith and GitHub-hosted runners through the `CI_RUNNER_FAMILY` repository Actions variable.
 - **Test:** Removed or merged narrow tests across many crates, folding useful coverage into broader behavior-oriented cases. (#147)
 
 ## [0.2.1] - 2026-06-08
