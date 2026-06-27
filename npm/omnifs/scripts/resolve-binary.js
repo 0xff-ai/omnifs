@@ -3,19 +3,23 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-// Inlined from npm/platforms.json. The platforms.json file lives at the
-// workspace root (npm/platforms.json), outside this package directory, so it
-// cannot be required at runtime from the published tarball. `just npm validate`
-// cross-checks this map against npm/platforms.json to prevent drift.
-const PACKAGES = {
-  "linux:x64": "@0xff-ai/omnifs-cli-linux-x64",
-  "linux:arm64": "@0xff-ai/omnifs-cli-linux-arm64",
-  "darwin:x64": "@0xff-ai/omnifs-cli-darwin-x64",
-  "darwin:arm64": "@0xff-ai/omnifs-cli-darwin-arm64"
-};
-
 function packageForPlatform(platform = process.platform, arch = process.arch) {
-  return PACKAGES[`${platform}:${arch}`] || null;
+  const packageJson = require("../package.json");
+  const dependencies = Object.keys(packageJson.optionalDependencies || {});
+
+  for (const packageName of dependencies) {
+    const metadata = packageMetadata(packageName);
+    if (!metadata) {
+      continue;
+    }
+    const os = Array.isArray(metadata.os) ? metadata.os : [];
+    const cpu = Array.isArray(metadata.cpu) ? metadata.cpu : [];
+    if (os.includes(platform) && cpu.includes(arch)) {
+      return packageName;
+    }
+  }
+
+  return null;
 }
 
 function binaryName() {
@@ -35,6 +39,14 @@ function resolveFromPackage(packageName) {
   const packageJson = require.resolve(`${packageName}/package.json`);
   const packageRoot = path.dirname(packageJson);
   return path.join(packageRoot, "bin", binaryName());
+}
+
+function packageMetadata(packageName) {
+  try {
+    return require(`${packageName}/package.json`);
+  } catch (_) {
+    return null;
+  }
 }
 
 function resolveBinary() {
@@ -85,7 +97,5 @@ function resolveBinary() {
 
 module.exports = {
   packageForPlatform,
-  resolveBinary,
-  // exported for npm-validate cross-check
-  PACKAGES
+  resolveBinary
 };

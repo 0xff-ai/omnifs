@@ -49,7 +49,7 @@ The next version is computed from conventional commits since the last tag: `feat
 |----------|---------|------|
 | `ci.yml` | push / PR to `main` | preflight, host/WASM verification, and on `main`: Linux + Darwin CLI archives, runtime images, smoke, the `sha-<commit>` manifest |
 | `release-pr.yml` | push to `main` | maintain the standing release PR; tag `vX.Y.Z` when it merges |
-| `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: GitHub Release + assets → GHCR promote → npm; platform npm packages staged from `npm/platforms.json` |
+| `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: GitHub Release + assets → GHCR promote → npm; platform npm packages staged from `npm/platform/*` |
 
 ## Maintainer commands
 
@@ -58,7 +58,6 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 | Subcommand | When | What it does |
 |------------|------|----------------|
 | **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the Cargo workspace version through npm workspace-aware `npm pkg set` |
-| **`just npm validate`** | preflight, ship | Cross-check `platforms.json`, the platform package.json manifests, and the inlined `resolve-binary.js` map (`cargo xtask npm validate`) |
 | **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
 Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, and `omnifs dev`.
@@ -69,13 +68,13 @@ Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, a
 - **Runtime**: `ghcr.io/0xff-ai/omnifs:<version>` promoted from `sha-<commit>` (also `v<version>` on GHCR; the CLI default uses the unprefixed tag). The runtime image stages the same Linux CLI binary.
 - **npm**: `@0xff-ai/omnifs` + four platform packages.
 
-## npm platform catalog
+## npm platform packages
 
-`npm/platforms.json` is the single source of truth for platform npm packages. Each entry defines the platform package name, Rust target triple, and npm `os`/`cpu` metadata. The Release workflow reads this file with `jq` while staging the four platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`.
+The package manifests under `npm/platform/*/package.json` are the single source of truth for platform npm packages. Each one defines the package name plus npm `os`/`cpu` metadata. The Release workflow loops over those platform package directories while staging the platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`.
 
-`npm/package.json` declares the private npm workspace that contains the root CLI package and the platform packages. `just npm sync` updates package versions by calling workspace-aware `npm pkg set`, not by reserializing JSON. This keeps package manifests in their existing order while still syncing the root package, platform packages, and root `optionalDependencies` to the Cargo workspace version. The repo-specific validation policy lives in `cargo xtask` (`crates/xtask/src/npm.rs`).
+`npm/package.json` declares the private npm workspace that contains the root CLI package and the platform packages. `just npm sync` updates package versions by calling workspace-aware `npm pkg set`, using the platform package manifests to rebuild the root package's `optionalDependencies` at the Cargo workspace version.
 
-The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work entirely from files inside the `@0xff-ai/omnifs` package directory. `npm/platforms.json` lives at the workspace root and is **not** included in the published tarball; if `resolve-binary.js` ever needs that data it must be inlined, with `just npm validate` cross-checking against `npm/platforms.json`.
+The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` helper must work from files available in the installed npm package graph. The root package's `optionalDependencies` list points at the platform packages, and `resolve-binary.js` reads the installed platform package metadata to find the package matching `process.platform` and `process.arch`.
 
 ## Version coupling
 
@@ -170,11 +169,9 @@ Gates that must be in place:
 |------|---------|
 | `justfile`, `just/` | Maintainer command surface used locally and in CI |
 | `cliff.toml` | git-cliff config: changelog areas, filters, and the version-bump policy |
-| `crates/xtask` | repo-specific npm package validation (run via `cargo xtask npm validate`) |
 | `npm/package.json` | private npm workspace root for the CLI and platform packages |
 | `just/providers.just` | WASI SDK install (`wasi-sdk` recipe) and provider/tool WASM builds |
 | `scripts/ci/common.sh` | Repo-root discovery and `version_pin()`, the string-pin reader for `tools/versions.toml` |
-| `npm/platforms.json` | Source of truth for npm platform packages |
 | `tools/versions.toml` | Pinned Zig, cargo-zigbuild, WASI SDK, and cargo tool versions used by CI |
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |

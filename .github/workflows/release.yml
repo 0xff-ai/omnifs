@@ -253,8 +253,9 @@ jobs:
           set -euo pipefail
           just npm sync
 
-          mapfile -t platforms < <(jq -r 'keys[]' npm/platforms.json)
-          for platform in "${platforms[@]}"; do
+          for pkg in npm/platform/*; do
+            [[ -d "$pkg" ]] || continue
+            platform="$(basename "$pkg")"
             archive="$(find dist-download -type f -name "omnifs-cli-${platform}.tar.xz" | head -n 1)"
             if [[ -z "$archive" ]]; then
               echo "missing CLI archive for $platform" >&2
@@ -282,7 +283,6 @@ jobs:
               fi
             fi
 
-            pkg="./npm/platform/$platform"
             mkdir -p "$pkg/bin"
             cp "$binary" "$pkg/bin/omnifs"
             chmod 755 "$pkg/bin/omnifs"
@@ -315,10 +315,8 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Sync and validate npm metadata
-        run: |
-          just npm sync
-          just npm validate
+      - name: Sync npm metadata
+        run: just npm sync
 
       - name: Stage root package
         run: just npm pack "$RUNNER_TEMP"

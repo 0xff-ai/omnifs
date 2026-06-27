@@ -14,7 +14,15 @@ sync version='':
 
     npm pkg set "version=${version}" --prefix npm --workspaces
 
-    mapfile -t packages < <(jq -r '.[] | .package' npm/platforms.json)
+    packages=()
+    while IFS= read -r package_json; do
+      packages+=("$(jq -er '.name' "$package_json")")
+    done < <(find npm/platform -mindepth 2 -maxdepth 2 -name package.json | sort)
+
+    while IFS= read -r package; do
+      npm pkg delete "optionalDependencies[${package}]" --prefix npm --workspace @0xff-ai/omnifs
+    done < <(jq -r '(.optionalDependencies // {}) | keys[]' npm/omnifs/package.json)
+
     optional_dependencies=()
     for package in "${packages[@]}"; do
       optional_dependencies+=("optionalDependencies[${package}]=${version}")
@@ -22,10 +30,6 @@ sync version='':
     npm pkg set "${optional_dependencies[@]}" --prefix npm --workspace @0xff-ai/omnifs
 
     printf 'synced npm packages to version %s\n' "$version"
-
-# Validate npm platform metadata and package manifests.
-validate:
-    cargo xtask npm validate
 
 # Pack the root npm package locally. Destination defaults to $TMPDIR or /tmp.
 pack destination=env_var_or_default('TMPDIR', '/tmp'):

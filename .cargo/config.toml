@@ -8,7 +8,3 @@
 [env]
 WASI_SYSROOT = { value = ".cache/wasi-sdk/share/wasi-sysroot", relative = true }
 CC_wasm32_wasip2 = { value = ".cache/wasi-sdk/bin/clang", relative = true }
-
-[alias]
-# Repository tasks, e.g. `cargo xtask npm validate`, `cargo xtask openapi check`.
-xtask = "run --package xtask --"

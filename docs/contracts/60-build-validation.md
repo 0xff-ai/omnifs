@@ -31,7 +31,7 @@ Use `just dev -y` for the supported contributor runtime path. Check status insid
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/tool/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check`, `just just-check`, `just docs-check`, and `just npm validate` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
+Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check`, `just just-check`, and `just docs-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 
 ### Documentation checks
 
@@ -60,7 +60,6 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 - `npm/package.json`
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
-- `crates/xtask/src/npm.rs`
 - `crates/omnifs-daemon/src/bin/openapi.rs`
 - `crates/omnifs-api/openapi/daemon.json`
 - `crates/omnifs-provider/schema/omnifs.provider.schema.json`
