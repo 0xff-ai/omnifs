@@ -75,8 +75,7 @@ fn status_does_not_require_store_listing() {
         &catalog,
         mounts,
         &crate::test_support::NonListingStore,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -105,7 +104,7 @@ fn schemes_reads_manifest_from_provider() {
     let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
     let mount_auth = crate::auth::load_mount_auth(&catalog, &mounts, "github").unwrap();
-    let loaded = omnifs_mount::mounts::auth_manifest_for(&catalog, mount_auth.config())
+    let loaded = omnifs_mount::mounts::auth_manifest_for(&catalog, mount_auth.spec())
         .unwrap()
         .unwrap();
 

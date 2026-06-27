@@ -6,10 +6,10 @@
 
 use crate::cloner::GitCloner;
 use crate::tools::archive::{ARCHIVE_TOOL_WASM, ArchiveExtractorComponent, DEFAULT_LIMITS};
-use crate::{Artifact, BuildError, HostContext, Runtime, component_engine};
+use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
 use omnifs_mount::materialize::{MaterializationMode, materialize};
-use omnifs_mount::mounts::{Registry, Resolved, Spec};
+use omnifs_mount::mounts::{Registry, Spec};
 use omnifs_provider::Catalog;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -95,7 +95,7 @@ impl ProviderRegistry {
     /// refresh timer (when the provider requests one) on `handle`.
     pub fn add_mount(
         &self,
-        spec: Spec,
+        spec: &Spec,
         handle: &tokio::runtime::Handle,
     ) -> Result<Arc<Runtime>, RegistryError> {
         let mount = spec.mount.clone();
@@ -106,7 +106,7 @@ impl ProviderRegistry {
         self.publish_new_mount(built, handle)
     }
 
-    fn build_mount(&self, spec: Spec) -> Result<BuiltMount, RegistryError> {
+    fn build_mount(&self, spec: &Spec) -> Result<BuiltMount, RegistryError> {
         omnifs_core::mount::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
@@ -116,15 +116,13 @@ impl ProviderRegistry {
                 wasm_path.display().to_string(),
             ));
         }
-        let resolved = resolve_mount_for_wasm(&wasm_path, spec)
-            .map_err(|error| registry_error(&mount, error))?;
-        let is_root = resolved.spec.root_mount;
+        let is_root = spec.root_mount;
 
         // Instantiation compiles WASM; keep it outside the instances lock.
         let runtime = Runtime::new(
             &self.engine,
             &wasm_path,
-            &resolved,
+            spec,
             self.cloner.clone(),
             &self.context,
             self.extractor.clone(),
@@ -320,7 +318,7 @@ impl ProviderRegistry {
             reason,
         } = work;
         let started = Instant::now();
-        match self.build_mount(spec) {
+        match self.build_mount(&spec) {
             Ok(built) => LoadResult::Ready {
                 mount,
                 wasm_path,
@@ -722,15 +720,6 @@ fn registry_error(mount: &str, error: BuildError) -> RegistryError {
     }
 }
 
-fn resolve_mount_for_wasm(wasm_path: &Path, config: Spec) -> Result<Resolved, BuildError> {
-    let metadata = Artifact::load(wasm_path)
-        .and_then(|artifact| artifact.metadata())
-        .map_err(BuildError::InvalidConfig)?;
-    config
-        .into_resolved(metadata.as_ref())
-        .map_err(|error| BuildError::InvalidConfig(error.to_string()))
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("config error: {0}")]
@@ -852,7 +841,7 @@ mod tests {
             serde_json::json!({ "mount": "test", "config": { "unexpected": true } }),
         );
 
-        match registry.add_mount(spec, &tokio::runtime::Handle::current()) {
+        match registry.add_mount(&spec, &tokio::runtime::Handle::current()) {
             Err(RegistryError::ConfigError(message)) => {
                 assert!(message.contains("failed validation"));
                 assert!(message.contains("mount test"));

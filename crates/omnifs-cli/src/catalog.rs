@@ -1,26 +1,16 @@
 //! Discovery helpers over the provider [`Catalog`] and the configured mounts.
 //!
-//! Spec-to-`Resolved` resolution is the free `omnifs_mount::mounts::resolve`
-//! join; these helpers wrap the CLI-facing shapes around it (the picker's
-//! installed-provider list, the already-configured set, and the provider-dir
-//! status). Mount enumeration lives in `Workspace::mounts()`.
+//! These wrap the CLI-facing shapes: the picker's installed-provider list, the
+//! already-configured set, and lookups by name. Mount enumeration lives in
+//! `Workspace::mounts()`. A spec carries its provider-manifest defaults from
+//! creation time, so reading one needs no resolution step.
 
 use std::collections::{BTreeMap, HashSet};
 
 use omnifs_core::MountName;
-use omnifs_mount::mounts::{Resolved, Spec};
 use omnifs_provider::{Catalog, Provider, ProviderManifest};
 
 use crate::session::MountConfig;
-
-/// Resolve a runtime-ready mount, optionally requiring provider metadata.
-pub(crate) fn resolve_mount_spec(
-    catalog: &Catalog,
-    spec: &Spec,
-    require_metadata: bool,
-) -> anyhow::Result<Resolved> {
-    omnifs_mount::mounts::resolve(catalog, spec, require_metadata).map_err(Into::into)
-}
 
 /// The latest installed artifact per provider name, each paired with its loaded
 /// manifest, for the `init` and `setup` provider pickers. A corrupt artifact is
@@ -72,14 +62,9 @@ pub(crate) fn configured_mounts(
         .collect();
     let mut by_provider = BTreeMap::new();
     for configured in mounts {
-        match resolve_mount_spec(catalog, &configured.config, true) {
-            Ok(mount) if installable.contains(&mount.provider_name) => {
-                by_provider.insert(mount.provider_name.clone(), mount.spec.mount);
-            },
-            Ok(_) => {},
-            Err(error) => {
-                tracing::warn!(source = %configured.source.display(), %error, "skipping unparsable mount config");
-            },
+        let provider_name = configured.config.provider_name().to_string();
+        if installable.contains(&provider_name) {
+            by_provider.insert(provider_name, configured.config.mount.clone());
         }
     }
     Ok(by_provider)

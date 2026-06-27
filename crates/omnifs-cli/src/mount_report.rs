@@ -5,10 +5,10 @@ use omnifs_creds::CredentialStore;
 use serde::Serialize;
 use std::path::PathBuf;
 
+use omnifs_mount::mounts::Spec;
 use omnifs_provider::Catalog;
 
 use crate::auth::AuthReadiness;
-use crate::catalog::resolve_mount_spec;
 use crate::session::MountConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,16 +47,26 @@ pub(crate) struct UserMountReadyStatus {
     pub(crate) auth: AuthReadiness,
 }
 
-pub(crate) fn load_mount_by_name(
-    catalog: &Catalog,
-    mounts: &[MountConfig],
-    name: &MountName,
-) -> anyhow::Result<omnifs_mount::mounts::Resolved> {
+pub(crate) fn load_mount_by_name(mounts: &[MountConfig], name: &MountName) -> anyhow::Result<Spec> {
     let mount = mounts
         .iter()
         .find(|m| &m.name == name)
         .ok_or_else(|| anyhow::anyhow!("no mount config named `{name}`"))?;
-    resolve_mount_spec(catalog, &mount.config, true)
+    Ok(mount.config.clone())
+}
+
+/// Whether the spec's pinned provider artifact is installed and its manifest
+/// loads. `false` when the artifact is absent; an error when it is present but
+/// its manifest is unreadable (a corrupt install), which the scans surface as
+/// `Invalid`.
+fn artifact_present(catalog: &Catalog, spec: &Spec) -> anyhow::Result<bool> {
+    match catalog.get(&spec.provider.id)? {
+        Some(provider) => {
+            provider.manifest()?;
+            Ok(true)
+        },
+        None => Ok(false),
+    }
 }
 
 pub(crate) fn scan_provider_configs(
@@ -66,37 +76,39 @@ pub(crate) fn scan_provider_configs(
     let mut providers = Vec::with_capacity(mounts.len());
     for configured in mounts {
         let config_path = configured.source.clone();
-        match resolve_mount_spec(catalog, &configured.config, true) {
-            Ok(config) => {
-                let provider_path = catalog.provider_path_by_id(&config.spec.provider.id);
-                let provider_present = provider_path.exists();
-                providers.push(ProviderConfigStatus::Ready(ProviderReadyStatus {
+        let spec = &configured.config;
+        let provider_present = match artifact_present(catalog, spec) {
+            Ok(present) => present,
+            Err(error) => {
+                providers.push(ProviderConfigStatus::Invalid {
                     config_path,
-                    mount: config.spec.mount,
-                    provider: config.provider_name.clone(),
-                    provider_present,
-                    root_mount: config.spec.root_mount,
-                    auth_count: config.spec.auth.len(),
-                    domain_count: config
-                        .spec
-                        .capabilities
-                        .as_ref()
-                        .and_then(|caps| caps.domains.as_ref())
-                        .map_or(0, |grant| grant.literal().len()),
-                    git_repo_count: config
-                        .spec
-                        .capabilities
-                        .as_ref()
-                        .and_then(|caps| caps.git_repos.as_ref())
-                        .map_or(0, |grant| grant.literal().len()),
-                    max_memory_mb: config.spec.capabilities.and_then(|caps| caps.max_memory_mb),
-                }));
+                    error: error.to_string(),
+                });
+                continue;
             },
-            Err(error) => providers.push(ProviderConfigStatus::Invalid {
-                config_path,
-                error: error.to_string(),
-            }),
-        }
+        };
+        providers.push(ProviderConfigStatus::Ready(ProviderReadyStatus {
+            config_path,
+            mount: spec.mount.clone(),
+            provider: spec.provider_name().to_string(),
+            provider_present,
+            root_mount: spec.root_mount,
+            auth_count: spec.auth.len(),
+            domain_count: spec
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.domains.as_ref())
+                .map_or(0, |grant| grant.literal().len()),
+            git_repo_count: spec
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.git_repos.as_ref())
+                .map_or(0, |grant| grant.literal().len()),
+            max_memory_mb: spec
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.max_memory_mb),
+        }));
     }
     providers
 }
@@ -125,15 +137,13 @@ fn read_user_mount_status(
     configured: &MountConfig,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<UserMountReadyStatus> {
-    let config_path = configured.source.clone();
-    let config = resolve_mount_spec(catalog, &configured.config, true)?;
-    let provider_path = catalog.provider_path_by_id(&config.spec.provider.id);
-    let provider_present = provider_path.exists();
-    let auth = crate::auth::mount_auth(catalog, config.clone()).readiness(store);
+    let spec = &configured.config;
+    let provider_present = artifact_present(catalog, spec)?;
+    let auth = crate::auth::mount_auth(catalog, spec.clone()).readiness(store);
     Ok(UserMountReadyStatus {
-        config_path: config_path.clone(),
-        mount: config.spec.mount,
-        provider: config.provider_name.clone(),
+        config_path: configured.source.clone(),
+        mount: spec.mount.clone(),
+        provider: spec.provider_name().to_string(),
         provider_present,
         auth,
     })

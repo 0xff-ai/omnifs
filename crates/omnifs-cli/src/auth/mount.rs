@@ -6,7 +6,7 @@ use omnifs_auth::oauth_request_from_config;
 use omnifs_core::AuthKind;
 use omnifs_creds::CredentialStore;
 use omnifs_mount::Auth;
-use omnifs_mount::mounts::Resolved;
+use omnifs_mount::mounts::Spec;
 use omnifs_provider::{
     AuthInject, AuthManifest, AuthScheme, Catalog, ProviderManifest, StaticTokenScheme,
 };
@@ -94,7 +94,7 @@ impl AuthSelection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountAuth {
-    config: Resolved,
+    spec: Spec,
     manifest: Option<AuthManifest>,
 }
 
@@ -103,51 +103,42 @@ pub(crate) fn load_mount_auth(
     mounts: &[MountConfig],
     mount: &str,
 ) -> anyhow::Result<MountAuth> {
-    let config = load_mount_auth_config(catalog, mounts, mount)?;
-    Ok(mount_auth(catalog, config))
+    let spec = load_mount_auth_config(mounts, mount)?;
+    Ok(mount_auth(catalog, spec))
 }
 
-pub(crate) fn load_all_mount_auth(
-    catalog: &Catalog,
-    mounts: Vec<MountConfig>,
-) -> anyhow::Result<Vec<MountAuth>> {
-    let mut results = mounts
+pub(crate) fn load_all_mount_auth(catalog: &Catalog, mounts: Vec<MountConfig>) -> Vec<MountAuth> {
+    let mut results: Vec<MountAuth> = mounts
         .into_iter()
-        .map(|m| {
-            let resolved = crate::catalog::resolve_mount_spec(catalog, &m.config, true)
-                .with_context(|| format!("load mount config `{}`", m.name))?;
-            Ok(mount_auth(catalog, resolved))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    results.sort_by(|a, b| a.config.spec.mount.cmp(&b.config.spec.mount));
-    Ok(results)
+        .map(|m| mount_auth(catalog, m.config))
+        .collect();
+    results.sort_by(|a, b| a.spec.mount.cmp(&b.spec.mount));
+    results
 }
 
-fn load_mount_auth_config(
-    catalog: &Catalog,
-    mounts: &[MountConfig],
-    mount: &str,
-) -> anyhow::Result<Resolved> {
+fn load_mount_auth_config(mounts: &[MountConfig], mount: &str) -> anyhow::Result<Spec> {
     let name = MountName::new(mount.to_owned())
         .with_context(|| format!("invalid mount name `{mount}`"))?;
-    crate::mount_report::load_mount_by_name(catalog, mounts, &name)
+    crate::mount_report::load_mount_by_name(mounts, &name)
         .with_context(|| format!("load mount config `{mount}`"))
 }
 
-/// Build the auth view for an already-resolved mount. The provider's auth
-/// manifest is best-effort: a missing or unreadable artifact leaves `manifest`
-/// as `None`, and the auth helpers surface a clear error at the point a scheme is
-/// actually needed (login, import) rather than failing the whole listing here.
-pub(crate) fn mount_auth(catalog: &Catalog, config: Resolved) -> MountAuth {
-    let manifest = omnifs_mount::mounts::auth_manifest_for(catalog, &config)
+/// Build the auth view for a mount spec. The provider's auth manifest is
+/// best-effort: a missing or unreadable artifact leaves `manifest` as `None`,
+/// and the auth helpers surface a clear error at the point a scheme is actually
+/// needed (login, import) rather than failing the whole listing here. The
+/// scheme name itself is already baked into `spec.auth` at creation, so it is
+/// available even when the manifest is not.
+pub(crate) fn mount_auth(catalog: &Catalog, spec: Spec) -> MountAuth {
+    let manifest = omnifs_mount::mounts::auth_manifest_for(catalog, &spec)
         .ok()
         .flatten();
-    MountAuth { config, manifest }
+    MountAuth { spec, manifest }
 }
 
 impl MountAuth {
-    pub(crate) fn config(&self) -> &Resolved {
-        &self.config
+    pub(crate) fn spec(&self) -> &Spec {
+        &self.spec
     }
 
     pub(crate) fn oauth_request(
@@ -189,7 +180,7 @@ impl MountAuth {
                 };
             },
         };
-        AuthReadiness::from_target(&self.config.spec.mount, target, store)
+        AuthReadiness::from_target(&self.spec.mount, target, store)
     }
 
     pub(crate) fn configured_target(
@@ -200,19 +191,18 @@ impl MountAuth {
         let scheme = auth.scheme().ok_or_else(|| {
             anyhow!(
                 "auth config for mount `{}` must set `scheme`",
-                self.config.spec.mount
+                self.spec.mount
             )
         })?;
         self.target_for_scheme(Some(auth), scheme, account)
     }
 
     fn primary_auth(&self) -> Option<&Auth> {
-        self.config
-            .spec
+        self.spec
             .auth
             .iter()
             .find(|auth| auth.is_oauth())
-            .or_else(|| self.config.spec.auth.first())
+            .or_else(|| self.spec.auth.first())
     }
 
     fn status_target(&self) -> anyhow::Result<CredentialTarget> {
@@ -236,7 +226,7 @@ impl MountAuth {
                         .ok_or_else(|| anyhow!("missing auth.scheme"))
                 })?
         };
-        CredentialTarget::for_configured_auth(&self.config, auth, Some(&scheme), auth.account())
+        CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme), auth.account())
     }
 
     fn target_for_scheme(
@@ -245,7 +235,7 @@ impl MountAuth {
         scheme: &str,
         account: Option<&str>,
     ) -> anyhow::Result<CredentialTarget> {
-        CredentialTarget::for_scheme(&self.config, auth, scheme, account)
+        CredentialTarget::for_scheme(&self.spec, auth, scheme, account)
     }
 
     fn manifest_view(&self) -> AuthManifestView<'_> {

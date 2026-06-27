@@ -59,12 +59,23 @@ impl RuntimeHarness {
         // the test config's `provider` field to the resulting `ProviderRef`, so
         // resolution and serving go through the content-addressed path the host
         // uses in production.
-        let spec = pin_spec_from_json(config_json, providers_dir.path())?;
+        let mut spec = pin_spec_from_json(config_json, providers_dir.path())?;
 
+        // Mirror the CLI's creation-time inheritance: bake the pinned provider's
+        // manifest defaults into the spec before serving, so the harness exercises
+        // the same already-hydrated spec the daemon sees in production.
         let catalog = Catalog::open(providers_dir.path());
-        let resolved = omnifs_mount::mounts::resolve(&catalog, &spec, false)
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        let wasm_path = catalog.provider_path_by_id(&resolved.spec.provider.id);
+        if let Some(provider) = catalog
+            .get(&spec.provider.id)
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
+        {
+            let manifest = provider
+                .manifest()
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            spec.apply_provider_metadata(&manifest)
+                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        }
+        let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));
         let caches = Caches::open(cache_dir.path()).map_err(|error| BuildError::CacheDir {
             path: cache_dir.path().to_path_buf(),
@@ -73,7 +84,7 @@ impl RuntimeHarness {
         let runtime = Runtime::new(
             engine,
             &wasm_path,
-            &resolved,
+            &spec,
             cloner,
             &HostContext::new(
                 cache_dir.path(),

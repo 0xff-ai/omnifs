@@ -1,4 +1,4 @@
-use super::config_generation::GeneratedMountConfig;
+use super::spec_creation::CreatedMountSpec;
 use crate::auth::AuthSelection;
 use omnifs_core::{AuthKind, MountName, ProviderRef};
 use omnifs_mount::mounts::Spec;
@@ -14,7 +14,7 @@ pub(super) struct MountFile<'a> {
     reference: &'a ProviderRef,
     auth: Option<&'a AuthSelection>,
     scopes: &'a [String],
-    generated: GeneratedMountConfig,
+    created: CreatedMountSpec,
 }
 
 impl<'a> MountFile<'a> {
@@ -23,14 +23,14 @@ impl<'a> MountFile<'a> {
         reference: &'a ProviderRef,
         auth: Option<&'a AuthSelection>,
         scopes: &'a [String],
-        generated: GeneratedMountConfig,
+        created: CreatedMountSpec,
     ) -> Self {
         Self {
             mount_name,
             reference,
             auth,
             scopes,
-            generated,
+            created,
         }
     }
 
@@ -56,8 +56,8 @@ impl<'a> MountFile<'a> {
                     })],
                 }
             }),
-            capabilities: self.generated.capabilities,
-            config_raw: self.generated.config.map(ProviderConfig::from_value),
+            capabilities: self.created.capabilities,
+            config_raw: self.created.config.map(ProviderConfig::from_value),
         }
     }
 }

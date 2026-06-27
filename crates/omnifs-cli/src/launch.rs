@@ -115,9 +115,7 @@ impl<'a> DockerMountMaterializer<'a> {
         )
         .with_context(|| format!("materialize mount {}", config.source.display()))?;
 
-        let resolved = crate::catalog::resolve_mount_spec(self.catalog, materialized.spec(), false)
-            .with_context(|| format!("resolve mount config for {}", config.source.display()))?;
-        let mount_auth = crate::auth::mount_auth(self.catalog, resolved);
+        let mount_auth = crate::auth::mount_auth(self.catalog, materialized.spec().clone());
         config.validate_host_managed_credentials(&mount_auth, self.store)?;
 
         Ok(materialized)

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use omnifs_caps::{Allowlist, Error, Grant};
-use omnifs_mount::mounts::Resolved;
+use omnifs_mount::mounts::Spec;
 use omnifs_provider::{ConfigSchema, HostResourceKind};
 use omnifs_wit::provider::types as wit_types;
 
@@ -28,14 +28,14 @@ impl CapabilityChecker {
         Self { grants }
     }
 
-    /// Build the enforcement allowlist from a resolved mount's grants plus the
+    /// Build the enforcement allowlist from a mount spec's grants plus the
     /// provider's runtime-requested capabilities. A dynamic unix-socket grant is
     /// resolved from the config field the provider marks as a host socket; a
     /// malformed or missing value resolves to no socket, so the provider is
     /// simply denied at callout time.
     #[must_use]
     pub fn from_config(
-        config: &Resolved,
+        config: &Spec,
         provider_caps: &wit_types::RequestedCapabilities,
         schema: Option<&ConfigSchema>,
     ) -> Self {
@@ -63,11 +63,11 @@ impl CapabilityChecker {
 }
 
 fn allowlist_from_config(
-    config: &Resolved,
+    config: &Spec,
     provider_caps: &wit_types::RequestedCapabilities,
     schema: Option<&ConfigSchema>,
 ) -> Allowlist {
-    let grants = config.spec.capabilities.as_ref();
+    let grants = config.capabilities.as_ref();
 
     let mut unix_sockets: Vec<PathBuf> = match grants.and_then(|g| g.unix_sockets.as_ref()) {
         Some(Grant::Literal(paths)) => paths.iter().map(PathBuf::from).collect(),
@@ -99,7 +99,7 @@ fn literal(grant: Option<&Grant<String>>) -> Vec<String> {
 
 /// The host socket a dynamic unix-socket grant resolves to: the `unix://`
 /// endpoint in the config field the provider marks as a host socket.
-fn dynamic_socket(config: &Resolved, schema: Option<&ConfigSchema>) -> Option<PathBuf> {
+fn dynamic_socket(config: &Spec, schema: Option<&ConfigSchema>) -> Option<PathBuf> {
     let field = schema?.resource_field(HostResourceKind::Socket)?;
     let endpoint = config_str(config, field)?;
     omnifs_caps::endpoint_socket(endpoint)
@@ -109,9 +109,8 @@ fn dynamic_socket(config: &Resolved, schema: Option<&ConfigSchema>) -> Option<Pa
 }
 
 /// The string value of a mount config field, if present.
-pub(crate) fn config_str<'a>(config: &'a Resolved, field: &str) -> Option<&'a str> {
+pub(crate) fn config_str<'a>(config: &'a Spec, field: &str) -> Option<&'a str> {
     config
-        .spec
         .config_raw
         .as_ref()
         .and_then(|config| config.as_value().get(field))

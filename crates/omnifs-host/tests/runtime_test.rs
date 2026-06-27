@@ -958,8 +958,6 @@ async fn test_cache_isolated_by_mount_name() {
     config_a.mount = "mount-a".to_string();
     let mut config_b = config;
     config_b.mount = "mount-b".to_string();
-    let resolved_a = config_a.into_resolved(None).unwrap();
-    let resolved_b = config_b.into_resolved(None).unwrap();
     // Both runtimes share the same global Caches; mount isolation is via key prefix.
     let caches = Caches::open(cache_dir.path()).unwrap();
     let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
@@ -978,7 +976,7 @@ async fn test_cache_isolated_by_mount_name() {
     let runtime_a = Runtime::new(
         &engine,
         &wasm_path,
-        &resolved_a,
+        &config_a,
         cloner.clone(),
         &context_a,
         extractor.clone(),
@@ -986,13 +984,7 @@ async fn test_cache_isolated_by_mount_name() {
     )
     .unwrap();
     let runtime_b = Runtime::new(
-        &engine,
-        &wasm_path,
-        &resolved_b,
-        cloner,
-        &context_b,
-        extractor,
-        &caches,
+        &engine, &wasm_path, &config_b, cloner, &context_b, extractor, &caches,
     )
     .unwrap();
 

@@ -7,6 +7,7 @@
 use omnifs_home::{Cli as CliRole, Workspace as HomeWorkspace, WorkspaceLayout};
 use omnifs_mount::mounts::Registry;
 use omnifs_provider::Catalog;
+use std::cell::OnceCell;
 use std::path::PathBuf;
 
 use crate::client::DaemonClient;
@@ -19,6 +20,10 @@ pub(crate) struct Workspace {
     home: HomeWorkspace<CliRole>,
     catalog: Catalog,
     daemon: DaemonClient,
+    /// The mount-spec registry, loaded once per command and reused. Disk is still
+    /// the source of truth; this is the in-memory read mirror so repeated
+    /// `mounts()` / reset enumeration does not re-scan `mounts/` each call.
+    registry: OnceCell<Registry>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +50,18 @@ impl Workspace {
             home,
             catalog,
             daemon,
+            registry: OnceCell::new(),
         }
+    }
+
+    /// The mount-spec registry for this command, scanned from `mounts/` on first
+    /// use and cached for the lifetime of this `Workspace`.
+    fn registry(&self) -> anyhow::Result<&Registry> {
+        if let Some(registry) = self.registry.get() {
+            return Ok(registry);
+        }
+        let registry = Registry::load(self.home.mounts_dir())?;
+        Ok(self.registry.get_or_init(|| registry))
     }
 
     pub(crate) fn layout(&self) -> &WorkspaceLayout {
@@ -71,7 +87,7 @@ impl Workspace {
     /// design: a malformed spec aborts enumeration rather than being silently
     /// skipped, matching the former per-file loader.
     pub(crate) fn mounts(&self) -> anyhow::Result<Vec<MountConfig>> {
-        let registry = Registry::load(self.home.mounts_dir())?;
+        let registry = self.registry()?;
         if let Some(failure) = registry.failures().first() {
             return Err(anyhow::anyhow!("{}", failure.error));
         }
@@ -92,25 +108,14 @@ impl Workspace {
     /// name/filename mismatch) still produce a target with
     /// `CredentialTarget::None` so reset can nuke broken state.
     pub(crate) fn reset_removal_targets(&self) -> anyhow::Result<Vec<MountRemovalTarget>> {
-        let registry = Registry::load(self.home.mounts_dir())?;
+        let registry = self.registry()?;
         let mut targets = Vec::new();
 
         for (name, spec) in registry.iter() {
-            let credential = match crate::catalog::resolve_mount_spec(&self.catalog, spec, false) {
-                Ok(resolved) => CredentialTarget::for_mount(&resolved),
-                Err(error) => {
-                    tracing::warn!(
-                        mount = %name,
-                        %error,
-                        "unresolvable mount config; will remove the file but cannot drop credentials"
-                    );
-                    CredentialTarget::None
-                },
-            };
             targets.push(MountRemovalTarget {
                 name: name.to_string(),
                 path: registry.spec_path(name),
-                credential,
+                credential: CredentialTarget::for_mount(spec),
             });
         }
 

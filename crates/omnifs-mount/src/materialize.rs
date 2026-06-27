@@ -2,9 +2,10 @@
 //!
 //! Shared by the CLI (to compute Docker preopen binds before `docker create`)
 //! and the daemon (to reconcile `mounts/*.json` into the registry). The steps,
-//! in order: apply provider metadata (auth scheme and config defaults) into any
-//! field the user left unset, check that the spec's capability grants satisfy
-//! the manifest's declared needs, then rewrite preopens. A preopen whose host
+//! in order: read the pinned manifest's capability needs, check that the spec's
+//! grants satisfy them, then rewrite preopens. The spec already carries its
+//! provider-manifest defaults (baked in at creation), so materialization reads
+//! the manifest but never mutates the spec's auth or config. A preopen whose host
 //! equals its guest is container-native (provided in the runtime's own
 //! filesystem, e.g. a dev fixture bind) and passes through untouched. Otherwise,
 //! on the host the preopen host path is canonicalized in place and no binds are
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use omnifs_caps::{Grant, PreopenMode};
 use omnifs_provider::{Catalog, ConfigSchema, HostResourceKind};
 
-use crate::mounts::{Error as MountError, Spec, apply_metadata_and_needs};
+use crate::mounts::{Error as MountError, Spec, manifest_requirements};
 
 /// Guest directory each container preopen is rewritten under, as
 /// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
@@ -168,14 +169,14 @@ pub fn materialize(
     // under-granted mount fails here rather than at the provider's first denied
     // callout. Over-granting beyond the manifest is allowed; the over-grant
     // check is deliberately not enforced (docs/future/provider-contract-versioning.md).
-    if let Some(applied) =
-        apply_metadata_and_needs(catalog, &mut spec).map_err(MaterializeError::Metadata)?
+    if let Some(requirements) =
+        manifest_requirements(catalog, &spec).map_err(MaterializeError::Metadata)?
     {
         let missing = spec
             .capabilities
             .clone()
             .unwrap_or_default()
-            .satisfies(&applied.needs);
+            .satisfies(&requirements.needs);
         if !missing.is_empty() {
             return Err(MaterializeError::MissingCapabilities {
                 mount: spec.mount.clone(),
@@ -187,7 +188,7 @@ pub fn materialize(
                     .join(", "),
             });
         }
-        check_dynamic_socket(&spec, applied.config_schema.as_ref())?;
+        check_dynamic_socket(&spec, requirements.config_schema.as_ref())?;
     }
 
     let preopen_binds = rewrite_preopens(&mut spec, mode)?;
@@ -383,8 +384,9 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    /// A catalog over an empty providers dir. `apply_metadata` finds no retained
-    /// artifact and returns `Ok(false)`, leaving the user-authored spec as-is.
+    /// A catalog over an empty providers dir. `manifest_requirements` finds no
+    /// retained artifact and returns `Ok(None)`, so the capability checks are
+    /// skipped and the spec passes through to preopen rewriting unchanged.
     fn builtin_catalog(root: &std::path::Path) -> Catalog {
         Catalog::open(root.join("providers"))
     }

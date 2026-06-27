@@ -6,10 +6,10 @@
 //! when one is declared.
 
 mod auth_import;
-mod config_generation;
 mod detect;
 mod mount_file;
 mod provider_selection;
+mod spec_creation;
 mod token_validation;
 
 use crate::error::WithHint;
@@ -28,11 +28,11 @@ use crate::launch_backend::LaunchBackend;
 use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
-use config_generation::MountConfigGenerator;
 use mount_file::MountFile;
 use omnifs_home::WorkspaceLayout;
 use omnifs_mount::mounts::Registry;
 use provider_selection::ProviderSelection;
+use spec_creation::MountSpecCreator;
 use token_validation::StaticTokenValidator;
 
 #[derive(Args, Debug, Clone)]
@@ -111,13 +111,13 @@ impl InitArgs {
                 "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively, or create the mount and run `omnifs auth login {mount_name}`."
             );
         }
-        let config_generator = MountConfigGenerator::new(manifest);
-        if self.no_input && config_generator.requires_prompt() {
+        let creator = MountSpecCreator::new(manifest);
+        if self.no_input && creator.requires_prompt() {
             anyhow::bail!(
                 "`omnifs init --no-input` cannot complete provider config prompts for `{provider_name}`. Run `omnifs init {provider_name}` interactively."
             );
         }
-        let generated = config_generator.generate(interactive)?;
+        let created = creator.create(interactive)?;
 
         // Resolve the effective auth before writing the mount config. If the
         // mount's default auth is OAuth and the user accepts an ambient
@@ -142,7 +142,7 @@ impl InitArgs {
             &reference,
             effective_auth.as_ref(),
             &self.scopes,
-            generated,
+            created,
         );
         let spec = mount_file.into_spec();
         let mount_path = paths.mounts_dir.join(format!("{mount_name}.json"));
@@ -329,7 +329,7 @@ pub(crate) async fn run_static_token_init(
 
 #[cfg(test)]
 mod tests {
-    use super::config_generation::{GeneratedMountConfig, MountConfigGenerator};
+    use super::spec_creation::{CreatedMountSpec, MountSpecCreator};
     use super::{AuthImportDecision, MountFile};
     use crate::auth::AuthSelection;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
@@ -355,17 +355,15 @@ mod tests {
             .unwrap(),
         );
 
-        let generated = MountConfigGenerator::new(&manifest)
-            .generate(false)
-            .unwrap();
+        let created = MountSpecCreator::new(&manifest).create(false).unwrap();
 
         assert_eq!(
-            generated.config,
+            created.config,
             Some(serde_json::json!({"endpoint": "unix:///var/run/docker.sock"})),
         );
         // `init` seeds the spec's grants from the manifest's needs, so a mount
         // carries explicit grants the materialize-time check can satisfy.
-        let capabilities = generated.capabilities.expect("grants seeded from needs");
+        let capabilities = created.capabilities.expect("grants seeded from needs");
         assert_eq!(
             capabilities.domains,
             Some(Grant::Literal(vec!["api.linear.app".to_string()])),
@@ -390,7 +388,7 @@ mod tests {
             .unwrap(),
         );
 
-        assert!(MountConfigGenerator::new(&manifest).requires_prompt());
+        assert!(MountSpecCreator::new(&manifest).requires_prompt());
     }
 
     #[test]
@@ -403,7 +401,7 @@ mod tests {
             &provider_ref("db"),
             None,
             &[],
-            GeneratedMountConfig {
+            CreatedMountSpec {
                 config: Some(serde_json::json!({"path": "/data/chinook.db"})),
                 capabilities: Some(ProviderCapabilities {
                     preopened_paths: Some(Grant::Literal(vec![PreopenedPath {

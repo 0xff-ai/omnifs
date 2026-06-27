@@ -17,12 +17,12 @@ pub(super) fn status(
     catalog: &Catalog,
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
-) -> anyhow::Result<()> {
-    let rows = load_auth_rows(catalog, store, mounts)?;
+) {
+    let rows = load_auth_rows(catalog, store, mounts);
     anstream::println!("backend: {}", store.backend_label());
     if rows.is_empty() {
         anstream::println!("no mount configs found in {}", layout.config_file.display());
-        return Ok(());
+        return;
     }
     for row in rows {
         anstream::println!("{}: {}", row.mount, row.text_detail());
@@ -30,7 +30,6 @@ pub(super) fn status(
             anstream::println!("  {line}");
         }
     }
-    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -50,7 +49,7 @@ pub(super) fn status_json(
     mounts: Vec<MountConfig>,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
-    let entries = load_auth_rows(catalog, store, mounts)?
+    let entries = load_auth_rows(catalog, store, mounts)
         .into_iter()
         .map(AuthStatusRow::into_json)
         .collect();
@@ -63,22 +62,21 @@ fn load_auth_rows(
     catalog: &Catalog,
     store: &dyn CredentialStore,
     mounts: Vec<MountConfig>,
-) -> anyhow::Result<Vec<AuthStatusRow>> {
-    let auth_mounts = crate::auth::load_all_mount_auth(catalog, mounts)?;
-    Ok(auth_mounts
+) -> Vec<AuthStatusRow> {
+    crate::auth::load_all_mount_auth(catalog, mounts)
         .iter()
         .map(|mount| row_for(catalog, store, mount))
-        .collect())
+        .collect()
 }
 
 fn row_for(catalog: &Catalog, store: &dyn CredentialStore, mount: &MountAuth) -> AuthStatusRow {
-    let available = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount.config())
+    let available = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount.spec())
         .ok()
         .flatten()
         .map(|auth| scheme_options(&auth))
         .unwrap_or_default();
     AuthStatusRow {
-        mount: mount.config().spec.mount.clone(),
+        mount: mount.spec().mount.clone(),
         readiness: mount.readiness(store),
         available,
     }

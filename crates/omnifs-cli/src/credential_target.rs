@@ -4,7 +4,7 @@ use anyhow::{Context, anyhow};
 use omnifs_core::{AccountId, AuthSchemeId, CredentialId, ProviderName};
 use omnifs_creds::{CredentialEntry, CredentialStore};
 use omnifs_mount::Auth;
-use omnifs_mount::mounts::Resolved;
+use omnifs_mount::mounts::Spec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CredentialTarget {
@@ -21,7 +21,7 @@ pub(crate) enum ExternalCredentialSource {
 
 impl CredentialTarget {
     pub(crate) fn for_scheme(
-        config: &Resolved,
+        config: &Spec,
         auth: Option<&Auth>,
         scheme: &str,
         account: Option<&str>,
@@ -47,8 +47,8 @@ impl CredentialTarget {
         )))
     }
 
-    pub(crate) fn for_mount(config: &Resolved) -> Self {
-        config.spec.auth.first().map_or(Self::None, |auth| {
+    pub(crate) fn for_mount(config: &Spec) -> Self {
+        config.auth.first().map_or(Self::None, |auth| {
             Self::for_configured_auth(config, auth, auth.scheme(), auth.account())
                 .unwrap_or(Self::None)
         })
@@ -93,7 +93,7 @@ impl CredentialTarget {
     }
 
     pub(crate) fn for_configured_auth(
-        config: &Resolved,
+        config: &Spec,
         auth: &Auth,
         scheme: Option<&str>,
         account: Option<&str>,
@@ -113,12 +113,12 @@ impl CredentialTarget {
     }
 
     fn internal_from_parts(
-        config: &Resolved,
+        config: &Spec,
         auth: Option<&Auth>,
         scheme: &str,
         account: Option<&str>,
     ) -> anyhow::Result<Self> {
-        let provider_id = ProviderName::new(&config.provider_name)?;
+        let provider_id = config.provider_name().clone();
         let account = account
             .or_else(|| auth.and_then(Auth::account))
             .map(AccountId::new)
