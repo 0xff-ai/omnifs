@@ -45,6 +45,10 @@ pub struct InitArgs {
     /// Skip prompts. Static-token providers also require --token or --token-env.
     #[arg(long)]
     pub no_input: bool,
+    /// Re-authenticate an existing mount instead of creating one. The positional
+    /// argument names the mount to re-authenticate.
+    #[arg(long)]
+    pub reauth: bool,
     /// Accept the auto-suggested mount name on collision (never overwrite).
     #[arg(long)]
     pub yes: bool,
@@ -70,6 +74,9 @@ impl InitArgs {
 
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn run_in_workspace(self, workspace: &Workspace) -> anyhow::Result<()> {
+        if self.reauth {
+            return self.run_reauth(workspace).await;
+        }
         let paths = workspace.layout();
         let interactive = !self.no_input;
         let catalog = workspace.catalog();
@@ -215,6 +222,66 @@ impl InitArgs {
                 anstream::eprintln!("Run `omnifs up` to restart with the new mount.");
             },
         }
+        Ok(())
+    }
+
+    /// Re-acquire the credential for an existing mount: OAuth login or a fresh
+    /// static token, dispatched on the mount's stored auth. The spec is left
+    /// untouched; only the credential store changes.
+    async fn run_reauth(self, workspace: &Workspace) -> anyhow::Result<()> {
+        let paths = workspace.layout();
+        let mount_name = self.provider.as_deref().ok_or_else(|| {
+            anyhow!("name the mount to re-authenticate: `omnifs init --reauth <mount>`")
+        })?;
+        let mounts = workspace.mounts()?;
+        let mount_config = mounts
+            .iter()
+            .find(|m| m.name.as_str() == mount_name)
+            .ok_or_else(|| {
+                anyhow!("no mount named `{mount_name}`; run `omnifs init <provider>` to create it")
+            })?;
+        let Some(auth) = mount_config.config.auth.first() else {
+            anyhow::bail!("mount `{mount_name}` needs no authentication");
+        };
+
+        let installed = crate::catalog::installed_providers(workspace.catalog())?;
+        let provider_name = mount_config.config.provider_name();
+        let (_, manifest) = crate::catalog::find_installed(&installed, provider_name.as_str())
+            .ok_or_else(|| {
+                anyhow!("provider `{provider_name}` for mount `{mount_name}` is not installed")
+            })?;
+
+        let selection = AuthSelection {
+            auth_type: auth.kind(),
+            scheme: auth.scheme().map(str::to_owned),
+            account: auth.account().map(str::to_owned),
+        };
+
+        if selection.is_oauth() {
+            anstream::println!("Re-authenticating `{mount_name}` over OAuth ...");
+            crate::auth::login_with_workspace(
+                workspace,
+                mount_name,
+                selection.account.as_deref(),
+                self.no_browser,
+                &self.scopes,
+            )
+            .await?;
+        } else {
+            let source = TokenSource::resolve(
+                self.token.as_deref(),
+                self.token_env.as_deref(),
+                !self.no_input,
+            )?;
+            let token = source.read()?;
+            run_static_token_init(manifest, &selection, token, &paths.credentials_file).await?;
+        }
+
+        anstream::println!();
+        anstream::println!("✓ Re-authenticated `{mount_name}`.");
+        anstream::println!(
+            "If a daemon is running, restart it with `omnifs up` to apply the new credential."
+        );
         Ok(())
     }
 }
