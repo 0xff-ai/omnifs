@@ -113,6 +113,6 @@ pub(crate) fn config_str<'a>(config: &'a Spec, field: &str) -> Option<&'a str> {
     config
         .config_raw
         .as_ref()
-        .and_then(|config| config.as_value().get(field))
+        .and_then(|config| config.get(field))
         .and_then(serde_json::Value::as_str)
 }

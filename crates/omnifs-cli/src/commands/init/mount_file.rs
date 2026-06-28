@@ -2,7 +2,7 @@ use super::spec_creation::CreatedMountSpec;
 use crate::auth::AuthSelection;
 use omnifs_core::{AuthKind, MountName, ProviderRef};
 use omnifs_mount::mounts::Spec;
-use omnifs_mount::{Auth, OAuth, ProviderConfig, StaticToken};
+use omnifs_mount::{Auth, OAuth, StaticToken};
 
 /// Composes the [`Spec`] for a newly authored mount. The on-disk JSON is the
 /// `Spec`'s own serialization, persisted atomically by `Registry::put`; this
@@ -39,25 +39,25 @@ impl<'a> MountFile<'a> {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),
             root_mount: false,
-            auth: self.auth.map_or_else(Vec::new, |auth| {
+            auth: self.auth.map(|auth| {
                 let account = auth.account.clone();
                 let scheme = auth.scheme.clone();
                 match auth.auth_type {
-                    AuthKind::StaticToken => vec![Auth::StaticToken(StaticToken {
+                    AuthKind::StaticToken => Auth::StaticToken(StaticToken {
                         scheme,
                         account,
                         ..StaticToken::default()
-                    })],
-                    AuthKind::OAuth => vec![Auth::OAuth(OAuth {
+                    }),
+                    AuthKind::OAuth => Auth::OAuth(OAuth {
                         scheme,
                         account,
                         scopes: (!self.scopes.is_empty()).then(|| self.scopes.to_vec()),
                         ..OAuth::default()
-                    })],
+                    }),
                 }
             }),
             capabilities: self.created.capabilities,
-            config_raw: self.created.config.map(ProviderConfig::from_value),
+            config_raw: self.created.config,
         }
     }
 }

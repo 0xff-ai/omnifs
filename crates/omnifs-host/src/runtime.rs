@@ -23,7 +23,6 @@ use omnifs_cache::{Caches, Store};
 use omnifs_caps::{Grant, PreopenedPath};
 use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
-use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
 use omnifs_provider::{ConfigMetadata, HostResourceBinding, ProviderStore};
 use omnifs_wit::provider::types as wit_types;
@@ -302,13 +301,13 @@ impl Runtime {
         let auth_manifest = manifest
             .as_ref()
             .and_then(omnifs_provider::ProviderManifest::wasm_auth_manifest);
-        let auth = if config.auth.is_empty() {
+        let auth = if config.auth.is_none() {
             Arc::new(AuthManager::none())
         } else {
             let store = credential_store_for_file(context.credentials_file());
             Arc::new(
                 AuthManager::from_configs_manifest_store_with_store(
-                    &config.auth,
+                    config.auth.as_slice(),
                     auth_manifest.as_ref(),
                     config.provider_name().as_str(),
                     store,
@@ -660,10 +659,7 @@ fn validate_instance_config(
     };
 
     let empty_config = serde_json::Value::Object(serde_json::Map::new());
-    let config_value = config
-        .config_raw
-        .as_ref()
-        .map_or(&empty_config, ProviderConfig::as_value);
+    let config_value = config.config_raw.as_ref().unwrap_or(&empty_config);
     match metadata.validate_config(config_value) {
         Ok(()) => Ok(()),
         Err(error) => Err(BuildError::InvalidConfig(format!(

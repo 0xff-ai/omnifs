@@ -70,9 +70,10 @@ fn load_auth_rows(
 }
 
 fn row_for(catalog: &Catalog, store: &dyn CredentialStore, mount: &MountAuth) -> AuthStatusRow {
-    let available = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount.spec())
+    let available = omnifs_mount::mounts::pinned_manifest(catalog, mount.spec())
         .ok()
         .flatten()
+        .and_then(|manifest| manifest.auth)
         .map(|auth| scheme_options(&auth))
         .unwrap_or_default();
     AuthStatusRow {

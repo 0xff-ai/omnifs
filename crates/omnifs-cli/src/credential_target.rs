@@ -48,9 +48,8 @@ impl CredentialTarget {
     }
 
     pub(crate) fn for_mount(config: &Spec) -> Self {
-        config.auth.first().map_or(Self::None, |auth| {
-            Self::for_configured_auth(config, auth, auth.scheme(), auth.account())
-                .unwrap_or(Self::None)
+        config.auth.as_ref().map_or(Self::None, |auth| {
+            Self::for_configured_auth(config, auth, auth.scheme()).unwrap_or(Self::None)
         })
     }
 
@@ -96,7 +95,6 @@ impl CredentialTarget {
         config: &Spec,
         auth: &Auth,
         scheme: Option<&str>,
-        account: Option<&str>,
     ) -> anyhow::Result<Self> {
         if let Some(token_file) = auth.token_file() {
             return Ok(Self::External(ExternalCredentialSource::TokenFile(
@@ -109,7 +107,8 @@ impl CredentialTarget {
             )));
         }
         let scheme = scheme.ok_or_else(|| anyhow!("missing auth.scheme"))?;
-        Self::internal_from_parts(config, Some(auth), scheme, account)
+        // `account` is derived from `auth` inside `internal_from_parts`.
+        Self::internal_from_parts(config, Some(auth), scheme, None)
     }
 
     fn internal_from_parts(

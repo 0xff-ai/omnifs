@@ -104,8 +104,10 @@ fn schemes_reads_manifest_from_provider() {
     let catalog = Catalog::open(&paths.providers_dir);
     let mounts = mounts_for(&paths);
     let mount_auth = crate::auth::load_mount_auth(&catalog, &mounts, "github").unwrap();
-    let loaded = omnifs_mount::mounts::auth_manifest_for(&catalog, mount_auth.spec())
+    let loaded = omnifs_mount::mounts::pinned_manifest(&catalog, mount_auth.spec())
         .unwrap()
+        .unwrap()
+        .wasm_auth_manifest()
         .unwrap();
 
     assert_eq!(loaded, manifest);

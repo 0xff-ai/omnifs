@@ -10,7 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use omnifs_caps::Need;
 use omnifs_provider::ProviderManifest;
 
 /// How a candidate provider artifact differs from the pinned one.

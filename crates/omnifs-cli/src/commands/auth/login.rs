@@ -29,9 +29,10 @@ pub(super) async fn login(
 ) -> anyhow::Result<()> {
     let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
-    let guidance = omnifs_mount::mounts::provider_auth_manifest_for(catalog, mount_auth.spec())
+    let guidance = omnifs_mount::mounts::pinned_manifest(catalog, mount_auth.spec())
         .ok()
         .flatten()
+        .and_then(|manifest| manifest.auth)
         .map(|auth| auth.guidance_for(&request.scheme().key))
         .unwrap_or_default();
     print_oauth_consent_summary(mount, &request, &guidance);

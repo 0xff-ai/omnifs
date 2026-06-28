@@ -5,15 +5,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod materialize;
-mod mount_config;
 pub mod mounts;
 pub mod upgrade;
 
-pub use mount_config::{
-    Auth, AuthKind, OAuth, ProviderConfig, StaticToken, deserialize_auth as deserialize_mount_auth,
-    serialize_auth as serialize_mount_auth,
-};
+pub use auth::{Auth, AuthKind, OAuth, StaticToken};
 pub use upgrade::{
     AddedField, AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, UpgradePlan,
 };
