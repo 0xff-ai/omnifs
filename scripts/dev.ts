@@ -413,9 +413,6 @@ async function launchContainer({ devHome, image, fixtures }) {
   if (process.env.SSH_AUTH_SOCK && existsSync(process.env.SSH_AUTH_SOCK)) {
     args.push("-v", `${process.env.SSH_AUTH_SOCK}:/ssh-agent`);
   }
-  if (existsSync("/var/run/docker.sock")) {
-    args.push("-v", "/var/run/docker.sock:/var/run/docker.sock:ro");
-  }
   for (const bind of fixtures.binds) {
     args.push("-v", bind);
   }
