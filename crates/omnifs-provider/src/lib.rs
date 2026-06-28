@@ -46,4 +46,4 @@ pub use sections::{
 };
 pub use store::{Index, IndexEntry, ProviderStore, StoreError};
 pub use validation::{SchemaError, validate_config};
-pub use wasm::{ProviderWasm, ProviderWasmError};
+pub use wasm::{Artifact, ArtifactError, ArtifactLoadError, ProviderWasm, ProviderWasmError};

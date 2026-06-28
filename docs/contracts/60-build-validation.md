@@ -11,9 +11,9 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider and tool WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers/tools and injects provider metadata. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built WASM bytes.
+Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers and injects provider metadata. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built provider WASM bytes.
 
-Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider/tool artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
+Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 
 ### Generated OpenAPI and schemas
 
@@ -29,7 +29,7 @@ Use `just dev -y` for the supported contributor runtime path. Check status insid
 
 ### CI gates
 
-Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/tool/test-provider WASM crates; WASM crates use provider-specific gates.
+Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/test-provider WASM crates; WASM crates use provider-specific gates.
 
 Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check`, `just just-check`, and `just docs-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 

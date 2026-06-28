@@ -3,7 +3,7 @@
 //!
 //! `Catalog` answers "which retained artifact is this pinned id / the latest for
 //! this name / every installed provider?" Each [`Provider`] it yields lazily
-//! reads its embedded manifest from the by-hash WASM. Nothing here touches mount
+//! reads its embedded manifest from the retained WASM. Nothing here touches mount
 //! specs; resolution (joining a spec against this index) lives in `omnifs-mount`.
 
 use std::fs;
@@ -59,7 +59,7 @@ impl Catalog {
                 name: entry.name.clone(),
                 version: entry.version.clone(),
             },
-            wasm_path: self.store().by_hash_path(&entry.id),
+            wasm_path: self.store().artifact_path(&entry.id),
         }
     }
 
@@ -101,10 +101,10 @@ impl Catalog {
             .collect())
     }
 
-    /// `by-hash/<hex>.wasm` for a pinned id (the serving path).
+    /// `<hex>.wasm` for a pinned id (the serving path).
     #[must_use]
     pub fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
-        self.store().by_hash_path(id)
+        self.store().artifact_path(id)
     }
 
     /// The state of the backing providers directory: absent, present with a
@@ -135,7 +135,7 @@ pub enum DirStatus {
 }
 
 /// A retained provider artifact resolved from the store: content id, catalog/UI
-/// meta, and a lazily-read handle to the by-hash WASM.
+/// meta, and a lazily-read handle to the retained WASM.
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub id: ProviderId,
@@ -153,7 +153,7 @@ impl Provider {
         }
     }
 
-    /// `by-hash/<hex>.wasm` path of this artifact.
+    /// `<hex>.wasm` path of this artifact.
     #[must_use]
     pub fn wasm_path(&self) -> &Path {
         &self.wasm_path

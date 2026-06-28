@@ -1,10 +1,10 @@
 use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
-use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
 use omnifs_mount::mounts::Spec;
-use omnifs_provider::{Catalog, ProviderStore};
+use omnifs_provider::{Artifact, Catalog, ProviderStore};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
@@ -54,7 +54,7 @@ impl RuntimeHarness {
         })?;
         let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
 
-        // Pin the named provider into this harness's by-hash store and rewrite
+        // Pin the named provider into this harness's provider store and rewrite
         // the test config's `provider` field to the resulting `ProviderRef`, so
         // resolution and serving go through the content-addressed path the host
         // uses in production.
@@ -267,7 +267,7 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
     path
 }
 
-/// Build (or refresh) the provider/tool WASM the harness loads.
+/// Build (or refresh) the provider WASM the harness loads.
 ///
 /// The harness loads providers as prebuilt `wasm32-wasip2` components from the
 /// shared target dir. Running tests against a stale build silently exercises
@@ -341,7 +341,7 @@ pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
     make_runtime_from_config(config_json)
 }
 
-/// Pin the provider named in `config_json`'s `provider` field into the by-hash
+/// Pin the provider named in `config_json`'s `provider` field into the provider
 /// store under `providers_dir`, then return the config as a `Spec` whose
 /// `provider` is the resulting `ProviderRef`. This routes test resolution and
 /// serving through the content-addressed path the host uses in production.
@@ -360,49 +360,21 @@ fn pin_spec_from_json(config_json: &str, providers_dir: &StdPath) -> Result<Spec
         .map_err(|error| BuildError::InvalidConfig(format!("build test spec: {error}")))
 }
 
-/// Lay the built `provider_file` WASM into a by-hash store and return its pinned
+/// Lay the built `provider_file` WASM into the provider store and return its pinned
 /// reference, named from the artifact's embedded manifest id (which can differ
 /// from the file stem, e.g. `test_provider.wasm` -> `test-provider`).
 fn pin_provider(providers_dir: &StdPath, provider_file: &str) -> Result<ProviderRef, BuildError> {
     let src = provider_wasm_path(provider_file);
     let bytes = std::fs::read(&src)
         .map_err(|error| BuildError::InvalidConfig(format!("read {}: {error}", src.display())))?;
-    let id = ProviderId::from_wasm_bytes(&bytes);
-    let manifest = omnifs_provider::read_provider_metadata_section(&bytes).map_err(|error| {
-        BuildError::InvalidConfig(format!("read manifest from {provider_file}: {error}"))
-    })?;
-    let name = manifest
-        .as_ref()
-        .map_or_else(|| stem_provider_name(provider_file), |m| m.id.clone());
-    let version = manifest.and_then(|m| m.version);
-    let meta = ProviderMeta {
-        name: ProviderName::new(name)
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?,
-        version: version.map(ProviderVersion::new),
-    };
+    let artifact = Artifact::from_bytes(provider_file, bytes)
+        .map_err(|error| BuildError::InvalidConfig(format!("{provider_file}: {error}")))?;
+    let reference = artifact.reference();
     let store = ProviderStore::new(providers_dir);
     store
-        .put_if_absent(&id, &bytes)
+        .add_artifact(artifact)
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-    store
-        .install(id, meta.clone(), provider_file.to_string())
-        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-    Ok(ProviderRef { id, meta })
-}
-
-/// Fallback name for a tool wasm with no embedded manifest.
-fn stem_provider_name(provider_file: &str) -> String {
-    StdPath::new(provider_file)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map_or_else(
-            || provider_file.to_string(),
-            |stem| {
-                stem.strip_prefix("omnifs_provider_")
-                    .unwrap_or(stem)
-                    .to_string()
-            },
-        )
+    Ok(reference)
 }
 
 /// A pinned reference for the test provider with a placeholder id, for tests

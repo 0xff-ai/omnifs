@@ -174,8 +174,9 @@ impl DevArgs {
         )?;
 
         if self.image.is_none() {
-            provider_bundle::install_target_bundle(workspace.path(), &layout.providers_dir)?;
-            build_image(workspace.path(), image, &layout.providers_dir)?;
+            let provider_context =
+                provider_bundle::install_target_providers(workspace.path(), &layout.providers_dir)?;
+            build_image(workspace.path(), image, &provider_context)?;
         } else {
             provider_bundle::ensure_providers_installed(&layout.providers_dir)?;
         }

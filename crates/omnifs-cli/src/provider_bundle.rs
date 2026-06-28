@@ -1,17 +1,15 @@
 //! Provider WASM installation into the content-addressed store.
 //!
 //! Each provider WASM is hashed to its [`ProviderId`], written under
-//! `providers_dir/by-hash/<hex>.wasm`, and recorded in `index.json` (advancing
-//! `latest[name]`). Content addressing makes installation idempotent: an
-//! artifact already present under `by-hash/` is skipped.
+//! `providers_dir/<hex>.wasm`, and recorded in `index.json` (advancing
+//! `latest[name]`). Content addressing makes installation idempotent.
 
 use anyhow::Context as _;
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderVersion};
-use omnifs_provider::ProviderStore;
+use omnifs_provider::{Artifact, ArtifactLoadError, ProviderStore};
 
 const FIXTURE_PROVIDER_DIRS: &[&str] = &["test"];
 
@@ -44,17 +42,23 @@ pub(crate) fn ensure_providers_installed(providers_dir: &Path) -> anyhow::Result
         entry
             .read_to_end(&mut bytes)
             .with_context(|| format!("read embedded provider bundle file `{name}`"))?;
-        install_artifact(&store, &name, &bytes)?;
+        let artifact = Artifact::from_bytes(name.clone(), bytes)
+            .with_context(|| format!("read provider metadata from `{name}`"))?;
+        store
+            .add_artifact(artifact)
+            .with_context(|| format!("install embedded provider `{name}`"))?;
     }
     Ok(())
 }
 
-/// Install freshly-built provider WASM from the workspace's
-/// `target/wasm32-wasip2/release` into the content-addressed store. Used by
-/// `omnifs dev`, which consumes the host-built WASM rather than the bundle
-/// embedded at CLI compile time.
-pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> anyhow::Result<()> {
-    let artifact_dir = workspace.join("target/wasm32-wasip2/release");
+/// Install freshly-built provider WASM from the workspace target dir into the
+/// content-addressed store. Used by `omnifs dev`, which consumes host-built WASM
+/// rather than the bundle embedded at CLI compile time.
+pub(crate) fn install_target_providers(
+    workspace: &Path,
+    providers_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let artifact_dir = target_artifact_dir(workspace);
     let expected = expected_files(workspace)?;
     let missing = expected
         .iter()
@@ -76,13 +80,18 @@ pub(crate) fn install_target_bundle(workspace: &Path, providers_dir: &Path) -> a
         providers_dir.display()
     );
 
+    let store = ProviderStore::new(providers_dir);
     for file in &expected {
         let source = artifact_dir.join(file);
-        let bytes = std::fs::read(&source)
-            .with_context(|| format!("read provider artifact {}", source.display()))?;
-        write_if_changed(providers_dir, file, &bytes)?;
+        install_file(&store, &source)?;
     }
-    ingest_exported_artifacts(providers_dir)
+    report_unexpected_wasm(&artifact_dir, &expected)?;
+    Ok(artifact_dir)
+}
+
+#[must_use]
+pub(crate) fn target_artifact_dir(workspace: &Path) -> PathBuf {
+    workspace.join("target/wasm32-wasip2/release")
 }
 
 /// The provider WASM filenames `omnifs dev` expects in the workspace build
@@ -115,86 +124,68 @@ fn expected_files(workspace: &Path) -> anyhow::Result<BTreeSet<String>> {
     Ok(files)
 }
 
-/// Ingest the flat WASM files copied into `providers_dir` into the
-/// content-addressed store: every WASM is hashed and indexed.
-fn ingest_exported_artifacts(providers_dir: &Path) -> anyhow::Result<()> {
-    let store = ProviderStore::new(providers_dir);
-    let read = std::fs::read_dir(providers_dir)
-        .with_context(|| format!("scan {}", providers_dir.display()))?;
+fn report_unexpected_wasm(artifact_dir: &Path, expected: &BTreeSet<String>) -> anyhow::Result<()> {
+    let read = std::fs::read_dir(artifact_dir)
+        .with_context(|| format!("scan {}", artifact_dir.display()))?;
     for entry in read {
         let path = entry
-            .with_context(|| format!("scan {}", providers_dir.display()))?
+            .with_context(|| format!("scan {}", artifact_dir.display()))?
             .path();
         if path.extension().is_none_or(|ext| ext != "wasm") {
             continue;
         }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            anstream::eprintln!("  ! skipping invalid provider WASM {}", path.display());
             continue;
         };
-        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        install_artifact(&store, name, &bytes)?;
+        if expected.contains(name) {
+            continue;
+        }
+        match Artifact::from_file(&path) {
+            Ok(_) => {
+                anstream::eprintln!(
+                    "  ! skipping unexpected provider WASM `{name}`: not part of providers/"
+                );
+            },
+            Err(ArtifactLoadError::Artifact(error)) => {
+                anstream::eprintln!("  ! skipping invalid provider WASM `{name}`: {error}");
+            },
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
 
-/// Write `file` into `providers_dir` only when its bytes differ from what is
-/// already there, replacing atomically via a temp file.
-fn write_if_changed(providers_dir: &Path, file: &str, bytes: &[u8]) -> anyhow::Result<()> {
-    let target = providers_dir.join(file);
-    if target.is_file() && std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
-        return Ok(());
+pub(crate) fn install_file(store: &ProviderStore, path: &Path) -> anyhow::Result<()> {
+    match Artifact::from_file(path) {
+        Ok(artifact) => {
+            let file = artifact.file().to_string();
+            store
+                .add_artifact(artifact)
+                .with_context(|| format!("install provider artifact `{file}`"))?;
+            Ok(())
+        },
+        Err(ArtifactLoadError::Artifact(error)) => Err(error).with_context(|| {
+            format!(
+                "provider artifact {} is invalid",
+                display_provider_path(path)
+            )
+        }),
+        Err(error) => Err(error.into()),
     }
-    let temp = temp_path(&target);
-    std::fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
-    std::fs::rename(&temp, &target).with_context(|| {
-        format!(
-            "move provider bundle file {} to {}",
-            temp.display(),
-            target.display()
-        )
-    })?;
-    Ok(())
 }
 
-fn temp_path(target: &Path) -> PathBuf {
-    let file_name = target
-        .file_name()
+fn display_provider_path(path: &Path) -> String {
+    path.file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("provider.wasm");
-    let mut temp = target.to_path_buf();
-    temp.set_file_name(format!("{file_name}.tmp-{}", std::process::id()));
-    temp
-}
-
-/// Install one bundle entry: hash it into `by-hash/` and record it in the index
-/// with the name and version from its embedded manifest.
-fn install_artifact(store: &ProviderStore, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
-    let id = ProviderId::from_wasm_bytes(bytes);
-    store
-        .put_if_absent(&id, bytes)
-        .with_context(|| format!("store provider `{name}`"))?;
-    let manifest = omnifs_provider::read_provider_metadata_section(bytes)
-        .with_context(|| format!("read provider manifest from `{name}`"))?
-        .with_context(|| format!("provider `{name}` has no embedded manifest section"))?;
-    let provider_name = ProviderName::new(manifest.id.clone()).with_context(|| {
-        format!(
-            "provider `{name}` has an invalid manifest id `{}`",
-            manifest.id
-        )
-    })?;
-    let meta = ProviderMeta {
-        name: provider_name,
-        version: manifest.version.clone().map(ProviderVersion::new),
-    };
-    store
-        .install(id, meta, name.to_string())
-        .with_context(|| format!("index provider `{name}`"))?;
-    Ok(())
+        .map_or_else(|| path.display().to_string(), ToOwned::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
 
     #[test]
     fn ensure_providers_installed_populates_store() {
@@ -212,8 +203,8 @@ mod tests {
         );
         for entry in &index.providers {
             assert!(
-                store.by_hash_path(&entry.id).is_file(),
-                "missing by-hash artifact for `{}`",
+                store.artifact_path(&entry.id).is_file(),
+                "missing retained artifact for `{}`",
                 entry.name
             );
             assert_ne!(
@@ -222,5 +213,53 @@ mod tests {
                 "the test fixture provider must not ship in the embedded bundle"
             );
         }
+    }
+
+    #[test]
+    fn install_target_providers_skips_invalid_unexpected_wasm() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let providers_dir = tempfile::tempdir().expect("providers dir");
+        let provider = bundled_provider("omnifs_provider_github.wasm");
+
+        std::fs::create_dir_all(workspace.path().join("providers/github")).unwrap();
+        std::fs::write(
+            workspace.path().join("providers/github/Cargo.toml"),
+            "[package]\nname = \"omnifs-provider-github\"\n",
+        )
+        .unwrap();
+        let artifact_dir = workspace.path().join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(artifact_dir.join("omnifs_provider_github.wasm"), provider).unwrap();
+        std::fs::write(artifact_dir.join("stale.wasm"), EMPTY_WASM).unwrap();
+
+        install_target_providers(workspace.path(), providers_dir.path())
+            .expect("install providers");
+
+        let index = ProviderStore::new(providers_dir.path())
+            .read_index()
+            .expect("read index");
+        assert_eq!(index.providers.len(), 1);
+        assert_eq!(index.providers[0].file, "omnifs_provider_github.wasm");
+        assert!(
+            !providers_dir
+                .path()
+                .join("omnifs_provider_github.wasm")
+                .exists()
+        );
+    }
+
+    fn bundled_provider(name: &str) -> Vec<u8> {
+        let decoder = zstd::stream::read::Decoder::new(Cursor::new(EMBEDDED_PROVIDER_BUNDLE))
+            .expect("decode embedded provider bundle");
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries().expect("read embedded provider bundle") {
+            let mut entry = entry.expect("read embedded provider bundle entry");
+            if entry.path().expect("read embedded provider bundle path") == Path::new(name) {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).expect("read provider bytes");
+                return bytes;
+            }
+        }
+        panic!("provider `{name}` missing from embedded bundle");
     }
 }

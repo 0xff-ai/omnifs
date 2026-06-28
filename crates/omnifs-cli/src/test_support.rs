@@ -74,7 +74,7 @@ pub(crate) fn spec_with_reference(
 
 /// Install a fake provider (built by [`wasm_with_provider_metadata`]) into the
 /// content-addressed store under `providers_dir`, returning its pinned
-/// reference. The catalog resolves the embedded manifest from the by-hash
+/// reference. The catalog resolves the embedded manifest from the retained
 /// artifact, so auth/config resolution works exactly as in production.
 #[cfg(test)]
 pub(crate) fn install_fixture_provider(

@@ -37,7 +37,7 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 
 ### Provider bundles
 
-`Dockerfile` is the contributor image path for `omnifs dev`. Dev image builds consume host-built provider/tool WASM from the dev provider store as a named Docker build context; the normal runtime image stage must not compile providers again. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider/tool bundle and unpack it into `OMNIFS_HOME/providers`.
+`Dockerfile` is the contributor image path for `omnifs dev`. Dev image builds consume host-built provider WASM from `target/wasm32-wasip2/release` as a named Docker build context; the normal runtime image stage must not compile providers again. `omnifs dev` installs those same host-built provider artifacts into the dev provider store for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
 
 ## Must not
 

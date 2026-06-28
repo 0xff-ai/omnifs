@@ -65,6 +65,9 @@ pub enum Commands {
     /// Manage configured mounts: add, ls, rm.
     Mounts(commands::mounts::MountsArgs),
 
+    /// Manage installed provider WASM artifacts.
+    Providers(commands::providers::ProvidersArgs),
+
     /// Nuke every mount config and (by default) its stored credential,
     /// then stop and remove the container. Asks for confirmation unless
     /// `--yes` is set.
@@ -124,6 +127,7 @@ impl Commands {
             Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run().await,
             Self::Mounts(args) => args.run().await,
+            Self::Providers(args) => args.run(),
             Self::Reset(args) => args.run().await,
             Self::Completions(args) => {
                 args.run();

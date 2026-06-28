@@ -27,8 +27,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use common::{
-    copy_release_wasm_into, free_port, install_test_provider, live_acceptance_enabled,
-    nfs_serial_lock, omnifs_bin, platform_can_mount, release_wasm_dir, test_mount_spec,
+    free_port, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
+    platform_can_mount, release_wasm_dir, test_mount_spec,
 };
 
 fn curl(args: &[&str]) -> bool {
@@ -120,9 +120,7 @@ fn start() -> Option<Daemon> {
     let home = tempfile::tempdir().expect("home tempdir");
     let providers = home.path().join("providers");
     std::fs::create_dir_all(&providers).expect("providers dir");
-    copy_release_wasm_into(&providers);
-    // The daemon serves by content id, so the test provider must be in the
-    // by-hash store (the flat copy above only satisfies the archive tool).
+    // The daemon serves by content id, so the test provider must be installed.
     let test_id = install_test_provider(&providers);
 
     // Write the mount spec before spawning so the daemon reconciles it on start.
