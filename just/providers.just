@@ -62,7 +62,7 @@ build: wasi-sdk
       printf 'no provider WASM components found\n' >&2
       exit 1
     fi
-    cargo run --release -p omnifs-embed-metadata -- target/wasm32-wasip2/release
+    cargo run -p omnifs-embed-metadata -- target/wasm32-wasip2/release
 
 # Validate built WASM components.
 validate:

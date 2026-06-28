@@ -6,7 +6,7 @@ use crate::sections::{ProviderMetadataError, is_hostname_only, validate_provider
 use omnifs_caps::{Grants, Need};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const PROVIDER_WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
 
@@ -116,6 +116,7 @@ impl ProviderAuthManifest {
                 self.default
             )));
         }
+        let mut seen = HashSet::new();
         for scheme in &self.schemes {
             let Some(key) = scheme.key() else {
                 return Err(ProviderMetadataError::Validation(
@@ -123,7 +124,20 @@ impl ProviderAuthManifest {
                         .to_string(),
                 ));
             };
+            if !seen.insert(key) {
+                return Err(ProviderMetadataError::Validation(format!(
+                    "auth.schemes: duplicate scheme key {key:?}"
+                )));
+            }
             validate_scheme(key, scheme)?;
+            // Each scheme must inject its credential somewhere: the host keys
+            // injection entirely off per-scheme domains, so an empty list ships a
+            // credential that is silently never attached to any request.
+            if scheme.inject_domains().is_empty() {
+                return Err(ProviderMetadataError::Validation(format!(
+                    "auth.schemes.{key}: declares no inject domains; call `.inject(&[..])`"
+                )));
+            }
             validate_inject_domains(scheme.inject_domains())?;
             // A bring-your-own-app OAuth scheme (no shipped client id) forces the
             // user to create their own app; it must say how.

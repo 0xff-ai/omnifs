@@ -10,7 +10,7 @@
 //!
 //! Usage: `omnifs-embed-metadata <wasm-dir>`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use omnifs_caps::{Need as HostNeed, PreopenMode, PreopenedPath};
@@ -82,11 +82,13 @@ fn main() -> Result<(), DynError> {
         let manifest = to_manifest(&metadata());
         let json = serde_json::to_vec(&manifest)
             .map_err(|error| format!("{}: serialize manifest: {error}", path.display()))?;
-        // Fail the build loudly if a provider self-reports a manifest the host
-        // would reject (schema or domain validation).
-        ProviderManifest::from_bytes(&json)
-            .map_err(|error| format!("{}: invalid manifest: {error}", path.display()))?;
         let rewritten = embed_provider_metadata_section(&wasm, &json)?;
+        // Validate the embedded artifact exactly as the host will read it: this
+        // gates on schema + domain validation AND catches a stray duplicate
+        // section (e.g. a stale nested one) before a bad wasm is written.
+        omnifs_provider::read_provider_metadata_section(&rewritten)
+            .map_err(|error| format!("{}: invalid embedded metadata: {error}", path.display()))?
+            .ok_or_else(|| format!("{}: no metadata section after embed", path.display()))?;
         std::fs::write(&path, &rewritten)
             .map_err(|error| format!("write {}: {error}", path.display()))?;
         println!(
@@ -94,6 +96,33 @@ fn main() -> Result<(), DynError> {
             json.len(),
             path.display()
         );
+    }
+
+    // Guard against the PROVIDERS registry drifting from the built wasm set: any
+    // provider component in the dir we did not embed would ship metadata-less and
+    // only fail at host load, with no build-time signal. Fail here instead.
+    let embedded: HashSet<&str> = PROVIDERS.iter().map(|(file, _)| *file).collect();
+    for entry in
+        std::fs::read_dir(dir).map_err(|error| format!("scan {}: {error}", dir.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("scan {}: {error}", dir.display()))?
+            .path();
+        if path.extension().is_none_or(|ext| ext != "wasm") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_provider_component =
+            name.starts_with("omnifs_provider_") || name == "test_provider.wasm";
+        if is_provider_component && !embedded.contains(name) {
+            return Err(format!(
+                "{name} is a provider component but is not in the embed registry; \
+                 add it to PROVIDERS in omnifs-embed-metadata"
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -172,6 +201,7 @@ fn to_need(need: &SdkNeed) -> HostNeed {
 
 fn to_auth(auth: Auth) -> ProviderAuthManifest {
     let mut guidance_map = BTreeMap::new();
+    let mut schemes = Vec::with_capacity(auth.schemes.len());
     for (key, scheme) in auth.schemes {
         let scheme_guidance = match scheme {
             Scheme::StaticToken(token) => guidance(token.summary, token.setup, token.docs_url),
@@ -180,14 +210,11 @@ fn to_auth(auth: Auth) -> ProviderAuthManifest {
         if !scheme_guidance.is_empty() {
             guidance_map.insert((*key).to_owned(), scheme_guidance);
         }
+        schemes.push(to_scheme(key, scheme));
     }
     ProviderAuthManifest {
         default: auth.default.to_owned(),
-        schemes: auth
-            .schemes
-            .iter()
-            .map(|(key, scheme)| to_scheme(key, scheme))
-            .collect(),
+        schemes,
         guidance: guidance_map,
     }
 }
