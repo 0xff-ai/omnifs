@@ -138,12 +138,13 @@ impl Issue {
 }
 
 const AUTH: Auth = Auth::new(
-    &["api.linear.app"],
     "oauth",
     &[
         (
             "pat",
             Scheme::StaticToken(StaticToken::new("Linear personal access token or API key")
+                .inject(&["api.linear.app"])
+                .prefix("")
                 .creation_url("https://linear.app/settings/api")
                 .summary("A personal API key created in Linear's API settings.")
                 .validation(
@@ -166,14 +167,15 @@ const AUTH: Auth = Auth::new(
                 "https://api.linear.app/oauth/token",
                 "http://127.0.0.1:{port}/callback",
             )
+            .inject(&["api.linear.app"])
+            .prefix("")
             .client_id("4dc7b7c05f651306a318de6f9f963b40")
             .scopes(&["read"])
             .summary("Browser sign-in through omnifs's Linear app, granting read access to your workspace."),
             ),
         ),
     ],
-)
-.prefix("");
+);
 
 #[omnifs_sdk::provider(
     id = "linear",

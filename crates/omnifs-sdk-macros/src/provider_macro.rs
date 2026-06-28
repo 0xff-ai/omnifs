@@ -458,11 +458,16 @@ fn provider_metadata_impl_tokens(type_name: &syn::Ident, metadata: &TokenStream2
             const METADATA: omnifs_sdk::Metadata = #metadata;
         }
 
-        #[cfg(target_arch = "wasm32")]
-        #[used]
-        #[unsafe(link_section = "omnifs.provider-metadata.v1")]
-        static __OMNIFS_PROVIDER_METADATA: [u8; omnifs_sdk::METADATA_JSON_CAPACITY] =
-            <#type_name as omnifs_sdk::Provider>::METADATA.json_bytes();
+        /// Build-time accessor for the provider's typed metadata const. The
+        /// native metadata harvester links this crate as a library, calls this,
+        /// and injects the serialized JSON into the wasm `omnifs.provider-metadata.v1`
+        /// section. Never compiled into the wasm guest.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn provider_metadata() -> omnifs_sdk::Metadata {
+            <#type_name as omnifs_sdk::Provider>::METADATA
+        }
     }
 }
 

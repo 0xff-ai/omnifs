@@ -1,0 +1,31 @@
+[package]
+name = "omnifs-embed-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Build-time tool: convert each provider's typed Metadata const into the host ProviderManifest and inject it as the omnifs.provider-metadata.v1 wasm custom section"
+publish = false
+
+[[bin]]
+name = "omnifs-embed-metadata"
+path = "src/main.rs"
+
+[dependencies]
+omnifs-sdk = { workspace = true }
+omnifs-provider = { workspace = true }
+omnifs-caps = { workspace = true }
+serde_json = { workspace = true }
+omnifs-provider-arxiv = { version = "0.2.1", path = "../../providers/arxiv" }
+omnifs-provider-db = { version = "0.2.1", path = "../../providers/db" }
+omnifs-provider-dns = { version = "0.2.1", path = "../../providers/dns" }
+omnifs-provider-docker = { version = "0.2.1", path = "../../providers/docker" }
+omnifs-provider-github = { version = "0.2.1", path = "../../providers/github" }
+omnifs-provider-kubernetes = { version = "0.2.1", path = "../../providers/kubernetes" }
+omnifs-provider-linear = { version = "0.2.1", path = "../../providers/linear" }
+omnifs-provider-oura = { version = "0.2.1", path = "../../providers/oura" }
+test-provider = { version = "0.2.1", path = "../../providers/test" }
+
+[lints]
+workspace = true

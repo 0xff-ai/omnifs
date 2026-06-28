@@ -29,9 +29,7 @@ pub use auth_wire::{
 };
 pub use catalog::{Catalog, CatalogError, DirStatus, Provider};
 pub use config::{ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding};
-pub use manifest::{
-    AuthInject, BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest,
-};
+pub use manifest::{BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,
@@ -40,8 +38,8 @@ pub use records::{
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
-    ProviderMetadataError, provider_manifest_json, read_manifest_section,
-    read_provider_metadata_section,
+    ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,
+    read_manifest_section, read_provider_metadata_section,
 };
 pub use store::{Index, IndexEntry, ProviderStore, StoreError};
 pub use wasm::{Artifact, ArtifactError, ArtifactLoadError, ProviderWasm, ProviderWasmError};

@@ -29,9 +29,9 @@ Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object
 
 ### Provider metadata
 
-Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and static auth metadata. The provider macro lowers that into a `Provider::METADATA` associated const and emits its JSON bytes directly into the `omnifs.provider-metadata.v1` Wasm custom section.
+Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and static auth metadata. The provider macro lowers that into a `Provider::METADATA` associated const and a non-wasm `provider_metadata()` accessor. The native `omnifs-embed-metadata` build tool links the provider crates, converts each const into the host `ProviderManifest`, serializes it with `serde_json`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. The host (and `omnifs-auth`) own that JSON dialect; the SDK metadata types are typed const data and never serialize themselves.
 
-Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm. Do not add a host-side metadata postprocessor; the metadata section is part of provider compilation.
+Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
 
 ### Host resource config fields
 
@@ -59,7 +59,7 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - Copy static sibling, object leaf, capture, or implicit-prefix precedence across operation-specific dispatch paths.
 - Treat path-oriented routes as inferior escape hatches when the domain is not object-shaped.
 - Create or edit `providers/*/omnifs.provider.json`.
-- Add a host-side provider metadata injection step.
+- Make the SDK metadata types serialize themselves, or hand-write the metadata JSON dialect; conversion to the host `ProviderManifest` is the harvester's job.
 - Hide host resource bindings inside type shapes.
 - Revive `x-omnifs-init`, guest-path rewriting, or magic `endpoint` field coupling.
 - Split endpoint APIs into type-only and value-only variants unless the value model changes.
@@ -75,6 +75,7 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `crates/omnifs-sdk/src/config_resource.rs`
 - `crates/omnifs-sdk/tests/wit_boundary.rs`
 - `crates/omnifs-sdk/src/metadata.rs`
+- `crates/omnifs-embed-metadata/src/main.rs`
 - `crates/omnifs-provider/src/sections.rs`
 - `crates/omnifs-mount/src/materialize.rs`
 - `providers/*/src/lib.rs`

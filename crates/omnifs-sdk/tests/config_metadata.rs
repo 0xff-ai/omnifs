@@ -1,4 +1,6 @@
-use omnifs_sdk::{HostFile, HostSocket, ProvidesConfigMetadata};
+use omnifs_sdk::{
+    ConfigType, DefaultValue, HostFile, HostResourceBinding, HostSocket, ProvidesConfigMetadata,
+};
 use std::collections::BTreeMap;
 
 #[allow(dead_code)]
@@ -31,41 +33,37 @@ fn default_endpoint() -> HostSocket {
 
 #[test]
 fn config_metadata_is_generated_from_the_static_dialect() {
-    const METADATA: omnifs_sdk::ConfigMetadata = match <Config as ProvidesConfigMetadata>::METADATA
-    {
-        Some(metadata) => metadata,
-        None => panic!("config metadata missing"),
-    };
-    static BYTES: [u8; omnifs_sdk::METADATA_JSON_CAPACITY] = METADATA.json_bytes();
-    let metadata: serde_json::Value = serde_json::from_slice(&BYTES).unwrap();
-    let fields = metadata["fields"].as_array().unwrap();
+    let metadata = <Config as ProvidesConfigMetadata>::METADATA.expect("config metadata missing");
+    let fields = metadata.fields;
 
-    assert_eq!(fields[0]["name"], "endpoint");
-    assert_eq!(fields[0]["type"], serde_json::json!({ "kind": "string" }));
+    assert_eq!(fields[0].name, "endpoint");
+    assert_eq!(fields[0].value_type, ConfigType::String);
+    assert_eq!(fields[0].binding, Some(HostResourceBinding::Socket));
     assert_eq!(
-        fields[0]["binding"],
-        serde_json::json!({ "kind": "socket" }),
+        fields[0].default,
+        Some(DefaultValue::String("unix:///var/run/docker.sock"))
     );
-    assert_eq!(fields[0]["default"], "unix:///var/run/docker.sock");
 
-    assert_eq!(fields[1]["name"], "path");
-    assert_eq!(fields[1]["required"], true);
-    assert_eq!(fields[1]["binding"], serde_json::json!({ "kind": "file" }),);
+    assert_eq!(fields[1].name, "path");
+    assert!(fields[1].required);
+    assert_eq!(fields[1].binding, Some(HostResourceBinding::File));
 
-    assert_eq!(fields[2]["name"], "sample_limit");
-    assert_eq!(fields[2]["type"], serde_json::json!({ "kind": "integer" }));
-    assert_eq!(fields[2]["default"], 20);
+    assert_eq!(fields[2].name, "sample_limit");
+    assert_eq!(fields[2].value_type, ConfigType::Integer);
+    assert_eq!(fields[2].default, Some(DefaultValue::Integer(20)));
 
-    assert_eq!(fields[3]["name"], "resolvers");
-    assert_eq!(fields[3]["type"]["kind"], "map");
-    let resolver_fields = fields[3]["type"]["values"]["fields"].as_array().unwrap();
-    assert_eq!(resolver_fields[0]["name"], "url");
-    assert_eq!(resolver_fields[0]["required"], true);
+    assert_eq!(fields[3].name, "resolvers");
+    let ConfigType::Map(values) = fields[3].value_type else {
+        panic!("resolvers should be a map");
+    };
+    let ConfigType::Object(resolver_fields) = *values else {
+        panic!("map values should be an object");
+    };
+    assert_eq!(resolver_fields[0].name, "url");
+    assert!(resolver_fields[0].required);
+    assert_eq!(resolver_fields[1].name, "aliases");
     assert_eq!(
-        resolver_fields[1]["type"],
-        serde_json::json!({
-            "kind": "array",
-            "items": { "kind": "string" },
-        }),
+        resolver_fields[1].value_type,
+        ConfigType::Array(&ConfigType::String)
     );
 }

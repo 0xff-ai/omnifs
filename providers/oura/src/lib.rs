@@ -34,7 +34,6 @@ const DATE_FIELDS: &[&str] = &[
 struct Api;
 
 const AUTH: Auth = Auth::new(
-    &["api.ouraring.com"],
     "oauth",
     &[(
         "oauth",
@@ -44,6 +43,7 @@ const AUTH: Auth = Auth::new(
             "https://api.ouraring.com/oauth/token",
             "http://localhost:58880/",
         )
+        .inject(&["api.ouraring.com"])
         .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
         .scopes(&[
             "email", "personal", "daily", "heartrate", "workout", "tag", "session", "spo2Daily",

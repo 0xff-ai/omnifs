@@ -134,13 +134,23 @@ pub(crate) fn render_provider_auth(provider_label: &str, auth: &ProviderAuthMani
         "{}",
         style::bold(format!("Authentication for {provider_label}"))
     );
+    let domains: std::collections::BTreeSet<&str> = auth
+        .schemes
+        .iter()
+        .flat_map(AuthScheme::inject_domains)
+        .map(String::as_str)
+        .collect();
     anstream::println!(
         "  {}",
-        style::dim(format!("Applies to: {}", auth.inject.domains.join(", ")))
+        style::dim(format!(
+            "Applies to: {}",
+            domains.into_iter().collect::<Vec<_>>().join(", ")
+        ))
     );
-    for (key, scheme) in &auth.schemes {
+    for scheme in &auth.schemes {
+        let Some(key) = scheme.key() else { continue };
         anstream::println!();
-        render_scheme(key, scheme, &auth.guidance_for(key), *key == auth.default);
+        render_scheme(key, scheme, &auth.guidance_for(key), auth.default == key);
     }
 }
 

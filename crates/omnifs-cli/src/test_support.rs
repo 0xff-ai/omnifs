@@ -110,25 +110,25 @@ pub(crate) fn wasm_with_provider_metadata(id: &str, provider: &str) -> Vec<u8> {
         "defaultMount": id,
         "capabilities": [],
         "auth": {
-            "inject": {
-                "domains": ["api.example.com"],
-                "header": "Authorization",
-                "prefix": "Bearer "
-            },
             "default": "device",
-            "schemes": {
-                "device": {
-                    "type": "oauth",
-                    "displayName": "Device flow",
-                    "clientId": "client-id",
-                    "flow": {
-                        "kind": "deviceCode",
+            "schemes": [
+                {
+                    "oauth": {
+                        "key": "device",
+                        "displayName": "Device flow",
                         "authorizationEndpoint": "https://example.com/authorize",
-                        "deviceAuthorizationEndpoint": "https://example.com/device/code",
-                        "tokenEndpoint": "https://example.com/token"
+                        "tokenEndpoint": "https://example.com/token",
+                        "defaultClientId": "client-id",
+                        "flow": {
+                            "deviceCode": {
+                                "deviceAuthorizationEndpoint": "https://example.com/device/code"
+                            }
+                        },
+                        "injectDomains": ["api.example.com"],
+                        "injectValuePrefix": "Bearer "
                     }
                 }
-            }
+            ]
         }
     });
     wasm_with_metadata_section(&serde_json::to_vec(&metadata).unwrap())

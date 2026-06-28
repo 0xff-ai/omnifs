@@ -1,51 +1,33 @@
 //! Guest-side provider auth metadata.
 //!
-//! These types are intentionally static-slice shaped: the provider macro embeds
-//! auth in the provider metadata const, and rustc evaluates that const into the
-//! Wasm metadata section.
+//! These types are static-slice shaped so a provider can embed them in its
+//! `Metadata` const. They carry no runtime behavior: the build-time harvester
+//! converts them into the host's `ProviderManifest` and serializes that into the
+//! `omnifs.provider-metadata.v1` section. Each scheme is self-contained, it owns
+//! the domains/header/prefix the host injects its credential with.
 
-/// A provider's auth manifest: how the host injects credentials, which scheme
-/// `omnifs init` defaults to, and the schemes a user can pick.
+/// A provider's auth manifest: which scheme `omnifs init` defaults to and the
+/// schemes a user can pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Auth {
-    pub inject: Inject,
     pub default: &'static str,
     pub schemes: &'static [SchemeEntry],
 }
 
 impl Auth {
-    /// Start an auth manifest. `domains` are the hostnames the host injects the
-    /// credential into; `default` names the scheme `omnifs init` picks when the
-    /// user makes no explicit choice.
-    pub const fn new(
-        domains: &'static [&'static str],
-        default: &'static str,
-        schemes: &'static [SchemeEntry],
-    ) -> Self {
-        Self {
-            inject: Inject {
-                domains,
-                header: "Authorization",
-                prefix: "Bearer ",
-            },
-            default,
-            schemes,
-        }
-    }
-
+    /// Start an auth manifest. `default` names the scheme `omnifs init` picks
+    /// when the user makes no explicit choice.
     #[must_use]
-    pub const fn header(mut self, header: &'static str) -> Self {
-        self.inject.header = header;
-        self
-    }
-
-    #[must_use]
-    pub const fn prefix(mut self, prefix: &'static str) -> Self {
-        self.inject.prefix = prefix;
-        self
+    pub const fn new(default: &'static str, schemes: &'static [SchemeEntry]) -> Self {
+        Self { default, schemes }
     }
 }
 
+/// One keyed auth scheme.
+pub type SchemeEntry = (&'static str, Scheme);
+
+/// How the host attaches this scheme's credential to outbound requests: the
+/// hostnames it applies to, the header name, and the value prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Inject {
     pub domains: &'static [&'static str],
@@ -53,8 +35,15 @@ pub struct Inject {
     pub prefix: &'static str,
 }
 
-/// One keyed auth scheme.
-pub type SchemeEntry = (&'static str, Scheme);
+impl Inject {
+    const fn new() -> Self {
+        Self {
+            domains: &[],
+            header: "Authorization",
+            prefix: "Bearer ",
+        }
+    }
+}
 
 /// One auth scheme: a user-supplied static token or a host-driven OAuth flow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +55,7 @@ pub enum Scheme {
 /// A bring-your-own static token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaticToken {
+    pub inject: Inject,
     pub description: &'static str,
     pub creation_url: Option<&'static str>,
     pub validation: Option<Validation>,
@@ -78,6 +68,7 @@ impl StaticToken {
     #[must_use]
     pub const fn new(description: &'static str) -> Self {
         Self {
+            inject: Inject::new(),
             description,
             creation_url: None,
             validation: None,
@@ -85,6 +76,28 @@ impl StaticToken {
             setup: &[],
             docs_url: None,
         }
+    }
+
+    /// Hostnames the host injects this token into. Required; a scheme that
+    /// injects nowhere can never authenticate a request.
+    #[must_use]
+    pub const fn inject(mut self, domains: &'static [&'static str]) -> Self {
+        self.inject.domains = domains;
+        self
+    }
+
+    /// Override the injection header (default `Authorization`).
+    #[must_use]
+    pub const fn header(mut self, header: &'static str) -> Self {
+        self.inject.header = header;
+        self
+    }
+
+    /// Override the value prefix (default `Bearer `). Pass `""` for a raw token.
+    #[must_use]
+    pub const fn prefix(mut self, prefix: &'static str) -> Self {
+        self.inject.prefix = prefix;
+        self
     }
 
     #[must_use]
@@ -118,10 +131,14 @@ impl StaticToken {
     }
 }
 
-/// A host-driven OAuth scheme.
+/// A host-driven OAuth scheme. `authorization_endpoint` and `token_endpoint` are
+/// common to every flow; the flow-specific endpoints live in [`Flow`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OAuth {
+    pub inject: Inject,
     pub display_name: &'static str,
+    pub authorization_endpoint: &'static str,
+    pub token_endpoint: &'static str,
     pub client_id: Option<&'static str>,
     pub scopes: &'static [&'static str],
     pub flow: Flow,
@@ -141,10 +158,10 @@ impl OAuth {
     ) -> Self {
         Self::with_flow(
             display_name,
+            authorization_endpoint,
+            token_endpoint,
             Flow::DeviceCode {
-                authorization_endpoint,
                 device_authorization_endpoint,
-                token_endpoint,
             },
         )
     }
@@ -159,9 +176,9 @@ impl OAuth {
     ) -> Self {
         Self::with_flow(
             display_name,
+            authorization_endpoint,
+            token_endpoint,
             Flow::PkceLoopback {
-                authorization_endpoint,
-                token_endpoint,
                 redirect_uri_template,
             },
         )
@@ -177,17 +194,25 @@ impl OAuth {
     ) -> Self {
         Self::with_flow(
             display_name,
+            authorization_endpoint,
+            token_endpoint,
             Flow::ClientSideToken {
-                authorization_endpoint,
-                token_endpoint,
                 redirect_uri_template,
             },
         )
     }
 
-    const fn with_flow(display_name: &'static str, flow: Flow) -> Self {
+    const fn with_flow(
+        display_name: &'static str,
+        authorization_endpoint: &'static str,
+        token_endpoint: &'static str,
+        flow: Flow,
+    ) -> Self {
         Self {
+            inject: Inject::new(),
             display_name,
+            authorization_endpoint,
+            token_endpoint,
             client_id: None,
             scopes: &[],
             flow,
@@ -195,6 +220,27 @@ impl OAuth {
             setup: &[],
             docs_url: None,
         }
+    }
+
+    /// Hostnames the host injects the obtained token into. Required.
+    #[must_use]
+    pub const fn inject(mut self, domains: &'static [&'static str]) -> Self {
+        self.inject.domains = domains;
+        self
+    }
+
+    /// Override the injection header (default `Authorization`).
+    #[must_use]
+    pub const fn header(mut self, header: &'static str) -> Self {
+        self.inject.header = header;
+        self
+    }
+
+    /// Override the value prefix (default `Bearer `).
+    #[must_use]
+    pub const fn prefix(mut self, prefix: &'static str) -> Self {
+        self.inject.prefix = prefix;
+        self
     }
 
     #[must_use]
@@ -228,21 +274,17 @@ impl OAuth {
     }
 }
 
+/// The flow-specific endpoints of an OAuth scheme. The shared authorization and
+/// token endpoints live on [`OAuth`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
     DeviceCode {
-        authorization_endpoint: &'static str,
         device_authorization_endpoint: &'static str,
-        token_endpoint: &'static str,
     },
     PkceLoopback {
-        authorization_endpoint: &'static str,
-        token_endpoint: &'static str,
         redirect_uri_template: &'static str,
     },
     ClientSideToken {
-        authorization_endpoint: &'static str,
-        token_endpoint: &'static str,
         redirect_uri_template: &'static str,
     },
 }

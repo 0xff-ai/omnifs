@@ -193,7 +193,7 @@ The manifest (identity, capabilities, config metadata, auth) is authored from `#
 - The config metadata is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which emits the SDK's static config dialect); no manifest argument is needed.
 - Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file -> read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket). The manifest records them as string fields with a host-resource binding.
 
-The compact auth wire form (the shape serialized into the embedded section) is unchanged from the former JSON file format; it is now produced from Rust builder expressions instead.
+Each auth scheme is self-contained: it carries its own injection domains, header, and prefix. Author them per scheme with `StaticToken::new(..).inject(&["api.host"])` or `OAuth::device_code(..).inject(&["api.host"])`, plus `.header(..)`/`.prefix(..)` overrides (e.g. `.prefix("")` for a raw token). `Auth::new(default, schemes)` takes no block-level inject. At build time the native `omnifs-embed-metadata` harvester converts each provider's typed `Provider::METADATA` const into the host `ProviderManifest` JSON and injects it as the custom section; the SDK metadata types never serialize themselves.
 
 ## Build and verify
 

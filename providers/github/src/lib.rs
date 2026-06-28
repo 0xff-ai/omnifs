@@ -35,12 +35,12 @@ pub enum StateFilter {
 }
 
 const AUTH: Auth = Auth::new(
-    &["api.github.com"],
     "device",
     &[
         (
             "pat",
             Scheme::StaticToken(StaticToken::new("GitHub personal access token")
+                .inject(&["api.github.com"])
                 .creation_url(
                     "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
                 )
@@ -66,6 +66,7 @@ const AUTH: Auth = Auth::new(
                 "https://github.com/login/device/code",
                 "https://github.com/login/oauth/access_token",
             )
+            .inject(&["api.github.com"])
             .client_id("Ov23licogxMDzS47s9sF")
             .summary(
                 "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",

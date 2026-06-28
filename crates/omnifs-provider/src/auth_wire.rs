@@ -16,6 +16,29 @@ pub enum AuthScheme {
     Oauth(OauthScheme),
 }
 
+impl AuthScheme {
+    /// The scheme's key, or `None` for [`AuthScheme::None`].
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            AuthScheme::None => None,
+            AuthScheme::StaticToken(scheme) => Some(&scheme.key),
+            AuthScheme::Oauth(scheme) => Some(&scheme.key),
+        }
+    }
+
+    /// Hostnames this scheme's credential is injected into. Empty for
+    /// [`AuthScheme::None`].
+    #[must_use]
+    pub fn inject_domains(&self) -> &[String] {
+        match self {
+            AuthScheme::None => &[],
+            AuthScheme::StaticToken(scheme) => &scheme.inject_domains,
+            AuthScheme::Oauth(scheme) => &scheme.inject_domains,
+        }
+    }
+}
+
 /// Human-facing setup guidance for a single auth scheme.
 ///
 /// Display metadata only: it never affects header injection, so it rides on the
@@ -51,6 +74,7 @@ impl SchemeGuidance {
 #[serde(rename_all = "camelCase")]
 pub struct StaticTokenScheme {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
     pub value_prefix: String,
     pub description: String,
@@ -68,15 +92,23 @@ pub struct OauthScheme {
     pub display_name: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_scopes: Vec<String>,
     pub flow: OAuthFlow,
+    #[serde(default, skip_serializing_if = "TokenEndpointAuthMethod::is_none")]
     pub token_endpoint_auth: TokenEndpointAuthMethod,
+    #[serde(default)]
     pub refresh_token_rotates: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_authorize_params: Vec<KeyValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_token_params: Vec<KeyValue>,
     pub inject_domains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject_header_name: Option<String>,
     pub inject_value_prefix: String,
 }

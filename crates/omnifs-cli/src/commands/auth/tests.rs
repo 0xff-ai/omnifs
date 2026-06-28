@@ -440,104 +440,60 @@ fn install_provider_named(
 }
 
 fn auth_block_json(manifest: &AuthManifest) -> serde_json::Value {
-    let inject = serde_json::json!({
-        "domains": first_inject_domains(&manifest.schemes[0]),
-        "header": first_inject_header(&manifest.schemes[0]),
-        "prefix": first_inject_prefix(&manifest.schemes[0]),
-    });
-    let default = match &manifest.schemes[0] {
-        AuthScheme::None => "default".to_owned(),
-        AuthScheme::StaticToken(scheme) => scheme.key.clone(),
-        AuthScheme::Oauth(scheme) => scheme.key.clone(),
-    };
-    let mut schemes = serde_json::Map::new();
-    for scheme in &manifest.schemes {
-        match scheme {
-            AuthScheme::None => {},
-            AuthScheme::StaticToken(static_token) => {
-                schemes.insert(
-                    static_token.key.clone(),
-                    serde_json::json!({
-                        "type": "staticToken",
-                        "description": static_token.description,
-                    }),
-                );
-            },
-            AuthScheme::Oauth(oauth) => {
-                schemes.insert(oauth.key.clone(), oauth_scheme_json(oauth));
-            },
-        }
-    }
+    let default = manifest
+        .schemes
+        .iter()
+        .find_map(AuthScheme::key)
+        .unwrap_or("default")
+        .to_owned();
+    let schemes: Vec<serde_json::Value> = manifest.schemes.iter().filter_map(scheme_json).collect();
     serde_json::json!({
-        "inject": inject,
         "default": default,
         "schemes": schemes,
     })
 }
 
-fn first_inject_domains(scheme: &AuthScheme) -> Vec<String> {
+fn scheme_json(scheme: &AuthScheme) -> Option<serde_json::Value> {
     match scheme {
-        AuthScheme::None => Vec::new(),
-        AuthScheme::StaticToken(scheme) => scheme.inject_domains.clone(),
-        AuthScheme::Oauth(scheme) => scheme.inject_domains.clone(),
-    }
-}
-
-fn first_inject_header(scheme: &AuthScheme) -> String {
-    match scheme {
-        AuthScheme::None => "Authorization".to_owned(),
-        AuthScheme::StaticToken(scheme) => scheme
-            .header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_owned()),
-        AuthScheme::Oauth(scheme) => scheme
-            .inject_header_name
-            .clone()
-            .unwrap_or_else(|| "Authorization".to_owned()),
-    }
-}
-
-fn first_inject_prefix(scheme: &AuthScheme) -> String {
-    match scheme {
-        AuthScheme::None => String::new(),
-        AuthScheme::StaticToken(scheme) => scheme.value_prefix.clone(),
-        AuthScheme::Oauth(scheme) => scheme.inject_value_prefix.clone(),
+        AuthScheme::None => None,
+        AuthScheme::StaticToken(static_token) => Some(serde_json::json!({
+            "staticToken": {
+                "key": static_token.key,
+                "headerName": static_token.header_name,
+                "description": static_token.description,
+                "valuePrefix": static_token.value_prefix,
+                "injectDomains": static_token.inject_domains,
+            }
+        })),
+        AuthScheme::Oauth(oauth) => Some(serde_json::json!({ "oauth": oauth_scheme_json(oauth) })),
     }
 }
 
 fn oauth_scheme_json(oauth: &OauthScheme) -> serde_json::Value {
     let flow = match &oauth.flow {
         OAuthFlow::DeviceCode(config) => serde_json::json!({
-            "kind": "deviceCode",
-            "authorizationEndpoint": oauth.authorization_endpoint,
-            "deviceAuthorizationEndpoint": config.device_authorization_endpoint,
-            "tokenEndpoint": oauth.token_endpoint,
+            "deviceCode": { "deviceAuthorizationEndpoint": config.device_authorization_endpoint },
         }),
         OAuthFlow::PkceManualCode(config) => serde_json::json!({
-            "kind": "pkceManualCode",
-            "authorizationEndpoint": oauth.authorization_endpoint,
-            "tokenEndpoint": oauth.token_endpoint,
-            "redirectUri": config.redirect_uri,
+            "pkceManualCode": { "redirectUri": config.redirect_uri },
         }),
         OAuthFlow::PkceLoopback(config) => serde_json::json!({
-            "kind": "pkceLoopback",
-            "authorizationEndpoint": oauth.authorization_endpoint,
-            "tokenEndpoint": oauth.token_endpoint,
-            "redirectUriTemplate": config.redirect_uri_template,
+            "pkceLoopback": { "redirectUriTemplate": config.redirect_uri_template },
         }),
         OAuthFlow::ClientSideToken(config) => serde_json::json!({
-            "kind": "clientSideToken",
-            "authorizationEndpoint": oauth.authorization_endpoint,
-            "tokenEndpoint": oauth.token_endpoint,
-            "redirectUriTemplate": config.redirect_uri_template,
+            "clientSideToken": { "redirectUriTemplate": config.redirect_uri_template },
         }),
     };
     serde_json::json!({
-        "type": "oauth",
+        "key": oauth.key,
         "displayName": oauth.display_name,
-        "clientId": oauth.default_client_id.clone().unwrap_or_else(|| "test-client".to_owned()),
-        "scopes": oauth.default_scopes,
+        "authorizationEndpoint": oauth.authorization_endpoint,
+        "tokenEndpoint": oauth.token_endpoint,
+        "defaultClientId": oauth.default_client_id.clone().unwrap_or_else(|| "test-client".to_owned()),
+        "defaultScopes": oauth.default_scopes,
         "flow": flow,
+        "injectDomains": oauth.inject_domains,
+        "injectValuePrefix": oauth.inject_value_prefix,
     })
 }
 

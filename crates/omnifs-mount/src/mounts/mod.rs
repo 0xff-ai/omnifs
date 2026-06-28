@@ -95,7 +95,7 @@ impl Spec {
     ) -> Result<(), serde_json::Error> {
         if self.auth.is_empty()
             && let Some(auth) = &manifest.auth
-            && let Some(default_scheme) = auth.schemes.get(&auth.default)
+            && let Some(default_scheme) = auth.scheme(&auth.default)
         {
             let auth = match default_scheme {
                 omnifs_provider::AuthScheme::StaticToken(_) => {
@@ -497,7 +497,7 @@ mod tests {
     fn linear_manifest_parses_with_static_token_scheme() {
         let manifest = linear_manifest();
         let auth = manifest.auth.as_ref().expect("linear auth block");
-        let pat = auth.schemes.get("pat").expect("linear pat scheme");
+        let pat = auth.scheme("pat").expect("linear pat scheme");
         assert!(matches!(pat, omnifs_provider::AuthScheme::StaticToken(_)));
         let omnifs_provider::AuthScheme::StaticToken(static_token) = pat else {
             unreachable!()
@@ -512,11 +512,11 @@ mod tests {
     fn github_manifest_parses_with_static_token_scheme() {
         let manifest = github_manifest();
         let auth = manifest.auth.as_ref().expect("github auth block");
-        let pat = auth.schemes.get("pat").expect("github pat scheme");
+        let pat = auth.scheme("pat").expect("github pat scheme");
         let omnifs_provider::AuthScheme::StaticToken(static_token) = pat else {
             panic!("expected static token");
         };
-        assert_eq!(auth.inject.prefix, "Bearer ");
+        assert_eq!(static_token.value_prefix, "Bearer ");
         let val = static_token.validation.as_ref().expect("validation");
         assert_eq!(val.method, "GET");
         assert_eq!(val.expect_status, 200);

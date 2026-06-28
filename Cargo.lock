@@ -2982,6 +2982,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-embed-metadata"
+version = "0.2.1"
+dependencies = [
+ "omnifs-caps",
+ "omnifs-provider",
+ "omnifs-provider-arxiv",
+ "omnifs-provider-db",
+ "omnifs-provider-dns",
+ "omnifs-provider-docker",
+ "omnifs-provider-github",
+ "omnifs-provider-kubernetes",
+ "omnifs-provider-linear",
+ "omnifs-provider-oura",
+ "omnifs-sdk",
+ "serde_json",
+ "test-provider",
+]
+
+[[package]]
 name = "omnifs-fuse"
 version = "0.2.1"
 dependencies = [
