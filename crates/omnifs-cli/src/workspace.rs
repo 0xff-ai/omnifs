@@ -35,7 +35,7 @@ pub(crate) struct MountRemovalTarget {
 
 impl Workspace {
     pub(crate) fn resolve() -> anyhow::Result<Self> {
-        let layout = crate::dev_support::contributor_layout()?;
+        let layout = WorkspaceLayout::resolve()?;
         Ok(Self::from_layout(layout))
     }
 

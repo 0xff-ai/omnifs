@@ -5,5 +5,15 @@
     "path": "/data/test.db",
     "read_only": true,
     "sample_limit": 20
+  },
+  "capabilities": {
+    "preopened_paths": [
+      {
+        "host": "/data",
+        "guest": "/data",
+        "mode": "ro"
+      }
+    ],
+    "max_memory_mb": 128
   }
 }

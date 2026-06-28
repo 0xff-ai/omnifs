@@ -60,8 +60,9 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 # with `omnifs-provider-` and builds them in a single cargo invocation.
 # Adding a new provider is therefore just `providers/<name>/...` with
 # its provider manifest. The normal contributor runtime image no longer depends
-# on this stage; `omnifs dev` passes host-built WASM as the `provider-wasm`
-# named build context so the Docker image does not compile providers again.
+# on this stage; `scripts/dev.ts` passes the host-built provider-store bundle
+# as the `provider-wasm` named build context so the Docker image does not
+# compile providers again.
 
 FROM toolchain AS providers
 WORKDIR /src
@@ -178,8 +179,8 @@ FROM runtime-base AS runtime
 # contributor's `omnifs` on PATH (e.g. an old npm-installed release)
 # is used to launch an image built from a newer source tree that
 # wires new capabilities (ports, env vars, mounts) the old launcher
-# doesn't know about. `omnifs dev` and CI both pass the workspace
-# `CARGO_PKG_VERSION` as the build arg.
+# doesn't know about. `scripts/dev.ts` and CI both pass the workspace version
+# as the build arg.
 #
 # OMNIFS_LAUNCH_PROTOCOL is set to `daemon-control-v<API_MAJOR>` and must
 # match the `EXPECTED_LAUNCH_PROTOCOL` constant in `crates/omnifs-cli/src/runtime.rs`.

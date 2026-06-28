@@ -12,9 +12,8 @@ mod commands;
 mod config;
 mod credential_target;
 mod daemon_teardown;
-mod dev;
-mod dev_support;
 mod error;
+#[cfg(feature = "daemon")]
 mod host_teardown;
 mod inspector;
 mod launch;

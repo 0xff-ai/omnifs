@@ -11,8 +11,8 @@
 //! are never touched.
 //!
 //! Backend-aware: the daemon's mode and mount point come from the run-state
-//! file `omnifs up`/`omnifs dev` write (`<config_dir>/launch.json`). The host-
-//! native backend's mount is host-visible, so the subshell above runs on the
+//! file `omnifs up` writes (`<config_dir>/launch.json`). The host-native
+//! backend's mount is host-visible, so the subshell above runs on the
 //! host pointed at it. The Docker backend's mount lives inside the container at
 //! the guest mount path and is invisible on the host, so there `omnifs shell`
 //! execs into the running container instead.

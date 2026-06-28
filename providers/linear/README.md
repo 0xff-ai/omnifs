@@ -25,10 +25,10 @@ so the host can reuse cached content across opens until Linear's
 
 The provider is built into the omnifs container image. Run
 `omnifs init linear` to create a user mount config and complete the
-default OAuth flow. The `omnifs dev` contributor sandbox provisions the
-`pat` scheme automatically: when `LINEAR_API_KEY` is set, it imports that
-token into the dev-home credential store (`~/.omnifs/dev/credentials.json`),
-and the embedded `providers/linear/dev-mount.json` references it by scheme.
+default OAuth flow. The `just dev` contributor sandbox provisions the `pat`
+scheme automatically: when `LINEAR_API_KEY` is set, `scripts/dev.ts` writes
+that token into the dev-home credential store (`~/.omnifs-dev/credentials.json`),
+and the embedded `providers/linear/dev/mount.json` references it by scheme.
 
 ### Authentication
 
@@ -80,7 +80,7 @@ with scheme `pat` (the `pat` scheme is declared in the provider's `auth = ..` ar
 
 ### Running in Docker
 
-The repo's `omnifs dev` command runs the default contributor sandbox.
+The repo's `just dev` command runs the default contributor sandbox.
 
 ## Implementation notes
 

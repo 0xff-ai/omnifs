@@ -50,5 +50,5 @@ openapi:
 
 # Build provider artifacts and launch the supported contributor runtime.
 [group('dev')]
-dev *args: providers::build
-    cargo run -p omnifs-cli -- dev {{ args }}
+dev *args:
+    bun scripts/dev.ts {{ args }}

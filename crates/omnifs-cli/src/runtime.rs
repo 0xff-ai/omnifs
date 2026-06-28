@@ -477,7 +477,7 @@ impl Runtime {
                                  This tag may not be published yet. Options:\n\
                                  - Configure a specific runtime image in `config.toml` (for example \
                                    a release tag or a channel tag)\n\
-                                 - Run `omnifs dev` to build and launch the local sandbox\n\
+                                 - Run `just dev` to build and launch the local sandbox\n\
                                  - Check https://ghcr.io/0xff-ai/omnifs for available tags"
                             )
                         } else {
@@ -581,12 +581,12 @@ fn check_launch_protocol(image: &str, label: Option<&str>) -> Result<()> {
         Some(other) => anyhow::bail!(
             "runtime image `{image}` uses launch protocol `{other}`, but this CLI expects \
              `{EXPECTED_LAUNCH_PROTOCOL}`. Configure a matching runtime image in `config.toml`, \
-             or run `omnifs dev` to build and launch the local sandbox."
+             or run `just dev` to build and launch the local sandbox."
         ),
         None => anyhow::bail!(
             "runtime image `{image}` does not declare `{LAUNCH_PROTOCOL_LABEL}`. It was likely \
              built before the daemon control-API launcher. Configure a matching runtime image in \
-             `config.toml`, or run `omnifs dev` to build and launch the local sandbox."
+             `config.toml`, or run `just dev` to build and launch the local sandbox."
         ),
     }
 }

@@ -12,7 +12,7 @@ metadata:
   name: greeting
   namespace: demo
 data:
-  message: "hello from omnifs dev"
+  message: "hello from just dev"
 ---
 apiVersion: apps/v1
 kind: Deployment

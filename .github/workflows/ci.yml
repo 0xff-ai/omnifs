@@ -127,10 +127,13 @@ jobs:
       - name: Stage WASM components
         run: |
           set -euo pipefail
-          mkdir -p dist-wasm
+          mkdir -p dist-wasm dist-provider-store
           cp target/wasm32-wasip2/release/*.wasm dist-wasm/
           test -n "$(find dist-wasm -maxdepth 1 -name 'omnifs_provider_*.wasm' -print -quit)"
           test -f dist-wasm/test_provider.wasm
+          cp target/omnifs-provider-store/index.json dist-provider-store/
+          cp target/omnifs-provider-store/*.wasm dist-provider-store/
+          test -n "$(find dist-provider-store -maxdepth 1 -name '*.wasm' -print -quit)"
 
       - name: Attest WASM components
         if: env.CI_MAIN_PUSH == 'true'
@@ -143,6 +146,14 @@ jobs:
         with:
           name: omnifs-wasm
           path: dist-wasm/*.wasm
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload provider store bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-provider-store
+          path: dist-provider-store/*
           retention-days: 90
           if-no-files-found: error
 
@@ -573,11 +584,19 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Download amd64 image digest
         uses: actions/download-artifact@v8
         with:
           name: docker-digest-amd64
           path: /tmp/digests
+
+      - name: Download provider store bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-provider-store
+          path: target/omnifs-provider-store
 
       - uses: ./.github/actions/omnifs-install-cli
         with:
@@ -619,11 +638,19 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Download arm64 image digest
         uses: actions/download-artifact@v8
         with:
           name: docker-digest-arm64
           path: /tmp/digests
+
+      - name: Download provider store bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-provider-store
+          path: target/omnifs-provider-store
 
       - uses: ./.github/actions/omnifs-install-cli
         with:
