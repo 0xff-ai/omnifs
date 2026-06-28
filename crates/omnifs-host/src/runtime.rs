@@ -139,6 +139,7 @@ pub struct Runtime {
 /// Test operation driver used by provider integration tests that need to
 /// inspect and answer captured host imports. This is not the provider runtime
 /// protocol: production operations await WIT async host imports directly.
+#[doc(hidden)]
 pub struct TestOp<'a> {
     runtime: &'a Runtime,
     op: Op,
@@ -476,9 +477,50 @@ impl Runtime {
     pub(crate) fn next_operation_id(&self) -> u64 {
         self.next_operation_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Non-blocking receive of the next captured provider callout, if one has
+    /// been issued and not yet answered. Only yields values on runtimes built
+    /// with [`Runtime::new_for_callout_tests`]; returns `None` otherwise or when
+    /// no callout is pending. Lets a concurrency test observe that two ops are
+    /// suspended on host imports at the same instant before answering either.
+    #[doc(hidden)]
+    pub fn try_recv_test_callout(&self) -> Option<PendingTestCallout> {
+        let received = self.test_callouts.as_ref()?.lock().ok()?.try_recv().ok()?;
+        Some(PendingTestCallout {
+            op_id: received.op_id,
+            reply: received.reply,
+        })
+    }
+}
+
+/// Test-only handle to one captured provider callout awaiting its answer. See
+/// [`Runtime::try_recv_test_callout`].
+#[doc(hidden)]
+pub struct PendingTestCallout {
+    op_id: u64,
+    reply: tokio::sync::oneshot::Sender<wit_types::CalloutResult>,
+}
+
+impl PendingTestCallout {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn op_id(&self) -> u64 {
+        self.op_id
+    }
+
+    /// Resume the suspended provider future with `result`.
+    #[doc(hidden)]
+    pub fn answer(self, result: wit_types::CalloutResult) {
+        let _ = self.reply.send(result);
+    }
 }
 
 impl Runtime {
+    /// Synchronous test entry: blocks the caller until the operation returns or
+    /// suspends on captured callouts. Production code drives ops through the
+    /// async [`Runtime::run_op`] path instead; this exists for the provider
+    /// integration harness (`omnifs-itest`).
+    #[doc(hidden)]
     pub fn start_op(&self, op: Op) -> Result<TestOp<'_>> {
         let op_gen = self.cache.current_generation();
         let id = self.next_operation_id();

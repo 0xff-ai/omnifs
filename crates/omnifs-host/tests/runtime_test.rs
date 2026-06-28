@@ -118,8 +118,10 @@ async fn test_list_hello_dir() {
         .unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 14);
+            assert_eq!(listing.entries.len(), 16);
             let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"remote-a"));
+            assert!(names.contains(&"remote-b"));
             assert!(names.contains(&"message"));
             assert!(names.contains(&"large-ranged"));
             assert!(names.contains(&"greeting"));
@@ -411,6 +413,8 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "message",
             "projected",
             "ranged",
+            "remote-a",
+            "remote-b",
             "snapshot",
             "throttled",
             "unbounded",
@@ -841,6 +845,8 @@ async fn test_lookup_returns_siblings_and_list_warms_child_shape() {
             "message",
             "projected",
             "ranged",
+            "remote-a",
+            "remote-b",
             "snapshot",
             "throttled",
             "unbounded",

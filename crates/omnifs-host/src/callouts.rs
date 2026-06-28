@@ -278,9 +278,41 @@ impl CalloutHost {
                     .await
             },
             wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req, op_id),
+            // `open_repo` shells out to `git` and blocks (clone, fetch). Run it
+            // off the single concurrent-store event-loop thread so other
+            // in-flight provider ops on this instance keep progressing while it
+            // runs; awaiting the blocking task yields `Pending` to the loop.
+            wit_types::Callout::GitOpenRepo(req) => {
+                let git = self.git.clone();
+                let req = req.clone();
+                let span = tracing::Span::current();
+                spawn_blocking_callout("git.open_repo", move || {
+                    span.in_scope(|| git.open_repo(&req, op_id))
+                })
+                .await
+            },
             wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
-            wit_types::Callout::ReadBlob(req) => self.blob.read(req),
+            // Synchronous bounded disk read; offloaded for the same reason as
+            // `git.open_repo` so a slow read never stalls the event loop.
+            wit_types::Callout::ReadBlob(req) => {
+                let blob = self.blob.clone();
+                let req = *req;
+                let span = tracing::Span::current();
+                spawn_blocking_callout("blob.read", move || span.in_scope(|| blob.read(&req))).await
+            },
         }
+    }
+}
+
+/// Run a blocking executor call on the Tokio blocking pool and surface a join
+/// failure as an internal `CalloutResult`. Keeps synchronous host work off the
+/// component event-loop thread so concurrent provider ops are not serialized.
+async fn spawn_blocking_callout(
+    label: &'static str,
+    f: impl FnOnce() -> wit_types::CalloutResult + Send + 'static,
+) -> wit_types::CalloutResult {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(join_error) => callout_internal(format!("{label} task failed: {join_error}")),
     }
 }

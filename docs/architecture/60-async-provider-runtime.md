@@ -93,6 +93,14 @@ Tracing is preserved at the callout boundary. Every host import creates the same
 
 The inspector also remains callout-oriented. It begins when the async host import arrives and finishes when the executor returns the `callout-result`.
 
+## Concurrency and blocking
+
+The driver runs one provider instance on a single event-loop thread, so same-instance concurrency depends on every suspension point yielding that thread rather than blocking it.
+
+- **Async callouts yield.** HTTP and archive callouts are `async` and return control to the event loop while the host does the work, so other in-flight ops keep progressing.
+- **Synchronous executors are offloaded.** `GitExecutor::open_repo` (which shells out to `git`) and `BlobExecutor::read` (a bounded disk read) are synchronous. `CalloutHost::run` runs them on the Tokio blocking pool via `spawn_blocking`, so a slow clone or read suspends only its own op, not the whole instance. Without this, the blocking call would run inside the host-task future's poll on the event-loop thread and stall every concurrent op.
+- **WASI Preview 2 imports still block the instance.** `wasmtime_wasi::p2::add_to_linker_async` binds WASI functions on the legacy `func_wrap_async` path, which holds the store exclusively across the await (Wasmtime `StoreFiberYield::KeepStore`). A provider that blocks on WASI I/O (a preopened-file read, `wasi:io/poll`) therefore serializes the instance for the duration of that wait, unlike an omnifs callout. This is inherent to WASI p2; only a move to WASI p3 (concurrent host bindings) would change it. Providers do upstream work through omnifs callouts, not WASI, so this is rarely on the hot path.
+
 ## Test harness
 
 Provider integration tests still need deterministic canned HTTP and blob responses. The harness uses `Runtime::new_for_callout_tests`, which captures selected host imports and lets tests answer them.

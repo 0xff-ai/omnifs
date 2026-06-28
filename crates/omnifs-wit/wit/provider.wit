@@ -67,8 +67,6 @@ interface types {
         callout-error(callout-error),
     }
 
-    type callout-results = list<callout-result>;
-
     // --- Terminal host mutations ---
 
     /// Host-side mutations committed at the return boundary, grouped in typed
