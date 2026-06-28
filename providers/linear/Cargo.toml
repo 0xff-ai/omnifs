@@ -22,7 +22,6 @@ omnifs-sdk = { workspace = true }
 hashbrown = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
-strum = { workspace = true }
 [lints.rust]
 unsafe_code = "allow"
 

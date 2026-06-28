@@ -24,7 +24,6 @@ http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rc-zip-sync = { version = "4", default-features = false, features = ["deflate"] }
-strum = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

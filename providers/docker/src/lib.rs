@@ -81,39 +81,13 @@ impl fmt::Display for ContainerRef {
     }
 }
 
-macro_rules! name_segment {
-    ($ty:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $ty(String);
+#[omnifs_sdk::path_segment(validate = is_valid_docker_name)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectName(String);
 
-        impl $ty {
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl FromStr for $ty {
-            type Err = ();
-
-            fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-                if is_valid_docker_name(value) {
-                    Ok(Self(value.to_string()))
-                } else {
-                    Err(())
-                }
-            }
-        }
-
-        impl fmt::Display for $ty {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-    };
-}
-
-name_segment!(ProjectName);
-name_segment!(ServiceName);
+#[omnifs_sdk::path_segment(validate = is_valid_docker_name)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServiceName(String);
 
 // ---------------------------------------------------------------------------
 // Containers (keyed directories of direct file reads, no canonical bytes)

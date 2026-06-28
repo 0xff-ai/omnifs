@@ -69,50 +69,25 @@ fn valid_segment(s: &str) -> bool {
             .any(|b| b < 0x20 || matches!(b, b'%' | b'?' | b'#'))
 }
 
-macro_rules! string_segment {
-    ($(#[$meta:meta])* $name:ident) => {
-        $(#[$meta])*
-        #[derive(Clone, Debug)]
-        pub(crate) struct $name(String);
+/// A Kubernetes namespace name.
+#[omnifs_sdk::path_segment(validate = valid_segment)]
+#[derive(Clone, Debug)]
+pub(crate) struct Namespace(String);
 
-        impl $name {
-            pub(crate) fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
+/// A resource type's filesystem plural.
+#[omnifs_sdk::path_segment(validate = valid_segment)]
+#[derive(Clone, Debug)]
+pub(crate) struct ResourceType(String);
 
-        impl FromStr for $name {
-            type Err = ();
+/// A resource object name.
+#[omnifs_sdk::path_segment(validate = valid_segment)]
+#[derive(Clone, Debug)]
+pub(crate) struct ResourceName(String);
 
-            fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-                valid_segment(s).then(|| Self(s.to_string())).ok_or(())
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(&self.0)
-            }
-        }
-    };
-}
-
-string_segment!(
-    /// A Kubernetes namespace name.
-    Namespace
-);
-string_segment!(
-    /// A resource type's filesystem plural.
-    ResourceType
-);
-string_segment!(
-    /// A resource object name.
-    ResourceName
-);
-string_segment!(
-    /// A `<container>.log` leaf name under a pod's `logs/` directory.
-    LogFile
-);
+/// A `<container>.log` leaf name under a pod's `logs/` directory.
+#[omnifs_sdk::path_segment(validate = valid_segment)]
+#[derive(Clone, Debug)]
+pub(crate) struct LogFile(String);
 
 /// The `pods` resource type, used to gate the `logs/` subtree to pods only.
 /// As a capture (not a literal route segment) it stays invisible in the

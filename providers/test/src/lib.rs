@@ -15,8 +15,6 @@
 #![allow(clippy::needless_pass_by_value)]
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
-use core::fmt;
-use core::str::FromStr;
 use core::time::Duration;
 
 use omnifs_sdk::handler::BoxFuture;
@@ -47,39 +45,12 @@ struct DynamicCaptures {
 // Object family: `Item`
 // ===========================================================================
 
+#[omnifs_sdk::path_segment]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[strum(serialize_all = "snake_case")]
 enum StateFilter {
     Open,
     All,
-}
-
-impl FromStr for StateFilter {
-    type Err = ProviderError;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "open" => Ok(Self::Open),
-            "all" => Ok(Self::All),
-            other => Err(ProviderError::invalid_input(format!(
-                "unknown state filter {other:?}"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for StateFilter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Open => "open",
-            Self::All => "all",
-        })
-    }
-}
-
-impl PathSegment for StateFilter {
-    fn choices() -> Option<&'static [&'static str]> {
-        Some(&["open", "all"])
-    }
 }
 
 #[omnifs_sdk::object(kind = "test.item", key = ItemKey)]

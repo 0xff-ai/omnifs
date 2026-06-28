@@ -111,58 +111,24 @@ impl AsRef<str> for SupportedRecordType {
     }
 }
 
+fn is_valid_domain_name(s: &str) -> bool {
+    s.parse::<IpAddr>().is_err()
+        && s.contains('.')
+        && !s.contains(char::is_whitespace)
+        && s.len() <= 253
+}
+
+fn is_valid_resolver_name(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains(char::is_whitespace)
+}
+
+#[omnifs_sdk::path_segment(validate = is_valid_domain_name)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DomainName(String);
 
+#[omnifs_sdk::path_segment(validate = is_valid_resolver_name)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ResolverName(String);
-
-impl FromStr for DomainName {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        (s.parse::<IpAddr>().is_err()
-            && s.contains('.')
-            && !s.contains(char::is_whitespace)
-            && s.len() <= 253)
-            .then_some(Self(s.to_string()))
-            .ok_or(())
-    }
-}
-
-impl std::fmt::Display for DomainName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl AsRef<str> for DomainName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for ResolverName {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        (!s.is_empty() && !s.contains('/') && !s.contains(char::is_whitespace))
-            .then_some(Self(s.to_string()))
-            .ok_or(())
-    }
-}
-
-impl std::fmt::Display for ResolverName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl AsRef<str> for ResolverName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
 
 const BUILTIN_RESOLVERS: &[(&str, &str, &[&str])] = &[
     (

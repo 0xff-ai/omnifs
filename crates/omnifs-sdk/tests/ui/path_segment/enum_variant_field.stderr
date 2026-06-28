@@ -1,0 +1,5 @@
+error: #[path_segment] enum variants must be fieldless
+ --> tests/ui/path_segment/enum_variant_field.rs:3:5
+  |
+3 |     Tuple(String),
+  |     ^^^^^

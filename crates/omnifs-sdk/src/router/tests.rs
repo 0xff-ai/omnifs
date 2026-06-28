@@ -1,7 +1,7 @@
 //! Router unit tests for the object face model and dispatch contracts.
 
 use super::*;
-use crate::captures::{Capture, Captures, FromCaptures};
+use crate::captures::{Capture, Captures, FromCaptures, PathSegment};
 use crate::cx::Cx;
 use crate::error::{ProviderError, ProviderErrorKind, Result};
 use crate::handler::DirCx;
@@ -12,10 +12,8 @@ use crate::repr::{Json, Markdown, Representable};
 use omnifs_core::ContentType;
 use omnifs_wit::provider::types as wit_types;
 use std::cell::RefCell;
-use std::fmt;
 use std::future::Future;
 use std::rc::Rc;
-use std::str::FromStr;
 use std::task::{Context, Poll, Waker};
 
 // ---------------------------------------------------------------------------
@@ -360,33 +358,12 @@ fn route_shape_tracks_explicit_child_routes_under_object_anchor() {
 // Faceted key + facet view-leaf expansion
 // ---------------------------------------------------------------------------
 
+#[omnifs_sdk::path_segment]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[strum(serialize_all = "snake_case")]
 enum Filter {
     Open,
     All,
-}
-
-impl FromStr for Filter {
-    type Err = ProviderError;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "open" => Ok(Self::Open),
-            "all" => Ok(Self::All),
-            other => Err(ProviderError::invalid_input(format!(
-                "unknown filter {other}"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open => write!(f, "open"),
-            Self::All => write!(f, "all"),
-        }
-    }
 }
 
 struct FacetedKey {
@@ -410,7 +387,8 @@ impl FromCaptures for FacetedKey {
             filter: Facet(
                 caps.get("filter")
                     .ok_or_else(|| ProviderError::invalid_input("missing filter"))?
-                    .parse()?,
+                    .parse()
+                    .map_err(|()| ProviderError::invalid_input("invalid filter"))?,
             ),
         })
     }
@@ -427,11 +405,14 @@ impl IdentityCaptures for FacetedKey {
 
 impl crate::object::FacetMetadata for FacetedKey {
     fn facet_axes() -> &'static [crate::object::FacetAxis] {
-        static AXES: [crate::object::FacetAxis; 1] = [crate::object::FacetAxis {
-            capture_name: "filter",
-            choices: &["open", "all"],
-        }];
-        &AXES
+        static AXES: std::sync::OnceLock<[crate::object::FacetAxis; 1]> =
+            std::sync::OnceLock::new();
+        &AXES.get_or_init(|| {
+            [crate::object::FacetAxis {
+                capture_name: "filter",
+                choices: Filter::choices().expect("Filter has finite choices"),
+            }]
+        })[..]
     }
 }
 
