@@ -15,10 +15,10 @@ use std::path::Path;
 
 use omnifs_caps::{Need as HostNeed, PreopenMode, PreopenedPath};
 use omnifs_provider::{
-    AuthScheme, BuildEvidence as HostBuildEvidence, ClientSideTokenConfig, ConfigField,
-    ConfigMetadata, ConfigType, DeviceCodeConfig, HostResourceBinding, OAuthFlow, OauthScheme,
-    PkceLoopbackConfig, ProviderAuthManifest, ProviderManifest, SchemeGuidance, StaticTokenScheme,
-    TokenEndpointAuthMethod, TokenValidation, embed_provider_metadata_section,
+    AuthScheme, ClientSideTokenConfig, ConfigField, ConfigMetadata, ConfigType, DeviceCodeConfig,
+    HostResourceBinding, OAuthFlow, OauthScheme, PkceLoopbackConfig, ProviderAuthManifest,
+    ProviderManifest, SchemeGuidance, StaticTokenScheme, TokenEndpointAuthMethod, TokenValidation,
+    embed_provider_metadata_section,
 };
 use omnifs_sdk::auth::{Auth, Flow, OAuth, Scheme, StaticToken, Validation};
 use omnifs_sdk::config_resource::{
@@ -134,10 +134,6 @@ fn to_manifest(metadata: &Metadata) -> ProviderManifest {
         provider: metadata.provider.to_owned(),
         default_mount: metadata.default_mount.to_owned(),
         version: metadata.version.map(str::to_owned),
-        build_evidence: metadata.build_evidence.map(|evidence| HostBuildEvidence {
-            wit: evidence.wit.to_owned(),
-            sdk: evidence.sdk.to_owned(),
-        }),
         capabilities: metadata.capabilities.iter().map(to_need).collect(),
         auth: metadata.auth.map(to_auth),
         config: metadata.config.map(to_config),

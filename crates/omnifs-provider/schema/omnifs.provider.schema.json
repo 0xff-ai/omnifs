@@ -13,16 +13,6 @@
         }
       ]
     },
-    "buildEvidence": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/BuildEvidence"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "capabilities": {
       "type": "array",
       "items": {
@@ -100,23 +90,6 @@
             "oauth"
           ]
         }
-      ]
-    },
-    "BuildEvidence": {
-      "description": "Build provenance for a compiled provider component: the `omnifs:provider`\nWIT package version and the SDK version it was built against. The\n`#[provider]` macro stamps this into the embedded manifest so the host can\nlater detect a provider built against an incompatible contract.",
-      "type": "object",
-      "properties": {
-        "sdk": {
-          "type": "string"
-        },
-        "wit": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "wit",
-        "sdk"
       ]
     },
     "ClientSideTokenConfig": {

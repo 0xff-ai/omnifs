@@ -140,7 +140,7 @@ pub use config_resource::{
     ConfigField, ConfigMetadata, ConfigType, DefaultValue, HostFile, HostResourceBinding,
     HostSocket, ProvidesConfigMetadata,
 };
-pub use metadata::{BuildEvidence, Metadata, Need, Provider};
+pub use metadata::{Metadata, Need, Provider};
 #[doc(hidden)]
 pub use omnifs_wit as __wit;
 pub use omnifs_wit::provider::{exports, omnifs};

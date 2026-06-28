@@ -9,8 +9,6 @@
 use crate::auth::Auth;
 use crate::config_resource::ConfigMetadata;
 
-pub const WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
-
 /// Provider metadata contract.
 pub trait Provider {
     const METADATA: Metadata;
@@ -23,7 +21,6 @@ pub struct Metadata {
     pub provider: &'static str,
     pub default_mount: &'static str,
     pub version: Option<&'static str>,
-    pub build_evidence: Option<BuildEvidence>,
     pub capabilities: &'static [Need],
     pub auth: Option<Auth>,
     pub config: Option<ConfigMetadata>,
@@ -38,7 +35,6 @@ impl Metadata {
             provider: "",
             default_mount: id,
             version: None,
-            build_evidence: None,
             capabilities: &[],
             auth: None,
             config: None,
@@ -70,12 +66,6 @@ impl Metadata {
     }
 
     #[must_use]
-    pub const fn build_evidence(mut self, evidence: BuildEvidence) -> Self {
-        self.build_evidence = Some(evidence);
-        self
-    }
-
-    #[must_use]
     pub const fn capabilities(mut self, capabilities: &'static [Need]) -> Self {
         self.capabilities = capabilities;
         self
@@ -91,22 +81,6 @@ impl Metadata {
     pub const fn config(mut self, config: Option<ConfigMetadata>) -> Self {
         self.config = config;
         self
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BuildEvidence {
-    pub wit: &'static str,
-    pub sdk: &'static str,
-}
-
-impl BuildEvidence {
-    #[must_use]
-    pub const fn current(sdk: &'static str) -> Self {
-        Self {
-            wit: WIT_CONTRACT,
-            sdk,
-        }
     }
 }
 

@@ -29,7 +29,7 @@ pub use auth_wire::{
 };
 pub use catalog::{Catalog, CatalogError, DirStatus, Provider};
 pub use config::{ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding};
-pub use manifest::{BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest};
+pub use manifest::{ProviderAuthManifest, ProviderManifest};
 pub use records::{
     DecodeError, HandlerKindRecord, HandlerRecord, ManifestCaptureRecord, ManifestRecord,
     ManifestRecordIter, MutationRecord, SubtreeRouteRecord, TAG_HANDLER, TAG_MUTATION,

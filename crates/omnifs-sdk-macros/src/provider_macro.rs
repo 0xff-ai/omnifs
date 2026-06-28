@@ -397,7 +397,6 @@ fn metadata_tokens(
     let display_name = LitStr::new(&manifest.description, Span::call_site());
     let provider_file = LitStr::new(&manifest.provider_file, Span::call_site());
     let default_mount = LitStr::new(&manifest.default_mount, Span::call_site());
-    let sdk_version = LitStr::new(env!("CARGO_PKG_VERSION"), Span::call_site());
     let version = manifest.version.as_ref().map(|version| {
         let version = LitStr::new(version, Span::call_site());
         quote! { .version(#version) }
@@ -415,7 +414,6 @@ fn metadata_tokens(
             .provider(#provider_file)
             .mount(#default_mount)
             #version
-            .build_evidence(omnifs_sdk::BuildEvidence::current(#sdk_version))
             #capabilities
             #auth
             .config(<#config_type as omnifs_sdk::ProvidesConfigMetadata>::METADATA)

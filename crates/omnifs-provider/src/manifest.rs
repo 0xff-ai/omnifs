@@ -8,8 +8,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
-pub const PROVIDER_WIT_CONTRACT: &str = "omnifs:provider@0.4.0";
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderManifest {
@@ -22,41 +20,12 @@ pub struct ProviderManifest {
     /// macro. Informational catalog/UI context, never identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_evidence: Option<BuildEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<Need>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<ConfigMetadata>,
-}
-
-/// Build provenance for a compiled provider component: the `omnifs:provider`
-/// WIT package version and the SDK version it was built against. The
-/// `#[provider]` macro stamps this into the embedded manifest so the host can
-/// later detect a provider built against an incompatible contract.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BuildEvidence {
-    pub wit: String,
-    pub sdk: String,
-}
-
-impl BuildEvidence {
-    #[must_use]
-    pub fn current(sdk_version: impl Into<String>) -> Self {
-        Self {
-            wit: PROVIDER_WIT_CONTRACT.to_string(),
-            sdk: sdk_version.into(),
-        }
-    }
-
-    fn validate(&self) -> Result<(), ProviderMetadataError> {
-        validate_non_empty("buildEvidence.wit", &self.wit)?;
-        validate_non_empty("buildEvidence.sdk", &self.sdk)?;
-        Ok(())
-    }
 }
 
 /// Provider auth block from the `omnifs.provider-metadata.v1` embedded section.
@@ -185,9 +154,6 @@ impl ProviderManifest {
         validate_non_empty("displayName", &self.display_name)?;
         validate_non_empty("provider", &self.provider)?;
         validate_non_empty("defaultMount", &self.default_mount)?;
-        if let Some(build_evidence) = &self.build_evidence {
-            build_evidence.validate()?;
-        }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
             // A dynamic grant is resolved at mount-start from a config field
@@ -660,21 +626,6 @@ mod tests {
         );
         let reparsed = encode_provider_manifest(&oauth_manifest).unwrap();
         assert_eq!(method(&reparsed), TokenEndpointAuthMethod::ClientSecretPost);
-    }
-
-    #[test]
-    fn provider_wit_contract_constant_matches_wit_package() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../omnifs-wit/wit/provider.wit");
-        let wit = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!("read {}: {error}", path.display());
-        });
-        let package = wit
-            .lines()
-            .find(|line| line.starts_with("package "))
-            .expect("provider.wit declares a package");
-
-        assert_eq!(package, format!("package {PROVIDER_WIT_CONTRACT};"));
     }
 
     #[test]
