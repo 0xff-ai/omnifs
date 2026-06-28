@@ -25,6 +25,12 @@ const GUEST_HOME = "/root/.omnifs";
 const GUEST_MOUNT = "/omnifs";
 const GUEST_SHELL = "/bin/zsh";
 
+// Dev mounts whose provider needs a static token, and the host env var that
+// holds it. Dev orchestration, not provider or mount data, so it lives here
+// rather than in the mount templates. The same env var name appears as a
+// `${VAR}` placeholder in `contrib/dev-credentials.json`.
+const DEV_TOKEN_ENV = { github: "GITHUB_TOKEN", linear: "LINEAR_API_KEY" };
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workspace = resolve(scriptDir, "..");
 process.chdir(workspace);
@@ -219,7 +225,7 @@ async function renderDevHomePlan(profileMounts, providerStore, options) {
   const templates = discoverTemplates();
   const mounts = [];
   const skipped = [];
-  const credentialEntries = {};
+  const credentialEnv = {};
 
   for (const mountName of profileMounts) {
     const found = templates.get(mountName);
@@ -232,23 +238,20 @@ async function renderDevHomePlan(profileMounts, providerStore, options) {
     const providerName = spec.provider;
     spec.provider = providerRef(index, providerName);
 
-    if (spec.auth?.token_env) {
-      const tokenEnv = spec.auth.token_env;
+    const tokenEnv = DEV_TOKEN_ENV[providerName];
+    if (tokenEnv) {
       const token = await resolveToken(providerName, tokenEnv, options);
       if (!token) {
         skipped.push(`${mountName}: missing ${tokenEnv}`);
         continue;
       }
-      const scheme = spec.auth.scheme || "default";
-      const account = spec.auth.account || "default";
-      credentialEntries[`${providerName}:${scheme}:${account}`] = staticToken(token);
-      delete spec.auth.token_env;
+      credentialEnv[tokenEnv] = token;
     }
 
     mounts.push({ name: mountName, provider: providerName, spec });
   }
 
-  return { mounts, skipped, credentials: credentialEntries };
+  return { mounts, skipped, credentialEnv };
 }
 
 function providerRef(index, providerName) {
@@ -288,20 +291,22 @@ async function resolveToken(providerName, tokenEnv, options) {
   return token || null;
 }
 
-function staticToken(accessToken) {
-  return {
-    kind: "static-token",
-    access_token: accessToken,
-    refresh_token: null,
-    refreshability: "not-applicable",
-    expires_at: null,
-    token_type: "Bearer",
-    stored_at: new Date().toISOString(),
-    last_validated: null,
-    scopes: [],
-    upstream_identity: null,
-    extras: {},
-  };
+// Render the dev credential store from the checked-in template, replacing each
+// `"${VAR}"` placeholder with the JSON-encoded env value dev resolved (so the
+// token is escaped correctly), or `null` when the var is absent. The template
+// (`contrib/dev-credentials.json`) owns the entry shape, mirroring
+// `omnifs_creds::CredentialEntry`; dev only fills in secrets. Entries left
+// without a token are dropped, so a mount with no token has no credential.
+function renderCredentials(credentialEnv) {
+  const raw = readFileSync(join(workspace, "contrib/dev-credentials.json"), "utf8");
+  const filled = raw.replace(/"\$\{(\w+)\}"/g, (_, name) =>
+    credentialEnv[name] === undefined ? "null" : JSON.stringify(credentialEnv[name]),
+  );
+  const store = JSON.parse(filled);
+  store.entries = Object.fromEntries(
+    Object.entries(store.entries).filter(([, entry]) => entry.access_token !== null),
+  );
+  return store;
 }
 
 function printPlan({ devHome, image, profile, render, keepRunning }) {
@@ -345,7 +350,7 @@ function writeDevHome(devHome, providerStore, image, render) {
   }
 
   const credentialsPath = join(devHome, "credentials.json");
-  writeJson(credentialsPath, { version: 1, entries: render.credentials });
+  writeJson(credentialsPath, renderCredentials(render.credentialEnv));
   chmodPrivateFile(credentialsPath);
 }
 

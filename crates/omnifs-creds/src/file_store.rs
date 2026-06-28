@@ -216,6 +216,27 @@ mod tests {
     }
 
     #[test]
+    fn loads_minimal_static_token_entry() {
+        // The dev credentials template (`contrib/dev-credentials.json`) writes
+        // the minimal on-disk form: only the three required fields. Guard that
+        // it round-trips so interpolating env values into that template yields a
+        // store the host can read.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"entries":{"github:pat:default":{"kind":"static-token","access_token":"ghp_x","stored_at":"1970-01-01T00:00:00Z"}}}"#,
+        )
+        .unwrap();
+        let entry = FileStore::new(&path)
+            .get(&CredentialId::new("github", "pat", "default").unwrap())
+            .unwrap()
+            .expect("minimal entry loads");
+        assert_eq!(entry.access_token().expose_secret(), "ghp_x");
+        assert_eq!(entry.token_type(), "Bearer");
+    }
+
+    #[test]
     fn survives_reopen() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("creds.json");
