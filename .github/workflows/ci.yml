@@ -19,8 +19,9 @@ env:
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 jobs:
-  # CI uses standard GitHub-hosted runners. Keep the runner anchors centralized
-  # so Linux x64 and Linux arm64 jobs stay consistent across the matrix.
+  # Set the repository Actions variable CI_RUNNER_FAMILY=blacksmith to use
+  # Blacksmith runners. Leave it unset, or set it to github, to use standard
+  # GitHub-hosted runners.
   # Decide whether this run executes the build matrix. Every build job
   # transitively `needs: preflight`, so gating preflight here cascades a skip to
   # the whole matrix (a skipped dependency skips its dependents). A run skips the
@@ -29,7 +30,7 @@ jobs:
   # `main` ruleset requires none), so a skip never blocks a merge.
   changes:
     name: changes
-    runs-on: &linux_runner ubuntu-latest
+    runs-on: &linux_runner ${{ vars.CI_RUNNER_FAMILY == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       code: ${{ steps.decide.outputs.code }}
     steps:
@@ -313,7 +314,7 @@ jobs:
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
-    runs-on: &arm_runner ubuntu-24.04-arm
+    runs-on: &arm_runner ${{ vars.CI_RUNNER_FAMILY == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-linux-arm64
