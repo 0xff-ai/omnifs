@@ -49,7 +49,7 @@ impl AuthScheme {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemeGuidance {
-    /// One-line summary shown in scheme pickers and `omnifs auth explain`.
+    /// One-line summary shown in scheme pickers during `omnifs init`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Ordered provider-specific prerequisite steps, rendered after the host's

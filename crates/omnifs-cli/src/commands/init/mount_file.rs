@@ -43,10 +43,7 @@ impl<'a> MountFile<'a> {
                 let account = auth.account.clone();
                 let scheme = auth.scheme.clone();
                 match auth.auth_type {
-                    AuthKind::StaticToken => Auth::StaticToken(StaticToken {
-                        scheme,
-                        account,
-                    }),
+                    AuthKind::StaticToken => Auth::StaticToken(StaticToken { scheme, account }),
                     AuthKind::OAuth => Auth::OAuth(OAuth {
                         scheme,
                         account,

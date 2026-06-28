@@ -240,7 +240,7 @@ impl InitArgs {
             .ok_or_else(|| {
                 anyhow!("no mount named `{mount_name}`; run `omnifs init <provider>` to create it")
             })?;
-        let Some(auth) = mount_config.config.auth.first() else {
+        let Some(auth) = mount_config.config.auth.as_ref() else {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
         };
 
