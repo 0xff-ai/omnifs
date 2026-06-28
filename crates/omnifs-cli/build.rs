@@ -150,17 +150,15 @@ fn store_bundle_files(dir: &std::path::Path) -> Vec<String> {
         })
         .filter(|path| path.extension().is_some_and(|ext| ext == "wasm"))
         .map(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map_or_else(
-                    || {
-                        panic!(
-                            "provider store bundle path is not valid UTF-8: {}",
-                            path.display()
-                        )
-                    },
-                    str::to_owned,
-                )
+            path.file_name().and_then(|name| name.to_str()).map_or_else(
+                || {
+                    panic!(
+                        "provider store bundle path is not valid UTF-8: {}",
+                        path.display()
+                    )
+                },
+                str::to_owned,
+            )
         })
         .collect::<Vec<_>>();
     files.sort();
