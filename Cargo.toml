@@ -70,6 +70,7 @@ hashbrown = "0.15"
 http = "1"
 mime = "0.3"
 strum = { version = "0.27", features = ["derive"] }
+trybuild = "1"
 percent-encoding = "2"
 url = "2"
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }

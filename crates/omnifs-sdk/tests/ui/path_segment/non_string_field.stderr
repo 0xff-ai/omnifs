@@ -1,0 +1,5 @@
+error: #[path_segment] string-wrapper mode requires a String field
+ --> tests/ui/path_segment/non_string_field.rs:6:12
+  |
+6 | struct Bad(u32);
+  |            ^^^

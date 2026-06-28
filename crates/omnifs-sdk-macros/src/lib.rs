@@ -1,6 +1,6 @@
 //! Proc macros for the omnifs provider SDK.
 //!
-//! Five macros, all top-level (there are no per-route attribute macros;
+//! Six macros, all top-level (there are no per-route attribute macros;
 //! routes are registered imperatively in `start`):
 //!
 //! - [`macro@provider`] lowers one impl block onto the WIT exports.
@@ -8,6 +8,8 @@
 //!   canonical format, stability).
 //! - [`macro@path_captures`] turns a struct into a typed multi-segment
 //!   route key.
+//! - [`macro@path_segment`] turns a single path-segment type into its parser,
+//!   renderer, and optional finite choices.
 //! - [`derive@Endpoint`] declares an outbound HTTP host.
 //! - [`macro@config`] wires serde onto a provider config type.
 
@@ -18,6 +20,7 @@ mod captures_macro;
 mod config_macro;
 mod endpoint_macro;
 mod object_macro;
+mod path_segment_macro;
 mod provider_macro;
 
 /// The provider entrypoint: lowers one impl block onto the full WIT export
@@ -128,6 +131,27 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn path_captures(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemStruct);
     match captures_macro::path_captures_impl(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Turn a single path segment type into its parser, renderer, and optional
+/// finite choices.
+///
+/// Enum mode accepts unit-only enums and generates `FromStr`, `Display`,
+/// `AsRef<str>`, and `PathSegment::choices()`. Segment names use
+/// `#[strum(serialize_all = "snake_case")]` on the enum or
+/// `#[strum(serialize = "...")]` on individual variants.
+///
+/// String-wrapper mode accepts one-field tuple structs with a `String` field:
+/// `#[path_segment(validate = is_valid_name)] struct Name(String);`. It
+/// generates `FromStr`, `Display`, `AsRef<str>`, `PathSegment`, and an `as_str`
+/// method. `normalize = path::to::fn` may be supplied when construction stores
+/// a normalized value after validation.
+#[proc_macro_attribute]
+pub fn path_segment(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match path_segment_macro::path_segment_impl(attr, item) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

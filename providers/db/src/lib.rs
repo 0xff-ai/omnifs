@@ -15,9 +15,7 @@
 
 use hashbrown::HashSet;
 use std::cell::RefCell;
-use std::fmt;
 use std::rc::Rc;
-use std::str::FromStr;
 
 use omnifs_sdk::handler::DirIntent;
 use omnifs_sdk::prelude::*;
@@ -78,34 +76,14 @@ fn install_known_tables(names: impl IntoIterator<Item = String>) {
 /// navigable once their captures parse, before a table leaf handler can prove
 /// existence. DB tables are a local snapshot, so this parser admits only names
 /// observed at provider start to preserve lookup misses for absent tables.
+#[omnifs_sdk::path_segment(validate = is_known_table_segment)]
 #[derive(Clone, Debug)]
 struct TableName(String);
 
-impl TableName {
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for TableName {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s.is_empty() || s.contains(['\0', '/', '\\']) {
-            return Err(());
-        }
-        let known = KNOWN_TABLES.with(|cell| cell.borrow().contains(s));
-        if !known {
-            return Err(());
-        }
-        Ok(Self(s.to_string()))
-    }
-}
-
-impl fmt::Display for TableName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+fn is_known_table_segment(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains(['\0', '/', '\\'])
+        && KNOWN_TABLES.with(|cell| cell.borrow().contains(s))
 }
 
 #[omnifs_sdk::path_captures]

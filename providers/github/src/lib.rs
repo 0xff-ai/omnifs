@@ -3,7 +3,6 @@
 
 //! github-provider: GitHub virtual filesystem provider for omnifs.
 
-use core::str::FromStr;
 use hashbrown::HashSet;
 use omnifs_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,23 +25,13 @@ pub(crate) enum OwnerKind {
 }
 
 /// State filter for resources.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr, strum::Display,
-)]
+#[omnifs_sdk::path_segment]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[strum(serialize_all = "snake_case")]
 pub enum StateFilter {
-    #[strum(serialize = "open")]
     Open,
-    #[strum(serialize = "all")]
     All,
 }
-
-impl PathSegment for StateFilter {
-    fn choices() -> Option<&'static [&'static str]> {
-        Some(&["open", "all"])
-    }
-}
-
-const STATE_FILTERS: &[&str] = &["open", "all"];
 
 fn auth() -> omnifs_sdk::auth::Auth {
     use omnifs_sdk::auth::{Auth, OAuth, StaticToken, Validation};
@@ -114,9 +103,11 @@ impl GithubProvider {
             o.dynamic();
             o.file("repo.json").canonical::<Json>()?;
             o.dir("repo").tree(Repo::tree)?;
-            o.dir("issues").choices(STATE_FILTERS)?;
+            o.dir("issues")
+                .choices(StateFilter::choices().expect("StateFilter has finite choices"))?;
             o.dir("issues/{filter}").collection(Repo::issues)?;
-            o.dir("pulls").choices(STATE_FILTERS)?;
+            o.dir("pulls")
+                .choices(StateFilter::choices().expect("StateFilter has finite choices"))?;
             o.dir("pulls/{filter}").collection(Repo::pulls)?;
             o.dir("actions/runs").collection(Repo::workflow_runs)?;
             Ok(())
@@ -172,9 +163,11 @@ impl GithubProvider {
     }
 }
 
+#[omnifs_sdk::path_segment(validate = is_safe_owner, normalize = str::to_ascii_lowercase)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnerName(String);
 
+#[omnifs_sdk::path_segment(validate = is_safe_segment)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepoName(String);
 
@@ -196,50 +189,6 @@ impl RepoId {
 impl std::fmt::Display for RepoId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.owner, self.repo)
-    }
-}
-
-impl FromStr for OwnerName {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        // GitHub owners are case-insensitive; normalize once here so
-        // /Octocat/.. and /octocat/.. collapse to one LogicalId capture.
-        is_safe_owner(s)
-            .then(|| Self(s.to_ascii_lowercase()))
-            .ok_or(())
-    }
-}
-
-impl FromStr for RepoName {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        is_safe_segment(s).then(|| Self(s.to_string())).ok_or(())
-    }
-}
-
-impl AsRef<str> for OwnerName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for OwnerName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl AsRef<str> for RepoName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for RepoName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
     }
 }
 

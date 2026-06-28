@@ -14,7 +14,7 @@
 
 use omnifs_sdk::__wit::provider::types as wit_types;
 use omnifs_sdk::browse::{CachedCanonical, List, ReadOutcome};
-use omnifs_sdk::captures::{Captures, FromCaptures};
+use omnifs_sdk::captures::{Captures, FromCaptures, PathSegment};
 use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, PageCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
@@ -28,10 +28,8 @@ use omnifs_sdk::projection::{FileProjection, StreamFile};
 use omnifs_sdk::repr::{Json, Markdown, Representable};
 use omnifs_sdk::router::Router;
 use std::cell::RefCell;
-use std::fmt;
 use std::future::Future;
 use std::rc::Rc;
-use std::str::FromStr;
 use std::task::{Context, Poll, Waker};
 
 // ===========================================================================
@@ -433,28 +431,12 @@ fn file_object_preload_object_keeps_full_sibling_anchor_path() {
 // Nested collection (parent Repo -> issues/{filter}/{number} child Issue)
 // ===========================================================================
 
+#[omnifs_sdk::path_segment]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[strum(serialize_all = "snake_case")]
 enum Filter {
     Open,
     All,
-}
-impl FromStr for Filter {
-    type Err = ProviderError;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "open" => Ok(Self::Open),
-            "all" => Ok(Self::All),
-            other => Err(ProviderError::invalid_input(format!("bad filter {other}"))),
-        }
-    }
-}
-impl fmt::Display for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open => write!(f, "open"),
-            Self::All => write!(f, "all"),
-        }
-    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -544,7 +526,8 @@ impl FromCaptures for IssueKey {
             filter: Facet(
                 c.get("filter")
                     .ok_or_else(|| ProviderError::invalid_input("missing filter"))?
-                    .parse()?,
+                    .parse()
+                    .map_err(|()| ProviderError::invalid_input("invalid filter"))?,
             ),
         })
     }
@@ -560,11 +543,13 @@ impl IdentityCaptures for IssueKey {
 }
 impl FacetMetadata for IssueKey {
     fn facet_axes() -> &'static [FacetAxis] {
-        static AXES: [FacetAxis; 1] = [FacetAxis {
-            capture_name: "filter",
-            choices: &["open", "all"],
-        }];
-        &AXES
+        static AXES: std::sync::OnceLock<[FacetAxis; 1]> = std::sync::OnceLock::new();
+        &AXES.get_or_init(|| {
+            [FacetAxis {
+                capture_name: "filter",
+                choices: Filter::choices().expect("Filter has finite choices"),
+            }]
+        })[..]
     }
 }
 impl Key for IssueKey {}
@@ -627,7 +612,8 @@ impl FromCaptures for IssueListKey {
             filter: c
                 .get("filter")
                 .ok_or_else(|| ProviderError::invalid_input("missing filter"))?
-                .parse()?,
+                .parse()
+                .map_err(|()| ProviderError::invalid_input("invalid filter"))?,
         })
     }
 }

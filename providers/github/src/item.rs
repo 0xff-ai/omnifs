@@ -1,9 +1,6 @@
 //! Path keys, object loads, collection methods, and live faces for the GitHub
 //! provider.
 
-use core::fmt;
-use core::str::FromStr;
-
 use rc_zip_sync::ReadZip;
 
 use omnifs_core::ContentType;
@@ -19,9 +16,12 @@ use crate::{
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
 /// plain `PathSegment` capture (NOT a facet): an issue comment and a pull
 /// comment are distinct objects, so `item_kind` is part of identity.
+#[omnifs_sdk::path_segment]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ItemKind {
+    #[strum(serialize = "issues")]
     Issues,
+    #[strum(serialize = "pulls")]
     Pulls,
 }
 
@@ -38,32 +38,6 @@ impl ItemKind {
             Self::Issues => "issues",
             Self::Pulls => "pulls",
         }
-    }
-}
-
-impl FromStr for ItemKind {
-    type Err = ProviderError;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "issues" => Ok(Self::Issues),
-            "pulls" => Ok(Self::Pulls),
-            other => Err(ProviderError::invalid_input(format!(
-                "unknown item kind {other}"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for ItemKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.rest_resource())
-    }
-}
-
-impl PathSegment for ItemKind {
-    fn choices() -> Option<&'static [&'static str]> {
-        Some(&["issues", "pulls"])
     }
 }
 
@@ -270,7 +244,7 @@ impl Owner {
         let mut names = fetch_owner_repos(&cx, &key.owner, kind).await?;
         names.sort();
         let entries = names.into_iter().filter_map(|name| {
-            RepoName::from_str(&name).ok().map(|repo| {
+            name.parse::<RepoName>().ok().map(|repo| {
                 CollectionEntry::key(RepoKey {
                     owner: key.owner.clone(),
                     repo,

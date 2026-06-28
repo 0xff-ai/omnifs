@@ -83,6 +83,7 @@ async fn root(_cx: DirCx) -> Result<DirProjection> {
     Ok(DirProjection::open(core::iter::empty::<Entry>()))
 }
 
+#[omnifs_sdk::path_segment]
 #[derive(
     Clone,
     Copy,
@@ -157,8 +158,6 @@ impl Collection {
         })
     }
 }
-
-impl PathSegment for Collection {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RangeKind {

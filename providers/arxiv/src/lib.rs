@@ -83,40 +83,15 @@ impl PathSegment for PaperId {
 }
 
 /// Validated arXiv category code.
+#[omnifs_sdk::path_segment(validate = is_valid_category_name)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CategoryName(String);
 
-impl FromStr for CategoryName {
-    type Err = ProviderError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        if value.is_empty()
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-        {
-            return Err(ProviderError::not_found("invalid category"));
-        }
-        Ok(Self(value.to_string()))
-    }
-}
-
-impl fmt::Display for CategoryName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl AsRef<str> for CategoryName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl PathSegment for CategoryName {
-    fn choices() -> Option<&'static [&'static str]> {
-        None
-    }
+fn is_valid_category_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
 /// Version directory segment (`@latest`, `v1`, `v2`, ...).

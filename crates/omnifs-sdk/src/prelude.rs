@@ -35,7 +35,7 @@ pub use crate::router::{
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};
 
-pub use omnifs_sdk_macros::{Endpoint, config, object, path_captures, provider};
+pub use omnifs_sdk_macros::{Endpoint, config, object, path_captures, path_segment, provider};
 
 pub use omnifs_wit::provider::types::{
     CalloutResults, OpResult, ProviderEvent, ProviderInfo, ProviderReturn, ProviderStep,

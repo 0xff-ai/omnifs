@@ -19,6 +19,10 @@ use core::str::FromStr;
 /// `FromStr` accepted, because rendered values become path segments again
 /// (see how arxiv percent-encodes paper ids in `Display` and decodes in
 /// `FromStr`).
+///
+/// Prefer `#[omnifs_sdk::path_segment]` for simple finite enums and validated
+/// `String` newtypes. Keep manual impls for structured segments that need
+/// custom decode or render behavior.
 pub trait PathSegment: FromStr + Display + 'static {
     /// The finite set of allowed values, or `None` for an unbounded
     /// capture.

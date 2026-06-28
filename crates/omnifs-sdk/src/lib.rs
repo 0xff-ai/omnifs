@@ -149,6 +149,8 @@ macro_rules! export {
     };
 }
 
+extern crate self as omnifs_sdk;
+
 pub mod archives;
 mod async_runtime;
 pub mod auth;
@@ -185,6 +187,7 @@ pub use omnifs_sdk_macros::Endpoint;
 pub use omnifs_sdk_macros::config;
 pub use omnifs_sdk_macros::object;
 pub use omnifs_sdk_macros::path_captures;
+pub use omnifs_sdk_macros::path_segment;
 pub use omnifs_sdk_macros::provider;
 
 // Re-export deps that generated code references, so providers don't need

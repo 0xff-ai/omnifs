@@ -21,64 +21,27 @@ use crate::api::{
 use crate::objects::Issue;
 
 /// State filter directories under `/teams/{team}/issues/`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr, strum::Display,
-)]
+#[omnifs_sdk::path_segment]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[strum(serialize_all = "snake_case")]
 pub enum StateFilter {
     /// Open issues. Linear state types in `{triage, backlog, unstarted, started}`.
-    #[strum(serialize = "open")]
     Open,
     /// All issues regardless of state.
-    #[strum(serialize = "all")]
     All,
 }
 
-impl PathSegment for StateFilter {
-    fn choices() -> Option<&'static [&'static str]> {
-        Some(&["open", "all"])
-    }
-}
-
 /// A Linear team key (e.g. `ENG`, `OPS`). Uppercase ASCII alphanumeric.
+#[omnifs_sdk::path_segment(validate = is_valid_team_key)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TeamKey(String);
 
-impl TeamKey {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+fn is_valid_team_key(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-
-impl FromStr for TeamKey {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s.is_empty() || s.len() > 32 {
-            return Err(());
-        }
-        let ok = s
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if !ok {
-            return Err(());
-        }
-        Ok(Self(s.to_string()))
-    }
-}
-
-impl AsRef<str> for TeamKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for TeamKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl PathSegment for TeamKey {}
 
 /// A Linear issue identifier (e.g. `ENG-1234`). The textual form is
 /// what users type and what Linear's API accepts in `Issue.identifier`.

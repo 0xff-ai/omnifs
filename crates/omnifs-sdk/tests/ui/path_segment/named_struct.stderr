@@ -1,0 +1,8 @@
+error: #[path_segment] string-wrapper mode requires a tuple struct
+ --> tests/ui/path_segment/named_struct.rs:6:12
+  |
+6 |   struct Bad {
+  |  ____________^
+7 | |     value: String,
+8 | | }
+  | |_^

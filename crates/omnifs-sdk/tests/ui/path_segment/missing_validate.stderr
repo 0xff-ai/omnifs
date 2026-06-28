@@ -1,0 +1,5 @@
+error: string-wrapper path_segment mode requires validate = path::to::predicate
+ --> tests/ui/path_segment/missing_validate.rs:2:8
+  |
+2 | struct Bad(String);
+  |        ^^^
