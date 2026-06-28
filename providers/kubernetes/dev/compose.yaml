@@ -1,4 +1,4 @@
-# Throwaway Kubernetes for `omnifs dev`.
+# Throwaway Kubernetes for `just dev`.
 #
 # k3s runs the cluster; a co-located `kubectl proxy` shares k3s's network
 # namespace, so it reaches the API server at the default 127.0.0.1:6443 with
@@ -46,7 +46,7 @@ services:
     volumes:
       - kubeconfig:/output:ro
       # Shared host dir carrying the unix socket, also bind-mounted into the
-      # omnifs container at the same path. Set by `omnifs dev`.
+      # omnifs container at the same path. Set by `scripts/dev.ts`.
       - ${OMNIFS_K8S_SOCK_DIR:?set OMNIFS_K8S_SOCK_DIR}:/run/omnifs
 
 volumes:

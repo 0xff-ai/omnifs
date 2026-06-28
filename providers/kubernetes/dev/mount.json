@@ -3,5 +3,11 @@
   "mount": "k8s",
   "config": {
     "endpoint": "unix:///run/omnifs/k8s.sock"
+  },
+  "capabilities": {
+    "unix_sockets": {
+      "dynamic": true
+    },
+    "max_memory_mb": 256
   }
 }

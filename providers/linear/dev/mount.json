@@ -5,5 +5,9 @@
     "type": "static-token",
     "scheme": "pat",
     "token_env": "LINEAR_API_KEY"
+  },
+  "capabilities": {
+    "domains": ["api.linear.app"],
+    "max_memory_mb": 128
   }
 }

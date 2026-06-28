@@ -1,4 +1,4 @@
-# Chinook SQLite fixture for `omnifs dev`. Baked at build time; the fixture
+# Chinook SQLite fixture for `just dev`. Baked at build time; the fixture
 # container seeds a host bind mount on first start.
 FROM alpine:3.21
 RUN apk add --no-cache curl \

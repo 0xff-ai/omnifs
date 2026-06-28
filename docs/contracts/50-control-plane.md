@@ -29,15 +29,13 @@ The daemon runs host-native or in Docker. Docker is one launch mechanism, not th
 
 Keep Docker-specific bind/materialization policy in Docker launch paths. Keep native and Docker daemon argument generation aligned where behavior is shared.
 
-### Dev home and workspace layout
+### Dev home
 
-Inside a source checkout, contributor commands use `~/.omnifs-dev` unless `OMNIFS_HOME` is explicit. Outside a checkout, normal `~/.omnifs` applies.
-
-Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev home when run from a checkout. Keep explicit `OMNIFS_HOME` as the override.
+`scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, bind-mounts it into the container as `OMNIFS_HOME`, and opens the developer inside that container. Host CLI commands use the normal workspace resolution unless `OMNIFS_HOME` is explicit; do not reintroduce a Rust-side dev command or dev-session owner.
 
 ### Provider bundles
 
-`Dockerfile` is the contributor image path for `omnifs dev`. Dev image builds consume host-built provider WASM from `target/wasm32-wasip2/release` as a named Docker build context; the normal runtime image stage must not compile providers again. `omnifs dev` installs those same host-built provider artifacts into the dev provider store for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
+`Dockerfile` is the contributor image path for `just dev`. Dev image builds consume the content-addressed provider-store bundle at `target/omnifs-provider-store` as a named Docker build context; the normal runtime image stage must not compile providers again. `scripts/dev.ts` copies that same bundle into the dev provider store for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`. Release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
 
 ## Must not
 
@@ -63,9 +61,9 @@ Keep `omnifs dev`, `shell`, `status`, `logs`, and `down` aligned on the same dev
 - `crates/omnifs-mount/src/mounts/mod.rs`
 - `crates/omnifs-cli/src/launch.rs`
 - `crates/omnifs-cli/src/runtime.rs`
-- `crates/omnifs-cli/src/dev_support.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `crates/omnifs-home/src/lib.rs`
+- `scripts/dev.ts`
 - `Dockerfile`
 - `crates/omnifs-daemon/src/bin/openapi.rs`
 - `scripts/ci/build-runtime-image.sh`

@@ -11,9 +11,11 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+#[cfg(feature = "daemon")]
+use anyhow::Context as _;
+use anyhow::Result;
+#[cfg(feature = "daemon")]
 use omnifs_daemon::DaemonArgs;
 
 use crate::config::{Config, ConfiguredBackend};
@@ -227,8 +229,10 @@ pub(crate) struct LaunchParams {
 
 // --- Native launch -----------------------------------------------------------
 
+#[cfg(feature = "daemon")]
 pub(crate) async fn launch_native(cache_dir: &Path, control_addr: SocketAddr) -> Result<()> {
     use std::process::Stdio;
+    use std::time::Duration;
 
     use tokio::process::Command;
 
@@ -313,6 +317,15 @@ pub(crate) async fn launch_native(cache_dir: &Path, control_addr: SocketAddr) ->
     anyhow::bail!("omnifs daemon did not become ready within 30s\n{tail}")
 }
 
+#[cfg(not(feature = "daemon"))]
+pub(crate) async fn launch_native(_cache_dir: &Path, _control_addr: SocketAddr) -> Result<()> {
+    anyhow::bail!(
+        "this omnifs binary was built without host-native daemon support; \
+         configure the Docker runtime or rebuild with the `daemon` feature"
+    )
+}
+
+#[cfg(feature = "daemon")]
 fn read_log_tail(log_path: &Path) -> String {
     const TAIL: usize = 4096;
     match std::fs::read(log_path) {
@@ -333,6 +346,7 @@ fn read_log_tail(log_path: &Path) -> String {
 /// Sweep any stale mount left by a dead host-native daemon. On Linux the FUSE
 /// mount at `mount_point` is unmounted directly; on other platforms the NFS
 /// mount-state files under `nfs_state_dir` drive the sweep.
+#[cfg(feature = "daemon")]
 pub(crate) fn reclaim_native(mount_point: Option<&Path>, nfs_state_dir: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -360,6 +374,15 @@ pub(crate) fn reclaim_native(mount_point: Option<&Path>, nfs_state_dir: &Path) -
     }
 }
 
+#[cfg(not(feature = "daemon"))]
+pub(crate) fn reclaim_native(_mount_point: Option<&Path>, _nfs_state_dir: &Path) -> Result<()> {
+    anyhow::bail!(
+        "this omnifs binary was built without host-native daemon support; \
+         rerun teardown with a default omnifs build"
+    )
+}
+
+#[cfg(feature = "daemon")]
 #[cfg(not(target_os = "linux"))]
 fn sweep_nfs_state_dir(state_dir: &Path) -> Result<()> {
     let summary = crate::host_teardown::teardown_host_native_nfs(state_dir)?;

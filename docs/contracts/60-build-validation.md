@@ -11,7 +11,7 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers and injects provider metadata. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built provider WASM bytes.
+Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers, injects provider metadata, and emits `target/omnifs-provider-store` with content-addressed WASM files plus `index.json`. `just dev` runs `scripts/dev.ts`, so dev mount pinning and the dev image both consume the same provider-store bundle.
 
 Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 

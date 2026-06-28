@@ -1,4 +1,4 @@
-//! Shared launch choreography for `omnifs up` and `omnifs dev`.
+//! Shared launch choreography for `omnifs up`.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

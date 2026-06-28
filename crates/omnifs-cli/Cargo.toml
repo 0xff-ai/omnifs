@@ -16,8 +16,8 @@ path = "src/main.rs"
 [dependencies]
 omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
-omnifs-daemon = { workspace = true }
-omnifs-nfs = { workspace = true }
+omnifs-daemon = { workspace = true, optional = true }
+omnifs-nfs = { workspace = true, optional = true }
 omnifs-home = { workspace = true }
 omnifs-mount = { workspace = true }
 omnifs-provider = { workspace = true }
@@ -51,6 +51,10 @@ ratatui = "0.29"
 crossterm = "0.28"
 tar = { workspace = true }
 zstd = { workspace = true }
+
+[features]
+default = ["daemon"]
+daemon = ["dep:omnifs-daemon", "dep:omnifs-nfs"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

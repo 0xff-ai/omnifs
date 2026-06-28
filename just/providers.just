@@ -64,6 +64,10 @@ build: wasi-sdk
       exit 1
     fi
     target/release/omnifs-embed-manifest "${wasms[@]}"
+    bundle_wasms=(target/wasm32-wasip2/release/omnifs_provider_*.wasm)
+    cargo run --release -p omnifs-provider --bin omnifs-provider-store-bundle -- \
+      --out target/omnifs-provider-store \
+      "${bundle_wasms[@]}"
 
 # Validate built WASM components.
 validate:
