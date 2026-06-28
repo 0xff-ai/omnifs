@@ -89,9 +89,6 @@ fn print_preview(targets: &[MountRemovalTarget], keep_credentials: bool) {
             CredentialTarget::Internal(_) => {
                 anstream::println!("      (keeping credentials, --keep-credentials)");
             },
-            CredentialTarget::External(source) => {
-                anstream::println!("      (external credential {source} unchanged)");
-            },
             CredentialTarget::None => {},
         }
     }

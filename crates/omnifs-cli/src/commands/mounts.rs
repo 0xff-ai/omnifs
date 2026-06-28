@@ -144,11 +144,6 @@ fn confirm(
         CredentialTarget::Internal(_) => {
             anstream::println!("  • keep the stored credential (--keep-credentials)");
         },
-        CredentialTarget::External(source) => {
-            anstream::println!(
-                "  • leave the externally-configured credential ({source}) unchanged"
-            );
-        },
         CredentialTarget::None => {},
     }
     anstream::print!("Continue? [y/N] ");

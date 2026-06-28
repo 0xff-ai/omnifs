@@ -134,9 +134,6 @@ impl AuthStatusRow {
     fn text_detail(&self) -> String {
         match &self.readiness {
             AuthReadiness::None => "no auth required".to_owned(),
-            AuthReadiness::ConfiguredExternally { source } => {
-                format!("external credential ({source})")
-            },
             AuthReadiness::Missing { .. } => {
                 format!(
                     "missing credential; run `omnifs auth login {}` (`omnifs auth explain {}` for options)",

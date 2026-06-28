@@ -46,7 +46,6 @@ impl<'a> MountFile<'a> {
                     AuthKind::StaticToken => Auth::StaticToken(StaticToken {
                         scheme,
                         account,
-                        ..StaticToken::default()
                     }),
                     AuthKind::OAuth => Auth::OAuth(OAuth {
                         scheme,

@@ -1,5 +1,3 @@
-use std::fmt;
-
 use anyhow::{Context, anyhow};
 use omnifs_core::{AccountId, AuthSchemeId, CredentialId, ProviderName};
 use omnifs_creds::{CredentialEntry, CredentialStore};
@@ -9,14 +7,7 @@ use omnifs_mount::mounts::Spec;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CredentialTarget {
     Internal(CredentialId),
-    External(ExternalCredentialSource),
     None,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExternalCredentialSource {
-    TokenFile(String),
-    TokenEnv(String),
 }
 
 impl CredentialTarget {
@@ -56,14 +47,14 @@ impl CredentialTarget {
     pub(crate) fn keys(&self) -> Vec<&CredentialId> {
         match self {
             Self::Internal(key) => vec![key],
-            Self::External(_) | Self::None => Vec::new(),
+            Self::None => Vec::new(),
         }
     }
 
     pub(crate) fn primary_key(&self) -> Option<&CredentialId> {
         match self {
             Self::Internal(key) => Some(key),
-            Self::External(_) | Self::None => None,
+            Self::None => None,
         }
     }
 
@@ -96,16 +87,6 @@ impl CredentialTarget {
         auth: &Auth,
         scheme: Option<&str>,
     ) -> anyhow::Result<Self> {
-        if let Some(token_file) = auth.token_file() {
-            return Ok(Self::External(ExternalCredentialSource::TokenFile(
-                token_file.to_owned(),
-            )));
-        }
-        if let Some(token_env) = auth.token_env() {
-            return Ok(Self::External(ExternalCredentialSource::TokenEnv(
-                token_env.to_owned(),
-            )));
-        }
         let scheme = scheme.ok_or_else(|| anyhow!("missing auth.scheme"))?;
         // `account` is derived from `auth` inside `internal_from_parts`.
         Self::internal_from_parts(config, Some(auth), scheme, None)
@@ -129,14 +110,5 @@ impl CredentialTarget {
             scheme,
             account,
         )))
-    }
-}
-
-impl fmt::Display for ExternalCredentialSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TokenFile(path) => write!(f, "token_file={path}"),
-            Self::TokenEnv(name) => write!(f, "token_env={name}"),
-        }
     }
 }

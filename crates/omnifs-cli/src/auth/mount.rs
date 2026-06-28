@@ -178,7 +178,7 @@ impl MountAuth {
                 };
             },
         };
-        AuthReadiness::from_target(&self.spec.mount, target, store)
+        AuthReadiness::from_target(&self.spec.mount, &target, store)
     }
 
     pub(crate) fn configured_target(

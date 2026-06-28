@@ -195,7 +195,6 @@ pub(crate) fn write_mount_row(out: &mut String, mount: &UserMountStatus) {
             let glyph = match row.kind {
                 AuthTerminalKind::None => crate::style::dim("◯"),
                 AuthTerminalKind::Ready => crate::style::success("●"),
-                AuthTerminalKind::External => crate::style::warn("●"),
                 AuthTerminalKind::Missing | AuthTerminalKind::Error => crate::style::error("●"),
             };
             let _ = writeln!(out, "  {glyph}  {:<14} {}", m.mount, row.summary);
