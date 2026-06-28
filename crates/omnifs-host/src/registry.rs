@@ -770,9 +770,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn add_mount_rejects_invalid_provider_config() {
-        // The test provider's embedded manifest declares a configSchema
-        // (additionalProperties: false, no properties), so the host's
-        // validate_instance_config rejects a mount config with extra fields.
+        // The test provider's embedded manifest declares empty config metadata,
+        // so the host's validate_instance_config rejects a mount config with
+        // extra fields.
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
@@ -800,7 +800,7 @@ mod tests {
         );
 
         // Pin the test provider into the provider store, then mount it with an
-        // out-of-schema config field the provider's configSchema forbids.
+        // out-of-schema config field the provider config metadata forbids.
         let spec = pin_spec(
             providers_dir.path(),
             &base_wasm,

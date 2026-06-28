@@ -11,6 +11,7 @@ mod objects;
 use core::str::FromStr;
 
 use hashbrown::HashSet;
+use omnifs_sdk::auth::{Auth, Extract, OAuth, Scheme, StaticToken, Validation};
 use omnifs_sdk::prelude::*;
 use serde_json::json;
 
@@ -136,13 +137,13 @@ impl Issue {
     }
 }
 
-fn auth() -> omnifs_sdk::auth::Auth {
-    use omnifs_sdk::auth::{Auth, OAuth, StaticToken, Validation};
-    Auth::new(["api.linear.app"], "oauth")
-        .prefix("")
-        .scheme(
+const AUTH: Auth = Auth::new(
+    &["api.linear.app"],
+    "oauth",
+    &[
+        (
             "pat",
-            StaticToken::new("Linear personal access token or API key")
+            Scheme::StaticToken(StaticToken::new("Linear personal access token or API key")
                 .creation_url("https://linear.app/settings/api")
                 .summary("A personal API key created in Linear's API settings.")
                 .validation(
@@ -151,23 +152,28 @@ fn auth() -> omnifs_sdk::auth::Auth {
                         "{\"query\":\"query { viewer { id name email organization { name urlKey } } }\"}",
                     )
                     .json_pointer("/data/viewer/id")
-                    .extract("identity", "/data/viewer/email")
-                    .extract("workspace", "/data/viewer/organization/urlKey"),
-                ),
-        )
-        .scheme(
+                    .extract(&[
+                        Extract::new("identity", "/data/viewer/email"),
+                        Extract::new("workspace", "/data/viewer/organization/urlKey"),
+                    ]),
+                )),
+        ),
+        (
             "oauth",
-            OAuth::pkce_loopback(
+            Scheme::Oauth(OAuth::pkce_loopback(
                 "Linear OAuth",
                 "https://linear.app/oauth/authorize",
                 "https://api.linear.app/oauth/token",
                 "http://127.0.0.1:{port}/callback",
             )
             .client_id("4dc7b7c05f651306a318de6f9f963b40")
-            .scopes(["read"])
+            .scopes(&["read"])
             .summary("Browser sign-in through omnifs's Linear app, granting read access to your workspace."),
-        )
-}
+            ),
+        ),
+    ],
+)
+.prefix("");
 
 #[omnifs_sdk::provider(
     id = "linear",
@@ -183,7 +189,7 @@ fn auth() -> omnifs_sdk::auth::Auth {
             "Leave room for GraphQL response decoding and issue tree projections."
         ),
     ),
-    auth = auth()
+    auth = AUTH
 )]
 impl LinearProvider {
     fn start(r: &mut Router) -> Result<()> {

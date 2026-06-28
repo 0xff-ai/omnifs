@@ -12,6 +12,8 @@ use strum::{EnumProperty, VariantArray};
 use time::format_description::well_known::{Iso8601, Rfc3339};
 use time::{Date, Duration, Time};
 
+use omnifs_sdk::auth::{Auth, OAuth, Scheme};
+
 const PRELOAD_RADIUS: Duration = Duration::days(15);
 const JSON_SUFFIX: &str = ".json";
 const DATE_FIELDS: &[&str] = &[
@@ -31,25 +33,27 @@ const DATE_FIELDS: &[&str] = &[
 )]
 struct Api;
 
-fn auth() -> omnifs_sdk::auth::Auth {
-    use omnifs_sdk::auth::{Auth, OAuth};
-    Auth::new(["api.ouraring.com"], "oauth").scheme(
+const AUTH: Auth = Auth::new(
+    &["api.ouraring.com"],
+    "oauth",
+    &[(
         "oauth",
-        OAuth::client_side_token(
+        Scheme::Oauth(OAuth::client_side_token(
             "Oura OAuth",
             "https://cloud.ouraring.com/oauth/authorize",
             "https://api.ouraring.com/oauth/token",
             "http://localhost:58880/",
         )
         .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
-        .scopes([
+        .scopes(&[
             "email", "personal", "daily", "heartrate", "workout", "tag", "session", "spo2Daily",
         ])
         .summary(
             "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
         ),
-    )
-}
+        ),
+    )],
+);
 
 #[omnifs_sdk::provider(
     id = "oura",
@@ -62,7 +66,7 @@ fn auth() -> omnifs_sdk::auth::Auth {
         ),
         memory_mb(128, "Leave room for date-range and time-series JSON responses."),
     ),
-    auth = auth()
+    auth = AUTH
 )]
 impl OuraProvider {
     fn start(r: &mut Router) -> Result<()> {

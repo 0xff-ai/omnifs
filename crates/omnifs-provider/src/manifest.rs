@@ -5,7 +5,7 @@ use crate::auth_wire::{
     PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
     TokenEndpointAuthMethod, TokenValidation,
 };
-use crate::config::ConfigSchema;
+use crate::config::ConfigMetadata;
 use crate::sections::{ProviderMetadataError, is_hostname_only, validate_provider_manifest};
 use omnifs_caps::{Grants, Need};
 use schemars::JsonSchema;
@@ -34,7 +34,7 @@ pub struct ProviderManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_schema: Option<schemars::Schema>,
+    pub config: Option<ConfigMetadata>,
 }
 
 /// Build provenance for a compiled provider component: the `omnifs:provider`
@@ -486,12 +486,12 @@ impl ProviderManifest {
         }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
-            // A dynamic grant is resolved at mount-start from a config field the
-            // provider marks with `x-omnifs-resource`: a unix socket into the
-            // callout allowlist, a preopened path into a WASI preopen. Any other
-            // dynamic kind has no resolver and would resolve to an empty
-            // allowlist, denying the provider at its first callout. Reject those
-            // at the manifest boundary.
+            // A dynamic grant is resolved at mount-start from a config field
+            // bound to the matching host resource: a unix socket into the
+            // callout allowlist, a preopened path into a WASI preopen. Any
+            // other dynamic kind has no resolver and would resolve to an empty
+            // allowlist, denying the provider at its first callout. Reject
+            // those at the manifest boundary.
             if entry.is_dynamic()
                 && !matches!(entry, Need::UnixSocket { .. } | Need::PreopenedPath { .. })
             {
@@ -506,11 +506,8 @@ impl ProviderManifest {
         if let Some(auth) = &self.auth {
             auth.validate()?;
         }
-        if let Some(schema) = self.config_schema.as_ref() {
-            jsonschema::meta::validate(schema.as_value()).map_err(|error| {
-                ProviderMetadataError::Validation(format!("configSchema: {error}"))
-            })?;
-            ConfigSchema::parse(schema)?;
+        if let Some(config) = self.config.as_ref() {
+            config.validate()?;
         }
         Ok(())
     }
@@ -716,12 +713,20 @@ mod tests {
         ]
     }"#;
 
-    const INVALID_MANIFEST_CONFIG_SCHEMA: &[u8] = br#"{
+    const INVALID_MANIFEST_CONFIG: &[u8] = br#"{
         "id": "bad",
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
-        "configSchema": { "type": 7 }
+        "config": {
+            "fields": [
+                {
+                    "name": "endpoint",
+                    "type": { "kind": "integer" },
+                    "binding": { "kind": "socket" }
+                }
+            ]
+        }
     }"#;
 
     const GUIDANCE_MANIFEST: &[u8] = br#"{
@@ -846,12 +851,12 @@ mod tests {
                 }
             ),
             (
-                "invalid config schema",
-                INVALID_MANIFEST_CONFIG_SCHEMA,
+                "invalid config metadata",
+                INVALID_MANIFEST_CONFIG,
                 |error: &ProviderMetadataError| {
                     matches!(
                         error,
-                        ProviderMetadataError::Validation(message) if message.contains("configSchema")
+                        ProviderMetadataError::Validation(message) if message.contains("host-resource bindings")
                     )
                 }
             ),

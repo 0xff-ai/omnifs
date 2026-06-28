@@ -29,10 +29,10 @@
         "$ref": "#/$defs/Need"
       }
     },
-    "configSchema": {
+    "config": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Schema"
+          "$ref": "#/$defs/ConfigMetadata"
         },
         {
           "type": "null"
@@ -131,6 +131,188 @@
       "required": [
         "wit",
         "sdk"
+      ]
+    },
+    "ConfigField": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostResourceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/ConfigType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "ConfigMetadata": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigField"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "$ref": "#/$defs/ConfigType"
+            },
+            "kind": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "map"
+            },
+            "values": {
+              "$ref": "#/$defs/ConfigType"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConfigField"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fields"
+          ]
+        }
+      ]
+    },
+    "HostResourceBinding": {
+      "description": "Binds a config field's string value to a host resource the sandbox must be\ngranted. The provider also declares the matching capability as a `dynamic`\nneed; the host resolves the concrete grant from this field's value at\nmount-start.",
+      "oneOf": [
+        {
+          "description": "A host file the provider opens through a preopened WASI directory. The\nhost preopens the file's parent directory at the same path (guest ==\nhost) with `mode`, so the provider opens the configured path unchanged.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "mode": {
+              "$ref": "#/$defs/PreopenMode",
+              "default": "ro"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A host unix socket the host issues provider callouts over. The value is a\n`unix://` endpoint resolved into the socket allowlist.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "socket"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "ManifestAuthScheme": {
@@ -571,12 +753,6 @@
       "required": [
         "host",
         "guest"
-      ]
-    },
-    "Schema": {
-      "type": [
-        "object",
-        "boolean"
       ]
     },
     "TokenEndpointAuthMethod": {

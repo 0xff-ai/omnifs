@@ -136,11 +136,14 @@
 //! `serde_json` are re-exported for generated code and provider maps (use
 //! `hashbrown::HashMap` for provider-internal maps).
 
-pub use config_resource::{HostFile, HostSocket, ProvidesConfigSchema};
+pub use config_resource::{
+    ConfigField, ConfigMetadata, ConfigType, DefaultValue, HostFile, HostResourceBinding,
+    HostSocket, ProvidesConfigMetadata,
+};
+pub use metadata::{BuildEvidence, METADATA_JSON_CAPACITY, Metadata, Need, Provider};
 #[doc(hidden)]
 pub use omnifs_wit as __wit;
 pub use omnifs_wit::provider::{exports, omnifs};
-pub use schemars;
 
 #[macro_export]
 macro_rules! export {
@@ -169,6 +172,7 @@ pub mod helpers;
 pub mod http;
 pub mod identity;
 pub mod invalidation;
+pub mod metadata;
 pub mod object;
 pub mod prelude;
 pub mod projection;

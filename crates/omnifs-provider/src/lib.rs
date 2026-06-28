@@ -1,6 +1,6 @@
 //! The provider contract: the `omnifs.provider-manifest.v1` and
 //! `omnifs.provider-metadata.v1` custom sections, route resolution, the
-//! provider capability model, the config schema, and the single
+//! provider capability model, the config metadata, and the single
 //! auth-scheme model.
 //!
 //! The section is a concatenation of length-framed records. Each record is
@@ -19,7 +19,6 @@ mod records;
 mod resolve;
 mod sections;
 mod store;
-mod validation;
 mod wasm;
 
 pub use auth_resolve::SchemeResolveError;
@@ -29,7 +28,7 @@ pub use auth_wire::{
     TokenEndpointAuthMethod, TokenValidation,
 };
 pub use catalog::{Catalog, CatalogError, DirStatus, Provider};
-pub use config::{ConfigProperty, ConfigSchema, ConfigSchemaType, HostResource, HostResourceKind};
+pub use config::{ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding};
 pub use manifest::{
     AuthInject, BuildEvidence, PROVIDER_WIT_CONTRACT, ProviderAuthManifest, ProviderManifest,
 };
@@ -41,9 +40,8 @@ pub use records::{
 pub use resolve::{ResolveError, ResolvedManifest, resolve_manifest};
 pub use sections::{
     MANIFEST_SECTION_NAME, ManifestSectionError, PROVIDER_METADATA_SECTION_NAME,
-    ProviderMetadataError, embed_provider_metadata_section, provider_manifest_json,
-    read_manifest_section, read_provider_metadata_section,
+    ProviderMetadataError, provider_manifest_json, read_manifest_section,
+    read_provider_metadata_section,
 };
 pub use store::{Index, IndexEntry, ProviderStore, StoreError};
-pub use validation::{SchemaError, validate_config};
 pub use wasm::{Artifact, ArtifactError, ArtifactLoadError, ProviderWasm, ProviderWasmError};

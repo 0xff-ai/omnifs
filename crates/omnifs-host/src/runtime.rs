@@ -25,7 +25,7 @@ use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_mount::ProviderConfig;
 use omnifs_mount::mounts::Spec;
-use omnifs_provider::{ConfigSchema, HostResource, ProviderStore};
+use omnifs_provider::{ConfigMetadata, HostResourceBinding, ProviderStore};
 use omnifs_wit::provider::types as wit_types;
 
 use std::io;
@@ -275,37 +275,28 @@ impl Runtime {
     ) -> std::result::Result<Self, BuildError> {
         let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
-        // Load the pinned artifact's manifest once: capability/config-schema
+        // Load the pinned artifact's manifest once: capability/config metadata
         // validation, preopen resolution, and auth all read it, and enforcement
         // rests on this pinned manifest, never on a spec-stamped snapshot.
         let manifest = Artifact::load(wasm_path)
             .and_then(|artifact| artifact.metadata())
             .map_err(BuildError::InvalidConfig)?;
-        let config_schema = manifest
+        let config_metadata = manifest
             .as_ref()
-            .and_then(|manifest| manifest.config_schema.as_ref())
-            .map(ConfigSchema::parse)
-            .transpose()
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            .and_then(|manifest| manifest.config.as_ref())
+            .cloned();
 
-        let preopens = resolve_preopens(config, config_schema.as_ref());
+        let preopens = resolve_preopens(config, config_metadata.as_ref());
         let instance = Instance::new(engine, wasm_path, config_bytes, &preopens)?;
 
-        // `schemars::Schema::as_value` is the method clippy would name here, but
-        // schemars is not a direct dependency, so the closure stays.
-        #[allow(clippy::redundant_closure_for_method_calls)]
-        let schema_value = manifest
-            .as_ref()
-            .and_then(|manifest| manifest.config_schema.as_ref())
-            .map(|schema| schema.as_value());
-        validate_instance_config(schema_value, config, mount_name)?;
+        validate_instance_config(config_metadata.as_ref(), config, mount_name)?;
 
         let init_return = instance.initialize().map_err(BuildError::from)?;
         let initialize_result = finish_initialize_return(init_return)?;
         let capability = Arc::new(CapabilityChecker::from_config(
             config,
             &initialize_result.capabilities,
-            config_schema.as_ref(),
+            config_metadata.as_ref(),
         ));
 
         let auth_manifest = manifest
@@ -631,19 +622,19 @@ fn finish_initialize_return(
 /// verbatim; a dynamic one is resolved at mount-start from the config fields the
 /// provider marks as host files: the file's parent directory is preopened at the
 /// same path (guest == host), so the provider opens the configured path
-/// unchanged. The mode comes from the field's `HostResource::File` marker.
-fn resolve_preopens(config: &Spec, schema: Option<&ConfigSchema>) -> Vec<PreopenedPath> {
+/// unchanged. The mode comes from the field's host-resource binding.
+fn resolve_preopens(config: &Spec, metadata: Option<&ConfigMetadata>) -> Vec<PreopenedPath> {
     match config
         .capabilities
         .as_ref()
         .and_then(|capabilities| capabilities.preopened_paths.as_ref())
     {
         Some(Grant::Literal(paths)) => paths.clone(),
-        Some(Grant::Dynamic(_)) => schema
+        Some(Grant::Dynamic(_)) => metadata
             .into_iter()
-            .flat_map(ConfigSchema::resource_fields)
-            .filter_map(|(field, resource)| {
-                let HostResource::File { mode } = resource else {
+            .flat_map(ConfigMetadata::host_resource_fields)
+            .filter_map(|(field, metadata)| {
+                let Some(HostResourceBinding::File { mode }) = metadata.binding else {
                     return None;
                 };
                 let value = config_str(config, field)?;
@@ -660,11 +651,11 @@ fn resolve_preopens(config: &Spec, schema: Option<&ConfigSchema>) -> Vec<Preopen
 }
 
 fn validate_instance_config(
-    schema: Option<&serde_json::Value>,
+    metadata: Option<&ConfigMetadata>,
     config: &Spec,
     mount_name: &str,
 ) -> std::result::Result<(), BuildError> {
-    let Some(schema) = schema else {
+    let Some(metadata) = metadata else {
         return Ok(());
     };
 
@@ -673,16 +664,11 @@ fn validate_instance_config(
         .config_raw
         .as_ref()
         .map_or(&empty_config, ProviderConfig::as_value);
-    match omnifs_provider::validate_config(schema, config_value) {
+    match metadata.validate_config(config_value) {
         Ok(()) => Ok(()),
-        Err(omnifs_provider::SchemaError::Validation(error)) => Err(BuildError::InvalidConfig(
-            format!("config for mount {mount_name} failed validation: {error}"),
-        )),
-        Err(omnifs_provider::SchemaError::InvalidSchema(error)) => {
-            Err(BuildError::ProviderProtocol(format!(
-                "provider config schema for mount {mount_name} is invalid: {error}"
-            )))
-        },
+        Err(error) => Err(BuildError::InvalidConfig(format!(
+            "config for mount {mount_name} failed validation: {error}"
+        ))),
     }
 }
 

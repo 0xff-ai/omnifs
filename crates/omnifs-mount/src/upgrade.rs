@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use omnifs_caps::Need;
-use omnifs_provider::{ConfigSchema, ProviderManifest};
+use omnifs_provider::ProviderManifest;
 
 /// How a candidate provider artifact differs from the pinned one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,22 +158,16 @@ struct Field {
 }
 
 fn extract_config_fields(manifest: &ProviderManifest) -> Vec<Field> {
-    let Some(schema) = manifest.config_schema.as_ref() else {
+    let Some(config) = manifest.config.as_ref() else {
         return Vec::new();
     };
-    let Ok(parsed) = ConfigSchema::parse(schema) else {
-        return Vec::new();
-    };
-    parsed
-        .properties
+    config
+        .fields
         .iter()
-        .map(|(name, prop)| Field {
-            name: name.clone(),
-            // A field is required iff the schema's `required` array names it; a
-            // default may coexist with required-ness (e.g. an endpoint with a
-            // sensible default the operator must still acknowledge).
-            required: parsed.required.iter().any(|req| req == name),
-            default: prop.default.clone(),
+        .map(|field| Field {
+            name: field.name.clone(),
+            required: field.required,
+            default: field.default.clone(),
         })
         .collect()
 }
@@ -296,20 +290,16 @@ fn diff_fields(old: &[Field], new: &[Field]) -> Vec<FieldChange> {
 mod tests {
     use super::*;
 
-    /// Build a manifest with the given config-schema properties and `required`
-    /// array, for diff classification tests.
-    fn manifest(config_props: &serde_json::Value, required: &[&str]) -> ProviderManifest {
+    /// Build a manifest with the given config fields for diff classification tests.
+    fn manifest(fields: &serde_json::Value) -> ProviderManifest {
         let json = serde_json::json!({
             "id": "demo",
             "displayName": "Demo",
             "provider": "omnifs_provider_demo.wasm",
             "defaultMount": "demo",
             "capabilities": [],
-            "configSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": config_props,
-                "required": required,
+            "config": {
+                "fields": fields,
             }
         });
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
@@ -352,15 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn config_schema_upgrade_diff() {
-        let base_props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
-        let base = manifest(&base_props, &["endpoint"]);
+    fn config_metadata_upgrade_diff() {
+        let base_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" }
+        ]);
+        let base = manifest(&base_fields);
 
-        let optional_props = serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "timeout_secs": { "type": "integer", "default": 30 }
-        });
-        let with_optional = manifest(&optional_props, &["endpoint"]);
+        let optional_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" },
+            { "name": "timeout_secs", "type": { "kind": "integer" }, "default": 30 }
+        ]);
+        let with_optional = manifest(&optional_fields);
         match UpgradePlan::diff(&base, &with_optional) {
             UpgradePlan::AdditiveConfig { added } => {
                 assert_eq!(added.len(), 1);
@@ -370,21 +362,21 @@ mod tests {
             other => panic!("expected AdditiveConfig, got {other:?}"),
         }
 
-        let required_props = serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "api_key": { "type": "string" }
-        });
-        let with_required = manifest(&required_props, &["endpoint", "api_key"]);
+        let required_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" },
+            { "name": "api_key", "type": { "kind": "string" }, "required": true }
+        ]);
+        let with_required = manifest(&required_fields);
         assert!(matches!(
             UpgradePlan::diff(&base, &with_required),
             UpgradePlan::BreakingConfig { .. }
         ));
 
-        let required_default_props = serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "region": { "type": "string", "default": "us-east-1" }
-        });
-        let with_required_default = manifest(&required_default_props, &["endpoint", "region"]);
+        let required_default_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" },
+            { "name": "region", "type": { "kind": "string" }, "required": true, "default": "us-east-1" }
+        ]);
+        let with_required_default = manifest(&required_default_fields);
         assert!(matches!(
             UpgradePlan::diff(&base, &with_required_default),
             UpgradePlan::BreakingConfig { .. }
@@ -393,21 +385,25 @@ mod tests {
 
     #[test]
     fn identical_manifests_are_identical() {
-        let props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
-        let m = manifest(&props, &["endpoint"]);
-        let m2 = manifest(&props, &["endpoint"]);
+        let fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" }
+        ]);
+        let m = manifest(&fields);
+        let m2 = manifest(&fields);
         assert_eq!(UpgradePlan::diff(&m, &m2), UpgradePlan::Identical);
     }
 
     #[test]
     fn removed_field_is_breaking() {
-        let old_props = serde_json::json!({
-                "endpoint": { "type": "string", "default": "x" },
-                "timeout_secs": { "type": "integer", "default": 30 }
-        });
-        let old = manifest(&old_props, &["endpoint"]);
-        let new_props = serde_json::json!({ "endpoint": { "type": "string", "default": "x" } });
-        let new = manifest(&new_props, &["endpoint"]);
+        let old_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" },
+            { "name": "timeout_secs", "type": { "kind": "integer" }, "default": 30 }
+        ]);
+        let old = manifest(&old_fields);
+        let new_fields = serde_json::json!([
+            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" }
+        ]);
+        let new = manifest(&new_fields);
         assert!(matches!(
             UpgradePlan::diff(&old, &new),
             UpgradePlan::BreakingConfig { .. }

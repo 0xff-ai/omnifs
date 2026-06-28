@@ -31,11 +31,11 @@ mod provider_macro;
 /// `(&mut Router<State>)` and returns `Result<State>`. `Config` and `State`
 /// are inferred from the `start` signature.
 ///
-/// The manifest (identity, capabilities, config schema, auth) is authored from
-/// these arguments and assembled into the `omnifs.provider-metadata.v1` custom
-/// section at build: the macro emits a config-less `manifest_json()` lifecycle
-/// export that the build tool (`just providers build`) runs and injects. There
-/// is no hand-written `omnifs.provider.json`.
+/// The manifest (identity, capabilities, config metadata, auth) is authored from
+/// these arguments, the config type's static metadata, and static auth metadata.
+/// The macro lowers it into `Provider::METADATA` and emits the JSON bytes into
+/// the `omnifs.provider-metadata.v1` custom section. There is no hand-written
+/// `omnifs.provider.json` and no host-side metadata postprocessor.
 ///
 /// Arguments:
 ///
@@ -48,13 +48,12 @@ mod provider_macro;
 ///   memory_mb(<int>, "why"))`: the declared capability needs. `unix_socket` and
 ///   `preopened_path` are dynamic, resolved at mount-start from the
 ///   [`HostSocket`](../omnifs_sdk/struct.HostSocket.html) /
-///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field.
-/// - `auth = <expr>`: a typed [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
-///   value spliced into the manifest's `auth` block.
-/// - The config schema is derived from the inferred or explicit config type
-///   (via `#[config]`) and spliced in automatically; no argument is needed.
-/// - `resources(git = <bool>, memory_mb = <int>)`: requested capabilities
-///   exported during initialization.
+///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field binding.
+/// - `auth = <expr>`: a typed static [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
+///   value included in `Provider::METADATA`.
+/// - The config metadata is derived from the inferred or explicit config type's
+///   static config dialect (via `#[config]`) and spliced in automatically; no
+///   argument is needed.
 /// - `events(timer(<Duration expr>, Self::method))`: register a timer
 ///   handler `async fn method(cx: Cx<State>) -> Result<Invalidation>`; the
 ///   interval is exported as the manifest's `refresh-interval-secs`. The

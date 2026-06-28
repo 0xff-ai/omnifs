@@ -161,20 +161,6 @@ impl Instance {
         })
     }
 
-    /// The provider's self-describing manifest as a JSON string. Needs no config
-    /// and runs no `start`, so the build-time manifest-embed tool can call it on
-    /// any provider (including config/auth-gated ones) to harvest the full
-    /// manifest before injecting the metadata custom section.
-    pub fn manifest_json(&self) -> std::result::Result<String, Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            Ok(self
-                .bindings
-                .omnifs_provider_lifecycle()
-                .call_manifest_json(&mut *store)?)
-        })
-    }
-
     pub fn close_file(&self, handle: u64) -> std::result::Result<(), Error> {
         without_tokio_handle(|| {
             let mut store = self.store.lock();

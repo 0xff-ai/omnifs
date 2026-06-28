@@ -305,25 +305,25 @@ mod tests {
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_mount::mounts::Registry;
-    use omnifs_provider::{AuthManifest, AuthScheme, Catalog, ProviderManifest, ProviderStore};
+    use omnifs_provider::{
+        AuthManifest, AuthScheme, Catalog, ConfigField, ConfigMetadata, ConfigType,
+        HostResourceBinding, ProviderManifest, ProviderStore,
+    };
     use serde_json::Value;
 
     #[test]
-    fn generate_mount_config_materializes_schema_defaults() {
+    fn generate_mount_config_materializes_config_defaults() {
         let mut manifest = provider_manifest();
-        manifest.config_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "required": ["endpoint"],
-                "properties": {
-                    "endpoint": {
-                        "type": "string",
-                        "default": "unix:///var/run/docker.sock"
-                    }
-                }
-            }))
-            .unwrap(),
-        );
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "endpoint".to_string(),
+                value_type: ConfigType::String,
+                required: true,
+                default: Some(serde_json::json!("unix:///var/run/docker.sock")),
+                description: None,
+                binding: None,
+            }],
+        });
 
         let created = MountSpecCreator::new(&manifest).create(false).unwrap();
 
@@ -342,21 +342,20 @@ mod tests {
     }
 
     #[test]
-    fn config_schema_reports_interactive_prompt_requirement() {
+    fn config_metadata_reports_interactive_prompt_requirement() {
         let mut manifest = provider_manifest();
-        manifest.config_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "default": "/data/test.db",
-                        "x-omnifs-resource": { "kind": "file", "mode": "ro" }
-                    }
-                }
-            }))
-            .unwrap(),
-        );
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "path".to_string(),
+                value_type: ConfigType::String,
+                required: false,
+                default: Some(serde_json::json!("/data/test.db")),
+                description: None,
+                binding: Some(HostResourceBinding::File {
+                    mode: PreopenMode::Ro,
+                }),
+            }],
+        });
 
         assert!(MountSpecCreator::new(&manifest).requires_prompt());
     }
@@ -613,7 +612,7 @@ mod tests {
                     m
                 },
             }),
-            config_schema: None,
+            config: None,
         }
     }
 

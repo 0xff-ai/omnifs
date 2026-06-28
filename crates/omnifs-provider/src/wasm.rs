@@ -159,7 +159,7 @@ fn collect_manifest_records(section: &[u8]) -> Result<Vec<ManifestRecord>, Decod
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sections::embed_provider_metadata_section;
+    use crate::sections::wasm_with_provider_metadata;
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
     const DEMO_METADATA: &[u8] = br#"{
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn artifact_from_bytes_reads_metadata_and_hashes_bytes() {
-        let bytes = embed_provider_metadata_section(EMPTY_WASM, DEMO_METADATA).unwrap();
+        let bytes = wasm_with_provider_metadata(EMPTY_WASM, DEMO_METADATA);
         let artifact = Artifact::from_bytes("demo.wasm", bytes.clone()).unwrap();
 
         assert_eq!(artifact.file(), "demo.wasm");

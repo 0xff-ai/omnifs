@@ -232,7 +232,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use crate::Artifact;
-    use crate::sections::embed_provider_metadata_section;
+    use crate::sections::wasm_with_provider_metadata;
     use tempfile::tempdir;
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\0\0\0";
@@ -251,11 +251,10 @@ mod tests {
             "provider": file,
             "defaultMount": name
         });
-        let bytes = embed_provider_metadata_section(
+        let bytes = wasm_with_provider_metadata(
             EMPTY_WASM,
             serde_json::to_vec(&metadata).unwrap().as_slice(),
-        )
-        .unwrap();
+        );
         let id = ProviderId::from_wasm_bytes(&bytes);
         (id, Artifact::from_bytes(file, bytes).unwrap())
     }

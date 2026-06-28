@@ -23,7 +23,7 @@ Credential file protection is a local desktop trust boundary. It protects agains
 
 ## Auth metadata
 
-Provider metadata declares auth schemes, injection domains, header shape, flow type, scopes, and setup guidance. Metadata is generated from `#[omnifs_sdk::provider]` annotations and embedded as `omnifs.provider-metadata.v1` during `just providers build`.
+Provider metadata declares auth schemes, injection domains, header shape, flow type, scopes, and setup guidance. Metadata is generated from `#[omnifs_sdk::provider]` annotations and emitted by the provider macro as `omnifs.provider-metadata.v1` in the compiled Wasm.
 
 The host extracts that metadata and builds generic auth strategies from it. It does not branch on provider names.
 

@@ -11,7 +11,7 @@ Read this before touching CI, `just` recipes, provider artifact generation, wasi
 
 ### Provider build artifacts
 
-Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers and injects provider metadata. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built provider WASM bytes.
+Provider WASM artifacts are built with the pinned wasi-sdk. `just providers build` compiles providers; the SDK provider macro emits provider metadata directly into each Wasm artifact. `just dev` depends on that build and then runs the source CLI's `dev` command, so dev mount pinning and the dev image both consume the same host-built provider WASM bytes.
 
 Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 
@@ -41,7 +41,7 @@ Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-chec
 
 - Treat missing provider WASM in a fresh worktree as a product regression.
 - Use `cargo check --workspace --all-targets` as a host gate.
-- Assume bare provider builds contain injected metadata.
+- Treat host-target provider checks as proof that Wasm metadata was emitted.
 - Hand-edit generated OpenAPI or schema files as the primary fix.
 - Change API/model code without regenerating the corresponding checked-in artifact and running its focused parity test.
 - Validate only the intended leaf path when parent traversal changed.
