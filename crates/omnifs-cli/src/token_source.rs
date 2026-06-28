@@ -1,7 +1,7 @@
-//! Typed source for static-token input. Shared between `omnifs init` and
-//! `omnifs auth import`. `--token VALUE` is rejected to keep secrets out
-//! of shell history; only `--token -` (stdin) and `--token-env VAR` are
-//! accepted. Interactive mode (no flags, terminal stdin) prompts.
+//! Typed source for static-token input used by `omnifs init`. `--token VALUE`
+//! is rejected to keep secrets out of shell history; only `--token -` (stdin)
+//! and `--token-env VAR` are accepted. Interactive mode (no flags, terminal
+//! stdin) prompts.
 
 use anyhow::{Context, bail};
 use secrecy::SecretString;

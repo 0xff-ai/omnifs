@@ -22,7 +22,6 @@ use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::auth::AuthSelection;
-use crate::commands::auth;
 use crate::credential_target::CredentialTarget;
 use crate::launch_backend::LaunchBackend;
 use crate::token_source::TokenSource;
@@ -108,7 +107,7 @@ impl InitArgs {
         }
         if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
             anyhow::bail!(
-                "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively, or create the mount and run `omnifs auth login {mount_name}`."
+                "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively."
             );
         }
         let creator = MountSpecCreator::new(manifest);
@@ -154,7 +153,7 @@ impl InitArgs {
                 run_static_token_init(manifest, auth, token, &paths.credentials_file).await?;
             } else if auth.is_oauth() {
                 anstream::println!("Starting OAuth login for `{mount_name}` ...");
-                auth::login_with_workspace(
+                crate::auth::login_with_workspace(
                     workspace,
                     mount_name.as_str(),
                     auth.account.as_deref(),
@@ -164,7 +163,7 @@ impl InitArgs {
                 .await
                 .inspect_err(|_| {
                     anstream::eprintln!(
-                        "Mount `{mount_name}` was created, but login did not complete. Run `omnifs auth login {mount_name}` to finish."
+                        "Mount `{mount_name}` was created, but login did not complete. Run `omnifs init --reauth {mount_name}` to finish."
                     );
                 })?;
             } else {

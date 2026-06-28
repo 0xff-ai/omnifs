@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod completions;
 pub mod debug;
 pub mod doctor;

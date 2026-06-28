@@ -26,9 +26,6 @@ pub enum Commands {
     /// Print mount and provider configuration status.
     Status(commands::status::StatusArgs),
 
-    /// Manage provider credentials.
-    Auth(commands::auth::AuthArgs),
-
     /// Start omnifs with your configured mounts: materialize host credentials
     /// into a session dir, bind-mount them into the container, then run it.
     Up(commands::up::UpArgs),
@@ -109,7 +106,6 @@ impl Commands {
                 exit_for_verdict(verdict);
             },
             Self::Status(args) => args.run().await,
-            Self::Auth(args) => args.run().await,
             Self::Setup(args) => args.run().await,
             Self::Init(args) => args.run().await,
             Self::Up(args) => args.run().await,

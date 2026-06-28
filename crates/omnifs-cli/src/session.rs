@@ -72,12 +72,12 @@ impl MountConfig {
         match (auth.is_oauth(), entry) {
             (_, Ok(_)) => Ok(()),
             (true, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs auth login {}` to authenticate",
+                "Run `omnifs init --reauth {}` to authenticate",
                 self.name
             )),
             (false, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs auth import {}` or `omnifs init {}` to configure this mount's token",
-                self.name, self.name
+                "Run `omnifs init --reauth {}` to configure this mount's token",
+                self.name
             )),
         }
     }

@@ -4,10 +4,10 @@
 //! lives here (host-owned) rather than being re-authored in every provider
 //! manifest. A provider manifest supplies only what is specific to it (which
 //! token to create, which app to register); that guidance is paired with this
-//! canned copy at the point of display.
+//! canned copy at the point of display by `omnifs init`'s auth step.
 
 use crate::style;
-use omnifs_provider::{AuthScheme, OAuthFlow, ProviderAuthManifest, SchemeGuidance};
+use omnifs_provider::{OAuthFlow, SchemeGuidance};
 
 /// An authentication mechanism omnifs knows how to drive, independent of any
 /// particular provider.
@@ -21,15 +21,6 @@ pub(crate) enum AuthMode {
 }
 
 impl AuthMode {
-    /// Every mode, in rough order of how commonly a user meets it.
-    pub(crate) const ALL: [AuthMode; 5] = [
-        AuthMode::StaticToken,
-        AuthMode::OauthPkceLoopback,
-        AuthMode::OauthDeviceCode,
-        AuthMode::OauthPkceManualCode,
-        AuthMode::OauthClientSideToken,
-    ];
-
     /// Short human label.
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -38,36 +29,6 @@ impl AuthMode {
             AuthMode::OauthPkceLoopback => "OAuth browser redirect (PKCE)",
             AuthMode::OauthPkceManualCode => "OAuth paste-the-redirect (PKCE)",
             AuthMode::OauthClientSideToken => "OAuth token redirect",
-        }
-    }
-
-    /// One-line summary for pickers and listings.
-    pub(crate) fn summary(self) -> &'static str {
-        match self {
-            AuthMode::StaticToken => {
-                "Paste a long-lived token you create in the provider's settings."
-            },
-            AuthMode::OauthDeviceCode => {
-                "Approve a short code in your browser; works on headless hosts."
-            },
-            AuthMode::OauthPkceLoopback => {
-                "Your browser opens, you approve, and you're redirected back automatically."
-            },
-            AuthMode::OauthPkceManualCode => {
-                "Your browser opens; you paste the final redirect URL back here."
-            },
-            AuthMode::OauthClientSideToken => {
-                "Your browser opens; the access token comes back in the redirect."
-            },
-        }
-    }
-
-    /// The mode a concrete scheme drives, or `None` for [`AuthScheme::None`].
-    pub(crate) fn from_scheme(scheme: &AuthScheme) -> Option<AuthMode> {
-        match scheme {
-            AuthScheme::None => None,
-            AuthScheme::StaticToken(_) => Some(AuthMode::StaticToken),
-            AuthScheme::Oauth(oauth) => Some(AuthMode::from_oauth_flow(&oauth.flow)),
         }
     }
 
@@ -101,115 +62,6 @@ impl AuthMode {
             },
         }
     }
-}
-
-/// Render the general catalog of supported auth mechanisms for `omnifs auth modes`.
-pub(crate) fn render_modes_catalog() {
-    anstream::println!("{}", style::bold("Authentication modes omnifs supports"));
-    anstream::println!(
-        "{}",
-        style::dim(
-            "How a provider authenticates is declared in its manifest; run `omnifs auth explain <provider>` for a specific one."
-        )
-    );
-    for mode in AuthMode::ALL {
-        anstream::println!();
-        anstream::println!("{}", style::accent(mode.label()));
-        anstream::println!("  {}", mode.summary());
-        anstream::println!("  {}", style::dim(mode.experience()));
-    }
-    anstream::println!();
-    anstream::println!(
-        "{}",
-        style::dim(
-            "Some providers need no auth at all (public APIs). OAuth flows may use omnifs's registered app or your own: when a provider ships no client id, you create an app and supply its client id and secret."
-        )
-    );
-}
-
-/// Render every auth scheme a provider declares, pairing the host's canned
-/// flow-kind copy with the provider's own setup guidance.
-pub(crate) fn render_provider_auth(provider_label: &str, auth: &ProviderAuthManifest) {
-    anstream::println!(
-        "{}",
-        style::bold(format!("Authentication for {provider_label}"))
-    );
-    let domains: std::collections::BTreeSet<&str> = auth
-        .schemes
-        .iter()
-        .flat_map(AuthScheme::inject_domains)
-        .map(String::as_str)
-        .collect();
-    anstream::println!(
-        "  {}",
-        style::dim(format!(
-            "Applies to: {}",
-            domains.into_iter().collect::<Vec<_>>().join(", ")
-        ))
-    );
-    for scheme in &auth.schemes {
-        let Some(key) = scheme.key() else { continue };
-        anstream::println!();
-        render_scheme(key, scheme, &auth.guidance_for(key), auth.default == key);
-    }
-}
-
-fn render_scheme(key: &str, scheme: &AuthScheme, guidance: &SchemeGuidance, is_default: bool) {
-    let mode = AuthMode::from_scheme(scheme);
-    let mode_label = mode.map_or("unknown", AuthMode::label);
-    let default_tag = if is_default {
-        format!(" {}", style::dim("(default)"))
-    } else {
-        String::new()
-    };
-    anstream::println!(
-        "{} {}{}",
-        style::accent(key),
-        style::dim(format!("— {mode_label}")),
-        default_tag
-    );
-
-    // Provider one-liner if it gave one, else the canned mode summary.
-    match (&guidance.summary, mode) {
-        (Some(summary), _) => anstream::println!("  {summary}"),
-        (None, Some(mode)) => anstream::println!("  {}", mode.summary()),
-        (None, None) => {},
-    }
-    if let Some(mode) = mode {
-        anstream::println!("  {}", style::dim(mode.experience()));
-    }
-
-    match scheme {
-        AuthScheme::StaticToken(s) => {
-            if let Some(url) = &s.creation_url {
-                anstream::println!(
-                    "  {} {}",
-                    style::dim("Create a token at:"),
-                    style::accent(url)
-                );
-            }
-        },
-        AuthScheme::Oauth(o) => {
-            if !o.default_scopes.is_empty() {
-                anstream::println!(
-                    "  {} {}",
-                    style::dim("Scopes:"),
-                    o.default_scopes.join(", ")
-                );
-            }
-            if o.default_client_id.is_none() {
-                anstream::println!(
-                    "  {}",
-                    style::warn(
-                        "Needs your own OAuth app: omnifs ships no client id for this scheme."
-                    )
-                );
-            }
-        },
-        AuthScheme::None => {},
-    }
-
-    print_steps_and_docs(guidance);
 }
 
 fn print_steps_and_docs(guidance: &SchemeGuidance) {

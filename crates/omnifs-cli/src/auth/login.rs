@@ -11,14 +11,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use super::shared::format_scopes;
-use crate::auth::explain::{self, AuthMode};
+use super::explain::{self, AuthMode};
 use crate::style;
 use crate::workspace::Workspace;
 use omnifs_provider::Catalog;
 use omnifs_provider::SchemeGuidance;
 
-pub(super) async fn login(
+async fn login(
     catalog: &Catalog,
     mounts: &[crate::session::MountConfig],
     store: Box<dyn CredentialStore>,
@@ -46,11 +45,11 @@ pub(super) async fn login(
         LoginRequest::Loopback(request) => client
             .login_loopback(request)
             .await
-            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
         LoginRequest::ClientSideToken(request) => client
             .login_client_side_token(request)
             .await
-            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
         LoginRequest::ManualCode(request) => client
             .login_manual_code(request, |url| async move {
                 anstream::println!("Open {url}");
@@ -66,7 +65,7 @@ pub(super) async fn login(
                     .map_err(|error| omnifs_auth::AuthError::BrowserOpen(error.to_string()))
             })
             .await
-            .with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?,
+            .with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?,
         LoginRequest::DeviceCode(request) => {
             let bar = indicatif::ProgressBar::new_spinner();
             bar.set_style(indicatif::ProgressStyle::with_template(
@@ -89,7 +88,7 @@ pub(super) async fn login(
                 },
                 Err(_) => bar.finish_and_clear(),
             }
-            result.with_hint(format!("Re-run `omnifs auth login {mount}` to retry"))?
+            result.with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?
         },
     };
     for key in target.keys() {
@@ -128,7 +127,7 @@ pub(crate) async fn login_with_workspace(
     .await
 }
 
-pub(super) fn present_device_prompt(
+fn present_device_prompt(
     prompt: &DeviceCodePrompt,
     bar: &indicatif::ProgressBar,
     no_browser: bool,
@@ -161,11 +160,7 @@ pub(super) fn present_device_prompt(
     bar.set_message("Authorizing — waiting for confirmation");
 }
 
-pub(super) fn print_oauth_consent_summary(
-    mount: &str,
-    request: &OAuthRequest,
-    guidance: &SchemeGuidance,
-) {
+fn print_oauth_consent_summary(mount: &str, request: &OAuthRequest, guidance: &SchemeGuidance) {
     let scheme = request.scheme();
     let mode = AuthMode::from_oauth_flow(&scheme.flow);
     anstream::println!(
@@ -188,7 +183,7 @@ pub(super) fn print_oauth_consent_summary(
     }
 }
 
-pub(super) fn manual_code_from_input(input: &str) -> anyhow::Result<ManualCode> {
+fn manual_code_from_input(input: &str) -> anyhow::Result<ManualCode> {
     let trimmed = input.trim();
     if let Ok(url) = reqwest::Url::parse(trimmed) {
         let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
@@ -220,5 +215,13 @@ impl UrlOpener for PrintOpener {
             anstream::println!("Open {url}");
             Ok(())
         })
+    }
+}
+
+fn format_scopes(scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        "<none>".to_owned()
+    } else {
+        scopes.join(", ")
     }
 }
