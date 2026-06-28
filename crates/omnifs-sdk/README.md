@@ -37,7 +37,7 @@ Build with `cargo build --target wasm32-wasip2 --release`. The `.wasm` component
 - **Handlers**: async functions taking `Cx`, `DirCx`, state-bearing `Cx<State>` / `DirCx<State>`, or typed `#[path_captures]` keys. Return `FileProjection`, `DirProjection`, `TreeRef`, or `Effects` (for timer/event handlers).
 - **Objects**: `#[object]` types implement `Object::load` / `Object::render`; `bind` mounts them at a path template. The host caches canonical bytes and pushes them on later reads.
 - **Endpoints**: `#[derive(Endpoint)]` plus `cx.endpoint::<E>()` for typed HTTP (and rate-limit policy) against declared bases.
-- **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes the batch and calls `resume`; there are no fire-and-forget callouts.
+- **Callouts**: handlers `.await` on `cx.http()`, `cx.git()`, etc. The host executes each async import and returns the typed result to the awaiting future; there are no fire-and-forget callouts.
 - **Projections**: `FileProjection` / `DirProjection` encode size, stability, byte source, and additional file, directory, and canonical effects that should be materialized with the accepted result. Listings use `FileProj::listing_shape()` for file entries named before content is fetched.
 
 See the [provider SDK contract](https://github.com/0xff-ai/omnifs/blob/main/docs/contracts/20-provider-sdk.md) and [projection tree contract](https://github.com/0xff-ai/omnifs/blob/main/docs/contracts/30-projection-tree.md) for routing precedence, pagination (`@next` / `@all`), and attribute rules.

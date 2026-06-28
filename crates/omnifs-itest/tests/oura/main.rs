@@ -42,7 +42,7 @@ fn oura_harness() -> RuntimeHarness {
 }
 
 fn resume_json(op: &mut omnifs_host::TestOp<'_>, body: &'static [u8]) {
-    op.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: vec![Header {
             name: "etag".to_string(),

@@ -25,6 +25,8 @@ Lower provider output into neutral host/tree types before frontend adaptation. K
 
 New provider authority is a gated decision. Gate new callout families, new preopens, process effects, socket effects, broader network authority, and auth or transport changes. Describe the security model change and add enforcement-boundary tests in the same change.
 
+Async host imports do not reduce this gate. A provider may suspend on a host import, but the host still owns execution, auth injection, capability checks, timeout behavior, and error mapping. Adding or widening an import is an authority change even when the SDK call site looks like ordinary async Rust.
+
 ### Auth and credentials
 
 Credentials live host-side. Providers declare auth needs; the host resolves, stores, refreshes, and injects credentials after a callout crosses the WASM boundary.
@@ -42,6 +44,7 @@ OAuth client ids in provider declarations are public application identifiers, no
 - Transmit credentials through the daemon API.
 - Let providers read the credential store directly.
 - Build a provider-specific credential bypass in host runtime code.
+- Treat WIT async imports as provider-owned I/O.
 
 ## Code
 

@@ -71,7 +71,7 @@ fn resource_collections_use_discovered_group_version_paths() {
             .ends_with("/api/v1/namespaces/demo/events")
     );
     core_events
-        .resume(vec![http_ok(br#"{"items":[]}"#)])
+        .answer_callouts(vec![http_ok(br#"{"items":[]}"#)])
         .unwrap();
 
     let mut deployments = harness.list("/namespaces/demo/deployments").unwrap();
@@ -82,7 +82,7 @@ fn resource_collections_use_discovered_group_version_paths() {
             .ends_with("/apis/apps/v1/namespaces/demo/deployments")
     );
     deployments
-        .resume(vec![http_ok(
+        .answer_callouts(vec![http_ok(
             br#"{"items":[{"metadata":{"name":"ticker"}}]}"#,
         )])
         .unwrap();
@@ -119,7 +119,8 @@ fn object_manifest_strips_only_managed_fields() {
             .url
             .ends_with("/api/v1/namespaces/demo/configmaps/greeting")
     );
-    op.resume(vec![http_ok(CONFIGMAP_JSON.as_bytes())]).unwrap();
+    op.answer_callouts(vec![http_ok(CONFIGMAP_JSON.as_bytes())])
+        .unwrap();
 
     let canonical: Value = serde_json::from_slice(&read_bytes(&op)).unwrap();
     let meta = canonical.get("metadata").expect("metadata present");
@@ -151,7 +152,7 @@ fn status_yaml_renders_status_or_null() {
             .url
             .ends_with("/api/v1/namespaces/demo/pods/web")
     );
-    pod.resume(vec![http_ok(
+    pod.answer_callouts(vec![http_ok(
         br#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"web"},"status":{"phase":"Running"}}"#,
     )])
     .unwrap();
@@ -167,7 +168,7 @@ fn status_yaml_renders_status_or_null() {
             .ends_with("/api/v1/namespaces/demo/configmaps/greeting")
     );
     configmap
-        .resume(vec![http_ok(
+        .answer_callouts(vec![http_ok(
             br#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"greeting"},"data":{"k":"v"}}"#,
         )])
         .unwrap();
@@ -191,7 +192,7 @@ fn events_txt_uses_kubectl_field_selector() {
             .ends_with("/api/v1/namespaces/demo/pods/web"),
         "events.txt first loads the object for its kind/uid"
     );
-    op.resume(vec![http_ok(
+    op.answer_callouts(vec![http_ok(
         br#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"web","namespace":"demo","uid":"abc-123"}}"#,
     )])
     .unwrap();
@@ -202,7 +203,8 @@ fn events_txt_uses_kubectl_field_selector() {
         field_selector_of(&events_url),
         "involvedObject.name=web,involvedObject.namespace=demo,involvedObject.kind=Pod,involvedObject.uid=abc-123"
     );
-    op.resume(vec![http_ok(br#"{"items":[]}"#)]).unwrap();
+    op.answer_callouts(vec![http_ok(br#"{"items":[]}"#)])
+        .unwrap();
     assert_eq!(read_bytes(&op), b"No events.\n");
 }
 

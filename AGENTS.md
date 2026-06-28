@@ -68,6 +68,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | Object/view/blob cache roles, canonical push, effects, invalidation fences | `docs/architecture/30-cache-and-effects.md` |
 | Auth trust boundary, OAuth ownership, credential injection, grants versus needs | `docs/architecture/40-auth-boundary.md` |
 | NFSv4 loopback filehandles, stateids, leases, attrs, mount lifecycle | `docs/architecture/50-nfs-frontend.md` |
+| Provider async execution, host imports, callout tracing, same-instance concurrency | `docs/architecture/60-async-provider-runtime.md` |
 
 ## Orientation
 
@@ -98,7 +99,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - **Object.** Provider-side domain identity plus canonical bytes and derived files.
 - **Render.** SDK-side assembly of an object's canonical bytes. A provider concern, never a frontend concern.
 - **Path.** `omnifs_core::path::Path`, the parsed provider path type used inside SDK and tree policy.
-- **Callout.** A host-run effect a provider suspends on, such as HTTP. The host executes it and resumes the provider.
+- **Callout.** A host-run effect a provider awaits through an async WIT import, such as HTTP. The host executes it and the component future resumes with the result.
 - **Effect.** The single terminal channel a provider returns for cache writes, invalidations, and related host-visible side effects.
 
 ## Avoid these frames
@@ -121,6 +122,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - Contributor dev commands run inside the container. From the host, use `docker exec omnifs omnifs status`, `docker exec -it -w /omnifs omnifs /bin/zsh`, `docker logs omnifs`, and `docker rm -f omnifs`.
 - `Dockerfile` is the contributor image path for `just dev`. The dev image consumes the host-built provider-store bundle from `target/omnifs-provider-store` instead of compiling providers inside the image, while the dev provider store retains artifacts by content id for runtime mount pinning. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`; release CLI binaries embed the provider bundle and unpack it into `OMNIFS_HOME/providers`.
 - A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
+- Provider namespace and notify exports are async component functions. SDK callout futures await host imports directly; the host uses Wasmtime component async with `run_concurrent` so one provider instance can have multiple filesystem operations in flight.
 
 ## Product contract
 

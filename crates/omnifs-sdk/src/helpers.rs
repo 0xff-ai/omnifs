@@ -2,18 +2,12 @@
 //! provider macro's generated glue.
 
 use crate::error::{ProviderError, Result};
-use omnifs_wit::provider::types::{OpResult, ProviderReturn, ProviderStep};
+use omnifs_wit::provider::types::{OpResult, ProviderReturn};
 
 /// Wrap anything convertible to a [`ProviderError`] into a terminal
 /// [`ProviderReturn`] with no effects.
 pub fn err(error: impl Into<ProviderError>) -> ProviderReturn {
     ProviderReturn::terminal(OpResult::from(error.into()))
-}
-
-/// Like [`err`], wrapped as a returned [`ProviderStep`]: the shape a WIT
-/// entry point must produce when it fails before any future can run.
-pub fn err_step(error: impl Into<ProviderError>) -> ProviderStep {
-    ProviderStep::returned(err(error))
 }
 
 /// Render a value as pretty-printed JSON with a trailing newline, so the

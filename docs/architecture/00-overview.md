@@ -27,7 +27,9 @@ Identity is layered. The provider computes a logical id from object kind and nor
 
 ## Callouts and effects
 
-A provider step either suspends on callouts or returns a terminal result. The host executes callouts such as HTTP fetches, blob fetches, git clone/open operations, archive opens, and blob reads, then resumes the provider with the results.
+Provider namespace and notify calls are async component exports that return terminal results. When provider code awaits host work, it calls an async WIT import. The host executes callouts such as HTTP fetches, blob fetches, git clone/open operations, archive opens, and blob reads, then the component future resumes with the typed result.
+
+One provider instance can serve multiple concurrent filesystem operations. Wasmtime's component async runtime owns suspension while the host owns the callout executors, auth injection, capability checks, tracing, and cache-visible effects.
 
 Terminal host mutations travel through effects:
 
@@ -110,5 +112,6 @@ These directions were explicitly ruled out and should not return without a new g
 - Cache and effects rationale: `docs/architecture/30-cache-and-effects.md`
 - Auth boundary rationale: `docs/architecture/40-auth-boundary.md`
 - NFS frontend rationale: `docs/architecture/50-nfs-frontend.md`
+- Async provider runtime: `docs/architecture/60-async-provider-runtime.md`
 - Provider authoring: `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md`
 - Roadmap and non-current ideas: `docs/future/`

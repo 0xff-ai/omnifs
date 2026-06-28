@@ -9,16 +9,7 @@ interface types {
     type file-handle = u64;
     type blob-id = u64;
 
-    // --- Provider progress and terminal return ---
-
-    /// One provider progress step. `suspended` is not a return: the host
-    /// must run a non-empty callout batch and resume the same operation.
-    /// `returned` is the completed operation answer plus host-side
-    /// effects to commit.
-    variant provider-step {
-        suspended(list<callout>),
-        returned(provider-return),
-    }
+    // --- Terminal return ---
 
     /// Completed operation answer. This shape cannot carry callouts.
     /// `effects` is the only terminal host-mutation channel.
@@ -42,9 +33,9 @@ interface types {
 
     // --- Callouts (provider -> host, request/response) ---
 
-    /// Work the host runs on the provider's behalf. Every callout expects
-    /// a matching `callout-result` back via `resume`; there are no
-    /// fire-and-forget callouts, and provider returns never carry
+    /// Work the host runs on the provider's behalf through async host
+    /// imports. Every callout expects one typed `callout-result`; there
+    /// are no fire-and-forget callouts, and provider returns never carry
     /// trailing callouts.
     variant callout {
         fetch(http-request),
@@ -510,32 +501,25 @@ interface lifecycle {
 }
 
 interface namespace {
-    use types.{correlation-id, file-handle, provider-step, canonical-input, cursor};
+    use types.{correlation-id, file-handle, provider-return, canonical-input, cursor};
 
-    lookup-child: func(id: correlation-id, parent-path: string, name: string)
-        -> provider-step;
-    list-children: func(id: correlation-id, path: string, cached-validator: option<string>, cursor: option<cursor>)
-        -> provider-step;
-    read-file: func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
-        -> provider-step;
-    open-file: func(id: correlation-id, path: string)
-        -> provider-step;
-    read-chunk: func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
-        -> provider-step;
+    lookup-child: async func(id: correlation-id, parent-path: string, name: string)
+        -> provider-return;
+    list-children: async func(id: correlation-id, path: string, cached-validator: option<string>, cursor: option<cursor>)
+        -> provider-return;
+    read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
+        -> provider-return;
+    open-file: async func(id: correlation-id, path: string)
+        -> provider-return;
+    read-chunk: async func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
+        -> provider-return;
     close-file: func(handle: file-handle);
 }
 
-interface continuation {
-    use types.{callout-results, correlation-id, provider-step};
-
-    resume: func(id: correlation-id, results: callout-results) -> provider-step;
-    cancel: func(id: correlation-id);
-}
-
 interface notify {
-    use types.{correlation-id, provider-event, provider-step};
+    use types.{correlation-id, provider-event, provider-return};
 
-    on-event: func(id: correlation-id, event: provider-event) -> provider-step;
+    on-event: async func(id: correlation-id, event: provider-event) -> provider-return;
 }
 
 // === Host import ===
@@ -546,19 +530,29 @@ interface log {
     log: func(entry: log-entry);
 }
 
+interface callouts {
+    use types.{archive-open-request, blob-fetch-request, callout-result, correlation-id, git-open-request, http-request, read-blob-request};
+
+    fetch: async func(id: correlation-id, req: http-request) -> callout-result;
+    git-open-repo: async func(id: correlation-id, req: git-open-request) -> callout-result;
+    fetch-blob: async func(id: correlation-id, req: blob-fetch-request) -> callout-result;
+    open-archive: async func(id: correlation-id, req: archive-open-request) -> callout-result;
+    read-blob: async func(id: correlation-id, req: read-blob-request) -> callout-result;
+}
+
 // === Worlds ===
 
 world provider-core {
     import log;
+    import callouts;
     export lifecycle;
     export namespace;
-    export continuation;
 }
 
 world provider {
     import log;
+    import callouts;
     export lifecycle;
     export namespace;
-    export continuation;
     export notify;
 }

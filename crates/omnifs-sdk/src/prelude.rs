@@ -18,7 +18,7 @@ pub use crate::file_attrs::{
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
 };
-pub use crate::helpers::{err, err_step, pretty_json};
+pub use crate::helpers::{err, pretty_json};
 pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
 pub use crate::invalidation::Invalidation;
 pub use crate::object::{
@@ -38,6 +38,5 @@ pub use omnifs_core::path::{ParseError, Path, Segment};
 pub use omnifs_sdk_macros::{Endpoint, config, object, path_captures, path_segment, provider};
 
 pub use omnifs_wit::provider::types::{
-    CalloutResults, OpResult, ProviderEvent, ProviderInfo, ProviderReturn, ProviderStep,
-    RequestedCapabilities,
+    OpResult, ProviderEvent, ProviderInfo, ProviderReturn, RequestedCapabilities,
 };

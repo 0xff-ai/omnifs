@@ -24,6 +24,10 @@ pub fn component_engine(
 ) -> wasmtime::Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_async_stackful(true);
+    config.concurrency_support(true);
     // Persist compiled component artifacts under the host cache so engine
     // creation doesn't re-codegen identical wasm on every run. Silently
     // degrade if the cache can't be initialised (read-only dir, locked-down
@@ -65,12 +69,12 @@ pub fn provider_compiler_strategy() -> Option<Strategy> {
     }
 }
 
-/// Add synchronous WASI Preview 2 imports to a component linker.
+/// Add async WASI Preview 2 imports to a component linker.
 pub(crate) fn add_wasi_to_linker<T>(
     linker: &mut wasmtime::component::Linker<T>,
 ) -> wasmtime::Result<()>
 where
     T: WasiView + 'static,
 {
-    wasmtime_wasi::p2::add_to_linker_sync::<T>(linker)
+    wasmtime_wasi::p2::add_to_linker_async::<T>(linker)
 }

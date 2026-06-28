@@ -79,5 +79,5 @@ validate:
       exit 1
     fi
     for wasm in "${wasms[@]}"; do
-      wasm-tools validate "$wasm"
+      wasm-tools validate --features cm-async,cm-async-stackful,cm-async-builtins "$wasm"
     done

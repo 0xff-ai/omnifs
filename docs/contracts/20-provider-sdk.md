@@ -45,6 +45,14 @@ Endpoint values are intentional. Static endpoints are zero-sized values such as 
 
 Prefer typed endpoints for upstream APIs. Keep endpoint hooks with the endpoint type. Use raw `cx.http()` only when the URL is fully dynamic or the endpoint model does not fit.
 
+### Async host imports
+
+Provider handlers are async, and SDK callout futures await WIT async host imports directly. Do not recreate SDK-side yielded-callout queues, pending future tables, or provider continuation exports.
+
+Use `cx::join_all` for independent concurrent callouts. It starts sibling async imports by polling them in one provider operation; it must not depend on positional host resume batches.
+
+The provider macro owns WIT export glue. Namespace and notify exports are async and return terminal `provider-return` values. Lifecycle exports remain terminal.
+
 ### WIT coordination
 
 Changing the `Object` trait, route faces, dispatch, provider macro surface, or WIT contract is usually an all-provider migration. Keep providers, SDK tests, WIT boundary tests, and docs in step in the same change.
@@ -64,6 +72,7 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - Revive `x-omnifs-init`, guest-path rewriting, or magic `endpoint` field coupling.
 - Split endpoint APIs into type-only and value-only variants unless the value model changes.
 - Export speculative SDK surface without a current provider or host path that uses it.
+- Reintroduce provider-step, continuation exports, or SDK-managed resume queues for provider callouts.
 
 ## Code
 
@@ -72,6 +81,9 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `crates/omnifs-sdk/src/router`
 - `crates/omnifs-sdk/src/object.rs`
 - `crates/omnifs-sdk/src/endpoint.rs`
+- `crates/omnifs-sdk/src/http.rs`
+- `crates/omnifs-sdk/src/cx.rs`
+- `crates/omnifs-sdk-macros/src/provider_macro.rs`
 - `crates/omnifs-sdk/src/config_resource.rs`
 - `crates/omnifs-sdk/tests/wit_boundary.rs`
 - `crates/omnifs-sdk/src/metadata.rs`

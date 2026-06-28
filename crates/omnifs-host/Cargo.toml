@@ -19,12 +19,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 postcard = { workspace = true }
 tracing = { workspace = true }
+strum = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 futures = "0.3"
 url = "2"
-wasmtime-wasi = { version = "43", default-features = false, features = ["p2"] }
+wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2", "p3"] }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }

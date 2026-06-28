@@ -131,7 +131,7 @@ impl From<FileChunk> for omnifs_wit::provider::types::ReadChunkResult {
 pub trait RangeReader {
     /// Serve a chunk. `cx` is the state-erased context of the running
     /// read-chunk operation, so a reader that fetches ranges on demand can
-    /// `cx.http()…send().await` and the callout suspends and resumes on this
+    /// `cx.http()…send().await` and the WIT async host import runs under this
     /// operation. In-memory readers ignore it.
     fn read_chunk<'a>(
         &'a self,

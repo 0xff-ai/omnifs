@@ -24,7 +24,7 @@ mod path_segment_macro;
 mod provider_macro;
 
 /// The provider entrypoint: lowers one impl block onto the full WIT export
-/// surface (lifecycle, namespace, continuation, notify).
+/// surface (lifecycle, async namespace, async notify).
 ///
 /// The impl block contains a required synchronous `fn start` and any helper
 /// methods. `start` takes either `(config, &mut Router<State>)` or just
@@ -62,11 +62,11 @@ mod provider_macro;
 ///   registered handler warn and return no invalidations.
 ///
 /// What the expansion does, so debugging is not archaeology: it defines the
-/// provider type, thread-local `STATE`/`ROUTER`/async-runtime/range-handle
+/// provider type, thread-local `STATE`/`ROUTER`/range-handle
 /// slots, an `initialize` that deserializes config, runs `start`, and
 /// **seals the router** (overlapping route claims fail initialization), the
-/// namespace methods that drive your async handlers through the
-/// suspend/resume protocol, and the component `export!`.
+/// async namespace methods that await your handlers, and the component
+/// `export!`.
 #[proc_macro_attribute]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as provider_macro::ProviderArgs);

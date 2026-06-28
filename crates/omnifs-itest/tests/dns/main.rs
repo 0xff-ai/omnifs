@@ -369,7 +369,7 @@ fn dns_record_read_emits_no_canonical_store() {
         panic!("expected single fetch callout, got {:?}", op.callouts());
     };
 
-    op.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body: canned_a_response("example.com", "93.184.216.34"),
@@ -458,9 +458,9 @@ fn dns_resolver_aliases_target_configured_endpoint() {
 fn dns_record_read_is_mutable_not_immutable() {
     let harness = dns_harness();
     let mut op = harness.read("/example.com/A").unwrap();
-    assert!(op.is_suspended());
+    assert!(op.is_waiting_for_callouts());
 
-    op.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body: canned_a_response("example.com", "93.184.216.34"),
@@ -548,7 +548,7 @@ fn dns_all_keeps_partial_success_under_rate_limit() {
         })
     }));
 
-    op.resume(outcomes).unwrap();
+    op.answer_callouts(outcomes).unwrap();
     match op.into_result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             let body = String::from_utf8(omnifs_itest::into_inline(file)).unwrap();
@@ -567,7 +567,7 @@ fn dns_all_returns_rate_limited_when_every_query_is_rate_limited() {
     let mut op = harness.read("/example.com/all").unwrap();
     let fetches = expect_fetches(&op);
 
-    op.resume(
+    op.answer_callouts(
         (0..fetches.len())
             .map(|_| empty_http_response(429))
             .collect(),
@@ -587,7 +587,7 @@ fn dns_all_returns_network_when_every_query_fails_without_rate_limit() {
     let mut op = harness.read("/example.com/all").unwrap();
     let fetches = expect_fetches(&op);
 
-    op.resume(
+    op.answer_callouts(
         (0..fetches.len())
             .map(|_| empty_http_response(500))
             .collect(),

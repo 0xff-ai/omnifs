@@ -52,17 +52,6 @@ fn format_event(trace_id: TraceId, event: &InspectorEvent) -> String {
         } => format!(
             "provider.start #{trace_id} op={operation_id} {mount}/{provider} {method} {path}"
         ),
-        InspectorEvent::ProviderSuspend {
-            operation_id,
-            callout_count,
-        } => format!("provider.suspend #{trace_id} op={operation_id} callouts={callout_count}"),
-        InspectorEvent::ProviderResume {
-            operation_id,
-            round,
-            result_count,
-        } => format!(
-            "provider.resume #{trace_id} op={operation_id} round={round} results={result_count}"
-        ),
         InspectorEvent::ProviderEnd { operation_id, end } => format!(
             "provider.end   #{trace_id} op={operation_id} {} {}µs",
             end.result.outcome, end.elapsed_us

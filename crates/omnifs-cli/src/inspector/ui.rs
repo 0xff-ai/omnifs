@@ -394,9 +394,7 @@ impl OperationBlockView<'_> {
         ])];
 
         for stage in op.stages.iter().skip(1) {
-            if let Some(line) = (StageView { stage, width }).into_line() {
-                lines.push(line);
-            }
+            lines.push((StageView { stage, width }).into_line());
         }
 
         if let Some(elapsed) = op.fuse_elapsed_us {
@@ -429,9 +427,7 @@ impl OperationBlockView<'_> {
 
 /// One stage rendered as a three-column row: `{indent}{glyph} {display}`
 /// left-aligned, padded, then elapsed + outcome trailing at the right
-/// edge. Returns `None` for marker stages (`provider.suspend` /
-/// `provider.resume`) which the block view folds into the surrounding
-/// provider stage.
+/// edge.
 struct StageView<'a> {
     stage: &'a Stage,
     width: usize,
@@ -449,60 +445,57 @@ struct StageCell {
 }
 
 impl StageCell {
-    /// Pick the visual cell for a stage based on its kind. Returns
-    /// `None` for marker stages (`provider.suspend` / `provider.resume`)
-    /// which the block view folds into the surrounding provider stage.
-    fn for_stage(stage: &Stage) -> Option<Self> {
+    /// Pick the visual cell for a stage based on its kind.
+    fn for_stage(stage: &Stage) -> Self {
         match &stage.kind {
-            StageKind::ProviderSuspend | StageKind::ProviderResume => None,
-            StageKind::Provider(method) => Some(Self {
+            StageKind::Provider(method) => Self {
                 indent: "  ",
                 glyph: "▸",
                 glyph_color: Color::LightCyan,
                 display: method.clone(),
-            }),
-            StageKind::Callout(_) => Some(Self {
+            },
+            StageKind::Callout(_) => Self {
                 indent: "    ",
                 glyph: "◇",
                 glyph_color: Color::LightYellow,
                 display: stage.detail.clone(),
-            }),
+            },
             // Keep the `cache.<kind>` prefix in the visible text so
             // a row like `◐ cache.browse_hit /github/...` reads
             // unambiguously without relying on the user knowing what
             // the ◐ glyph means.
-            StageKind::Cache(_) => Some(Self {
+            StageKind::Cache(_) => Self {
                 indent: "  ",
                 glyph: "◐",
                 glyph_color: Color::LightGreen,
                 display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            }),
-            StageKind::SubtreeStart | StageKind::SubtreeEnd => Some(Self {
+            },
+            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
                 indent: "  ",
                 glyph: "▸",
                 glyph_color: Color::Magenta,
                 display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            }),
-            StageKind::CloneStart | StageKind::CloneEnd => Some(Self {
+            },
+            StageKind::CloneStart | StageKind::CloneEnd => Self {
                 indent: "    ",
                 glyph: "⇣",
                 glyph_color: Color::LightMagenta,
                 display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            }),
-            StageKind::Fuse(_) => Some(Self {
+            },
+            StageKind::Fuse(_) => Self {
                 indent: "  ",
                 glyph: "·",
                 glyph_color: Color::DarkGray,
                 display: stage.kind.display_label().into_owned(),
-            }),
+            },
         }
     }
 }
 
 impl StageView<'_> {
-    fn into_line(self) -> Option<Line<'static>> {
+    fn into_line(self) -> Line<'static> {
         let StageView { stage, width } = self;
-        let cell = StageCell::for_stage(stage)?;
+        let cell = StageCell::for_stage(stage);
 
         let (elapsed_text, outcome_text, outcome_color) =
             match (stage.elapsed_us, stage.outcome, stage.in_flight) {
@@ -566,6 +559,6 @@ impl StageView<'_> {
                 Style::default().fg(outcome_color),
             ));
         }
-        Some(Line::from(spans))
+        Line::from(spans)
     }
 }

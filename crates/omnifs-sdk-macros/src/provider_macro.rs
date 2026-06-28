@@ -535,7 +535,6 @@ fn generate_lifecycle(
             fn shutdown() {
                 STATE.with(|slot| *slot.borrow_mut() = None);
                 ROUTER.with(|slot| *slot.borrow_mut() = None);
-                ASYNC_RUNTIME.with(|runtime| runtime.clear());
                 RANGE_HANDLES.with(|handles| handles.clear());
                 omnifs_sdk::__internal::clear_breaker();
             }
@@ -548,8 +547,6 @@ fn generate_state_management(state_type: &Type) -> TokenStream2 {
         thread_local! {
             static STATE: core::cell::RefCell<Option<std::rc::Rc<core::cell::RefCell<#state_type>>>>
                 = const { core::cell::RefCell::new(None) };
-            static ASYNC_RUNTIME: omnifs_sdk::__internal::AsyncRuntime<#state_type> =
-                omnifs_sdk::__internal::AsyncRuntime::new();
             static ROUTER: core::cell::RefCell<
                 Option<std::rc::Rc<omnifs_sdk::prelude::Router<#state_type>>>
             > = const { core::cell::RefCell::new(None) };
@@ -580,38 +577,33 @@ fn generate_state_management(state_type: &Type) -> TokenStream2 {
 fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2 {
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::namespace::Guest for #type_name {
-            fn lookup_child(id: u64, parent_path: String, name: String) -> omnifs_sdk::prelude::ProviderStep {
+            async fn lookup_child(id: u64, parent_path: String, name: String) -> omnifs_sdk::prelude::ProviderReturn {
                 let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
-                let future_cx = cx.clone();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move {
-                        match router.lookup_child(&future_cx, &parent_path, &name).await {
-                            Ok(outcome) => {
-                                let (result, effects) = outcome.into_result_and_effects();
-                                omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OpResult::LookupChild(result),
-                                    effects.into_wit(),
-                                )
-                            },
-                            Err(error) => omnifs_sdk::prelude::err(error),
-                        }
-                    });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                match router.lookup_child(&cx, &parent_path, &name).await {
+                    Ok(outcome) => {
+                        let (result, effects) = outcome.into_result_and_effects();
+                        omnifs_sdk::prelude::ProviderReturn::with_effects(
+                            omnifs_sdk::prelude::OpResult::LookupChild(result),
+                            effects.into_wit(),
+                        )
+                    },
+                    Err(error) => omnifs_sdk::prelude::err(error),
+                }
             }
 
-            fn list_children(
+            async fn list_children(
                 id: u64,
                 path: String,
                 cached_validator: Option<String>,
                 cursor: Option<omnifs_sdk::omnifs::provider::types::Cursor>,
-            ) -> omnifs_sdk::prelude::ProviderStep {
+            ) -> omnifs_sdk::prelude::ProviderReturn {
                 let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -620,31 +612,26 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                     .map(|v| omnifs_sdk::file_attrs::VersionToken::from(v.as_str()));
                 let sdk_cursor = cursor.map(omnifs_sdk::prelude::Cursor::from);
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
-                let future_cx = cx.clone();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move {
-                        match router.list_children(&future_cx, &path, cached_validator, sdk_cursor).await {
-                            Ok(outcome) => {
-                                let (result, effects) = outcome.into_result_and_effects();
-                                omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OpResult::ListChildren(result),
-                                    effects.into_wit(),
-                                )
-                            },
-                            Err(error) => omnifs_sdk::prelude::err(error),
-                        }
-                    });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                match router.list_children(&cx, &path, cached_validator, sdk_cursor).await {
+                    Ok(outcome) => {
+                        let (result, effects) = outcome.into_result_and_effects();
+                        omnifs_sdk::prelude::ProviderReturn::with_effects(
+                            omnifs_sdk::prelude::OpResult::ListChildren(result),
+                            effects.into_wit(),
+                        )
+                    },
+                    Err(error) => omnifs_sdk::prelude::err(error),
+                }
             }
 
-            fn read_file(
+            async fn read_file(
                 id: u64,
                 path: String,
                 content_type: String,
                 cached_canonical: Option<omnifs_sdk::omnifs::provider::types::CanonicalInput>,
-            ) -> omnifs_sdk::prelude::ProviderStep {
+            ) -> omnifs_sdk::prelude::ProviderReturn {
                 let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
@@ -652,72 +639,62 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                     .map(omnifs_sdk::browse::CachedCanonical::from_wit);
                 let version = cached.as_ref().and_then(|c| c.validator.clone());
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
-                let future_cx = cx.clone();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move {
-                        match router.read_file(&future_cx, &path, &content_type, cached).await {
-                            Ok(outcome) => {
-                                let (result, effects) = outcome.into_result_and_effects();
-                                omnifs_sdk::prelude::ProviderReturn::with_effects(
-                                    omnifs_sdk::prelude::OpResult::ReadFile(result),
-                                    effects.into_wit(),
-                                )
-                            },
-                            Err(error) => omnifs_sdk::prelude::err(error),
-                        }
-                    });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                match router.read_file(&cx, &path, &content_type, cached).await {
+                    Ok(outcome) => {
+                        let (result, effects) = outcome.into_result_and_effects();
+                        omnifs_sdk::prelude::ProviderReturn::with_effects(
+                            omnifs_sdk::prelude::OpResult::ReadFile(result),
+                            effects.into_wit(),
+                        )
+                    },
+                    Err(error) => omnifs_sdk::prelude::err(error),
+                }
             }
 
-            fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderStep {
+            async fn open_file(id: u64, path: String) -> omnifs_sdk::prelude::ProviderReturn {
                 let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
-                let future_cx = cx.clone();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move {
-                        match router.open_file(&future_cx, &path).await {
-                            Ok(opened) => {
-                                let Some(handle) = RANGE_HANDLES.with(|handles| {
-                                    handles.allocate(opened.reader)
-                                }) else {
-                                    return omnifs_sdk::prelude::err(
-                                        omnifs_sdk::error::ProviderError::internal("no free ranged file handles")
-                                    );
-                                };
-                                omnifs_sdk::prelude::ProviderReturn::terminal(
-                                    omnifs_sdk::prelude::OpResult::OpenFile(
-                                        omnifs_sdk::omnifs::provider::types::OpenFileResult {
-                                            handle: handle.get(),
-                                            attrs: opened.attrs.into(),
-                                        },
-                                    )
-                                )
-                            },
-                            Err(error) => omnifs_sdk::prelude::err(error),
-                        }
-                    });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                match router.open_file(&cx, &path).await {
+                    Ok(opened) => {
+                        let Some(handle) = RANGE_HANDLES.with(|handles| {
+                            handles.allocate(opened.reader)
+                        }) else {
+                            return omnifs_sdk::prelude::err(
+                                omnifs_sdk::error::ProviderError::internal("no free ranged file handles")
+                            );
+                        };
+                        omnifs_sdk::prelude::ProviderReturn::terminal(
+                            omnifs_sdk::prelude::OpResult::OpenFile(
+                                omnifs_sdk::omnifs::provider::types::OpenFileResult {
+                                    handle: handle.get(),
+                                    attrs: opened.attrs.into(),
+                                },
+                            )
+                        )
+                    },
+                    Err(error) => omnifs_sdk::prelude::err(error),
+                }
             }
 
-            fn read_chunk(id: u64, handle: u64, offset: u64, len: u32) -> omnifs_sdk::prelude::ProviderStep {
+            async fn read_chunk(id: u64, handle: u64, offset: u64, len: u32) -> omnifs_sdk::prelude::ProviderReturn {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
                 let Some(handle_id) = ::std::num::NonZeroU64::new(handle) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::not_found(
                             format!("unknown file handle {handle}")
                         )
                     );
                 };
                 let Some(reader) = RANGE_HANDLES.with(|handles| handles.get(handle_id)) else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::not_found(
                             format!("unknown file handle {handle}")
                         )
@@ -725,44 +702,18 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 let read_cx = cx.erase_state();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move {
-                        match reader.read_chunk(&read_cx, offset, len).await {
-                            Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
-                                omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
-                            ),
-                            Err(error) => omnifs_sdk::prelude::err(error),
-                        }
-                    });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                match reader.read_chunk(&read_cx, offset, len).await {
+                    Ok(chunk) => omnifs_sdk::prelude::ProviderReturn::terminal(
+                        omnifs_sdk::prelude::OpResult::ReadChunk(chunk.into())
+                    ),
+                    Err(error) => omnifs_sdk::prelude::err(error),
+                }
             }
 
             fn close_file(handle: u64) {
                 if let Some(handle_id) = ::std::num::NonZeroU64::new(handle) {
                     RANGE_HANDLES.with(|handles| handles.remove(handle_id));
                 }
-            }
-        }
-    }
-}
-
-fn generate_continuation(type_name: &syn::Ident) -> TokenStream2 {
-    quote! {
-        impl omnifs_sdk::exports::omnifs::provider::continuation::Guest for #type_name {
-            fn resume(
-                id: u64,
-                outcome: omnifs_sdk::prelude::CalloutResults,
-            ) -> omnifs_sdk::prelude::ProviderStep {
-                if let Some(response) = ASYNC_RUNTIME.with(|runtime| runtime.resume(id, outcome.clone())) {
-                    return response;
-                }
-                omnifs_sdk::prelude::err_step(
-                    omnifs_sdk::error::ProviderError::internal(format!("no pending future for id {id}"))
-                )
-            }
-
-            fn cancel(id: u64) {
-                ASYNC_RUNTIME.with(|runtime| runtime.cancel(id));
             }
         }
     }
@@ -822,20 +773,18 @@ fn generate_notify(
 
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::notify::Guest for #type_name {
-            fn on_event(
+            async fn on_event(
                 id: u64,
                 event: omnifs_sdk::prelude::ProviderEvent,
-            ) -> omnifs_sdk::prelude::ProviderStep {
+            ) -> omnifs_sdk::prelude::ProviderReturn {
                 let Ok(state) = state_handle() else {
-                    return omnifs_sdk::prelude::err_step(
+                    return omnifs_sdk::prelude::err(
                         omnifs_sdk::error::ProviderError::internal("provider not initialized")
                     );
                 };
                 let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
                 let future_cx = cx.clone();
-                let future: ::std::pin::Pin<Box<dyn ::core::future::Future<Output = omnifs_sdk::prelude::ProviderReturn>>> =
-                    Box::pin(async move { #dispatch });
-                ASYNC_RUNTIME.with(|runtime| runtime.start(id, cx, future))
+                #dispatch
             }
         }
     }
@@ -885,7 +834,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         &caps_tokens,
     );
     let namespace = generate_namespace(&type_name, state_type);
-    let continuation = generate_continuation(&type_name);
     let notify = generate_notify(&type_name, state_type, args.timer.as_ref());
 
     Ok(quote! {
@@ -902,7 +850,6 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         #provider_metadata
         #lifecycle
         #namespace
-        #continuation
         #notify
 
         #[cfg(target_arch = "wasm32")]

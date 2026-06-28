@@ -111,13 +111,13 @@ fn discovery_response(url: &str) -> CalloutResult {
 /// returns the projected cluster-scoped type names (sorted).
 pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
     let mut op = harness.list("/cluster").unwrap();
-    while op.is_suspended() {
+    while op.is_waiting_for_callouts() {
         let responses: Vec<CalloutResult> = op
             .expect_fetches()
             .iter()
             .map(|fetch| discovery_response(&fetch.url))
             .collect();
-        op.resume(responses).unwrap();
+        op.answer_callouts(responses).unwrap();
     }
     sorted_entry_names(op.into_list_children().unwrap())
 }
@@ -127,7 +127,7 @@ pub fn warm_discovery(harness: &RuntimeHarness) -> Vec<String> {
 pub fn list_type_names(harness: &RuntimeHarness, path: &str) -> Vec<String> {
     let op = harness.list(path).unwrap();
     assert!(
-        !op.is_suspended(),
+        !op.is_waiting_for_callouts(),
         "type listing for {path} should reuse cached discovery with no callout"
     );
     sorted_entry_names(op.into_list_children().unwrap())

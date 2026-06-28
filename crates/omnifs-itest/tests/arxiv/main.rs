@@ -32,7 +32,7 @@ const PAPER_ID: &str = "2604.00002";
 const PAPER_ID_ANCHOR: &str = "arxiv.paper|paper=2604.00002";
 
 fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
-    op.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body,
@@ -45,7 +45,7 @@ fn resume_paper_atom(op: &mut TestOp<'_>) {
 }
 
 fn resume_blob(op: &mut TestOp<'_>, blob: u64) {
-    op.resume(vec![CalloutResult::BlobFetched(
+    op.answer_callouts(vec![CalloutResult::BlobFetched(
         omnifs_wit::provider::types::BlobFetched {
             blob,
             size: 4,
