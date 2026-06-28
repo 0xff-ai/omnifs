@@ -182,38 +182,8 @@ fn extract_capabilities(manifest: &ProviderManifest) -> Vec<FlatCapability> {
     manifest
         .capabilities
         .iter()
-        .map(|entry| {
-            (
-                capability_kind(entry),
-                capability_value(entry),
-                entry.is_dynamic(),
-            )
-        })
+        .map(|entry| (entry.kind().to_string(), entry.value(), entry.is_dynamic()))
         .collect()
-}
-
-fn capability_kind(entry: &Need) -> String {
-    match entry {
-        Need::Domain { .. } => "domain",
-        Need::GitRepo { .. } => "gitRepo",
-        Need::UnixSocket { .. } => "unixSocket",
-        Need::PreopenedPath { .. } => "preopenedPath",
-        Need::MemoryMb { .. } => "memoryMb",
-        Need::FetchBlobBytes { .. } => "fetchBlobBytes",
-        Need::ReadBlobBytes { .. } => "readBlobBytes",
-    }
-    .to_string()
-}
-
-fn capability_value(entry: &Need) -> String {
-    match entry {
-        Need::Domain { value, .. }
-        | Need::GitRepo { value, .. }
-        | Need::UnixSocket { value, .. } => value.clone(),
-        Need::PreopenedPath { value, .. } => serde_json::to_string(value).unwrap_or_default(),
-        Need::MemoryMb { value, .. } => value.to_string(),
-        Need::FetchBlobBytes { value, .. } | Need::ReadBlobBytes { value, .. } => value.to_string(),
-    }
 }
 
 // ── Diff helpers ────────────────────────────────────────────────────────────

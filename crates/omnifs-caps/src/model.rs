@@ -188,6 +188,42 @@ impl Need {
             | Self::ReadBlobBytes { dynamic, .. } => *dynamic,
         }
     }
+
+    /// The capability-kind discriminant, identical to the manifest wire tag.
+    /// The single source of truth for the kind string across the under-grant
+    /// check ([`Missing`]) and upgrade-diff surfaces; keep it aligned with the
+    /// serde `tag` rename on this enum.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Domain { .. } => "domain",
+            Self::GitRepo { .. } => "gitRepo",
+            Self::UnixSocket { .. } => "unixSocket",
+            Self::PreopenedPath { .. } => "preopenedPath",
+            Self::MemoryMb { .. } => "memoryMb",
+            Self::FetchBlobBytes { .. } => "fetchBlobBytes",
+            Self::ReadBlobBytes { .. } => "readBlobBytes",
+        }
+    }
+
+    /// The capability value rendered for display: the literal value for access
+    /// kinds, `host -> guest` for a preopen, the number for a scalar limit. The
+    /// dynamic marker is not included; callers that surface dynamic-ness append
+    /// it. Shared so a preopen renders the same way in every host-facing
+    /// message.
+    #[must_use]
+    pub fn value(&self) -> String {
+        match self {
+            Self::Domain { value, .. }
+            | Self::GitRepo { value, .. }
+            | Self::UnixSocket { value, .. } => value.clone(),
+            Self::PreopenedPath { value, .. } => format!("{} -> {}", value.host, value.guest),
+            Self::MemoryMb { value, .. } => value.to_string(),
+            Self::FetchBlobBytes { value, .. } | Self::ReadBlobBytes { value, .. } => {
+                value.to_string()
+            },
+        }
+    }
 }
 
 /// A capability a provider's manifest needs that a mount's [`Grants`] do not
