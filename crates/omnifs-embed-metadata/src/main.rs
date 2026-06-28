@@ -77,10 +77,6 @@ fn main() -> Result<(), DynError> {
 
     for (file, metadata) in PROVIDERS {
         let path = dir.join(file);
-        if !path.exists() {
-            // A profile may build a subset of providers; skip ones not present.
-            continue;
-        }
         let wasm =
             std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
         let manifest = to_manifest(&metadata());
