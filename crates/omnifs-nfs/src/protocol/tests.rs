@@ -7,7 +7,7 @@ use crate::protocol::client::ClientTable;
 use crate::protocol::compound::handle_compound;
 use crate::protocol::consts::{
     CLAIM_NULL, FATTR4_FILEID, FATTR4_SIZE, FATTR4_TYPE, NF4REG, NFS4_OK, NFS4ERR_BAD_COOKIE,
-    NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT,
+    NFS4ERR_DELAY, NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT,
     NFS4ERR_NOFILEHANDLE, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL,
     NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL, OP_CLOSE, OP_GETATTR, OP_GETFH,
     OP_ILLEGAL, OP_LOOKUP, OP_OPEN, OP_OPEN_CONFIRM, OP_PUTFH, OP_PUTROOTFH, OP_READ, OP_READDIR,
@@ -581,6 +581,69 @@ fn synthetic_readdir_non_exhaustive_listing_returns_known_snapshot() {
         ]
     );
     assert!(decoded.eof);
+}
+
+#[test]
+fn synthetic_readdir_can_return_delay() {
+    struct DelayExport(StaticExport);
+
+    impl ReadOnlyExport for DelayExport {
+        fn root(&self) -> u64 {
+            self.0.root()
+        }
+
+        fn attr(&self, id: u64) -> StatusResult<Attr> {
+            self.0.attr(id)
+        }
+
+        fn lookup(&self, parent: u64, name: &str) -> StatusResult<u64> {
+            self.0.lookup(parent, name)
+        }
+
+        fn readdir(&self, _id: u64) -> StatusResult<DirListing> {
+            Err(Status::Delay)
+        }
+
+        fn read(&self, id: u64) -> StatusResult<Vec<u8>> {
+            self.0.read(id)
+        }
+
+        fn readlink(&self, id: u64) -> StatusResult<Vec<u8>> {
+            self.0.readlink(id)
+        }
+
+        fn open_state(
+            &self,
+            generation: u64,
+            id: u64,
+            clientid: u64,
+            access: u32,
+        ) -> StatusResult<OpenResult> {
+            self.0.open_state(generation, id, clientid, access)
+        }
+
+        fn validate_state(&self, stateid: StateId) -> StatusResult<()> {
+            self.0.validate_state(stateid)
+        }
+
+        fn read_state(&self, stateid: StateId, offset: u64, count: u32) -> StatusResult<OpenRead> {
+            self.0.read_state(stateid, offset, count)
+        }
+
+        fn close_state(&self, stateid: StateId) -> StatusResult<StateId> {
+            self.0.close_state(stateid)
+        }
+
+        fn renew_client(&self, clientid: u64) -> StatusResult<()> {
+            self.0.renew_client(clientid)
+        }
+    }
+
+    let export = DelayExport(StaticExport::fixture());
+    assert_eq!(
+        compound_status(&export, &[op_only(OP_PUTROOTFH), op_readdir()]),
+        NFS4ERR_DELAY
+    );
 }
 
 #[test]

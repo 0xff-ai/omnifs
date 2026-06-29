@@ -340,7 +340,11 @@ impl Export {
                             matches!(merged_attrs.size(), view_types::FileSize::Exact(_));
                         entry.attrs = Some(merged_attrs);
                     }
-                    entry.body.clone_from(&body_for_update);
+                    if !(matches!(entry.body, EntryBody::Backing(_))
+                        && matches!(body_for_update, EntryBody::Provider))
+                    {
+                        entry.body.clone_from(&body_for_update);
+                    }
                     if matches!(entry.body, EntryBody::Backing(_)) {
                         entry.size_exact = true;
                         entry.attrs = None;
@@ -540,11 +544,10 @@ impl Export {
             TreeErrorKind::IsDirectory => Status::IsDir,
             TreeErrorKind::PermissionDenied => Status::Access,
             TreeErrorKind::InvalidInput => Status::Invalid,
-            TreeErrorKind::TooLarge
-            | TreeErrorKind::RateLimited
-            | TreeErrorKind::Timeout
-            | TreeErrorKind::Network
-            | TreeErrorKind::Internal => Status::Io,
+            TreeErrorKind::TooLarge | TreeErrorKind::Internal => Status::Io,
+            TreeErrorKind::RateLimited | TreeErrorKind::Timeout | TreeErrorKind::Network => {
+                Status::Delay
+            },
         }
     }
 
@@ -1688,5 +1691,65 @@ mod tests {
             .expect("backing read");
         assert_eq!(chunk.data, vec![0]);
         assert!(chunk.eof);
+    }
+
+    #[test]
+    fn transient_tree_errors_map_to_delay() {
+        for kind in [
+            TreeErrorKind::RateLimited,
+            TreeErrorKind::Timeout,
+            TreeErrorKind::Network,
+        ] {
+            let error = TreeError {
+                kind,
+                message: "retry later".to_string(),
+                retryable: true,
+                retry_after: None,
+            };
+            assert_eq!(Export::tree_status(&error), Status::Delay);
+        }
+    }
+
+    #[test]
+    fn provider_rebind_preserves_resolved_backing_subtree() {
+        let harness = empty_export();
+        let temp = tempfile::tempdir().expect("backing tempdir");
+        std::fs::write(temp.path().join("README.md"), b"hello from checkout\n")
+            .expect("write backing child");
+        let checkout = test_path("checkout");
+
+        let id = harness.export.get_or_alloc(EntrySeed {
+            scope: ROOT_ID,
+            mount_name: "test",
+            path: &checkout,
+            parent: ROOT_ID,
+            kind: NodeKind::Directory,
+            size: 0,
+            size_exact: true,
+            attrs: None,
+            body: EntryBody::Backing(temp.path().to_path_buf()),
+        });
+
+        let rebound = harness.export.get_or_alloc(EntrySeed {
+            scope: ROOT_ID,
+            mount_name: "test",
+            path: &checkout,
+            parent: ROOT_ID,
+            kind: NodeKind::Directory,
+            size: 0,
+            size_exact: true,
+            attrs: None,
+            body: EntryBody::Provider,
+        });
+
+        assert_eq!(rebound, id);
+        let readme = harness
+            .export
+            .lookup(id, "README.md")
+            .expect("backing child lookup after provider rebind");
+        assert_eq!(
+            harness.export.read(readme).expect("backing child read"),
+            b"hello from checkout\n".to_vec()
+        );
     }
 }
