@@ -354,6 +354,7 @@ async fn run_init_loop(
             provider: Some(provider_name.clone()),
             as_name: None,
             no_input: false,
+            reauth: false,
             yes: args.yes,
             no_browser: args.no_browser,
             token: None,

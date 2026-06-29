@@ -53,9 +53,6 @@ impl MountConfig {
         let Some(auth) = &mount_auth.spec().auth else {
             return Ok(());
         };
-        if auth.token_file().is_some() || auth.token_env().is_some() {
-            return Ok(());
-        }
         let target = mount_auth
             .configured_target(auth, auth.account())
             .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
@@ -75,12 +72,12 @@ impl MountConfig {
         match (auth.is_oauth(), entry) {
             (_, Ok(_)) => Ok(()),
             (true, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs auth login {}` to authenticate",
+                "Run `omnifs init --reauth {}` to authenticate",
                 self.name
             )),
             (false, Err(error)) => Err(error).with_hint(format!(
-                "Run `omnifs auth import {}` or `omnifs init {}` to configure this mount's token",
-                self.name, self.name
+                "Run `omnifs init --reauth {}` to configure this mount's token",
+                self.name
             )),
         }
     }
@@ -152,26 +149,6 @@ mod tests {
             .materialize(&config)
             .unwrap();
         assert!(mount.preopen_binds().is_empty());
-    }
-
-    #[test]
-    fn materialize_passes_through_token_env_configs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("dns").unwrap(),
-            config: spec_with_provider(
-                "dns",
-                r#"{"mount":"dns","auth":{"type":"static-token","scheme":"pat","token_env":"FOO"}}"#,
-            ),
-            source: PathBuf::from("/dev/null"),
-        };
-        let catalog = test_catalog(tmp.path());
-        // A token_env credential is host-unmanaged, so validation requires no
-        // stored credential.
-        DockerMountMaterializer::new(&catalog, &store)
-            .materialize(&config)
-            .unwrap();
     }
 
     #[test]

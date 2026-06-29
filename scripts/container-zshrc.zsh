@@ -43,7 +43,7 @@ if [[ -o interactive ]]; then
     print -P "  %F{8}# follow runtime traces%f"
     print -P "  %F{7}\$ omnifs logs -f%f"
     print
-    print -P "  %F{8}# inspect stored credentials%f"
-    print -P "  %F{7}\$ omnifs auth status%f"
+    print -P "  %F{8}# inspect mounts, providers, and credential state%f"
+    print -P "  %F{7}\$ omnifs status%f"
     print
 fi

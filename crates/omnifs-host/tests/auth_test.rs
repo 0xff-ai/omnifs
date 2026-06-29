@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use omnifs_caps::Allowlist;
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
@@ -16,48 +14,12 @@ use omnifs_provider::{
 };
 use omnifs_wit::provider::types as wit_types;
 use secrecy::{ExposeSecret, SecretString};
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-struct ScopedEnvVar {
-    _guard: MutexGuard<'static, ()>,
-    key: String,
-    original: Option<OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &str, value: &str) -> Self {
-        let guard = ENV_LOCK.lock().unwrap();
-        let original = std::env::var_os(key);
-        // SAFETY: ENV_LOCK is held, so no other thread is reading or writing
-        // the environment concurrently.
-        unsafe { std::env::set_var(key, value) };
-        Self {
-            _guard: guard,
-            key: key.to_string(),
-            original,
-        }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        // SAFETY: ENV_LOCK is still held via `_guard` in Self, so no other
-        // thread is reading or writing the environment concurrently.
-        match &self.original {
-            Some(value) => unsafe { std::env::set_var(&self.key, value) },
-            None => unsafe { std::env::remove_var(&self.key) },
-        }
-    }
-}
 
 fn github_pat_manifest() -> AuthManifest {
     AuthManifest {
@@ -73,12 +35,10 @@ fn github_pat_manifest() -> AuthManifest {
     }
 }
 
-fn github_pat_auth(token_env: Option<&str>, token_file: Option<&str>) -> AuthConfig {
+fn github_pat_auth() -> AuthConfig {
     AuthConfig::StaticToken(StaticTokenConfig {
         scheme: Some("pat".to_string()),
         account: None,
-        token_env: token_env.map(str::to_owned),
-        token_file: token_file.map(str::to_owned),
     })
 }
 
@@ -98,17 +58,6 @@ fn auth_manager(configs: &[AuthConfig], manifest: Option<&AuthManifest>) -> Auth
 }
 
 #[test]
-fn test_static_token_env_injection() {
-    let auth = github_pat_auth(Some("OMNIFS_TEST_TOKEN_AUTH"), None);
-    let _env = ScopedEnvVar::set("OMNIFS_TEST_TOKEN_AUTH", "ghp_test123");
-    let manager = github_pat_manager(auth);
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert_eq!(headers.len(), 1);
-    assert_eq!(headers[0].0, "Authorization");
-    assert_eq!(headers[0].1, "Bearer ghp_test123");
-}
-
-#[test]
 fn test_no_injection_without_config() {
     let manager = AuthManager::none();
     let headers = manager.headers_for_url("https://api.github.com/repos");
@@ -116,30 +65,16 @@ fn test_no_injection_without_config() {
 }
 
 #[test]
-fn test_missing_env_var_returns_no_headers() {
-    let auth = github_pat_auth(Some("DEFINITELY_NOT_SET_12345"), None);
-    let manager = github_pat_manager(auth);
+fn test_missing_credential_returns_no_headers_but_requires_auth() {
+    let manager = github_pat_manager(github_pat_auth());
     let headers = manager.headers_for_url("https://api.github.com/repos");
     assert!(headers.is_empty());
     assert!(manager.requires_auth_for_url("https://api.github.com/repos"));
 }
 
 #[test]
-fn test_static_token_injection_from_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let token_file = dir.path().join("github_token");
-    std::fs::write(&token_file, "ghp_file_token\n").unwrap();
-    let auth = github_pat_auth(None, Some(&token_file.display().to_string()));
-    let manager = github_pat_manager(auth);
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert_eq!(headers.len(), 1);
-    assert_eq!(headers[0].0, "Authorization");
-    assert_eq!(headers[0].1, "Bearer ghp_file_token");
-}
-
-#[test]
 fn test_static_token_injection_from_store() {
-    let auth = github_pat_auth(None, None);
+    let auth = github_pat_auth();
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let key = CredentialId::new("github", "pat", "default").unwrap();
     store
@@ -167,41 +102,10 @@ fn test_static_token_injection_from_store() {
 }
 
 #[test]
-fn test_token_file_takes_precedence_over_env() {
-    let dir = tempfile::tempdir().unwrap();
-    let token_file = dir.path().join("github_token");
-    std::fs::write(&token_file, "ghp_from_file").unwrap();
-    let auth = github_pat_auth(
-        Some("OMNIFS_TEST_TOKEN_AUTH_PREFERRED"),
-        Some(&token_file.display().to_string()),
-    );
-    let _env = ScopedEnvVar::set("OMNIFS_TEST_TOKEN_AUTH_PREFERRED", "ghp_from_env");
-    let manager = github_pat_manager(auth);
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert_eq!(headers[0].1, "Bearer ghp_from_file");
-}
-
-#[test]
-fn test_missing_token_file_falls_back_to_env() {
-    let dir = tempfile::tempdir().unwrap();
-    let missing_token_file = dir.path().join("missing_token");
-    let auth = github_pat_auth(
-        Some("OMNIFS_TEST_TOKEN_AUTH_FALLBACK"),
-        Some(&missing_token_file.display().to_string()),
-    );
-    let _env = ScopedEnvVar::set("OMNIFS_TEST_TOKEN_AUTH_FALLBACK", "ghp_from_env");
-    let manager = github_pat_manager(auth);
-    let headers = manager.headers_for_url("https://api.github.com/repos");
-    assert_eq!(headers[0].1, "Bearer ghp_from_env");
-}
-
-#[test]
 fn test_auth_manifest_backed_static_token_injection() {
     let auth = AuthConfig::StaticToken(StaticTokenConfig {
         scheme: Some("pat".to_string()),
         account: None,
-        token_env: Some("OMNIFS_TEST_MANIFEST_TOKEN".to_string()),
-        token_file: None,
     });
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::StaticToken(StaticTokenScheme {
@@ -214,9 +118,24 @@ fn test_auth_manifest_backed_static_token_injection() {
             validation: None,
         })],
     };
-    let _env = ScopedEnvVar::set("OMNIFS_TEST_MANIFEST_TOKEN", "secret");
-
-    let manager = auth_manager(&[auth], Some(&manifest));
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+    store
+        .put(
+            &CredentialId::new("github", "pat", "default").unwrap(),
+            &CredentialEntry::static_token(
+                SecretString::from("secret".to_string()),
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+        )
+        .unwrap();
+    let manager = AuthManager::from_configs_manifest_store_with_http(
+        &[auth],
+        Some(&manifest),
+        "github",
+        store,
+        reqwest_oauth2::Client::new(),
+    )
+    .unwrap();
 
     assert_eq!(
         manager.headers_for_url("https://api.example.com/repos"),
@@ -236,8 +155,6 @@ fn test_auth_manifest_backed_static_token_missing_credential_still_requires_auth
     let auth = AuthConfig::StaticToken(StaticTokenConfig {
         scheme: Some("pat".to_string()),
         account: None,
-        token_env: Some("DEFINITELY_NOT_SET_MANIFEST_TOKEN".to_string()),
-        token_file: None,
     });
     let manifest = AuthManifest {
         schemes: vec![AuthScheme::StaticToken(StaticTokenScheme {
@@ -306,10 +223,7 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
     // but has no valid credential (env var doesn't exist). The injector should
     // exist (so requires_auth_for_url returns true) but have no header_value
     // (so headers_for_url returns empty).
-    let auth = Arc::new(github_pat_manager(github_pat_auth(
-        Some("DEFINITELY_NOT_SET_12345"),
-        None,
-    )));
+    let auth = Arc::new(github_pat_manager(github_pat_auth()));
 
     // Verify the setup: auth is required for this domain but no headers available
     assert!(auth.requires_auth_for_url("https://api.github.com/repos"));

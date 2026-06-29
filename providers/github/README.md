@@ -34,7 +34,7 @@ Hybrid search + REST pagination; `ItemKind` (`issues` vs `pulls`) selects the li
 
 ## Capabilities
 
-`api.github.com` over HTTPS plus `git@github.com:*` over SSH for the bind-mounted clones. The default user workflow is `omnifs init github`, which runs GitHub's device flow with product client id `Ov23licogxMDzS47s9sF` and no default scopes. That default is public-read only; use `omnifs init github --scope repo` only when you need private repository access and accept GitHub OAuth's broad private-repository grant. Use `omnifs auth login github` to repair a missing or expired credential after the mount exists. Bearer-token auth via `GITHUB_TOKEN` env or a Docker secret file remains supported for the development Compose path. 256 MiB memory limit. Read-only today; mutation path WIP per the design docs.
+`api.github.com` over HTTPS plus `git@github.com:*` over SSH for the bind-mounted clones. The default user workflow is `omnifs init github`, which runs GitHub's device flow with product client id `Ov23licogxMDzS47s9sF` and no default scopes. That default is public-read only; use `omnifs init github --scope repo` only when you need private repository access and accept GitHub OAuth's broad private-repository grant. Use `omnifs init --reauth github` to repair a missing or expired credential after the mount exists, or `omnifs init github --token-env GITHUB_TOKEN` to authenticate with a personal access token from an environment variable. 256 MiB memory limit. Read-only today; mutation path WIP per the design docs.
 
 ## Install
 

@@ -217,9 +217,7 @@ fn copy_real_providers(providers_dir: &Path, linear_enabled: bool) {
 }
 
 fn write_real_mounts(mounts_dir: &Path, config_dir: &Path, db_dir: &Path, linear_enabled: bool) {
-    let github_token_path = config_dir.join("github_token");
-    std::fs::write(&github_token_path, gh_token()).expect("github token file");
-    set_private_file_mode(&github_token_path);
+    write_credentials(config_dir, linear_enabled);
     create_sqlite_fixture(&db_dir.join("test.db"));
 
     write_mount(
@@ -233,16 +231,50 @@ fn write_real_mounts(mounts_dir: &Path, config_dir: &Path, db_dir: &Path, linear
         r#"{"provider":"omnifs_provider_dns.wasm","mount":"dns"}"#,
     );
     write_mount(mounts_dir, "docker", DOCKER_MOUNT_JSON);
-    write_mount(mounts_dir, "github", &github_mount_json(&github_token_path));
+    write_mount(mounts_dir, "github", GITHUB_MOUNT_JSON);
     write_mount(mounts_dir, "db", &db_mount_json(db_dir));
     if linear_enabled {
         write_mount(
             mounts_dir,
             "linear",
-            r#"{"provider":"omnifs_provider_linear.wasm","mount":"linear","auth":{"type":"static-token","scheme":"pat","token_env":"LINEAR_TOKEN"}}"#,
+            r#"{"provider":"omnifs_provider_linear.wasm","mount":"linear","auth":{"type":"static-token","scheme":"pat"}}"#,
         );
     }
 }
+
+/// Populate the credential store the registry reads. Tokens now live only in
+/// the store; the mount spec's auth carries identity (scheme), never a source.
+/// Entries mirror `omnifs_creds::CredentialEntry`'s wire form.
+fn write_credentials(config_dir: &Path, linear_enabled: bool) {
+    let mut entries = vec![format!(
+        r#""github:pat:default":{}"#,
+        static_token_entry(&gh_token())
+    )];
+    if linear_enabled {
+        let token = std::env::var("LINEAR_TOKEN").expect("LINEAR_TOKEN");
+        entries.push(format!(
+            r#""linear:pat:default":{}"#,
+            static_token_entry(&token)
+        ));
+    }
+    let path = config_dir.join("credentials.json");
+    let body = entries.join(",");
+    std::fs::write(&path, format!(r#"{{"version":1,"entries":{{{body}}}}}"#))
+        .expect("write credentials.json");
+    set_private_file_mode(&path);
+}
+
+fn static_token_entry(token: &str) -> String {
+    format!(
+        r#"{{"kind":"static-token","access_token":{token:?},"refresh_token":null,"refreshability":"not-applicable","expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{{}}}}"#
+    )
+}
+
+const GITHUB_MOUNT_JSON: &str = r#"{
+    "provider":"omnifs_provider_github.wasm",
+    "mount":"github",
+    "auth":{"type":"static-token","scheme":"pat"}
+}"#;
 
 const DOCKER_MOUNT_JSON: &str = r#"{
     "provider":"omnifs_provider_docker.wasm",
@@ -250,21 +282,6 @@ const DOCKER_MOUNT_JSON: &str = r#"{
     "capabilities":{"unix_sockets":["/var/run/docker.sock"],"max_memory_mb":64},
     "config":{"endpoint":"unix:///var/run/docker.sock"}
 }"#;
-
-fn github_mount_json(github_token_path: &Path) -> String {
-    format!(
-        r#"{{
-            "provider":"omnifs_provider_github.wasm",
-            "mount":"github",
-            "auth":{{
-                "type":"static-token",
-                "scheme":"pat",
-                "token_file":{token_file:?}
-            }}
-        }}"#,
-        token_file = github_token_path.display().to_string()
-    )
-}
 
 fn db_mount_json(db_dir: &Path) -> String {
     format!(

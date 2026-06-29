@@ -25,10 +25,6 @@ pub struct StaticToken {
     /// User-chosen account handle for host-managed credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_env: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -95,22 +91,6 @@ impl Auth {
         match self {
             Self::StaticToken(config) => config.account.as_deref(),
             Self::OAuth(config) => config.account.as_deref(),
-        }
-    }
-
-    #[must_use]
-    pub fn token_env(&self) -> Option<&str> {
-        match self {
-            Self::StaticToken(config) => config.token_env.as_deref(),
-            Self::OAuth(_) => None,
-        }
-    }
-
-    #[must_use]
-    pub fn token_file(&self) -> Option<&str> {
-        match self {
-            Self::StaticToken(config) => config.token_file.as_deref(),
-            Self::OAuth(_) => None,
         }
     }
 

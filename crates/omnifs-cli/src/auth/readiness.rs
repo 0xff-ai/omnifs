@@ -22,9 +22,6 @@ pub(crate) enum AuthReadiness {
     Missing {
         command: String,
     },
-    ConfiguredExternally {
-        source: String,
-    },
     Error {
         message: String,
     },
@@ -47,7 +44,6 @@ pub(crate) struct AuthProbeSummary {
 pub(crate) enum AuthTerminalKind {
     None,
     Ready,
-    External,
     Missing,
     Error,
 }
@@ -61,20 +57,15 @@ pub(crate) struct AuthTerminalRow {
 impl AuthReadiness {
     pub(crate) fn from_target(
         mount_name: &str,
-        target: CredentialTarget,
+        target: &CredentialTarget,
         store: &dyn CredentialStore,
     ) -> Self {
         match target {
             CredentialTarget::None => return Self::None,
-            CredentialTarget::External(source) => {
-                return Self::ConfiguredExternally {
-                    source: source.to_string(),
-                };
-            },
             CredentialTarget::Internal(_) => {},
         }
 
-        let command = format!("omnifs auth login {mount_name}");
+        let command = format!("omnifs init --reauth {mount_name}");
         match target.lookup(store) {
             Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
             Ok(None) => Self::Missing { command },
@@ -129,10 +120,6 @@ impl AuthReadiness {
                     message: format!("{kind}{scopes_str}{notice_str}"),
                 }
             },
-            Self::ConfiguredExternally { source } => AuthProbeSummary {
-                severity: AuthProbeSeverity::Ok,
-                message: format!("external ({source})"),
-            },
             Self::Missing { command } => AuthProbeSummary {
                 severity: AuthProbeSeverity::Warn,
                 message: format!("run `{command}`"),
@@ -175,10 +162,6 @@ impl AuthReadiness {
                     summary,
                 }
             },
-            Self::ConfiguredExternally { source } => AuthTerminalRow {
-                kind: AuthTerminalKind::External,
-                summary: format!("external ({source})"),
-            },
             Self::Missing { command } => AuthTerminalRow {
                 kind: AuthTerminalKind::Missing,
                 summary: format!("missing — run `{command}`"),
@@ -202,7 +185,7 @@ pub(crate) fn credential_notices(
         return Vec::new();
     }
     if entry.is_expired_at(time::OffsetDateTime::now_utc()) {
-        let command = reauth_command.unwrap_or("omnifs auth login <mount>");
+        let command = reauth_command.unwrap_or("omnifs init --reauth <mount>");
         return vec![format!("expired; run `{command}`")];
     }
     vec!["not refreshable; re-authentication will be required after expiry".to_owned()]
@@ -226,27 +209,8 @@ mod tests {
     fn from_target_reports_no_auth_required() {
         let store = MemoryStore::new();
         assert_eq!(
-            AuthReadiness::from_target("github", CredentialTarget::None, &store),
+            AuthReadiness::from_target("github", &CredentialTarget::None, &store),
             AuthReadiness::None
-        );
-    }
-
-    #[test]
-    fn from_target_reports_external_token_source() {
-        let store = MemoryStore::new();
-        assert_eq!(
-            AuthReadiness::from_target(
-                "github",
-                CredentialTarget::External(
-                    crate::credential_target::ExternalCredentialSource::TokenEnv(
-                        "GITHUB_TOKEN".into()
-                    )
-                ),
-                &store
-            ),
-            AuthReadiness::ConfiguredExternally {
-                source: "token_env=GITHUB_TOKEN".into(),
-            }
         );
     }
 
@@ -267,7 +231,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        match AuthReadiness::from_target("github", CredentialTarget::Internal(key), &store) {
+        match AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store) {
             AuthReadiness::Ready { kind, scopes, .. } => {
                 assert_eq!(kind, "oauth");
                 assert_eq!(scopes, vec!["repo".to_string()]);
@@ -281,9 +245,9 @@ mod tests {
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
         assert_eq!(
-            AuthReadiness::from_target("github", CredentialTarget::Internal(key), &store),
+            AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store),
             AuthReadiness::Missing {
-                command: "omnifs auth login github".into(),
+                command: "omnifs init --reauth github".into(),
             }
         );
     }

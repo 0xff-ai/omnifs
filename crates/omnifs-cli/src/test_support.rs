@@ -1,37 +1,5 @@
 //! Shared test helpers for wasm fixture construction and path layout.
 
-#[cfg(test)]
-use omnifs_core::CredentialId;
-#[cfg(test)]
-use omnifs_creds::{CredentialEntry, CredentialStore, StoreError};
-
-/// Credential store that rejects listing, for status paths that must not require enumeration.
-#[cfg(test)]
-pub(crate) struct NonListingStore;
-
-#[cfg(test)]
-impl CredentialStore for NonListingStore {
-    fn put(&self, _: &CredentialId, _: &CredentialEntry) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    fn get(&self, _: &CredentialId) -> Result<Option<CredentialEntry>, StoreError> {
-        Ok(None)
-    }
-
-    fn delete(&self, _: &CredentialId) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError> {
-        Ok(None)
-    }
-
-    fn backend_label(&self) -> String {
-        "non-listing".to_owned()
-    }
-}
-
 /// Build a workspace layout rooted at `root` with the standard subdirectory layout
 /// our test fixtures use. Directories are not created; callers that need
 /// `mounts_dir` or `providers_dir` to exist should mkdir them explicitly.

@@ -728,7 +728,7 @@
           }
         },
         "summary": {
-          "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
+          "description": "One-line summary shown in scheme pickers during `omnifs init`.",
           "type": [
             "string",
             "null"

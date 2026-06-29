@@ -289,13 +289,6 @@ impl StaticTokenStrategy {
         scheme: &str,
         store_context: Option<&AuthStoreContext>,
     ) -> Result<Option<String>, AuthError> {
-        if config.token_file.is_some() || config.token_env.is_some() {
-            return Ok(read_credential(
-                config.token_file.as_deref(),
-                config.token_env.as_deref(),
-            ));
-        }
-
         let context =
             store_context.ok_or(AuthError::CredentialStoreRequired(AuthKind::StaticToken))?;
         let account = config
@@ -552,22 +545,6 @@ impl From<SchemeResolveError> for AuthError {
             },
         }
     }
-}
-
-fn read_credential(token_file: Option<&str>, token_env: Option<&str>) -> Option<String> {
-    token_file
-        .and_then(|path| {
-            std::fs::read_to_string(path)
-                .ok()
-                .map(|contents| contents.trim().to_string())
-                .filter(|contents| !contents.is_empty())
-        })
-        .or_else(|| {
-            token_env
-                .and_then(|env_var| std::env::var(env_var).ok())
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty())
-        })
 }
 
 fn oauth_entry_is_valid(entry: &CredentialEntry) -> bool {

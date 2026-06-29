@@ -104,15 +104,6 @@ pub(crate) fn load_mount_auth(
     Ok(mount_auth(catalog, spec))
 }
 
-pub(crate) fn load_all_mount_auth(catalog: &Catalog, mounts: Vec<MountConfig>) -> Vec<MountAuth> {
-    let mut results: Vec<MountAuth> = mounts
-        .into_iter()
-        .map(|m| mount_auth(catalog, m.config))
-        .collect();
-    results.sort_by(|a, b| a.spec.mount.cmp(&b.spec.mount));
-    results
-}
-
 fn load_mount_auth_config(mounts: &[MountConfig], mount: &str) -> anyhow::Result<Spec> {
     let name = MountName::new(mount.to_owned())
         .with_context(|| format!("invalid mount name `{mount}`"))?;
@@ -157,18 +148,6 @@ impl MountAuth {
         Ok((request, target))
     }
 
-    pub(crate) fn static_token_target(
-        &self,
-        requested_scheme: Option<&str>,
-        account: Option<&str>,
-    ) -> anyhow::Result<CredentialTarget> {
-        let auth = self.primary_auth();
-        let scheme = self
-            .manifest_view()
-            .static_token_scheme_key(requested_scheme, auth.and_then(Auth::scheme))?;
-        self.target_for_scheme(auth, &scheme, account)
-    }
-
     pub(crate) fn readiness(&self, store: &dyn CredentialStore) -> AuthReadiness {
         let target = match self.status_target() {
             Ok(target) => target,
@@ -178,7 +157,7 @@ impl MountAuth {
                 };
             },
         };
-        AuthReadiness::from_target(&self.spec.mount, target, store)
+        AuthReadiness::from_target(&self.spec.mount, &target, store)
     }
 
     pub(crate) fn configured_target(
