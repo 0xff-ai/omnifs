@@ -105,9 +105,9 @@ where
 /// Embed `metadata_json` as the `omnifs.provider-metadata.v1` custom section,
 /// returning the rewritten component bytes. Any existing top-level section with
 /// that name is replaced, so re-embedding is idempotent (the reader rejects
-/// duplicates). The build-time embed tool harvests `metadata_json` from a
-/// provider's `manifest_json()` export; the host reads the result
-/// pre-instantiation.
+/// duplicates). The build-time harvester serializes a provider's `Metadata`
+/// const with `serde_json` and injects the result here; the host reads it back
+/// pre-instantiation via [`read_provider_metadata_section`].
 pub fn embed_provider_metadata_section(
     wasm: &[u8],
     metadata_json: &[u8],
@@ -148,6 +148,13 @@ pub fn embed_provider_metadata_section(
     }
     append_custom_section(&mut out, PROVIDER_METADATA_SECTION_NAME, metadata_json);
     Ok(out)
+}
+
+#[cfg(test)]
+pub(crate) fn wasm_with_provider_metadata(wasm: &[u8], metadata_json: &[u8]) -> Vec<u8> {
+    let mut out = wasm.to_vec();
+    append_custom_section(&mut out, PROVIDER_METADATA_SECTION_NAME, metadata_json);
+    out
 }
 
 /// Append a wasm custom section (id `0`, encoded identically in the core and

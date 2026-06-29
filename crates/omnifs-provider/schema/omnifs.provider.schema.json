@@ -6,17 +6,7 @@
     "auth": {
       "anyOf": [
         {
-          "$ref": "#/$defs/AuthBlock"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "buildEvidence": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/BuildEvidence"
+          "$ref": "#/$defs/ProviderAuthManifest"
         },
         {
           "type": "null"
@@ -29,10 +19,10 @@
         "$ref": "#/$defs/Need"
       }
     },
-    "configSchema": {
+    "config": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Schema"
+          "$ref": "#/$defs/ConfigMetadata"
         },
         {
           "type": "null"
@@ -68,295 +58,257 @@
     "defaultMount"
   ],
   "$defs": {
-    "AuthBlock": {
-      "description": "Wire form of the whole auth block as it appears in the `omnifs.provider-metadata.v1` section.",
+    "AuthScheme": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "staticToken": {
+              "$ref": "#/$defs/StaticTokenScheme"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "staticToken"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "oauth": {
+              "$ref": "#/$defs/OauthScheme"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "oauth"
+          ]
+        }
+      ]
+    },
+    "ClientSideTokenConfig": {
       "type": "object",
       "properties": {
-        "default": {
-          "description": "Key of the scheme used by `omnifs init` when no explicit choice.",
+        "redirectUriTemplate": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "redirectUriTemplate"
+      ]
+    },
+    "ConfigField": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostResourceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
           "type": "string"
         },
-        "inject": {
-          "$ref": "#/$defs/AuthInject"
+        "required": {
+          "type": "boolean"
         },
-        "schemes": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ManifestAuthScheme"
-          }
+        "type": {
+          "$ref": "#/$defs/ConfigType"
         }
       },
       "additionalProperties": false,
       "required": [
-        "inject",
-        "default",
-        "schemes"
+        "name",
+        "type"
       ]
     },
-    "AuthInject": {
+    "ConfigMetadata": {
       "type": "object",
       "properties": {
-        "domains": {
+        "fields": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ConfigField"
           }
-        },
-        "header": {
-          "type": "string"
-        },
-        "prefix": {
-          "type": "string"
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "domains",
-        "header",
-        "prefix"
+      "additionalProperties": false
+    },
+    "ConfigType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "$ref": "#/$defs/ConfigType"
+            },
+            "kind": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "map"
+            },
+            "values": {
+              "$ref": "#/$defs/ConfigType"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConfigField"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fields"
+          ]
+        }
       ]
     },
-    "BuildEvidence": {
-      "description": "Build provenance for a compiled provider component: the `omnifs:provider`\nWIT package version and the SDK version it was built against. The\n`#[provider]` macro stamps this into the embedded manifest so the host can\nlater detect a provider built against an incompatible contract.",
+    "DeviceCodeConfig": {
       "type": "object",
       "properties": {
-        "sdk": {
-          "type": "string"
-        },
-        "wit": {
+        "deviceAuthorizationEndpoint": {
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
-        "wit",
-        "sdk"
+        "deviceAuthorizationEndpoint"
       ]
     },
-    "ManifestAuthScheme": {
-      "description": "On-disk discriminant for a scheme entry.",
+    "HostResourceBinding": {
+      "description": "Binds a config field's string value to a host resource the sandbox must be\ngranted. The provider also declares the matching capability as a `dynamic`\nneed; the host resolves the concrete grant from this field's value at\nmount-start.",
       "oneOf": [
         {
-          "description": "Compact wire form of a static-token scheme in the `omnifs.provider-metadata.v1` section.",
+          "description": "A host file the provider opens through a preopened WASI directory. The\nhost preopens the file's parent directory at the same path (guest ==\nhost) with `mode`, so the provider opens the configured path unchanged.",
           "type": "object",
           "properties": {
-            "creationUrl": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "description": {
-              "type": "string"
-            },
-            "docsUrl": {
-              "description": "Link to provider documentation for this auth path.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "setup": {
-              "description": "Ordered provider-specific prerequisite steps beyond creating the token.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "summary": {
-              "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
+            "kind": {
               "type": "string",
-              "const": "staticToken"
+              "const": "file"
             },
-            "validation": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/TokenValidation"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "mode": {
+              "$ref": "#/$defs/PreopenMode",
+              "default": "ro"
             }
           },
           "additionalProperties": false,
           "required": [
-            "type",
-            "description"
+            "kind"
           ]
         },
         {
-          "description": "Compact wire form of an OAuth scheme in the `omnifs.provider-metadata.v1` section.",
+          "description": "A host unix socket the host issues provider callouts over. The value is a\n`unix://` endpoint resolved into the socket allowlist.",
           "type": "object",
           "properties": {
-            "clientId": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "displayName": {
-              "type": "string"
-            },
-            "docsUrl": {
-              "description": "Link to provider documentation for this auth path.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "flow": {
-              "$ref": "#/$defs/ManifestOAuthFlow"
-            },
-            "scopes": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "setup": {
-              "description": "Ordered provider-specific prerequisite steps (create an OAuth app,\nenable an API). Required when no `clientId` is shipped.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "summary": {
-              "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "tokenEndpointAuth": {
-              "description": "How the host authenticates at the token endpoint. `none` (the default)\nsuits public PKCE clients; confidential clients that must present a\nsecret use `clientSecretPost` or `clientSecretBasic`.",
-              "$ref": "#/$defs/TokenEndpointAuthMethod"
-            },
-            "type": {
+            "kind": {
               "type": "string",
-              "const": "oauth"
+              "const": "socket"
             }
           },
           "additionalProperties": false,
           "required": [
-            "type",
-            "displayName",
-            "flow"
+            "kind"
           ]
         }
       ]
     },
-    "ManifestOAuthFlow": {
-      "description": "On-disk compact flow descriptor inside an OAuth scheme.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "authorizationEndpoint": {
-              "type": "string"
-            },
-            "deviceAuthorizationEndpoint": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "deviceCode"
-            },
-            "tokenEndpoint": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "authorizationEndpoint",
-            "deviceAuthorizationEndpoint",
-            "tokenEndpoint"
-          ]
+    "KeyValue": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
         },
-        {
-          "type": "object",
-          "properties": {
-            "authorizationEndpoint": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "pkceLoopback"
-            },
-            "redirectUriTemplate": {
-              "type": "string"
-            },
-            "tokenEndpoint": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "authorizationEndpoint",
-            "tokenEndpoint",
-            "redirectUriTemplate"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "authorizationEndpoint": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "pkceManualCode"
-            },
-            "redirectUri": {
-              "type": "string"
-            },
-            "tokenEndpoint": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "authorizationEndpoint",
-            "tokenEndpoint",
-            "redirectUri"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "authorizationEndpoint": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "clientSideToken"
-            },
-            "redirectUriTemplate": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "tokenEndpoint": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "authorizationEndpoint",
-            "tokenEndpoint"
-          ]
+        "value": {
+          "type": "string"
         }
+      },
+      "required": [
+        "key",
+        "value"
       ]
     },
     "Need": {
@@ -545,6 +497,161 @@
         }
       ]
     },
+    "OAuthFlow": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "pkceLoopback": {
+              "$ref": "#/$defs/PkceLoopbackConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pkceLoopback"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "pkceManualCode": {
+              "$ref": "#/$defs/PkceManualCodeConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pkceManualCode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "clientSideToken": {
+              "$ref": "#/$defs/ClientSideTokenConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "clientSideToken"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "deviceCode": {
+              "$ref": "#/$defs/DeviceCodeConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "deviceCode"
+          ]
+        }
+      ]
+    },
+    "OauthScheme": {
+      "type": "object",
+      "properties": {
+        "authorizationEndpoint": {
+          "type": "string"
+        },
+        "defaultClientId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultScopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "extraAuthorizeParams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          }
+        },
+        "extraTokenParams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          }
+        },
+        "flow": {
+          "$ref": "#/$defs/OAuthFlow"
+        },
+        "injectDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "injectHeaderName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "injectValuePrefix": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "refreshTokenRotates": {
+          "type": "boolean",
+          "default": false
+        },
+        "revocationEndpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenEndpoint": {
+          "type": "string"
+        },
+        "tokenEndpointAuth": {
+          "$ref": "#/$defs/TokenEndpointAuthMethod"
+        }
+      },
+      "required": [
+        "key",
+        "displayName",
+        "authorizationEndpoint",
+        "tokenEndpoint",
+        "flow",
+        "injectDomains",
+        "injectValuePrefix"
+      ]
+    },
+    "PkceLoopbackConfig": {
+      "type": "object",
+      "properties": {
+        "redirectUriTemplate": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "redirectUriTemplate"
+      ]
+    },
+    "PkceManualCodeConfig": {
+      "type": "object",
+      "properties": {
+        "redirectUri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "redirectUri"
+      ]
+    },
     "PreopenMode": {
       "description": "Access mode for a preopened directory grant.",
       "type": "string",
@@ -573,10 +680,108 @@
         "guest"
       ]
     },
-    "Schema": {
-      "type": [
-        "object",
-        "boolean"
+    "ProviderAuthManifest": {
+      "description": "Provider auth block from the `omnifs.provider-metadata.v1` embedded section.\n\nEach scheme is self-contained: it carries its own injection domains, header,\nand prefix, so the embedded wire form is exactly what the host and\n`omnifs-auth` consume. There is no compact-vs-expanded encoding and no\ntransform on read, the provider serializes [`AuthScheme`] directly.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Key of the scheme `omnifs init` defaults to when the user makes no choice.",
+          "type": "string"
+        },
+        "guidance": {
+          "description": "Per-scheme setup guidance, keyed by scheme key. Display metadata only;\nnever affects header injection, so it rides here rather than on the\ninjection-facing [`AuthScheme`].",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SchemeGuidance"
+          }
+        },
+        "schemes": {
+          "description": "The schemes a user can pick, each self-contained with its own injection\ndomains, header, and prefix.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuthScheme"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "default",
+        "schemes"
+      ]
+    },
+    "SchemeGuidance": {
+      "description": "Human-facing setup guidance for a single auth scheme.\n\nDisplay metadata only: it never affects header injection, so it rides on the\nmanifest [`ProviderAuthManifest`](crate::ProviderAuthManifest) rather than on\nthe injection-facing [`AuthScheme`]. The host pairs it with its own canned\nper-flow-kind explanation; a provider supplies only what is specific to it\n(e.g. \"create an OAuth app\", \"enable the Calendar API\").",
+      "type": "object",
+      "properties": {
+        "docsUrl": {
+          "description": "Link to provider documentation for this auth path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setupSteps": {
+          "description": "Ordered provider-specific prerequisite steps, rendered after the host's\ncanned flow-kind explanation. Required for an OAuth scheme that ships no\nclient id (the user must create their own app).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "description": "One-line summary shown in scheme pickers and `omnifs auth explain`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "StaticTokenScheme": {
+      "type": "object",
+      "properties": {
+        "creationUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "headerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "injectDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valuePrefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "valuePrefix",
+        "description",
+        "injectDomains"
       ]
     },
     "TokenEndpointAuthMethod": {

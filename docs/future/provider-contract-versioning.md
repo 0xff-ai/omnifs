@@ -113,7 +113,7 @@ new provider candidate. The flow is:
 3. Choose a new provider candidate from the catalog, usually through
    `latest_by_name(old.meta.name)`.
 4. Load the new candidate's `ProviderManifest`.
-5. Compare the manifest surfaces directly: config schema, capabilities, auth
+5. Compare the manifest surfaces directly: config metadata, capabilities, auth
    declaration, and any future declarative migration hints.
 6. Ask the user to approve what is changing and to provide any missing values.
 7. Rewrite the mount with migrated config, the chosen credential binding, and

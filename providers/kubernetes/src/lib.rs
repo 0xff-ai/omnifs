@@ -34,6 +34,7 @@ use crate::objects::{ClusterResource, NamespacedResource};
 pub struct Config {
     /// API endpoint. A `unix://` socket served by `kubectl proxy --unix-socket`
     /// is the supported transport.
+    #[omnifs(default = "unix:///run/omnifs/k8s.sock")]
     #[serde(default = "default_endpoint")]
     endpoint: omnifs_sdk::HostSocket,
     /// When true, type listings show only resource types with at least one

@@ -1,43 +1,34 @@
 use crate::sections::ProviderMetadataError;
-use indexmap::IndexMap;
 use omnifs_caps::PreopenMode;
-use schemars::{JsonSchema, Schema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ConfigSchema {
-    #[serde(rename = "type")]
-    pub schema_type: ConfigSchemaType,
-    #[serde(default)]
-    pub properties: IndexMap<String, ConfigProperty>,
-    /// JSON-Schema `required` array. A field can be required and still carry a
-    /// default, so this is the authoritative required signal: default-presence
-    /// only governs seeding (`defaults`), never required-ness.
-    #[serde(default)]
-    pub required: Vec<String>,
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ConfigField>,
 }
 
-impl ConfigSchema {
-    pub fn parse(schema: &Schema) -> Result<Self, ProviderMetadataError> {
-        let config_schema: Self = serde_json::from_value(schema.as_value().clone())
-            .map_err(|error| ProviderMetadataError::Validation(format!("configSchema: {error}")))?;
-        if config_schema.schema_type != ConfigSchemaType::Object {
-            return Err(ProviderMetadataError::Validation(
-                "configSchema must be a top-level object schema".to_string(),
-            ));
-        }
-        Ok(config_schema)
+impl ConfigMetadata {
+    pub fn validate(&self) -> Result<(), ProviderMetadataError> {
+        validate_fields("config", &self.fields)
     }
 
     #[must_use]
     pub fn defaults(&self) -> serde_json::Value {
-        let mut out = serde_json::Map::new();
-        for (name, property) in &self.properties {
-            if let Some(default) = &property.default {
-                out.insert(name.clone(), default.clone());
-            }
-        }
-        serde_json::Value::Object(out)
+        let fields = self
+            .fields
+            .iter()
+            .filter_map(|field| {
+                field
+                    .default
+                    .as_ref()
+                    .map(|default| (field.name.clone(), default.clone()))
+            })
+            .collect();
+        serde_json::Value::Object(fields)
     }
 
     /// Whether `omnifs init` must prompt interactively for a value. Only a
@@ -45,61 +36,193 @@ impl ConfigSchema {
     /// mount-start from the path the user supplies.
     #[must_use]
     pub fn requires_prompt(&self) -> bool {
-        self.resource_fields()
-            .any(|(_, resource)| matches!(resource, HostResource::File { .. }))
+        self.host_resource_fields()
+            .any(|(_, field)| matches!(field.binding, Some(HostResourceBinding::File { .. })))
     }
 
-    /// The config fields declared as host-resource references, in declaration
-    /// order. The host resolves each field's grant from its value at
-    /// mount-start (a socket into the callout allowlist, a file into a WASI
-    /// preopen).
-    pub fn resource_fields(&self) -> impl Iterator<Item = (&str, HostResource)> {
-        self.properties.iter().filter_map(|(name, property)| {
-            property.resource.map(|resource| (name.as_str(), resource))
-        })
+    /// The config fields bound to host resources, in declaration order. The
+    /// host resolves each field's grant from its value at mount-start.
+    pub fn host_resource_fields(&self) -> impl Iterator<Item = (&str, &ConfigField)> {
+        self.fields
+            .iter()
+            .filter(|field| field.binding.is_some())
+            .map(|field| (field.name.as_str(), field))
     }
 
-    /// The single field declared as `kind`, if any.
+    /// The config field bound to the host socket, if any.
     #[must_use]
-    pub fn resource_field(&self, kind: HostResourceKind) -> Option<&str> {
-        self.resource_fields()
-            .find(|(_, resource)| resource.kind() == kind)
+    pub fn host_socket_field(&self) -> Option<&str> {
+        self.host_resource_fields()
+            .find(|(_, field)| matches!(field.binding, Some(HostResourceBinding::Socket)))
             .map(|(name, _)| name)
+    }
+
+    pub fn validate_config(&self, config: &serde_json::Value) -> Result<(), ConfigError> {
+        let mut errors = Vec::new();
+        validate_object_value(&self.fields, config, "", &mut errors);
+        errors
+            .is_empty()
+            .then_some(())
+            .ok_or_else(|| ConfigError(errors.join("; ")))
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ConfigSchemaType {
-    Object,
+fn validate_fields(path: &str, fields: &[ConfigField]) -> Result<(), ProviderMetadataError> {
+    let mut names = HashSet::new();
+    for field in fields {
+        if field.name.is_empty() {
+            return Err(ProviderMetadataError::Validation(format!(
+                "{path}: config field name must not be empty"
+            )));
+        }
+        if !names.insert(field.name.as_str()) {
+            return Err(ProviderMetadataError::Validation(format!(
+                "{path}: duplicate config field `{}`",
+                field.name
+            )));
+        }
+        field.validate(path)?;
+    }
+    Ok(())
+}
+
+fn validate_object_value(
+    fields: &[ConfigField],
+    value: &serde_json::Value,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object() else {
+        errors.push(format!(
+            "{}must be an object",
+            path_prefix(path).unwrap_or_default()
+        ));
+        return;
+    };
+    for key in object.keys() {
+        if !fields.iter().any(|field| field.name == *key) {
+            errors.push(format!("unknown field `{}`{}", key, at_path(path)));
+        }
+    }
+    for field in fields {
+        match object.get(&field.name) {
+            Some(value) => {
+                let field_path = child_path(path, &field.name);
+                field.value_type.validate_value(value, &field_path, errors);
+            },
+            None if field.required => {
+                errors.push(format!(
+                    "missing required field `{}`{}",
+                    field.name,
+                    at_path(path)
+                ));
+            },
+            None => {},
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub value_type: ConfigType,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<HostResourceBinding>,
+}
+
+impl ConfigField {
+    fn validate(&self, path: &str) -> Result<(), ProviderMetadataError> {
+        if self.binding.is_some() && !matches!(self.value_type, ConfigType::String) {
+            return Err(ProviderMetadataError::Validation(format!(
+                "{path}.{}: host-resource bindings are only valid on string fields",
+                self.name
+            )));
+        }
+        self.value_type
+            .validate_metadata(&format!("{path}.{}", self.name))?;
+        if let Some(default) = &self.default {
+            let mut errors = Vec::new();
+            self.value_type
+                .validate_value(default, &format!("{path}.{}", self.name), &mut errors);
+            if !errors.is_empty() {
+                return Err(ProviderMetadataError::Validation(format!(
+                    "invalid default for config field `{}`: {}",
+                    self.name,
+                    errors.join("; ")
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ConfigType {
     String,
     Boolean,
     Integer,
-    Number,
-    Array,
-    Null,
+    Array { items: Box<ConfigType> },
+    Map { values: Box<ConfigType> },
+    Object { fields: Vec<ConfigField> },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ConfigProperty {
-    #[serde(default, rename = "type")]
-    pub schema_type: Option<ConfigSchemaType>,
-    #[serde(default)]
-    pub default: Option<serde_json::Value>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default, rename = "x-omnifs-resource")]
-    pub resource: Option<HostResource>,
+impl ConfigType {
+    fn validate_metadata(&self, path: &str) -> Result<(), ProviderMetadataError> {
+        match self {
+            Self::Array { items } => items.validate_metadata(&format!("{path}[]")),
+            Self::Map { values } => values.validate_metadata(&format!("{path}.*")),
+            Self::Object { fields } => validate_fields(path, fields),
+            Self::String | Self::Boolean | Self::Integer => Ok(()),
+        }
+    }
+
+    fn validate_value(&self, value: &serde_json::Value, path: &str, errors: &mut Vec<String>) {
+        match self {
+            Self::String if !value.is_string() => errors.push(expected(path, "string")),
+            Self::Boolean if !value.is_boolean() => errors.push(expected(path, "boolean")),
+            Self::Integer if !is_integer(value) => errors.push(expected(path, "integer")),
+            Self::Array { items } => {
+                let Some(values) = value.as_array() else {
+                    errors.push(expected(path, "array"));
+                    return;
+                };
+                for (index, value) in values.iter().enumerate() {
+                    items.validate_value(value, &format!("{path}[{index}]"), errors);
+                }
+            },
+            Self::Map { values } => {
+                let Some(object) = value.as_object() else {
+                    errors.push(expected(path, "object"));
+                    return;
+                };
+                for (key, value) in object {
+                    values.validate_value(value, &child_path(path, key), errors);
+                }
+            },
+            Self::Object { fields } => {
+                validate_object_value(fields, value, path, errors);
+            },
+            Self::String | Self::Boolean | Self::Integer => {},
+        }
+    }
 }
 
-/// Declares that a config field's value references a host resource the sandbox
-/// must be granted. The provider also declares the matching capability as a
-/// `dynamic` need; the host resolves the concrete grant from this field's value
-/// at mount-start. One marker drives both the socket allowlist and the WASI
-/// preopen, replacing the per-kind bespoke bindings.
+/// Binds a config field's string value to a host resource the sandbox must be
+/// granted. The provider also declares the matching capability as a `dynamic`
+/// need; the host resolves the concrete grant from this field's value at
+/// mount-start.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum HostResource {
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum HostResourceBinding {
     /// A host file the provider opens through a preopened WASI directory. The
     /// host preopens the file's parent directory at the same path (guest ==
     /// host) with `mode`, so the provider opens the configured path unchanged.
@@ -112,19 +235,38 @@ pub enum HostResource {
     Socket,
 }
 
-/// The kind discriminant of a [`HostResource`], for looking a field up by kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostResourceKind {
-    File,
-    Socket,
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ConfigError(String);
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
-impl HostResource {
-    #[must_use]
-    pub fn kind(self) -> HostResourceKind {
-        match self {
-            Self::File { .. } => HostResourceKind::File,
-            Self::Socket => HostResourceKind::Socket,
-        }
+fn is_integer(value: &serde_json::Value) -> bool {
+    value.as_i64().is_some() || value.as_u64().is_some()
+}
+
+fn expected(path: &str, expected: &str) -> String {
+    format!(
+        "{}must be {expected}",
+        path_prefix(path).unwrap_or_default()
+    )
+}
+
+fn path_prefix(path: &str) -> Option<String> {
+    (!path.is_empty()).then(|| format!("`{path}` "))
+}
+
+fn at_path(path: &str) -> String {
+    path_prefix(path).map_or_else(String::new, |path| format!(" at {path}"))
+}
+
+fn child_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
     }
 }

@@ -23,6 +23,7 @@ use crate::api::{
 #[omnifs_sdk::config]
 pub struct Config {
     /// Docker daemon endpoint.
+    #[omnifs(default = "unix:///var/run/docker.sock")]
     #[serde(default = "default_endpoint")]
     endpoint: omnifs_sdk::HostSocket,
 }

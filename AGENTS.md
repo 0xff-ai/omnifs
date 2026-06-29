@@ -74,7 +74,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-core`: path, content type, auth, mount, provider, and view primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
-- `crates/omnifs-provider`: provider manifests, config schemas, validation, the provider index over the content-addressed store, and WASM metadata.
+- `crates/omnifs-provider`: provider manifests, config metadata, validation, the provider index over the content-addressed store, and WASM metadata.
 - `crates/omnifs-mount`: the mount-spec registry (sole owner of on-disk specs), creation-time inheritance of provider-manifest defaults into a spec, and materialization against the provider index.
 - `crates/omnifs-host`: trusted runtime, callouts, auth, namespace, cache access, pagination, and archive execution.
 - `crates/omnifs-tree`: shared projection semantics consumed by every frontend.
@@ -192,9 +192,8 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
 - **Provider rebuild contention under nextest.** Some `omnifs-host` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
 - **Host checks may need generated provider artifacts.** If a host check fails because provider WASM is missing, build providers first or point the check at an existing artifact directory.
-- **Bare provider builds miss injected metadata.** A plain `cargo build --target wasm32-wasip2` can produce component bytes, but `just providers build` is what injects `omnifs.provider-metadata.v1` with evaluated config schema.
-- **Provider metadata section rewriting must stay shallow.** `embed_provider_metadata_section` replaces top-level metadata sections and copies nested module/component spans verbatim. Do not parse into nested spans while rewriting.
-- **Host resource schema markers must inline.** `HostFile` and `HostSocket` schemas must keep `x-omnifs-resource` directly on the config property; hiding it behind `$ref` makes host resource lookup miss it.
+- **Provider metadata is injected at build time, not compiled into the Wasm.** The `#[provider]` macro emits the typed `Provider::METADATA` const plus a native `provider_metadata()` accessor (non-wasm only); `omnifs-embed-metadata` (run by `just providers build`) links the provider crates, converts each const into the host `ProviderManifest`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. Missing metadata means the harvester did not run, build providers with `just providers build`. The host reads the section pre-instantiation; it never instantiates a component to read it.
+- **Host resource bindings must stay per-field.** `HostFile` and `HostSocket` are string config fields with host-resource bindings. Keep the binding on the field metadata; hiding it in the type shape makes host resource lookup miss it.
 - **Raw mount specs are not strict today.** CLI config and mount auth/config blocks are strict, but raw top-level mount `Spec` parsing currently allows unknown keys. Do not claim strict mount-spec parsing unless the code and tests change.
 - **Object anchors mount at their `r.object` template.** Mount directory-shaped objects at the real anchor path, or use a detached object handle plus `r.object`/`r.alias`.
 - **Seal-time route errors are component-init errors.** `cargo check --target wasm32-wasip2` can compile incoherent route trees. Provider route validity is proved when the host initializes and seals the provider.

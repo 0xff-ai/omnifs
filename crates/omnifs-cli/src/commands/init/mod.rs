@@ -168,7 +168,7 @@ impl InitArgs {
                     );
                 })?;
             } else {
-                if interactive && let Ok((scheme, _inject)) = auth.static_token_scheme(manifest) {
+                if interactive && let Ok(scheme) = auth.static_token_scheme(manifest) {
                     let guidance = manifest
                         .auth
                         .as_ref()
@@ -244,10 +244,13 @@ pub(crate) async fn run_static_token_init(
     token: SecretString,
     credentials_file: &Path,
 ) -> anyhow::Result<()> {
-    let (static_token_scheme, inject) = auth.static_token_scheme(manifest)?;
+    let static_token_scheme = auth.static_token_scheme(manifest)?;
 
-    let header_name = &inject.header;
-    let header_prefix = &inject.prefix;
+    let header_name = static_token_scheme
+        .header_name
+        .as_deref()
+        .unwrap_or("Authorization");
+    let header_prefix = static_token_scheme.value_prefix.as_str();
 
     let validation = match static_token_scheme.validation.as_ref() {
         Some(v) => Some(
@@ -305,25 +308,25 @@ mod tests {
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_mount::mounts::Registry;
-    use omnifs_provider::{AuthManifest, AuthScheme, Catalog, ProviderManifest, ProviderStore};
+    use omnifs_provider::{
+        AuthManifest, AuthScheme, Catalog, ConfigField, ConfigMetadata, ConfigType,
+        HostResourceBinding, ProviderManifest, ProviderStore,
+    };
     use serde_json::Value;
 
     #[test]
-    fn generate_mount_config_materializes_schema_defaults() {
+    fn generate_mount_config_materializes_config_defaults() {
         let mut manifest = provider_manifest();
-        manifest.config_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "required": ["endpoint"],
-                "properties": {
-                    "endpoint": {
-                        "type": "string",
-                        "default": "unix:///var/run/docker.sock"
-                    }
-                }
-            }))
-            .unwrap(),
-        );
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "endpoint".to_string(),
+                value_type: ConfigType::String,
+                required: true,
+                default: Some(serde_json::json!("unix:///var/run/docker.sock")),
+                description: None,
+                binding: None,
+            }],
+        });
 
         let created = MountSpecCreator::new(&manifest).create(false).unwrap();
 
@@ -342,21 +345,20 @@ mod tests {
     }
 
     #[test]
-    fn config_schema_reports_interactive_prompt_requirement() {
+    fn config_metadata_reports_interactive_prompt_requirement() {
         let mut manifest = provider_manifest();
-        manifest.config_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "default": "/data/test.db",
-                        "x-omnifs-resource": { "kind": "file", "mode": "ro" }
-                    }
-                }
-            }))
-            .unwrap(),
-        );
+        manifest.config = Some(ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "path".to_string(),
+                value_type: ConfigType::String,
+                required: false,
+                default: Some(serde_json::json!("/data/test.db")),
+                description: None,
+                binding: Some(HostResourceBinding::File {
+                    mode: PreopenMode::Ro,
+                }),
+            }],
+        });
 
         assert!(MountSpecCreator::new(&manifest).requires_prompt());
     }
@@ -539,23 +541,18 @@ mod tests {
 
     fn provider_manifest() -> ProviderManifest {
         use omnifs_provider::{
-            AuthInject, AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig,
-            ProviderAuthManifest, StaticTokenScheme, TokenEndpointAuthMethod,
+            AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, ProviderAuthManifest,
+            StaticTokenScheme, TokenEndpointAuthMethod,
         };
         use std::collections::BTreeMap;
 
-        let inject = AuthInject {
-            domains: vec!["api.linear.app".to_string()],
-            header: "Authorization".to_string(),
-            prefix: String::new(),
-        };
+        let domains = vec!["api.linear.app".to_string()];
         ProviderManifest {
             id: "linear".to_string(),
             display_name: "Linear".to_string(),
             provider: "omnifs_provider_linear.wasm".to_string(),
             default_mount: "linear".to_string(),
             version: None,
-            build_evidence: None,
             capabilities: vec![
                 omnifs_caps::Need::Domain {
                     value: "api.linear.app".to_string(),
@@ -569,51 +566,40 @@ mod tests {
                 },
             ],
             auth: Some(ProviderAuthManifest {
-                inject: inject.clone(),
                 default: "oauth".to_string(),
                 guidance: BTreeMap::new(),
-                schemes: {
-                    let mut m = BTreeMap::new();
-                    m.insert(
-                        "oauth".to_string(),
-                        AuthScheme::Oauth(OauthScheme {
-                            key: "oauth".to_string(),
-                            display_name: "Linear OAuth".to_string(),
-                            authorization_endpoint: "https://linear.app/oauth/authorize"
-                                .to_string(),
-                            token_endpoint: "https://api.linear.app/oauth/token".to_string(),
-                            revocation_endpoint: None,
-                            default_client_id: Some("test-client-id".to_string()),
-                            default_scopes: vec!["read".to_string()],
-                            flow: OAuthFlow::PkceLoopback(PkceLoopbackConfig {
-                                redirect_uri_template: "http://127.0.0.1:{port}/callback"
-                                    .to_string(),
-                            }),
-                            token_endpoint_auth: TokenEndpointAuthMethod::None,
-                            refresh_token_rotates: true,
-                            extra_authorize_params: vec![],
-                            extra_token_params: vec![],
-                            inject_domains: inject.domains.clone(),
-                            inject_header_name: Some(inject.header.clone()),
-                            inject_value_prefix: inject.prefix.clone(),
+                schemes: vec![
+                    AuthScheme::Oauth(OauthScheme {
+                        key: "oauth".to_string(),
+                        display_name: "Linear OAuth".to_string(),
+                        authorization_endpoint: "https://linear.app/oauth/authorize".to_string(),
+                        token_endpoint: "https://api.linear.app/oauth/token".to_string(),
+                        revocation_endpoint: None,
+                        default_client_id: Some("test-client-id".to_string()),
+                        default_scopes: vec!["read".to_string()],
+                        flow: OAuthFlow::PkceLoopback(PkceLoopbackConfig {
+                            redirect_uri_template: "http://127.0.0.1:{port}/callback".to_string(),
                         }),
-                    );
-                    m.insert(
-                        "pat".to_string(),
-                        AuthScheme::StaticToken(StaticTokenScheme {
-                            key: "pat".to_string(),
-                            header_name: Some(inject.header.clone()),
-                            value_prefix: inject.prefix.clone(),
-                            description: "Linear API key".to_string(),
-                            inject_domains: inject.domains.clone(),
-                            creation_url: None,
-                            validation: None,
-                        }),
-                    );
-                    m
-                },
+                        token_endpoint_auth: TokenEndpointAuthMethod::None,
+                        refresh_token_rotates: true,
+                        extra_authorize_params: vec![],
+                        extra_token_params: vec![],
+                        inject_domains: domains.clone(),
+                        inject_header_name: Some("Authorization".to_string()),
+                        inject_value_prefix: String::new(),
+                    }),
+                    AuthScheme::StaticToken(StaticTokenScheme {
+                        key: "pat".to_string(),
+                        header_name: Some("Authorization".to_string()),
+                        value_prefix: String::new(),
+                        description: "Linear API key".to_string(),
+                        inject_domains: domains.clone(),
+                        creation_url: None,
+                        validation: None,
+                    }),
+                ],
             }),
-            config_schema: None,
+            config: None,
         }
     }
 

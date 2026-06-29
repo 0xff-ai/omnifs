@@ -454,7 +454,7 @@ interface types {
     }
 
     /// The provider manifest: the versioned provider/host contract describing
-    /// identity, declared capability needs, and config schema. The build step
+    /// identity, declared capability needs, and config metadata. The build step
     /// embeds this as a static global the host reads BEFORE instantiation (to
     /// build the capability sandbox), so it is never a runtime call. Being a
     /// WIT type, its shape is versioned with the `omnifs:provider` package, so
@@ -507,14 +507,6 @@ interface lifecycle {
     /// changed later.
     initialize: func(config: list<u8>) -> provider-return;
     shutdown: func();
-
-    /// The provider's self-describing manifest as a JSON string, built from
-    /// the same annotations the macro authors. Unlike `initialize`, it needs
-    /// no config and runs no `start`, so a build tool can call it on a config
-    /// or auth-gated provider to harvest `config-schema`/`auth` (which the
-    /// proc-macro cannot evaluate) and inject the `omnifs.provider-metadata.v1`
-    /// custom section the host reads pre-instantiation.
-    manifest-json: func() -> string;
 }
 
 interface namespace {

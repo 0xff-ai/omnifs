@@ -136,11 +136,25 @@
 //! `serde_json` are re-exported for generated code and provider maps (use
 //! `hashbrown::HashMap` for provider-internal maps).
 
-pub use config_resource::{HostFile, HostSocket, ProvidesConfigSchema};
+#[cfg(not(target_arch = "wasm32"))]
+pub use config_resource::ProvidesConfigMetadata;
+pub use config_resource::{HostFile, HostSocket};
+
+// The provider metadata block. These wire types live in omnifs-provider and
+// omnifs-caps; a provider constructs and the harvester serializes them entirely
+// host-side, so they are re-exported only for non-wasm targets. The wasm guest
+// never references them.
+#[cfg(not(target_arch = "wasm32"))]
+pub use omnifs_caps::{Need, PreopenMode, PreopenedPath};
+#[cfg(not(target_arch = "wasm32"))]
+pub use omnifs_provider::{
+    ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, OauthScheme,
+    ProviderAuthManifest, ProviderManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
+};
+
 #[doc(hidden)]
 pub use omnifs_wit as __wit;
 pub use omnifs_wit::provider::{exports, omnifs};
-pub use schemars;
 
 #[macro_export]
 macro_rules! export {
@@ -153,7 +167,6 @@ extern crate self as omnifs_sdk;
 
 pub mod archives;
 mod async_runtime;
-pub mod auth;
 pub mod blob;
 pub mod browse;
 pub mod captures;

@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow};
 use omnifs_caps::Grants;
-use omnifs_provider::{ConfigProperty, ConfigSchema, HostResource, ProviderManifest};
+use omnifs_provider::{ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -24,16 +24,15 @@ impl<'a> MountSpecCreator<'a> {
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
             (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
-        let Some(schema) = self.manifest.config_schema.as_ref() else {
+        let Some(config_metadata) = self.manifest.config.as_ref() else {
             return Ok(CreatedMountSpec {
                 config: None,
                 capabilities,
             });
         };
-        let schema = ConfigSchema::parse(schema)?;
-        let mut config = schema.defaults();
+        let mut config = config_metadata.defaults();
         if interactive {
-            prompt_host_files(&schema, &mut config)?;
+            prompt_host_files(config_metadata, &mut config)?;
         }
         self.validate(&config)?;
         Ok(CreatedMountSpec {
@@ -43,20 +42,21 @@ impl<'a> MountSpecCreator<'a> {
     }
 
     pub(super) fn requires_prompt(&self) -> bool {
-        let Some(schema) = self.manifest.config_schema.as_ref() else {
+        let Some(config_metadata) = self.manifest.config.as_ref() else {
             return false;
         };
-        ConfigSchema::parse(schema).is_ok_and(|schema| schema.requires_prompt())
+        config_metadata.requires_prompt()
     }
 
     fn validate(&self, config: &Value) -> anyhow::Result<()> {
-        let schema = self
+        let config_metadata = self
             .manifest
-            .config_schema
+            .config
             .as_ref()
-            .ok_or_else(|| anyhow!("provider `{}` has no configSchema", self.manifest.id))?;
-        omnifs_provider::validate_config(schema.as_value(), config)
-            .map_err(|error| anyhow!("generated provider config failed schema validation: {error}"))
+            .ok_or_else(|| anyhow!("provider `{}` has no config metadata", self.manifest.id))?;
+        config_metadata
+            .validate_config(config)
+            .map_err(|error| anyhow!("generated provider config failed validation: {error}"))
     }
 }
 
@@ -65,24 +65,27 @@ impl<'a> MountSpecCreator<'a> {
 /// already seeded from the manifest's dynamic need; the host resolves the
 /// preopen from this path at mount-start (guest == host), so init only collects
 /// the value.
-fn prompt_host_files(schema: &ConfigSchema, config: &mut Value) -> anyhow::Result<()> {
+fn prompt_host_files(metadata: &ConfigMetadata, config: &mut Value) -> anyhow::Result<()> {
     let Some(config_obj) = config.as_object_mut() else {
         anyhow::bail!("generated config must be an object");
     };
-    for (name, property) in &schema.properties {
-        let Some(HostResource::File { .. }) = property.resource else {
+    for (name, field) in metadata.host_resource_fields() {
+        let Some(HostResourceBinding::File { .. }) = field.binding else {
             continue;
         };
-        let host_path = prompt_host_file(name, property)?
+        let host_path = prompt_host_file(name, field)?
             .canonicalize()
             .with_context(|| format!("canonicalize host file for `{name}`"))?;
-        config_obj.insert(name.clone(), Value::String(host_path.display().to_string()));
+        config_obj.insert(
+            name.to_string(),
+            Value::String(host_path.display().to_string()),
+        );
     }
     Ok(())
 }
 
-fn prompt_host_file(name: &str, property: &ConfigProperty) -> anyhow::Result<PathBuf> {
-    let description = property.description.as_deref().unwrap_or(name);
+fn prompt_host_file(name: &str, field: &ConfigField) -> anyhow::Result<PathBuf> {
+    let description = field.description.as_deref().unwrap_or(name);
     let raw = inquire::Text::new(description)
         .prompt()
         .map_err(|e| anyhow!("prompt error: {e}"))?;

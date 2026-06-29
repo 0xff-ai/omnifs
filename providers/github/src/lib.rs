@@ -17,6 +17,10 @@ use api::GitHubApi;
 use item::ItemKind;
 pub(crate) use objects::ItemData;
 use objects::{Comment, Issue, Owner, PullRequest, Repo, WorkflowRun};
+#[cfg(not(target_arch = "wasm32"))]
+use omnifs_sdk::{
+    OauthScheme, ProviderAuthManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerKind {
@@ -33,15 +37,20 @@ pub enum StateFilter {
     All,
 }
 
-fn auth() -> omnifs_sdk::auth::Auth {
-    use omnifs_sdk::auth::{Auth, OAuth, StaticToken, Validation};
-    Auth::new(["api.github.com"], "device")
-        .scheme(
-            "pat",
-            StaticToken::new("GitHub personal access token")
+#[cfg(not(target_arch = "wasm32"))]
+fn auth() -> ProviderAuthManifest {
+    ProviderAuthManifest::builder("device")
+        .static_token(
+            StaticTokenScheme::new("pat", "GitHub personal access token")
+                .inject(["api.github.com"])
                 .creation_url(
                     "https://github.com/settings/tokens/new?scopes=read:user&description=omnifs",
                 )
+                .validation(
+                    TokenValidation::get("https://api.github.com/user")
+                        .extract([("identity", "/login")]),
+                ),
+            SchemeGuidance::new()
                 .summary(
                     "A classic personal access token; the create link pre-selects the read:user scope.",
                 )
@@ -50,22 +59,23 @@ fn auth() -> omnifs_sdk::auth::Auth {
                 ])
                 .docs_url(
                     "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
-                )
-                .validation(Validation::get("https://api.github.com/user").extract("identity", "/login")),
+                ),
         )
-        .scheme(
-            "device",
-            OAuth::device_code(
+        .oauth(
+            OauthScheme::device_code(
+                "device",
                 "GitHub OAuth device flow",
                 "https://github.com/login/oauth/authorize",
                 "https://github.com/login/device/code",
                 "https://github.com/login/oauth/access_token",
             )
-            .client_id("Ov23licogxMDzS47s9sF")
-            .summary(
+            .inject(["api.github.com"])
+            .client_id("Ov23licogxMDzS47s9sF"),
+            SchemeGuidance::new().summary(
                 "Approve a one-time code at github.com/login/device using omnifs's GitHub app; nothing to copy back.",
             ),
         )
+        .build()
 }
 
 #[omnifs_sdk::provider(
@@ -86,8 +96,7 @@ fn auth() -> omnifs_sdk::auth::Auth {
             "Leave room for larger GitHub API payloads and repository tree projections."
         ),
     ),
-    auth = auth(),
-    resources(git = true)
+    auth = auth()
 )]
 impl GithubProvider {
     fn start(r: &mut Router) -> Result<()> {

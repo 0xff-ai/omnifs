@@ -70,7 +70,6 @@ struct ItemKey {
 #[omnifs_sdk::provider(
     id = "example",
     capabilities(domain("api.example.com", "fetch items")),
-    resources(endpoints = [Api]),
 )]
 impl ExampleProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {
@@ -186,15 +185,15 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## Manifest (provider metadata)
 
-The manifest (identity, capabilities, config schema, auth) is authored entirely from `#[omnifs_sdk::provider(...)]` arguments and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers build`. There is no hand-written `omnifs.provider.json`.
+The manifest (identity, capabilities, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers build`. There is no hand-written `omnifs.provider.json`.
 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
 - `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"), memory_mb(<int>,"why"))` declare capability needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
 - `auth = <expr>` splices a typed `omnifs_sdk::auth::Auth` builder value (covering `StaticToken`, `OAuth` device-code/PKCE/client-side-token flows, and `Validation`) into the manifest auth block.
-- The config schema is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which now also derives `schemars::JsonSchema`); no manifest argument is needed.
-- Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file → read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket); their `JsonSchema` emits an `x-omnifs-resource` marker on the property.
+- The config metadata is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which emits the SDK's static config dialect); no manifest argument is needed.
+- Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file -> read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket). The manifest records them as string fields with a host-resource binding.
 
-The compact auth wire form (the shape serialized into the embedded section) is unchanged from the former JSON file format; it is now produced from Rust builder expressions instead.
+Each auth scheme is self-contained: it carries its own injection domains, header, and prefix. Author them per scheme with `StaticToken::new(..).inject(&["api.host"])` or `OAuth::device_code(..).inject(&["api.host"])`, plus `.header(..)`/`.prefix(..)` overrides (e.g. `.prefix("")` for a raw token). `Auth::new(default, schemes)` takes no block-level inject. At build time the native `omnifs-embed-metadata` harvester converts each provider's typed `Provider::METADATA` const into the host `ProviderManifest` JSON and injects it as the custom section; the SDK metadata types never serialize themselves.
 
 ## Build and verify
 

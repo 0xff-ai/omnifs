@@ -95,7 +95,7 @@ impl Spec {
     ) -> Result<(), serde_json::Error> {
         if self.auth.is_empty()
             && let Some(auth) = &manifest.auth
-            && let Some(default_scheme) = auth.schemes.get(&auth.default)
+            && let Some(default_scheme) = auth.scheme(&auth.default)
         {
             let auth = match default_scheme {
                 omnifs_provider::AuthScheme::StaticToken(_) => {
@@ -116,13 +116,10 @@ impl Spec {
                 self.auth.push(auth);
             }
         }
-        if let Some(schema) = manifest.config_schema.as_ref()
+        if let Some(config) = manifest.config.as_ref()
             && self.config_raw.is_none()
         {
-            let config = omnifs_provider::ConfigSchema::parse(schema)
-                .map_err(serde::de::Error::custom)?
-                .defaults();
-            self.config_raw = Some(ProviderConfig::from_value(config));
+            self.config_raw = Some(ProviderConfig::from_value(config.defaults()));
         }
         Ok(())
     }
@@ -181,15 +178,15 @@ pub enum Error {
 }
 
 /// What materialization reads from a pinned manifest: the capability needs (the
-/// oracle for the required-capabilities check) and the parsed config schema,
-/// which names the host-resource config fields a dynamic grant resolves from.
+/// oracle for the required-capabilities check) and the config metadata, which
+/// names the host-resource config fields a dynamic grant resolves from.
 pub struct ManifestRequirements {
     pub needs: Vec<Need>,
-    pub config_schema: Option<omnifs_provider::ConfigSchema>,
+    pub config: Option<omnifs_provider::ConfigMetadata>,
 }
 
 /// Read what materialization checks a spec against from its pinned manifest: the
-/// capability needs and the parsed config schema. Loads the artifact once and
+/// capability needs and config metadata. Loads the artifact once and
 /// never mutates the spec (defaults are baked in at creation time, not here).
 /// `None` when the artifact is not retained; the missing-artifact error then
 /// surfaces at build time.
@@ -201,18 +198,9 @@ pub fn manifest_requirements(
         return Ok(None);
     };
     let manifest = provider.manifest()?;
-    let config_schema = manifest
-        .config_schema
-        .as_ref()
-        .map(omnifs_provider::ConfigSchema::parse)
-        .transpose()
-        .map_err(|source| Error::ExtractProviderMetadata {
-            path: provider.wasm_path().to_path_buf(),
-            source,
-        })?;
     Ok(Some(ManifestRequirements {
         needs: manifest.capabilities,
-        config_schema,
+        config: manifest.config,
     }))
 }
 
@@ -509,7 +497,7 @@ mod tests {
     fn linear_manifest_parses_with_static_token_scheme() {
         let manifest = linear_manifest();
         let auth = manifest.auth.as_ref().expect("linear auth block");
-        let pat = auth.schemes.get("pat").expect("linear pat scheme");
+        let pat = auth.scheme("pat").expect("linear pat scheme");
         assert!(matches!(pat, omnifs_provider::AuthScheme::StaticToken(_)));
         let omnifs_provider::AuthScheme::StaticToken(static_token) = pat else {
             unreachable!()
@@ -524,11 +512,11 @@ mod tests {
     fn github_manifest_parses_with_static_token_scheme() {
         let manifest = github_manifest();
         let auth = manifest.auth.as_ref().expect("github auth block");
-        let pat = auth.schemes.get("pat").expect("github pat scheme");
+        let pat = auth.scheme("pat").expect("github pat scheme");
         let omnifs_provider::AuthScheme::StaticToken(static_token) = pat else {
             panic!("expected static token");
         };
-        assert_eq!(auth.inject.prefix, "Bearer ");
+        assert_eq!(static_token.value_prefix, "Bearer ");
         let val = static_token.validation.as_ref().expect("validation");
         assert_eq!(val.method, "GET");
         assert_eq!(val.expect_status, 200);

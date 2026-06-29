@@ -7,9 +7,7 @@ use omnifs_core::AuthKind;
 use omnifs_creds::CredentialStore;
 use omnifs_mount::Auth;
 use omnifs_mount::mounts::Spec;
-use omnifs_provider::{
-    AuthInject, AuthManifest, AuthScheme, Catalog, ProviderManifest, StaticTokenScheme,
-};
+use omnifs_provider::{AuthManifest, AuthScheme, Catalog, ProviderManifest, StaticTokenScheme};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
@@ -68,7 +66,7 @@ impl AuthSelection {
     pub(crate) fn static_token_scheme<'a>(
         &self,
         manifest: &'a ProviderManifest,
-    ) -> anyhow::Result<(&'a StaticTokenScheme, &'a AuthInject)> {
+    ) -> anyhow::Result<&'a StaticTokenScheme> {
         let auth_block = manifest.auth.as_ref().ok_or_else(|| {
             anyhow!(
                 "provider `{}` has no auth block; cannot run static-token init",
@@ -79,11 +77,10 @@ impl AuthSelection {
         let scheme_key = AuthManifestView::new(Some(&wasm_manifest))
             .static_token_scheme_key(self.scheme.as_deref(), None)?;
         let scheme = auth_block
-            .schemes
-            .get(&scheme_key)
+            .scheme(&scheme_key)
             .ok_or_else(|| anyhow!("provider `{}` has no scheme `{scheme_key}`", manifest.id))?;
         match scheme {
-            AuthScheme::StaticToken(static_token) => Ok((static_token, &auth_block.inject)),
+            AuthScheme::StaticToken(static_token) => Ok(static_token),
             _ => anyhow::bail!(
                 "provider `{}` scheme `{scheme_key}` is OAuth, not static-token",
                 manifest.id

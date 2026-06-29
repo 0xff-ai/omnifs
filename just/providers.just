@@ -46,24 +46,23 @@ check: wasi-sdk
       -p test-provider \
       --no-run
 
-# Build provider WASM components and embed provider metadata.
+# Build provider WASM components and embed their metadata. The provider macro
+# emits each provider's typed metadata const; `omnifs-embed-metadata` converts it
+# into the host ProviderManifest and injects the JSON as the
+# `omnifs.provider-metadata.v1` custom section the host reads pre-instantiation.
 build: wasi-sdk
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --target wasm32-wasip2 --release \
       -p 'omnifs-provider-*' \
       -p test-provider
-    # The manifest section is authored from `#[provider]` annotations and
-    # assembled here by running each component's `manifest_json()` export (the
-    # only place `config_schema` can be evaluated), then injected into the wasm.
-    cargo build --release -p omnifs-host --bin omnifs-embed-manifest
     shopt -s nullglob
     wasms=(target/wasm32-wasip2/release/omnifs_provider_*.wasm target/wasm32-wasip2/release/test_provider.wasm)
     if (( ${#wasms[@]} == 0 )); then
-      printf 'no provider WASM components found to embed\n' >&2
+      printf 'no provider WASM components found\n' >&2
       exit 1
     fi
-    target/release/omnifs-embed-manifest "${wasms[@]}"
+    cargo run -p omnifs-embed-metadata -- target/wasm32-wasip2/release
 
 # Validate built WASM components.
 validate:

@@ -25,6 +25,7 @@ pub(crate) struct DnsRecord {
 
 #[omnifs_sdk::config]
 struct Config {
+    #[omnifs(default = "cloudflare")]
     #[serde(default = "default_resolver_name")]
     default_resolver: String,
     #[serde(default)]

@@ -12,6 +12,9 @@ use strum::{EnumProperty, VariantArray};
 use time::format_description::well_known::{Iso8601, Rfc3339};
 use time::{Date, Duration, Time};
 
+#[cfg(not(target_arch = "wasm32"))]
+use omnifs_sdk::{OauthScheme, ProviderAuthManifest, SchemeGuidance};
+
 const PRELOAD_RADIUS: Duration = Duration::days(15);
 const JSON_SUFFIX: &str = ".json";
 const DATE_FIELDS: &[&str] = &[
@@ -31,24 +34,28 @@ const DATE_FIELDS: &[&str] = &[
 )]
 struct Api;
 
-fn auth() -> omnifs_sdk::auth::Auth {
-    use omnifs_sdk::auth::{Auth, OAuth};
-    Auth::new(["api.ouraring.com"], "oauth").scheme(
-        "oauth",
-        OAuth::client_side_token(
-            "Oura OAuth",
-            "https://cloud.ouraring.com/oauth/authorize",
-            "https://api.ouraring.com/oauth/token",
-            "http://localhost:58880/",
+#[cfg(not(target_arch = "wasm32"))]
+fn auth() -> ProviderAuthManifest {
+    ProviderAuthManifest::builder("oauth")
+        .oauth(
+            OauthScheme::client_side_token(
+                "oauth",
+                "Oura OAuth",
+                "https://cloud.ouraring.com/oauth/authorize",
+                "https://api.ouraring.com/oauth/token",
+                "http://localhost:58880/",
+            )
+            .inject(["api.ouraring.com"])
+            .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
+            .scopes([
+                "email", "personal", "daily", "heartrate", "workout", "tag", "session",
+                "spo2Daily",
+            ]),
+            SchemeGuidance::new().summary(
+                "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
+            ),
         )
-        .client_id("9443bed5-98df-4a2d-b08e-d2a10c1851ae")
-        .scopes([
-            "email", "personal", "daily", "heartrate", "workout", "tag", "session", "spo2Daily",
-        ])
-        .summary(
-            "Browser sign-in through omnifs's Oura app; the access token returns directly in the redirect.",
-        ),
-    )
+        .build()
 }
 
 #[omnifs_sdk::provider(

@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use omnifs_caps::{Grant, PreopenMode};
-use omnifs_provider::{Catalog, ConfigSchema, HostResourceKind};
+use omnifs_provider::{Catalog, ConfigMetadata};
 
 use crate::mounts::{Error as MountError, Spec, manifest_requirements};
 
@@ -188,7 +188,7 @@ pub fn materialize(
                     .join(", "),
             });
         }
-        check_dynamic_socket(&spec, requirements.config_schema.as_ref())?;
+        check_dynamic_socket(&spec, requirements.config.as_ref())?;
     }
 
     let preopen_binds = rewrite_preopens(&mut spec, mode)?;
@@ -209,7 +209,7 @@ pub fn materialize(
 /// checked here.
 fn check_dynamic_socket(
     spec: &Spec,
-    schema: Option<&ConfigSchema>,
+    metadata: Option<&ConfigMetadata>,
 ) -> Result<(), MaterializeError> {
     let is_dynamic = spec
         .capabilities
@@ -219,8 +219,7 @@ fn check_dynamic_socket(
     if !is_dynamic {
         return Ok(());
     }
-    let Some(field) = schema.and_then(|schema| schema.resource_field(HostResourceKind::Socket))
-    else {
+    let Some(field) = metadata.and_then(ConfigMetadata::host_socket_field) else {
         return Err(MaterializeError::UnresolvedDynamicSocket {
             mount: spec.mount.clone(),
             detail: "no config field is marked as a host socket".to_string(),
@@ -269,34 +268,35 @@ mod dynamic_socket_tests {
         serde_json::from_value(value).expect("spec parses")
     }
 
-    fn socket_schema() -> ConfigSchema {
+    fn socket_metadata() -> ConfigMetadata {
         serde_json::from_value(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "endpoint": { "type": "string", "x-omnifs-resource": { "kind": "socket" } }
-            }
+            "fields": [{
+                "name": "endpoint",
+                "type": { "kind": "string" },
+                "binding": { "kind": "socket" }
+            }]
         }))
-        .expect("schema parses")
+        .expect("config metadata parses")
     }
 
     #[test]
     fn dynamic_socket_validation_errors() {
-        let schema = socket_schema();
+        let metadata = socket_metadata();
         assert!(
             check_dynamic_socket(
                 &dynamic_socket_spec(Some("unix:///run/omnifs/k8s.sock")),
-                Some(&schema)
+                Some(&metadata)
             )
             .is_ok()
         );
         assert!(matches!(
-            check_dynamic_socket(&dynamic_socket_spec(None), Some(&schema)),
+            check_dynamic_socket(&dynamic_socket_spec(None), Some(&metadata)),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));
         assert!(matches!(
             check_dynamic_socket(
                 &dynamic_socket_spec(Some("https://example.com")),
-                Some(&schema)
+                Some(&metadata)
             ),
             Err(MaterializeError::UnresolvedDynamicSocket { .. })
         ));

@@ -208,7 +208,7 @@ omnifs runs a Linux FUSE filesystem in a runtime container. The host CLI owns se
 +-------------+          +-----------------------------+          +----------------+
 ```
 
-Providers are WebAssembly components implementing the [`omnifs:provider` WIT interface](crates/omnifs-wit/wit/provider.wit). Providers are self-contained: they declare identity, capabilities, config schema, and auth via `#[omnifs_sdk::provider]` annotations, which the build assembles into the `omnifs.provider-metadata.v1` Wasm custom section. A provider's main job is to answer filesystem operations via entrypoint methods `lookup_child`, `list_children`, and `read_file`.
+Providers are WebAssembly components implementing the [`omnifs:provider` WIT interface](crates/omnifs-wit/wit/provider.wit). Providers are self-contained: they declare identity, capabilities, config metadata, and auth via `#[omnifs_sdk::provider]` annotations, which the build assembles into the `omnifs.provider-metadata.v1` Wasm custom section. A provider's main job is to answer filesystem operations via entrypoint methods `lookup_child`, `list_children`, and `read_file`.
 
 Providers do not hold tokens, open sockets, or run Git themselves. They return callout requests such as HTTP fetches, blob downloads, archive opens, or repo tree handoffs. The host executes those requests, attaches credentials at the boundary, enforces declared capabilities, and owns caching.
 

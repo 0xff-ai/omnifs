@@ -91,12 +91,15 @@ struct SchemeOption {
 fn scheme_options(auth: &ProviderAuthManifest) -> Vec<SchemeOption> {
     auth.schemes
         .iter()
-        .map(|(key, scheme)| SchemeOption {
-            key: key.clone(),
-            label: AuthMode::from_scheme(scheme)
-                .map_or("unknown", AuthMode::label)
-                .to_owned(),
-            is_default: *key == auth.default,
+        .filter_map(|scheme| {
+            let key = scheme.key()?;
+            Some(SchemeOption {
+                key: key.to_owned(),
+                label: AuthMode::from_scheme(scheme)
+                    .map_or("unknown", AuthMode::label)
+                    .to_owned(),
+                is_default: auth.default == key,
+            })
         })
         .collect()
 }

@@ -12,6 +12,7 @@ clippy:
     cargo clippy --workspace \
       --exclude 'omnifs-provider-*' \
       --exclude test-provider \
+      --exclude omnifs-embed-metadata \
       --all-targets \
       -- -D warnings
 
@@ -19,4 +20,5 @@ clippy:
 test:
     OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
       --exclude 'omnifs-provider-*' \
-      --exclude test-provider
+      --exclude test-provider \
+      --exclude omnifs-embed-metadata

@@ -35,11 +35,13 @@ pub(crate) struct Config {
     /// Open the database read-only. Defaults to true. The host
     /// preopen mode should match: read-only providers receive
     /// `DirPerms::READ + FilePerms::READ` preopens.
+    #[omnifs(default = true)]
     #[serde(default = "default_read_only")]
     pub read_only: bool,
     /// Maximum rows returned in `sample.json`. Defaults to 20.
     /// Tables with more rows are still counted in `count.txt`,
     /// but `sample.json` is truncated to `sample_limit`.
+    #[omnifs(default = 20)]
     #[serde(default = "default_sample_limit")]
     pub sample_limit: u32,
 }

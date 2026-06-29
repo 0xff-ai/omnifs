@@ -1,11 +1,11 @@
 # Provider SDK contracts
 
 Status: current-contract
-Owns: provider shape, object model, route dispatch, provider metadata injection, host resource config fields, endpoint values, and WIT-facing SDK changes.
+Owns: provider shape, object model, route dispatch, provider metadata emission, host resource config fields, endpoint values, and WIT-facing SDK changes.
 
 ## Read when
 
-Read this before touching `crates/omnifs-sdk`, SDK macros, providers, `provider.wit`, route registration, object blocks, provider metadata, provider config schemas, endpoint helpers, or all-provider migrations.
+Read this before touching `crates/omnifs-sdk`, SDK macros, providers, `provider.wit`, route registration, object blocks, provider metadata, provider config metadata, endpoint helpers, or all-provider migrations.
 
 ## Rules
 
@@ -29,15 +29,15 @@ Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object
 
 ### Provider metadata
 
-Provider manifests are generated from `#[omnifs_sdk::provider]` annotations and each component's `manifest_json()` export, then injected as `omnifs.provider-metadata.v1` during `just providers build`.
+Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and static auth metadata. The provider macro lowers that into a `Provider::METADATA` associated const and a non-wasm `provider_metadata()` accessor. The native `omnifs-embed-metadata` build tool links the provider crates, converts each const into the host `ProviderManifest`, serializes it with `serde_json`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. The host (and `omnifs-auth`) own that JSON dialect; the SDK metadata types are typed const data and never serialize themselves.
 
-Use `just providers build` when artifacts need embedded metadata. Keep section rewriting idempotent and copy nested module/component spans verbatim when rewriting top-level metadata.
+Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
 
 ### Host resource config fields
 
-Config fields that name host resources use typed `HostFile` or `HostSocket` fields. Their schemas emit `x-omnifs-resource`, and the host resolves those grants at mount-start.
+Config fields that name host resources use typed `HostFile` or `HostSocket` fields. The manifest records them as string fields with a host-resource binding, and the host resolves those grants at mount-start.
 
-Keep `x-omnifs-resource` directly on the config property. Resolve dynamic grants during mount materialization, not lazily during provider execution.
+Keep host-resource bindings directly on the config field metadata. Resolve dynamic grants during mount materialization, not lazily during provider execution.
 
 ### Endpoint values
 
@@ -59,8 +59,8 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - Copy static sibling, object leaf, capture, or implicit-prefix precedence across operation-specific dispatch paths.
 - Treat path-oriented routes as inferior escape hatches when the domain is not object-shaped.
 - Create or edit `providers/*/omnifs.provider.json`.
-- Treat a bare `cargo build --target wasm32-wasip2` artifact as release-complete metadata.
-- Hide host resource schema markers behind `$ref`.
+- Make the SDK metadata types serialize themselves, or hand-write the metadata JSON dialect; conversion to the host `ProviderManifest` is the harvester's job.
+- Hide host resource bindings inside type shapes.
 - Revive `x-omnifs-init`, guest-path rewriting, or magic `endpoint` field coupling.
 - Split endpoint APIs into type-only and value-only variants unless the value model changes.
 - Export speculative SDK surface without a current provider or host path that uses it.
@@ -74,8 +74,9 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `crates/omnifs-sdk/src/endpoint.rs`
 - `crates/omnifs-sdk/src/config_resource.rs`
 - `crates/omnifs-sdk/tests/wit_boundary.rs`
+- `crates/omnifs-sdk/src/metadata.rs`
+- `crates/omnifs-embed-metadata/src/main.rs`
 - `crates/omnifs-provider/src/sections.rs`
-- `crates/omnifs-host/src/bin/embed_manifest.rs`
 - `crates/omnifs-mount/src/materialize.rs`
 - `providers/*/src/lib.rs`
 - `providers/DESIGN.md`
@@ -88,4 +89,4 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `just providers validate`
 - Provider initialization/seal tests after route-surface changes.
 - WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
-- Schema generation/checks when provider config schemas change.
+- Manifest schema generation/checks when provider config metadata changes.

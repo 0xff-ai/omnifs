@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use omnifs_caps::{Allowlist, Error, Grant};
 use omnifs_mount::mounts::Spec;
-use omnifs_provider::{ConfigSchema, HostResourceKind};
+use omnifs_provider::ConfigMetadata;
 use omnifs_wit::provider::types as wit_types;
 
 /// Default sandbox memory budget when a mount grants no explicit limit.
@@ -37,9 +37,9 @@ impl CapabilityChecker {
     pub fn from_config(
         config: &Spec,
         provider_caps: &wit_types::RequestedCapabilities,
-        schema: Option<&ConfigSchema>,
+        metadata: Option<&ConfigMetadata>,
     ) -> Self {
-        Self::new(allowlist_from_config(config, provider_caps, schema))
+        Self::new(allowlist_from_config(config, provider_caps, metadata))
     }
 
     #[must_use]
@@ -65,13 +65,13 @@ impl CapabilityChecker {
 fn allowlist_from_config(
     config: &Spec,
     provider_caps: &wit_types::RequestedCapabilities,
-    schema: Option<&ConfigSchema>,
+    metadata: Option<&ConfigMetadata>,
 ) -> Allowlist {
     let grants = config.capabilities.as_ref();
 
     let mut unix_sockets: Vec<PathBuf> = match grants.and_then(|g| g.unix_sockets.as_ref()) {
         Some(Grant::Literal(paths)) => paths.iter().map(PathBuf::from).collect(),
-        Some(Grant::Dynamic(_)) => dynamic_socket(config, schema).into_iter().collect(),
+        Some(Grant::Dynamic(_)) => dynamic_socket(config, metadata).into_iter().collect(),
         None => Vec::new(),
     };
     unix_sockets.extend(provider_caps.unix_sockets.iter().map(PathBuf::from));
@@ -99,8 +99,8 @@ fn literal(grant: Option<&Grant<String>>) -> Vec<String> {
 
 /// The host socket a dynamic unix-socket grant resolves to: the `unix://`
 /// endpoint in the config field the provider marks as a host socket.
-fn dynamic_socket(config: &Spec, schema: Option<&ConfigSchema>) -> Option<PathBuf> {
-    let field = schema?.resource_field(HostResourceKind::Socket)?;
+fn dynamic_socket(config: &Spec, metadata: Option<&ConfigMetadata>) -> Option<PathBuf> {
+    let field = metadata?.host_socket_field()?;
     let endpoint = config_str(config, field)?;
     omnifs_caps::endpoint_socket(endpoint)
         .ok()
