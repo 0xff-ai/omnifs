@@ -108,6 +108,7 @@ impl From<BlobError> for wit_types::CalloutResult {
 }
 
 /// Executes provider blob callouts against a host-owned disk cache.
+#[derive(Clone)]
 pub struct BlobExecutor {
     http: Arc<HttpStack>,
     cache: Arc<BlobCache>,

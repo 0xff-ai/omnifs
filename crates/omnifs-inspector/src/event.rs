@@ -36,17 +36,6 @@ pub enum InspectorEvent {
         method: String,
         path: String,
     },
-    #[serde(rename = "provider.suspend")]
-    ProviderSuspend {
-        operation_id: u64,
-        callout_count: u32,
-    },
-    #[serde(rename = "provider.resume")]
-    ProviderResume {
-        operation_id: u64,
-        round: u32,
-        result_count: u32,
-    },
     #[serde(rename = "callout.start")]
     CalloutStart {
         operation_id: u64,

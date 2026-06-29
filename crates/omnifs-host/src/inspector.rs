@@ -400,27 +400,6 @@ impl InspectorProviderOp {
         })
     }
 
-    pub fn suspend(&self, callout_count: usize) {
-        self.sink.emit(
-            self.trace_id,
-            InspectorEvent::ProviderSuspend {
-                operation_id: self.operation_id,
-                callout_count: clamp_u32(callout_count),
-            },
-        );
-    }
-
-    pub fn resume(&self, round: u32, result_count: usize) {
-        self.sink.emit(
-            self.trace_id,
-            InspectorEvent::ProviderResume {
-                operation_id: self.operation_id,
-                round,
-                result_count: clamp_u32(result_count),
-            },
-        );
-    }
-
     /// Mark the outcome and emit `provider.end` on drop.
     pub fn finish(self, outcome: OutcomeFields) {
         self.outcome.set(Some(outcome));

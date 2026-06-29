@@ -180,7 +180,7 @@ async fn list_root_yields_known_children() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_hello_yields_fourteen_children_with_message() {
+async fn list_hello_yields_sixteen_children_with_message() {
     let t = test_tree();
     let tree = &t.tree;
     let ctx = RequestCtx::default();
@@ -194,14 +194,15 @@ async fn list_hello_yields_fourteen_children_with_message() {
         ListOutcome::Subtree(_) => panic!("/hello is a provider listing"),
     };
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-    // Verified against providers/test/src/lib.rs: /hello projects 9 files
+    // Verified against providers/test/src/lib.rs: /hello projects 11 files
     // (message, greeting, projected, lazy, fresh-full, ranged, unknown-ranged,
-    // large-ranged, volatile-tail) and 5 dirs (bundle, feed, unbounded,
-    // throttled, snapshot) = 14. (The blueprint cited 13 from a stale
-    // runtime_test.rs:80; the host's own test_list_hello_dir fails the same way
-    // on feat/omnifs-nfs.)
-    assert_eq!(listing.entries.len(), 14, "got {names:?}");
+    // large-ranged, volatile-tail, remote-a, remote-b) and 5 dirs (bundle, feed,
+    // unbounded, throttled, snapshot) = 16. `remote-a`/`remote-b` are the
+    // callout-suspending leaves the host concurrency test drives.
+    assert_eq!(listing.entries.len(), 16, "got {names:?}");
     assert!(names.contains(&"message"));
+    assert!(names.contains(&"remote-a"));
+    assert!(names.contains(&"remote-b"));
 }
 
 /// The test provider's `/checkout` returns `subtree(tree-ref 777)` (see

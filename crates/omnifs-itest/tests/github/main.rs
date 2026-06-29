@@ -31,7 +31,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
         gate_fetch.url
     );
     repo_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"name":"Hello-World"}"#.to_vec(),
@@ -80,7 +80,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     );
 
     runs_listed
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{
@@ -112,8 +112,8 @@ fn github_issue_list_projects_files() {
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/issues/open").unwrap();
     assert!(
-        response.is_suspended(),
-        "expected suspended response, got {response:?}"
+        response.is_waiting_for_callouts(),
+        "expected callout wait, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts() else {
         panic!("expected fetch callout, got {:?}", response.callouts());
@@ -127,7 +127,7 @@ fn github_issue_list_projects_files() {
     );
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -215,7 +215,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
     ), "unexpected search URL: {}", fetch.url);
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -248,7 +248,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
     );
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"[
@@ -293,7 +293,7 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
     };
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -311,7 +311,7 @@ fn github_issue_list_dedupes_overlap_at_search_rest_seam() {
     };
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"[
@@ -342,8 +342,8 @@ fn github_pr_list_projects_files() {
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/pulls/open").unwrap();
     assert!(
-        response.is_suspended(),
-        "expected suspended response, got {response:?}"
+        response.is_waiting_for_callouts(),
+        "expected callout wait, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts() else {
         panic!("expected fetch callout, got {:?}", response.callouts());
@@ -357,7 +357,7 @@ fn github_pr_list_projects_files() {
     );
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -434,8 +434,8 @@ fn github_action_run_list_projects_files() {
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/actions/runs").unwrap();
     assert!(
-        response.is_suspended(),
-        "expected suspended response, got {response:?}"
+        response.is_waiting_for_callouts(),
+        "expected callout wait, got {response:?}"
     );
     let [Callout::Fetch(fetch)] = response.callouts() else {
         panic!("expected fetch callout, got {:?}", response.callouts());
@@ -449,7 +449,7 @@ fn github_action_run_list_projects_files() {
     );
 
     response
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -516,12 +516,12 @@ fn github_provider_action_run_lookup_validates_and_listing_validates() {
         .list("/octocat/Hello-World/actions/runs/123")
         .unwrap();
     assert!(
-        issued.is_suspended(),
+        issued.is_waiting_for_callouts(),
         "expected action run listing to dispatch validation, got {issued:?}"
     );
 
     issued
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"id":123,"status":"completed","conclusion":"success"}"#.to_vec(),
@@ -577,7 +577,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         gate_fetch.url
     );
     repo_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"name":"Hello-World"}"#.to_vec(),
@@ -599,7 +599,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         owner_load.url
     );
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
@@ -612,7 +612,7 @@ fn github_owner_listing_tracks_browsed_repos() {
         classify_fetch.url
     );
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
@@ -628,7 +628,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     );
 
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"[{"name":"Hello-World"}]"#.to_vec(),
@@ -668,10 +668,10 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     for path in ["/zeta/zulu", "/open/source", "/alpha/app", "/openai/api"] {
         let mut step = harness.list(path).unwrap();
         assert!(
-            step.is_suspended(),
+            step.is_waiting_for_callouts(),
             "expected repo gate fetch for {path}, got {step:?}"
         );
-        step.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        step.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: b"{}".to_vec(),
@@ -704,7 +704,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         owner_load.url
     );
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"login":"open","type":"User"}"#.to_vec(),
@@ -717,7 +717,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
         classify_fetch.url
     );
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: br#"{"login":"open","type":"User"}"#.to_vec(),
@@ -733,7 +733,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     );
 
     owner_listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::<Header>::new(),
             body: b"[]".to_vec(),
@@ -861,7 +861,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
     );
 
     issued
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 404,
             headers: Vec::<Header>::new(),
             body: b"{\"message\":\"Not Found\"}".to_vec(),
@@ -907,7 +907,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
     );
 
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -957,7 +957,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         body_fetch.url
     );
 
-    body.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    body.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body: br#"{
@@ -1008,7 +1008,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         diff_fetch.headers
     );
 
-    diff.resume(vec![CalloutResult::BlobFetched(BlobFetched {
+    diff.answer_callouts(vec![CalloutResult::BlobFetched(BlobFetched {
         blob: 1,
         size: 25,
         content_type: Some("application/octet-stream".to_string()),
@@ -1030,11 +1030,11 @@ fn github_pr_lookup_validates_and_exposes_diff() {
         .read("/octocat/Hello-World/pulls/open/7/diff")
         .unwrap();
     assert!(
-        retry.is_suspended(),
+        retry.is_waiting_for_callouts(),
         "expected PR diff reread to refetch, got {retry:?}"
     );
     retry
-        .resume(vec![CalloutResult::CalloutError(CalloutError {
+        .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
             kind: ErrorKind::Network,
             message: "network down".to_string(),
             retryable: true,
@@ -1074,7 +1074,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     );
 
     run_listed
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{"id":123,"status":"completed","conclusion":"success"}"#.to_vec(),
@@ -1113,7 +1113,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     );
 
     index_listed
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{"workflow_runs":[{"id":42,"status":"in_progress","conclusion":null}]}"#
@@ -1200,12 +1200,12 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
     for case in &cases {
         let mut first = harness.read(case.path).unwrap();
         assert!(
-            first.is_suspended(),
+            first.is_waiting_for_callouts(),
             "{name}: expected fetch callout on first read, got {first:?}",
             name = case.name
         );
         first
-            .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+            .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
                 status: 200,
                 headers: case.ok_headers.clone(),
                 body: case.ok_body.to_vec(),
@@ -1227,12 +1227,12 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
 
         let mut second = harness.read(case.path).unwrap();
         assert!(
-            second.is_suspended(),
+            second.is_waiting_for_callouts(),
             "{name}: expected fetch callout on second read (no provider cache), got {second:?}",
             name = case.name
         );
         second
-            .resume(vec![CalloutResult::CalloutError(CalloutError {
+            .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
                 kind: ErrorKind::Network,
                 message: "network down".to_string(),
                 retryable: true,
@@ -1294,7 +1294,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         list_fetch.url
     );
     issue_list
-        .resume(ok_body(
+        .answer_callouts(ok_body(
             br#"[{"id":42,"user":{"login":"octocat"},"body":"first issue comment"}]"#,
         ))
         .unwrap();
@@ -1322,7 +1322,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     let comment_dir = "/octocat/Hello-World/issues/open/1/comments/42";
     let mut dir = harness.list(comment_dir).unwrap();
     let _ = dir.expect_single_fetch();
-    dir.resume(ok_body(
+    dir.answer_callouts(ok_body(
         br#"{"id":42,"user":{"login":"octocat"},"body":"first issue comment"}"#,
     ))
     .unwrap();
@@ -1354,7 +1354,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         first_fetch.url
     );
     first
-        .resume(ok_body(
+        .answer_callouts(ok_body(
             br#"{"id":42,"user":{"login":"octocat"},"body":"A comment"}"#,
         ))
         .unwrap();
@@ -1370,11 +1370,11 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     // fetches again. A network error on the refetch surfaces as Network.
     let mut reread = harness.read(comment_md).unwrap();
     assert!(
-        reread.is_suspended(),
+        reread.is_waiting_for_callouts(),
         "comment reread should refetch, got {reread:?}"
     );
     reread
-        .resume(vec![CalloutResult::CalloutError(CalloutError {
+        .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
             kind: omnifs_wit::provider::types::ErrorKind::Network,
             message: "network down".to_string(),
             retryable: true,
@@ -1391,9 +1391,9 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     // identically on a cold reread.
     let comment_json = "/octocat/Hello-World/issues/open/1/comments/42/comment.json";
     let mut json_read = harness.read(comment_json).unwrap();
-    assert!(json_read.is_suspended());
+    assert!(json_read.is_waiting_for_callouts());
     json_read
-        .resume(ok_body(
+        .answer_callouts(ok_body(
             br#"{"id":42,"user":{"login":"octocat"},"body":"A comment"}"#,
         ))
         .unwrap();
@@ -1415,7 +1415,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         pr_fetch.url
     );
     pr_read
-        .resume(ok_body(
+        .answer_callouts(ok_body(
             br#"{"id":9,"user":{"login":"hubot"},"body":"a pr comment"}"#,
         ))
         .unwrap();
@@ -1441,7 +1441,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
         missing_fetch.url
     );
     missing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 404,
             headers: Vec::new(),
             body: b"{\"message\":\"Not Found\"}".to_vec(),
@@ -1524,14 +1524,14 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
         "unexpected issue list URL: {}",
         first_issue_page.url
     );
-    issues.resume(vec![search_page(1500, 1)]).unwrap();
+    issues.answer_callouts(vec![search_page(1500, 1)]).unwrap();
     assert!(
-        issues.is_suspended(),
+        issues.is_waiting_for_callouts(),
         "expected parallel issue page fetches, got {issues:?}"
     );
     assert_page_fetches(issues.callouts(), 2..=10);
     let issue_pages = (2..=10).map(|page| rest_page(page * 100)).collect();
-    issues.resume(issue_pages).unwrap();
+    issues.answer_callouts(issue_pages).unwrap();
     match issues.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
@@ -1555,14 +1555,14 @@ fn github_provider_paginates_issue_and_pr_results_in_parallel() {
     assert!(first_pr_page.url.ends_with(
         "/search/issues?q=repo:octocat/Hello-World+is:pr+state:open&sort=created&order=desc&per_page=100"
     ), "unexpected PR list URL: {}", first_pr_page.url);
-    pulls.resume(vec![search_page(1500, 7)]).unwrap();
+    pulls.answer_callouts(vec![search_page(1500, 7)]).unwrap();
     assert!(
-        pulls.is_suspended(),
+        pulls.is_waiting_for_callouts(),
         "expected parallel PR page fetches, got {pulls:?}"
     );
     assert_page_fetches(pulls.callouts(), 2..=10);
     let pr_pages = (2..=10).map(|page| rest_page(page * 100 + 7)).collect();
-    pulls.resume(pr_pages).unwrap();
+    pulls.answer_callouts(pr_pages).unwrap();
     match pulls.result().unwrap() {
         OpResult::ListChildren(ListChildrenResult::Entries(listing)) => {
             let names: Vec<&str> = listing
@@ -1615,7 +1615,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     );
 
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 404,
             headers: vec![Header {
                 name: "etag".to_string(),
@@ -1632,7 +1632,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     );
 
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -1650,7 +1650,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         classify_user.url
     );
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 404,
             headers: vec![Header {
                 name: "etag".to_string(),
@@ -1666,7 +1666,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
         classify_org.url
     );
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"{
@@ -1686,7 +1686,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     );
 
     listing
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: br#"[{"name":"api"}]"#.to_vec(),
@@ -1742,7 +1742,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
         issue_fetch.url
     );
     issue_cached
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: vec![Header {
                 name: "etag".to_string(),
@@ -1837,7 +1837,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
             "{kind}: unexpected URL {}",
             fetch.url
         );
-        op.resume(denied_page()).unwrap();
+        op.answer_callouts(denied_page()).unwrap();
         expect_denied(&op);
     }
 }
@@ -1872,7 +1872,7 @@ async fn open_then_all_one_load() {
     );
 
     first
-        .resume(vec![CalloutResult::HttpResponse(HttpResponse {
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
             headers: Vec::new(),
             body: issue_json.to_vec(),
@@ -1958,7 +1958,7 @@ fn item_json_byte_equals_single_get() {
         fetch.url
     );
 
-    step.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    step.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body: issue_json.to_vec(),

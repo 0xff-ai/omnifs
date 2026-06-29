@@ -89,12 +89,12 @@
 //! # The async model
 //!
 //! Handlers are plain `async fn`s. Awaiting an HTTP call (or git, blob,
-//! archive callout) suspends the whole operation: the SDK yields the callout
-//! batch to the host, the host runs it (concurrently, for batches), and
-//! `resume` continues your future with the results. Your code reads as
-//! straight-line async; there is no executor, no `Send` bounds, and state is
-//! single-threaded by construction. Use [`cx::join_all`] to issue N callouts
-//! in one suspension round instead of serially.
+//! archive callout) awaits a WIT async host import. The component runtime
+//! suspends the operation while the host runs the effect, then resumes your
+//! future with the result. Your code reads as straight-line async; there is no
+//! executor, no `Send` bounds, and state is single-threaded by construction.
+//! Use [`cx::join_all`] to issue independent callouts concurrently instead of
+//! serially.
 //!
 //! # Caching and effects: the rules
 //!
@@ -166,7 +166,6 @@ macro_rules! export {
 extern crate self as omnifs_sdk;
 
 pub mod archives;
-mod async_runtime;
 pub mod blob;
 pub mod browse;
 pub mod captures;
@@ -214,7 +213,6 @@ pub use crate::cx::Cx;
 
 /// Internal types used by generated code. Not part of the public API.
 pub mod __internal {
-    pub use crate::async_runtime::AsyncRuntime;
     pub use crate::cx::Cx;
     pub use crate::range_handles::RangeReaders;
     pub use crate::rate_limit::clear_breaker;

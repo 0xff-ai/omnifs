@@ -8,6 +8,7 @@ use crate::archive::ArchiveExecutor;
 use crate::auth::{AuthManager, credential_store_for_file};
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::blob_cache::BlobCache;
+use crate::callouts::{CalloutHost, TestCallout, TestCallouts};
 use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
 use crate::git;
@@ -31,6 +32,7 @@ use std::io;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 
 use crate::clock::{self, DYNAMIC_TTL_MILLIS};
 use crate::object_id::ObjectId;
@@ -104,18 +106,14 @@ impl HostContext {
 
 /// Runtime for one mounted WASM provider component.
 ///
-/// Manages the Wasmtime store, routes callouts, and handles async
-/// continuations with operation ID allocation.
+/// Manages the Wasmtime instance driver, host callout imports, cache state,
+/// and operation id allocation.
 pub struct Runtime {
     pub(crate) instance: Instance,
     initialize_result: wit_types::InitializeResult,
     pub(crate) mount_name: String,
     pub(crate) provider_name: String,
     next_operation_id: AtomicU64,
-    pub(crate) http: Arc<HttpStack>,
-    pub(crate) git: git::GitExecutor,
-    pub(crate) blob: BlobExecutor,
-    pub(crate) archive: Arc<ArchiveExecutor>,
     blob_cache: Arc<BlobCache>,
     trees: Arc<TreeRefs>,
     pub(crate) cache: Store,
@@ -135,8 +133,13 @@ pub struct Runtime {
     /// Injected inspector sink. Defaults to the process-global configured sink
     /// so production wiring is unchanged; tests can supply their own.
     pub(crate) inspector: Option<Arc<InspectorSink>>,
+    test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestCallout>>>,
 }
 
+/// Test operation driver used by provider integration tests that need to
+/// inspect and answer captured host imports. This is not the provider runtime
+/// protocol: production operations await WIT async host imports directly.
+#[doc(hidden)]
 pub struct TestOp<'a> {
     runtime: &'a Runtime,
     op: Op,
@@ -146,7 +149,12 @@ pub struct TestOp<'a> {
 }
 
 enum TestOpState {
-    Suspended(Vec<wit_types::Callout>),
+    InProgress,
+    WaitingForCallouts {
+        callouts: Vec<wit_types::Callout>,
+        replies: Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
+        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, Error>>,
+    },
     Returned {
         result: Box<wit_types::OpResult>,
         effects: Box<wit_types::Effects>,
@@ -272,6 +280,36 @@ impl Runtime {
         context: &HostContext,
         caches: &Arc<Caches>,
     ) -> std::result::Result<Self, BuildError> {
+        Self::build(engine, wasm_path, config, cloner, context, caches, false)
+    }
+
+    #[doc(hidden)]
+    pub fn new_for_callout_tests(
+        engine: &wasmtime::Engine,
+        wasm_path: &StdPath,
+        config: &Spec,
+        cloner: Arc<GitCloner>,
+        context: &HostContext,
+        caches: &Arc<Caches>,
+    ) -> std::result::Result<Self, BuildError> {
+        Self::build(engine, wasm_path, config, cloner, context, caches, true)
+    }
+
+    fn build(
+        engine: &wasmtime::Engine,
+        wasm_path: &StdPath,
+        config: &Spec,
+        cloner: Arc<GitCloner>,
+        context: &HostContext,
+        caches: &Arc<Caches>,
+        capture_test_callouts: bool,
+    ) -> std::result::Result<Self, BuildError> {
+        let (test_callouts, test_rx) = if capture_test_callouts {
+            let (test_callouts, rx) = TestCallouts::channel();
+            (Some(test_callouts), Some(rx))
+        } else {
+            (None, None)
+        };
         let mount_name = config.mount.as_str();
         let config_bytes = config.config_bytes();
         // Load the pinned artifact's manifest once: capability/config metadata
@@ -332,16 +370,24 @@ impl Runtime {
         let blob_limits = BlobLimits::from_config(config);
         let http = Arc::new(HttpStack::new(auth.clone(), capability.clone())?);
         let blob = BlobExecutor::new(Arc::clone(&http), blob_cache.clone(), blob_limits);
+        let mut callout_host = CalloutHost::new(
+            Arc::clone(&http),
+            git.clone(),
+            blob.clone(),
+            Arc::clone(&archive),
+        );
+        if let Some(test_callouts) = test_callouts {
+            callout_host = callout_host.with_test_callouts(test_callouts);
+        }
+        instance
+            .set_callouts(callout_host)
+            .map_err(BuildError::from)?;
         Ok(Self {
             instance,
             initialize_result,
             mount_name: mount_name.to_string(),
             provider_name: config.provider_name().to_string(),
             next_operation_id: AtomicU64::new(1),
-            http,
-            git,
-            blob,
-            archive,
             blob_cache,
             trees,
             cache,
@@ -350,6 +396,7 @@ impl Runtime {
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             inspector: inspector::global(),
+            test_callouts: test_rx.map(std::sync::Mutex::new),
         })
     }
 
@@ -430,14 +477,58 @@ impl Runtime {
     pub(crate) fn next_operation_id(&self) -> u64 {
         self.next_operation_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Non-blocking receive of the next captured provider callout, if one has
+    /// been issued and not yet answered. Only yields values on runtimes built
+    /// with [`Runtime::new_for_callout_tests`]; returns `None` otherwise or when
+    /// no callout is pending. Lets a concurrency test observe that two ops are
+    /// suspended on host imports at the same instant before answering either.
+    #[doc(hidden)]
+    pub fn try_recv_test_callout(&self) -> Option<PendingTestCallout> {
+        let received = self.test_callouts.as_ref()?.lock().ok()?.try_recv().ok()?;
+        Some(PendingTestCallout {
+            op_id: received.op_id,
+            reply: received.reply,
+        })
+    }
+}
+
+/// Test-only handle to one captured provider callout awaiting its answer. See
+/// [`Runtime::try_recv_test_callout`].
+#[doc(hidden)]
+pub struct PendingTestCallout {
+    op_id: u64,
+    reply: tokio::sync::oneshot::Sender<wit_types::CalloutResult>,
+}
+
+impl PendingTestCallout {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn op_id(&self) -> u64 {
+        self.op_id
+    }
+
+    /// Resume the suspended provider future with `result`.
+    #[doc(hidden)]
+    pub fn answer(self, result: wit_types::CalloutResult) {
+        let _ = self.reply.send(result);
+    }
 }
 
 impl Runtime {
+    /// Synchronous test entry: blocks the caller until the operation returns or
+    /// suspends on captured callouts. Production code drives ops through the
+    /// async [`Runtime::run_op`] path instead; this exists for the provider
+    /// integration harness (`omnifs-itest`).
+    #[doc(hidden)]
     pub fn start_op(&self, op: Op) -> Result<TestOp<'_>> {
         let op_gen = self.cache.current_generation();
         let id = self.next_operation_id();
-        let step = self.instance.start_op(&op, id)?;
-        TestOp::from_step(self, op, id, op_gen, step)
+        if self.test_callouts.is_some() {
+            return TestOp::start_callout_test(self, op, id, op_gen);
+        }
+        let ret = futures::executor::block_on(self.instance.start_op(op.clone(), id))?;
+        TestOp::from_return(self, op, id, op_gen, ret)
     }
 
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
@@ -482,57 +573,137 @@ impl Runtime {
 }
 
 impl<'a> TestOp<'a> {
-    fn from_step(
-        runtime: &'a Runtime,
-        op: Op,
-        id: u64,
-        op_gen: u64,
-        step: wit_types::ProviderStep,
-    ) -> Result<Self> {
-        let mut started = Self {
+    fn start_callout_test(runtime: &'a Runtime, op: Op, id: u64, op_gen: u64) -> Result<Self> {
+        let instance = runtime.instance.clone();
+        let op_for_task = op.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("omnifs-test-op-{id}"))
+            .spawn(move || {
+                let result = futures::executor::block_on(instance.start_op(op_for_task, id));
+                let _ = result_tx.send(result);
+            })
+            .map_err(|error| Error::ProviderProtocol(format!("spawn test op: {error}")))?;
+
+        let state = Self::wait_for_progress(runtime, &op, id, op_gen, result_rx)?;
+        Ok(Self {
             runtime,
             op,
             id,
             op_gen,
-            state: TestOpState::Suspended(Vec::new()),
-        };
-        started.state = started.state_from_step(step)?;
-        Ok(started)
+            state,
+        })
     }
 
-    fn state_from_step(&self, step: wit_types::ProviderStep) -> Result<TestOpState> {
-        match step {
-            wit_types::ProviderStep::Suspended(callouts) => {
-                if callouts.is_empty() {
+    fn from_return(
+        runtime: &'a Runtime,
+        op: Op,
+        id: u64,
+        op_gen: u64,
+        ret: wit_types::ProviderReturn,
+    ) -> Result<Self> {
+        let state = Self::returned_state(runtime, &op, op_gen, ret)?;
+        Ok(Self {
+            runtime,
+            op,
+            id,
+            op_gen,
+            state,
+        })
+    }
+
+    fn wait_for_progress(
+        runtime: &Runtime,
+        op: &Op,
+        id: u64,
+        op_gen: u64,
+        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, Error>>,
+    ) -> Result<TestOpState> {
+        let inbox = runtime.test_callouts.as_ref().ok_or_else(|| {
+            Error::ProviderProtocol("test callout inbox is not configured".to_string())
+        })?;
+        let recv_callout = |timeout| {
+            inbox
+                .lock()
+                .expect("test callout receiver poisoned")
+                .recv_timeout(timeout)
+        };
+        loop {
+            match result_rx.try_recv() {
+                Ok(ret) => return Self::returned_state(runtime, op, op_gen, ret?),
+                Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(Error::ProviderProtocol(
-                        "provider suspended with no callouts".to_string(),
+                        "provider operation result channel closed".to_string(),
                     ));
-                }
-                Ok(TestOpState::Suspended(callouts))
-            },
-            wit_types::ProviderStep::Returned(ret) => {
-                let effects = ret.effects.clone();
-                let result = self
-                    .runtime
-                    .finish_provider_return(&self.op, ret, self.op_gen)?;
-                self.runtime.note_returned_result(&result);
-                Ok(TestOpState::Returned {
-                    result: Box::new(result),
-                    effects: Box::new(effects),
-                })
-            },
+                },
+                Err(mpsc::TryRecvError::Empty) => {},
+            }
+
+            match recv_callout(std::time::Duration::from_millis(10)) {
+                Ok(first) => {
+                    let mut callouts = Vec::new();
+                    let mut replies = Vec::new();
+                    Self::push_test_callout(id, first, &mut callouts, &mut replies)?;
+                    while let Ok(next) = recv_callout(std::time::Duration::from_millis(1)) {
+                        Self::push_test_callout(id, next, &mut callouts, &mut replies)?;
+                    }
+                    return Ok(TestOpState::WaitingForCallouts {
+                        callouts,
+                        replies,
+                        result_rx,
+                    });
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {},
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::ProviderProtocol(
+                        "test callout receiver closed".to_string(),
+                    ));
+                },
+            }
         }
+    }
+
+    fn push_test_callout(
+        id: u64,
+        test_callout: TestCallout,
+        callouts: &mut Vec<wit_types::Callout>,
+        replies: &mut Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
+    ) -> Result<()> {
+        if test_callout.op_id != id {
+            return Err(Error::ProviderProtocol(format!(
+                "test callout for operation {} received while driving operation {id}",
+                test_callout.op_id
+            )));
+        }
+        callouts.push(test_callout.callout);
+        replies.push(test_callout.reply);
+        Ok(())
+    }
+
+    fn returned_state(
+        runtime: &Runtime,
+        op: &Op,
+        op_gen: u64,
+        ret: wit_types::ProviderReturn,
+    ) -> Result<TestOpState> {
+        let effects = ret.effects.clone();
+        let result = runtime.finish_provider_return(op, ret, op_gen)?;
+        runtime.note_returned_result(&result);
+        Ok(TestOpState::Returned {
+            result: Box::new(result),
+            effects: Box::new(effects),
+        })
     }
 
     pub fn callouts(&self) -> &[wit_types::Callout] {
         match &self.state {
-            TestOpState::Suspended(callouts) => callouts,
-            TestOpState::Returned { .. } => &[],
+            TestOpState::WaitingForCallouts { callouts, .. } => callouts,
+            TestOpState::InProgress | TestOpState::Returned { .. } => &[],
         }
     }
 
-    pub fn is_suspended(&self) -> bool {
-        matches!(self.state, TestOpState::Suspended(_))
+    pub fn is_waiting_for_callouts(&self) -> bool {
+        matches!(self.state, TestOpState::WaitingForCallouts { .. })
     }
 
     pub fn is_returned(&self) -> bool {
@@ -540,46 +711,60 @@ impl<'a> TestOp<'a> {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    pub fn resume(&mut self, results: Vec<wit_types::CalloutResult>) -> Result<()> {
-        if !self.is_suspended() {
+    pub fn answer_callouts(&mut self, results: Vec<wit_types::CalloutResult>) -> Result<()> {
+        let state = std::mem::replace(&mut self.state, TestOpState::InProgress);
+        let TestOpState::WaitingForCallouts {
+            replies, result_rx, ..
+        } = state
+        else {
             return Err(Error::ProviderProtocol(
-                "cannot resume an operation that has already returned".to_string(),
+                "provider operation is not waiting on test callouts".to_string(),
             ));
+        };
+        if results.len() != replies.len() {
+            return Err(Error::ProviderProtocol(format!(
+                "expected {} test callout results, got {}",
+                replies.len(),
+                results.len()
+            )));
         }
-        let step = self.runtime.instance.resume(self.id, results)?;
-        self.state = self.state_from_step(step)?;
+        for (reply, result) in replies.into_iter().zip(results) {
+            let _ = reply.send(result);
+        }
+        self.state =
+            Self::wait_for_progress(self.runtime, &self.op, self.id, self.op_gen, result_rx)?;
         Ok(())
     }
 
     pub fn into_result(self) -> Result<wit_types::OpResult> {
         match self.state {
             TestOpState::Returned { result, .. } => Ok(*result),
-            TestOpState::Suspended(_) => Err(Error::ProviderProtocol(
-                "operation is still suspended".to_string(),
-            )),
+            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
+                Error::ProviderProtocol("provider operation has not returned".to_string()),
+            ),
         }
     }
 
     pub fn result(&self) -> Option<&wit_types::OpResult> {
         match &self.state {
             TestOpState::Returned { result, .. } => Some(result.as_ref()),
-            TestOpState::Suspended(_) => None,
+            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => None,
         }
     }
 
     pub fn effects(&self) -> Option<&wit_types::Effects> {
         match &self.state {
             TestOpState::Returned { effects, .. } => Some(effects.as_ref()),
-            TestOpState::Suspended(_) => None,
+            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => None,
         }
     }
 
     pub fn into_result_and_effects(self) -> Result<(wit_types::OpResult, wit_types::Effects)> {
         match self.state {
             TestOpState::Returned { result, effects } => Ok((*result, *effects)),
-            TestOpState::Suspended(_) => Err(Error::ProviderProtocol(
-                "operation is still suspended".to_string(),
-            )),
+            TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
+                Error::ProviderProtocol("provider operation has not returned".to_string()),
+            ),
         }
     }
 }
@@ -589,8 +774,11 @@ impl std::fmt::Debug for TestOp<'_> {
         let mut debug = f.debug_struct("TestOp");
         debug.field("id", &self.id).field("op", &self.op);
         match &self.state {
-            TestOpState::Suspended(callouts) => {
-                debug.field("state", &"suspended");
+            TestOpState::InProgress => {
+                debug.field("state", &"in_progress");
+            },
+            TestOpState::WaitingForCallouts { callouts, .. } => {
+                debug.field("state", &"waiting-for-callouts");
                 debug.field("callouts", callouts);
             },
             TestOpState::Returned { result, effects } => {
@@ -709,9 +897,9 @@ pub mod __test_support {
     use std::fmt;
 
     /// Stable kind labels used by the outer dispatch span. Kept in lockstep
-    /// with the internal `CalloutKind::as_str()` values.
+    /// with the internal `CalloutKind` strum labels.
     pub fn kind_label(callout: &wit_types::Callout) -> &'static str {
-        CalloutKind::of(callout).as_str()
+        CalloutKind::of(callout).into()
     }
 
     /// Public re-display wrapper for redacting URLs in log output.

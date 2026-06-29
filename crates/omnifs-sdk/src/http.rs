@@ -8,12 +8,10 @@
 //! inspect the response directly.
 //!
 //! Sending never performs I/O in the guest. [`CalloutFuture`] yields the
-//! request onto the operation's [`Cx`] queue on its first poll; the runtime
-//! suspends the operation and hands the queued batch to the host, which runs
-//! it and resumes the operation with results in batch order. The future then
-//! consumes exactly one delivered result. That one-callout-per-suspension
-//! shape is what keeps results aligned when [`crate::cx::join_all`] batches
-//! siblings.
+//! request through a WIT async host import; the component runtime suspends the
+//! operation while the host runs the effect and resumes this future with the
+//! typed result. Poll several callout futures with [`crate::cx::join_all`] when
+//! the provider can issue independent upstream requests concurrently.
 //!
 //! The per-authority rate-limit breaker is checked here, at the lowest
 //! layer, so raw `cx.http()` sends and blob fetches inherit it as well as
@@ -30,6 +28,8 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use core::time::Duration;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+#[cfg(target_arch = "wasm32")]
+use omnifs_wit::provider::omnifs::provider::callouts;
 use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpRequest, HttpResponse};
 
 /// Entry point returned by `cx.http()`. Starts a request against a fully
@@ -142,36 +142,44 @@ impl<'cx, S> Request<'cx, S> {
     }
 
     /// Lower the request into a `fetch` callout. Awaiting the returned
-    /// future suspends the operation; the host executes the fetch and the
-    /// resumed future yields the full response (any status, body buffered in
-    /// guest memory). For large bodies use [`Self::into_blob`] so the bytes
-    /// stay host-side. Fails immediately, without a callout, on a sticky
-    /// builder error or an open rate-limit window for the URL's authority.
-    pub fn send(self) -> CalloutFuture<'cx, S, Response<Vec<u8>>> {
+    /// future suspends the operation on a WIT async host import; the host
+    /// executes the fetch and resumes the future with the full response (any
+    /// status, body buffered in guest memory). For large bodies use
+    /// [`Self::into_blob`] so the bytes stay host-side. Fails immediately,
+    /// without a callout, on a sticky builder error or an open rate-limit
+    /// window for the URL's authority.
+    pub fn send(self) -> CalloutFuture<'cx, Response<Vec<u8>>> {
+        let cx = self.cx;
+        match self.into_fetch_request() {
+            Ok(wit_request) => CalloutFuture::new(cx, Callout::Fetch(wit_request), |r| {
+                expect_callout(
+                    "fetch",
+                    |r| match r {
+                        CalloutResult::HttpResponse(resp) => Some(response_from_wit(resp)),
+                        _ => None,
+                    },
+                    r,
+                )
+            }),
+            Err(error) => CalloutFuture::ready_error(cx, error),
+        }
+    }
+
+    pub(crate) fn into_fetch_request(self) -> Result<HttpRequest> {
         if let Some(error) = self.error {
-            return CalloutFuture::ready_error(self.cx, error);
+            return Err(error);
         }
         // Proactive breaker: if this authority is in an open 429 window,
         // fast-fail without issuing the callout. This lives at the lowest HTTP
         // layer so raw `cx.http()` users inherit it, not only typed endpoints.
         if let Some(error) = self.open_breaker_error() {
-            return CalloutFuture::ready_error(self.cx, error);
+            return Err(error);
         }
-        let wit_request = HttpRequest {
+        Ok(HttpRequest {
             method: self.method.as_str().to_string(),
             url: self.url,
             headers: WitHeaders(&self.headers).into(),
             body: self.body,
-        };
-        CalloutFuture::new(self.cx, Callout::Fetch(wit_request), |r| {
-            expect_callout(
-                "fetch",
-                |r| match r {
-                    CalloutResult::HttpResponse(resp) => Some(response_from_wit(resp)),
-                    _ => None,
-                },
-                r,
-            )
         })
     }
 
@@ -246,7 +254,7 @@ impl<'cx, S> BlobRequest<'cx, S> {
     /// builder error, or when the authority's rate-limit window is open.
     /// Note the `BlobRef` carries the upstream status: chain
     /// [`crate::blob::BlobRef::error_for_status`] for the default mapping.
-    pub fn send(self) -> CalloutFuture<'cx, S, crate::blob::BlobRef> {
+    pub fn send(self) -> CalloutFuture<'cx, crate::blob::BlobRef> {
         if let Some(error) = self.inner.error {
             return CalloutFuture::ready_error(self.inner.cx, error);
         }
@@ -391,74 +399,71 @@ pub(crate) fn expect_callout<T>(
 /// The future shape of every callout (fetch, fetch-blob, read-blob,
 /// git-open-repo, open-archive).
 ///
-/// Protocol: the first poll pushes the callout onto the owning [`Cx`]'s
-/// yield queue and returns `Pending`; the runtime suspends the operation
-/// and hands the queued batch to the host. After the host resumes the
-/// operation with results in batch order, the next poll pops exactly one
-/// result from the delivery queue and maps it through `extract`.
-///
-/// Invariant: one callout yielded, one result consumed, per suspension.
-/// Results carry no correlation ids, so alignment is purely positional;
-/// this is the contract [`crate::cx::join_all`] relies on to fan out
-/// siblings in a single suspension round. `Ready` short-circuits builder
-/// and breaker errors without touching the queues.
-pub enum CalloutFuture<'cx, S, T> {
-    Pending {
-        cx: &'cx Cx<S>,
-        callout: Option<Callout>,
-        extract: fn(CalloutResult) -> Result<T>,
-    },
+/// `Pending` wraps the generated async WIT import future. `Ready` short-circuits
+/// builder and breaker errors without entering the host.
+pub enum CalloutFuture<'cx, T> {
+    Pending(Pin<Box<dyn Future<Output = Result<T>> + 'cx>>),
     Ready(Option<Result<T>>),
 }
 
 // `Ready` carries `T`, so the auto-derive would gate `Unpin` on
 // `T: Unpin`; this future never relies on structural pinning of any
 // variant field, so the manual impl is sound regardless of `T`.
-impl<S, T> Unpin for CalloutFuture<'_, S, T> {}
+impl<T> Unpin for CalloutFuture<'_, T> {}
 
-impl<'cx, S, T> CalloutFuture<'cx, S, T> {
-    pub(crate) fn new(
+impl<'cx, T: 'cx> CalloutFuture<'cx, T> {
+    pub(crate) fn new<S>(
         cx: &'cx Cx<S>,
         callout: Callout,
         extract: fn(CalloutResult) -> Result<T>,
     ) -> Self {
-        Self::Pending {
-            cx,
-            callout: Some(callout),
-            extract,
-        }
+        Self::Pending(Box::pin(run_callout(cx.id(), callout, extract)))
     }
 
-    pub(crate) fn ready_error(_cx: &'cx Cx<S>, error: ProviderError) -> Self {
+    pub(crate) fn ready_error<S>(_cx: &'cx Cx<S>, error: ProviderError) -> Self {
         Self::Ready(Some(Err(error)))
     }
 }
 
-impl<S, T> Future for CalloutFuture<'_, S, T> {
+impl<T> Future for CalloutFuture<'_, T> {
     type Output = Result<T>;
 
-    fn poll(mut self: Pin<&mut Self>, _ctx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
             Self::Ready(slot) => match slot.take() {
                 Some(result) => Poll::Ready(result),
                 None => Poll::Pending,
             },
-            Self::Pending {
-                cx,
-                callout,
-                extract,
-            } => {
-                if let Some(callout) = callout.take() {
-                    cx.push_yielded(callout);
-                    return Poll::Pending;
-                }
-                if let Some(result) = cx.pop_delivered() {
-                    return Poll::Ready(extract(result));
-                }
-                Poll::Pending
-            },
+            Self::Pending(future) => future.as_mut().poll(ctx),
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_callout<T>(
+    id: u64,
+    callout: Callout,
+    extract: fn(CalloutResult) -> Result<T>,
+) -> Result<T> {
+    let result = match callout {
+        Callout::Fetch(req) => callouts::fetch(id, req).await,
+        Callout::GitOpenRepo(req) => callouts::git_open_repo(id, req).await,
+        Callout::FetchBlob(req) => callouts::fetch_blob(id, req).await,
+        Callout::OpenArchive(req) => callouts::open_archive(id, req).await,
+        Callout::ReadBlob(req) => callouts::read_blob(id, req).await,
+    };
+    extract(result)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_callout<T>(
+    _id: u64,
+    _callout: Callout,
+    _extract: fn(CalloutResult) -> Result<T>,
+) -> impl Future<Output = Result<T>> {
+    core::future::ready(Err(ProviderError::internal(
+        "provider callouts require a wasm32 component target",
+    )))
 }
 
 #[cfg(test)]
@@ -475,15 +480,6 @@ mod tests {
         future.as_mut().poll(&mut ctx)
     }
 
-    fn take_single_fetch<S>(cx: &Cx<S>) -> HttpRequest {
-        let mut yielded = cx.take_yielded_callouts();
-        assert_eq!(yielded.len(), 1, "expected exactly one yielded callout");
-        match yielded.remove(0) {
-            Callout::Fetch(req) => req,
-            other => panic!("expected Callout::Fetch, got {other:?}"),
-        }
-    }
-
     #[test]
     fn json_content_type_handling() {
         #[derive(serde::Serialize)]
@@ -498,15 +494,12 @@ mod tests {
             name: "alice",
             count: 3,
         };
-        let mut fut = Box::pin(
-            cx.http()
-                .post("https://example.test/api")
-                .json(&payload)
-                .send(),
-        );
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-
-        let req = take_single_fetch(&cx);
+        let req = cx
+            .http()
+            .post("https://example.test/api")
+            .json(&payload)
+            .into_fetch_request()
+            .unwrap();
         assert_eq!(req.method, "POST");
         let body = req.body.expect("json() must set a body");
         assert_eq!(body, br#"{"name":"alice","count":3}"#.to_vec());
@@ -520,16 +513,13 @@ mod tests {
 
         let state = Rc::new(RefCell::new(()));
         let cx = Cx::new(2, state);
-        let mut fut = Box::pin(
-            cx.http()
-                .post("https://example.test/api")
-                .header("content-type", "application/vnd.custom+json")
-                .json(&serde_json::json!({"k": "v"}))
-                .send(),
-        );
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-
-        let req = take_single_fetch(&cx);
+        let req = cx
+            .http()
+            .post("https://example.test/api")
+            .header("content-type", "application/vnd.custom+json")
+            .json(&serde_json::json!({"k": "v"}))
+            .into_fetch_request()
+            .unwrap();
         let ct_headers: Vec<&Header> = req
             .headers
             .iter()
@@ -555,10 +545,6 @@ mod tests {
             Poll::Ready(Err(_)) => {},
             other => panic!("expected immediate error, got {other:?}"),
         }
-        assert!(
-            cx.take_yielded_callouts().is_empty(),
-            "no callout should be issued when builder failed"
-        );
     }
 
     #[test]
@@ -600,12 +586,25 @@ mod tests {
         };
 
         assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
-        assert!(
-            cx.take_yielded_callouts().is_empty(),
-            "open breaker must not issue a fetch callout"
-        );
-
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn host_target_callout_future_fails_if_executed() {
+        let state = Rc::new(RefCell::new(()));
+        let cx = Cx::new(1, state);
+        let mut fut = Box::pin(cx.http().get("https://example.test/api").send());
+
+        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
+            panic!("expected host-target callout to fail immediately");
+        };
+
+        assert_eq!(error.kind(), ProviderErrorKind::Internal);
+        assert!(
+            error.message().contains("wasm32 component target"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

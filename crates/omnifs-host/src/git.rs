@@ -16,6 +16,7 @@ use omnifs_wit::provider::types as wit_types;
 use std::sync::Arc;
 use tracing::warn;
 
+#[derive(Clone)]
 pub struct GitExecutor {
     cloner: Arc<GitCloner>,
     capability: Arc<CapabilityChecker>,

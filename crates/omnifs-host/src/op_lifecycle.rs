@@ -1,4 +1,4 @@
-//! Op execution loop: start → suspend/resume → apply effects → return.
+//! Op execution loop: start async provider call → apply effects → return.
 //!
 //! Everything from the first `instance.start_op` call to the final
 //! `Materializer::apply` lives here so a read-file round trip is traceable
@@ -28,43 +28,18 @@ impl Runtime {
         let live_op = trace_id.and_then(|t| {
             InspectorProviderOp::begin(&op, id, &self.mount_name, &self.provider_name, t)
         });
-        let mut resume_round = 0u32;
-        let mut step = self.instance.start_op(&op, id)?;
-        let result = loop {
-            match step {
-                wit_types::ProviderStep::Returned(ret) => {
-                    let handoff_start = std::time::Instant::now();
-                    let outcome = self.finish_provider_return(&op, ret, op_gen);
-                    // Emit subtree.start/end when the provider handed
-                    // off a tree-ref. Done here, after finish handles
-                    // the validation + effect-apply, so the elapsed
-                    // reflects the resolution work.
-                    if let (Some(trace), Ok(op_result)) = (trace_id, outcome.as_ref())
-                        && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
-                        && let Some(sink) = self.inspector.as_ref()
-                    {
-                        sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
-                    }
-                    break outcome;
-                },
-                wit_types::ProviderStep::Suspended(callouts) => {
-                    if callouts.is_empty() {
-                        break Err(Error::ProviderProtocol(
-                            "provider suspended with no callouts".to_string(),
-                        ));
-                    }
-                    if let Some(live) = &live_op {
-                        live.suspend(callouts.len());
-                    }
-                    let results = self.dispatch_callouts(id, &callouts).await;
-                    if let Some(live) = &live_op {
-                        live.resume(resume_round, results.len());
-                    }
-                    resume_round += 1;
-                    step = self.instance.resume(id, results)?;
-                },
-            }
-        };
+        let ret = self.instance.start_op(op.clone(), id).await?;
+        let handoff_start = std::time::Instant::now();
+        let result = self.finish_provider_return(&op, ret, op_gen);
+        // Emit subtree.start/end when the provider handed off a tree-ref.
+        // Done here, after finish handles validation and effect application,
+        // so the elapsed reflects the resolution work.
+        if let (Some(trace), Ok(op_result)) = (trace_id, result.as_ref())
+            && let Some(tree_ref) = inspector::subtree_tree_ref(op_result)
+            && let Some(sink) = self.inspector.as_ref()
+        {
+            sink.emit_subtree_handoff(trace, id, tree_ref, handoff_start.elapsed());
+        }
         if let Some(live) = live_op {
             let outcome = match &result {
                 Ok(_) => OutcomeFields::ok(),

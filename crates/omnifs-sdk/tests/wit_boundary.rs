@@ -1,8 +1,8 @@
 //! WIT-boundary tests for the provider object SDK.
 //!
 //! Each test builds a fixture provider's `Router<()>`, drives a browse method
-//! (`lookup_child` / `list_children` / `read_file` / `open_file`) through the
-//! callout suspend/resume loop, lowers the SDK result via its public
+//! (`lookup_child` / `list_children` / `read_file` / `open_file`), lowers the
+//! SDK result via its public
 //! `into_*_and_effects()` / `into_wit()`, and asserts on the exact WIT records.
 //! These assertions encode the CORRECT behavior the SDK must exhibit at the
 //! host boundary; they are the contract the three fixes restore.
@@ -36,74 +36,28 @@ use std::task::{Context, Poll, Waker};
 // Drive loop
 // ===========================================================================
 
-/// Poll a future to completion, draining yielded callouts and pushing canned
-/// HTTP results back so a handler that issues a callout resumes. Fixtures whose
-/// loads are synchronous never yield, so the loop completes on the first poll.
-fn drive<T>(cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> T {
+/// Poll a future to completion. This suite is a pure SDK router/lowering test:
+/// a pending future has reached an async WIT import and belongs in a component
+/// runtime test instead of a host-side fake callout loop.
+fn drive<T>(_cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> T {
     let mut fut = Box::pin(fut);
     let waker = Waker::noop();
     let mut ctx = Context::from_waker(waker);
-    loop {
-        match fut.as_mut().poll(&mut ctx) {
-            Poll::Ready(result) => return result.expect("handler returned an error"),
-            Poll::Pending => {
-                let yielded = cx.take_yielded_callouts();
-                assert!(
-                    !yielded.is_empty(),
-                    "future is pending but yielded no callouts: deadlock"
-                );
-                for callout in yielded {
-                    let result = match callout {
-                        wit_types::Callout::GitOpenRepo(_) => {
-                            wit_types::CalloutResult::GitRepoOpened(wit_types::GitRepoInfo {
-                                repo: 7,
-                                tree: 7,
-                            })
-                        },
-                        wit_types::Callout::OpenArchive(_) => {
-                            wit_types::CalloutResult::ArchiveOpened(wit_types::ArchiveOpened {
-                                tree: 7,
-                            })
-                        },
-                        _ => wit_types::CalloutResult::HttpResponse(wit_types::HttpResponse {
-                            status: 200,
-                            headers: Vec::new(),
-                            body: b"callout-body".to_vec(),
-                        }),
-                    };
-                    cx.push_delivered(result);
-                }
-            },
-        }
+    match fut.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result.expect("handler returned an error"),
+        Poll::Pending => panic!("fixture future reached an async host import"),
     }
 }
 
 /// Like [`drive`] but returns the handler's `Result` instead of panicking on
 /// an error, for tests that assert a path is rejected.
-fn drive_result<T>(cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> Result<T> {
+fn drive_result<T>(_cx: &Cx<()>, fut: impl Future<Output = Result<T>>) -> Result<T> {
     let mut fut = Box::pin(fut);
     let waker = Waker::noop();
     let mut ctx = Context::from_waker(waker);
-    loop {
-        match fut.as_mut().poll(&mut ctx) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => {
-                let yielded = cx.take_yielded_callouts();
-                assert!(
-                    !yielded.is_empty(),
-                    "future is pending but yielded no callouts: deadlock"
-                );
-                for _callout in yielded {
-                    cx.push_delivered(wit_types::CalloutResult::HttpResponse(
-                        wit_types::HttpResponse {
-                            status: 200,
-                            headers: Vec::new(),
-                            body: b"callout-body".to_vec(),
-                        },
-                    ));
-                }
-            },
-        }
+    match fut.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("fixture future reached an async host import"),
     }
 }
 
@@ -894,14 +848,11 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
 }
 
 // ===========================================================================
-// Direct face (callout)
+// Direct face
 // ===========================================================================
 
-async fn item_live(cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
-    // Issue a callout so the drive loop must suspend and resume.
-    let resp = cx.http().get("https://example/").send().await?;
-    let body = resp.into_body();
-    Ok(FileProjection::body(format!("live:{}:{}", key.id, body.len())).build())
+async fn item_live(_cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
+    Ok(FileProjection::body(format!("live:{}", key.id)).build())
 }
 
 #[test]
@@ -927,8 +878,7 @@ fn direct_face_runs_handler_and_returns_inline_no_canonical() {
     let wit_types::ByteSource::Inline(bytes) = &result.bytes else {
         panic!("direct face returns inline bytes, got {:?}", result.bytes);
     };
-    // "callout-body" is 12 bytes.
-    assert_eq!(bytes, b"live:42:12");
+    assert_eq!(bytes, b"live:42");
 }
 
 // ===========================================================================
@@ -1017,17 +967,9 @@ async fn bare_live(_cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
 // Tree face (FIX A): an object dir tree face dispatches the subtree handoff
 // ===========================================================================
 
-/// A tree dir face's method: issue a git-open callout (the drive loop answers
-/// it) and hand the subtree off.
-async fn repo_tree(cx: Cx<()>, key: RepoKey) -> Result<omnifs_sdk::handler::TreeRef> {
-    let opened = cx
-        .git()
-        .open_repo(
-            format!("github.com/{}/{}", key.owner, key.repo),
-            format!("git@github.com:{}/{}.git", key.owner, key.repo),
-        )
-        .await?;
-    Ok(omnifs_sdk::handler::TreeRef::new(opened.tree))
+/// A tree dir face's method: hand a host-resolved subtree off.
+async fn repo_tree(_cx: Cx<()>, _key: RepoKey) -> Result<omnifs_sdk::handler::TreeRef> {
+    Ok(omnifs_sdk::handler::TreeRef::new(7))
 }
 
 fn tree_face_router() -> Router<()> {
@@ -1047,8 +989,8 @@ fn tree_face_router() -> Router<()> {
 fn object_tree_face_lookup_returns_subtree_handoff() {
     let r = tree_face_router();
     let cx = cx();
-    // A lookup at the tree path runs the treeref handler (git-open callout) and
-    // returns the host-resolved subtree handle, not a static dir.
+    // A lookup at the tree path runs the treeref handler and returns the
+    // host-resolved subtree handle, not a static dir.
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"));
     let (out, _effects) = lookup.into_result_and_effects();
     assert!(

@@ -48,7 +48,7 @@ impl<'cx, S> Builder<'cx, S> {
         self,
         cache_key: impl Into<String>,
         clone_url: impl Into<String>,
-    ) -> CalloutFuture<'cx, S, GitRepoInfo> {
+    ) -> CalloutFuture<'cx, GitRepoInfo> {
         CalloutFuture::new(
             self.cx,
             Callout::GitOpenRepo(GitOpenRequest {

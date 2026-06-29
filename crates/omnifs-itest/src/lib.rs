@@ -80,7 +80,7 @@ impl RuntimeHarness {
             path: cache_dir.path().to_path_buf(),
             source: std::io::Error::other(error.to_string()),
         })?;
-        let runtime = Runtime::new(
+        let runtime = Runtime::new_for_callout_tests(
             engine,
             &wasm_path,
             &spec,

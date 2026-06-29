@@ -279,13 +279,19 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
         HttpEndpoint::parse(self.endpoint.base()).build_url(&self.path, &query)
     }
 
-    /// Lower to an HTTP request, returning the endpoint alongside it so a
-    /// caller can still consult [`EndpointHooks`] after the send.
-    fn into_http_request(mut self) -> Result<(Request<'a, S>, E)> {
+    /// Lower to an HTTP request and the endpoint response policy that must be
+    /// applied after the host returns the raw response.
+    fn into_http_request(mut self) -> Result<(Request<'a, S>, ResponsePolicy<E>)> {
         if let Some(error) = self.body_error.take() {
             return Err(error);
         }
         let url = self.url();
+        let rate_limit = self.endpoint.rate_limit();
+        let policy = ResponsePolicy::new(
+            self.endpoint,
+            crate::rate_limit::authority_of(&url),
+            rate_limit,
+        );
         let builder = self.cx.http();
         let mut req = if self.method == http::Method::POST {
             builder.post(url)
@@ -293,7 +299,7 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
             builder.get(url)
         };
         // Endpoint defaults first, so a per-request `.header(..)` overrides.
-        for (name, value) in self.endpoint.default_headers() {
+        for (name, value) in policy.endpoint.default_headers() {
             req = req.header(name, value);
         }
         // Merge the pre-parsed HeaderMap; extend_headers skips re-parsing.
@@ -307,7 +313,7 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
             }
             req = req.body(body);
         }
-        Ok((req, self.endpoint))
+        Ok((req, policy))
     }
 
     /// Send through the breaker: the check happens in `Request::send`; here we
@@ -315,47 +321,9 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
     /// on a `status < 400` response so the next request to a throttled
     /// authority fast-fails instead of calling out.
     async fn send_raw(self) -> Result<Response<Vec<u8>>> {
-        let authority = crate::rate_limit::authority_of(&self.url());
-        let policy = self.endpoint.rate_limit();
-        let (request, endpoint) = self.into_http_request()?;
+        let (request, policy) = self.into_http_request()?;
         let resp = request.send().await?;
-
-        // Provider-specific classification runs first: it can detect error
-        // signals the default status mapping misses (e.g. a 403 rate limit),
-        // and a classified rate limit arms the breaker just like a native 429.
-        if let Some(error) = endpoint.classify(&resp) {
-            if let Some(authority) = &authority
-                && error.kind() == crate::error::ProviderErrorKind::RateLimited
-                && !matches!(policy, RateLimitPolicy::Off)
-            {
-                crate::rate_limit::with_breaker(|b| {
-                    b.record_429(authority, error.retry_after());
-                });
-            }
-            return Err(error);
-        }
-
-        if let Some(authority) = authority {
-            let status = resp.status();
-            if !matches!(policy, RateLimitPolicy::Off) {
-                crate::rate_limit::with_breaker(|b| {
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let parsed = resp
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(crate::rate_limit::parse_retry_after_secs);
-                        let cooldown = match policy {
-                            RateLimitPolicy::Cooldown(d) => Some(d),
-                            _ => None,
-                        };
-                        b.record_429(&authority, parsed.or(cooldown));
-                    } else if status.as_u16() < 400 {
-                        b.record_success(&authority);
-                    }
-                });
-            }
-        }
+        policy.apply(&resp)?;
         Ok(resp)
     }
 
@@ -399,6 +367,76 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
         BlobRequestBuilder {
             inner: self,
             cache_key: None,
+        }
+    }
+}
+
+struct ResponsePolicy<E> {
+    endpoint: E,
+    authority: Option<String>,
+    rate_limit: RateLimitPolicy,
+}
+
+impl<E: EndpointHooks> ResponsePolicy<E> {
+    fn new(endpoint: E, authority: Option<String>, rate_limit: RateLimitPolicy) -> Self {
+        Self {
+            endpoint,
+            authority,
+            rate_limit,
+        }
+    }
+
+    fn apply(&self, resp: &Response<Vec<u8>>) -> Result<()> {
+        // Provider-specific classification runs first: it can detect error
+        // signals the default status mapping misses (e.g. a 403 rate limit),
+        // and a classified rate limit arms the breaker just like a native 429.
+        if let Some(error) = self.endpoint.classify(resp) {
+            if error.kind() == crate::error::ProviderErrorKind::RateLimited {
+                self.record_rate_limit(error.retry_after());
+            }
+            return Err(error);
+        }
+
+        match resp.status() {
+            StatusCode::TOO_MANY_REQUESTS => self.record_rate_limit(self.retry_after(resp)),
+            status if status.as_u16() < 400 => self.record_success(),
+            _ => {},
+        }
+        Ok(())
+    }
+
+    fn retry_after(&self, resp: &Response<Vec<u8>>) -> Option<core::time::Duration> {
+        let parsed = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::rate_limit::parse_retry_after_secs);
+        let cooldown = match self.rate_limit {
+            RateLimitPolicy::Cooldown(d) => Some(d),
+            _ => None,
+        };
+        parsed.or(cooldown)
+    }
+
+    fn record_rate_limit(&self, retry_after: Option<core::time::Duration>) {
+        if matches!(self.rate_limit, RateLimitPolicy::Off) {
+            return;
+        }
+        if let Some(authority) = &self.authority {
+            crate::rate_limit::with_breaker(|b| {
+                b.record_429(authority, retry_after);
+            });
+        }
+    }
+
+    fn record_success(&self) {
+        if matches!(self.rate_limit, RateLimitPolicy::Off) {
+            return;
+        }
+        if let Some(authority) = &self.authority {
+            crate::rate_limit::with_breaker(|b| {
+                b.record_success(authority);
+            });
         }
     }
 }
@@ -474,7 +512,7 @@ impl<'a, E: EndpointHooks, S> BlobRequestBuilder<'a, E, S> {
     /// always refers to a successful response body.
     pub async fn fetch(self) -> Result<BlobHandle> {
         let cache_key = self.cache_key.clone();
-        let (request, _endpoint) = self.inner.into_http_request()?;
+        let (request, _policy) = self.inner.into_http_request()?;
         let mut blob: BlobRequest<'a, S> = request.into_blob();
         if let Some(key) = cache_key {
             blob = blob.with_cache_key(key);
@@ -500,10 +538,6 @@ pub struct BlobHandle {
 mod tests {
     use super::*;
     use crate::error::ProviderErrorKind;
-    use core::future::Future;
-    use core::pin::Pin;
-    use core::task::{Poll, Waker};
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse as WitHttpResponse};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -543,24 +577,12 @@ mod tests {
     }
     impl EndpointHooks for TestEpCooldown {}
 
-    fn drive_once<F: Future>(future: &mut Pin<Box<F>>) -> Poll<F::Output> {
-        let waker = Waker::noop();
-        let mut ctx = core::task::Context::from_waker(waker);
-        future.as_mut().poll(&mut ctx)
-    }
-
-    fn deliver_response<S>(cx: &Cx<S>, status: u16, headers: &[(&str, &str)]) {
-        cx.push_delivered(CalloutResult::HttpResponse(WitHttpResponse {
-            status,
-            headers: headers
-                .iter()
-                .map(|(name, value)| Header {
-                    name: (*name).to_string(),
-                    value: (*value).to_string(),
-                })
-                .collect(),
-            body: Vec::new(),
-        }));
+    fn response(status: u16, headers: &[(&str, &str)]) -> Response<Vec<u8>> {
+        let mut builder = Response::builder().status(status);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Vec::new()).expect("test response")
     }
 
     #[test]
@@ -571,17 +593,10 @@ mod tests {
         });
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(cx.endpoint(TestEp).get("/x").json::<serde_json::Value>());
-
-        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
-            panic!("expected open breaker to fail immediately");
-        };
+        let (request, _policy) = cx.endpoint(TestEp).get("/x").into_http_request().unwrap();
+        let error = request.into_fetch_request().unwrap_err();
 
         assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
-        assert!(
-            cx.take_yielded_callouts().is_empty(),
-            "open breaker must not issue a fetch callout"
-        );
 
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
     }
@@ -591,15 +606,14 @@ mod tests {
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(cx.endpoint(TestEpOff).get("/x").send_checked());
-
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-        assert_eq!(cx.take_yielded_callouts().len(), 1);
-        deliver_response(&cx, 429, &[]);
-
-        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
-            panic!("expected 429 response to surface as an error");
-        };
+        let (_request, policy) = cx
+            .endpoint(TestEpOff)
+            .get("/x")
+            .into_http_request()
+            .unwrap();
+        let resp = response(429, &[]);
+        policy.apply(&resp).unwrap();
+        let error = resp.error_for_status_ref().unwrap_err();
 
         assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
         assert_eq!(
@@ -615,15 +629,14 @@ mod tests {
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
 
         let cx = Cx::new(1, Rc::new(RefCell::new(())));
-        let mut fut = Box::pin(cx.endpoint(TestEpCooldown).get("/x").send_checked());
-
-        assert!(matches!(drive_once(&mut fut), Poll::Pending));
-        assert_eq!(cx.take_yielded_callouts().len(), 1);
-        deliver_response(&cx, 429, &[]);
-
-        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
-            panic!("expected 429 response to surface as an error");
-        };
+        let (_request, policy) = cx
+            .endpoint(TestEpCooldown)
+            .get("/x")
+            .into_http_request()
+            .unwrap();
+        let resp = response(429, &[]);
+        policy.apply(&resp).unwrap();
+        let error = resp.error_for_status_ref().unwrap_err();
 
         assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
         let remaining =

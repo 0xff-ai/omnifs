@@ -78,8 +78,6 @@ pub enum OperationStatus {
 pub enum StageKind {
     Fuse(String),
     Provider(String),
-    ProviderSuspend,
-    ProviderResume,
     Callout(u32),
     Cache(CacheKind),
     SubtreeStart,
@@ -97,8 +95,6 @@ impl StageKind {
         match self {
             Self::Fuse(op) => Cow::Owned(format!("fuse.{op}")),
             Self::Provider(method) => Cow::Owned(format!("provider.{method}")),
-            Self::ProviderSuspend => Cow::Borrowed("provider.suspend"),
-            Self::ProviderResume => Cow::Borrowed("provider.resume"),
             Self::Callout(idx) => Cow::Owned(format!("callout.{idx}")),
             Self::Cache(kind) => Cow::Borrowed(super::format::cache_event_label(*kind)),
             Self::SubtreeStart => Cow::Borrowed("subtree.start"),
@@ -160,7 +156,6 @@ pub struct Operation {
     pub started_mono: u64,
     pub ended_mono: Option<u64>,
     pub fuse_elapsed_us: Option<u64>,
-    pub provider_suspended: bool,
 }
 
 impl Operation {
@@ -179,7 +174,6 @@ impl Operation {
             started_mono: mono_us,
             ended_mono: None,
             fuse_elapsed_us: None,
-            provider_suspended: false,
         }
     }
 
@@ -281,14 +275,6 @@ impl TraceReducer {
                 path,
                 ..
             } => self.on_provider_start(trace_id, *operation_id, provider, method, path),
-            InspectorEvent::ProviderSuspend { callout_count, .. } => {
-                self.on_provider_suspend(trace_id, *callout_count);
-            },
-            InspectorEvent::ProviderResume {
-                round,
-                result_count,
-                ..
-            } => self.on_provider_resume(trace_id, *round, *result_count),
             InspectorEvent::ProviderEnd { end, .. } => {
                 self.on_provider_end(trace_id, end.elapsed_us, end.result.outcome);
             },
@@ -452,30 +438,6 @@ impl TraceReducer {
             operation.stages.push(Stage::in_flight(
                 StageKind::Provider(method.to_string()),
                 "",
-            ));
-        }
-    }
-
-    fn on_provider_suspend(&mut self, trace_id: TraceId, callout_count: u32) {
-        if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.provider_suspended = true;
-            operation.stages.push(Stage::done(
-                StageKind::ProviderSuspend,
-                format!("{callout_count} callout(s)"),
-                None,
-                None,
-            ));
-        }
-    }
-
-    fn on_provider_resume(&mut self, trace_id: TraceId, round: u32, result_count: u32) {
-        if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.provider_suspended = false;
-            operation.stages.push(Stage::done(
-                StageKind::ProviderResume,
-                format!("round={round} results={result_count}"),
-                None,
-                None,
             ));
         }
     }

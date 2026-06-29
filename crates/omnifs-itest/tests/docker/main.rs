@@ -25,7 +25,7 @@ fn inspect_body(status: &str, running: bool) -> Vec<u8> {
 }
 
 fn resume_http(op: &mut TestOp<'_>, body: Vec<u8>) {
-    op.resume(vec![CalloutResult::HttpResponse(HttpResponse {
+    op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: Vec::new(),
         body,

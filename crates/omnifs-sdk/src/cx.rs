@@ -1,18 +1,12 @@
-//! Handler execution context and callout batching.
+//! Handler execution context and concurrent callout polling.
 //!
 //! [`Cx<State>`](Cx) is what an async handler holds: typed provider state
-//! plus the operation's callout machinery. Awaiting a callout future pushes
-//! the callout onto the yield queue and suspends; the runtime drains the
-//! queue after every poll and hands the batch to the host, which runs it
-//! concurrently and resumes the operation with results in batch order.
-//! Every callout is strictly request/response: each one yielded expects
-//! exactly one typed result back, matched positionally, not by id.
+//! plus op-level metadata such as the host-assigned operation id and cached
+//! validator. Awaiting a callout future awaits a WIT async host import; the
+//! component runtime suspends the operation while the host executes the effect.
 //!
-//! [`join_all`] exploits that protocol to fan out N callout futures in one
-//! suspension round instead of N sequential round trips. The positional
-//! matching is also its sharp edge: every child must belong to the same
-//! `Cx` and yield exactly one callout per suspension, or sibling results
-//! silently misalign (see [`join_all`]).
+//! [`join_all`] polls sibling callout futures in one operation so the async
+//! component runtime can keep several host imports in flight at once.
 
 use crate::archives;
 use crate::git;
@@ -21,16 +15,14 @@ use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use omnifs_wit::provider::types::{Callout, CalloutResult};
-use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Execution context for async provider handlers.
 ///
-/// `Cx` separates the op-level callout machinery ([`CxShared`]: the id, the
-/// yield/deliver queues, the host-pushed validator) from the typed provider
-/// `State`. The shared part is reference-counted so cloned contexts and
-/// state-erased range readers drive callouts on the same operation.
+/// `Cx` separates op-level metadata ([`CxShared`]: the id and host-pushed
+/// validator) from the typed provider `State`. The shared part is
+/// reference-counted so cloned contexts and state-erased range readers keep
+/// the same operation identity.
 pub struct Cx<S = ()> {
     shared: Rc<CxShared>,
     state: Rc<RefCell<S>>,
@@ -47,12 +39,10 @@ impl<S> Clone for Cx<S> {
     }
 }
 
-/// Op-level callout machinery, independent of the provider state type so a
-/// state-erased [`Cx`] shares the same queues (see [`Cx::erase_state`]).
+/// Op-level metadata, independent of the provider state type so a state-erased
+/// [`Cx`] shares the same operation identity (see [`Cx::erase_state`]).
 struct CxShared {
     id: u64,
-    yielded: RefCell<Vec<Callout>>,
-    delivered: RefCell<VecDeque<CalloutResult>>,
     /// The host-pushed validator for this path's anchor, if held (ADR-0001
     /// §5.2). Set by host glue via [`Cx::with_version`]; read by handlers
     /// through [`Cx::version`].
@@ -63,37 +53,30 @@ impl<S> Cx<S> {
     /// Create a new context for the given operation id and state handle.
     pub fn new(id: u64, state: Rc<RefCell<S>>) -> Self {
         Self {
-            shared: Rc::new(CxShared {
-                id,
-                yielded: RefCell::new(Vec::new()),
-                delivered: RefCell::new(VecDeque::new()),
-                version: None,
-            }),
+            shared: Rc::new(CxShared { id, version: None }),
             state,
         }
     }
 
     /// Attach the host-pushed validator for this anchor. Called by host glue
     /// before a handler or `Object::load` runs; the validator is read back via
-    /// [`Self::version`]. Rebuilds the shared cell (fresh queues) because the
-    /// validator is fixed for the lifetime of a single operation.
+    /// [`Self::version`]. Rebuilds the shared cell because the validator is
+    /// fixed for the lifetime of a single operation.
     #[doc(hidden)]
     #[must_use]
     pub fn with_version(self, version: Option<crate::file_attrs::VersionToken>) -> Self {
         Self {
             shared: Rc::new(CxShared {
                 id: self.shared.id,
-                yielded: RefCell::new(Vec::new()),
-                delivered: RefCell::new(VecDeque::new()),
                 version,
             }),
             state: Rc::clone(&self.state),
         }
     }
 
-    /// A state-erased view sharing this operation's callout machinery. Used by
-    /// ranged readers, whose handle type is state-erased but whose callouts
-    /// still suspend and resume on the operation the runtime is driving.
+    /// A state-erased view sharing this operation's identity. Used by ranged
+    /// readers, whose handle type is state-erased but whose callouts still run
+    /// under the operation the runtime is driving.
     #[doc(hidden)]
     pub fn erase_state(&self) -> Cx<()> {
         Cx {
@@ -107,6 +90,11 @@ impl<S> Cx<S> {
     /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`].
     pub fn version(&self) -> Option<&crate::file_attrs::VersionToken> {
         self.shared.version.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn id(&self) -> u64 {
+        self.shared.id
     }
 
     /// A typed handle to an outbound [`crate::endpoint::Endpoint`] value. Pass
@@ -150,51 +138,12 @@ impl<S> Cx<S> {
     pub fn archives(&self) -> archives::Builder<'_, S> {
         archives::Builder::new(self)
     }
-
-    /// Drain the callouts queued since the last poll. Exposed for the
-    /// WIT-boundary test harness, which drives the suspend/resume loop by
-    /// draining yielded callouts and pushing canned results; the host runtime
-    /// glue uses the same queue.
-    #[doc(hidden)]
-    pub fn take_yielded_callouts(&self) -> Vec<Callout> {
-        std::mem::take(&mut *self.shared.yielded.borrow_mut())
-    }
-
-    /// Deliver a callout result back to a suspended handler. Exposed for the
-    /// WIT-boundary test harness (see [`Self::take_yielded_callouts`]).
-    #[doc(hidden)]
-    pub fn push_delivered(&self, outcome: CalloutResult) {
-        self.shared.delivered.borrow_mut().push_back(outcome);
-    }
-
-    pub(crate) fn push_yielded(&self, callout: Callout) {
-        self.shared.yielded.borrow_mut().push(callout);
-    }
-
-    pub(crate) fn pop_delivered(&self) -> Option<CalloutResult> {
-        self.shared.delivered.borrow_mut().pop_front()
-    }
 }
 
 /// Run a collection of callout futures concurrently and collect their
-/// outputs in input order. All queued callouts are yielded in a single
-/// batch, so the host runs them in parallel and the whole fan-out costs one
-/// suspension round instead of one per child; on resume each child consumes
-/// its result from the delivery queue in FIFO order.
-///
-/// Correctness rests on positional alignment, and violations are NOT
-/// detected; they surface as siblings receiving each other's results (or a
-/// type-mismatch error at best). Every child future MUST:
-///
-/// - belong to the same `Cx` as its siblings (results are delivered to one
-///   operation queue; a child bound to another `Cx` never sees its result
-///   and steals nothing from the queue it should have used), and
-/// - yield exactly one callout per suspension, the [`crate::http::CalloutFuture`]
-///   shape. A child that yields two callouts from one poll, or polls
-///   `Pending` without yielding, shifts every later sibling's result.
-///
-/// Plain SDK callout futures (HTTP sends, blob fetches, git opens, archive
-/// opens) and async fns that await them sequentially all satisfy this.
+/// outputs in input order. Polling every child before returning `Pending`
+/// starts every generated async host import the child reaches, so the host can
+/// run the corresponding HTTP, git, blob, or archive work concurrently.
 ///
 /// ```ignore
 /// let pages = join_all(
@@ -216,9 +165,8 @@ where
 }
 
 /// Future returned by [`join_all`]. Polls children in index order, which is
-/// what keeps yield order (and therefore delivery order) aligned with input
-/// order across suspension rounds; children finish independently and the
-/// output preserves input positions.
+/// what starts sibling host imports promptly; children finish independently and
+/// the output preserves input positions.
 pub struct JoinAll<F: Future> {
     futures: Vec<Option<Pin<Box<F>>>>,
     results: Vec<Option<F::Output>>,
@@ -264,41 +212,18 @@ impl<F: Future> Future for JoinAll<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
-    use std::task::Waker;
+    use std::future::ready;
 
     #[test]
-    fn join_all_yields_all_callouts_in_a_single_batch() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let f1 = cx.http().get("https://a.example/").send();
-        let f2 = cx.http().get("https://b.example/").send();
-        let f3 = cx.http().get("https://c.example/").send();
-
-        let mut combined = Box::pin(join_all([f1, f2, f3]));
-        let waker = Waker::noop();
+    fn join_all_preserves_input_order_for_ready_children() {
+        let mut combined = Box::pin(join_all([ready("a"), ready("b"), ready("c")]));
+        let waker = std::task::Waker::noop();
         let mut ctx = Context::from_waker(waker);
-        assert!(matches!(combined.as_mut().poll(&mut ctx), Poll::Pending,));
-
-        let yielded = cx.take_yielded_callouts();
-        assert_eq!(yielded.len(), 3);
-
-        for body in ["a", "b", "c"] {
-            cx.push_delivered(CalloutResult::HttpResponse(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: body.as_bytes().to_vec(),
-            }));
-        }
 
         let Poll::Ready(results) = combined.as_mut().poll(&mut ctx) else {
-            panic!("expected ready after delivery");
+            panic!("expected ready children to complete");
         };
-        let bodies: Vec<Vec<u8>> = results
-            .into_iter()
-            .map(|r| r.unwrap().into_body())
-            .collect();
-        assert_eq!(bodies, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+
+        assert_eq!(results, ["a", "b", "c"]);
     }
 }

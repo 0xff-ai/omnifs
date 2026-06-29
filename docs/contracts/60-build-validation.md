@@ -15,6 +15,10 @@ Provider WASM artifacts are built with the pinned wasi-sdk. `just providers buil
 
 Install the pinned wasi-sdk with `just providers wasi-sdk` when needed. Run `just providers build` before host tests that need generated provider artifacts. Use `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` after prebuilding providers for nextest runs that would otherwise contend (`just host test` sets it for you).
 
+Provider runtime changes must validate both binding surfaces separately: `omnifs-wit` host bindings with `--features host-bindings`, and SDK/provider guest bindings without that feature. Do not combine those into one Cargo invocation that enables host bindings while compiling the SDK.
+
+Provider component validation must enable the component-model async validation features used by provider exports.
+
 ### Generated OpenAPI and schemas
 
 OpenAPI is generated from daemon implementation, and provider manifest schema is generated from provider model types. Keep generated artifacts synchronized with code.

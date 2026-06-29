@@ -17,6 +17,7 @@ pub mod provider {
         world: "provider",
         path: "wit",
         pub_export_macro: true,
+        generate_unused_types: true,
         additional_derives: [Clone, serde::Serialize, serde::Deserialize],
     });
 
@@ -60,47 +61,6 @@ pub mod provider {
         #[must_use]
         pub fn expect_result(self) -> types::OpResult {
             self.result
-        }
-    }
-
-    impl types::ProviderStep {
-        /// Suspension: callouts to run before the host calls `resume`.
-        #[must_use]
-        pub fn suspend(callouts: Vec<types::Callout>) -> Self {
-            Self::Suspended(callouts)
-        }
-
-        /// Completed operation answer.
-        #[must_use]
-        pub fn returned(ret: types::ProviderReturn) -> Self {
-            Self::Returned(ret)
-        }
-
-        /// True when the provider needs the host to run callouts and resume
-        /// the same operation.
-        #[must_use]
-        pub fn is_suspended(&self) -> bool {
-            matches!(self, Self::Suspended(callouts) if !callouts.is_empty())
-        }
-
-        /// Unwrap the terminal result, panicking if the step is suspended.
-        /// Intended for test assertions.
-        #[must_use]
-        pub fn expect_returned(self) -> types::ProviderReturn {
-            match self {
-                Self::Returned(ret) => ret,
-                Self::Suspended(_) => panic!("expected returned provider step, got suspended"),
-            }
-        }
-
-        /// Take the staged callouts, panicking if the step is terminal.
-        /// Intended for test assertions.
-        #[must_use]
-        pub fn expect_callouts(self) -> Vec<types::Callout> {
-            match self {
-                Self::Suspended(callouts) => callouts,
-                Self::Returned(_) => panic!("expected suspended provider step, got returned"),
-            }
         }
     }
 

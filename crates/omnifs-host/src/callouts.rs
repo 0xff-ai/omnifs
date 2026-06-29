@@ -2,10 +2,11 @@
 //!
 //! # Dispatch
 //!
-//! `Runtime::dispatch_callouts` walks the suspended callout
-//! batch, routes each variant to its executor, and returns the matching
-//! `CalloutResult` list to `continuation.resume`. `run_callout`'s match
-//! is exhaustive; adding a WIT callout requires adding a real executor arm.
+//! `CalloutHost` implements the host side of the provider's async callout
+//! imports. Each import routes one callout variant to its executor and returns
+//! the matching `CalloutResult` directly to the suspended component future.
+//! `CalloutHost::run` is exhaustive; adding a WIT callout requires adding a
+//! real executor arm.
 //!
 //! # Layering: only the public boundary builds `CalloutResult`
 //!
@@ -27,11 +28,10 @@
 //! `RUST_LOG=omnifs_callout=info` filters everything in this layer
 //! without bringing in unrelated host tracing.
 //!
-//! Each callout produces an outer `callout` span from `dispatch_one`
-//! with operation id, batch index, and kind, plus an executor span on
-//! the public method that owns request and outcome fields for that
-//! callout. URL and header fields render through redacting display
-//! wrappers.
+//! Each callout produces an outer `callout` span from `CalloutHost::dispatch`
+//! with operation id, callout index, and kind, plus an executor span on the
+//! public method that owns request and outcome fields for that callout. URL and
+//! header fields render through redacting display wrappers.
 //!
 //! Every field a span ever records via `Span::record` must appear in
 //! its `#[instrument(fields(...))]` declaration. `tracing` silently
@@ -46,27 +46,38 @@
 //! # Adding a callout
 //!
 //! 1. Add the WIT `callout` variant and `callout-result` arm.
-//! 2. Add a new `CalloutKind` variant + `as_str` mapping in this file.
+//! 2. Add a new `CalloutKind` variant + strum label in this file.
 //! 3. Extend `CalloutKind::of` exhaustively (no wildcard arm).
 //! 4. Add the executor public method with
 //!    `#[tracing::instrument(target = "omnifs_callout", skip_all,
 //!    fields(...))]` listing all fields (use `field::Empty` for
 //!    late-bound ones) and calling `record_outcome(&result)` before
 //!    return.
-//! 5. Add a `run_callout` arm dispatching to it.
+//! 5. Add a `CalloutHost::run` arm dispatching to it.
 
-use crate::Runtime;
+use crate::archive::ArchiveExecutor;
+use crate::blob::BlobExecutor;
+use crate::git::GitExecutor;
+use crate::http::HttpStack;
 use crate::inspector::InspectorCallout;
 use crate::log_redaction::WitHeaders;
 use omnifs_wit::provider::types as wit_types;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use tracing::Instrument;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, strum::IntoStaticStr)]
 pub(crate) enum CalloutKind {
+    #[strum(serialize = "http.fetch")]
     HttpFetch,
+    #[strum(serialize = "git.open_repo")]
     GitOpenRepo,
+    #[strum(serialize = "blob.fetch")]
     BlobFetch,
+    #[strum(serialize = "archive.open")]
     OpenArchive,
+    #[strum(serialize = "blob.read")]
     ReadBlob,
 }
 
@@ -78,16 +89,6 @@ impl CalloutKind {
             wit_types::Callout::FetchBlob(_) => Self::BlobFetch,
             wit_types::Callout::OpenArchive(_) => Self::OpenArchive,
             wit_types::Callout::ReadBlob(_) => Self::ReadBlob,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::HttpFetch => "http.fetch",
-            Self::GitOpenRepo => "git.open_repo",
-            Self::BlobFetch => "blob.fetch",
-            Self::OpenArchive => "archive.open",
-            Self::ReadBlob => "blob.read",
         }
     }
 }
@@ -121,6 +122,45 @@ pub(crate) fn callout_invalid(message: impl Into<String>) -> wit_types::CalloutR
 }
 pub(crate) fn callout_network(message: impl Into<String>) -> wit_types::CalloutResult {
     callout_error(wit_types::ErrorKind::Network, message, true)
+}
+
+/// Test-only capture channel for provider integration tests that inspect
+/// outbound HTTP/blob imports before answering them.
+#[derive(Clone)]
+pub(crate) struct TestCallouts {
+    tx: mpsc::Sender<TestCallout>,
+}
+
+pub(crate) struct TestCallout {
+    pub(crate) op_id: u64,
+    pub(crate) callout: wit_types::Callout,
+    pub(crate) reply: tokio::sync::oneshot::Sender<wit_types::CalloutResult>,
+}
+
+impl TestCallouts {
+    pub(crate) fn channel() -> (Self, mpsc::Receiver<TestCallout>) {
+        let (tx, rx) = mpsc::channel();
+        (Self { tx }, rx)
+    }
+
+    async fn run(&self, op_id: u64, callout: wit_types::Callout) -> wit_types::CalloutResult {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .tx
+            .send(TestCallout {
+                op_id,
+                callout,
+                reply,
+            })
+            .is_err()
+        {
+            return callout_internal("test callout receiver dropped");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => callout_internal("test callout response dropped"),
+        }
+    }
 }
 
 /// Records outcome-side span fields on `Span::current()` for the active
@@ -166,37 +206,54 @@ pub(crate) fn record_outcome(result: &wit_types::CalloutResult) {
     }
 }
 
-impl Runtime {
-    /// Runs every callout concurrently and returns positionally aligned
-    /// outcomes. The SDK's `join_all` pops outcomes from a FIFO queue in
-    /// yield order, so this ordering is load-bearing.
-    pub(super) async fn dispatch_callouts(
-        &self,
-        operation_id: u64,
-        callouts: &[wit_types::Callout],
-    ) -> Vec<wit_types::CalloutResult> {
-        let futures = callouts
-            .iter()
-            .enumerate()
-            .map(|(index, callout)| self.dispatch_one(operation_id, index, callout));
-        futures::future::join_all(futures).await
+#[derive(Clone)]
+pub(crate) struct CalloutHost {
+    http: Arc<HttpStack>,
+    git: GitExecutor,
+    blob: BlobExecutor,
+    archive: Arc<ArchiveExecutor>,
+    next_callout_index: Arc<AtomicUsize>,
+    test_callouts: Option<TestCallouts>,
+}
+
+impl CalloutHost {
+    pub(crate) fn new(
+        http: Arc<HttpStack>,
+        git: GitExecutor,
+        blob: BlobExecutor,
+        archive: Arc<ArchiveExecutor>,
+    ) -> Self {
+        Self {
+            http,
+            git,
+            blob,
+            archive,
+            next_callout_index: Arc::new(AtomicUsize::new(0)),
+            test_callouts: None,
+        }
     }
 
-    async fn dispatch_one(
+    pub(crate) fn with_test_callouts(mut self, test_callouts: TestCallouts) -> Self {
+        self.test_callouts = Some(test_callouts);
+        self
+    }
+
+    pub(crate) async fn dispatch(
         &self,
         op_id: u64,
-        index: usize,
-        callout: &wit_types::Callout,
+        callout: wit_types::Callout,
     ) -> wit_types::CalloutResult {
-        let live = InspectorCallout::begin(callout, op_id, index);
+        let index = self.next_callout_index.fetch_add(1, Ordering::Relaxed);
+        let live = InspectorCallout::begin(&callout, op_id, index);
+        let kind: &'static str = CalloutKind::of(&callout).into();
         let result = self
-            .run_callout(callout, op_id)
+            .run(&callout, op_id)
             .instrument(tracing::info_span!(
                 target: "omnifs_callout",
                 "callout",
                 operation_id = op_id,
                 callout_index = index,
-                kind = CalloutKind::of(callout).as_str(),
+                kind = kind,
             ))
             .await;
         if let Some(live) = live {
@@ -205,11 +262,15 @@ impl Runtime {
         result
     }
 
-    async fn run_callout(
-        &self,
-        callout: &wit_types::Callout,
-        op_id: u64,
-    ) -> wit_types::CalloutResult {
+    async fn run(&self, callout: &wit_types::Callout, op_id: u64) -> wit_types::CalloutResult {
+        if let Some(test_callouts) = &self.test_callouts
+            && matches!(
+                callout,
+                wit_types::Callout::Fetch(_) | wit_types::Callout::FetchBlob(_)
+            )
+        {
+            return test_callouts.run(op_id, callout.clone()).await;
+        }
         match callout {
             wit_types::Callout::Fetch(req) => {
                 self.http
@@ -217,9 +278,41 @@ impl Runtime {
                     .await
             },
             wit_types::Callout::FetchBlob(req) => self.blob.fetch(req).await,
-            wit_types::Callout::GitOpenRepo(req) => self.git.open_repo(req, op_id),
+            // `open_repo` shells out to `git` and blocks (clone, fetch). Run it
+            // off the single concurrent-store event-loop thread so other
+            // in-flight provider ops on this instance keep progressing while it
+            // runs; awaiting the blocking task yields `Pending` to the loop.
+            wit_types::Callout::GitOpenRepo(req) => {
+                let git = self.git.clone();
+                let req = req.clone();
+                let span = tracing::Span::current();
+                spawn_blocking_callout("git.open_repo", move || {
+                    span.in_scope(|| git.open_repo(&req, op_id))
+                })
+                .await
+            },
             wit_types::Callout::OpenArchive(req) => self.archive.open(req).await,
-            wit_types::Callout::ReadBlob(req) => self.blob.read(req),
+            // Synchronous bounded disk read; offloaded for the same reason as
+            // `git.open_repo` so a slow read never stalls the event loop.
+            wit_types::Callout::ReadBlob(req) => {
+                let blob = self.blob.clone();
+                let req = *req;
+                let span = tracing::Span::current();
+                spawn_blocking_callout("blob.read", move || span.in_scope(|| blob.read(&req))).await
+            },
         }
+    }
+}
+
+/// Run a blocking executor call on the Tokio blocking pool and surface a join
+/// failure as an internal `CalloutResult`. Keeps synchronous host work off the
+/// component event-loop thread so concurrent provider ops are not serialized.
+async fn spawn_blocking_callout(
+    label: &'static str,
+    f: impl FnOnce() -> wit_types::CalloutResult + Send + 'static,
+) -> wit_types::CalloutResult {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(join_error) => callout_internal(format!("{label} task failed: {join_error}")),
     }
 }

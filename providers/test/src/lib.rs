@@ -355,6 +355,11 @@ impl TestProvider {
         r.file("/hello/projected").handler(projected)?;
         r.file("/hello/lazy").handler(lazy)?;
         r.file("/hello/fresh-full").handler(fresh_full)?;
+        // Each suspends on an HTTP callout. Two distinct paths (so reads do not
+        // coalesce) let the host concurrency test hold two ops in flight at once
+        // to prove independent ops interleave on one instance.
+        r.file("/hello/remote-a").handler(remote)?;
+        r.file("/hello/remote-b").handler(remote)?;
         r.file("/hello/ranged").ranged().handler(ranged)?;
         r.file("/hello/unknown-ranged")
             .ranged()
@@ -462,6 +467,14 @@ async fn fresh_full(cx: Cx<State>) -> Result<FileProjection> {
             .dynamic()
             .build(),
     )
+}
+
+/// Issues a single HTTP callout and returns its body verbatim. The handler
+/// suspends on the async host import, so the host concurrency test can hold two
+/// of these in flight simultaneously on one provider instance.
+async fn remote(cx: Cx<State>) -> Result<FileProjection> {
+    let resp = cx.http().get("https://httpbin.org/get").send().await?;
+    Ok(FileProjection::body(resp.into_body()).dynamic().build())
 }
 
 // ===========================================================================

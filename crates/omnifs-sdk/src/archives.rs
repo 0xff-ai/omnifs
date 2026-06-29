@@ -108,7 +108,7 @@ impl<'cx, S> OpenRequest<'cx, S> {
     /// handle per operation rather than persisting it: the host caches
     /// extraction by blob, format, and strip prefix, so repeated opens are
     /// cheap.
-    pub fn send(self) -> CalloutFuture<'cx, S, TreeRef> {
+    pub fn send(self) -> CalloutFuture<'cx, TreeRef> {
         let request = ArchiveOpenRequest {
             blob: self.blob.raw(),
             format: self.format.into(),

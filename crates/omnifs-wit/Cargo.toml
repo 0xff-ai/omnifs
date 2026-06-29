@@ -15,7 +15,7 @@ host-bindings = ["dep:wasmtime"]
 
 [dependencies]
 serde = { workspace = true }
-wit-bindgen = "0.41"
+wit-bindgen = "0.57.1"
 wasmtime = { workspace = true, optional = true }
 
 [lints]

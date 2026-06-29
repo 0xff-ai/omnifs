@@ -1,13 +1,17 @@
 //! `Instance` — the Wasmtime mechanics boundary.
 //!
 //! Owns the wasm store, the generated bindings, and the serialized
-//! provider config. Every method takes a fresh store lock per call.
+//! provider config. A dedicated driver thread keeps Wasmtime's concurrent
+//! store event loop alive so independent host tasks can start provider
+//! calls while earlier calls are suspended on async host imports.
 //! `Runtime` composes this with orchestration concerns
 //! (executors, caches, activity, invalidation, inflight).
 
 use std::path::{Component as PathComponent, Path, PathBuf};
+use std::sync::Arc;
 
-use parking_lot::Mutex;
+use crate::callouts::CalloutHost;
+use futures::StreamExt;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
@@ -18,15 +22,33 @@ use crate::{BuildError, Error, Op};
 use omnifs_caps::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
 
-/// Owns the WASM component instance and serialized provider config.
-///
-/// All Wasmtime store access goes through this type. Methods acquire
-/// the store lock on entry and release it on return; no caller holds
-/// the store across host-side work.
+#[derive(Clone)]
 pub struct Instance {
-    store: Mutex<wasmtime::Store<HostState>>,
-    bindings: Provider,
+    tx: tokio::sync::mpsc::UnboundedSender<Command>,
     config_bytes: Vec<u8>,
+}
+
+enum Command {
+    SetCallouts {
+        callouts: CalloutHost,
+        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+    },
+    Initialize {
+        config_bytes: Vec<u8>,
+        reply: std::sync::mpsc::Sender<std::result::Result<wit_types::ProviderReturn, Error>>,
+    },
+    StartOp {
+        op: Op,
+        id: u64,
+        reply: tokio::sync::oneshot::Sender<std::result::Result<wit_types::ProviderReturn, Error>>,
+    },
+    Shutdown {
+        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+    },
+    CloseFile {
+        handle: u64,
+        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+    },
 }
 
 impl Instance {
@@ -36,172 +58,253 @@ impl Instance {
         config_bytes: Vec<u8>,
         preopens: &[PreopenedPath],
     ) -> std::result::Result<Self, BuildError> {
-        let mut linker = Linker::<HostState>::new(engine);
-        wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
-        Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let engine = engine.clone();
+        let wasm_path = wasm_path.to_path_buf();
+        let preopens = preopens.to_vec();
 
-        let component = Component::from_file(engine, wasm_path)?;
-        let wasi = build_wasi_ctx(preopens)?;
-        let mut store = wasmtime::Store::new(
-            engine,
-            HostState {
-                wasi,
-                table: ResourceTable::new(),
-            },
-        );
+        std::thread::Builder::new()
+            .name("omnifs-provider-instance".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(BuildError::ProviderProtocol(format!(
+                            "provider driver runtime: {error}"
+                        ))));
+                        return;
+                    },
+                };
+                runtime.block_on(async move {
+                    match build_driver_state(&engine, &wasm_path, &preopens).await {
+                        Ok((store, bindings)) => {
+                            let _ = ready_tx.send(Ok(()));
+                            if let Err(error) = drive_instance(store, bindings, rx).await {
+                                tracing::error!(error = %error, "provider instance driver exited");
+                            }
+                        },
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error));
+                        },
+                    }
+                });
+            })
+            .map_err(|error| {
+                BuildError::ProviderProtocol(format!("spawn provider driver: {error}"))
+            })?;
 
-        let bindings = Provider::instantiate(&mut store, &component, &linker)?;
+        ready_rx.recv().map_err(|error| {
+            BuildError::ProviderProtocol(format!("provider driver did not start: {error}"))
+        })??;
 
-        Ok(Self {
-            store: Mutex::new(store),
-            bindings,
-            config_bytes,
-        })
+        Ok(Self { tx, config_bytes })
     }
 
-    pub fn start_op(
+    pub(crate) async fn start_op(
         &self,
-        op: &Op,
+        op: Op,
         id: u64,
-    ) -> std::result::Result<wit_types::ProviderStep, Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            let namespace = self.bindings.omnifs_provider_namespace();
-            match op {
-                Op::LookupChild { parent_path, name } => namespace
-                    .call_lookup_child(&mut *store, id, parent_path.as_str(), name.as_str())
-                    .map_err(Into::into),
-                Op::ListChildren {
-                    path,
-                    cached_validator,
-                    cursor,
-                } => namespace
-                    .call_list_children(
-                        &mut *store,
-                        id,
-                        path.as_str(),
-                        cached_validator.as_deref(),
-                        cursor.as_ref(),
-                    )
-                    .map_err(Into::into),
-                Op::ReadFile {
-                    path,
-                    content_type,
-                    cached_canonical,
-                } => namespace
-                    .call_read_file(
-                        &mut *store,
-                        id,
-                        path.as_str(),
-                        content_type,
-                        cached_canonical.as_ref(),
-                    )
-                    .map_err(Into::into),
-                Op::OpenFile { path } => namespace
-                    .call_open_file(&mut *store, id, path.as_str())
-                    .map_err(Into::into),
-                Op::ReadChunk {
-                    handle,
-                    offset,
-                    length,
-                } => namespace
-                    .call_read_chunk(&mut *store, id, *handle, *offset, *length)
-                    .map_err(Into::into),
-                Op::OnEvent { event } => self
-                    .bindings
-                    .omnifs_provider_notify()
-                    .call_on_event(&mut *store, id, event)
-                    .map_err(Into::into),
-                // `Op::Initialize` is driven directly through
-                // `Instance::initialize`: the WIT lifecycle method
-                // returns a `provider-return`, never suspends, and has no
-                // correlation id. The variant remains in the `Op` enum so
-                // `finish_provider_return` and `Validator` can tag the
-                // initialize result with the operation that produced it.
-                Op::Initialize => {
-                    unreachable!("Op::Initialize never reaches start_op; see Instance::initialize")
-                },
-            }
-        })
-    }
-
-    #[allow(clippy::needless_pass_by_value)] // generated WIT binding requires &Vec
-    pub fn resume(
-        &self,
-        id: u64,
-        results: Vec<wit_types::CalloutResult>,
-    ) -> std::result::Result<wit_types::ProviderStep, Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            Ok(self.bindings.omnifs_provider_continuation().call_resume(
-                &mut *store,
-                id,
-                &results,
-            )?)
-        })
+    ) -> std::result::Result<wit_types::ProviderReturn, Error> {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::StartOp { op, id, reply })
+            .map_err(|_| Error::ProviderProtocol("provider instance driver stopped".to_string()))?;
+        recv.await
+            .map_err(|_| Error::ProviderProtocol("provider operation reply dropped".to_string()))?
     }
 
     pub fn initialize(&self) -> std::result::Result<wit_types::ProviderReturn, Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            Ok(self
-                .bindings
-                .omnifs_provider_lifecycle()
-                .call_initialize(&mut *store, &self.config_bytes)?)
+        self.call_sync(|reply| Command::Initialize {
+            config_bytes: self.config_bytes.clone(),
+            reply,
         })
+    }
+
+    pub(crate) fn set_callouts(&self, callouts: CalloutHost) -> std::result::Result<(), Error> {
+        self.call_sync(|reply| Command::SetCallouts { callouts, reply })
     }
 
     pub fn shutdown(&self) -> std::result::Result<(), Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            self.bindings
-                .omnifs_provider_lifecycle()
-                .call_shutdown(&mut *store)?;
-            Ok(())
-        })
+        self.call_sync(|reply| Command::Shutdown { reply })
     }
 
     pub fn close_file(&self, handle: u64) -> std::result::Result<(), Error> {
-        without_tokio_handle(|| {
-            let mut store = self.store.lock();
-            self.bindings
-                .omnifs_provider_namespace()
-                .call_close_file(&mut *store, handle)?;
-            Ok(())
-        })
+        self.call_sync(|reply| Command::CloseFile { handle, reply })
+    }
+
+    fn call_sync<T>(
+        &self,
+        build: impl FnOnce(std::sync::mpsc::Sender<std::result::Result<T, Error>>) -> Command,
+    ) -> std::result::Result<T, Error> {
+        let (reply, recv) = std::sync::mpsc::channel();
+        self.tx
+            .send(build(reply))
+            .map_err(|_| Error::ProviderProtocol("provider instance driver stopped".to_string()))?;
+        recv.recv()
+            .map_err(|_| Error::ProviderProtocol("provider instance reply dropped".to_string()))?
     }
 }
 
-/// Run a synchronous wasmtime call without an ambient tokio
-/// runtime handle.
-///
-/// The host uses `wasmtime_wasi::p2::add_to_linker_sync`. When the
-/// guest reaches into WASI (preopened files, sockets, etc.) the shim
-/// calls `tokio::runtime::Handle::try_current()`. If a handle is
-/// present, the shim does `handle.block_on(future)`, which panics on
-/// a tokio worker thread with "Cannot start a runtime from within a
-/// runtime".
-///
-/// FUSE callbacks reach this code through `rt.block_on(...)`, so the
-/// tokio handle is current here. We hop to a fresh OS thread that
-/// has no handle; `try_current()` returns `Err` there and the WASI
-/// shim falls through to its standalone `RUNTIME` singleton.
-///
-/// `Store<T>` is `Send` as long as the `WasiView` data is, and the
-/// lock guard never crosses the thread boundary because the closure
-/// owns it. This is a per-call thread spawn; the cost is one OS
-/// thread per FUSE op, which is acceptable for the current latency
-/// budget. A long-lived owner thread per provider is the obvious
-/// next optimisation.
-fn without_tokio_handle<R, F>(f: F) -> R
-where
-    F: FnOnce() -> R + Send,
-    R: Send,
-{
-    if tokio::runtime::Handle::try_current().is_err() {
-        return f();
+async fn build_driver_state(
+    engine: &wasmtime::Engine,
+    wasm_path: &Path,
+    preopens: &[PreopenedPath],
+) -> std::result::Result<(wasmtime::Store<HostState>, Provider), BuildError> {
+    let mut linker = Linker::<HostState>::new(engine);
+    wasm::add_wasi_to_linker::<HostState>(&mut linker)?;
+    Provider::add_to_linker::<HostState, HostState>(&mut linker, |state| state)?;
+
+    let component = Component::from_file(engine, wasm_path)?;
+    let wasi = build_wasi_ctx(preopens)?;
+    let mut store = wasmtime::Store::new(
+        engine,
+        HostState {
+            wasi,
+            table: ResourceTable::new(),
+            callouts: None,
+        },
+    );
+
+    let bindings = Provider::instantiate_async(&mut store, &component, &linker).await?;
+    Ok((store, bindings))
+}
+
+async fn drive_instance(
+    mut store: wasmtime::Store<HostState>,
+    bindings: Provider,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> wasmtime::Result<()> {
+    let bindings = Arc::new(bindings);
+    store
+        .run_concurrent(async |accessor| -> wasmtime::Result<()> {
+            let mut calls = futures::stream::FuturesUnordered::new();
+            loop {
+                tokio::select! {
+                    Some(command) = rx.recv() => {
+                        match command {
+                            Command::SetCallouts { callouts, reply } => {
+                                accessor.with(|mut access| {
+                                    access.get().callouts = Some(callouts);
+                                });
+                                let _ = reply.send(Ok(()));
+                            },
+                            Command::Initialize { config_bytes, reply } => {
+                                let lifecycle = bindings.omnifs_provider_lifecycle();
+                                let result = match accessor.with(|access| {
+                                    lifecycle
+                                        .func_initialize()
+                                        .func()
+                                        .typed::<(Vec<u8>,), (wit_types::ProviderReturn,)>(&access)
+                                }) {
+                                    Ok(initialize) => initialize
+                                        .call_concurrent(accessor, (config_bytes,))
+                                        .await
+                                        .map(|(ret,)| ret),
+                                    Err(error) => Err(error),
+                                }
+                                .map_err(Into::into);
+                                let _ = reply.send(result);
+                            },
+                            Command::StartOp { op, id, reply } => {
+                                let bindings = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = call_op(&bindings, accessor, op, id).await;
+                                    let _ = reply.send(result);
+                                }));
+                            },
+                            Command::Shutdown { reply } => {
+                                let shutdown = bindings.omnifs_provider_lifecycle().func_shutdown();
+                                let result = shutdown
+                                    .call_concurrent(accessor, ())
+                                    .await
+                                    .map_err(Into::into);
+                                let _ = reply.send(result);
+                                break;
+                            },
+                            Command::CloseFile { handle, reply } => {
+                                let close_file =
+                                    bindings.omnifs_provider_namespace().func_close_file();
+                                let result = close_file
+                                    .call_concurrent(accessor, (handle,))
+                                    .await
+                                    .map_err(Into::into);
+                                let _ = reply.send(result);
+                            },
+                        }
+                    },
+                    Some(()) = calls.next(), if !calls.is_empty() => {},
+                    else => break,
+                }
+            }
+            Ok(())
+        })
+        .await?
+}
+
+async fn call_op(
+    bindings: &Provider,
+    accessor: &wasmtime::component::Accessor<HostState>,
+    op: Op,
+    id: u64,
+) -> std::result::Result<wit_types::ProviderReturn, Error> {
+    let namespace = bindings.omnifs_provider_namespace();
+    match op {
+        Op::LookupChild { parent_path, name } => Ok(namespace
+            .call_lookup_child(
+                accessor,
+                id,
+                parent_path.as_str().to_string(),
+                name.as_str().to_string(),
+            )
+            .await?),
+        Op::ListChildren {
+            path,
+            cached_validator,
+            cursor,
+        } => Ok(namespace
+            .call_list_children(
+                accessor,
+                id,
+                path.as_str().to_string(),
+                cached_validator,
+                cursor,
+            )
+            .await?),
+        Op::ReadFile {
+            path,
+            content_type,
+            cached_canonical,
+        } => Ok(namespace
+            .call_read_file(
+                accessor,
+                id,
+                path.as_str().to_string(),
+                content_type,
+                cached_canonical,
+            )
+            .await?),
+        Op::OpenFile { path } => Ok(namespace
+            .call_open_file(accessor, id, path.as_str().to_string())
+            .await?),
+        Op::ReadChunk {
+            handle,
+            offset,
+            length,
+        } => Ok(namespace
+            .call_read_chunk(accessor, id, handle, offset, length)
+            .await?),
+        Op::OnEvent { event } => Ok(bindings
+            .omnifs_provider_notify()
+            .call_on_event(accessor, id, event)
+            .await?),
+        Op::Initialize => {
+            unreachable!("Op::Initialize never reaches start_op; see Instance::initialize")
+        },
     }
-    std::thread::scope(|s| s.spawn(f).join().expect("wasmtime worker thread panicked"))
 }
 
 fn build_wasi_ctx(
