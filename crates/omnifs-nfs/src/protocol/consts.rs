@@ -53,6 +53,7 @@ pub(crate) const NFS4ERR_BADHANDLE: u32 = 10001;
 pub(crate) const NFS4ERR_BAD_COOKIE: u32 = 10003;
 pub(crate) const NFS4ERR_NOTSUPP: u32 = 10004;
 pub(crate) const NFS4ERR_TOOSMALL: u32 = 10005;
+pub(crate) const NFS4ERR_DELAY: u32 = 10008;
 pub(crate) const NFS4ERR_EXPIRED: u32 = 10011;
 pub(crate) const NFS4ERR_FHEXPIRED: u32 = 10014;
 pub const NFS4ERR_RESOURCE: u32 = 10018;

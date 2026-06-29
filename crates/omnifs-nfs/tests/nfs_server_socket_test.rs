@@ -1,10 +1,13 @@
 mod support;
 
-use omnifs_nfs::{NFS4_OK, ReadOnlyExport, start_server};
+use omnifs_nfs::{
+    Attr, DirListing, NFS4_OK, NodeKind, OpenRead, OpenResult, ReadOnlyExport, StateId, Status,
+    StatusResult, start_server,
+};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const RPC_CALL: u32 = 0;
@@ -85,6 +88,173 @@ fn nfs_tcp_server_lists_reads_and_closes_through_runtime() {
     assert!(eof);
     client.close(&large);
     let _ = std::fs::remove_file(trace_path);
+}
+
+#[test]
+fn nfs_tcp_server_dispatches_rpcs_concurrently() {
+    // A slow READDIR must not head-of-line block a later RPC on the same
+    // connection: the fast GETFH reply has to come back while the READDIR is
+    // still parked in the provider. A serial read/handle/write loop would be
+    // stuck inside the parked READDIR and never reach the GETFH, so this test
+    // would time out instead of passing.
+    let gate = Gate::default();
+    let export: Arc<dyn ReadOnlyExport> = Arc::new(GateExport { gate: gate.clone() });
+    let server = start_server(
+        export,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        None,
+    )
+    .expect("start loopback NFS server");
+
+    let mut stream = TcpStream::connect(server.addr()).expect("connect NFS server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout");
+
+    let slow_xid = 9001;
+    write_rpc_record(
+        &mut stream,
+        &rpc_call(
+            slow_xid,
+            &compound_payload(&[op_only(OP_PUTROOTFH), op_readdir()]),
+        ),
+    );
+
+    // Block until the slow handler is parked inside the gated READDIR, then race
+    // a fast GETFH on the same connection.
+    Gate::wait(&gate.entered);
+    let fast_xid = 9002;
+    write_rpc_record(
+        &mut stream,
+        &rpc_call(
+            fast_xid,
+            &compound_payload(&[op_only(OP_PUTROOTFH), op_only(OP_GETFH)]),
+        ),
+    );
+
+    let first = read_reply_xid(&mut stream);
+    assert_eq!(
+        first, fast_xid,
+        "fast GETFH reply must return while the slow READDIR is still parked"
+    );
+
+    // Release the parked handler; its reply is still framed back afterwards.
+    Gate::signal(&gate.released);
+    let second = read_reply_xid(&mut stream);
+    assert_eq!(
+        second, slow_xid,
+        "the released READDIR reply is delivered after the fast reply"
+    );
+}
+
+/// Two one-shot condition flags used to rendezvous the test thread with a
+/// handler thread parked inside the gated export.
+#[derive(Clone, Default)]
+struct Gate {
+    entered: Arc<(Mutex<bool>, Condvar)>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Gate {
+    fn signal(slot: &(Mutex<bool>, Condvar)) {
+        *slot.0.lock().expect("gate lock") = true;
+        slot.1.notify_all();
+    }
+
+    fn wait(slot: &(Mutex<bool>, Condvar)) {
+        let mut flag = slot.0.lock().expect("gate lock");
+        while !*flag {
+            flag = slot.1.wait(flag).expect("gate wait");
+        }
+    }
+}
+
+/// Export whose root `readdir` parks on a gate while every other operation
+/// returns immediately, so a slow READDIR and a fast GETFH can be raced over a
+/// single connection.
+struct GateExport {
+    gate: Gate,
+}
+
+impl ReadOnlyExport for GateExport {
+    fn root(&self) -> u64 {
+        1
+    }
+
+    fn attr(&self, id: u64) -> StatusResult<Attr> {
+        Ok(Attr {
+            id,
+            parent: 1,
+            kind: NodeKind::Directory,
+            size: 0,
+            mode: 0o555,
+            change: 1,
+            mtime_sec: 0,
+        })
+    }
+
+    fn lookup(&self, _parent: u64, _name: &str) -> StatusResult<u64> {
+        Err(Status::NoEnt)
+    }
+
+    fn readdir(&self, _id: u64) -> StatusResult<DirListing> {
+        Gate::signal(&self.gate.entered);
+        Gate::wait(&self.gate.released);
+        Ok(DirListing {
+            entries: Vec::new(),
+            exhaustive: true,
+        })
+    }
+
+    fn read(&self, _id: u64) -> StatusResult<Vec<u8>> {
+        Err(Status::Invalid)
+    }
+
+    fn readlink(&self, _id: u64) -> StatusResult<Vec<u8>> {
+        Err(Status::Invalid)
+    }
+
+    fn open_state(
+        &self,
+        _generation: u64,
+        _id: u64,
+        _clientid: u64,
+        _access: u32,
+    ) -> StatusResult<OpenResult> {
+        Err(Status::Invalid)
+    }
+
+    fn validate_state(&self, _stateid: StateId) -> StatusResult<()> {
+        Err(Status::BadStateId)
+    }
+
+    fn read_state(&self, _stateid: StateId, _offset: u64, _count: u32) -> StatusResult<OpenRead> {
+        Err(Status::BadStateId)
+    }
+
+    fn close_state(&self, stateid: StateId) -> StatusResult<StateId> {
+        Ok(stateid)
+    }
+
+    fn renew_client(&self, _clientid: u64) -> StatusResult<()> {
+        Ok(())
+    }
+}
+
+fn read_reply_xid(stream: &mut TcpStream) -> u32 {
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).expect("read RPC marker");
+    let marker = u32::from_be_bytes(header);
+    assert_ne!(marker & 0x8000_0000, 0, "test expects one-fragment replies");
+    let len = usize::try_from(marker & 0x7fff_ffff).expect("record length fits usize");
+    let mut payload = vec![0; len];
+    stream
+        .read_exact(&mut payload)
+        .expect("read RPC response payload");
+    u32::from_be_bytes(payload[..4].try_into().expect("xid is u32"))
 }
 
 struct NfsTcpClient {

@@ -8,13 +8,23 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 const MAX_CONNECTIONS: usize = 64;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on concurrently-dispatched RPC handler threads across all
+/// connections. A provider-backed `readdir`/`lookup`/`read` can block on cold
+/// upstream work (a GitHub fetch, a git clone); dispatching each RPC to its own
+/// worker lets many run at once so one slow op never head-of-line blocks the
+/// rest of a connection's traffic. The cap bounds total in-flight worker
+/// threads under a request flood.
+const MAX_INFLIGHT_RPCS: usize = 128;
 
 pub struct RunningNfsServer {
     addr: SocketAddr,
@@ -66,6 +76,7 @@ pub fn start_server(
     let active_connections = Arc::new(AtomicUsize::new(0));
     let workers = Arc::new(Mutex::new(Vec::new()));
     let thread_workers = Arc::clone(&workers);
+    let slots = RpcSlots::new(MAX_INFLIGHT_RPCS);
     let thread = thread::spawn(move || {
         loop {
             match listener.accept() {
@@ -100,16 +111,19 @@ pub fn start_server(
                     }
                     let export = Arc::clone(&export);
                     let clients = Arc::clone(&clients);
+                    let slots = Arc::clone(&slots);
                     let trace = trace.clone();
+                    let conn_trace = trace.clone();
                     trace.line(&format!("connection peer={peer:?}"));
                     let worker = thread::spawn(move || {
                         let _connection_permit = connection_permit;
                         if let Err(error) = serve_connection(
                             stream,
                             generation,
-                            clients.as_ref(),
-                            export.as_ref(),
-                            &trace,
+                            &clients,
+                            &export,
+                            &conn_trace,
+                            &slots,
                         ) {
                             trace.line(&format!("connection_closed peer={peer:?} err={error}"));
                         }
@@ -136,30 +150,152 @@ pub fn start_server(
     })
 }
 
+/// Serve one client connection with concurrent RPC dispatch.
+///
+/// The read side keeps `stream` and, for each record, hands the work to a
+/// dedicated handler thread instead of running it inline. A slow
+/// provider-backed op therefore no longer blocks the next RPC on the same
+/// connection (NFSv4.0 funnels a mount's traffic over one or a few
+/// connections, so inline blocking wedged the whole mount). Replies carry their
+/// own XID, so out-of-order completion is protocol-legal; a single writer
+/// thread owns a cloned socket handle and frames each reply back as its handler
+/// finishes, serializing the wire without serializing the work.
 fn serve_connection(
     mut stream: TcpStream,
     generation: u64,
-    clients: &ClientTable,
-    export: &dyn ReadOnlyExport,
+    clients: &Arc<ClientTable>,
+    export: &Arc<dyn ReadOnlyExport>,
     trace: &Trace,
+    slots: &Arc<RpcSlots>,
 ) -> io::Result<()> {
-    loop {
-        let record = match read_rpc_record(&mut stream) {
-            Ok(Some(record)) => record,
-            Ok(None) => return Ok(()),
+    let write_stream = stream.try_clone()?;
+    let (responses, rx) = mpsc::channel::<Vec<u8>>();
+    let writer = thread::Builder::new()
+        .name("nfs-writer".to_string())
+        .spawn(move || {
+            let mut write_stream = write_stream;
+            while let Ok(payload) = rx.recv() {
+                if write_rpc_record(&mut write_stream, &payload).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn nfs writer thread");
+
+    // Per-connection count of dispatched-but-unfinished handlers. The idle read
+    // timeout reaps the connection only when this is zero; otherwise the
+    // connection stays open so an outstanding slow handler can still deliver its
+    // reply here.
+    let inflight = Arc::new(AtomicUsize::new(0));
+
+    let outcome = loop {
+        match read_rpc_record(&mut stream) {
+            Ok(Some(record)) => {
+                // Backpressure: block the reader when the global dispatch cap is
+                // saturated rather than spawning unboundedly.
+                let slot = slots.acquire();
+                inflight.fetch_add(1, Ordering::AcqRel);
+                let guard = InflightGuard {
+                    _slot: slot,
+                    inflight: Arc::clone(&inflight),
+                };
+                let responses = responses.clone();
+                let clients = Arc::clone(clients);
+                let export = Arc::clone(export);
+                let handler_trace = trace.clone();
+                let spawned = thread::Builder::new()
+                    .name("nfs-rpc".to_string())
+                    .spawn(move || {
+                        let _guard = guard;
+                        let response = handle_rpc_record(
+                            &record,
+                            generation,
+                            &clients,
+                            &*export,
+                            &handler_trace,
+                        );
+                        // The writer may have already exited on a broken socket;
+                        // a dropped reply is recovered by client retransmit.
+                        let _ = responses.send(response);
+                    });
+                if spawned.is_err() {
+                    // Guard/sender drop here, releasing the slot and inflight
+                    // count; the client retransmits the unanswered call.
+                    trace.line("rpc_dispatch_spawn_failed");
+                }
+            },
+            Ok(None) => break Ok(()),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                trace.line("connection_idle_timeout");
-                return Ok(());
+                if inflight.load(Ordering::Acquire) == 0 {
+                    trace.line("connection_idle_timeout");
+                    break Ok(());
+                }
             },
-            Err(error) => return Err(error),
-        };
-        let response = handle_rpc_record(&record, generation, clients, export, trace);
-        write_rpc_record(&mut stream, &response)?;
+            Err(error) => break Err(error),
+        }
+    };
+
+    // Drop the reader's keep-alive sender so the writer exits once every
+    // outstanding handler has sent its reply and dropped its own sender, then
+    // wait for the wire to drain before tearing the connection down.
+    drop(responses);
+    let _ = writer.join();
+    outcome
+}
+
+/// A global counting semaphore bounding concurrent RPC handler threads. A
+/// permit is held for the lifetime of one dispatched RPC and released on drop.
+struct RpcSlots {
+    available: Mutex<usize>,
+    free: Condvar,
+}
+
+impl RpcSlots {
+    fn new(permits: usize) -> Arc<Self> {
+        Arc::new(Self {
+            available: Mutex::new(permits),
+            free: Condvar::new(),
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> RpcSlot {
+        let mut available = self.available.lock().expect("rpc slots lock");
+        while *available == 0 {
+            available = self.free.wait(available).expect("rpc slots wait");
+        }
+        *available -= 1;
+        RpcSlot {
+            slots: Arc::clone(self),
+        }
+    }
+}
+
+struct RpcSlot {
+    slots: Arc<RpcSlots>,
+}
+
+impl Drop for RpcSlot {
+    fn drop(&mut self) {
+        *self.slots.available.lock().expect("rpc slots lock") += 1;
+        self.slots.free.notify_one();
+    }
+}
+
+/// Held by a dispatched handler thread; on drop it releases the global slot and
+/// decrements the connection's in-flight count.
+struct InflightGuard {
+    _slot: RpcSlot,
+    inflight: Arc<AtomicUsize>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.inflight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
