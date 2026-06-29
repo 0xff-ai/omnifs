@@ -1,6 +1,20 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set working-directory := '..'
 
+# Build native workspace crates.
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    excludes=()
+    while IFS= read -r package; do
+      excludes+=(--exclude "$package")
+    done < <(
+      cargo metadata --no-deps --format-version 1 \
+        | jq -r '.packages[] | select(.manifest_path | contains("/providers/")) | .name'
+    )
+    excludes+=(--exclude omnifs-embed-metadata)
+    cargo build --workspace "${excludes[@]}"
+
 # Lint native host crates with warnings denied.
 clippy:
     #!/usr/bin/env bash
