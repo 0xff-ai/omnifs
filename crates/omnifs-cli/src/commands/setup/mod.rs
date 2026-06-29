@@ -58,6 +58,7 @@ impl SetupArgs {
         let workspace = Workspace::resolve()?;
         let paths = workspace.layout();
         let config = workspace.config()?;
+        crate::provider_bundle::ensure_providers_installed(&paths.providers_dir)?;
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
@@ -283,6 +284,7 @@ fn resolve_selection(
 
     let chosen = inquire::MultiSelect::new("Which providers do you want to configure?", options)
         .with_default(&default_indices)
+        .with_formatter(&format_selected_providers)
         .with_help_message("space to toggle, a all, n none, enter confirm, esc cancel")
         .prompt()
         .map_err(|e| anyhow!("selection prompt: {e}"))?;
@@ -341,6 +343,16 @@ impl fmt::Display for ProviderOption {
     }
 }
 
+fn format_selected_providers(
+    options: &[inquire::list_option::ListOption<&ProviderOption>],
+) -> String {
+    options
+        .iter()
+        .map(|option| option.value.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn validate_preselected(
     requested: &[String],
     installed: &[(Provider, ProviderManifest)],
@@ -391,6 +403,8 @@ async fn run_init_loop(
         anstream::println!();
         anstream::println!("{}", crate::style::bold(format!("--- {provider_name} ---")));
 
+        init::print_capability_justifications(manifest);
+
         if !args.yes {
             let proceed = inquire::Confirm::new(&format!("Configure `{provider_name}`?"))
                 .with_default(true)
@@ -426,6 +440,7 @@ async fn run_init_loop(
             token: None,
             token_env: None,
             scopes: Vec::new(),
+            show_capabilities: false,
         };
         let outcome = init_args
             .run_in_workspace(workspace)
@@ -444,4 +459,27 @@ async fn launch_via_up() -> anyhow::Result<()> {
     anstream::println!();
     anstream::println!("Launching omnifs ...");
     up::UpArgs::default().run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderOption, format_selected_providers};
+    use inquire::list_option::ListOption;
+
+    #[test]
+    fn selected_provider_prompt_answer_shows_only_ids() {
+        let arxiv = ProviderOption {
+            id: "arxiv".to_owned(),
+            line: "arxiv          network domains: export.arxiv.org; memory limit: 64 MiB"
+                .to_owned(),
+        };
+        let github = ProviderOption {
+            id: "github".to_owned(),
+            line: "github         network domains: api.github.com; memory limit: 256 MiB"
+                .to_owned(),
+        };
+        let selected = vec![ListOption::new(0, &arxiv), ListOption::new(1, &github)];
+
+        assert_eq!(format_selected_providers(&selected), "arxiv, github");
+    }
 }
