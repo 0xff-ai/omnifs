@@ -216,14 +216,13 @@ The cache is host-owned plain byte storage. Providers can return canonical upstr
 
 ## Development workflows
 
-Use `omnifs dev` when working from this repository. It builds the dev image, provisions credentials for the built-in dev mounts from your host (`gh` CLI, provider env vars) into a dedicated `~/.omnifs-dev` home, fetches the Chinook SQLite fixture, synthesizes dev mounts from the built-in provider manifests, and starts the container. Nothing is written into the checkout.
+Use `just dev` when working from this repository. It runs `scripts/dev.ts`, builds provider WASM into a content-addressed provider-store bundle, renders the built-in dev mounts and credentials into a dedicated `~/.omnifs-dev` home, builds the dev image from that bundle, starts fixtures, and launches the container. Nothing is written into the checkout.
 
 ```bash
 git clone https://github.com/0xff-ai/omnifs
 cd omnifs
-cargo install --path crates/omnifs-cli --force
-omnifs dev -y
-omnifs shell
+just dev -y
+# opens a shell at /omnifs inside the container
 ```
 
 Refresh generated and formatted artifacts:
@@ -235,7 +234,7 @@ just refresh
 For runtime behavior, validate through the container:
 
 ```bash
-omnifs dev -y
+just dev -y
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
 docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'

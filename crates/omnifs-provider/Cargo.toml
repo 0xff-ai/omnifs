@@ -31,6 +31,10 @@ tempfile = { workspace = true }
 name = "dump-provider"
 path = "src/bin/dump_provider.rs"
 
+[[bin]]
+name = "omnifs-provider-store-bundle"
+path = "src/bin/store_bundle.rs"
+
 [lints.rust]
 unsafe_code = "deny"
 

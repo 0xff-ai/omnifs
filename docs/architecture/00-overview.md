@@ -79,7 +79,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount delivery is disk reconcile today. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`. New non-secret interactions should prefer REST API extensions over new direct workspace coupling.
 
-Runtime modes are host-native and Docker. Docker is one launch mechanism, not the daemon architecture. Inside a source checkout, contributor commands use `~/.omnifs-dev` unless `OMNIFS_HOME` is explicit.
+Runtime modes are host-native and Docker. Docker is one launch mechanism, not the daemon architecture. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home for the container.
 
 ## Auth and sandbox
 

@@ -24,7 +24,7 @@ Read the rustdocs in `crates/omnifs-sdk/src/lib.rs` for the full guide; `provide
 11. **Use `#[omnifs_sdk::path_segment]` for simple path segment types.** Finite enums get generated `FromStr`, `Display`, `AsRef<str>`, and `PathSegment::choices()` from `#[strum(serialize_all = "snake_case")]` or per-variant `#[strum(serialize = "...")]`; validated `String` newtypes use `#[path_segment(validate = pred, normalize = f)]`. Keep manual parsers for structured syntax (`TEAM-123`, dates, versions, encoded ids). Use `strum` only when the enum also needs extra behavior such as `VariantArray` or `EnumProperty`.
 12. **Use `hashbrown::HashMap`** (re-exported by the SDK) for provider-internal maps.
 13. **Error semantics:** `NotFound` for absent upstream resources or rows; `InvalidInput` for impossible path syntax; `rate_limited(..).with_retry_after(..)` on 429 (drives the SDK breaker and host window); `from_http_status` for the rest. Put operation context in the message.
-14. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `omnifs dev` container (repo policy).
+14. **No provider unit tests in-crate.** Verify behavior through host-driven integration tests and the live `just dev` container (repo policy).
 
 ## One route API: which face
 
@@ -201,7 +201,7 @@ Each auth scheme is self-contained: it carries its own injection domains, header
 cargo build -p <provider-crate> --target wasm32-wasip2          # the component artifact
 cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 just providers check                                             # the repo gate
-omnifs dev -y                                                    # live container with all builtin providers
+just dev -y                                                      # live container with all builtin providers
 docker exec omnifs /bin/zsh -lc 'omnifs status'
 ```
 

@@ -9,8 +9,7 @@ use anyhow::{Context, anyhow};
 use omnifs_core::MountName;
 use omnifs_creds::CredentialStore;
 use omnifs_mount::mounts::Spec;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::{auth::MountAuth, error::WithHint};
 
@@ -21,11 +20,6 @@ pub(crate) const ENV_CONTAINER_NAME: &str = "OMNIFS_CONTAINER_NAME";
 
 pub(crate) const GUEST_FUSE_MOUNT: &str = "/omnifs";
 pub(crate) const OMNIFS_HOME: &str = "/root/.omnifs";
-
-/// Shell the runtime image ships and configures (`Dockerfile` sets
-/// `SHELL=/bin/zsh` and installs `/etc/zsh/zshrc`). The host's `$SHELL` is
-/// meaningless inside the guest, so the interactive dev shell uses this.
-pub(crate) const GUEST_SHELL: &str = "/bin/zsh";
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountConfig {
@@ -96,18 +90,6 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-pub(crate) fn set_private_dir(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod 700 {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +120,7 @@ mod tests {
         )
     }
 
-    fn test_catalog(root: &Path) -> Catalog {
+    fn test_catalog(root: &std::path::Path) -> Catalog {
         let paths = omnifs_home::WorkspaceLayout::under_root(root);
         Catalog::open(paths.providers_dir)
     }
@@ -231,8 +213,8 @@ mod tests {
     fn materialize_rewrites_preopens_to_container_bind_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
-        fs::create_dir_all(&db_dir).unwrap();
-        fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join("chinook.sqlite"), "").unwrap();
 
         let store = MemoryStore::new();
         let config = MountConfig {

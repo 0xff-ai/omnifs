@@ -53,7 +53,7 @@ fn write_provider_bundle(
     files.sort();
     files.dedup();
 
-    let artifact_dir = find_artifact_dir(workspace_root, &files);
+    let bundle = find_provider_bundle(workspace_root, &files);
     let archive_path = out_dir.join(PROVIDER_BUNDLE_ARCHIVE);
     let writer = Vec::new();
     let encoder =
@@ -61,8 +61,8 @@ fn write_provider_bundle(
     let mut archive = tar::Builder::new(encoder);
     archive.mode(tar::HeaderMode::Deterministic);
 
-    for file in files {
-        let path = artifact_dir.join(&file);
+    for file in bundle.files {
+        let path = bundle.dir.join(&file);
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = fs::read(&path).unwrap_or_else(|error| {
             panic!(
@@ -104,10 +104,27 @@ fn write_provider_bundle(
         .unwrap_or_else(|error| panic!("write {}: {error}", archive_path.display()));
 }
 
-fn find_artifact_dir(workspace_root: &std::path::Path, files: &[String]) -> PathBuf {
+struct ProviderBundleSource {
+    dir: PathBuf,
+    files: Vec<String>,
+}
+
+fn find_provider_bundle(
+    workspace_root: &std::path::Path,
+    files: &[String],
+) -> ProviderBundleSource {
     for dir in artifact_dirs(workspace_root) {
+        if dir.join("index.json").is_file() {
+            return ProviderBundleSource {
+                files: store_bundle_files(&dir),
+                dir,
+            };
+        }
         if files.iter().all(|file| dir.join(file).is_file()) {
-            return dir;
+            return ProviderBundleSource {
+                dir,
+                files: files.to_vec(),
+            };
         }
     }
 
@@ -119,6 +136,38 @@ fn find_artifact_dir(workspace_root: &std::path::Path, files: &[String]) -> Path
     panic!(
         "provider bundle artifacts are missing; searched:\n{searched}\nrun `just providers build` first, or set {PROVIDER_BUNDLE_DIR_ENV} to the built WASM directory"
     );
+}
+
+fn store_bundle_files(dir: &std::path::Path) -> Vec<String> {
+    let mut files = fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("scan provider store bundle {}: {error}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| {
+                    panic!("scan provider store bundle {}: {error}", dir.display())
+                })
+                .path()
+        })
+        .filter(|path| path.extension().is_some_and(|ext| ext == "wasm"))
+        .map(|path| {
+            path.file_name().and_then(|name| name.to_str()).map_or_else(
+                || {
+                    panic!(
+                        "provider store bundle path is not valid UTF-8: {}",
+                        path.display()
+                    )
+                },
+                str::to_owned,
+            )
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "provider store bundle {} contains index.json but no WASM artifacts",
+        dir.display()
+    );
+    files
 }
 
 fn artifact_dirs(workspace_root: &std::path::Path) -> Vec<PathBuf> {

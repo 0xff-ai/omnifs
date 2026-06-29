@@ -1,4 +1,8 @@
 {
   "provider": "arxiv",
-  "mount": "arxiv"
+  "mount": "arxiv",
+  "capabilities": {
+    "domains": ["export.arxiv.org", "arxiv.org"],
+    "max_memory_mb": 64
+  }
 }

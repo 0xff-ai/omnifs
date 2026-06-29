@@ -170,7 +170,7 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
 /// Subscribe to the daemon's event stream and forward every received
 /// line into `tx`. Reconnects with a short backoff if the daemon is
 /// not yet listening — useful for `omnifs inspect` racing
-/// `omnifs dev`. Connect/disconnect transitions are reported through
+/// `just dev`. Connect/disconnect transitions are reported through
 /// `SourceMessage` so the front-end never claims "connected" while the
 /// stream is still failing.
 fn socket_source(addr: &str, record: Option<&Path>, tx: &Sender<SourceMessage>) {

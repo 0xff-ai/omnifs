@@ -3,7 +3,11 @@
   "mount": "github",
   "auth": {
     "type": "static-token",
-    "scheme": "pat",
-    "token_env": "GITHUB_TOKEN"
+    "scheme": "pat"
+  },
+  "capabilities": {
+    "domains": ["api.github.com"],
+    "git_repos": ["git@github.com:*"],
+    "max_memory_mb": 256
   }
 }

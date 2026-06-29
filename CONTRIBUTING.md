@@ -4,19 +4,17 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which builds provider and tool WASM once with `just providers build`, then runs the source CLI's `dev` command. The Rust launcher builds the dev image from the host-built WASM, pins dev mount specs to the exact installed provider bytes, materializes fixtures, and launches the container directly through the Docker API.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script checks prerequisites, builds provider WASM into a content-addressed provider-store bundle, builds the runtime image from the same bundle, renders dev mounts and credentials into `~/.omnifs-dev`, starts fixtures, launches the container, and opens a shell at `/omnifs`.
 
 ```bash
-just dev            # build providers, build dev image, materialize fixtures, launch container
-omnifs shell        # omnifs-aware shell for exploring the tree
-omnifs logs -f      # follow container output
-omnifs status       # inspect mounts, providers, auth state
-omnifs down         # stop and remove the container
+just dev            # build providers, build dev image, materialize fixtures, open /omnifs
+docker exec omnifs omnifs status
+docker exec -it -w /omnifs omnifs /bin/zsh
+docker logs -f omnifs
+docker rm -f omnifs
 ```
 
-`omnifs dev` is contributor-only and requires a source checkout. It walks up from cwd looking for the workspace `Cargo.toml`, resolves a dedicated dev home at `~/.omnifs-dev`, installs host-built provider WASM into `~/.omnifs-dev/providers`, downloads the Chinook SQLite fixture into `~/.omnifs-dev/db/test.db`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with dev mounts under `/omnifs/<mount>`. Dev auth uses `token_env` mount specs: set `GITHUB_TOKEN` or `LINEAR_API_KEY` on the host before `just dev` to pass them into the runtime container. Missing env vars are reported as warnings; mounts still start, but authenticated requests may fail.
-
-When run from inside the source checkout, the whole contributor command family (`omnifs shell`, `status`, `logs`, `down`) defaults to the same `~/.omnifs-dev` home, so a session started by `omnifs dev` is visible to them with no `OMNIFS_HOME` prefix. An explicit `OMNIFS_HOME` always overrides this; outside a checkout the normal `~/.omnifs` applies.
+`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, copies the provider-store bundle into `~/.omnifs-dev/providers`, writes pinned mount specs under `~/.omnifs-dev/mounts`, interpolates host tokens into the `contrib/dev-credentials.json` template to produce `~/.omnifs-dev/credentials.json`, builds an image tagged `omnifs:<short-sha>-dev`, and starts the container with dev mounts under `/omnifs/<mount>`. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
 
 Do not add alternate local mount recipes unless explicitly requested.
 
@@ -39,7 +37,7 @@ WASM tests compile but cannot execute on the host because there is no WASM runti
 
 CI builds Rust artifacts natively and uses Docker only to assemble the runtime image. Linux CLI artifacts use `cargo-zigbuild` with a GNU glibc 2.17 baseline; Darwin CLI artifacts are cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. Provider and tool WASM artifacts are built by `just providers build`; WASI SDK pins live at their install sites, such as `just/providers.just` for local builds and `Dockerfile` for container stages.
 
-`Dockerfile` remains the contributor image path for `omnifs dev`. `just dev` installs the already-built provider/tool WASM into `~/.omnifs-dev/providers` and passes that directory as the `provider-wasm` build context, so the image embeds those bytes instead of compiling providers again inside Docker. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider/tool WASM bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
+`Dockerfile` remains the contributor image path for `just dev`. `just providers build` emits `target/omnifs-provider-store` containing content-addressed provider WASM plus `index.json`; `scripts/dev.ts` copies that store into `~/.omnifs-dev/providers` and passes it as the `provider-wasm` build context, so the image embeds those bytes instead of compiling providers again inside Docker. Release runtime image assembly uses `scripts/ci/build-runtime-image.sh`, which stages the prebuilt Linux CLI binary into a small Ubuntu runtime context. Release CLI binaries embed the compressed provider bundle and unpack it into the host `OMNIFS_HOME/providers`; do not make the runtime image the owner of `/root/.omnifs/providers`. Keep `just dev` working when changing Docker-related files.
 
 CI orchestration shells live in `scripts/ci/`, with `scripts/ci/common.sh` factoring out repo-root discovery. Npm version sync and OpenAPI generation are just recipes. The release flow is git-cliff plus the `release-pr.yml` coordinator (see `RELEASING.md`); the repo carries no Bun.
 
@@ -59,7 +57,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 ## Runtime debugging
 
 - Runtime log file is `/tmp/omnifs.log` inside the container.
-- `omnifs logs` or `docker logs omnifs` shows stdout/stderr from the entrypoint. Runtime FUSE traces still go to `/tmp/omnifs.log` inside the container.
+- `docker logs omnifs` shows stdout/stderr from the entrypoint. Runtime FUSE traces still go to `/tmp/omnifs.log` inside the container.
 - Clone failures should surface in the runtime log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
 - Use `omnifs status` inside the container for fast mount/config/provider/cache triage.
@@ -67,7 +65,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 
 When a repo path returns `Input/output error`, check:
 
-1. `omnifs logs` or `docker logs omnifs`
+1. `docker logs omnifs`
 2. SSH auth inside the container
 3. whether the mount is still present in `/proc/mounts`
 

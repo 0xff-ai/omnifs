@@ -60,7 +60,7 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 | **`just npm sync`** | CI before npm publish; optional locally | Set all `npm/**/package.json` versions from the Cargo workspace version through npm workspace-aware `npm pkg set` |
 | **`just npm pack`** | local verification, ship | Pack the root npm package locally |
 
-Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, and `omnifs dev`.
+Day-to-day dev uses the relevant CI-shaped just lanes, `just providers build`, and `just dev`.
 
 ## What gets released
 
@@ -183,4 +183,4 @@ Gates that must be in place:
 ## Related docs
 
 - `CHANGELOG.md`
-- `AGENTS.md`: `omnifs dev`, validation lanes
+- `AGENTS.md`: `just dev`, validation lanes

@@ -3,7 +3,10 @@
   "mount": "linear",
   "auth": {
     "type": "static-token",
-    "scheme": "pat",
-    "token_env": "LINEAR_API_KEY"
+    "scheme": "pat"
+  },
+  "capabilities": {
+    "domains": ["api.linear.app"],
+    "max_memory_mb": 128
   }
 }

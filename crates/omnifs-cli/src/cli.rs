@@ -31,16 +31,7 @@ pub enum Commands {
 
     /// Start omnifs with your configured mounts: materialize host credentials
     /// into a session dir, bind-mount them into the container, then run it.
-    ///
-    /// For first-run setup use `omnifs setup`; `omnifs dev` is the contributor
-    /// sandbox built from a source checkout.
     Up(commands::up::UpArgs),
-    /// Contributor sandbox: blocking dev session from a source checkout.
-    /// Brings up profile-selected fixtures, launches the FUSE runtime container,
-    /// and opens an interactive shell at `/omnifs` inside it (exit tears down).
-    ///
-    /// For normal use run `omnifs setup` (first run) or `omnifs up`.
-    Dev(crate::dev::DevArgs),
     /// Stop and remove the omnifs container and clean up the session dir.
     Down(commands::down::DownArgs),
     /// Tail the daemon log inside the container.
@@ -92,6 +83,7 @@ pub enum Commands {
     /// directly. The daemon still runs as its own process over the
     /// control API; this is the same binary, not a separate entrypoint.
     #[command(hide = true)]
+    #[cfg(feature = "daemon")]
     Daemon(omnifs_daemon::DaemonArgs),
 }
 
@@ -121,7 +113,6 @@ impl Commands {
             Self::Setup(args) => args.run().await,
             Self::Init(args) => args.run().await,
             Self::Up(args) => args.run().await,
-            Self::Dev(args) => args.run().await,
             Self::Down(args) => args.run().await,
             Self::Logs(args) => args.run().await,
             Self::Inspect(args) => args.run().await,
@@ -135,6 +126,7 @@ impl Commands {
             },
             Self::Version(args) => args.run().await,
             Self::Debug(args) => args.run(),
+            #[cfg(feature = "daemon")]
             Self::Daemon(args) => omnifs_daemon::run(args),
         }
     }

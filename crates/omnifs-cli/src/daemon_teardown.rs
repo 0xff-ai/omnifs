@@ -1,7 +1,11 @@
 //! Daemon stop and backend reclaim workflows.
 
+#[cfg(feature = "daemon")]
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "daemon")]
+use std::path::PathBuf;
+#[cfg(feature = "daemon")]
 use std::time::Duration;
 
 use crate::launch_backend::LaunchBackend;
@@ -134,6 +138,7 @@ impl<'a> DaemonTeardown<'a> {
 
 /// Poll until `mount_point` leaves the OS mount table (the daemon unmounts
 /// shortly after answering shutdown), at a 100ms cadence for up to ~3s.
+#[cfg(feature = "daemon")]
 fn wait_unmounted(mount_point: &Path, force: bool) -> anyhow::Result<()> {
     let poll =
         || crate::host_teardown::poll_until_unmounted(mount_point, Duration::from_millis(100), 30);
@@ -149,6 +154,15 @@ fn wait_unmounted(mount_point: &Path, force: bool) -> anyhow::Result<()> {
     Err(StillMounted::inspect(mount_point, force).into())
 }
 
+#[cfg(not(feature = "daemon"))]
+fn wait_unmounted(_mount_point: &Path, _force: bool) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "this omnifs binary was built without host-native daemon support; \
+         rerun teardown with a default omnifs build"
+    )
+}
+
+#[cfg(feature = "daemon")]
 #[derive(Debug)]
 struct StillMounted {
     mount_point: PathBuf,
@@ -156,6 +170,7 @@ struct StillMounted {
     open_handles: Option<String>,
 }
 
+#[cfg(feature = "daemon")]
 impl StillMounted {
     fn inspect(mount_point: &Path, forced: bool) -> Self {
         Self {
@@ -166,6 +181,7 @@ impl StillMounted {
     }
 }
 
+#[cfg(feature = "daemon")]
 impl fmt::Display for StillMounted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -194,4 +210,5 @@ impl fmt::Display for StillMounted {
     }
 }
 
+#[cfg(feature = "daemon")]
 impl std::error::Error for StillMounted {}
