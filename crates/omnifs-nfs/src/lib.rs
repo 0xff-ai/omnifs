@@ -6,6 +6,7 @@
 //! types; the wire protocol code remains isolated behind `ReadOnlyExport`.
 
 mod adapter;
+mod delayed;
 mod error;
 mod export;
 mod mount;
