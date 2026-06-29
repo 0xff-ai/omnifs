@@ -12,6 +12,7 @@
 
 mod auth_resolve;
 mod auth_wire;
+mod authoring;
 mod catalog;
 mod config;
 mod manifest;
@@ -27,6 +28,7 @@ pub use auth_wire::{
     OauthScheme, PkceLoopbackConfig, PkceManualCodeConfig, SchemeGuidance, StaticTokenScheme,
     TokenEndpointAuthMethod, TokenValidation,
 };
+pub use authoring::ProviderAuthBuilder;
 pub use catalog::{Catalog, CatalogError, DirStatus, Provider};
 pub use config::{ConfigError, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding};
 pub use manifest::{ProviderAuthManifest, ProviderManifest};

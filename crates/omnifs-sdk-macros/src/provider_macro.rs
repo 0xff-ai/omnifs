@@ -397,52 +397,65 @@ fn metadata_tokens(
     let display_name = LitStr::new(&manifest.description, Span::call_site());
     let provider_file = LitStr::new(&manifest.provider_file, Span::call_site());
     let default_mount = LitStr::new(&manifest.default_mount, Span::call_site());
-    let version = manifest.version.as_ref().map(|version| {
-        let version = LitStr::new(version, Span::call_site());
-        quote! { .version(#version) }
-    });
+    let version = manifest.version.as_ref().map_or_else(
+        || quote! { None },
+        |version| {
+            let version = LitStr::new(version, Span::call_site());
+            quote! { Some(#version.to_string()) }
+        },
+    );
     let capability_entries = capabilities.iter().map(capability_tokens);
-    let capabilities = (!capabilities.is_empty()).then(|| {
-        quote! {
-            .capabilities(&[#(#capability_entries),*])
-        }
-    });
-    let auth = auth.map(|auth| quote! { .auth(#auth) });
+    let auth = auth.map_or_else(|| quote! { None }, |auth| quote! { Some(#auth) });
     quote! {
-        omnifs_sdk::Metadata::new(#id)
-            .display_name(#display_name)
-            .provider(#provider_file)
-            .mount(#default_mount)
-            #version
-            #capabilities
-            #auth
-            .config(<#config_type as omnifs_sdk::ProvidesConfigMetadata>::METADATA)
+        omnifs_sdk::ProviderManifest {
+            id: #id.to_string(),
+            display_name: #display_name.to_string(),
+            provider: #provider_file.to_string(),
+            default_mount: #default_mount.to_string(),
+            version: #version,
+            capabilities: ::std::vec![#(#capability_entries),*],
+            auth: #auth,
+            config: <#config_type as omnifs_sdk::ProvidesConfigMetadata>::metadata(),
+        }
     }
 }
 
 fn capability_tokens(need: &omnifs_caps::Need) -> TokenStream2 {
+    // A dynamic socket/preopen need resolves its concrete value from a config
+    // field at mount-start; the placeholder mirrors the host's marker.
+    let dynamic_placeholder = "resolved from config at mount-start";
     match need {
         omnifs_caps::Need::Domain { value, why, .. } => {
             let value = LitStr::new(value, Span::call_site());
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::Need::domain(#value, #why) }
+            quote! { omnifs_sdk::Need::Domain { value: #value.to_string(), why: #why.to_string(), dynamic: false } }
         },
         omnifs_caps::Need::GitRepo { value, why, .. } => {
             let value = LitStr::new(value, Span::call_site());
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::Need::git_repo(#value, #why) }
+            quote! { omnifs_sdk::Need::GitRepo { value: #value.to_string(), why: #why.to_string(), dynamic: false } }
         },
         omnifs_caps::Need::UnixSocket { why, .. } => {
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::Need::unix_socket_dynamic(#why) }
+            quote! { omnifs_sdk::Need::UnixSocket { value: #dynamic_placeholder.to_string(), why: #why.to_string(), dynamic: true } }
         },
         omnifs_caps::Need::PreopenedPath { why, .. } => {
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::Need::preopened_path_dynamic(#why) }
+            quote! {
+                omnifs_sdk::Need::PreopenedPath {
+                    value: omnifs_sdk::PreopenedPath {
+                        host: #dynamic_placeholder.to_string(),
+                        guest: #dynamic_placeholder.to_string(),
+                        mode: omnifs_sdk::PreopenMode::default(),
+                    },
+                    why: #why.to_string(),
+                    dynamic: true,
+                }
+            }
         },
         omnifs_caps::Need::MemoryMb { value, why, .. } => {
             let why = LitStr::new(why, Span::call_site());
-            quote! { omnifs_sdk::Need::memory_mb(#value, #why) }
+            quote! { omnifs_sdk::Need::MemoryMb { value: #value, why: #why.to_string(), dynamic: false } }
         },
         omnifs_caps::Need::FetchBlobBytes { .. } | omnifs_caps::Need::ReadBlobBytes { .. } => {
             unreachable!("provider macro does not parse blob byte capabilities")
@@ -450,21 +463,17 @@ fn capability_tokens(need: &omnifs_caps::Need) -> TokenStream2 {
     }
 }
 
-fn provider_metadata_impl_tokens(type_name: &syn::Ident, metadata: &TokenStream2) -> TokenStream2 {
+fn provider_metadata_impl_tokens(metadata: &TokenStream2) -> TokenStream2 {
     quote! {
-        impl omnifs_sdk::Provider for #type_name {
-            const METADATA: omnifs_sdk::Metadata = #metadata;
-        }
-
-        /// Build-time accessor for the provider's typed metadata const. The
-        /// native metadata harvester links this crate as a library, calls this,
-        /// and injects the serialized JSON into the wasm `omnifs.provider-metadata.v1`
+        /// Build-time accessor for the provider's metadata. The native metadata
+        /// harvester links this crate as a library, calls this, and serializes
+        /// the result verbatim into the wasm `omnifs.provider-metadata.v1`
         /// section. Never compiled into the wasm guest.
         #[cfg(not(target_arch = "wasm32"))]
         #[doc(hidden)]
         #[must_use]
-        pub fn provider_metadata() -> omnifs_sdk::Metadata {
-            <#type_name as omnifs_sdk::Provider>::METADATA
+        pub fn provider_metadata() -> omnifs_sdk::ProviderManifest {
+            #metadata
         }
     }
 }
@@ -864,7 +873,7 @@ pub(crate) fn provider_impl(args: &ProviderArgs, input: ItemImpl) -> syn::Result
         &args.capabilities,
         args.auth.as_ref(),
     );
-    let provider_metadata = provider_metadata_impl_tokens(&type_name, &metadata);
+    let provider_metadata = provider_metadata_impl_tokens(&metadata);
 
     let state_management = generate_state_management(state_type);
     let lifecycle = generate_lifecycle(

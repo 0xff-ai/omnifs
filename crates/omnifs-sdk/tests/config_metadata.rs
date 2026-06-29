@@ -1,6 +1,5 @@
-use omnifs_sdk::{
-    ConfigType, DefaultValue, HostFile, HostResourceBinding, HostSocket, ProvidesConfigMetadata,
-};
+use omnifs_sdk::serde_json::json;
+use omnifs_sdk::{ConfigType, HostFile, HostResourceBinding, HostSocket, ProvidesConfigMetadata};
 use std::collections::BTreeMap;
 
 #[allow(dead_code)]
@@ -33,30 +32,38 @@ fn default_endpoint() -> HostSocket {
 
 #[test]
 fn config_metadata_is_generated_from_the_static_dialect() {
-    let metadata = <Config as ProvidesConfigMetadata>::METADATA.expect("config metadata missing");
-    let fields = metadata.fields;
+    let metadata = <Config as ProvidesConfigMetadata>::metadata().expect("config metadata missing");
+    let fields = &metadata.fields;
 
     assert_eq!(fields[0].name, "endpoint");
     assert_eq!(fields[0].value_type, ConfigType::String);
     assert_eq!(fields[0].binding, Some(HostResourceBinding::Socket));
     assert_eq!(
         fields[0].default,
-        Some(DefaultValue::String("unix:///var/run/docker.sock"))
+        Some(json!("unix:///var/run/docker.sock"))
     );
 
     assert_eq!(fields[1].name, "path");
     assert!(fields[1].required);
-    assert_eq!(fields[1].binding, Some(HostResourceBinding::File));
+    assert_eq!(
+        fields[1].binding,
+        Some(HostResourceBinding::File {
+            mode: omnifs_sdk::PreopenMode::default()
+        })
+    );
 
     assert_eq!(fields[2].name, "sample_limit");
     assert_eq!(fields[2].value_type, ConfigType::Integer);
-    assert_eq!(fields[2].default, Some(DefaultValue::Integer(20)));
+    assert_eq!(fields[2].default, Some(json!(20)));
 
     assert_eq!(fields[3].name, "resolvers");
-    let ConfigType::Map(values) = fields[3].value_type else {
+    let ConfigType::Map { values } = &fields[3].value_type else {
         panic!("resolvers should be a map");
     };
-    let ConfigType::Object(resolver_fields) = *values else {
+    let ConfigType::Object {
+        fields: resolver_fields,
+    } = values.as_ref()
+    else {
         panic!("map values should be an object");
     };
     assert_eq!(resolver_fields[0].name, "url");
@@ -64,6 +71,8 @@ fn config_metadata_is_generated_from_the_static_dialect() {
     assert_eq!(resolver_fields[1].name, "aliases");
     assert_eq!(
         resolver_fields[1].value_type,
-        ConfigType::Array(&ConfigType::String)
+        ConfigType::Array {
+            items: Box::new(ConfigType::String)
+        }
     );
 }

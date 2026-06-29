@@ -18,8 +18,11 @@ pub(crate) fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
             let ident = &item_struct.ident;
             let metadata = metadata_tokens(&fields);
             let provides = quote! {
+                #[cfg(not(target_arch = "wasm32"))]
                 impl omnifs_sdk::ProvidesConfigMetadata for #ident {
-                    const METADATA: Option<omnifs_sdk::ConfigMetadata> = Some(#metadata);
+                    fn metadata() -> Option<omnifs_sdk::ConfigMetadata> {
+                        Some(#metadata)
+                    }
                 }
             };
             Ok(quote! {
@@ -67,7 +70,7 @@ fn metadata_tokens(fields: &[ConfigField]) -> TokenStream2 {
     let fields = fields.iter().map(ConfigField::metadata_tokens);
     quote! {
         omnifs_sdk::ConfigMetadata {
-            fields: &[#(#fields),*],
+            fields: ::std::vec![#(#fields),*],
         }
     }
 }
@@ -107,13 +110,13 @@ impl ConfigField {
         let description = self.description.as_ref().map_or_else(
             || quote! { None },
             |description| {
-                quote! { Some(#description) }
+                quote! { Some(#description.to_string()) }
             },
         );
         let binding = self.ty.binding_tokens().unwrap_or_else(|| quote! { None });
         quote! {
             omnifs_sdk::ConfigField {
-                name: #name,
+                name: #name.to_string(),
                 value_type: #value_type,
                 required: #required,
                 default: #default,
@@ -177,22 +180,22 @@ impl FieldType {
             Self::Array(items) => {
                 let items = items.type_tokens();
                 quote! {
-                    omnifs_sdk::ConfigType::Array(&#items)
+                    omnifs_sdk::ConfigType::Array { items: ::std::boxed::Box::new(#items) }
                 }
             },
             Self::Map(values) => {
                 let values = values.type_tokens();
                 quote! {
-                    omnifs_sdk::ConfigType::Map(&#values)
+                    omnifs_sdk::ConfigType::Map { values: ::std::boxed::Box::new(#values) }
                 }
             },
             Self::Object(ty) => quote_spanned! {ty.span()=>
-                omnifs_sdk::ConfigType::Object({
-                    match <#ty as omnifs_sdk::ProvidesConfigMetadata>::METADATA {
+                omnifs_sdk::ConfigType::Object {
+                    fields: match <#ty as omnifs_sdk::ProvidesConfigMetadata>::metadata() {
                         Some(metadata) => metadata.fields,
-                        None => &[],
-                    }
-                })
+                        None => ::std::vec![],
+                    },
+                }
             },
         }
     }
@@ -203,13 +206,15 @@ impl FieldType {
         };
         match self {
             Self::String(_) => quote! {
-                Some(omnifs_sdk::DefaultValue::String(#default))
+                Some(omnifs_sdk::serde_json::Value::String((#default).to_string()))
             },
             Self::Boolean => quote! {
-                Some(omnifs_sdk::DefaultValue::Boolean(#default))
+                Some(omnifs_sdk::serde_json::Value::Bool(#default))
             },
             Self::Integer => quote! {
-                Some(omnifs_sdk::DefaultValue::Integer((#default) as i64))
+                Some(omnifs_sdk::serde_json::Value::Number(
+                    omnifs_sdk::serde_json::Number::from((#default) as i64),
+                ))
             },
             Self::Array(_) | Self::Map(_) | Self::Object(_) => quote_spanned! {default.span()=>
                 compile_error!("#[omnifs(default = ...)] supports string, bool, and integer config fields")
@@ -237,7 +242,7 @@ impl FieldBinding {
         match self {
             Self::None => None,
             Self::HostFile => Some(quote! {
-                Some(omnifs_sdk::HostResourceBinding::File)
+                Some(omnifs_sdk::HostResourceBinding::File { mode: omnifs_sdk::PreopenMode::default() })
             }),
             Self::HostSocket => Some(quote! {
                 Some(omnifs_sdk::HostResourceBinding::Socket)
