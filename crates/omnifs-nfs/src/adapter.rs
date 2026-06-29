@@ -16,6 +16,7 @@
 //! as a path is referenced and is pruned only by explicit invalidation, mirroring
 //! the FUSE adapter.
 
+use crate::delayed::{DelayedOps, DelayedResult};
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access, open_data_slice,
@@ -35,13 +36,21 @@ use omnifs_tree::{
     Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult, RequestCtx,
     Synthetic, Tree, TreeError, TreeErrorKind,
 };
+use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path as FsPath, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use tokio::runtime::{Handle, RuntimeFlavor};
+
+/// How long an NFS handler waits inline for a provider-backed `READDIR`/`LOOKUP`
+/// before deferring to the background table and replying `NFS4ERR_DELAY`. Short
+/// enough that a cold provider op never holds the reply (so the mount stays
+/// responsive), long enough that a warm/fast op still answers in one round trip.
+const NFS_INLINE_BUDGET: Duration = Duration::from_millis(75);
 
 /// Per-inode renderer state. This is the NFS analogue of the FUSE `NodeEntry`:
 /// it carries the stable identity a `(generation, id)` filehandle rehydrates
@@ -167,6 +176,13 @@ impl ObjectKey {
     }
 }
 
+/// Identity of a deferred directory listing: which mount, which directory.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct DelayedListKey {
+    mount: String,
+    path: Path,
+}
+
 pub struct Export {
     rt: Handle,
     /// The provider registry both the adapter and `Tree` hold. The adapter uses
@@ -176,7 +192,17 @@ pub struct Export {
     /// The renderer-neutral projection core. Owns resolve/list/read decision
     /// logic; the NFS adapter enters the async runtime to call it and turns the
     /// neutral `Node`/`Listing`/`ReadResult` into NFS identity + `fattr4`.
-    tree: Tree,
+    /// `Arc` so the deferral table can drive `list` from a background task
+    /// without re-deriving the core.
+    tree: Arc<Tree>,
+    /// Deferral table for provider-backed `READDIR`. A cold list runs in the
+    /// background; the handler waits [`NFS_INLINE_BUDGET`] then replies
+    /// `NFS4ERR_DELAY` so the mount never blocks on upstream work. Only `READDIR`
+    /// is deferred: `Tree` caches a listing's dirents, so the retry re-resolves
+    /// into a warm cache. `LOOKUP` is not cached that way, so it stays inline
+    /// (see `lookup_via_tree`) rather than risk re-running provider work on
+    /// every retry.
+    delayed_lists: DelayedOps<DelayedListKey, Result<ListOutcome, Status>>,
     inodes: DashMap<u64, NodeEntry>,
     path_to_inode: DashMap<ObjectKey, u64>,
     next_ino: AtomicU64,
@@ -191,11 +217,12 @@ pub struct Export {
 
 impl Export {
     pub fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
-        let tree = Tree::new(Arc::clone(&registry));
+        let tree = Arc::new(Tree::new(Arc::clone(&registry)));
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"
         );
+        let delayed_lists = DelayedOps::new(rt.clone());
         let root_mount = registry.root_mount_name();
         let inodes = DashMap::new();
         let path_to_inode = DashMap::new();
@@ -223,6 +250,7 @@ impl Export {
             rt,
             registry,
             tree,
+            delayed_lists,
             inodes,
             path_to_inode,
             next_ino: AtomicU64::new(EXPORT_ROOT_ID + 1),
@@ -551,6 +579,33 @@ impl Export {
         }
     }
 
+    fn list_key(mount: &str, path: &Path) -> DelayedListKey {
+        DelayedListKey {
+            mount: mount.to_string(),
+            path: path.clone(),
+        }
+    }
+
+    /// The truth computation for a directory listing, as a `'static` future
+    /// factory the deferral table spawns. Errors are mapped to `Status` here so
+    /// the table stays protocol-agnostic.
+    fn list_op(
+        &self,
+        mount: &str,
+        path: &Path,
+    ) -> impl FnOnce() -> Pin<Box<dyn Future<Output = Result<ListOutcome, Status>> + Send>> {
+        let tree = Arc::clone(&self.tree);
+        let node = Node::provider_dir(mount.to_string(), path.clone());
+        move || {
+            Box::pin(async move {
+                let ctx = RequestCtx::default();
+                tree.list(&node, None, &ctx)
+                    .await
+                    .map_err(|error| Self::tree_status(&error))
+            })
+        }
+    }
+
     /// Resolve `name` under the provider directory `parent_path` through
     /// `Tree::resolve_child` and bind the resulting `Node` to an inode. `Tree`
     /// owns the provider lookup, the `@next`/`@all` control resolution, the
@@ -565,6 +620,10 @@ impl Export {
         name: &Segment,
         runtime: &Arc<Runtime>,
     ) -> StatusResult<u64> {
+        // Inline (not deferred): a cold child lookup is not cached by `Tree` the
+        // way a listing is, so deferring it would re-run provider work on every
+        // retry. Concurrent dispatch keeps the rest of the mount responsive while
+        // this one resolves.
         let parent_node = Node::provider_dir(mount_name.to_string(), parent_path.clone());
         let ctx = RequestCtx::default();
         match self
@@ -1247,13 +1306,15 @@ impl ReadOnlyExport for Export {
         }
 
         let runtime = self.runtime_for_mount(&mount_name).ok_or(Status::NoEnt)?;
-        let node = Node::provider_dir(mount_name.clone(), path.clone());
-        let ctx = RequestCtx::default();
-        match self.rt.block_on(self.tree.list(&node, None, &ctx)) {
-            Ok(ListOutcome::Listing(listing)) => {
+        match self.delayed_lists.resolve(
+            Self::list_key(&mount_name, &path),
+            NFS_INLINE_BUDGET,
+            self.list_op(&mount_name, &path),
+        ) {
+            DelayedResult::Ready(Ok(ListOutcome::Listing(listing))) => {
                 Ok(self.snapshot_from_listing(scope, &mount_name, &path, id, &listing, &runtime))
             },
-            Ok(ListOutcome::Subtree(dir)) => {
+            DelayedResult::Ready(Ok(ListOutcome::Subtree(dir))) => {
                 if let Some(mut entry) = self.inodes.get_mut(&id)
                     && !matches!(entry.body, EntryBody::Backing(_))
                 {
@@ -1261,16 +1322,8 @@ impl ReadOnlyExport for Export {
                 }
                 self.readdir_backing(scope, &mount_name, &path, id, &dir)
             },
-            Err(error) => {
-                tracing::warn!(
-                    op = "readdir",
-                    mount = %mount_name,
-                    path = %path,
-                    error = %error,
-                    "NFS Tree readdir failed"
-                );
-                Err(Self::tree_status(&error))
-            },
+            DelayedResult::Ready(Err(status)) => Err(status),
+            DelayedResult::Pending => Err(Status::Delay),
         }
     }
 
