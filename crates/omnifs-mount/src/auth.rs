@@ -1,38 +1,14 @@
+//! The sparse user-authored auth block for a mount `Spec`: a single [`Auth`]
+//! selection (static token or OAuth) plus typed read accessors. The provider
+//! config is intentionally not modeled here: the provider owns its meaning, so
+//! it stays an opaque `serde_json::Value` on the spec.
+
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 pub use omnifs_core::AuthKind;
 
-/// Provider-specific configuration object from a mount JSON file's `"config"` field.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(value_type = Object)]
-#[serde(transparent)]
-pub struct ProviderConfig(serde_json::Value);
-
-impl ProviderConfig {
-    #[must_use]
-    pub fn from_value(value: serde_json::Value) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    pub fn as_value(&self) -> &serde_json::Value {
-        &self.0
-    }
-
-    #[must_use]
-    pub fn into_value(self) -> serde_json::Value {
-        self.0
-    }
-
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(&self.0).unwrap_or_else(|_| b"{}".to_vec())
-    }
-}
-
 /// Authentication configuration for HTTP requests.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Auth {
     StaticToken(StaticToken),
@@ -40,7 +16,7 @@ pub enum Auth {
     OAuth(OAuth),
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     /// Provider-declared auth scheme key for manifest-backed credentials.
@@ -55,7 +31,7 @@ pub struct StaticToken {
     pub token_file: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
     /// Provider-declared auth scheme key for manifest-backed credentials.
@@ -149,35 +125,5 @@ impl Auth {
             Self::OAuth(config) => Some(config),
             Self::StaticToken(_) => None,
         }
-    }
-}
-
-pub fn deserialize_auth<'de, D>(deserializer: D) -> Result<Vec<Auth>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(Box<Auth>),
-        Many(Vec<Auth>),
-    }
-    match Option::<OneOrMany>::deserialize(deserializer)? {
-        None => Ok(Vec::new()),
-        Some(OneOrMany::One(single)) => Ok(vec![*single]),
-        Some(OneOrMany::Many(vec)) => Ok(vec),
-    }
-}
-
-/// Symmetric with [`deserialize_auth`]: a lone auth entry serializes as a single
-/// object (the common authored form), more than one as an array. The empty case
-/// is handled by the field's `skip_serializing_if`, so it is never reached here.
-pub fn serialize_auth<S>(auth: &[Auth], serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match auth {
-        [single] => single.serialize(serializer),
-        many => many.serialize(serializer),
     }
 }

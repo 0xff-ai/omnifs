@@ -32,28 +32,28 @@ impl Grants {
     fn unmet(&self, need: &Need) -> Option<Missing> {
         match need {
             Need::Domain { value, dynamic, .. } => unmet_value(
-                "domain",
+                need.kind(),
                 self.domains.as_ref(),
                 value,
                 *dynamic,
                 Match::Exact,
             ),
             Need::GitRepo { value, dynamic, .. } => unmet_value(
-                "gitRepo",
+                need.kind(),
                 self.git_repos.as_ref(),
                 value,
                 *dynamic,
                 Match::Glob,
             ),
             Need::UnixSocket { value, dynamic, .. } => unmet_value(
-                "unixSocket",
+                need.kind(),
                 self.unix_sockets.as_ref(),
                 value,
                 *dynamic,
                 Match::Exact,
             ),
             Need::PreopenedPath { value, dynamic, .. } => {
-                unmet_preopen(self.preopened_paths.as_ref(), value, *dynamic)
+                unmet_preopen(need.kind(), self.preopened_paths.as_ref(), value, *dynamic)
             },
             Need::MemoryMb { .. } | Need::FetchBlobBytes { .. } | Need::ReadBlobBytes { .. } => {
                 None
@@ -134,6 +134,7 @@ fn unmet_value(
 }
 
 fn unmet_preopen(
+    kind: &'static str,
     grant: Option<&Grant<PreopenedPath>>,
     need: &PreopenedPath,
     dynamic: bool,
@@ -153,7 +154,7 @@ fn unmet_preopen(
         None
     } else {
         Some(Missing {
-            kind: "preopenedPath",
+            kind,
             value: format!("{} -> {}", need.host, need.guest),
         })
     }

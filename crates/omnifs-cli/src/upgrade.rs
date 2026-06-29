@@ -22,8 +22,8 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use omnifs_core::ProviderRef;
+use omnifs_mount::UpgradePlan;
 use omnifs_mount::mounts::{Registry, Spec};
-use omnifs_mount::{ProviderConfig, UpgradePlan};
 use omnifs_provider::Catalog;
 
 use crate::session::MountConfig;
@@ -134,7 +134,7 @@ fn apply_additive_upgrade(
     // Fill new optional fields with their defaults, never overwriting an existing
     // key. A config object survives even when nothing was added; it is dropped
     // only when it was absent and no default applied.
-    let mut config = match spec.config_raw.take().map(ProviderConfig::into_value) {
+    let mut config = match spec.config_raw.take() {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
@@ -145,8 +145,7 @@ fn apply_additive_upgrade(
             config.insert(field.name.clone(), default.clone());
         }
     }
-    spec.config_raw =
-        (!config.is_empty()).then(|| ProviderConfig::from_value(serde_json::Value::Object(config)));
+    spec.config_raw = (!config.is_empty()).then_some(serde_json::Value::Object(config));
     spec.provider = reference.clone();
 
     let mounts_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));

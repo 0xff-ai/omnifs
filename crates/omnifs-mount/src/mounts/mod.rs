@@ -12,16 +12,15 @@ use std::path::{Path, PathBuf};
 
 use omnifs_core::{ProviderName, ProviderRef, mount};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-use crate::{Auth, OAuth, ProviderConfig, StaticToken};
-use omnifs_caps::{Grants, Need};
-use omnifs_provider::{AuthManifest, Catalog, CatalogError, ProviderAuthManifest};
+use crate::{Auth, OAuth, StaticToken};
+use omnifs_caps::Grants;
+use omnifs_provider::{Catalog, CatalogError, ProviderManifest};
 
 /// Raw user-authored mount JSON.
 ///
 /// Loaded from JSON files in the mount spec directory.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Spec {
     /// The pinned provider reference: the content [`ProviderId`] plus the
     /// [`ProviderMeta`] (name, version) resolved when the CLI pinned it.
@@ -30,17 +29,14 @@ pub struct Spec {
     pub mount: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub root_mount: bool,
-    #[serde(
-        default,
-        deserialize_with = "crate::deserialize_mount_auth",
-        serialize_with = "crate::serialize_mount_auth",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub auth: Vec<Auth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Grants>,
+    /// Opaque provider config. The provider owns its meaning, so the host keeps
+    /// it as a free-form value and never parses it.
     #[serde(rename = "config", skip_serializing_if = "Option::is_none")]
-    pub config_raw: Option<ProviderConfig>,
+    pub config_raw: Option<serde_json::Value>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false`, so a
@@ -78,10 +74,12 @@ impl Spec {
         })
     }
 
+    #[must_use]
     pub fn config_bytes(&self) -> Vec<u8> {
-        self.config_raw
-            .as_ref()
-            .map_or_else(|| b"{}".to_vec(), ProviderConfig::to_bytes)
+        self.config_raw.as_ref().map_or_else(
+            || b"{}".to_vec(),
+            |config| serde_json::to_vec(config).unwrap_or_else(|_| b"{}".to_vec()),
+        )
     }
 
     /// Fill manifest-declared auth-scheme and config defaults into any field the
@@ -93,11 +91,11 @@ impl Spec {
         &mut self,
         manifest: &omnifs_provider::ProviderManifest,
     ) -> Result<(), serde_json::Error> {
-        if self.auth.is_empty()
+        if self.auth.is_none()
             && let Some(auth) = &manifest.auth
             && let Some(default_scheme) = auth.scheme(&auth.default)
         {
-            let auth = match default_scheme {
+            self.auth = match default_scheme {
                 omnifs_provider::AuthScheme::StaticToken(_) => {
                     Some(Auth::StaticToken(StaticToken {
                         scheme: Some(auth.default.clone()),
@@ -112,14 +110,11 @@ impl Spec {
                 // makes future variants force a compile-time decision.
                 omnifs_provider::AuthScheme::None => None,
             };
-            if let Some(auth) = auth {
-                self.auth.push(auth);
-            }
         }
         if let Some(config) = manifest.config.as_ref()
             && self.config_raw.is_none()
         {
-            self.config_raw = Some(ProviderConfig::from_value(config.defaults()));
+            self.config_raw = Some(config.defaults());
         }
         Ok(())
     }
@@ -153,9 +148,9 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to extract provider metadata from {}: {source}", path.display())]
-    ExtractProviderMetadata {
-        path: PathBuf,
+    #[error("failed to parse config schema for provider `{provider}`: {source}")]
+    ConfigSchema {
+        provider: String,
         source: omnifs_provider::ProviderMetadataError,
     },
     #[error(transparent)]
@@ -177,52 +172,16 @@ pub enum Error {
     },
 }
 
-/// What materialization reads from a pinned manifest: the capability needs (the
-/// oracle for the required-capabilities check) and the config metadata, which
-/// names the host-resource config fields a dynamic grant resolves from.
-pub struct ManifestRequirements {
-    pub needs: Vec<Need>,
-    pub config: Option<omnifs_provider::ConfigMetadata>,
-}
-
-/// Read what materialization checks a spec against from its pinned manifest: the
-/// capability needs and config metadata. Loads the artifact once and
-/// never mutates the spec (defaults are baked in at creation time, not here).
-/// `None` when the artifact is not retained; the missing-artifact error then
-/// surfaces at build time.
-pub fn manifest_requirements(
-    catalog: &Catalog,
-    spec: &Spec,
-) -> Result<Option<ManifestRequirements>, Error> {
+/// The pinned provider's manifest, or `None` when the artifact is not retained
+/// (the missing-artifact error then surfaces at build time). Loads the artifact
+/// once and never mutates the spec: defaults are baked in at creation time, not
+/// here. Callers pluck what they need (`capabilities`, `config`,
+/// `wasm_auth_manifest()`, the full `auth` block) from the returned manifest.
+pub fn pinned_manifest(catalog: &Catalog, spec: &Spec) -> Result<Option<ProviderManifest>, Error> {
     let Some(provider) = catalog.get(&spec.provider.id)? else {
         return Ok(None);
     };
-    let manifest = provider.manifest()?;
-    Ok(Some(ManifestRequirements {
-        needs: manifest.capabilities,
-        config: manifest.config,
-    }))
-}
-
-/// The injection-only auth manifest for a mount's pinned provider.
-pub fn auth_manifest_for(catalog: &Catalog, spec: &Spec) -> Result<Option<AuthManifest>, Error> {
-    let Some(provider) = catalog.get(&spec.provider.id)? else {
-        return Ok(None);
-    };
-    Ok(provider.manifest()?.wasm_auth_manifest())
-}
-
-/// The full auth block (including display guidance) for a mount's provider.
-/// Unlike [`auth_manifest_for`], which returns the injection-only wire form, this
-/// carries the per-scheme setup guidance.
-pub fn provider_auth_manifest_for(
-    catalog: &Catalog,
-    spec: &Spec,
-) -> Result<Option<ProviderAuthManifest>, Error> {
-    let Some(provider) = catalog.get(&spec.provider.id)? else {
-        return Ok(None);
-    };
-    Ok(provider.manifest()?.auth)
+    Ok(Some(provider.manifest()?))
 }
 
 /// In-memory mirror of the on-disk mount-spec directory, and the sole owner of
@@ -422,7 +381,7 @@ fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(),
     })
 }
 
-pub fn spec_paths_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
+fn spec_paths_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -530,9 +489,12 @@ mod tests {
         cfg.apply_provider_metadata(&manifest).unwrap();
 
         assert_eq!(cfg.provider_name().as_str(), "linear");
-        assert_eq!(cfg.auth.len(), 1);
-        assert!(cfg.auth[0].is_oauth());
-        assert_eq!(cfg.auth[0].scheme(), Some("oauth"));
+        let auth = cfg
+            .auth
+            .as_ref()
+            .expect("auth filled from manifest default");
+        assert!(auth.is_oauth());
+        assert_eq!(auth.scheme(), Some("oauth"));
     }
 
     #[test]

@@ -18,24 +18,25 @@ use std::path::{Path, PathBuf};
 use omnifs_caps::{Grant, PreopenMode};
 use omnifs_provider::{Catalog, ConfigMetadata};
 
-use crate::mounts::{Error as MountError, Spec, manifest_requirements};
+use crate::mounts::{Error as MountError, Spec, pinned_manifest};
 
 /// Guest directory each container preopen is rewritten under, as
 /// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
 pub const GUEST_PREOPENS_DIR: &str = "/run/omnifs/preopens";
 
 /// A host directory to bind into the container, paired with the guest path the
-/// provider sandbox will preopen.
+/// provider sandbox will preopen. Internal to materialization: callers consume
+/// the rendered docker bind specs via [`ContainerPreopenBinds`], never a
+/// `PreopenBind` directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreopenBind {
+pub(crate) struct PreopenBind {
     pub host: PathBuf,
     pub container: String,
     pub mode: PreopenMode,
 }
 
 impl PreopenBind {
-    #[must_use]
-    pub fn docker_bind_spec(&self) -> String {
+    fn docker_bind_spec(&self) -> String {
         let mode = match self.mode {
             PreopenMode::Ro => "ro",
             PreopenMode::Rw => "rw",
@@ -54,11 +55,6 @@ impl ContainerPreopenBinds {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.binds.is_empty()
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[PreopenBind] {
-        &self.binds
     }
 
     #[must_use]
@@ -169,14 +165,12 @@ pub fn materialize(
     // under-granted mount fails here rather than at the provider's first denied
     // callout. Over-granting beyond the manifest is allowed; the over-grant
     // check is deliberately not enforced (docs/future/provider-contract-versioning.md).
-    if let Some(requirements) =
-        manifest_requirements(catalog, &spec).map_err(MaterializeError::Metadata)?
-    {
+    if let Some(manifest) = pinned_manifest(catalog, &spec).map_err(MaterializeError::Metadata)? {
         let missing = spec
             .capabilities
             .clone()
             .unwrap_or_default()
-            .satisfies(&requirements.needs);
+            .satisfies(&manifest.capabilities);
         if !missing.is_empty() {
             return Err(MaterializeError::MissingCapabilities {
                 mount: spec.mount.clone(),
@@ -188,7 +182,7 @@ pub fn materialize(
                     .join(", "),
             });
         }
-        check_dynamic_socket(&spec, requirements.config.as_ref())?;
+        check_dynamic_socket(&spec, manifest.config.as_ref())?;
     }
 
     let preopen_binds = rewrite_preopens(&mut spec, mode)?;
@@ -228,7 +222,7 @@ fn check_dynamic_socket(
     let endpoint = spec
         .config_raw
         .as_ref()
-        .and_then(|config| config.as_value().get(field))
+        .and_then(|config| config.get(field))
         .and_then(serde_json::Value::as_str);
     let detail = match endpoint {
         None => format!("no `{field}` config is set"),
@@ -384,7 +378,7 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    /// A catalog over an empty providers dir. `manifest_requirements` finds no
+    /// A catalog over an empty providers dir. `pinned_manifest` finds no
     /// retained artifact and returns `Ok(None)`, so the capability checks are
     /// skipped and the spec passes through to preopen rewriting unchanged.
     fn builtin_catalog(root: &std::path::Path) -> Catalog {
@@ -418,14 +412,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            out.preopen_binds().as_slice(),
-            &[PreopenBind {
-                host: canonical,
-                container: format!("{GUEST_PREOPENS_DIR}/db/0"),
-                mode: PreopenMode::Ro,
-            }]
-        );
+        // The spec's preopen host is rewritten to the stable guest path.
         let preopen = &out
             .spec()
             .capabilities
@@ -437,6 +424,15 @@ mod tests {
             .literal()[0];
         assert_eq!(preopen.host, format!("{GUEST_PREOPENS_DIR}/db/0"));
         assert_eq!(preopen.guest, "/data");
+
+        // The launcher receives the canonical host directory bound at that path.
+        assert_eq!(
+            out.into_preopen_binds().into_docker_bind_specs(),
+            vec![format!(
+                "{}:{GUEST_PREOPENS_DIR}/db/0:ro",
+                canonical.display()
+            )],
+        );
     }
 
     #[test]

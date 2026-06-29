@@ -93,7 +93,7 @@ pub(crate) fn scan_provider_configs(
             provider: spec.provider_name().to_string(),
             provider_present,
             root_mount: spec.root_mount,
-            auth_count: spec.auth.len(),
+            auth_count: usize::from(spec.auth.is_some()),
             domain_count: spec
                 .capabilities
                 .as_ref()

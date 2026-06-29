@@ -56,45 +56,39 @@ impl MountConfig {
         mount_auth: &MountAuth,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<()> {
-        for auth in &mount_auth.spec().auth {
-            if auth.token_file().is_some() || auth.token_env().is_some() {
-                continue;
-            }
-            let target = mount_auth
-                .configured_target(auth, auth.account())
-                .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
-            let key = target
-                .primary_key()
-                .expect("credential target for scheme is internal");
-            let key_name = key.storage_key();
-            let entry = target
-                .lookup(store)
-                .with_context(|| {
-                    format!("fetch credential `{key_name}` for mount `{}`", self.name)
-                })?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "no stored credential for `{key_name}` (mount `{}`)",
-                        self.name
-                    )
-                });
-            match (auth.is_oauth(), entry) {
-                (_, Ok(_)) => {},
-                (true, Err(error)) => {
-                    return Err(error).with_hint(format!(
-                        "Run `omnifs auth login {}` to authenticate",
-                        self.name
-                    ));
-                },
-                (false, Err(error)) => {
-                    return Err(error).with_hint(format!(
-                        "Run `omnifs auth import {}` or `omnifs init {}` to configure this mount's token",
-                        self.name, self.name
-                    ));
-                },
-            }
+        let Some(auth) = &mount_auth.spec().auth else {
+            return Ok(());
+        };
+        if auth.token_file().is_some() || auth.token_env().is_some() {
+            return Ok(());
         }
-        Ok(())
+        let target = mount_auth
+            .configured_target(auth, auth.account())
+            .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
+        let key = target
+            .primary_key()
+            .expect("credential target for scheme is internal");
+        let key_name = key.storage_key();
+        let entry = target
+            .lookup(store)
+            .with_context(|| format!("fetch credential `{key_name}` for mount `{}`", self.name))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no stored credential for `{key_name}` (mount `{}`)",
+                    self.name
+                )
+            });
+        match (auth.is_oauth(), entry) {
+            (_, Ok(_)) => Ok(()),
+            (true, Err(error)) => Err(error).with_hint(format!(
+                "Run `omnifs auth login {}` to authenticate",
+                self.name
+            )),
+            (false, Err(error)) => Err(error).with_hint(format!(
+                "Run `omnifs auth import {}` or `omnifs init {}` to configure this mount's token",
+                self.name, self.name
+            )),
+        }
     }
 }
 

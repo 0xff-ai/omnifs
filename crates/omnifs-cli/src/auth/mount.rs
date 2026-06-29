@@ -127,9 +127,10 @@ fn load_mount_auth_config(mounts: &[MountConfig], mount: &str) -> anyhow::Result
 /// scheme name itself is already baked into `spec.auth` at creation, so it is
 /// available even when the manifest is not.
 pub(crate) fn mount_auth(catalog: &Catalog, spec: Spec) -> MountAuth {
-    let manifest = omnifs_mount::mounts::auth_manifest_for(catalog, &spec)
+    let manifest = omnifs_mount::mounts::pinned_manifest(catalog, &spec)
         .ok()
-        .flatten();
+        .flatten()
+        .and_then(|manifest| manifest.wasm_auth_manifest());
     MountAuth { spec, manifest }
 }
 
@@ -195,11 +196,7 @@ impl MountAuth {
     }
 
     fn primary_auth(&self) -> Option<&Auth> {
-        self.spec
-            .auth
-            .iter()
-            .find(|auth| auth.is_oauth())
-            .or_else(|| self.spec.auth.first())
+        self.spec.auth.as_ref()
     }
 
     fn status_target(&self) -> anyhow::Result<CredentialTarget> {
@@ -223,7 +220,7 @@ impl MountAuth {
                         .ok_or_else(|| anyhow!("missing auth.scheme"))
                 })?
         };
-        CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme), auth.account())
+        CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme))
     }
 
     fn target_for_scheme(
