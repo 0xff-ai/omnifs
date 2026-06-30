@@ -64,9 +64,6 @@ pub struct InitArgs {
     /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub scopes: Vec<String>,
-    /// Internal: setup prints capability grants before its own confirmation.
-    #[arg(skip = true)]
-    pub(crate) show_capabilities: bool,
 }
 
 impl InitArgs {
@@ -113,7 +110,7 @@ impl InitArgs {
         let reference = provider.reference();
         let auth_manifest = manifest.wasm_auth_manifest();
         let default_auth = AuthSelection::from_provider_default(manifest);
-        if interactive && self.show_capabilities {
+        if interactive {
             print_capability_justifications(manifest);
         }
         if self.no_input && default_auth.as_ref().is_some_and(AuthSelection::is_oauth) {
