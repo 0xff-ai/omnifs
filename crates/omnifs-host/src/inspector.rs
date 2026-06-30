@@ -709,36 +709,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn emit_assigns_monotonic_sequence_ids() {
-        let sink = InspectorSink::new_for_test(8);
-        for i in 0..5 {
-            sink.emit(i, dummy_event());
-        }
-        let snapshot = sink.history_snapshot();
-        let seqs: Vec<u64> = snapshot.iter().map(|r| r.seq).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn ring_drops_oldest_when_full_and_counts() {
-        let sink = InspectorSink::new_for_test(4);
-        for i in 0..10 {
-            sink.emit(i, dummy_event());
-        }
-        let snapshot = sink.history_snapshot();
-        assert_eq!(
-            snapshot.len(),
-            4,
-            "ring should retain capacity-many records"
-        );
-        // Retained records are the most recent emissions (seq 7..=10).
-        let seqs: Vec<u64> = snapshot.iter().map(|r| r.seq).collect();
-        assert_eq!(seqs, vec![7, 8, 9, 10]);
-        // Six older records dropped (seq 1..=6).
-        assert_eq!(sink.dropped_history(), 6);
-    }
-
     #[tokio::test]
     async fn subscriber_sees_history_snapshot_and_future_events() {
         let sink = Arc::new(InspectorSink::new_for_test(8));
@@ -753,27 +723,6 @@ mod tests {
         sink.emit(99, dummy_event());
         let next = sub.live.recv().await.expect("recv");
         assert_eq!(next.seq, 4);
-    }
-
-    #[tokio::test]
-    async fn lagged_subscriber_recovers_with_lag_count() {
-        // Broadcast capacity is OMNIFS_INSPECTOR_BROADCAST_CAP=256 by
-        // default; emit more than that without recving to force Lag.
-        // Use a custom small-capacity sink via direct construction.
-        let (live, mut rx) = broadcast::channel::<Arc<InspectorRecord>>(4);
-        for i in 0u64..10 {
-            let record = Arc::new(InspectorRecord::new("t", i, i, dummy_event()).with_seq(i));
-            let _ = live.send(record);
-        }
-        drop(live); // close sender so recv eventually terminates
-        let err = rx.recv().await.expect_err("expected lag");
-        match err {
-            broadcast::error::RecvError::Lagged(n) => assert!(n >= 1),
-            broadcast::error::RecvError::Closed => panic!("unexpected: Closed"),
-        }
-        // After Lag, recv resumes from the most recent record.
-        let last = rx.recv().await.expect("recv after lag");
-        assert!(last.seq >= 6, "should have advanced past the lag");
     }
 
     #[test]

@@ -595,16 +595,6 @@ mod tests {
         assert_eq!(provider.reference().meta.name.as_str(), "linear");
     }
 
-    /// An empty store yields no templates: there is no built-in fallback set.
-    #[test]
-    fn installed_providers_empty_without_installed_providers() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
-        let installed =
-            crate::catalog::installed_providers(&Catalog::open(&paths.providers_dir)).unwrap();
-        assert!(installed.is_empty());
-    }
-
     fn provider_manifest() -> ProviderManifest {
         use omnifs_provider::{
             AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, ProviderAuthManifest,

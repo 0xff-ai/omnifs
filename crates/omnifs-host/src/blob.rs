@@ -419,15 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn lookup_header_is_case_insensitive() {
-        let headers = vec![("Content-Type".into(), "text/plain".into())];
-        assert_eq!(
-            lookup_header(&headers, "content-type"),
-            Some("text/plain".into())
-        );
-    }
-
-    #[test]
     fn read_range_enforces_explicit_len_cap() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("blob");

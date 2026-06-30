@@ -1,18 +1,6 @@
 use omnifs_cache::{Record, RecordKind, SCHEMA_VERSION};
 
 #[test]
-fn cache_record_rejects_unknown_schema_version() {
-    let mut bytes = Record {
-        schema_version: SCHEMA_VERSION,
-        kind: RecordKind::File,
-        payload: vec![],
-    }
-    .serialize();
-    bytes[0] = 99; // corrupt schema version
-    assert!(Record::deserialize(&bytes).is_none());
-}
-
-#[test]
 fn cache_record_rejects_prior_schema_version() {
     // The durable read path version-gates on the record header byte: any record
     // whose leading schema byte differs from `SCHEMA_VERSION` is rejected as a

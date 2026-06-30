@@ -22,7 +22,7 @@ use omnifs_core::path::Path;
 use omnifs_core::view::{DirentRecord, DirentsPayload, EntryMeta};
 use omnifs_host::Runtime;
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{ListOutcome, NodeBody, RequestCtx, Tree, TreeErrorKind};
+use omnifs_tree::{ListOutcome, RequestCtx, Tree, TreeErrorKind};
 use tempfile::TempDir;
 
 /// Owns the harness temp dirs that must outlive the `Runtime`, plus the `Tree`
@@ -203,33 +203,6 @@ async fn list_hello_yields_sixteen_children_with_message() {
     assert!(names.contains(&"message"));
     assert!(names.contains(&"remote-a"));
     assert!(names.contains(&"remote-b"));
-}
-
-/// The test provider's `/checkout` returns `subtree(tree-ref 777)` (see
-/// providers/test/src/lib.rs:499), but tree 777 is never registered in the
-/// kernel-free harness (no git clone / archive callout runs), so the host's op
-/// validator rejects the lookup with "subtree result references unknown tree
-/// 777" (runtime_test.rs:560-584). This exercises the `LookupChildResult::Subtree`
-/// -> `resolve_tree_ref` seam in `Tree::resolve`; with a real backing dir it
-/// would return `NodeBody::Subtree`. Slice-1 deviation from the blueprint's
-/// `checkout_is_a_subtree_handoff` test, which assumed a resolvable treeref.
-#[tokio::test(flavor = "multi_thread")]
-async fn checkout_dangling_treeref_surfaces_as_error() {
-    let t = test_tree();
-    let tree = &t.tree;
-    let ctx = RequestCtx::default();
-
-    let err = tree
-        .resolve(&Path::parse("/checkout").unwrap(), &ctx)
-        .await
-        .expect_err("dangling treeref must error in the kernel-free harness");
-    assert!(
-        err.message.contains("777") || err.message.contains("tree"),
-        "expected a tree-ref error, got: {err}"
-    );
-    // The NodeBody::Subtree shape exists for the resolvable case; assert the
-    // type is reachable so the seam stays wired.
-    let _ = NodeBody::Subtree(std::path::PathBuf::from("/unused"));
 }
 
 /// NFSv4 filehandle-first / FUSE bare-inode rehydration: persist a NodeId

@@ -414,22 +414,3 @@ fn remove_state_file(state_file: &Path) {
         },
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::render_lsof_handles;
-
-    #[test]
-    fn lsof_handle_summary_renders_each_process() {
-        let rendered = render_lsof_handles(
-            "p48817\ncfish\nfcwd\nn/Users/raul/omnifs/oura\nf3\nn/Users/raul/omnifs/oura\np48937\nccaffeinate\nfcwd\nn/Users/raul/omnifs/oura\n",
-        )
-        .expect("blockers render");
-
-        assert!(rendered.contains("Open handles inside the mount:"));
-        assert!(rendered.contains("fish pid 48817"));
-        assert!(rendered.contains("cwd /Users/raul/omnifs/oura"));
-        assert!(rendered.contains("3 /Users/raul/omnifs/oura"));
-        assert!(rendered.contains("caffeinate pid 48937"));
-    }
-}

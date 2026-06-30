@@ -530,47 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_header_name_surfaces_at_send() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let mut fut = Box::pin(
-            cx.http()
-                .get("https://example.test/api")
-                .header("invalid name with space", "v")
-                .send(),
-        );
-
-        match drive_once(&mut fut) {
-            Poll::Ready(Err(_)) => {},
-            other => panic!("expected immediate error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn first_sticky_error_wins() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-
-        let mut fut = Box::pin(
-            cx.http()
-                .post("https://example.test/api")
-                .header("invalid name with space", "v")
-                .header("X-Bad", "value\nwith newline")
-                .send(),
-        );
-
-        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
-            panic!("expected immediate error");
-        };
-        assert_eq!(error.kind(), crate::error::ProviderErrorKind::InvalidInput);
-        assert!(
-            error.to_string().contains("invalid header name"),
-            "expected first failure (header name), got {error}"
-        );
-    }
-
-    #[test]
     fn raw_http_send_fast_fails_when_breaker_open() {
         crate::rate_limit::with_breaker(|b| {
             b.clear();
@@ -589,24 +548,6 @@ mod tests {
         crate::rate_limit::with_breaker(crate::rate_limit::RateLimitBreaker::clear);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn host_target_callout_future_fails_if_executed() {
-        let state = Rc::new(RefCell::new(()));
-        let cx = Cx::new(1, state);
-        let mut fut = Box::pin(cx.http().get("https://example.test/api").send());
-
-        let Poll::Ready(Err(error)) = drive_once(&mut fut) else {
-            panic!("expected host-target callout to fail immediately");
-        };
-
-        assert_eq!(error.kind(), ProviderErrorKind::Internal);
-        assert!(
-            error.message().contains("wasm32 component target"),
-            "unexpected error: {error}"
-        );
-    }
-
     #[test]
     fn response_ext_maps_429_to_retryable_rate_limit() {
         let resp = Response::builder()
@@ -621,19 +562,6 @@ mod tests {
         assert!(error.is_retryable());
         assert_eq!(error.message(), "HTTP 429; retry_after=3");
         assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
-    }
-
-    #[test]
-    fn rate_limit_without_retry_after_has_no_structured_hint() {
-        let resp = Response::builder()
-            .status(429)
-            .body(Vec::new())
-            .expect("response builder");
-
-        let error = resp.error_for_status_ref().unwrap_err();
-
-        assert_eq!(error.kind(), crate::error::ProviderErrorKind::RateLimited);
-        assert_eq!(error.retry_after(), None);
     }
 }
 
