@@ -330,28 +330,6 @@ impl Cache {
         }
     }
 
-    /// Remove the exact key from the mem and the database.
-    pub fn invalidate(&self, key: &Key) {
-        self.mem.invalidate(key);
-        if let Some(ref disk) = self.disk
-            && let Err(e) = disk.delete_exact(key.path.as_str())
-        {
-            tracing::debug!(path = key.path.as_str(), error = %e, "view cache disk invalidate failed");
-        }
-    }
-
-    /// Remove all entries whose key matches `predicate` from the mem.
-    /// Does not touch the database (prefix-level database cleanup is done
-    /// by `invalidate_prefix`).
-    pub fn invalidate_entries_if<P>(&self, predicate: P)
-    where
-        P: Fn(&Key, &Arc<Record>) -> bool + Send + Sync + 'static,
-    {
-        self.mem
-            .invalidate_entries_if(predicate)
-            .expect("invalidation closures enabled at cache construction");
-    }
-
     /// Remove all records at `prefix` or beneath it on a segment boundary from
     /// both the mem and the database.
     ///
@@ -407,11 +385,6 @@ impl Cache {
         let disk = self.disk.as_ref()?;
         let value = disk.freshness.get(scoped_path.as_bytes()).ok()??;
         postcard::from_bytes(&value).ok()
-    }
-
-    pub fn is_fresh(&self, scoped_path: &str, now_millis: u64) -> bool {
-        self.get_freshness(scoped_path)
-            .is_some_and(|f| f.expires_at.is_none_or(|exp| now_millis < exp))
     }
 
     fn delete_freshness(&self, scoped_path: &str) {
