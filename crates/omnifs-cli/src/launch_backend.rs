@@ -171,7 +171,14 @@ pub(crate) enum LaunchBackend {
 
 impl LaunchBackend {
     pub(crate) fn from_config(config: &Config) -> anyhow::Result<Self> {
-        match config.backend() {
+        Self::for_backend(config.backend(), config)
+    }
+
+    /// Build the launch backend for an explicitly chosen runtime, drawing
+    /// Docker image/container defaults from `config`. `omnifs up --runtime`
+    /// uses this to override the persisted default for one launch.
+    pub(crate) fn for_backend(backend: ConfiguredBackend, config: &Config) -> anyhow::Result<Self> {
+        match backend {
             ConfiguredBackend::Native => Ok(Self::Native),
             ConfiguredBackend::Docker => Ok(Self::Docker(DockerTarget::from_config(config)?)),
         }
