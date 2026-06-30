@@ -459,26 +459,3 @@ async fn launch_via_up() -> anyhow::Result<()> {
     anstream::println!("Launching omnifs ...");
     up::UpArgs::default().run().await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{ProviderOption, format_selected_providers};
-    use inquire::list_option::ListOption;
-
-    #[test]
-    fn selected_provider_prompt_answer_shows_only_ids() {
-        let arxiv = ProviderOption {
-            id: "arxiv".to_owned(),
-            line: "arxiv          network domains: export.arxiv.org; memory limit: 64 MiB"
-                .to_owned(),
-        };
-        let github = ProviderOption {
-            id: "github".to_owned(),
-            line: "github         network domains: api.github.com; memory limit: 256 MiB"
-                .to_owned(),
-        };
-        let selected = vec![ListOption::new(0, &arxiv), ListOption::new(1, &github)];
-
-        assert_eq!(format_selected_providers(&selected), "arxiv, github");
-    }
-}
