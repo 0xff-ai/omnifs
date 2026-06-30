@@ -40,18 +40,23 @@ pub fn name(os: HostOs) -> &'static str {
 }
 
 pub fn explain_runtime(os: HostOs) -> String {
-    let lead = "omnifs runs a host-native daemon by default. Docker is optional; \
-        when selected, Docker runs the Linux FUSE frontend inside the container.";
+    let lead = "omnifs can run its daemon two ways: host-native, or inside a Docker \
+        container running the Linux FUSE frontend. You'll pick a default next; \
+        re-run setup to change it, or override it per launch with \
+        `omnifs up --runtime <docker|native>`.";
 
     let per_os = match os {
         HostOs::MacOs => {
-            "On macOS, the native daemon serves a loopback NFS mount at a user-owned host path."
+            "On macOS the default is Docker. Host-native serves a loopback NFS mount \
+            at a user-owned host path and is experimental."
         },
         HostOs::LinuxNative => {
-            "On Linux, the native daemon serves the kernel FUSE frontend directly."
+            "On Linux the default is host-native, serving the kernel FUSE frontend \
+            directly; Docker is also available."
         },
         HostOs::LinuxWsl => {
-            "Inside WSL2, run setup from your WSL terminal. Native mode uses the Linux FUSE frontend in that distro."
+            "Inside WSL2 the default is host-native FUSE; run setup from your WSL \
+            terminal. Docker is also available."
         },
         HostOs::Unsupported => {
             "Your platform is not yet supported by omnifs. \

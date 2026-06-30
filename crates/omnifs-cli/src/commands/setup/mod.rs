@@ -61,14 +61,13 @@ impl SetupArgs {
         fs::create_dir_all(&paths.mounts_dir)
             .with_context(|| format!("create {}", paths.mounts_dir.display()))?;
 
-        // Record the launch backend so `omnifs up`/`down` read it. Docker is
-        // optional; native mode does not require a Docker daemon or image pull.
-        let backend = config.backend();
-        if config.system.runtime.is_none() {
-            let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
-            file.set_system_backend(backend)?;
-            file.save()?;
-        }
+        // Choose and record the default launch backend so `omnifs up`/`down`
+        // read it. The picker defaults to Docker on macOS and native on Linux;
+        // re-running setup is how the default is changed.
+        let backend = select_runtime(os, config.system.runtime, self.yes)?;
+        let mut file = crate::config::ConfigFile::load(&paths.config_file)?;
+        file.set_system_backend(backend)?;
+        file.save()?;
         let host_native = backend == ConfiguredBackend::Native;
 
         if !host_native {
@@ -156,6 +155,73 @@ fn print_banner(os: HostOs) {
 fn print_explainer(os: HostOs) {
     anstream::println!("{}", host_os::explain_runtime(os));
     anstream::println!();
+}
+
+/// The default runtime for a fresh setup on this OS: Docker on macOS (where
+/// host-native is loopback NFS and experimental), native on Linux/WSL where the
+/// kernel FUSE path is the norm.
+fn default_runtime(os: HostOs) -> ConfiguredBackend {
+    match os {
+        HostOs::MacOs => ConfiguredBackend::Docker,
+        HostOs::LinuxNative | HostOs::LinuxWsl | HostOs::Unsupported => ConfiguredBackend::Native,
+    }
+}
+
+/// One selectable runtime row, carrying its backend and an OS-specific label.
+struct RuntimeChoice {
+    backend: ConfiguredBackend,
+    label: &'static str,
+}
+
+impl fmt::Display for RuntimeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+/// Runtime options for the picker, ordered with this OS's default first. Native
+/// on macOS is labelled experimental (loopback NFS); Docker reads the same on
+/// every OS.
+fn runtime_choices(os: HostOs) -> Vec<RuntimeChoice> {
+    let docker = RuntimeChoice {
+        backend: ConfiguredBackend::Docker,
+        label: "docker  — Linux FUSE inside a container",
+    };
+    let native = RuntimeChoice {
+        backend: ConfiguredBackend::Native,
+        label: match os {
+            HostOs::MacOs => "native  — host loopback NFS (experimental)",
+            _ => "native  — host kernel FUSE",
+        },
+    };
+    match default_runtime(os) {
+        ConfiguredBackend::Docker => vec![docker, native],
+        ConfiguredBackend::Native => vec![native, docker],
+    }
+}
+
+/// Pick the default runtime: under `--yes` take the existing config value or the
+/// OS default without prompting; otherwise prompt with that value preselected.
+fn select_runtime(
+    os: HostOs,
+    current: Option<ConfiguredBackend>,
+    yes: bool,
+) -> anyhow::Result<ConfiguredBackend> {
+    let preferred = current.unwrap_or_else(|| default_runtime(os));
+    if yes {
+        return Ok(preferred);
+    }
+    let choices = runtime_choices(os);
+    let start = choices
+        .iter()
+        .position(|choice| choice.backend == preferred)
+        .unwrap_or(0);
+    let chosen = inquire::Select::new("Which runtime should omnifs use?", choices)
+        .with_starting_cursor(start)
+        .with_help_message("up/down to move, enter to confirm; re-run setup to change it")
+        .prompt()
+        .map_err(|e| anyhow!("runtime prompt: {e}"))?;
+    Ok(chosen.backend)
 }
 
 async fn connect_runtime(os: HostOs, target: &DockerTarget) -> anyhow::Result<Runtime> {
@@ -378,4 +444,60 @@ async fn launch_via_up() -> anyhow::Result<()> {
     anstream::println!();
     anstream::println!("Launching omnifs ...");
     up::UpArgs::default().run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_runtime_is_docker_on_mac_native_elsewhere() {
+        assert_eq!(default_runtime(HostOs::MacOs), ConfiguredBackend::Docker);
+        assert_eq!(
+            default_runtime(HostOs::LinuxNative),
+            ConfiguredBackend::Native
+        );
+        assert_eq!(default_runtime(HostOs::LinuxWsl), ConfiguredBackend::Native);
+    }
+
+    #[test]
+    fn choices_lead_with_the_os_default() {
+        assert_eq!(
+            runtime_choices(HostOs::MacOs)[0].backend,
+            ConfiguredBackend::Docker
+        );
+        assert_eq!(
+            runtime_choices(HostOs::LinuxNative)[0].backend,
+            ConfiguredBackend::Native
+        );
+    }
+
+    #[test]
+    fn native_is_marked_experimental_only_on_mac() {
+        let mac_native = runtime_choices(HostOs::MacOs)
+            .into_iter()
+            .find(|c| c.backend == ConfiguredBackend::Native)
+            .expect("native option present");
+        assert!(mac_native.label.contains("experimental"));
+
+        let linux_native = runtime_choices(HostOs::LinuxNative)
+            .into_iter()
+            .find(|c| c.backend == ConfiguredBackend::Native)
+            .expect("native option present");
+        assert!(!linux_native.label.contains("experimental"));
+    }
+
+    #[test]
+    fn yes_takes_the_existing_value_then_the_os_default() {
+        // An existing config value wins under --yes.
+        assert_eq!(
+            select_runtime(HostOs::MacOs, Some(ConfiguredBackend::Native), true).unwrap(),
+            ConfiguredBackend::Native
+        );
+        // With nothing configured, --yes falls back to the OS default.
+        assert_eq!(
+            select_runtime(HostOs::MacOs, None, true).unwrap(),
+            ConfiguredBackend::Docker
+        );
+    }
 }
