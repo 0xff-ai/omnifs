@@ -27,6 +27,8 @@ Prefer REST API extensions for new non-secret interactions. Keep credentials off
 
 The daemon runs host-native or in Docker. Docker is one launch mechanism, not the architecture. Host-native frontend defaults are FUSE on Linux and NFSv4 loopback on non-Linux.
 
+`omnifs setup` chooses the default runtime and records it at `[system].runtime`; the picker defaults to Docker on macOS (where host-native is loopback NFS and experimental) and host-native on Linux/WSL. `omnifs up --runtime <docker|native>` overrides that default for a single launch without persisting it. The override flows into the launch record, so `down`, `status`, and `shell` read the actually-running backend from the daemon and launch record, never from `[system].runtime`.
+
 Keep Docker-specific bind/materialization policy in Docker launch paths. Keep native and Docker daemon argument generation aligned where behavior is shared.
 
 ### Dev home
