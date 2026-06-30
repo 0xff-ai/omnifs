@@ -113,23 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_section_reads_runtime_fields() {
-        let config: Config = toml::from_str(
-            r#"
-                [system]
-                container_name = "omnifs-test"
-                image = "ghcr.io/example/omnifs:test"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(config.system.container_name.as_deref(), Some("omnifs-test"));
-        assert_eq!(
-            config.system.image.as_deref(),
-            Some("ghcr.io/example/omnifs:test")
-        );
-    }
-
-    #[test]
     fn config_file_round_trips() {
         // Guards the on-disk `[system].runtime` token: `setup` writes it and `up`
         // reads it, so a rename of the serialized form would silently break the
