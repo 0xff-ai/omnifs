@@ -24,9 +24,10 @@ pub struct ConfigSystem {
     pub runtime: Option<ConfiguredBackend>,
 }
 
-/// Daemon launch backend. `omnifs setup` records the choice; `omnifs up`
-/// reads it and starts the daemon that way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Daemon launch backend. `omnifs setup` records the default choice; `omnifs up`
+/// reads it, and `omnifs up --runtime` overrides it for one launch. The
+/// `ValueEnum` derive makes `docker`/`native` valid `--runtime` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfiguredBackend {
     /// Daemon runs inside a Docker container; the CLI owns the container

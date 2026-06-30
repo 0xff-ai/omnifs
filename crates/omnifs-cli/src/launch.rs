@@ -10,6 +10,7 @@ use omnifs_home::WorkspaceLayout;
 use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
 
 use crate::client::DaemonClient;
+use crate::config::ConfiguredBackend;
 use crate::launch_backend::{DockerTarget, LaunchBackend, LaunchParams};
 use crate::launch_record::LaunchRecord;
 use crate::runtime::Runtime;
@@ -26,23 +27,42 @@ use omnifs_provider::Catalog;
 pub(crate) struct Launcher<'a> {
     workspace: &'a Workspace,
     verb: &'static str,
+    /// Per-launch runtime override from `omnifs up --runtime`. When set it wins
+    /// over the persisted `[system].runtime` and is never written back.
+    runtime_override: Option<ConfiguredBackend>,
 }
 
 impl<'a> Launcher<'a> {
     pub(crate) fn new(workspace: &'a Workspace, verb: &'static str) -> Self {
-        Self { workspace, verb }
+        Self {
+            workspace,
+            verb,
+            runtime_override: None,
+        }
+    }
+
+    /// Override the runtime for this launch only (not persisted to config).
+    pub(crate) fn with_runtime_override(mut self, runtime: Option<ConfiguredBackend>) -> Self {
+        self.runtime_override = runtime;
+        self
     }
 
     pub(crate) async fn launch(self) -> anyhow::Result<LaunchOutcome> {
         let paths = self.workspace.layout();
         let config = self.workspace.config()?;
-        if config.system.runtime.is_none() {
+        // An explicit `--runtime` chooses the backend for this launch and skips
+        // the setup gate; otherwise the persisted default decides, and a missing
+        // one means setup never ran.
+        let backend = if let Some(runtime) = self.runtime_override {
+            LaunchBackend::for_backend(runtime, &config)?
+        } else if config.system.runtime.is_none() {
             anyhow::bail!(
-                "`{}` requires setup to choose a daemon backend; run `omnifs setup` first",
+                "`{}` requires setup to choose a daemon backend; run `omnifs setup` first, or pass `--runtime <docker|native>`",
                 self.verb
             );
-        }
-        let backend = LaunchBackend::from_config(&config)?;
+        } else {
+            LaunchBackend::from_config(&config)?
+        };
 
         let configs = self.workspace.mounts()?;
         if configs.is_empty() {
