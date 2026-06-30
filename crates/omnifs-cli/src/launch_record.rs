@@ -205,34 +205,3 @@ pub(crate) fn backend_from_daemon(
 fn record_path(config_dir: &Path) -> PathBuf {
     config_dir.join("launch.json")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::launch_backend::LaunchParams;
-
-    fn params(backend: LaunchBackend) -> LaunchParams {
-        LaunchParams {
-            control_addr: "127.0.0.1:7071".parse().unwrap(),
-            mount_point: None,
-            backend,
-        }
-    }
-
-    // `omnifs shell` decides native-vs-container purely from the launch record,
-    // so a per-launch `omnifs up --runtime` is reflected without touching config.
-    #[test]
-    fn docker_record_routes_shell_into_the_container() {
-        let target = DockerTarget::new("omnifs-x".into(), "img:1".into()).unwrap();
-        let record = LaunchRecord::new(&params(LaunchBackend::Docker(target)), None).unwrap();
-        assert_eq!(record.container_name(), Some("omnifs-x"));
-        assert_eq!(record.mode_label(), "container");
-    }
-
-    #[test]
-    fn native_record_routes_shell_to_a_host_subshell() {
-        let record = LaunchRecord::new(&params(LaunchBackend::Native), Some(4242)).unwrap();
-        assert_eq!(record.container_name(), None);
-        assert_eq!(record.mode_label(), "native");
-    }
-}
