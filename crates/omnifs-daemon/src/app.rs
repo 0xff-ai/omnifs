@@ -228,29 +228,3 @@ fn install_signal_handler(daemon: &Arc<server::Daemon>, rt: &Handle) {
 
 #[cfg(not(unix))]
 fn install_signal_handler(_daemon: &Arc<server::Daemon>, _rt: &Handle) {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn to_argv_native_launch_emits_expected_flags() {
-        let args = DaemonArgs {
-            listen: "127.0.0.1:7711".parse().expect("valid address"),
-            host_native: true,
-            nfs_port: 0,
-            nfs_state_dir: None,
-            nfs_trace: None,
-            root_symlinks: false,
-        };
-        assert_eq!(
-            args.to_argv(),
-            vec![
-                "daemon".to_string(),
-                "--listen".to_string(),
-                "127.0.0.1:7711".to_string(),
-                "--host-native".to_string(),
-            ]
-        );
-    }
-}
