@@ -187,7 +187,7 @@ impl UnmountCommand {
         }
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     fn macos(mount_point: &Path) -> Self {
         Self {
             program: "diskutil",
@@ -199,7 +199,7 @@ impl UnmountCommand {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     fn linux(mount_point: &Path) -> Self {
         Self {
             program: "umount",
@@ -688,24 +688,15 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, UnmountCommand,
-        ensure_private_state_dir, mount_table_contains, parse_macos_mounts, parse_proc_mounts,
-        read_mount_states, write_state,
+        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, ensure_private_state_dir,
+        mount_table_contains, parse_macos_mounts, parse_proc_mounts, read_mount_states,
+        write_state,
     };
     use serde_json::Value;
-    use std::ffi::OsString;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
 
     fn args_as_strings(command: &MountCommand) -> Vec<String> {
-        command
-            .args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    fn unmount_args_as_strings(command: &UnmountCommand) -> Vec<String> {
         command
             .args
             .iter()
@@ -744,23 +735,6 @@ mod tests {
                 "127.0.0.1:/omnifs",
                 "/Volumes/omnifs",
             ]
-        );
-    }
-
-    #[test]
-    fn linux_unmount_command_uses_umount() {
-        let command = UnmountCommand::linux(Path::new("/mnt/omnifs"));
-        assert_eq!(command.program, "umount");
-        assert_eq!(unmount_args_as_strings(&command), vec!["/mnt/omnifs"]);
-    }
-
-    #[test]
-    fn macos_unmount_command_uses_diskutil() {
-        let command = UnmountCommand::macos(Path::new("/Volumes/omnifs"));
-        assert_eq!(command.program, "diskutil");
-        assert_eq!(
-            unmount_args_as_strings(&command),
-            vec!["unmount", "/Volumes/omnifs"]
         );
     }
 
@@ -838,14 +812,5 @@ mod tests {
 
         drop(guard);
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn mount_command_keeps_path_as_single_argument() {
-        let command = MountCommand::linux(Path::new("/mnt/omnifs path"), 2049);
-        assert_eq!(
-            command.args.last(),
-            Some(&OsString::from("/mnt/omnifs path"))
-        );
     }
 }

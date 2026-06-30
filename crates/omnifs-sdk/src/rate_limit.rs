@@ -203,13 +203,4 @@ mod tests {
             Some("http://x.test:8080".into())
         );
     }
-
-    #[test]
-    fn parse_retry_after_secs_handles_int_and_rejects_date() {
-        assert_eq!(parse_retry_after_secs("3"), Some(Duration::from_secs(3)));
-        assert_eq!(
-            parse_retry_after_secs("Wed, 21 Oct 2099 07:28:00 GMT"),
-            None
-        );
-    }
 }

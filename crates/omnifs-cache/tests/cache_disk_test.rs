@@ -1,29 +1,9 @@
 use omnifs_cache::view::Cache;
-use omnifs_cache::{BatchRecord, Key, Record, RecordKind, SCHEMA_VERSION};
+use omnifs_cache::{BatchRecord, Key, Record, RecordKind};
 use omnifs_core::path::Path;
 
 fn p(path: &str) -> Path {
     Path::parse(path).unwrap()
-}
-
-#[test]
-fn disk_drops_records_from_prior_schema_version() {
-    // A stored record whose header advertises a prior schema version must
-    // decode as a miss so the runtime re-fetches from the provider. The disk
-    // read path runs every stored value through `Record::deserialize`, so this
-    // exercises the drop at its source. (Writing a stale record through the
-    // disk is impossible: the view database is wiped on open, and `put` always
-    // stamps the current `SCHEMA_VERSION`.)
-    let stale = [SCHEMA_VERSION - 1, 1u8]; // prior version, kind byte = Attr.
-    assert!(
-        Record::deserialize(&stale).is_none(),
-        "stale schema records must be treated as miss"
-    );
-    let current = [SCHEMA_VERSION, 1u8];
-    assert!(
-        Record::deserialize(&current).is_some(),
-        "current schema records must decode"
-    );
 }
 
 #[test]

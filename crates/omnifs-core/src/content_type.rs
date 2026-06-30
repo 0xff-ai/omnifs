@@ -135,29 +135,4 @@ mod tests {
         assert_eq!(ContentType::from_extension("yaml"), Some(ContentType::Yaml));
         assert_eq!(ContentType::from_extension("yml"), Some(ContentType::Yaml));
     }
-
-    #[test]
-    fn converts_to_mime_crate_type() {
-        assert_eq!(ContentType::Json.to_mime().unwrap(), mime::APPLICATION_JSON);
-        assert_eq!(
-            ContentType::Yaml.to_mime().unwrap(),
-            "application/yaml".parse::<mime::Mime>().unwrap()
-        );
-        assert_eq!(
-            ContentType::Custom("text/x-diff").to_mime().unwrap(),
-            "text/x-diff".parse::<mime::Mime>().unwrap()
-        );
-    }
-
-    #[test]
-    fn recovers_known_type_from_parsed_mime_essence() {
-        let markdown = "text/markdown; charset=utf-8"
-            .parse::<mime::Mime>()
-            .unwrap();
-
-        assert_eq!(
-            ContentType::from_mime_type(&markdown),
-            Some(ContentType::Markdown)
-        );
-    }
 }

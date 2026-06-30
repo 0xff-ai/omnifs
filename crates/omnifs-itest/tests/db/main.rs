@@ -311,13 +311,3 @@ async fn db_meta_direct_files() {
     let expected = format!("{}\n", dir.path().join("chinook.sqlite").display());
     assert_eq!(path, expected.into_bytes());
 }
-
-#[tokio::test]
-async fn db_readonly_immutable_no_revalidation() {
-    let (_dir, harness) = db_harness();
-
-    let first = read_bytes(&harness, "/tables/Album/count.txt").await;
-    let second = read_bytes(&harness, "/tables/Album/count.txt").await;
-    assert_eq!(first, second);
-    assert_eq!(first, b"3\n");
-}

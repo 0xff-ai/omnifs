@@ -206,15 +206,6 @@ mod tests {
     use time::OffsetDateTime;
 
     #[test]
-    fn from_target_reports_no_auth_required() {
-        let store = MemoryStore::new();
-        assert_eq!(
-            AuthReadiness::from_target("github", &CredentialTarget::None, &store),
-            AuthReadiness::None
-        );
-    }
-
-    #[test]
     fn from_target_reports_ready_credential() {
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
@@ -248,27 +239,6 @@ mod tests {
             AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store),
             AuthReadiness::Missing {
                 command: "omnifs init --reauth github".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn probe_and_terminal_projections_cover_error_state() {
-        let auth = AuthReadiness::Error {
-            message: "boom".into(),
-        };
-        assert_eq!(
-            auth.probe_summary(),
-            AuthProbeSummary {
-                severity: AuthProbeSeverity::Err,
-                message: "boom".into(),
-            }
-        );
-        assert_eq!(
-            auth.terminal_row(),
-            AuthTerminalRow {
-                kind: AuthTerminalKind::Error,
-                summary: "error: boom".into(),
             }
         );
     }

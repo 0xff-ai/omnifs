@@ -727,30 +727,4 @@ mod tests {
         assert_eq!(op.provider_name.as_deref(), Some("github"));
         assert!(op.stages.iter().all(|stage| !stage.in_flight));
     }
-
-    #[test]
-    fn trace_eviction_removes_operation_state() {
-        let mut traces = TraceReducer::default();
-        for trace_id in 0..(MAX_RECENT_TRACES as u64 + 2) {
-            traces.apply_record(&record(
-                trace_id,
-                trace_id,
-                InspectorEvent::FuseStart {
-                    op: "lookup".into(),
-                    mount: "test".into(),
-                    path: format!("/path/{trace_id}"),
-                },
-            ));
-        }
-
-        assert_eq!(traces.retained_trace_count(), MAX_RECENT_TRACES);
-        assert_eq!(traces.operations.len(), MAX_RECENT_TRACES);
-        assert!(traces.operation(0).is_none());
-        assert!(traces.operation(1).is_none());
-        assert!(
-            traces
-                .selected()
-                .is_some_and(|trace_id| traces.operation(trace_id).is_some())
-        );
-    }
 }

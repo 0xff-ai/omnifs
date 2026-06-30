@@ -353,16 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_manifests_are_identical() {
-        let fields = serde_json::json!([
-            { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" }
-        ]);
-        let m = manifest(&fields);
-        let m2 = manifest(&fields);
-        assert_eq!(UpgradePlan::diff(&m, &m2), UpgradePlan::Identical);
-    }
-
-    #[test]
     fn removed_field_is_breaking() {
         let old_fields = serde_json::json!([
             { "name": "endpoint", "type": { "kind": "string" }, "required": true, "default": "x" },

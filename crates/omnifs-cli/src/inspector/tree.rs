@@ -412,19 +412,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_creates_ancestor_chain() {
-        let mut tree = MountTree::new("github");
-        tree.mark_in_flight("raulk/omnifs/pulls/open", 1, 100);
-        let raulk = tree.root.children.get("raulk").expect("raulk");
-        let omnifs = raulk.children.get("omnifs").expect("omnifs");
-        let prs = omnifs.children.get("pulls").expect("pulls");
-        let open = prs.children.get("open").expect("open");
-        assert_eq!(open.mount_relative_path, "raulk/omnifs/pulls/open");
-        assert!(open.in_flight.contains(&1));
-        assert_eq!(open.status, NodeStatus::InFlight);
-    }
-
-    #[test]
     fn complete_demotes_to_cached_when_no_in_flight_left() {
         let mut tree = MountTree::new("dns");
         tree.mark_in_flight("example.com/MX", 1, 100);

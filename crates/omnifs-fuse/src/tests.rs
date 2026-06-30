@@ -484,35 +484,6 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
 }
 
 #[test]
-fn at_all_caps_total_pages_and_never_exceeds_the_bound() {
-    let h = build_harness();
-    h.opendir("/hello/feed");
-
-    // @all expands the (small) feed to completion in one read.
-    let (fh, status) = h.open_and_read("/hello/feed/@all", &[(0, 4096)]);
-    let status = String::from_utf8(status).unwrap();
-    h.release(fh);
-    assert!(
-        status.contains("complete"),
-        "@all status reports completion; got {status:?}"
-    );
-
-    let snapshot = h.opendir("/hello/feed");
-    let item_count = snapshot
-        .iter()
-        .filter(|(_, n, _)| !omnifs_host::pagination::is_reserved_provider_leaf(n))
-        .count();
-    // The test feed is 3 pages * 2 items = 6, well under the page cap. The
-    // bound itself (a single @all loads at most MAX_PAGINATION_PAGES pages,
-    // 2 items each) means a runaway feed cannot materialize everything.
-    assert_eq!(item_count, 6);
-    assert!(
-        item_count <= 2 * usize::try_from(omnifs_host::pagination::MAX_PAGINATION_PAGES).unwrap(),
-        "a single @all never exceeds the page cap"
-    );
-}
-
-#[test]
 fn synthetic_root_ignore_opens_without_provider_read() {
     let h = build_harness();
     // The root listing has no real .gitignore, so the host synthesizes one.

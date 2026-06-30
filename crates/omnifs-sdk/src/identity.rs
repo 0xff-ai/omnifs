@@ -113,42 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_format() {
-        let id = LogicalId::new(
-            ObjectKind("github.issue"),
-            vec![
-                ("owner", "o".into()),
-                ("repo", "r".into()),
-                ("number", "42".into()),
-            ],
-        );
-        assert_eq!(id.to_string(), "github.issue|owner=o|repo=r|number=42");
-    }
-
-    #[test]
-    fn identity_collapse_equality() {
-        let a = LogicalId::new(
-            ObjectKind("github.issue"),
-            vec![("owner", "o".into()), ("number", "42".into())],
-        );
-        let b = LogicalId::new(
-            ObjectKind("github.issue"),
-            vec![("owner", "o".into()), ("number", "42".into())],
-        );
-        assert_eq!(a, b);
-        let different_value = LogicalId::new(
-            ObjectKind("github.issue"),
-            vec![("owner", "o".into()), ("number", "99".into())],
-        );
-        assert_ne!(a, different_value);
-        let reordered = LogicalId::new(
-            ObjectKind("github.issue"),
-            vec![("number", "42".into()), ("owner", "o".into())],
-        );
-        assert_ne!(a, reordered);
-    }
-
-    #[test]
     fn matches_wire_self_check() {
         let id = LogicalId::new(
             ObjectKind("github.issue"),

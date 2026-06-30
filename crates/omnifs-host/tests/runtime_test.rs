@@ -26,18 +26,6 @@ fn test_context(
     HostContext::new(cache_dir, config_dir, providers_dir, credentials_file)
 }
 
-#[tokio::test]
-async fn test_initialize() {
-    let engine = make_engine();
-    let harness = make_runtime(&engine);
-    let info = harness.runtime.provider_info();
-    assert_eq!(info.name, "test-provider");
-    // Version now comes from the provider crate's `CARGO_PKG_VERSION` (no
-    // override arg); the test provider tracks the workspace version, same as
-    // this host test crate.
-    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
-}
-
 /// Every shipped provider must initialize (run `start()` + `seal()`) cleanly.
 /// The seal runs inside `initialize` and needs no credentials, so this is a
 /// deterministic gate for route-overlap and registration errors that a

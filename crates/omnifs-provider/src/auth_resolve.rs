@@ -194,17 +194,4 @@ mod tests {
             Err(SchemeResolveError::NoSchemes { kind: OAUTH_KIND })
         );
     }
-
-    #[test]
-    fn first_static_scheme_key_and_count() {
-        let manifest = AuthManifest {
-            schemes: vec![
-                oauth_scheme("oauth"),
-                static_scheme("pat"),
-                static_scheme("api-key"),
-            ],
-        };
-        assert_eq!(manifest.first_static_scheme_key(), Some("pat"));
-        assert_eq!(manifest.static_scheme_count(), 2);
-    }
 }

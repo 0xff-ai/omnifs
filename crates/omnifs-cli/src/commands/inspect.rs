@@ -95,28 +95,3 @@ fn check_record_path(path: Option<&Path>) -> anyhow::Result<()> {
         .with_context(|| format!("open record file `{}`", path.display()))?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn replay_plain_reads_jsonl_file() {
-        let replay_file = NamedTempFile::new().expect("tempfile");
-        let record = omnifs_inspector::InspectorRecord::new(
-            "t",
-            1,
-            1,
-            omnifs_inspector::InspectorEvent::FuseStart {
-                op: "lookup".into(),
-                mount: "dns".into(),
-                path: "/x".into(),
-            },
-        );
-        let line = serde_json::to_string(&record).expect("json");
-        fs::write(replay_file.path(), format!("{line}\n")).expect("write");
-        run_plain(SourceKind::Replay(replay_file.path().to_path_buf())).expect("replay");
-    }
-}

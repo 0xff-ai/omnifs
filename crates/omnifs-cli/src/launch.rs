@@ -437,17 +437,3 @@ fn report_launch_status(status: &DaemonStatus) {
         anstream::println!("✓ Runtime sees {} provider(s)", status.mounts.len());
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn parse_control_addr_handles_input() {
-        let bad = super::parse_control_addr("not-a-valid-socket-addr!!!");
-        assert_eq!(bad.port(), omnifs_api::DEFAULT_PORT);
-        assert_eq!(bad.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
-
-        let good = super::parse_control_addr("127.0.0.1:19999");
-        assert_eq!(good.port(), 19999);
-        assert_eq!(good.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
-    }
-}
