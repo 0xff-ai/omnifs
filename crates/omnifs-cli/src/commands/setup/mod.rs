@@ -440,7 +440,6 @@ async fn run_init_loop(
             token: None,
             token_env: None,
             scopes: Vec::new(),
-            show_capabilities: false,
         };
         let outcome = init_args
             .run_in_workspace(workspace)
