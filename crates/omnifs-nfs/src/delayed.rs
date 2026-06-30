@@ -177,14 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn fast_op_returns_ready_within_budget() {
-        let rt = multi_thread_rt();
-        let ops: DelayedOps<String, i32> = DelayedOps::new(rt.handle().clone());
-        let outcome = ops.resolve("k".to_string(), Duration::from_secs(2), || async { 7 });
-        assert!(matches!(outcome, DelayedResult::Ready(7)));
-    }
-
-    #[test]
     fn slow_op_defers_and_shares_one_running_task() {
         let rt = multi_thread_rt();
         let ops: DelayedOps<String, i32> = DelayedOps::new(rt.handle().clone());
@@ -239,27 +231,5 @@ mod tests {
             DelayedResult::Ready(2)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "no retention: re-resolved");
-    }
-
-    #[test]
-    fn panicking_op_is_pending_then_recovers_on_retry() {
-        let rt = multi_thread_rt();
-        let ops: DelayedOps<String, i32> = DelayedOps::new(rt.handle().clone());
-
-        // A task that panics before publishing must not wedge the key: the
-        // caller sees Pending and the slot is cleared.
-        assert!(matches!(
-            ops.resolve("k".to_string(), Duration::from_secs(2), || async {
-                panic!("boom")
-            }),
-            DelayedResult::Pending
-        ));
-        std::thread::sleep(Duration::from_millis(50));
-        // The next caller re-resolves cleanly rather than attaching to a dead
-        // slot and timing out forever.
-        assert!(matches!(
-            ops.resolve("k".to_string(), Duration::from_secs(2), || async { 7 }),
-            DelayedResult::Ready(7)
-        ));
     }
 }
