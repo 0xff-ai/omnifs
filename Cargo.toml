@@ -15,7 +15,7 @@ members = [
 default-members = ["crates/omnifs-cli", "crates/omnifs-host", "crates/omnifs-daemon"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/0xff-ai/omnifs"
@@ -23,24 +23,24 @@ homepage = "https://github.com/0xff-ai/omnifs"
 readme = "README.md"
 
 [workspace.dependencies]
-omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
-omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
-omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
-omnifs-creds = { version = "0.2.1", path = "crates/omnifs-creds" }
-omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
-omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
-omnifs-home = { version = "0.2.1", path = "crates/omnifs-home" }
-omnifs-host = { version = "0.2.1", path = "crates/omnifs-host" }
-omnifs-inspector = { version = "0.2.1", path = "crates/omnifs-inspector" }
-omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
-omnifs-mount = { version = "0.2.1", path = "crates/omnifs-mount" }
-omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
-omnifs-provider = { version = "0.2.1", path = "crates/omnifs-provider" }
-omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
-omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
-omnifs-tree = { version = "0.2.1", path = "crates/omnifs-tree" }
-omnifs-cache = { version = "0.2.1", path = "crates/omnifs-cache" }
-omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
+omnifs-api = { version = "0.3.0", path = "crates/omnifs-api" }
+omnifs-auth = { version = "0.3.0", path = "crates/omnifs-auth" }
+omnifs-caps = { version = "0.3.0", path = "crates/omnifs-caps" }
+omnifs-creds = { version = "0.3.0", path = "crates/omnifs-creds" }
+omnifs-daemon = { version = "0.3.0", path = "crates/omnifs-daemon" }
+omnifs-fuse = { version = "0.3.0", path = "crates/omnifs-fuse" }
+omnifs-home = { version = "0.3.0", path = "crates/omnifs-home" }
+omnifs-host = { version = "0.3.0", path = "crates/omnifs-host" }
+omnifs-inspector = { version = "0.3.0", path = "crates/omnifs-inspector" }
+omnifs-core = { version = "0.3.0", path = "crates/omnifs-core" }
+omnifs-mount = { version = "0.3.0", path = "crates/omnifs-mount" }
+omnifs-nfs = { version = "0.3.0", path = "crates/omnifs-nfs" }
+omnifs-provider = { version = "0.3.0", path = "crates/omnifs-provider" }
+omnifs-sdk = { version = "0.3.0", path = "crates/omnifs-sdk" }
+omnifs-sdk-macros = { version = "0.3.0", path = "crates/omnifs-sdk-macros" }
+omnifs-tree = { version = "0.3.0", path = "crates/omnifs-tree" }
+omnifs-cache = { version = "0.3.0", path = "crates/omnifs-cache" }
+omnifs-wit = { version = "0.3.0", path = "crates/omnifs-wit" }
 wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "winch", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }

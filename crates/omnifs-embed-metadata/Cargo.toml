@@ -17,15 +17,15 @@ omnifs-sdk = { workspace = true }
 omnifs-provider = { workspace = true }
 omnifs-caps = { workspace = true }
 serde_json = { workspace = true }
-omnifs-provider-arxiv = { version = "0.2.1", path = "../../providers/arxiv" }
-omnifs-provider-db = { version = "0.2.1", path = "../../providers/db" }
-omnifs-provider-dns = { version = "0.2.1", path = "../../providers/dns" }
-omnifs-provider-docker = { version = "0.2.1", path = "../../providers/docker" }
-omnifs-provider-github = { version = "0.2.1", path = "../../providers/github" }
-omnifs-provider-kubernetes = { version = "0.2.1", path = "../../providers/kubernetes" }
-omnifs-provider-linear = { version = "0.2.1", path = "../../providers/linear" }
-omnifs-provider-oura = { version = "0.2.1", path = "../../providers/oura" }
-test-provider = { version = "0.2.1", path = "../../providers/test" }
+omnifs-provider-arxiv = { version = "0.3.0", path = "../../providers/arxiv" }
+omnifs-provider-db = { version = "0.3.0", path = "../../providers/db" }
+omnifs-provider-dns = { version = "0.3.0", path = "../../providers/dns" }
+omnifs-provider-docker = { version = "0.3.0", path = "../../providers/docker" }
+omnifs-provider-github = { version = "0.3.0", path = "../../providers/github" }
+omnifs-provider-kubernetes = { version = "0.3.0", path = "../../providers/kubernetes" }
+omnifs-provider-linear = { version = "0.3.0", path = "../../providers/linear" }
+omnifs-provider-oura = { version = "0.3.0", path = "../../providers/oura" }
+test-provider = { version = "0.3.0", path = "../../providers/test" }
 
 [lints]
 workspace = true

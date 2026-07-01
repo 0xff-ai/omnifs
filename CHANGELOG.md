@@ -1,66 +1,63 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-
-Entries are grouped by product area; each is tagged with a type (Feature, Fix, Improvement, Performance, Breaking, Deprecation, Removal, Security).
-
-## [Unreleased]
-### Providers & projected paths
-- **Feature:** The provider SDK now centers object-shaped routes and collections: providers register objects, file objects, aliases, collection captures, choice-backed captures, preloads, invalidations, and typed object render faces through the SDK instead of hand-assembling path handlers. The built-in providers have been migrated onto that model, including GitHub, arXiv, db, DNS, Docker, Kubernetes, Linear, Oura, and the test provider.
-- **Breaking:** Provider manifests are now authored from provider annotations and embedded into the WASM component at build time, replacing the checked-in `omnifs.provider.json` files. Auth modes, endpoints, host resources, provider config metadata, and provider metadata now flow through the SDK macros and build-time manifest assembly.
-- **Feature:** A read-only Kubernetes provider projects a cluster as a filesystem: namespaces, resource types, and objects are browsable under `namespaces/<ns>/<kind>/<name>/`, each object renders its `manifest.yaml`, and pods expose live `logs/<container>.log` that stream with `tail -f`. The provider holds no cluster credential and reaches the API server through a `kubectl proxy`, so all auth and TLS stay host-side.
-- **Feature:** A read-only Oura provider projects Oura Ring health data as a filesystem: each day is a directory (`<day>/`) holding per-collection JSON files such as `daily_sleep.json`, `daily_activity.json`, `daily_readiness.json`, `heart_rate.json`, and `workout.json`. It authenticates with Oura's client-side-token OAuth flow, and reading any day preloads the surrounding ±15-day window so neighboring days are already warm.
-- **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
-- **Fix:** A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
-- **Improvement:** Kubernetes provider unit tests have been ported to host-driven integration tests, exercising the provider through the same code path as real consumers. (#127)
-- **Breaking:** The stability levels are renamed: `Immutable`/`Mutable`/`Volatile` are now `stable`/`dynamic`/`live`, freeing the old words for a future write model. (#132)
-- **Breaking:** Every object must now declare its stability (`o.stable()`, `o.dynamic()`, `o.live()`, or a key-dependent closure); there is no default. Omitting it is a build error, which prevents pinned identities from being silently treated as `dynamic` and given needless cache TTLs and eviction. (#132)
-- **Improvement:** When browsing a listing, many files are now served directly from the data already fetched, so reads don't need to refetch from upstream. (#146)
-
-### Runtime & mounts
-- **Improvement:** Archive extraction (mounting a stored `tar.gz`/`tar`/`zip` blob as a directory tree) now runs directly on the host instead of inside a WASM sandbox component. The `omnifs-tool-archive` component and the `omnifs:tool-archive` WIT world are removed; path sanitization and the entry/size/total-byte caps are unchanged, with a wall-clock deadline replacing the sandbox fuel limit. The `open-archive` provider callout is unchanged, so providers and consumers see no behavior change.
-- **Feature:** The daemon can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
-- **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
-- **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
-- **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.
-- **Feature:** The runtime is a daemon that owns the mount and exposes an HTTP control API, driven by the `omnifs` CLI over that API. It ships as a single `omnifs` binary: the daemon runs as the internal `omnifs daemon` subcommand (its own process, same control API), not a separate `omnifsd`. `omnifs up` reads `[system].runtime` (`docker` or `native`) and starts the daemon in a Docker container or host-native over NFS, defaulting to host-native on macOS (no Docker required) and Docker on Linux; `omnifs setup` records the choice.
-- **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
-- **Feature:** On macOS, `omnifs up` now serves the projected filesystem over a local NFS loopback mount, no Docker required. (#134)
-- **Improvement:** The filesystem projection now runs through a single frontend-neutral core, with FUSE and NFS each serving as a thin adapter that renders the same projection into its own kernel vocabulary. (#134)
-- **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
-- **Breaking:** The daemon loads its mount set from `mounts/*.json` on start and reconciles to that desired state, instead of the CLI pushing specs over the wire. (#141)
-- **Feature:** A new shutdown endpoint lets the daemon unmount its own filesystem, tear down providers, and exit gracefully. (#141)
-- **Fix:** Over NFS, the root directory now refreshes when a mount is added or removed, so clients see mounts appear and disappear immediately instead of caching a stale (sometimes empty) listing. (#142)
-- **Feature:** A provider's manifest declares the capabilities it needs; a mount grants a subset, and the host checks the grant covers the need at provider start. (#145)
-- **Feature:** A mount references its provider by the hash of its WASM bytes, so a projection always runs the exact artifact it was authored against. (#145)
+## [0.3.0] - 2026-07-01
 
 ### CLI & workflow
-- **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
-- **Fix:** The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
-- **Feature:** You can now see every authentication method omnifs supports with `omnifs auth modes`, and get provider-specific setup guidance with `omnifs auth explain <provider>`. (#131)
-- **Feature:** Provider manifests can now declare how the host authenticates at the token endpoint, enabling confidential-client OAuth flows like Google Workspace. (#131)
-- **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
-- **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
-- **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
-- **Improvement:** Released omnifs binaries now embed the provider and tool WASM and unpack it into the host on launch, so first run and upgrades install providers offline instead of downloading them from GitHub releases. (#142)
-- **Feature:** The CLI is now a thin client that always communicates with the daemon over its control API; commands like `down`, `status`, and `reset` no longer guess whether the daemon is native or Docker, making behavior consistent across runtimes. (#143)
-- **Fix:** A crashed daemon no longer hangs the `down` command; teardown now resolves quickly on both Linux and macOS by avoiding dead mounts. (#143)
+- Recommend auth status in shell banner
+- Make authentication self-explanatory and streamline the verb surface (#131)
+- Single omnifs binary with docker and host-native daemon backends (#137)
+- Embed the provider WASM bundle in the CLI binary (#142)
+- Make daemon lifecycle and mount compatibility explicit (#143)
+- Open the dev container shell with the image's zsh
+- Use host-built provider artifacts (#154)
+- Choose the default runtime during setup on any OS
+- Add `omnifs up --runtime` for a one-off runtime override
+- Install providers on demand and refine setup capability prompts
+- Always show init capability grants
 
-### Caching & performance
-- **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
-- **Fix:** The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
-- **Improvement:** The cache now uses the fjall database engine instead of redb, which simplifies how data is keyed and written across mounts. (#140)
-- **Improvement:** Object cache keys are now stored without the mount prefix, as each mount gets its own dedicated storage area. (#140)
-- **Security:** Path segments now reject control characters, making the internal delimiter used in view cache keys safe from accidental collisions. (#140)
+### Other
+- Adopt 0xff-ai/bot for changelog entries (PR-branch + merge gate) (#117)
+- Project the tree through a frontend-neutral core, host-native on macOS over NFS (#134)
+- Keep arm64 CI on the ubuntu-24.04 blacksmith runner
+- Tree/collection-capture/choices faces + migrate GitHub to object SDK
+- File_object direct form, BlobFile stability, object stream face; docker/test blockers
+- Omnifs dev.
+- Run providers on Wasmtime component async (#160)
 
-### Internal & maintenance
-- **Improvement:** Provider SDK guidance and system rationale have been split into binding `docs/contracts/` rules, focused `docs/architecture/` notes, and the provider-authoring skill, replacing the stale `docs/design/` stack with current ownership and validation rules.
-- **Test:** The SDK now has a WIT-boundary harness for provider exports and route behavior, and provider initialization tests assert that generated manifests seal through the host path instead of only compiling as guest code.
-- **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
-- **Improvement:** CI runner labels can now switch between Blacksmith and GitHub-hosted runners through the `CI_RUNNER_FAMILY` repository Actions variable.
-- **Improvement:** The daemon control API router now registers Axum routes and OpenAPI paths through one `utoipa-axum` surface, reducing route/spec drift.
-- **Test:** Removed or merged narrow tests across many crates, folding useful coverage into broader behavior-oriented cases. (#147)
+### Providers & projected paths
+- Apply file leaf modifiers to pending leaves (#110)
+- Stamp contract evidence and surface unhandled events (#112)
+- Read-only Kubernetes provider with throwaway dev cluster (#123)
+- Add Oura provider with client-side-token OAuth and preload effects (#113)
+- Project already-fetched data into listings (#146)
+- Expand default dev profile and add oura mount
+- Serve table sample.json as a whole-file body projection
+- Object trait reshape + collection/invalidation foundations
+- Object SDK core — faces, dispatch, macros, snapshot (gates green, 2 known blockers)
+- WIT-boundary harness + correct collections, file-object preload, leaf resolution
+- Migrate remaining 8 providers to object SDK (wasm-green, known fixups)
+- Mount Paper at /papers/{paper}/{version}, not root; add all-providers seal gate
+- Preloaded + just-read file-object days project as listable dirents
+- Author provider manifests from annotations (dns, arxiv)
+- Assemble the provider manifest section at build by running the component
+- Author db, docker, and kubernetes manifests from annotations
+- Author auth-provider manifests from annotations, retire the JSON path
+- Infer provider state in macros
+- Add explicit artifact installs (#157)
+- Add path segment macro (#158)
 
+### Runtime & mounts
+- Preserve learned file sizes (#106)
+- Live tail -f follow for volatile files (#115)
+- Add read-only NFSv4 loopback frontend to the daemon (#126)
+- Reconcile mounts from disk and own the runtime lifecycle (#141)
+- Host-enforced capability model and content-addressed provider pinning (#145)
+- Publish reconcile replacements after build
+- Pass container-native preopens through materialization
+- Make a spec file's name its mount identity, and route reset through the Registry
+- Keep the mount responsive under slow and throttled providers
+- Defer slow provider READDIR with NFS4ERR_DELAY
 ## [0.2.1] - 2026-06-08
 
 ### Fixed

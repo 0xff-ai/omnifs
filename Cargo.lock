@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "utoipa",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-auth"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "http",
  "oauth2",
@@ -2851,7 +2851,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-cache"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-caps"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hex",
  "schemars",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anstream",
  "anyhow",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-creds"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "atomic-write-file",
  "fs2",
@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-daemon"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-embed-metadata"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-caps",
  "omnifs-provider",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-fuse"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "fuser",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-home"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-core",
  "serde",
@@ -3026,7 +3026,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-host"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "async_singleflight",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-inspector"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-itest"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "hickory-proto",
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-mount"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "omnifs-caps",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-nfs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
@@ -3144,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-arxiv"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "percent-encoding",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-db"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "hex",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-dns"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "hickory-proto",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-docker"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bollard-stubs",
  "hashbrown 0.15.5",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-github"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "http",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-kubernetes"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "k8s-openapi",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-linear"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "omnifs-core",
@@ -3247,7 +3247,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-oura"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "serde",
@@ -3258,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-sdk"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "hex",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-sdk-macros"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-caps",
  "proc-macro2",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-tree"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-cache",
  "omnifs-core",
@@ -3303,7 +3303,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-wit"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "wasmtime",
@@ -4716,7 +4716,7 @@ dependencies = [
 
 [[package]]
 name = "test-provider"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "serde",
