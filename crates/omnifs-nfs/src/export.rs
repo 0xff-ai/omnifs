@@ -8,6 +8,7 @@ use crate::protocol::consts::{
     NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
+use omnifs_tree::{TreeError, TreeErrorKind};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -72,6 +73,27 @@ impl Status {
             Self::StaleClientId => NFS4ERR_STALE_CLIENTID,
             Self::Symlink => NFS4ERR_SYMLINK,
             Self::TooSmall => NFS4ERR_TOOSMALL,
+        }
+    }
+}
+
+/// Reactive NFS status mapping for definitive and transient [`TreeError`] kinds.
+///
+/// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
+/// retries. This path does not spawn background work; proactive `READDIR` deferral
+/// is separate (`omnifs_host::singleflight::Deferred`).
+impl From<&TreeError> for Status {
+    fn from(error: &TreeError) -> Self {
+        match error.kind {
+            TreeErrorKind::NotFound => Self::NoEnt,
+            TreeErrorKind::NotDirectory => Self::NotDir,
+            TreeErrorKind::IsDirectory => Self::IsDir,
+            TreeErrorKind::PermissionDenied => Self::Access,
+            TreeErrorKind::InvalidInput => Self::Invalid,
+            TreeErrorKind::TooLarge | TreeErrorKind::Internal => Self::Io,
+            TreeErrorKind::RateLimited | TreeErrorKind::Timeout | TreeErrorKind::Network => {
+                Self::Delay
+            },
         }
     }
 }
@@ -409,5 +431,28 @@ pub trait ReadOnlyExport: Send + Sync {
 
     fn parent(&self, id: u64) -> StatusResult<u64> {
         Ok(self.attr(id)?.parent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omnifs_tree::TreeErrorKind;
+
+    #[test]
+    fn transient_tree_errors_map_to_delay() {
+        for kind in [
+            TreeErrorKind::RateLimited,
+            TreeErrorKind::Timeout,
+            TreeErrorKind::Network,
+        ] {
+            let error = TreeError {
+                kind,
+                message: "retry later".to_string(),
+                retryable: true,
+                retry_after: None,
+            };
+            assert_eq!(Status::from(&error), Status::Delay);
+        }
     }
 }

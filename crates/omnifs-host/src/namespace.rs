@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use crate::clock::now_millis;
-use crate::inflight::{Acquired, CoalesceKey, share_outcome, unshare_outcome};
+use crate::coalesce::RunConfig;
+use crate::coalesce::ns::{Key as NsKey, SharedOutcome, share_outcome, unshare_outcome};
 use crate::materialize::{LookupOutcome, Materializer};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
@@ -30,7 +33,7 @@ impl Namespace<'_> {
             name,
         };
         let result = self
-            .coalesced(CoalesceKey::Path(child_path.clone()), || {
+            .coalesced(NsKey::Path(child_path.clone()), || {
                 self.runtime.run_op(op.clone(), fuse_trace)
             })
             .await?;
@@ -60,7 +63,7 @@ impl Namespace<'_> {
         let result = if is_continuation {
             self.runtime.run_op(op.clone(), fuse_trace).await?
         } else {
-            self.coalesced(CoalesceKey::Path(path.clone()), || {
+            self.coalesced(NsKey::Path(path.clone()), || {
                 self.runtime.run_op(op.clone(), fuse_trace)
             })
             .await?
@@ -137,8 +140,8 @@ impl Namespace<'_> {
         // reads of distinct paths that alias the same object share one provider
         // revalidation. Cold reads have no known id yet, so they key on the path.
         let coalesce_key = match &warm_id {
-            Some(host_id) => CoalesceKey::Object(ObjectId::from_bytes(host_id.clone())),
-            None => CoalesceKey::Path(path.clone()),
+            Some(host_id) => NsKey::Object(ObjectId::from_bytes(host_id.clone())),
+            None => NsKey::Path(path.clone()),
         };
         let result = if live {
             self.runtime.run_op(op, fuse_trace).await?
@@ -188,28 +191,19 @@ impl Namespace<'_> {
         }
     }
 
-    async fn coalesced<F, Fu>(&self, key: CoalesceKey, op: F) -> Result<wit_types::OpResult>
+    async fn coalesced<F, Fu>(&self, key: NsKey, op: F) -> Result<wit_types::OpResult>
     where
         F: Fn() -> Fu,
         Fu: std::future::Future<Output = Result<wit_types::OpResult>>,
     {
-        loop {
-            match self.runtime.inflight.acquire(&key) {
-                Acquired::Leader { guard } => {
-                    let result = op().await;
-                    guard.complete(share_outcome(&result));
-                    return result;
-                },
-                Acquired::ExactMatch { mut rx } => {
-                    if let Ok(outcome) = rx.recv().await {
-                        return unshare_outcome(outcome, Error::ProviderProtocol);
-                    }
-                },
-                Acquired::AncestorWait { mut rx } => {
-                    let _ = rx.recv().await;
-                },
-            }
-        }
+        let shared: Arc<SharedOutcome> = self
+            .runtime
+            .coalesce
+            .run(&key, RunConfig::NAMESPACE, || async {
+                share_outcome(&op().await)
+            })
+            .await;
+        unshare_outcome((*shared).clone(), Error::ProviderProtocol)
     }
 }
 
