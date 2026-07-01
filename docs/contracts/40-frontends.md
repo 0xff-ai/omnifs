@@ -27,6 +27,18 @@ macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a frontend
 
 Keep NFS filehandles, stateids, leases, mount state, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown in the NFS path.
 
+### NFS deferral and `NFS4ERR_DELAY`
+
+`omnifs-nfs` uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate them.
+
+**Reactive delay.** When `Tree` returns a transient upstream error (`RateLimited`, `Timeout`, `Network`), the NFS adapter maps it to `NFS4ERR_DELAY` through `tree_status`. The client retry starts fresh; no background work continues past the reply.
+
+**Proactive deferral.** Provider-backed `READDIR` uses `delayed::Listings` with an inline wait budget (`NFS_INLINE_BUDGET`). Past the budget the handler replies `NFS4ERR_DELAY` while the listing task keeps running. On success, `Tree` caches dirents so the retry hits warm cache. Only `READDIR` gets proactive deferral today: successful listings write authoritative dirents into `Tree`; cold `LOOKUP` lacks the same cache-convergence guarantee.
+
+**Concurrent dispatch.** Per-connection RPC dispatch runs each call on its own handler thread; replies carry their own XID. One slow op does not head-of-line block other RPCs on the same TCP connection. Proactive deferral is about not holding a single `READDIR` reply past the inline budget, not about serializing the connection.
+
+**Ownership.** `omnifs-host::singleflight` owns exact-key dedupe (`Group` for block-until-done work such as OAuth refresh; `Deferred` for budgeted proactive deferral). NFS `delayed::Listings` is a `Deferred` over `delayed::Key`. `omnifs-host::inflight::InFlight` owns ancestor-aware namespace coalescing for provider ops; it is not replaced by `Group`. Wait budgets and proactive `DELAY` signalling are NFS frontend policy. `Tree` computes truth and owns cache; it does not know about `NFS4ERR_DELAY` or wait budgets. Reactive `Status::from(&TreeError)` maps transient upstream errors without background continuation. FUSE owns its own blocking tolerance; it has no `DELAY` equivalent.
+
 ## Must not
 
 - Call provider WIT directly from a frontend.
@@ -38,6 +50,8 @@ Keep NFS filehandles, stateids, leases, mount state, and NFS protocol errors in 
 - Treat container FUSE as the architecture; Docker is one launch mechanism.
 - Remove live NFS test serialization casually.
 - Claim NFS gives FUSE-equivalent permission isolation.
+- Put wait budgets or `DELAY` policy in `omnifs-tree`.
+- Assume every `NFS4ERR_DELAY` implies background continuation past the reply.
 
 ## Code
 

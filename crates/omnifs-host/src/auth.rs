@@ -4,8 +4,8 @@
 //! inject headers directly. OAuth strategies keep tokens outside the provider
 //! sandbox and let `HttpStack` retry once with rebuilt headers.
 
+use crate::singleflight::Group;
 use arc_swap::ArcSwapOption;
-use async_singleflight::Group;
 use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
 use omnifs_core::CredentialId;
 use omnifs_creds::{CredentialEntry, CredentialStore, FileStore, StoreError};
