@@ -11,9 +11,10 @@ use crate::blob_cache::BlobCache;
 use crate::callouts::{CalloutHost, TestCallout, TestCallouts};
 use crate::capability::{CapabilityChecker, config_str};
 use crate::cloner::GitCloner;
+use crate::coalesce::Coalesce;
+use crate::coalesce::ns::{Key as NsCoalesceKey, SharedOutcome};
 use crate::git;
 use crate::http::HttpStack;
-use crate::inflight::InFlight;
 use crate::inspector::{self, InspectorSink};
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
@@ -118,7 +119,7 @@ pub struct Runtime {
     trees: Arc<TreeRefs>,
     pub(crate) cache: Store,
     pub(crate) invalidation: InvalidationState,
-    pub(crate) inflight: InFlight,
+    pub(crate) coalesce: Coalesce<NsCoalesceKey, SharedOutcome>,
     /// Per-path locks serializing the read-modify-write of a paged
     /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
     /// reads on the same directory must not both snapshot the same base and
@@ -392,7 +393,7 @@ impl Runtime {
             trees,
             cache,
             invalidation: InvalidationState::default(),
-            inflight: InFlight::new(),
+            coalesce: Coalesce::new(),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             inspector: inspector::global(),

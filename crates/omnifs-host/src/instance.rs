@@ -5,7 +5,7 @@
 //! store event loop alive so independent host tasks can start provider
 //! calls while earlier calls are suspended on async host imports.
 //! `Runtime` composes this with orchestration concerns
-//! (executors, caches, activity, invalidation, inflight).
+//! (executors, caches, activity, invalidation, coalesce).
 
 use std::path::{Component as PathComponent, Path, PathBuf};
 use std::sync::Arc;
