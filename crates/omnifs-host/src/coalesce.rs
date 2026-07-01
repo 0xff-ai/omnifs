@@ -192,7 +192,10 @@ impl<K: CoverKey, V> Coalesce<K, V> {
             .as_ref()
             .expect("Coalesce::resolve requires a runtime handle; use with_runtime()");
         let receiver = match self.claim(key) {
-            Claim::Run { mut guard } => {
+            Claim::Run {
+                mut guard,
+                receiver,
+            } => {
                 let key_id = guard.key_id.clone();
                 guard.disarm();
                 let coalesce = Arc::clone(self);
@@ -200,12 +203,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
                     let value = Arc::new(make().await);
                     coalesce.publish(&key_id, value);
                 });
-                self.slots
-                    .lock()
-                    .get(&key.exact_id())
-                    .expect("resolve runner slot")
-                    .result
-                    .subscribe()
+                receiver
             },
             Claim::Join(slot) => slot.result,
             Claim::Covered { .. } => {
@@ -222,7 +220,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
 
     async fn acquire(&self, key: &K, cfg: RunConfig) -> Acquired<'_, K, V> {
         match self.claim(key) {
-            Claim::Run { guard } => Acquired::Run { guard },
+            Claim::Run { guard, receiver: _ } => Acquired::Run { guard },
             Claim::Join(slot) => self.wait_exact(slot, cfg.exact).await,
             Claim::Covered(slot) => Acquired::Covered {
                 notifier: slot.notifier.subscribe(),
@@ -252,7 +250,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
             });
         }
 
-        let (result_tx, _) = watch::channel(None);
+        let (result_tx, result_rx) = watch::channel(None);
         let (notify_tx, _) = broadcast::channel(1);
         slots.insert(
             key_id.clone(),
@@ -268,6 +266,7 @@ impl<K: CoverKey, V> Coalesce<K, V> {
                 key_id,
                 armed: true,
             },
+            receiver: result_rx,
         }
     }
 
@@ -325,7 +324,10 @@ impl<K: CoverKey, V> Coalesce<K, V> {
 }
 
 enum Claim<'a, K: CoverKey, V> {
-    Run { guard: RunGuard<'a, K, V> },
+    Run {
+        guard: RunGuard<'a, K, V>,
+        receiver: watch::Receiver<Option<Arc<V>>>,
+    },
     Join(SlotRef<K, V>),
     Covered(SlotRef<K, V>),
 }
@@ -594,6 +596,34 @@ mod tests {
             .enable_all()
             .build()
             .expect("multi-thread runtime")
+    }
+
+    #[test]
+    fn concurrent_resolve_does_not_panic_when_runner_finishes_fast() {
+        let rt = multi_thread_rt();
+        let coalesce = Arc::new(Coalesce::with_runtime(rt.handle().clone()));
+        let key = StrKey("dir");
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..50 {
+                        match coalesce.resolve(&key, Duration::from_millis(200), {
+                            let ready = Arc::clone(&ready);
+                            move || async move {
+                                ready.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                1u32
+                            }
+                        }) {
+                            ResolveOutcome::Ready(value) => assert_eq!(*value, 1),
+                            ResolveOutcome::Pending => {},
+                        }
+                    }
+                });
+            }
+        });
+        assert!(ready.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     }
 
     #[test]
