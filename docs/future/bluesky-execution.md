@@ -64,7 +64,7 @@ Update this table as you work. Status values: `todo`, `in-progress`, `pr-open (#
 
 | Step | Title | Flags | Depends on | Status |
 |---|---|---|---|---|
-| PF | Preflight | — | — | todo |
+| PF | Preflight | — | — | done |
 | T1 | Latency measurement suite | PARALLEL-OK | PF | todo |
 | T2 | Dogfood telemetry counters | PARALLEL-OK | PF | todo |
 | T3 | Benchmark harness (deterministic) | PARALLEL-OK | PF | todo |
@@ -140,6 +140,8 @@ Update this table as you work. Status values: `todo`, `in-progress`, `pr-open (#
 5. Read, once, in this order: `docs/future/bluesky-rewrite.md`, `docs/future/bluesky-tree.md`, `docs/future/cli-experience.md`, `AGENTS.md`. You now have design context; this file still governs execution.
 
 No PR. Set PF `done` in the ledger via a docs-only commit on a branch `bluesky/PF-ledger` (PR title: `docs(plan): record preflight baseline`).
+
+**Preflight record (2026-07-03).** OS: macOS arm64 (Darwin 24.6.0). Linux builder: none configured; Docker 29.4.0 (linux/aarch64) is available, so `[LINUX]` steps get one containerized attempt before `blocked-linux`. wasi-sdk: pinned version installed via `just providers wasi-sdk`. Baseline on `main` (9a2f0b55): GATE-FMT exit=0; GATE-PROVIDERS exit=0; GATE-HOST exit=0 (`just host clippy` + `just host test`, 518/518 passed on retry; `omnifs-itest::dns dns_all_keeps_partial_success_under_rate_limit` flaked once, then passed 3/3 in isolation — treat as a known flake); GATE-TEST exit=0 (143/143, with `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` per §0.4 after pre-building providers; the bare invocation reproduces the documented provider-rebuild contention footgun).
 
 ---
 
