@@ -2,7 +2,7 @@
 //!
 //! The read-path DECISION logic (payload resolution, the cache cascade, the
 //! write fence, learned-size promotion, ranged-EOF learning) lives in
-//! `omnifs-tree`'s `read`/`handle` modules; the FUSE adapter keeps only the
+//! `omnifs-engine tree`'s `read`/`handle` modules; the FUSE adapter keeps only the
 //! kernel offset/size slicing of an already-rendered whole-file buffer.
 
 /// Slice `data` at the given FUSE `offset` and `size`, returning the relevant

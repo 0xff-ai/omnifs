@@ -1,11 +1,11 @@
 //! Filesystem frontends managed by the daemon.
 
 use omnifs_api::FrontendInfo;
+use omnifs_engine::MountRuntimes;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::NotifierHandle;
 #[cfg(target_os = "linux")]
 use omnifs_fuse::mount;
-use omnifs_host::registry::ProviderRegistry;
 use omnifs_nfs::NfsMountOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,18 +25,18 @@ pub(crate) enum Frontend {
 #[cfg(target_os = "linux")]
 pub(crate) struct Fuse {
     mount_point: PathBuf,
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     notifier: NotifierHandle,
 }
 
 pub(crate) struct Nfs {
     mount_point: PathBuf,
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     options: NfsMountOptions,
 }
 
 impl Frontend {
-    pub(crate) fn from_context(context: &DaemonContext, registry: Arc<ProviderRegistry>) -> Self {
+    pub(crate) fn from_context(context: &DaemonContext, registry: Arc<MountRuntimes>) -> Self {
         match context.frontend() {
             #[cfg(target_os = "linux")]
             FrontendKind::Fuse => Self::fuse(
@@ -57,11 +57,7 @@ impl Frontend {
     }
 
     #[cfg(target_os = "linux")]
-    fn fuse(
-        mount_point: PathBuf,
-        registry: Arc<ProviderRegistry>,
-        notifier: NotifierHandle,
-    ) -> Self {
+    fn fuse(mount_point: PathBuf, registry: Arc<MountRuntimes>, notifier: NotifierHandle) -> Self {
         Self::Fuse(Fuse {
             mount_point,
             registry,
@@ -69,11 +65,7 @@ impl Frontend {
         })
     }
 
-    fn nfs(
-        mount_point: PathBuf,
-        registry: Arc<ProviderRegistry>,
-        options: NfsMountOptions,
-    ) -> Self {
+    fn nfs(mount_point: PathBuf, registry: Arc<MountRuntimes>, options: NfsMountOptions) -> Self {
         Self::Nfs(Nfs {
             mount_point,
             registry,

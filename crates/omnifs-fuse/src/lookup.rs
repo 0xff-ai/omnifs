@@ -6,8 +6,8 @@ use super::Frontend;
 use fuser::{Errno, FileAttr};
 use omnifs_api::events::TraceId;
 use omnifs_core::path::Path;
-use omnifs_core::view::EntryKind;
-use omnifs_tree::{Node, RequestCtx};
+use omnifs_engine::view::EntryKind;
+use omnifs_engine::{Node, RequestCtx};
 use std::time::Duration;
 
 impl Frontend {

@@ -2854,22 +2854,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnifs-cache"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "dashmap",
- "fjall",
- "moka",
- "omnifs-core",
- "parking_lot",
- "postcard",
- "serde",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "omnifs-caps"
 version = "0.2.1"
 dependencies = [
@@ -2941,8 +2925,8 @@ dependencies = [
  "axum",
  "clap",
  "omnifs-api",
+ "omnifs-engine",
  "omnifs-fuse",
- "omnifs-host",
  "omnifs-nfs",
  "omnifs-workspace",
  "serde_json",
@@ -2973,41 +2957,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnifs-fuse"
+name = "omnifs-engine"
 version = "0.2.1"
 dependencies = [
- "dashmap",
- "fuser",
- "libc",
- "omnifs-api",
- "omnifs-cache",
- "omnifs-core",
- "omnifs-host",
- "omnifs-tree",
- "omnifs-wit",
- "omnifs-workspace",
- "parking_lot",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "omnifs-host"
-version = "0.2.1"
-dependencies = [
+ "anyhow",
  "arc-swap",
  "async_singleflight",
  "crossbeam-queue",
  "dashmap",
+ "fjall",
  "flate2",
  "futures",
  "hex",
  "http",
+ "moka",
  "omnifs-api",
  "omnifs-auth",
- "omnifs-cache",
  "omnifs-caps",
  "omnifs-core",
  "omnifs-itest",
@@ -3038,16 +3003,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-fuse"
+version = "0.2.1"
+dependencies = [
+ "dashmap",
+ "fuser",
+ "libc",
+ "omnifs-api",
+ "omnifs-core",
+ "omnifs-engine",
+ "omnifs-workspace",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "omnifs-itest"
 version = "0.2.1"
 dependencies = [
  "base64",
  "hickory-proto",
  "http",
- "omnifs-cache",
  "omnifs-core",
- "omnifs-host",
- "omnifs-tree",
+ "omnifs-engine",
  "omnifs-wit",
  "omnifs-workspace",
  "rusqlite",
@@ -3064,10 +3045,8 @@ version = "0.2.1"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
- "omnifs-cache",
  "omnifs-core",
- "omnifs-host",
- "omnifs-tree",
+ "omnifs-engine",
  "omnifs-workspace",
  "serde",
  "serde_json",
@@ -3198,22 +3177,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "omnifs-tree"
-version = "0.2.1"
-dependencies = [
- "omnifs-api",
- "omnifs-cache",
- "omnifs-core",
- "omnifs-host",
- "omnifs-itest",
- "omnifs-wit",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]

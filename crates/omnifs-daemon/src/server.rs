@@ -13,8 +13,8 @@ use omnifs_api::{
     DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
     MountFailure, MountInfo, ReadyInfo, ReconcileReport, StopReport, SubsystemHealth,
 };
-use omnifs_host::inspector::InspectorSink;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::InspectorSink;
+use omnifs_engine::MountRuntimes;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ struct ApiDoc;
 
 pub struct Daemon {
     context: DaemonContext,
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     sink: Option<Arc<InspectorSink>>,
     frontends: Frontend,
     /// The last reconcile's failed mounts, surfaced in `status` so a dark mount
@@ -62,7 +62,7 @@ pub struct Daemon {
 impl Daemon {
     pub(crate) fn new(
         context: DaemonContext,
-        registry: Arc<ProviderRegistry>,
+        registry: Arc<MountRuntimes>,
         sink: Option<Arc<InspectorSink>>,
         frontends: Frontend,
     ) -> Self {

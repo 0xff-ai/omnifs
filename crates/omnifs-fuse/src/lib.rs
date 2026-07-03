@@ -25,13 +25,13 @@ use common::InodeBody;
 use dashmap::DashMap;
 use fuser::{FileAttr, INodeNo, MountOption, Notifier};
 use inode::NodeEntry;
-use omnifs_core::view as view_types;
-use omnifs_core::view::{EntryKind, EntryMeta, FileAttrsCache};
 #[cfg(test)]
-use omnifs_host::Runtime;
-use omnifs_host::path_key::{PathKey, PathToInode};
-use omnifs_host::registry::ProviderRegistry;
-use omnifs_tree::Tree;
+use omnifs_engine::Engine;
+use omnifs_engine::MountRuntimes;
+use omnifs_engine::Tree;
+use omnifs_engine::render::{PathKey, PathToInode};
+use omnifs_engine::view as view_types;
+use omnifs_engine::view::{EntryKind, EntryMeta, FileAttrsCache};
 use parking_lot::Mutex;
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
 
 pub(crate) struct Frontend {
     rt: Handle,
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     /// The renderer-neutral projection core. Owns the listing/lookup/read
     /// DECISION logic (cache consult+populate, pagination, the `@next`/`@all`
     /// controls and mount-root ignore files, invalidation drain). The FUSE
@@ -81,7 +81,7 @@ pub(crate) struct Frontend {
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
     /// `Tree`-owned ranged read handles bound to a FUSE `fh`, each paired with
-    /// the kernel inode it serves. The handle owns its `Arc<Runtime>` + provider
+    /// the kernel inode it serves. The handle owns its `Arc<Engine>` + provider
     /// handle; the adapter drives `read`/`close` and promotes any learned size
     /// to the inode.
     ranged_handles: DashMap<u64, RangedSlot>,
@@ -96,14 +96,14 @@ pub(crate) struct Frontend {
 
 impl Frontend {
     #[cfg(test)]
-    pub(crate) fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
+    pub(crate) fn new(rt: Handle, registry: Arc<MountRuntimes>) -> Self {
         Self::new_with_path_map(rt, registry, Arc::new(DashMap::new()))
     }
 
     #[cfg(test)]
     pub(crate) fn new_with_path_map(
         rt: Handle,
-        registry: Arc<ProviderRegistry>,
+        registry: Arc<MountRuntimes>,
         path_to_inode: Arc<PathToInode>,
     ) -> Self {
         Self::new_with_path_map_and_notifier(
@@ -116,7 +116,7 @@ impl Frontend {
 
     pub(crate) fn new_with_path_map_and_notifier(
         rt: Handle,
-        registry: Arc<ProviderRegistry>,
+        registry: Arc<MountRuntimes>,
         path_to_inode: Arc<PathToInode>,
         notifier: NotifierHandle,
     ) -> Self {
@@ -161,7 +161,7 @@ impl Frontend {
     /// runtime through `Tree`; this registry accessor exists for the in-crate
     /// harness, which seeds caches and inspects mount-level state directly.
     #[cfg(test)]
-    pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Runtime>> {
+    pub(crate) fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Engine>> {
         self.registry.get(mount)
     }
 

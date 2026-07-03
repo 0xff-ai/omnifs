@@ -1,4 +1,4 @@
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::MountRuntimes;
 use omnifs_nfs::{Export, ReadOnlyExport};
 use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_workspace::provider::ProviderStore;
@@ -146,7 +146,7 @@ struct RealProviders {
     #[allow(dead_code)]
     runtime: Runtime,
     #[allow(dead_code)]
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     #[allow(dead_code)]
     config_dir: TempDir,
     #[allow(dead_code)]

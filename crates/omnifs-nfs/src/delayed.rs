@@ -13,7 +13,7 @@
 //! macOS client stays responsive for that call.
 //!
 //! [`Listings`] implements the proactive path for `READDIR` only via
-//! [`omnifs_host::singleflight::Deferred`]. It runs each listing once per
+//! [`omnifs_engine::singleflight::Deferred`]. It runs each listing once per
 //! directory as a detached leader, lets a caller wait up to a small budget, and
 //! reports [`DeferOutcome::Pending`] (mapped to `NFS4ERR_DELAY`) past it. The
 //! task is never cancelled, so a slow listing runs to completion and writes its
@@ -28,7 +28,7 @@
 //! it would re-run provider work on every retry regardless.
 //!
 //! This is separate from the reactive `NFS4ERR_DELAY` path in
-//! [`Status::from`](crate::export::Status) for [`TreeError`](omnifs_tree::TreeError),
+//! [`Status::from`](crate::export::Status) for [`TreeError`](omnifs_engine::TreeError),
 //! which maps transient upstream errors on any op without continuing background
 //! work past the reply.
 //!
@@ -39,9 +39,9 @@
 //! how many retransmits arrive.
 
 use omnifs_core::path::Path;
-use omnifs_host::coalesce::{CoalesceKey, CoverKey};
-pub(crate) use omnifs_host::singleflight::{DeferOutcome, Deferred};
-use omnifs_tree::ListOutcome;
+use omnifs_engine::ListOutcome;
+use omnifs_engine::coalesce::{CoalesceKey, CoverKey};
+pub(crate) use omnifs_engine::singleflight::{DeferOutcome, Deferred};
 
 use crate::export::Status;
 

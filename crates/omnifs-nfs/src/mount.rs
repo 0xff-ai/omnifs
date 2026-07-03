@@ -1,7 +1,7 @@
 use crate::adapter::Export;
 use crate::error::NfsFrontendError;
 use crate::server::start_server;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::MountRuntimes;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -63,7 +63,7 @@ impl NfsMountState {
 
 pub fn mount_blocking(
     mount_point: &Path,
-    registry: &Arc<ProviderRegistry>,
+    registry: &Arc<MountRuntimes>,
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFrontendError> {

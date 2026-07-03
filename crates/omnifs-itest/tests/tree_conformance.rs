@@ -1,6 +1,6 @@
 //! Slice 3: a kernel-free Tree-level CONFORMANCE harness.
 //!
-//! This is the provider-author verification loop (D9): it drives omnifs-tree's
+//! This is the provider-author verification loop (D9): it drives omnifs-engine tree's
 //! neutral `resolve` / `list` / `read` / `open` surface against a real wasm
 //! provider with NO fuser, NO mount, NO container, NO root. A provider author
 //! (or a frontend author proving the neutral surface) runs these to confirm a
@@ -29,14 +29,14 @@
 
 use std::sync::Arc;
 
-use omnifs_cache::RecordKind;
 use omnifs_core::path::Path;
-use omnifs_core::view::{CachedCursor, FileSize, Stability};
-use omnifs_host::Runtime;
-use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{
+use omnifs_engine::Engine;
+use omnifs_engine::test_support::cache::RecordKind;
+use omnifs_engine::view::{CachedCursor, FileSize, Stability};
+use omnifs_engine::{
     Cursor, ListOutcome, Listing, Node, ReadResult, RequestCtx, Tree, TreeErrorKind,
 };
+use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
 
@@ -46,12 +46,12 @@ use tempfile::TempDir;
 
 /// (a)+(b): a wasm provider loaded into a `Runtime`, wrapped in a `Tree` under a
 /// fixed mount name. Owns the harness temp dirs that must outlive the `Runtime`
-/// plus a second `Arc<Runtime>` clone so a conformance test can drive object
+/// plus a second `Arc<Engine>` clone so a conformance test can drive object
 /// invalidations directly (the write-fence/coherence case the `Tree` surface
 /// deliberately hides).
 pub struct ConformanceTree {
     tree: Tree,
-    runtime: Arc<Runtime>,
+    runtime: Arc<Engine>,
     ctx: RequestCtx,
     _clone_dir: TempDir,
     _cache_dir: TempDir,
@@ -353,7 +353,7 @@ async fn resolves_unrouted_path_as_not_found() {
 /// cannot be induced kernel-free: `Tree::read` captures `op_gen` and writes the
 /// durable cache in one synchronous poll for the canned (no-callout) provider,
 /// so the fenced ordering never arises. The underlying `Store::write_fenced`
-/// mechanism is covered by `omnifs-cache`'s `fence_rejects_stale_write`; this
+/// mechanism is covered by engine cache's `fence_rejects_stale_write`; this
 /// asserts the coherence outcome the fence exists to guarantee.
 #[tokio::test(flavor = "multi_thread")]
 async fn invalidation_evicts_cached_read() {
@@ -406,7 +406,7 @@ async fn invalidation_evicts_cached_read() {
 /// known once the renderer has classified the leaf as ranged. The harness plays
 /// that renderer role so `Tree::open`'s precondition is met.
 fn ranged_node(path_str: &str) -> Node {
-    use omnifs_core::view::{FileAttrsCache, ReadMode};
+    use omnifs_engine::view::{FileAttrsCache, ReadMode};
     let attrs = FileAttrsCache::deferred(
         FileSize::Unknown,
         ReadMode::Ranged,

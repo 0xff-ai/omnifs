@@ -6,16 +6,16 @@ use super::Frontend;
 use super::common::{DirSnapshot, FullReadTarget, InodeBody, root_ignore_meta, split_parent_leaf};
 use super::read_helpers::data_slice;
 use fuser::Errno;
-use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
-use omnifs_core::view::{DirentRecord, DirentsPayload, EntryKind, EntryMeta};
-use omnifs_host::HostContext;
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::pagination;
-use omnifs_host::path_key::PathKey;
-use omnifs_host::registry::ProviderRegistry;
-use omnifs_wit::provider::types as wit_types;
-use omnifs_wit::provider::types::ListChildrenResult;
+use omnifs_engine::GitCloner;
+use omnifs_engine::HostContext;
+use omnifs_engine::MountRuntimes;
+use omnifs_engine::render::PathKey;
+use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
+use omnifs_engine::test_support::pagination;
+use omnifs_engine::test_support::wit as wit_types;
+use omnifs_engine::test_support::{NamespaceListOutcome, ReadBytes};
+use omnifs_engine::view::{CachedCursor, DirentRecord, DirentsPayload, EntryKind, EntryMeta};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -119,7 +119,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     );
 
     let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-    let registry = ProviderRegistry::new(
+    let registry = MountRuntimes::new(
         HostContext::new(
             cache_dir.path(),
             &paths.config_dir,
@@ -293,7 +293,9 @@ impl FuseHarness {
         snapshot
             .iter()
             .map(|(_, name, _)| name.clone())
-            .filter(|name| !omnifs_host::pagination::is_reserved_provider_leaf(name))
+            .filter(|name| {
+                !omnifs_engine::test_support::pagination::is_reserved_provider_leaf(name)
+            })
             .collect()
     }
 
@@ -376,7 +378,9 @@ fn cat_next_advances_exactly_one_page_and_survives_partial_reads() {
     assert!(names.contains(&"@all".to_string()));
     let item_count = |s: &DirSnapshot| {
         s.iter()
-            .filter(|(_, n, _)| !omnifs_host::pagination::is_reserved_provider_leaf(n))
+            .filter(|(_, n, _)| {
+                !omnifs_engine::test_support::pagination::is_reserved_provider_leaf(n)
+            })
             .count()
     };
     assert_eq!(item_count(&page0), 2);
@@ -451,7 +455,7 @@ fn exhaustion_drops_controls_and_keeps_accumulated_entries() {
     assert!(
         !names
             .iter()
-            .any(|n| omnifs_host::pagination::is_reserved_provider_leaf(n)),
+            .any(|n| omnifs_engine::test_support::pagination::is_reserved_provider_leaf(n)),
         "controls drop once the feed is exhausted; got {names:?}"
     );
 
@@ -563,7 +567,8 @@ fn at_all_stops_at_the_page_cap_on_an_unbounded_feed() {
     let status = String::from_utf8(status).unwrap();
     h.release(fh);
 
-    let cap = usize::try_from(omnifs_host::pagination::MAX_PAGINATION_PAGES).unwrap();
+    let cap =
+        usize::try_from(omnifs_engine::test_support::pagination::MAX_PAGINATION_PAGES).unwrap();
     assert!(
         status.contains(&format!("capped at {cap} pages")),
         "@all reports the cap, not completion; got {status:?}"
@@ -761,7 +766,7 @@ fn provider_gitignore_wins_over_synthetic_marker() {
         )
         .expect("provider read succeeds");
     match result.bytes {
-        wit_types::ByteSource::Inline(bytes) => {
+        ReadBytes::Inline(bytes) => {
             assert_eq!(bytes, b"provider ignore\n");
         },
         other => panic!("expected inline provider ignore content, got {other:?}"),
@@ -874,11 +879,11 @@ fn continuation_page_does_not_overwrite_accumulated_dirents() {
     let result = h.fs.rt.block_on(runtime.namespace().list_children(
         &test_path("/hello/feed"),
         None,
-        Some(wit_types::Cursor::Page(1)),
+        Some(CachedCursor::Page(1)),
         None,
     ));
     assert!(
-        matches!(result, Ok(ListChildrenResult::Entries(_))),
+        matches!(result, Ok(NamespaceListOutcome::Entries(_))),
         "continuation returns page 1 entries"
     );
 

@@ -19,7 +19,7 @@ Keep inode numbers, filehandles, stateids, leases, notifications, reply construc
 
 FUSE is the Linux frontend, including native Linux and the optional Docker runtime container.
 
-Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-tree`.
+Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
 ### NFSv4 loopback
 
@@ -57,7 +57,7 @@ Keep NFS filehandles, stateids, leases, mount state, and NFS protocol errors in 
 
 - `crates/omnifs-fuse/src`
 - `crates/omnifs-nfs/src`
-- `crates/omnifs-tree/src`
+- `crates/omnifs-engine/src/tree`
 - `crates/omnifs-daemon/src/frontends.rs`
 - `crates/omnifs-cli/src/runtime.rs`
 - `crates/omnifs-cli/src/host_teardown.rs`

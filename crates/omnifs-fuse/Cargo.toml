@@ -13,8 +13,7 @@ keywords = ["omnifs", "fuse", "filesystem"]
 dashmap = { workspace = true }
 fuser = { version = "0.17", features = ["macos-no-mount"] }
 libc = { workspace = true }
-omnifs-host = { workspace = true }
-omnifs-tree = { workspace = true }
+omnifs-engine = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-api = { workspace = true }
 parking_lot = { workspace = true }
@@ -23,9 +22,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-omnifs-cache = { workspace = true }
 omnifs-workspace = { workspace = true }
-omnifs-wit = { workspace = true, features = ["host-bindings"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

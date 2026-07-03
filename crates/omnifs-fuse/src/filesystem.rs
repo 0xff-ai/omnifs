@@ -11,9 +11,8 @@ use fuser::{
 };
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
-use omnifs_core::view::EntryKind;
-use omnifs_host::inspector::{self, InspectorFuseScope};
-use omnifs_tree::{ListOutcome, RequestCtx};
+use omnifs_engine::view::EntryKind;
+use omnifs_engine::{InspectorFuseScope, ListOutcome, RequestCtx, global as inspector_global};
 use std::ffi::OsStr;
 use std::time::Duration;
 use tracing::{debug, debug_span, warn};
@@ -57,7 +56,7 @@ impl Filesystem for Frontend {
         let child_path = parent_path
             .join(name_str)
             .expect("lookup name must be a valid path segment");
-        let live_scope = inspector::global().map(|sink| {
+        let live_scope = inspector_global().map(|sink| {
             InspectorFuseScope::begin(sink, "lookup", &mount_name, child_path.as_str())
         });
         let live = live_scope.as_ref();
@@ -182,7 +181,7 @@ impl Filesystem for Frontend {
         let backing_path = inode_entry.body.backing_path().cloned();
         drop(inode_entry);
 
-        let live_scope = inspector::global()
+        let live_scope = inspector_global()
             .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, path.to_string()));
         let live = live_scope.as_ref();
 
@@ -292,7 +291,7 @@ impl Filesystem for Frontend {
         let path = inode_entry.path.clone();
         drop(inode_entry);
 
-        let live_scope = inspector::global()
+        let live_scope = inspector_global()
             .map(|sink| InspectorFuseScope::begin(sink, "read", &mount_name, path.to_string()));
         let live = live_scope.as_ref();
 
@@ -341,7 +340,7 @@ impl Filesystem for Frontend {
             attrs,
         };
 
-        let live_scope = inspector::global().map(|sink| {
+        let live_scope = inspector_global().map(|sink| {
             InspectorFuseScope::begin(sink, "open", &target.mount_name, target.path.to_string())
         });
         let live = live_scope.as_ref();

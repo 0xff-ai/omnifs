@@ -2,9 +2,8 @@
 
 use fuser::FopenFlags;
 use omnifs_core::path::Path;
-use omnifs_core::view::{EntryKind, FileAttrsCache};
-use omnifs_host::pagination;
-use omnifs_tree::{Node, RangedHandle};
+use omnifs_engine::view::{EntryKind, FileAttrsCache};
+use omnifs_engine::{Node, RangedHandle};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -48,14 +47,12 @@ impl InodeBody {
 /// from `Tree` entries with synthetic origin; the in-crate harness uses this to seed a
 /// host-synthesized inode directly.
 #[cfg(test)]
-pub(crate) fn root_ignore_meta() -> omnifs_core::view::EntryMeta {
-    omnifs_core::view::EntryMeta::file(
+pub(crate) fn root_ignore_meta() -> omnifs_engine::view::EntryMeta {
+    omnifs_engine::view::EntryMeta::file(
         FileAttrsCache::deferred(
-            omnifs_core::view::FileSize::Exact(
-                omnifs_host::pagination::IGNORE_CONTENT.len() as u64,
-            ),
-            omnifs_core::view::ReadMode::Full,
-            omnifs_core::view::Stability::Stable,
+            omnifs_engine::view::FileSize::Exact(b"@*\n".len() as u64),
+            omnifs_engine::view::ReadMode::Full,
+            omnifs_engine::view::Stability::Stable,
             None,
         )
         .expect("root ignore attrs are valid"),
@@ -104,7 +101,7 @@ impl FullReadTarget {
         self.body.is_synthetic()
             || self
                 .parent_and_leaf()
-                .is_some_and(|(_, leaf)| pagination::is_control_name(&leaf))
+                .is_some_and(|(_, leaf)| leaf == "@next" || leaf == "@all")
     }
 
     pub(crate) fn is_ranged(&self) -> bool {
