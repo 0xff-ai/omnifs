@@ -443,26 +443,17 @@ impl Registry {
     }
 }
 
-/// Write `bytes` to `path` atomically: serialize to a same-directory temp file,
-/// then rename over the target. `rename(2)` is atomic on a single filesystem, so
-/// a concurrent reader never observes a partial spec. The temp name is dot-hidden
-/// and lacks a `.json` extension, so [`spec_paths_in`] skips it even if a crash
-/// leaves it behind.
+/// Write a spec to `path` atomically through the crate's one atomic writer
+/// (same-directory temp file, then `rename(2)`), so a concurrent reader never
+/// observes a partial spec. The staging temp file the writer creates is not
+/// named `*.json`, so [`spec_paths_in`] skips it even if a crash leaves it
+/// behind.
 fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), SpecError> {
     fs::create_dir_all(mounts_dir).map_err(|source| SpecError::WriteSpec {
         path: mounts_dir.to_path_buf(),
         source,
     })?;
-    let file = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("spec.json");
-    let tmp = mounts_dir.join(format!(".{file}.tmp-{}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|source| SpecError::WriteSpec {
-        path: tmp.clone(),
-        source,
-    })?;
-    fs::rename(&tmp, path).map_err(|source| SpecError::WriteSpec {
+    crate::io::write_atomic(path, bytes, 0o644).map_err(|source| SpecError::WriteSpec {
         path: path.to_path_buf(),
         source,
     })
