@@ -27,7 +27,7 @@ const LAUNCH_PROTOCOL_LABEL: &str = "ai.0xff.omnifs.launch-protocol";
 /// Derived from `omnifs_api::API_MAJOR` so the image-label check and the
 /// control-API check are one fact in two places that cannot drift independently.
 /// A unit test in this module verifies the string matches the numeric constant.
-const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v1";
+const EXPECTED_LAUNCH_PROTOCOL: &str = "daemon-control-v2";
 
 /// Outcome of a Docker daemon reachability probe.
 pub(crate) enum DockerProbeOutcome {

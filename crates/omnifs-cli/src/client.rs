@@ -5,9 +5,12 @@
 //! `host:port` for non-default setups.
 
 use anyhow::{Context as _, Result};
-use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, ReconcileReport, StopReport};
+use omnifs_api::{
+    API_MAJOR, API_MINOR, ApiError, DaemonStatus, ErrorCode, ReconcileReport, StopReport,
+};
 use std::time::Duration;
 
+use crate::error::WithHint;
 use crate::inspector::daemon_addr;
 
 pub(crate) struct DaemonClient {
@@ -148,10 +151,38 @@ impl DaemonClient {
     }
 
     async fn parse_status(response: reqwest::Response) -> Result<DaemonStatus> {
-        let response = response
-            .error_for_status()
-            .context("daemon status request failed")?;
+        let response = Self::ensure_success(response, "daemon status request failed").await?;
         response.json().await.context("parse daemon status")
+    }
+
+    async fn ensure_success(
+        response: reqwest::Response,
+        context: &'static str,
+    ) -> Result<reqwest::Response> {
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        Err(Self::response_error(response, context).await)
+    }
+
+    async fn response_error(response: reqwest::Response, context: &'static str) -> anyhow::Error {
+        let status = response.status();
+        match response.json::<ApiError>().await {
+            Ok(api_error) => Self::api_error(context, &api_error),
+            Err(error) => {
+                anyhow::anyhow!(
+                    "{context}: daemon returned {status} with invalid ApiError JSON: {error}"
+                )
+            },
+        }
+    }
+
+    fn api_error(context: &'static str, api_error: &ApiError) -> anyhow::Error {
+        let error = anyhow::anyhow!("{context}: {}", api_error.message);
+        match Err::<(), _>(error).with_hint(hint_for(api_error.code)) {
+            Ok(()) => unreachable!("api error construction always starts from Err"),
+            Err(error) => error,
+        }
     }
 
     /// Converge the running daemon's mount set to the on-disk desired state
@@ -164,9 +195,8 @@ impl DaemonClient {
             .timeout(Duration::from_mins(3))
             .send()
             .await
-            .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?
-            .error_for_status()
-            .context("daemon reconcile request failed")?;
+            .with_context(|| format!("reconcile mounts on daemon at {}", self.base))?;
+        let response = Self::ensure_success(response, "daemon reconcile request failed").await?;
         response.json().await.context("parse reconcile report")
     }
 
@@ -189,9 +219,8 @@ impl DaemonClient {
             .await
         {
             Ok(response) => {
-                let report = response
-                    .error_for_status()
-                    .context("daemon shutdown request failed")?
+                let report = Self::ensure_success(response, "daemon shutdown request failed")
+                    .await?
                     .json()
                     .await
                     .context("parse stop report")?;
@@ -204,13 +233,33 @@ impl DaemonClient {
 
     /// True once the daemon reports the filesystem is serving.
     pub(crate) async fn ready(&self) -> bool {
-        matches!(
-            self.http
-                .get(format!("{}/v1/ready", self.base))
-                .send()
-                .await,
-            Ok(response) if response.status().is_success()
-        )
+        match self
+            .http
+            .get(format!("{}/v1/ready", self.base))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                let _ = Self::response_error(response, "daemon ready request failed").await;
+                false
+            },
+            Err(_) => false,
+        }
+    }
+}
+
+fn hint_for(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::AuthRequired | ErrorCode::ConsentRequired => "Try: omnifs mounts reauth <name>",
+        ErrorCode::MountNotFound => "Try: omnifs mounts ls",
+        ErrorCode::SpecInvalid => {
+            "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
+        },
+        ErrorCode::ProviderMissing => "Try: just providers build",
+        ErrorCode::ReconcileBusy => "Try: rerun the command after reconcile finishes",
+        ErrorCode::DaemonShuttingDown => "Try: omnifs up",
+        ErrorCode::Internal => "Try: omnifs doctor",
     }
 }
 
@@ -238,7 +287,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn status_optional_propagates_reachable_status_errors() {
+    async fn status_optional_maps_api_errors_to_hints() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -247,9 +296,23 @@ mod tests {
             let read = stream.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
             let response = if request.starts_with("GET /v1/status ") {
-                "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_string()
+                api_error_response(
+                    "401 Unauthorized",
+                    &ApiError {
+                        code: ErrorCode::AuthRequired,
+                        message: "credential required".to_string(),
+                        detail: None,
+                    },
+                )
             } else {
-                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_string()
+                api_error_response(
+                    "404 Not Found",
+                    &ApiError {
+                        code: ErrorCode::Internal,
+                        message: "not found".to_string(),
+                        detail: None,
+                    },
+                )
             };
             stream.write_all(response.as_bytes()).await.unwrap();
         });
@@ -264,8 +327,37 @@ mod tests {
         };
 
         let error = client.status_optional().await.unwrap_err();
-        assert!(format!("{error:#}").contains("daemon status request failed"));
+        let rendered = crate::error::render(&error);
+        assert!(rendered.contains("daemon status request failed: credential required"));
+        assert!(rendered.contains("Try: omnifs mounts reauth <name>"));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn hint_table_covers_every_error_code() {
+        assert_eq!(
+            hint_for(ErrorCode::AuthRequired),
+            "Try: omnifs mounts reauth <name>"
+        );
+        assert_eq!(
+            hint_for(ErrorCode::ConsentRequired),
+            "Try: omnifs mounts reauth <name>"
+        );
+        assert_eq!(hint_for(ErrorCode::MountNotFound), "Try: omnifs mounts ls");
+        assert_eq!(
+            hint_for(ErrorCode::SpecInvalid),
+            "Try: edit the mount spec or recreate it with `omnifs init <provider> --as <name>`"
+        );
+        assert_eq!(
+            hint_for(ErrorCode::ProviderMissing),
+            "Try: just providers build"
+        );
+        assert_eq!(
+            hint_for(ErrorCode::ReconcileBusy),
+            "Try: rerun the command after reconcile finishes"
+        );
+        assert_eq!(hint_for(ErrorCode::DaemonShuttingDown), "Try: omnifs up");
+        assert_eq!(hint_for(ErrorCode::Internal), "Try: omnifs doctor");
     }
 
     /// A daemon reporting a different major must be refused.
@@ -336,6 +428,15 @@ mod tests {
     fn json_response(body: &str) -> String {
         format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn api_error_response(status: &str, error: &ApiError) -> String {
+        let body = serde_json::to_string(error).unwrap();
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
             body.len(),
             body
         )

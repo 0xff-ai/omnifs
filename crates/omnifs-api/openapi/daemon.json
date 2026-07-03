@@ -28,9 +28,9 @@
           "404": {
             "description": "inspector stream disabled",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -86,9 +86,9 @@
           "404": {
             "description": "mount not found",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -115,7 +115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReadyInfo"
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -179,6 +179,22 @@
   },
   "components": {
     "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "detail": {},
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "DaemonBackend": {
         "type": "string",
         "description": "Backend serving a daemon. The CLI reads this (and the launch record) instead\nof inferring the backend from `[system].runtime`.",
@@ -292,6 +308,19 @@
           "mounts"
         ]
       },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "auth_required",
+          "consent_required",
+          "mount_not_found",
+          "spec_invalid",
+          "provider_missing",
+          "reconcile_busy",
+          "daemon_shutting_down",
+          "internal"
+        ]
+      },
       "FrontendInfo": {
         "type": "object",
         "required": [
@@ -321,9 +350,13 @@
         "description": "One mount that did not converge during a reconcile. `mount` is the mount\nname, or the spec path when the name could not be parsed.",
         "required": [
           "mount",
+          "kind",
           "reason"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
           "mount": {
             "type": "string"
           },
@@ -354,7 +387,7 @@
       },
       "ReadyInfo": {
         "type": "object",
-        "description": "`GET /v1/ready`: 200 with `ready: true` once the filesystem is\nserving; 503 with `ready: false` while starting up.",
+        "description": "`GET /v1/ready`: 200 with `ready: true` once the filesystem is serving.\nNon-ready responses use [`ApiError`].",
         "required": [
           "ready"
         ],
