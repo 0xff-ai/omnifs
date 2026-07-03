@@ -176,7 +176,7 @@ cargo nextest run
 
 Use the right wider gate for the change:
 
-- **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/docs/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
+- **Before a push or PR handoff.** Run the relevant CI-shaped lanes directly rather than relying on a local aggregate: formatting/npm preflight, provider gates for WASM changes, and host gates for host-target changes.
 - **WASM toolchain.** Provider WASM builds need wasi-sdk. Install the pinned version with `just providers wasi-sdk`.
 - **Fresh worktree or missing artifacts.** Run `RUSTC_WRAPPER= just providers build` before treating missing provider artifacts as product failures.
 - **Host gate.** Use `just host clippy` and `just host test`; both exclude provider/test-provider WASM crates from host-target builds.
@@ -185,7 +185,7 @@ Use the right wider gate for the change:
 - **Route-surface change.** Run the host integration path that initializes and seals providers, especially `all_providers_initialize_and_seal`.
 - **Control API change.** Run `just openapi` to regenerate the checked-in spec, then run the daemon OpenAPI parity test.
 - **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
-- **Documentation-heavy change.** Run `just docs-check`.
+- **Documentation-heavy change.** Run `just docs-check` locally. It is not a CI gate and does not block a merge, so run it yourself when you touch `docs/`.
 
 Do not use `cargo check --workspace --all-targets` as the host gate. If validation cannot run, say exactly what failed, what was skipped, and the next best check.
 

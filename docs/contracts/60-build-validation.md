@@ -35,11 +35,11 @@ Use `just dev -y` for the supported contributor runtime path. Check status insid
 
 Use the repo gates instead of ad hoc workspace commands. Host-target gates exclude provider/test-provider WASM crates; WASM crates use provider-specific gates.
 
-Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check`, `just just-check`, and `just docs-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
+Run the relevant CI-shaped lanes before a push or PR handoff. Use `just fmt-check` and `just just-check` for preflight parity. Use `just host clippy` and `just host test` for host-target iteration. Use `just providers check`, `just providers build`, and `just providers validate` for WASM iteration.
 
 ### Documentation checks
 
-`just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths.
+`just docs-check` verifies doc-to-doc links and the contract file template. It does not validate code symbols or code paths. It is a local convenience recipe only; CI does not run it, so it never blocks a merge.
 
 ## Must not
 

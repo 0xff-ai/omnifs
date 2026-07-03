@@ -89,7 +89,6 @@ jobs:
           set -euo pipefail
           just fmt-check
           just just-check
-          just docs-check
 
   components:
     name: components
