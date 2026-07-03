@@ -1,5 +1,5 @@
 use super::{AuthError, BoxFuture, ManualCode, UrlOpener, parse_callback_url};
-use omnifs_provider::{
+use omnifs_workspace::authn::{
     ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig,
     PkceManualCodeConfig, TokenEndpointAuthMethod,
 };

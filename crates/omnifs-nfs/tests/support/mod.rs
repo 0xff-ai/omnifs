@@ -78,8 +78,8 @@ fn test_export_with_mount_options(mount: &str, root_mount: bool) -> TestExport {
 }
 
 /// The pinned reference for the test provider, derived from its built bytes.
-pub fn test_provider_reference() -> omnifs_core::ProviderRef {
-    use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+pub fn test_provider_reference() -> omnifs_workspace::ids::ProviderRef {
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     let bytes =
         std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");
     ProviderRef {
@@ -94,7 +94,7 @@ pub fn test_provider_reference() -> omnifs_core::ProviderRef {
 /// A mount `Spec` for the test provider, pinned to the provider store any
 /// `TestExport` installs it into.
 #[allow(dead_code)]
-pub fn test_provider_spec(mount: &str) -> omnifs_mount::mounts::Spec {
+pub fn test_provider_spec(mount: &str) -> omnifs_workspace::mounts::Spec {
     let value = serde_json::json!({
         "provider": test_provider_reference(),
         "mount": mount,
@@ -104,7 +104,7 @@ pub fn test_provider_spec(mount: &str) -> omnifs_mount::mounts::Spec {
 
 /// Install the test provider into the content-addressed store at `providers_dir`.
 fn install_test_provider(providers_dir: &Path) {
-    use omnifs_provider::ProviderStore;
+    use omnifs_workspace::provider::ProviderStore;
     let reference = test_provider_reference();
     let bytes =
         std::fs::read(provider_wasm_path("test_provider.wasm")).expect("read test provider");

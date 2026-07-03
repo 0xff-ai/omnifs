@@ -18,11 +18,8 @@ omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-daemon = { workspace = true, optional = true }
 omnifs-nfs = { workspace = true, optional = true }
-omnifs-home = { workspace = true }
 omnifs-mtab = { workspace = true }
-omnifs-mount = { workspace = true }
-omnifs-provider = { workspace = true }
-omnifs-creds = { workspace = true }
+omnifs-workspace = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-core = { workspace = true }
 clap = { workspace = true }

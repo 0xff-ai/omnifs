@@ -218,14 +218,14 @@ impl MountFixture {
         }
 
         let bytes = std::fs::read(wasm).expect("read test provider");
-        let id = omnifs_core::ProviderId::from_wasm_bytes(&bytes);
-        let store = omnifs_provider::ProviderStore::new(&providers_dir);
+        let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
+        let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
         store.put_if_absent(&id, &bytes).expect("put test provider");
         store
             .install(
                 id,
-                omnifs_core::ProviderMeta {
-                    name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+                omnifs_workspace::ids::ProviderMeta {
+                    name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
                     version: None,
                 },
                 "test_provider.wasm".into(),
@@ -239,7 +239,7 @@ impl MountFixture {
                 "capabilities": {{ "domains": ["httpbin.org"] }}
             }}"#
         );
-        let spec = omnifs_mount::mounts::Spec::parse(&mount_config).expect("parse mount spec");
+        let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
 
         let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")));
         let registry = Arc::new(

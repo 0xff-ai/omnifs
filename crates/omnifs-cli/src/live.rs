@@ -8,8 +8,8 @@ use crate::client::DaemonClient;
 use crate::launch::DockerMountMaterializer;
 use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
-use omnifs_creds::CredentialStore;
-use omnifs_provider::Catalog;
+use omnifs_workspace::creds::CredentialStore;
+use omnifs_workspace::provider::Catalog;
 
 pub(crate) enum LiveApply {
     /// No daemon answered on the control port; the change is config-only.

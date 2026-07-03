@@ -1,6 +1,8 @@
 use anyhow::{Context, anyhow};
 use omnifs_caps::Grants;
-use omnifs_provider::{ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest};
+use omnifs_workspace::provider::{
+    ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 

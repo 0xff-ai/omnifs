@@ -15,6 +15,7 @@ omnifs-core = { workspace = true }
 omnifs-host = { workspace = true }
 omnifs-mtab = { workspace = true }
 omnifs-tree = { workspace = true }
+omnifs-workspace = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -23,8 +24,6 @@ dashmap = { workspace = true }
 getrandom = "0.3"
 
 [dev-dependencies]
-omnifs-mount = { workspace = true }
-omnifs-provider = { workspace = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

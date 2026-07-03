@@ -1,8 +1,9 @@
 use anyhow::{Context, anyhow};
-use omnifs_core::{AccountId, AuthSchemeId, CredentialId, ProviderName};
-use omnifs_creds::{CredentialEntry, CredentialStore};
-use omnifs_mount::Auth;
-use omnifs_mount::mounts::Spec;
+use omnifs_workspace::authn::{AccountId, CredentialId, SchemeId as AuthSchemeId};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
+use omnifs_workspace::ids::ProviderName;
+use omnifs_workspace::mounts::Auth;
+use omnifs_workspace::mounts::Spec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CredentialTarget {

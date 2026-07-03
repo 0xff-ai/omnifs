@@ -116,7 +116,7 @@ fn push_option_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>)
 /// until unmounted. Blocks; expects to run on a tokio runtime (the caller
 /// owns runtime and tracing setup).
 pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
-    use omnifs_home::telemetry::{self, DaemonEvent, TelemetrySink};
+    use omnifs_workspace::telemetry::{self, DaemonEvent, TelemetrySink};
 
     let context = DaemonContext::resolve(args)?;
     context.prepare_startup_dirs()?;

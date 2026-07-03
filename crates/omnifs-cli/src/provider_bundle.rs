@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use omnifs_provider::{Artifact, ProviderStore};
+use omnifs_workspace::provider::{Artifact, ProviderStore};
 
 static EMBEDDED_PROVIDER_BUNDLE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/provider-bundle.tar.zst"));

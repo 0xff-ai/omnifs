@@ -2,7 +2,9 @@
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
-use omnifs_provider::{Artifact, ArtifactLoadError, IndexEntry, ProviderStore, StoreError};
+use omnifs_workspace::provider::{
+    Artifact, ArtifactLoadError, IndexEntry, ProviderStore, StoreError,
+};
 use std::path::{Path, PathBuf};
 
 use crate::workspace::Workspace;

@@ -7,9 +7,9 @@
 use crate::cloner::GitCloner;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_cache::Caches;
-use omnifs_mount::materialize::{MaterializationMode, materialize};
-use omnifs_mount::mounts::{Registry, Spec};
-use omnifs_provider::Catalog;
+use omnifs_workspace::mounts::materialize::{MaterializationMode, materialize};
+use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::provider::Catalog;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,7 +114,7 @@ impl ProviderRegistry {
         spec: &Spec,
         capture_test_callouts: bool,
     ) -> Result<BuiltMount, RegistryError> {
-        omnifs_core::mount::Name::new(spec.mount.clone())
+        omnifs_workspace::mounts::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
         let wasm_path = self.context.provider_path_by_id(&spec.provider.id);
@@ -756,10 +756,10 @@ mod tests {
     use super::{ProviderRegistry, RegistryError};
     use crate::HostContext;
     use crate::cloner::GitCloner;
-    use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_mount::materialize::MaterializationMode;
-    use omnifs_mount::mounts::Spec;
-    use omnifs_provider::ProviderStore;
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
+    use omnifs_workspace::mounts::Spec;
+    use omnifs_workspace::mounts::materialize::MaterializationMode;
+    use omnifs_workspace::provider::ProviderStore;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -810,7 +810,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -862,7 +862,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         // A mount pinning a content id with no matching retained artifact.
         let mounts_dir = paths.config_dir.join("mounts");
@@ -926,7 +926,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(
@@ -1017,7 +1017,7 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let cache_dir = tempfile::tempdir().expect("temp cache dir");
         let providers_dir = tempfile::tempdir().expect("temp providers dir");
-        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         let base_wasm = test_provider_wasm_path();
         assert!(

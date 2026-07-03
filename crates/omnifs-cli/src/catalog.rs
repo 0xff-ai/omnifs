@@ -7,8 +7,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use omnifs_core::MountName;
-use omnifs_provider::{Catalog, Provider, ProviderManifest};
+use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::provider::{Catalog, Provider, ProviderManifest};
 
 use crate::session::MountConfig;
 
@@ -79,8 +79,8 @@ pub(crate) fn mount_exists(mounts: &[MountConfig], name: &MountName) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::{wasm_with_metadata_section, wasm_with_provider_metadata};
-    use omnifs_core::{ProviderId, ProviderMeta, ProviderName};
-    use omnifs_provider::ProviderStore;
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
+    use omnifs_workspace::provider::ProviderStore;
 
     fn meta(name: &str) -> ProviderMeta {
         ProviderMeta {

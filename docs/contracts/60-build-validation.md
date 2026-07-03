@@ -73,7 +73,7 @@ The two runtime images share one Dockerfile. `runtime-base` owns the apt/setup b
 - `scripts/ci/check-doc-contracts.sh`
 - `crates/omnifs-daemon/src/bin/openapi.rs`
 - `crates/omnifs-api/openapi/daemon.json`
-- `crates/omnifs-provider/schema/omnifs.provider.schema.json`
+- `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`

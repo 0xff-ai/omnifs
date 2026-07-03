@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use omnifs_provider as mts;
+use omnifs_workspace::provider as mts;
 
 /// Decoded provider component artifact with embedded metadata accessors.
 pub struct Artifact {

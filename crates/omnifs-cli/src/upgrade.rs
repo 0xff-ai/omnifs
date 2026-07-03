@@ -21,10 +21,10 @@
 use std::path::Path;
 
 use anyhow::Context as _;
-use omnifs_core::ProviderRef;
-use omnifs_mount::UpgradePlan;
-use omnifs_mount::mounts::{Registry, Spec};
-use omnifs_provider::Catalog;
+use omnifs_workspace::ids::ProviderRef;
+use omnifs_workspace::mounts::UpgradePlan;
+use omnifs_workspace::mounts::{Registry, Spec};
+use omnifs_workspace::provider::Catalog;
 
 use crate::session::MountConfig;
 
@@ -78,7 +78,7 @@ pub(crate) fn run_upgrade_check(
             UpgradePlan::BreakingConfig { changes } => {
                 let descriptions: Vec<_> = changes
                     .iter()
-                    .map(omnifs_mount::FieldChange::describe)
+                    .map(omnifs_workspace::mounts::FieldChange::describe)
                     .collect();
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact has a \
@@ -93,8 +93,8 @@ pub(crate) fn run_upgrade_check(
                 let mut parts = Vec::new();
                 for change in &caps {
                     let direction = match change.direction {
-                        omnifs_mount::CapabilityDirection::Added => "added",
-                        omnifs_mount::CapabilityDirection::Removed => "removed",
+                        omnifs_workspace::mounts::CapabilityDirection::Added => "added",
+                        omnifs_workspace::mounts::CapabilityDirection::Removed => "removed",
                     };
                     parts.push(format!(
                         "{direction} capability `{}` = `{}`",
@@ -126,7 +126,7 @@ pub(crate) fn run_upgrade_check(
 fn apply_additive_upgrade(
     spec_path: &Path,
     reference: &ProviderRef,
-    added: &[omnifs_mount::AddedField],
+    added: &[omnifs_workspace::mounts::AddedField],
 ) -> anyhow::Result<()> {
     let mut spec =
         Spec::from_file(spec_path).with_context(|| format!("read spec {}", spec_path.display()))?;

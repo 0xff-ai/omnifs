@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use omnifs_core::path::Path;
-use omnifs_core::{MountName, MountNameError};
+use omnifs_workspace::mounts::{Name as MountName, NameError as MountNameError};
 
 pub type PathToInode = DashMap<PathKey, u64>;
 

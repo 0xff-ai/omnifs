@@ -5,10 +5,10 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_home::{Daemon, OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
-use omnifs_mount::materialize::MaterializationMode;
 use omnifs_nfs::NfsMountOptions;
+use omnifs_workspace::layout::{Daemon, OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
+use omnifs_workspace::mounts::materialize::MaterializationMode;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
@@ -103,10 +103,10 @@ impl DaemonContext {
 
     /// The launch backend mapped to the telemetry vocabulary, recorded on every
     /// daemon lifecycle event.
-    pub(crate) fn telemetry_backend(&self) -> omnifs_home::telemetry::Backend {
+    pub(crate) fn telemetry_backend(&self) -> omnifs_workspace::telemetry::Backend {
         match self.backend {
-            DaemonBackend::Native => omnifs_home::telemetry::Backend::Native,
-            DaemonBackend::Docker => omnifs_home::telemetry::Backend::Docker,
+            DaemonBackend::Native => omnifs_workspace::telemetry::Backend::Native,
+            DaemonBackend::Docker => omnifs_workspace::telemetry::Backend::Docker,
         }
     }
 

@@ -9,9 +9,7 @@ description = "Generic host-side OAuth protocol engine for omnifs."
 readme = "README.md"
 
 [dependencies]
-omnifs-creds = { workspace = true }
-omnifs-mount = { workspace = true }
-omnifs-provider = { workspace = true }
+omnifs-workspace = { workspace = true }
 http = { workspace = true }
 oauth2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

@@ -1,7 +1,7 @@
-use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_host::registry::ProviderRegistry;
 use omnifs_nfs::{Export, ReadOnlyExport};
-use omnifs_provider::ProviderStore;
+use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+use omnifs_workspace::provider::ProviderStore;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -244,7 +244,7 @@ fn write_real_mounts(mounts_dir: &Path, config_dir: &Path, db_dir: &Path, linear
 
 /// Populate the credential store the registry reads. Tokens now live only in
 /// the store; the mount spec's auth carries identity (scheme), never a source.
-/// Entries mirror `omnifs_creds::CredentialEntry`'s wire form.
+/// Entries mirror `omnifs_workspace::creds::CredentialEntry`'s wire form.
 fn write_credentials(config_dir: &Path, linear_enabled: bool) {
     let mut entries = vec![format!(
         r#""github:pat:default":{}"#,

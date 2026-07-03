@@ -28,7 +28,7 @@ use omnifs_api::MountInfo;
 use crate::launch_record::LaunchRecord;
 use crate::session::GUEST_MOUNT;
 use crate::workspace::Workspace;
-use omnifs_home::OMNIFS_MOUNT_POINT_ENV;
+use omnifs_workspace::layout::OMNIFS_MOUNT_POINT_ENV;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ShellArgs {

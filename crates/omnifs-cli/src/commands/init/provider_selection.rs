@@ -1,8 +1,8 @@
 use crate::catalog::mount_exists;
 use crate::session::MountConfig;
 use anyhow::anyhow;
-use omnifs_core::MountName;
-use omnifs_provider::{Provider, ProviderManifest};
+use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 pub(super) struct ProviderSelection<'a> {
     mounts: &'a [MountConfig],

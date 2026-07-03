@@ -77,7 +77,7 @@ impl Config {
     /// `[telemetry] enabled` config field combined with the `OMNIFS_TELEMETRY`
     /// env kill switch, so either one can turn it off.
     pub fn telemetry_enabled(&self) -> bool {
-        self.telemetry.enabled && omnifs_home::telemetry::enabled_from_env()
+        self.telemetry.enabled && omnifs_workspace::telemetry::enabled_from_env()
     }
 }
 

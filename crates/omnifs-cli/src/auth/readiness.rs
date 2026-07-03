@@ -2,8 +2,8 @@
 
 use std::fmt::Write as _;
 
-use omnifs_core::AuthKind;
-use omnifs_creds::{CredentialEntry, CredentialStore, Refreshability};
+use omnifs_workspace::authn::AuthKind;
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, Refreshability};
 use serde::Serialize;
 
 use crate::credential_target::CredentialTarget;
@@ -200,8 +200,8 @@ pub(crate) fn format_rfc3339(value: time::OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::CredentialId;
-    use omnifs_creds::MemoryStore;
+    use omnifs_workspace::authn::CredentialId;
+    use omnifs_workspace::creds::MemoryStore;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 

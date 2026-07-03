@@ -1,11 +1,11 @@
 //! Status report: data types, collection, and rendering.
 
-use omnifs_creds::FileStore;
+use omnifs_workspace::creds::FileStore;
 use std::fmt::Write as _;
 
 use omnifs_api::{DaemonHealth, DaemonStatus, DaemonSubsystem, HealthState, SubsystemHealth};
-use omnifs_home::WorkspaceLayout;
-use omnifs_provider::Catalog;
+use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::provider::Catalog;
 
 use crate::auth::AuthTerminalKind;
 pub(crate) use crate::mount_report::{ProviderConfigStatus, ProviderReadyStatus, UserMountStatus};

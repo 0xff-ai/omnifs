@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest, UrlOpener,
 };
-use omnifs_creds::{CredentialStore, FileStore};
+use omnifs_workspace::creds::{CredentialStore, FileStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -14,8 +14,8 @@ use std::sync::Arc;
 use super::explain::{self, AuthMode};
 use crate::style;
 use crate::workspace::Workspace;
-use omnifs_provider::Catalog;
-use omnifs_provider::SchemeGuidance;
+use omnifs_workspace::authn::SchemeGuidance;
+use omnifs_workspace::provider::Catalog;
 
 async fn login(
     catalog: &Catalog,
@@ -28,7 +28,7 @@ async fn login(
 ) -> anyhow::Result<()> {
     let mount_auth = crate::auth::load_mount_auth(catalog, mounts, mount)?;
     let (request, target) = mount_auth.oauth_request(account, scopes)?;
-    let guidance = omnifs_mount::mounts::pinned_manifest(catalog, mount_auth.spec())
+    let guidance = omnifs_workspace::mounts::pinned_manifest(catalog, mount_auth.spec())
         .ok()
         .flatten()
         .and_then(|manifest| manifest.auth)
