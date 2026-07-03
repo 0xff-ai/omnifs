@@ -5,10 +5,10 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_home::{Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
-use omnifs_mount::materialize::MaterializationMode;
 use omnifs_nfs::NfsMountOptions;
+use omnifs_workspace::layout::{Workspace, WorkspaceLayout};
+use omnifs_workspace::mounts::materialize::MaterializationMode;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 

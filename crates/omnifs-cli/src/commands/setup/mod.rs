@@ -15,7 +15,7 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_provider::{Provider, ProviderManifest};
+use omnifs_workspace::provider::{Provider, ProviderManifest};
 
 use crate::commands::{init, up};
 use crate::config::ConfiguredBackend;
@@ -97,7 +97,7 @@ impl SetupArgs {
             let home = std::env::var_os("HOME")
                 .ok_or_else(|| anyhow::anyhow!("cannot resolve host mount point: set HOME"))?;
             let mount_point = std::path::PathBuf::from(home).join("omnifs");
-            let mount_root = omnifs_home::WorkspaceLayout::display(&mount_point);
+            let mount_root = omnifs_workspace::layout::WorkspaceLayout::display(&mount_point);
             (
                 "Host mount",
                 mount_root.clone(),

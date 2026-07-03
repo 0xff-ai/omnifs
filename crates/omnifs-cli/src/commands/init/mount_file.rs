@@ -1,8 +1,10 @@
 use super::spec_creation::CreatedMountSpec;
 use crate::auth::AuthSelection;
-use omnifs_core::{AuthKind, MountName, ProviderRef};
-use omnifs_mount::mounts::Spec;
-use omnifs_mount::{Auth, OAuth, StaticToken};
+use omnifs_workspace::authn::AuthKind;
+use omnifs_workspace::ids::ProviderRef;
+use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
 
 /// Composes the [`Spec`] for a newly authored mount. The on-disk JSON is the
 /// `Spec`'s own serialization, persisted atomically by `Registry::put`; this

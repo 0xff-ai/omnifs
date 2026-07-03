@@ -7,7 +7,7 @@
 //! canned copy at the point of display by `omnifs init`'s auth step.
 
 use crate::style;
-use omnifs_provider::{OAuthFlow, SchemeGuidance};
+use omnifs_workspace::authn::{OAuthFlow, SchemeGuidance};
 
 /// An authentication mechanism omnifs knows how to drive, independent of any
 /// particular provider.

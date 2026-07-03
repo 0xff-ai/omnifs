@@ -6,7 +6,7 @@
 mod common;
 
 use common::with_env;
-use omnifs_home::{
+use omnifs_workspace::layout::{
     CACHE_SUBDIR, CONFIG_FILE, CREDENTIALS_FILE, OMNIFS_HOME_ENV, ResolveError, WorkspaceLayout,
 };
 

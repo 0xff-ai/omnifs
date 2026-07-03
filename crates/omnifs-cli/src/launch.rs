@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use omnifs_api::{API_MAJOR, API_MINOR, DaemonStatus, DaemonSubsystem};
-use omnifs_creds::{CredentialStore, FileStore};
-use omnifs_home::WorkspaceLayout;
-use omnifs_mount::materialize::{self, MaterializationMode, MaterializedMount};
+use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::mounts::materialize::{self, MaterializationMode, MaterializedMount};
 
 use crate::client::DaemonClient;
 use crate::config::ConfiguredBackend;
@@ -16,7 +16,7 @@ use crate::launch_record::LaunchRecord;
 use crate::runtime::Runtime;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
-use omnifs_provider::Catalog;
+use omnifs_workspace::provider::Catalog;
 
 /// Command-owned daemon launcher.
 ///

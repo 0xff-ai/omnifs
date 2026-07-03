@@ -53,10 +53,10 @@ OAuth client ids in provider declarations are public application identifiers, no
 - `crates/omnifs-host/src/callouts.rs`
 - `crates/omnifs-host/src/http.rs`
 - `crates/omnifs-auth`
-- `crates/omnifs-creds`
+- `crates/omnifs-workspace/src/creds`
 - `crates/omnifs-caps`
-- `crates/omnifs-provider/src/auth_resolve.rs`
-- `crates/omnifs-mount/src/materialize.rs`
+- `crates/omnifs-workspace/src/authn/resolve.rs`
+- `crates/omnifs-workspace/src/mounts/materialize.rs`
 - `crates/omnifs-cli/src/commands/auth`
 - `crates/omnifs-cli/src/commands/init`
 - `providers/*/README.md`

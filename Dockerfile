@@ -118,7 +118,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release --target wasm32-wasip2 \
         -p 'omnifs-provider-*'; \
     cargo clippy -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider -- -D warnings; \
+        -p omnifs-sdk-macros -p omnifs-workspace -- -D warnings; \
     cargo clippy -p 'omnifs-provider-*' -p test-provider \
         --target wasm32-wasip2 -- -D warnings
 
@@ -135,7 +135,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release --target wasm32-wasip2 \
         -p 'omnifs-provider-*' -p test-provider; \
     cargo test --release -p omnifs-cli -p omnifs-daemon -p omnifs-host -p omnifs-sdk \
-        -p omnifs-sdk-macros -p omnifs-mount -p omnifs-provider; \
+        -p omnifs-sdk-macros -p omnifs-workspace; \
     cargo test -p 'omnifs-provider-*' -p test-provider \
         --target wasm32-wasip2 --no-run
 

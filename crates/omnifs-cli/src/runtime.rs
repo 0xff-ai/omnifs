@@ -16,7 +16,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::error::WithHint;
 use crate::launch_backend::{ContainerName, DockerTarget, ImageRef};
 use crate::session::{CONTAINER_NAME, GUEST_FUSE_MOUNT, IMAGE, OMNIFS_HOME};
-use omnifs_home::OMNIFS_HOME_ENV;
+use omnifs_workspace::layout::OMNIFS_HOME_ENV;
 
 /// Image label written by `Dockerfile` from the `OMNIFS_MIN_LAUNCHER_VERSION`
 /// build arg. The launcher reads it before `docker create` to refuse running
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn container_body_binds_and_env_ordering() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
 
         let image = ImageRef::new("ghcr.io/0xff-ai/omnifs:test").unwrap();

@@ -54,7 +54,7 @@ struct Fixture {
     mount_point: PathBuf,
     daemon_addr: String,
     /// Content id of the test provider installed into the provider store.
-    test_provider_id: omnifs_core::ProviderId,
+    test_provider_id: omnifs_workspace::ids::ProviderId,
     /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
     /// than the daemon subcommand directly.
     daemon_pid: Option<u32>,

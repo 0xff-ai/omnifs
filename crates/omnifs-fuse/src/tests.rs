@@ -82,7 +82,7 @@ fn build_harness() -> FuseHarness {
 fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let config_dir = tempfile::tempdir().expect("config dir");
-    let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+    let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
     let providers_dir = tempfile::tempdir().expect("providers dir");
     // The test provider goes into the provider store.
     let test_src = wasm_artifact_path("test_provider.wasm");
@@ -92,16 +92,16 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
         test_src.display()
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");
-    let id = omnifs_core::ProviderId::from_wasm_bytes(&test_bytes);
-    let store = omnifs_provider::ProviderStore::new(providers_dir.path());
+    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&test_bytes);
+    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir.path());
     store
         .put_if_absent(&id, &test_bytes)
         .expect("put test provider");
     store
         .install(
             id,
-            omnifs_core::ProviderMeta {
-                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+            omnifs_workspace::ids::ProviderMeta {
+                name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
                 version: None,
             },
             "test_provider.wasm".into(),
@@ -135,7 +135,7 @@ fn build_harness_with_provider_config(provider_config: &str) -> FuseHarness {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let spec = omnifs_mount::mounts::Spec::parse(&mount_config).expect("parse mount spec");
+    let spec = omnifs_workspace::mounts::Spec::parse(&mount_config).expect("parse mount spec");
     registry
         .add_mount(&spec, rt.handle())
         .expect("add test mount");

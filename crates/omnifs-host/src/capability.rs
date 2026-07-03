@@ -9,9 +9,9 @@
 use std::path::PathBuf;
 
 use omnifs_caps::{Allowlist, Error, Grant};
-use omnifs_mount::mounts::Spec;
-use omnifs_provider::ConfigMetadata;
 use omnifs_wit::provider::types as wit_types;
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::provider::ConfigMetadata;
 
 /// Default sandbox memory budget when a mount grants no explicit limit.
 const DEFAULT_MAX_MEMORY_MB: u32 = 64;

@@ -953,7 +953,7 @@ async fn test_cache_isolated_by_mount_name() {
     config_b.mount = "mount-b".to_string();
     // Both runtimes share the same global Caches; mount isolation is via key prefix.
     let caches = Caches::open(cache_dir.path()).unwrap();
-    let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+    let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
     let context_a = test_context(
         cache_dir.path(),
         &paths.config_dir,

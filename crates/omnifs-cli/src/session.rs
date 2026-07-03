@@ -6,9 +6,9 @@
 //! exist but does not copy or rewrite them into per-session files.
 
 use anyhow::{Context, anyhow};
-use omnifs_core::MountName;
-use omnifs_creds::CredentialStore;
-use omnifs_mount::mounts::Spec;
+use omnifs_workspace::creds::CredentialStore;
+use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::mounts::Spec;
 use std::path::PathBuf;
 
 use crate::{auth::MountAuth, error::WithHint};
@@ -90,14 +90,14 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::CredentialId;
-    use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
+    use omnifs_workspace::authn::CredentialId;
+    use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore};
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
     use crate::launch::DockerMountMaterializer;
     use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
-    use omnifs_provider::Catalog;
+    use omnifs_workspace::provider::Catalog;
 
     fn sample_entry(value: &str) -> CredentialEntry {
         CredentialEntry::static_token(
@@ -118,14 +118,14 @@ mod tests {
     }
 
     fn test_catalog(root: &std::path::Path) -> Catalog {
-        let paths = omnifs_home::WorkspaceLayout::under_root(root);
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(root);
         Catalog::open(paths.providers_dir)
     }
 
     #[test]
     fn materialize_validates_host_managed_static_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let reference = install_fixture_provider(&paths.providers_dir, "github");
 
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn materialize_oauth_mount_configs() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let reference = install_fixture_provider(&paths.providers_dir, "github");
 
@@ -226,7 +226,7 @@ mod tests {
             vec![format!(
                 "{}:{}/db/0:ro",
                 db_dir.canonicalize().unwrap().display(),
-                omnifs_mount::materialize::GUEST_PREOPENS_DIR,
+                omnifs_workspace::mounts::materialize::GUEST_PREOPENS_DIR,
             )],
             "the CLI formats the container preopen bind for docker create"
         );
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn materialize_errors_when_credential_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(tmp.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(tmp.path());
         std::fs::create_dir_all(&paths.providers_dir).unwrap();
         let reference = install_fixture_provider(&paths.providers_dir, "github");
 

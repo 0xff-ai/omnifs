@@ -3,17 +3,18 @@
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
 use omnifs_auth::oauth_request_from_config;
-use omnifs_core::AuthKind;
-use omnifs_creds::CredentialStore;
-use omnifs_mount::Auth;
-use omnifs_mount::mounts::Spec;
-use omnifs_provider::{AuthManifest, AuthScheme, Catalog, ProviderManifest, StaticTokenScheme};
+use omnifs_workspace::authn::AuthKind;
+use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
+use omnifs_workspace::creds::CredentialStore;
+use omnifs_workspace::mounts::Auth;
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::provider::{Catalog, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
 use crate::credential_target::CredentialTarget;
 use crate::session::MountConfig;
-use omnifs_core::MountName;
+use omnifs_workspace::mounts::Name as MountName;
 
 /// Auth mode chosen during `omnifs init` before a mount config exists on disk.
 #[derive(Clone, Debug)]
@@ -118,7 +119,7 @@ fn load_mount_auth_config(mounts: &[MountConfig], mount: &str) -> anyhow::Result
 /// scheme name itself is already baked into `spec.auth` at creation, so it is
 /// available even when the manifest is not.
 pub(crate) fn mount_auth(catalog: &Catalog, spec: Spec) -> MountAuth {
-    let manifest = omnifs_mount::mounts::pinned_manifest(catalog, &spec)
+    let manifest = omnifs_workspace::mounts::pinned_manifest(catalog, &spec)
         .ok()
         .flatten()
         .and_then(|manifest| manifest.wasm_auth_manifest());

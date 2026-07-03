@@ -15,8 +15,8 @@ mod token_validation;
 use crate::error::WithHint;
 use anyhow::{Context, anyhow};
 use clap::Args;
-use omnifs_creds::{CredentialEntry, CredentialStore, FileStore};
-use omnifs_provider::ProviderManifest;
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
+use omnifs_workspace::provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use time::OffsetDateTime;
@@ -28,8 +28,8 @@ use crate::token_source::TokenSource;
 use crate::workspace::Workspace;
 pub(crate) use auth_import::AuthImportDecision;
 use mount_file::MountFile;
-use omnifs_home::WorkspaceLayout;
-use omnifs_mount::mounts::Registry;
+use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::mounts::Registry;
 use provider_selection::ProviderSelection;
 use spec_creation::MountSpecCreator;
 use token_validation::StaticTokenValidator;
@@ -353,7 +353,7 @@ pub(crate) async fn run_static_token_init(
     let auth_manifest = manifest
         .auth
         .as_ref()
-        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
+        .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
     let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
         .static_token_scheme_key(auth.scheme.as_deref(), None)?;
     let target =
@@ -373,11 +373,13 @@ mod tests {
     use super::{AuthImportDecision, MountFile};
     use crate::auth::AuthSelection;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
-    use omnifs_core::{MountName, ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_mount::mounts::Registry;
-    use omnifs_provider::{
-        AuthManifest, AuthScheme, Catalog, ConfigField, ConfigMetadata, ConfigType,
-        HostResourceBinding, ProviderManifest, ProviderStore,
+    use omnifs_workspace::authn::{AuthManifest, AuthScheme};
+    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_workspace::mounts::Name as MountName;
+    use omnifs_workspace::mounts::Registry;
+    use omnifs_workspace::provider::{
+        Catalog, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderManifest,
+        ProviderStore,
     };
     use serde_json::Value;
 
@@ -480,7 +482,7 @@ mod tests {
         }
         let auth_manifest = AuthManifest {
             schemes: vec![
-                AuthScheme::StaticToken(omnifs_provider::StaticTokenScheme {
+                AuthScheme::StaticToken(omnifs_workspace::authn::StaticTokenScheme {
                     key: "pat".to_string(),
                     header_name: Some("Authorization".to_string()),
                     value_prefix: String::new(),
@@ -489,7 +491,7 @@ mod tests {
                     creation_url: None,
                     validation: None,
                 }),
-                AuthScheme::Oauth(omnifs_provider::OauthScheme {
+                AuthScheme::Oauth(omnifs_workspace::authn::OauthScheme {
                     key: "oauth".to_string(),
                     display_name: "Linear OAuth".to_string(),
                     authorization_endpoint: "https://example.com/authorize".to_string(),
@@ -497,12 +499,12 @@ mod tests {
                     revocation_endpoint: None,
                     default_client_id: None,
                     default_scopes: vec![],
-                    flow: omnifs_provider::OAuthFlow::PkceLoopback(
-                        omnifs_provider::PkceLoopbackConfig {
+                    flow: omnifs_workspace::authn::OAuthFlow::PkceLoopback(
+                        omnifs_workspace::authn::PkceLoopbackConfig {
                             redirect_uri_template: "http://127.0.0.1:{port}/cb".to_string(),
                         },
                     ),
-                    token_endpoint_auth: omnifs_provider::TokenEndpointAuthMethod::None,
+                    token_endpoint_auth: omnifs_workspace::authn::TokenEndpointAuthMethod::None,
                     refresh_token_rotates: false,
                     extra_authorize_params: vec![],
                     extra_token_params: vec![],
@@ -513,7 +515,7 @@ mod tests {
             ],
         };
         let oauth_default = AuthSelection {
-            auth_type: omnifs_core::AuthKind::OAuth,
+            auth_type: omnifs_workspace::authn::AuthKind::OAuth,
             scheme: Some("oauth".to_string()),
             account: None,
         };
@@ -529,7 +531,10 @@ mod tests {
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
-        assert_eq!(promoted.auth_type, omnifs_core::AuthKind::StaticToken);
+        assert_eq!(
+            promoted.auth_type,
+            omnifs_workspace::authn::AuthKind::StaticToken
+        );
         assert_eq!(promoted.scheme.as_deref(), Some("pat"));
         assert!(outcome.token.is_some(), "imported token should be set");
 
@@ -562,12 +567,12 @@ mod tests {
     #[test]
     fn installed_providers_reads_latest_artifact() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = omnifs_home::WorkspaceLayout::under_root(dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path());
 
         let mut manifest = provider_manifest();
         manifest.default_mount = "linear-dev".to_owned();
         let wasm = wasm_with_custom_section(
-            omnifs_provider::PROVIDER_METADATA_SECTION_NAME,
+            omnifs_workspace::provider::PROVIDER_METADATA_SECTION_NAME,
             &serde_json::to_vec(&manifest).unwrap(),
         );
         let id = ProviderId::from_wasm_bytes(&wasm);
@@ -597,10 +602,11 @@ mod tests {
     }
 
     fn provider_manifest() -> ProviderManifest {
-        use omnifs_provider::{
-            AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, ProviderAuthManifest,
-            StaticTokenScheme, TokenEndpointAuthMethod,
+        use omnifs_workspace::authn::{
+            AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme,
+            TokenEndpointAuthMethod,
         };
+        use omnifs_workspace::provider::ProviderAuthManifest;
         use std::collections::BTreeMap;
 
         let domains = vec!["api.linear.app".to_string()];

@@ -1,0 +1,57 @@
+[package]
+name = "omnifs-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Every byte under OMNIFS_HOME: layout, mount specs, provider index, credentials"
+categories = ["filesystem"]
+keywords = ["omnifs", "filesystem", "paths"]
+
+[dependencies]
+omnifs-core = { workspace = true }
+omnifs-caps = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+secrecy = { version = "0.10", features = ["serde"] }
+time = { workspace = true, features = ["serde", "formatting"] }
+fs2 = { workspace = true }
+atomic-write-file = "0.3"
+schemars = { workspace = true, features = ["indexmap2"] }
+jsonschema = { workspace = true }
+indexmap = { workspace = true }
+wasmparser = "0.246"
+hex = { workspace = true }
+blake3 = { workspace = true }
+strum = { workspace = true }
+utoipa = { workspace = true, optional = true }
+
+[features]
+# Enables utoipa::ToSchema derives on the id types for crates that generate
+# OpenAPI schemas. Default off: the gated OpenAPI surface is opt-in.
+utoipa = ["dep:utoipa"]
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "dump-provider"
+path = "src/bin/dump_provider.rs"
+
+[[bin]]
+name = "omnifs-provider-store-bundle"
+path = "src/bin/store_bundle.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"

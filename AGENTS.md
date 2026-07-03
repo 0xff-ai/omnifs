@@ -72,11 +72,10 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 
 ## Orientation
 
-- `crates/omnifs-core`: path, content type, auth, mount, provider, and view primitives.
+- `crates/omnifs-core`: path, content type, and view primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
-- `crates/omnifs-provider`: provider manifests, config metadata, validation, the provider index over the content-addressed store, and WASM metadata.
-- `crates/omnifs-mount`: the mount-spec registry (sole owner of on-disk specs), creation-time inheritance of provider-manifest defaults into a spec, and materialization against the provider index.
+- `crates/omnifs-workspace`: every byte under `OMNIFS_HOME`: the directory layout, provider/credential identity types, the auth-scheme wire model, provider manifests and the content-addressed provider index, the mount-spec registry (sole owner of on-disk specs) with creation-time inheritance and materialization, and credential stores.
 - `crates/omnifs-host`: trusted runtime, callouts, auth, namespace, cache access, pagination, and archive execution.
 - `crates/omnifs-tree`: shared projection semantics consumed by every frontend.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
@@ -115,7 +114,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`.
 - The CLI owns setup, credentials, lifecycle, and user-facing commands. It talks to the daemon through the REST API and the on-disk workspace under `OMNIFS_HOME`.
 - The REST API schema lives in `omnifs-api`. Credentials are never transmitted on the wire.
-- Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. `mount::Registry` (in `omnifs-mount`) is the sole spec owner: the CLI is the only author and writes through it atomically, the daemon reads through it on reconcile. `provider::Catalog` (in `omnifs-provider`) is the provider index over the content-addressed store. A spec inherits its provider-manifest defaults (auth scheme and config) at creation time, so it is self-contained: reading or serving it is a plain parse, with no read-time resolution step.
+- Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. `mounts::Registry` (in `omnifs-workspace`) is the sole spec owner: the CLI is the only author and writes through it atomically, the daemon reads through it on reconcile. `provider::Catalog` (in `omnifs-workspace`) is the provider index over the content-addressed store. A spec inherits its provider-manifest defaults (auth scheme and config) at creation time, so it is self-contained: reading or serving it is a plain parse, with no read-time resolution step.
 - Runtime modes are host-native and Docker. Docker runs the Linux daemon and exposes FUSE inside the container.
 - Linux defaults to FUSE. macOS defaults to read-only NFSv4.0 loopback through `omnifs-nfs`.
 - `omnifs setup` picks the default runtime (Docker on macOS, native on Linux/WSL; macOS native is experimental) and records it at `[system].runtime`. `omnifs up --runtime <docker|native>` overrides it for one launch without persisting; `down`/`status`/`shell` read the running backend from the daemon and launch record, never from `[system].runtime`.

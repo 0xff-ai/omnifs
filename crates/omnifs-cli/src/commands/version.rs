@@ -4,8 +4,8 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::workspace::Workspace;
-use omnifs_home::WorkspaceLayout;
-use omnifs_provider::{Catalog, DirStatus};
+use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct VersionArgs {
