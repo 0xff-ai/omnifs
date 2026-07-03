@@ -3,7 +3,7 @@
 mod support;
 
 use omnifs_core::path::Path;
-use omnifs_engine::Error;
+use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_itest::{make_initialized_runtime, try_make_runtime_from_config};
 use omnifs_wit::provider::types::{
@@ -295,7 +295,7 @@ async fn dns_provider_unknown_resolver_read_is_invalid_input() {
         .await
         .unwrap_err();
     match error {
-        Error::ProviderError(error) => {
+        EngineError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert!(
                 error.message.contains("unknown resolver specifier"),
@@ -334,7 +334,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .await
         .unwrap_err();
     match error {
-        Error::ProviderError(error) => {
+        EngineError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected unknown-record NotFound, got {other:?}"),
@@ -354,7 +354,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
         .await
         .unwrap_err();
     match error {
-        Error::ProviderError(error) => {
+        EngineError::ProviderError(error) => {
             assert_eq!(error.kind, ErrorKind::NotFound);
         },
         other => panic!("expected resolver unknown-record NotFound, got {other:?}"),

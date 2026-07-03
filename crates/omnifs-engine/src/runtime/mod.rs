@@ -199,7 +199,7 @@ impl CacheDirs {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum EngineError {
     #[error("wasmtime: {0}")]
     Wasmtime(#[from] wasmtime::Error),
     #[error("provider protocol: {0}")]
@@ -213,7 +213,7 @@ pub enum Error {
     },
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, EngineError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderErrorClass {
@@ -229,7 +229,7 @@ pub(crate) enum ProviderErrorClass {
     Internal,
 }
 
-impl Error {
+impl EngineError {
     pub(crate) fn unexpected_op_result(op: Op, result: wit_types::OpResult) -> Self {
         Self::UnexpectedOpResult {
             op: Box::new(op),
@@ -275,15 +275,15 @@ fn provider_error_class(kind: wit_types::ErrorKind) -> ProviderErrorClass {
     }
 }
 
-impl From<Error> for BuildError {
-    fn from(err: Error) -> Self {
+impl From<EngineError> for BuildError {
+    fn from(err: EngineError) -> Self {
         match err {
-            Error::Wasmtime(e) => Self::Wasmtime(e),
-            Error::ProviderProtocol(msg) => Self::ProviderProtocol(msg),
-            Error::ProviderError(e) => {
+            EngineError::Wasmtime(e) => Self::Wasmtime(e),
+            EngineError::ProviderProtocol(msg) => Self::ProviderProtocol(msg),
+            EngineError::ProviderError(e) => {
                 Self::ProviderProtocol(format!("provider error during build: {e:?}"))
             },
-            Error::UnexpectedOpResult { op, result } => Self::ProviderProtocol(format!(
+            EngineError::UnexpectedOpResult { op, result } => Self::ProviderProtocol(format!(
                 "{op:?} returned unexpected result during build: {result:?}"
             )),
         }
@@ -550,10 +550,10 @@ impl Runtime {
         let record = self
             .blob_cache
             .lookup_by_id(blob_id)
-            .ok_or_else(|| Error::ProviderProtocol(format!("blob {blob_id} not found")))?;
+            .ok_or_else(|| EngineError::ProviderProtocol(format!("blob {blob_id} not found")))?;
         let path = self.blob_cache.blob_path(&record.cache_key);
         std::fs::read(path)
-            .map_err(|e| Error::ProviderProtocol(format!("read blob {blob_id}: {e}")))
+            .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
     }
 }
 

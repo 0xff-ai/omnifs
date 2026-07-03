@@ -18,7 +18,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use crate::Provider;
 use crate::wasi::HostState;
 use crate::wasm;
-use crate::{BuildError, Error, Op};
+use crate::{BuildError, EngineError, Op};
 use omnifs_caps::{PreopenMode, PreopenedPath};
 use omnifs_wit::provider::types as wit_types;
 
@@ -31,23 +31,25 @@ pub struct Instance {
 enum Command {
     SetCallouts {
         callouts: CalloutHost,
-        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+        reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
     Initialize {
         config_bytes: Vec<u8>,
-        reply: std::sync::mpsc::Sender<std::result::Result<wit_types::ProviderReturn, Error>>,
+        reply: std::sync::mpsc::Sender<std::result::Result<wit_types::ProviderReturn, EngineError>>,
     },
     StartOp {
         op: Op,
         id: u64,
-        reply: tokio::sync::oneshot::Sender<std::result::Result<wit_types::ProviderReturn, Error>>,
+        reply: tokio::sync::oneshot::Sender<
+            std::result::Result<wit_types::ProviderReturn, EngineError>,
+        >,
     },
     Shutdown {
-        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+        reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
     CloseFile {
         handle: u64,
-        reply: std::sync::mpsc::Sender<std::result::Result<(), Error>>,
+        reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
 }
 
@@ -116,44 +118,51 @@ impl Instance {
         &self,
         op: Op,
         id: u64,
-    ) -> std::result::Result<wit_types::ProviderReturn, Error> {
+    ) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
         let (reply, recv) = tokio::sync::oneshot::channel();
         self.tx
             .send(Command::StartOp { op, id, reply })
-            .map_err(|_| Error::ProviderProtocol("provider instance driver stopped".to_string()))?;
-        recv.await
-            .map_err(|_| Error::ProviderProtocol("provider operation reply dropped".to_string()))?
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
     }
 
-    pub fn initialize(&self) -> std::result::Result<wit_types::ProviderReturn, Error> {
+    pub fn initialize(&self) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
         self.call_sync(|reply| Command::Initialize {
             config_bytes: self.config_bytes.clone(),
             reply,
         })
     }
 
-    pub(crate) fn set_callouts(&self, callouts: CalloutHost) -> std::result::Result<(), Error> {
+    pub(crate) fn set_callouts(
+        &self,
+        callouts: CalloutHost,
+    ) -> std::result::Result<(), EngineError> {
         self.call_sync(|reply| Command::SetCallouts { callouts, reply })
     }
 
-    pub fn shutdown(&self) -> std::result::Result<(), Error> {
+    pub fn shutdown(&self) -> std::result::Result<(), EngineError> {
         self.call_sync(|reply| Command::Shutdown { reply })
     }
 
-    pub fn close_file(&self, handle: u64) -> std::result::Result<(), Error> {
+    pub fn close_file(&self, handle: u64) -> std::result::Result<(), EngineError> {
         self.call_sync(|reply| Command::CloseFile { handle, reply })
     }
 
     fn call_sync<T>(
         &self,
-        build: impl FnOnce(std::sync::mpsc::Sender<std::result::Result<T, Error>>) -> Command,
-    ) -> std::result::Result<T, Error> {
+        build: impl FnOnce(std::sync::mpsc::Sender<std::result::Result<T, EngineError>>) -> Command,
+    ) -> std::result::Result<T, EngineError> {
         let (reply, recv) = std::sync::mpsc::channel();
-        self.tx
-            .send(build(reply))
-            .map_err(|_| Error::ProviderProtocol("provider instance driver stopped".to_string()))?;
-        recv.recv()
-            .map_err(|_| Error::ProviderProtocol("provider instance reply dropped".to_string()))?
+        self.tx.send(build(reply)).map_err(|_| {
+            EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+        })?;
+        recv.recv().map_err(|_| {
+            EngineError::ProviderProtocol("provider instance reply dropped".to_string())
+        })?
     }
 }
 
@@ -258,7 +267,7 @@ async fn call_op(
     accessor: &wasmtime::component::Accessor<HostState>,
     op: Op,
     id: u64,
-) -> std::result::Result<wit_types::ProviderReturn, Error> {
+) -> std::result::Result<wit_types::ProviderReturn, EngineError> {
     let namespace = bindings.omnifs_provider_namespace();
     match op {
         Op::LookupChild { parent_path, name } => Ok(namespace
