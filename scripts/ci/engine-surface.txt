@@ -7,4 +7,5 @@ pub use callouts::cloner::{CloneError, GitCloner};
 pub use inspect::{
 pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};
 pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
+pub use serving::ServingContext;
 pub use tree::{

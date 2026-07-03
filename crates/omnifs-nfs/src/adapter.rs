@@ -33,7 +33,7 @@ use omnifs_engine::view as view_types;
 use omnifs_engine::view::{EntryMeta, FileAttrsCache};
 use omnifs_engine::{
     Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult, RequestCtx,
-    Synthetic, Tree, TreeErrorKind,
+    ServingContext, Synthetic, Tree, TreeErrorKind,
 };
 use omnifs_workspace::mounts::Name as MountName;
 use std::future::Future;
@@ -215,7 +215,9 @@ pub struct Export {
 
 impl Export {
     pub fn new(rt: Handle, registry: Arc<MountRuntimes>) -> Self {
-        let tree = Arc::new(Tree::new(Arc::clone(&registry)));
+        let tree = Arc::new(Tree::new(ServingContext::from_runtimes(Arc::clone(
+            &registry,
+        ))));
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"

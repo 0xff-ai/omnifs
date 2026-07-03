@@ -34,7 +34,7 @@ use omnifs_engine::Engine;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::view::{CachedCursor, FileSize, Stability};
 use omnifs_engine::{
-    Cursor, ListOutcome, Listing, Node, ReadResult, RequestCtx, Tree, TreeErrorKind,
+    Cursor, ListOutcome, Listing, Node, ReadResult, RequestCtx, ServingContext, Tree, TreeErrorKind,
 };
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
@@ -71,7 +71,10 @@ pub fn tree_harness() -> ConformanceTree {
         ..
     } = make_runtime(&engine);
     let runtime = Arc::new(runtime);
-    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
     ConformanceTree {
         tree,
         runtime,
