@@ -720,12 +720,12 @@ pub struct ReconcileOutcome {
 /// swapped-out provider is a new id, hence a new spec hash. No file read or
 /// re-hash of the WASM is needed on reconcile.
 fn mount_fingerprint(spec: &Spec) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if let Ok(bytes) = serde_json::to_vec(spec) {
-        bytes.hash(&mut hasher);
-    }
-    hasher.finish()
+    let bytes = serde_json::to_vec(spec).unwrap_or_default();
+    let digest = blake3::hash(&bytes);
+    let prefix = digest.as_bytes()[..8]
+        .try_into()
+        .expect("blake3 digest is at least 8 bytes");
+    u64::from_le_bytes(prefix)
 }
 
 fn registry_error(mount: &str, error: BuildError) -> RegistryError {
