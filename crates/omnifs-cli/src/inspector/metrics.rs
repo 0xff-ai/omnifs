@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use omnifs_inspector::InspectorOutcome;
+use omnifs_api::events::InspectorOutcome;
 
 const WINDOW_US: u64 = 60_000_000; // 60s
 const MAX_SAMPLES: usize = 4096;

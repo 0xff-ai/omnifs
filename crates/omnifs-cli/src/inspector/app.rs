@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use omnifs_inspector::{InspectorRecord, TraceId};
+use omnifs_api::events::{InspectorRecord, TraceId};
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
@@ -143,7 +143,7 @@ impl App {
     }
 
     pub fn apply_line(&mut self, line: &str) {
-        match omnifs_inspector::parse_record_line(line.trim()) {
+        match InspectorRecord::parse_line(line.trim()) {
             Ok(record) => self.apply_record(&record),
             Err(_) => self.dropped_events += 1,
         }

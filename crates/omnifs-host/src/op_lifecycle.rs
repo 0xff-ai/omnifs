@@ -10,7 +10,7 @@ use crate::clock;
 use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
 use crate::op::Op;
 use crate::runtime::{Error, Result};
-use omnifs_inspector::{InspectorOutcome, OutcomeFields, TraceId};
+use omnifs_api::events::{InspectorOutcome, OutcomeFields, TraceId};
 use omnifs_wit::provider::types as wit_types;
 
 impl Runtime {

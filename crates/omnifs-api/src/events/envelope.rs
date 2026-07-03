@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::TraceId;
-use crate::event::InspectorEvent;
+use crate::events::TraceId;
+use crate::events::event::InspectorEvent;
 
 pub const SCHEMA_VERSION: u32 = 1;
 

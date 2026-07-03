@@ -15,7 +15,6 @@ use omnifs_api::{
 };
 use omnifs_host::inspector::InspectorSink;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_inspector::serialize_record;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
@@ -400,8 +399,8 @@ async fn events(State(daemon): State<Arc<Daemon>>) -> Response {
     daemon.event_stream()
 }
 
-fn record_line(record: &omnifs_inspector::InspectorRecord) -> Option<String> {
-    match serialize_record(record) {
+fn record_line(record: &omnifs_api::events::InspectorRecord) -> Option<String> {
+    match record.to_json() {
         Ok(mut line) => {
             line.push('\n');
             Some(line)

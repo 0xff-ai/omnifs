@@ -2823,7 +2823,13 @@ dependencies = [
 name = "omnifs-api"
 version = "0.2.1"
 dependencies = [
+ "libc",
  "serde",
+ "serde_json",
+ "strum 0.27.2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
  "utoipa",
 ]
 
@@ -2899,7 +2905,6 @@ dependencies = [
  "omnifs-creds",
  "omnifs-daemon",
  "omnifs-home",
- "omnifs-inspector",
  "omnifs-mount",
  "omnifs-nfs",
  "omnifs-provider",
@@ -2963,7 +2968,6 @@ dependencies = [
  "omnifs-fuse",
  "omnifs-home",
  "omnifs-host",
- "omnifs-inspector",
  "omnifs-mount",
  "omnifs-nfs",
  "serde_json",
@@ -3000,11 +3004,11 @@ dependencies = [
  "dashmap",
  "fuser",
  "libc",
+ "omnifs-api",
  "omnifs-cache",
  "omnifs-core",
  "omnifs-home",
  "omnifs-host",
- "omnifs-inspector",
  "omnifs-mount",
  "omnifs-provider",
  "omnifs-tree",
@@ -3036,13 +3040,13 @@ dependencies = [
  "futures",
  "hex",
  "http",
+ "omnifs-api",
  "omnifs-auth",
  "omnifs-cache",
  "omnifs-caps",
  "omnifs-core",
  "omnifs-creds",
  "omnifs-home",
- "omnifs-inspector",
  "omnifs-itest",
  "omnifs-mount",
  "omnifs-provider",
@@ -3069,19 +3073,6 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "zip",
-]
-
-[[package]]
-name = "omnifs-inspector"
-version = "0.2.1"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "strum 0.27.2",
- "tempfile",
- "thiserror 2.0.18",
- "url",
 ]
 
 [[package]]
@@ -3289,10 +3280,10 @@ dependencies = [
 name = "omnifs-tree"
 version = "0.2.1"
 dependencies = [
+ "omnifs-api",
  "omnifs-cache",
  "omnifs-core",
  "omnifs-host",
- "omnifs-inspector",
  "omnifs-itest",
  "omnifs-wit",
  "tempfile",

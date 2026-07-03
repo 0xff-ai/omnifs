@@ -4,9 +4,9 @@
 
 use super::Frontend;
 use fuser::{Errno, FileAttr};
+use omnifs_api::events::TraceId;
 use omnifs_core::path::Path;
 use omnifs_core::view::EntryKind;
-use omnifs_inspector::TraceId;
 use omnifs_tree::{Node, RequestCtx};
 use std::time::Duration;
 

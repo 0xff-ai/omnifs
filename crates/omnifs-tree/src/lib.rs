@@ -39,10 +39,10 @@ mod synthetic;
 
 use std::sync::Arc;
 
+use omnifs_api::events::TraceId;
 use omnifs_core::path::Path;
 use omnifs_host::Runtime;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_inspector::TraceId;
 
 pub use crate::error::{Result, TreeError, TreeErrorKind};
 pub use crate::handle::{RangedHandle, probe_live_growth, spawn_live_follow_pump};

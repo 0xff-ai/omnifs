@@ -39,7 +39,7 @@ omnifs-provider = { workspace = true }
 omnifs-cache = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-creds = { workspace = true }
-omnifs-inspector = { workspace = true }
+omnifs-api = { workspace = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }

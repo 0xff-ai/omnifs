@@ -1,7 +1,7 @@
 //! Tree error to FUSE errno mapping.
 
 use fuser::Errno;
-use omnifs_inspector::InspectorOutcome;
+use omnifs_api::events::InspectorOutcome;
 use omnifs_tree::{TreeError, TreeErrorKind};
 
 /// Map a FUSE errno to a stable inspector outcome.

@@ -13,7 +13,7 @@ keywords = ["omnifs", "filesystem", "projection"]
 omnifs-host = { workspace = true }
 omnifs-cache = { workspace = true }
 omnifs-core = { workspace = true }
-omnifs-inspector = { workspace = true }
+omnifs-api = { workspace = true }
 # Deviation from blueprint: omnifs-wit is a direct (not dev-only) dependency.
 # Namespace::list_children returns the raw wit ListChildrenResult, and omnifs-host
 # does not re-export the provider::types module, so list.rs must name the wit

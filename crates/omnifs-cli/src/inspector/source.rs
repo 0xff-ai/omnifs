@@ -60,7 +60,7 @@ impl EventsClient {
         mut on_line: impl FnMut(&str) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
         use futures_util::StreamExt as _;
-        use omnifs_inspector::split_complete_lines;
+        use omnifs_api::events::split_complete_lines;
 
         self.rt.block_on(async {
             let response = match self.http.get(&self.url).send().await {

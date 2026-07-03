@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::kind::{CacheKind, CalloutKind};
-use crate::outcome::OutcomeFields;
+use crate::events::kind::{CacheKind, CalloutKind};
+use crate::events::outcome::OutcomeFields;
 
 /// Shared tail of every `*End` variant: elapsed wall time plus outcome.
 /// `OutcomeFields` is itself flattened on the wire so `outcome` and the

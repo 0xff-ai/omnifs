@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use omnifs_inspector::{
+use omnifs_api::events::{
     CacheKind, CalloutKind, InspectorEvent, InspectorOutcome, InspectorRecord, TraceId,
 };
 
@@ -616,7 +616,7 @@ fn outcome_status(outcome: InspectorOutcome) -> OperationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_inspector::{OpEnd, OutcomeFields};
+    use omnifs_api::events::{OpEnd, OutcomeFields};
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
         InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)

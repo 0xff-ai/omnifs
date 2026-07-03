@@ -17,7 +17,6 @@ path = "src/bin/openapi.rs"
 omnifs-api = { workspace = true }
 omnifs-home = { workspace = true }
 omnifs-host = { workspace = true }
-omnifs-inspector = { workspace = true }
 omnifs-mount = { workspace = true }
 omnifs-nfs = { workspace = true }
 anyhow = { workspace = true }

@@ -9,10 +9,10 @@ use fuser::{
     Errno, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
+use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 use omnifs_core::view::EntryKind;
 use omnifs_host::inspector::{self, InspectorFuseScope};
-use omnifs_inspector::CacheKind;
 use omnifs_tree::{ListOutcome, RequestCtx};
 use std::ffi::OsStr;
 use std::time::Duration;

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::envelope::InspectorRecord;
-use crate::wire::serialize_record;
+use crate::events::envelope::InspectorRecord;
 
 #[derive(Debug, Error)]
 pub enum LineWriteError {
@@ -33,7 +32,7 @@ impl InspectorLineWriter {
     }
 
     pub fn write_record(&mut self, record: &InspectorRecord) -> Result<(), LineWriteError> {
-        let mut line = serialize_record(record)?;
+        let mut line = record.to_json()?;
         line.push('\n');
         self.file.write_all(line.as_bytes())?;
         self.file.flush()?;
@@ -44,9 +43,8 @@ impl InspectorLineWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::InspectorRecord;
-    use crate::event::InspectorEvent;
-    use crate::wire::parse_record_line;
+    use crate::events::envelope::InspectorRecord;
+    use crate::events::event::InspectorEvent;
 
     #[test]
     fn writer_appends_newline_framed_records() {
@@ -68,7 +66,7 @@ mod tests {
 
         let contents = std::fs::read_to_string(path).expect("read");
         let line = contents.lines().next().expect("one line");
-        let parsed = parse_record_line(line).expect("parse");
+        let parsed = InspectorRecord::parse_line(line).expect("parse");
         assert_eq!(parsed.trace_id, 7);
         assert!(matches!(parsed.event, InspectorEvent::FuseStart { .. }));
     }

@@ -7,10 +7,10 @@ use crate::materialize::{LookupOutcome, Materializer};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
 use crate::{Error, Namespace, Op};
+use omnifs_api::events::TraceId;
 use omnifs_cache::RecordKind;
 use omnifs_core::path::{Path, Segment};
 use omnifs_core::view::{AttrPayload, FileAttrsCache, Stability};
-use omnifs_inspector::TraceId;
 use omnifs_wit::provider::types as wit_types;
 
 impl Namespace<'_> {
