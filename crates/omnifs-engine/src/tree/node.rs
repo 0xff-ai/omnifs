@@ -76,7 +76,7 @@ pub struct NodeId {
 /// renderer turns into its own kernel/protocol identity (a FUSE inode + FileAttr,
 /// an NFS filehandle + fattr4). Carries NO inode number, NO filehandle, NO fuser
 /// FileAttr. `EntryMeta` is the substrate's own type (kind + Option<FileAttrsCache>),
-/// reused flat rather than re-encoded into an enum, so Materializer/cache/
+/// reused flat rather than re-encoded into an enum, so EffectApplier/cache/
 /// LookupOutcome speak the same shape at every boundary.
 #[derive(Debug, Clone)]
 pub struct Node {

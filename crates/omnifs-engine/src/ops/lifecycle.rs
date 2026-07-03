@@ -1,7 +1,7 @@
 //! Op execution loop: start async provider call → apply effects → return.
 //!
 //! Everything from the first `instance.start_op` call to the final
-//! `Materializer::apply` lives here so a read-file round trip is traceable
+//! `EffectApplier::apply` lives here so a read-file round trip is traceable
 //! through one seam. `Runtime` retains engine/instance/mount lifecycle and
 //! delegates here for all op execution.
 
@@ -66,7 +66,7 @@ impl Runtime {
             .map_err(Error::ProviderProtocol)?;
         let now = clock::now_millis();
         let (prefixes, paths) =
-            crate::materialize::Materializer::new(&self.cache).apply(&ret.effects, op_gen, now);
+            crate::effect_apply::EffectApplier::new(&self.cache).apply(&ret.effects, op_gen, now);
         self.record_view_invalidations(prefixes, paths);
         self.store_read_not_found_negative(op, &ret.result, op_gen, now);
         Ok(ret.result)

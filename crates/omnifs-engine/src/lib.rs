@@ -39,7 +39,7 @@ pub(crate) use auth_inject as auth;
 pub(crate) use cache::blob as blob_cache;
 pub(crate) use callouts::wit_convert as wit_protocol;
 pub(crate) use callouts::{archive, blob, cloner, git, http};
-pub(crate) use effects::apply as materialize;
+pub(crate) use effects::apply as effect_apply;
 pub(crate) use effects::invalidation;
 pub(crate) use inspect as inspector;
 pub(crate) use omnifs_wit::provider::Provider;

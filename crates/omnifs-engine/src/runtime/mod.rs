@@ -466,7 +466,7 @@ impl Runtime {
     pub fn apply_effects_for_test(&self, effects: &wit_types::Effects, op_gen: u64) {
         let now = clock::now_millis();
         let (prefixes, paths) =
-            crate::materialize::Materializer::new(&self.cache).apply(effects, op_gen, now);
+            crate::effect_apply::EffectApplier::new(&self.cache).apply(effects, op_gen, now);
         self.record_view_invalidations(prefixes, paths);
     }
 

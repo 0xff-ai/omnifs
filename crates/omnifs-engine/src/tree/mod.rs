@@ -13,12 +13,12 @@
 //! - Coalescing stays in `Namespace::coalesced`. `Tree` calls `Namespace` and
 //!   gets in-flight dedup for free; `Tree` NEVER adds a second coalescer.
 //! - `Tree` calls `Namespace`, NEVER `Runtime::run_op` directly (that would
-//!   lose coalescing AND Materializer cache-populate).
+//!   lose coalescing AND EffectApplier cache-populate).
 //! - Byte storage stays in `crate::cache::Store`. `Tree` reaches the cache ONLY
 //!   through the mount-owned `Runtime::cache()` handle; it never constructs a
 //!   raw store, so the per-mount generation/tombstone fence and mount-prefixed
 //!   keys are never bypassed.
-//! - wire->cache translation stays in `Materializer` (host-internal, inside
+//! - wire->cache translation stays in `EffectApplier` (host-internal, inside
 //!   `Namespace` methods); `Tree` never imports `wit_types` in its public
 //!   surface.
 //! - The tree-ref/clone/archive registry stays in `Runtime::resolve_tree_ref`.
