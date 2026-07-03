@@ -91,12 +91,12 @@ impl SetupArgs {
         let results = run_init_loop(&selected, &self, &installed, &workspace).await;
 
         let (mount_label, mount_root, browse_hint) = if host_native {
-            // The daemon resolves its own mount point; we preview the expected
-            // default here for the setup summary (HOME/omnifs, same logic as
-            // the daemon's `resolve_mount_point` default).
-            let home = std::env::var_os("HOME")
-                .ok_or_else(|| anyhow::anyhow!("cannot resolve host mount point: set HOME"))?;
-            let mount_point = std::path::PathBuf::from(home).join("omnifs");
+            // Preview the exact mount point the daemon will serve at through the
+            // shared resolver, so the summary matches the served location even
+            // when OMNIFS_MOUNT_POINT is set.
+            let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
+                anyhow::anyhow!("cannot resolve host mount point: set HOME or OMNIFS_MOUNT_POINT")
+            })?;
             let mount_root = omnifs_workspace::layout::WorkspaceLayout::display(&mount_point);
             (
                 "Host mount",

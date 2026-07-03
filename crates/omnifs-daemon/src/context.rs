@@ -42,7 +42,9 @@ impl DaemonContext {
         let workspace = Workspace::resolve()?;
         let layout = workspace.into_layout();
         let frontend = FrontendKind::platform_default();
-        let mount_point = resolve_mount_point()?;
+        let mount_point = omnifs_workspace::layout::resolve_mount_point().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
+        })?;
         let backend = if args.host_native {
             DaemonBackend::Native
         } else {
@@ -214,18 +216,4 @@ impl ProcessInfo {
             executable: std::env::current_exe().unwrap_or_else(|_| PathBuf::new()),
         }
     }
-}
-
-/// Resolve the host-visible mount point the daemon serves at. The container
-/// entrypoint exports `OMNIFS_MOUNT_POINT`; host-native falls back to
-/// `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted tree lives
-/// at a normal user-owned location.
-fn resolve_mount_point() -> anyhow::Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("OMNIFS_MOUNT_POINT") {
-        return Ok(PathBuf::from(explicit));
-    }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        anyhow::anyhow!("cannot resolve mount point: set HOME or OMNIFS_MOUNT_POINT")
-    })?;
-    Ok(PathBuf::from(home).join("omnifs"))
 }
