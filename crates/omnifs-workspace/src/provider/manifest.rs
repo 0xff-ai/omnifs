@@ -5,7 +5,7 @@ use crate::provider::config::ConfigMetadata;
 use crate::provider::sections::{
     ProviderMetadataError, is_hostname_only, validate_provider_manifest,
 };
-use omnifs_caps::{Grants, Need};
+use omnifs_caps::{Grants, Need, domain_matches};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -189,9 +189,39 @@ impl ProviderManifest {
         }
         if let Some(auth) = &self.auth {
             auth.validate()?;
+            self.validate_auth_inject_domain_coverage(auth)?;
         }
         if let Some(config) = self.config.as_ref() {
             config.validate()?;
+        }
+        Ok(())
+    }
+
+    fn validate_auth_inject_domain_coverage(
+        &self,
+        auth: &ProviderAuthManifest,
+    ) -> Result<(), ProviderMetadataError> {
+        for scheme in &auth.schemes {
+            let Some(key) = scheme.key() else {
+                continue;
+            };
+            for domain in scheme.inject_domains() {
+                let covered = self.capabilities.iter().any(|need| {
+                    matches!(
+                        need,
+                        Need::Domain {
+                            value,
+                            dynamic: false,
+                            ..
+                        } if domain_matches(value, domain)
+                    )
+                });
+                if !covered {
+                    return Err(ProviderMetadataError::Validation(format!(
+                        "auth.schemes.{key}.injectDomains entry {domain:?} is not covered by a declared domain capability need"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -431,6 +461,9 @@ mod tests {
         "displayName": "Demo",
         "provider": "demo.wasm",
         "defaultMount": "demo",
+        "capabilities": [
+            { "kind": "domain", "value": "api.demo.test", "why": "Fetch Demo API resources." }
+        ],
         "auth": {
             "default": "pat",
             "schemes": [
@@ -459,6 +492,9 @@ mod tests {
         "displayName": "Confidential",
         "provider": "conf.wasm",
         "defaultMount": "conf",
+        "capabilities": [
+            { "kind": "domain", "value": "api.conf.test", "why": "Fetch confidential API resources." }
+        ],
         "auth": {
             "default": "oauth",
             "schemes": [
@@ -627,6 +663,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_metadata_rejects_uncovered_inject_domains() {
+        let mut manifest = oauth_provider_manifest();
+        manifest.capabilities.clear();
+        let error = encode_provider_manifest(&manifest).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ProviderMetadataError::Validation(message)
+                    if message.contains("auth.schemes.oauth")
+                        && message.contains("api.linear.app")
+                        && message.contains("domain capability need")
+            ),
+            "unexpected error: {error}"
+        );
+
+        let mut wildcard = oauth_provider_manifest();
+        let Need::Domain { value, .. } = &mut wildcard.capabilities[0] else {
+            panic!("oauth fixture starts with a domain need");
+        };
+        *value = "*".to_string();
+        encode_provider_manifest(&wildcard).expect("wildcard domain need covers inject domain");
+    }
+
+    #[test]
     fn provider_manifest_auth_wire_shapes() {
         let guidance_manifest = ProviderManifest::from_bytes(GUIDANCE_MANIFEST).unwrap();
         let auth = guidance_manifest.auth.as_ref().expect("auth");
@@ -669,6 +729,9 @@ mod tests {
             "displayName": "BYO",
             "provider": "byo.wasm",
             "defaultMount": "byo",
+            "capabilities": [
+                { "kind": "domain", "value": "api.byo.test", "why": "Fetch BYO API resources." }
+            ],
             "auth": {
                 "default": "oauth",
                 "schemes": [
@@ -712,6 +775,13 @@ mod tests {
             "displayName": "Linear",
             "provider": "omnifs_provider_linear.wasm",
             "defaultMount": "linear",
+            "capabilities": [
+                {
+                    "kind": "domain",
+                    "value": "api.linear.app",
+                    "why": "Fetch Linear GraphQL resources."
+                }
+            ],
             "auth": {
                 "default": "oauth",
                 "schemes": [

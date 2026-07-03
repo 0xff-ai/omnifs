@@ -142,7 +142,7 @@ mod tests {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "github", "auth": {"type":"static-token","scheme":"pat"} }"#,
+                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"static-token","scheme":"pat"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
@@ -173,7 +173,7 @@ mod tests {
             name: MountName::try_from("github").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
+                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"oauth","scheme":"device","clientId":"client-id"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };
@@ -183,7 +183,10 @@ mod tests {
 
         let metadata_only = MountConfig {
             name: MountName::try_from("github").unwrap(),
-            config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
+            config: spec_with_reference(
+                &reference,
+                r#"{ "mount": "github", "capabilities": { "domains": ["api.example.com"] } }"#,
+            ),
             source: PathBuf::from("/dev/null"),
         };
         DockerMountSpecBuilder::new(&catalog, &store)
@@ -297,7 +300,7 @@ mod tests {
             name: MountName::try_from("ghost").unwrap(),
             config: spec_with_reference(
                 &reference,
-                r#"{ "mount": "ghost", "auth": {"type":"static-token","scheme":"pat"} }"#,
+                r#"{ "mount": "ghost", "capabilities": { "domains": ["api.example.com"] }, "auth": {"type":"static-token","scheme":"pat"} }"#,
             ),
             source: PathBuf::from("/dev/null"),
         };

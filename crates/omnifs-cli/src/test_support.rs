@@ -76,7 +76,9 @@ pub(crate) fn wasm_with_provider_metadata(id: &str, provider: &str) -> Vec<u8> {
         "displayName": id,
         "provider": provider,
         "defaultMount": id,
-        "capabilities": [],
+        "capabilities": [
+            { "kind": "domain", "value": "api.example.com", "why": "Serve authenticated Example API calls." }
+        ],
         "auth": {
             "default": "device",
             "schemes": [
