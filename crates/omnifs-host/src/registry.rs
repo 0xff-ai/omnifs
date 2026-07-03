@@ -966,4 +966,146 @@ mod tests {
             .expect("old mount should remain running");
         assert!(Arc::ptr_eq(&running, &still_running));
     }
+
+    /// Shared reconcile setup: a registry over fresh temp dirs plus the mounts
+    /// dir a test writes specs into. Holds the temp dirs so they outlive the
+    /// registry.
+    struct ReconcileFixture {
+        registry: Arc<ProviderRegistry>,
+        mounts_dir: PathBuf,
+        providers_dir: tempfile::TempDir,
+        base_wasm: PathBuf,
+        _config_dir: tempfile::TempDir,
+        _cache_dir: tempfile::TempDir,
+    }
+
+    fn reconcile_fixture() -> ReconcileFixture {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+
+        let base_wasm = test_provider_wasm_path();
+        assert!(
+            base_wasm.exists(),
+            "test provider missing at {}. Run `just providers build` first.",
+            base_wasm.display()
+        );
+
+        let mounts_dir = paths.config_dir.join("mounts");
+        std::fs::create_dir_all(&mounts_dir).expect("create mounts dir");
+
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let registry = Arc::new(
+            ProviderRegistry::new(
+                HostContext::new(
+                    cache_dir.path(),
+                    &paths.config_dir,
+                    providers_dir.path(),
+                    &paths.credentials_file,
+                ),
+                cloner,
+            )
+            .expect("registry init"),
+        );
+
+        ReconcileFixture {
+            registry,
+            mounts_dir,
+            providers_dir,
+            base_wasm,
+            _config_dir: config_dir,
+            _cache_dir: cache_dir,
+        }
+    }
+
+    /// A running mount whose spec changes to a still-valid but different form is
+    /// replaced: reconcile reports it as `updated` and swaps in a new runtime
+    /// instance (a fresh `Arc`), not the same one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_updates_running_mount_on_spec_change() {
+        let fx = reconcile_fixture();
+        let spec = pin_spec(
+            fx.providers_dir.path(),
+            &fx.base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let spec_path = fx.mounts_dir.join("test.json");
+        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
+
+        let handle = tokio::runtime::Handle::current();
+        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(
+            first.added,
+            ["test"],
+            "first reconcile adds the mount: {first:?}"
+        );
+        let running = fx.registry.get("test").expect("mount should be running");
+
+        // A superset domain grant still satisfies the provider's httpbin.org need
+        // but changes the mount fingerprint, so reconcile replaces the instance.
+        let mut changed = serde_json::to_value(&spec).unwrap();
+        changed["capabilities"]["domains"] = serde_json::json!(["httpbin.org", "example.com"]);
+        let changed: Spec = serde_json::from_value(changed).expect("rebuild changed spec");
+        std::fs::write(&spec_path, serde_json::to_vec_pretty(&changed).unwrap())
+            .expect("write changed spec");
+
+        let second = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(
+            second.updated,
+            ["test"],
+            "changed spec updates the mount: {second:?}"
+        );
+        assert!(second.added.is_empty());
+        let replaced = fx.registry.get("test").expect("mount running after update");
+        assert!(
+            !Arc::ptr_eq(&running, &replaced),
+            "an update swaps in a new runtime instance"
+        );
+    }
+
+    /// A mount whose spec file is deleted is removed on the next reconcile:
+    /// reported as `removed` and no longer served.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_removes_mount_when_spec_deleted() {
+        let fx = reconcile_fixture();
+        let spec = pin_spec(
+            fx.providers_dir.path(),
+            &fx.base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+        let spec_path = fx.mounts_dir.join("test.json");
+        std::fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).expect("write spec");
+
+        let handle = tokio::runtime::Handle::current();
+        let first = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(first.added, ["test"]);
+        assert!(
+            fx.registry.get("test").is_some(),
+            "mount is running after add"
+        );
+
+        std::fs::remove_file(&spec_path).expect("delete spec");
+        let second = fx.registry.reconcile(&handle, MaterializationMode::Docker);
+        assert_eq!(
+            second.removed,
+            ["test"],
+            "a deleted spec removes the mount: {second:?}"
+        );
+        assert!(
+            fx.registry.get("test").is_none(),
+            "a removed mount is no longer served"
+        );
+        assert!(fx.registry.mounts().is_empty());
+    }
 }
