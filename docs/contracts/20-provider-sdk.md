@@ -31,6 +31,8 @@ Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object
 
 Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and static auth metadata. The provider macro lowers that into a `Provider::METADATA` associated const and a non-wasm `provider_metadata()` accessor. The native `omnifs-embed-metadata` build tool links the provider crates, converts each const into the host `ProviderManifest`, serializes it with `serde_json`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. The host (and `omnifs-auth`) own that JSON dialect; the SDK metadata types are typed const data and never serialize themselves.
 
+Every auth injection domain must be covered by a declared domain capability need in the same manifest. Metadata validation rejects a scheme whose `injectDomains` entry is not matched by the provider's domain needs, and the error names the scheme key and domain.
+
 Use `just providers build` when artifacts need embedded metadata and validation-ready Wasm; it runs the harvester after the Wasm build. The host reads the section pre-instantiation, so it never instantiates a component to obtain metadata.
 
 ### Host resource config fields
