@@ -26,6 +26,7 @@ pub struct CachedCanonical {
     pub id: wit_types::LogicalId,
     pub bytes: Vec<u8>,
     pub validator: Option<VersionToken>,
+    pub revalidate: bool,
 }
 
 impl CachedCanonical {
@@ -34,6 +35,7 @@ impl CachedCanonical {
             id: input.id,
             bytes: input.bytes,
             validator: input.validator.map(VersionToken::from),
+            revalidate: input.revalidate,
         }
     }
 

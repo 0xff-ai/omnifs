@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+pub(crate) const DEFAULT_REVALIDATE_SECS: u64 = 15 * 60;
+
 /// Registry of loaded WASM providers.
 ///
 /// Instantiates providers on demand and manages their lifecycle including
@@ -149,6 +151,7 @@ impl MountRuntimes {
         Ok(BuiltMount {
             mount,
             is_root,
+            revalidate: spec.revalidate,
             runtime: Arc::new(runtime),
         })
     }
@@ -161,6 +164,7 @@ impl MountRuntimes {
         let BuiltMount {
             mount,
             is_root,
+            revalidate,
             runtime,
         } = built;
         // Claim the root binding before the instance becomes visible: a
@@ -190,7 +194,7 @@ impl MountRuntimes {
             }
             instances.insert(mount.clone(), Arc::clone(&runtime));
         }
-        self.start_timer(&mount, &runtime, handle);
+        self.start_timer(&mount, &runtime, revalidate, handle);
         info!(mount = mount.as_str(), root = is_root, "loaded provider");
         Ok(runtime)
     }
@@ -203,6 +207,7 @@ impl MountRuntimes {
         let BuiltMount {
             mount,
             is_root,
+            revalidate,
             runtime,
         } = built;
 
@@ -240,7 +245,7 @@ impl MountRuntimes {
             old_runtime
         };
 
-        self.start_timer(&mount, &runtime, handle);
+        self.start_timer(&mount, &runtime, revalidate, handle);
         if let Err(error) = old_runtime.shutdown() {
             warn!(mount = mount.as_str(), error = %error, "shutdown failed");
         }
@@ -374,12 +379,23 @@ impl MountRuntimes {
         self.fingerprints.write().remove(mount);
     }
 
-    fn start_timer(&self, mount: &str, runtime: &Arc<Runtime>, handle: &tokio::runtime::Handle) {
-        let interval_secs = runtime.requested_capabilities().refresh_interval_secs;
-        if interval_secs == 0 {
+    fn start_timer(
+        &self,
+        mount: &str,
+        runtime: &Arc<Runtime>,
+        revalidate: bool,
+        handle: &tokio::runtime::Handle,
+    ) {
+        let provider_interval_secs = runtime.requested_capabilities().refresh_interval_secs;
+        if provider_interval_secs == 0 && !revalidate {
             return;
         }
 
+        let interval_secs = if provider_interval_secs == 0 {
+            DEFAULT_REVALIDATE_SECS
+        } else {
+            u64::from(provider_interval_secs)
+        };
         let mount = mount.to_string();
         let runtime = Arc::clone(runtime);
         let mut shutdown = self.timer_shutdown.subscribe();
@@ -389,13 +405,17 @@ impl MountRuntimes {
                 if *shutdown.borrow_and_update() {
                     return;
                 }
-                let mut interval =
-                    tokio::time::interval(Duration::from_secs(u64::from(interval_secs)));
+                let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
-                            if let Err(e) = runtime.call_timer_tick().await {
+                            if provider_interval_secs != 0
+                                && let Err(e) = runtime.call_timer_tick().await
+                            {
                                 debug!(mount = mount.as_str(), error = %e, "provider timer tick failed");
+                            }
+                            if revalidate {
+                                runtime.revalidate_recent_objects().await;
                             }
                         }
                         changed = shutdown.changed() => {
@@ -676,6 +696,7 @@ struct LoadWork {
 struct BuiltMount {
     mount: String,
     is_root: bool,
+    revalidate: bool,
     runtime: Arc<Runtime>,
 }
 
@@ -755,13 +776,20 @@ pub enum RegistryError {
 mod tests {
     use super::{MountRuntimes, RegistryError};
     use crate::HostContext;
+    use crate::Runtime;
+    use crate::cache::Caches;
     use crate::cloner::GitCloner;
+    use crate::ops::namespace::ReadBytes;
+    use crate::test_support::PendingTestCallout;
+    use omnifs_core::path::Path as OmnifsPath;
+    use omnifs_wit::provider::types::{Callout, CalloutResult, Header, HttpResponse};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName};
     use omnifs_workspace::mounts::Spec;
     use omnifs_workspace::mounts::materialize::MaterializationMode;
     use omnifs_workspace::provider::ProviderStore;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// Lay `src` WASM into the provider store under `providers_dir` and return a
     /// `Spec` (built from `body`, which omits `provider`) pinned to the content
@@ -800,6 +828,64 @@ mod tests {
 
     fn test_provider_wasm_path() -> PathBuf {
         wasm_artifact_path("test_provider.wasm")
+    }
+
+    fn remote_item_body(title: &str) -> Vec<u8> {
+        format!(r#"{{"number":9,"title":"{title}","body":"Body 9","state":"open"}}"#).into_bytes()
+    }
+
+    fn http_response(status: u16, etag: Option<&str>, body: Vec<u8>) -> CalloutResult {
+        let mut headers = Vec::new();
+        if let Some(etag) = etag {
+            headers.push(Header {
+                name: "etag".to_string(),
+                value: etag.to_string(),
+            });
+        }
+        CalloutResult::HttpResponse(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    async fn next_callout(runtime: &Runtime) -> PendingTestCallout {
+        // Wall-clock deadline, not a yield-count budget: the callout lands only
+        // after real wasm work whose poll count varies wildly with machine
+        // load, and tokio test time is paused here so timers cannot be used.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if let Some(callout) = runtime.try_recv_test_callout() {
+                return callout;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("provider did not issue a test callout");
+    }
+
+    fn fetch_header<'a>(callout: &'a PendingTestCallout, name: &str) -> Option<&'a str> {
+        let Callout::Fetch(request) = callout.callout() else {
+            panic!("expected fetch callout, got {:?}", callout.callout());
+        };
+        request
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case(name))
+            .map(|header| header.value.as_str())
+    }
+
+    async fn wait_for_cached_bytes(runtime: &Runtime, path: &OmnifsPath, expected: &[u8]) {
+        for _ in 0..100 {
+            if runtime
+                .cache()
+                .cached_canonical_for(path)
+                .is_some_and(|canonical| canonical.bytes == expected)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("canonical cache did not refresh to expected bytes");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -999,6 +1085,113 @@ mod tests {
             .get("test")
             .expect("old mount should remain running");
         assert!(Arc::ptr_eq(&running, &still_running));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn revalidation_timer_refreshes_recent_object_without_provider_invalidation() {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let providers_dir = tempfile::tempdir().expect("temp providers dir");
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
+
+        let base_wasm = test_provider_wasm_path();
+        assert!(
+            base_wasm.exists(),
+            "test provider missing at {}. Run `just providers build` first.",
+            base_wasm.display()
+        );
+        let spec = pin_spec(
+            providers_dir.path(),
+            &base_wasm,
+            "test-provider",
+            serde_json::json!({
+                "mount": "test",
+                "config": {},
+                "capabilities": { "domains": ["httpbin.org"] }
+            }),
+        );
+
+        let engine = crate::component_engine(None, |_| {}).expect("engine");
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        let caches = Caches::open(cache_dir.path()).expect("cache open");
+        let context = HostContext::new(
+            cache_dir.path(),
+            &paths.config_dir,
+            providers_dir.path(),
+            &paths.credentials_file,
+        );
+        let runtime = Arc::new(
+            Runtime::new_for_callout_tests(&engine, &base_wasm, &spec, cloner, &context, &caches)
+                .expect("runtime"),
+        );
+
+        let timer_config_dir = tempfile::tempdir().expect("timer config dir");
+        let timer_cache_dir = tempfile::tempdir().expect("timer cache dir");
+        let timer_providers_dir = tempfile::tempdir().expect("timer providers dir");
+        let timer_paths =
+            omnifs_workspace::layout::WorkspaceLayout::under_root(timer_config_dir.path());
+        let timer_registry = MountRuntimes::new(
+            HostContext::new(
+                timer_cache_dir.path(),
+                &timer_paths.config_dir,
+                timer_providers_dir.path(),
+                &timer_paths.credentials_file,
+            ),
+            Arc::new(GitCloner::new(timer_cache_dir.path().join("clones"))),
+        )
+        .expect("timer registry");
+
+        timer_registry.start_timer(
+            "test",
+            &runtime,
+            spec.revalidate,
+            &tokio::runtime::Handle::current(),
+        );
+        tokio::task::yield_now().await;
+
+        let path = OmnifsPath::parse("/items/open/9/item.json").unwrap();
+        let content_type = path.content_type_mime(None).to_string();
+        let stale = remote_item_body("stale");
+        let fresh = remote_item_body("fresh");
+
+        let namespace = runtime.namespace();
+        let read = namespace.read_file(&path, content_type.clone(), None);
+        let answer = async {
+            let callout = next_callout(&runtime).await;
+            assert_eq!(fetch_header(&callout, "if-none-match"), None);
+            callout.answer(http_response(200, Some("item-9-v1"), stale.clone()));
+        };
+        let (read_result, ()) = tokio::join!(read, answer);
+        read_result.expect("initial read");
+        wait_for_cached_bytes(&runtime, &path, &stale).await;
+        let _ = runtime.drain_invalidated_paths();
+
+        tokio::time::advance(Duration::from_mins(1)).await;
+        let callout = next_callout(&runtime).await;
+        assert_eq!(fetch_header(&callout, "if-none-match"), Some("item-9-v1"));
+        callout.answer(http_response(200, Some("item-9-v2"), fresh.clone()));
+        wait_for_cached_bytes(&runtime, &path, &fresh).await;
+
+        let subsequent = runtime
+            .namespace()
+            .read_file(&path, content_type, None)
+            .await
+            .expect("subsequent read");
+        assert!(matches!(subsequent.bytes, ReadBytes::Canonical));
+        assert_eq!(
+            runtime.canonical_bytes_for(&path).as_deref(),
+            Some(fresh.as_slice())
+        );
+        assert!(
+            !runtime
+                .drain_invalidated_paths()
+                .iter()
+                .any(|invalidated| invalidated == &path),
+            "item 9 must refresh without an explicit provider invalidation"
+        );
+
+        timer_registry.shutdown_all();
+        runtime.shutdown().expect("runtime shutdown");
     }
 
     /// Shared reconcile setup: a registry over fresh temp dirs plus the mounts

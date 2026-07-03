@@ -165,8 +165,11 @@ where
         }
         let stability = (self.stability)(&key);
 
-        if let Some(ref push) = cached
-            && push.matches_anchor(&key.anchor(O::kind()))
+        let anchor = key.anchor(O::kind());
+        let matched_cached = cached.as_ref().filter(|push| push.matches_anchor(&anchor));
+
+        if let Some(push) = matched_cached
+            && !push.revalidate
         {
             return ServeCtx {
                 render_table: &self.render_table,
@@ -176,7 +179,7 @@ where
             .serve_warm(&key, target, &push.bytes, push.validator.clone());
         }
 
-        let since = cached.as_ref().and_then(|p| p.validator.clone());
+        let since = matched_cached.and_then(|p| p.validator.clone());
         let (value, canonical, preloads) = match O::load(cx, &key, since).await? {
             Load::Fresh {
                 value,
@@ -184,12 +187,12 @@ where
                 preloads,
             } => (value, canonical, preloads),
             Load::Unchanged => {
-                let bytes = cached.as_ref().map(|p| p.bytes.as_slice()).ok_or_else(|| {
+                let bytes = matched_cached.map(|p| p.bytes.as_slice()).ok_or_else(|| {
                     ProviderError::internal(
                         "Load::Unchanged returned without a host-pushed canonical",
                     )
                 })?;
-                let validator = cached.as_ref().and_then(|p| p.validator.clone());
+                let validator = matched_cached.and_then(|p| p.validator.clone());
                 return ServeCtx {
                     render_table: &self.render_table,
                     leaves: &self.leaves,
@@ -197,9 +200,9 @@ where
                 }
                 .serve_warm(&key, target, bytes, validator);
             },
-            Load::NotFound => return Ok(ReadOutcome::NotFound(Some(key.anchor(O::kind())))),
+            Load::NotFound => return Ok(ReadOutcome::NotFound(Some(anchor))),
         };
-        let id = key.anchor(O::kind());
+        let id = anchor;
         // The anchor base of the requested object is the path its canonical is
         // anchored at. For a dir-shaped anchor the read path is a leaf under
         // the anchor, so strip the leaf; for a file-shaped anchor the read

@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::{fs, io};
+use tracing::debug;
 
 pub(crate) mod instance;
 pub(crate) mod registry;
@@ -53,6 +54,7 @@ const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_h
 const PROVIDER_CACHE_SUBDIR: &str = "providers";
 const BLOB_CACHE_SUBDIR: &str = "blobs";
 const ARCHIVE_CACHE_SUBDIR: &str = "archives";
+const RECENT_REVALIDATE_OBJECTS: usize = 32;
 
 /// Host-owned filesystem context for provider runtime and mount lifecycle.
 #[derive(Clone, Debug)]
@@ -125,6 +127,7 @@ pub struct Runtime {
     pub(crate) cache: Store,
     pub(crate) invalidation: InvalidationState,
     pub(crate) coalesce: Coalesce<NsCoalesceKey, SharedOutcome>,
+    recent_objects: parking_lot::Mutex<RecentObjects>,
     /// Per-path locks serializing the read-modify-write of a paged
     /// directory's accumulated dirents. Two concurrent `@next` (or `@all`)
     /// reads on the same directory must not both snapshot the same base and
@@ -431,6 +434,7 @@ impl Runtime {
             cache,
             invalidation: InvalidationState::default(),
             coalesce: Coalesce::new(),
+            recent_objects: parking_lot::Mutex::new(RecentObjects::new(RECENT_REVALIDATE_OBJECTS)),
             pagination_locks: DashMap::new(),
             rate_limit_until: std::sync::Mutex::new(None),
             inspector: inspector::global(),
@@ -516,6 +520,32 @@ impl Runtime {
         self.next_operation_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    pub(crate) fn note_read_object(&self, id: ObjectId) {
+        self.recent_objects.lock().record(id);
+    }
+
+    pub(crate) async fn revalidate_recent_objects(&self) {
+        let ids = self.recent_objects.lock().snapshot();
+        for id in ids {
+            let Some(path) = self.revalidation_path_for(&id) else {
+                continue;
+            };
+            let content_type = path.content_type_mime(None).to_string();
+            if let Err(error) = self.namespace().revalidate_file(&path, content_type).await {
+                debug!(
+                    mount = self.mount_name.as_str(),
+                    path = path.as_str(),
+                    error = %error,
+                    "host revalidation read failed"
+                );
+            }
+        }
+    }
+
+    fn revalidation_path_for(&self, id: &ObjectId) -> Option<Path> {
+        self.cache.paths_for_id(id.as_bytes()).into_iter().next()
+    }
+
     pub async fn call_timer_tick(&self) -> Result<wit_types::OpResult> {
         self.run_op(
             Op::OnEvent {
@@ -554,6 +584,32 @@ impl Runtime {
         let path = self.blob_cache.blob_path(&record.cache_key);
         std::fs::read(path)
             .map_err(|e| EngineError::ProviderProtocol(format!("read blob {blob_id}: {e}")))
+    }
+}
+
+struct RecentObjects {
+    limit: usize,
+    ids: Vec<ObjectId>,
+}
+
+impl RecentObjects {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            ids: Vec::with_capacity(limit),
+        }
+    }
+
+    fn record(&mut self, id: ObjectId) {
+        if let Some(index) = self.ids.iter().position(|existing| existing == &id) {
+            self.ids.remove(index);
+        }
+        self.ids.insert(0, id);
+        self.ids.truncate(self.limit);
+    }
+
+    fn snapshot(&self) -> Vec<ObjectId> {
+        self.ids.clone()
     }
 }
 

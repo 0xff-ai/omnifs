@@ -404,6 +404,7 @@ pub mod ns {
     pub enum Key {
         Path(Path),
         Object(ObjectId),
+        Revalidate(ObjectId),
     }
 
     impl CoalesceKey for Key {
