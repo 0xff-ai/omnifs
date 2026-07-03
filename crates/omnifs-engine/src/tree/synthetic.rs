@@ -9,19 +9,90 @@
 //! - the pagination controls (`@next`/`@all`), an action whose read advances the
 //!   parent directory's accumulated dirents.
 //!
-//! All the names, metas, and byte content reuse the host `pagination`
-//! source-of-truth constants (`IGNORE_FILES`, `IGNORE_CONTENT`,
-//! `control_entries`, `is_*` predicates), so the synthetic surface is defined in
-//! exactly one place and the FUSE/NFS copies collapse onto it.
+//! This module is the source of truth for the synthetic projection surface:
+//! control names, ignore-file names and bytes, metadata, and name predicates.
 
 use crate::Runtime;
-use crate::pagination::{
-    self, CTRL_ALL, CTRL_NEXT, IGNORE_CONTENT, IGNORE_FILES, is_control_name, is_ignore_name,
-};
-use crate::view::{EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
+use crate::view::{DirentRecord, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability};
 use omnifs_core::path::Path;
 
 use super::node::{Entry, PaginationControl, Synthetic, SyntheticContent};
+
+/// Synthetic control-file leaf that loads the next page of a paged directory.
+const CTRL_NEXT: &str = "@next";
+/// Synthetic control-file leaf that loads every remaining page (capped).
+const CTRL_ALL: &str = "@all";
+/// Reserved prefix for host control entries. A provider listing must never
+/// yield a child whose name starts with this; such entries are skipped so
+/// provider data cannot shadow `@next`/`@all`.
+const CTRL_PREFIX: char = '@';
+
+/// Mount-root ignore files. Each carries a single `@*` pattern so recursive
+/// tools that honor ignore files (`rg`, `fd`, git) skip the `@next`/`@all`
+/// control files by default and never trigger pagination during a tree walk.
+pub const IGNORE_FILES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
+
+/// Content served for any mount-root ignore file: ignore every `@`-prefixed
+/// control entry.
+pub const IGNORE_CONTENT: &str = "@*\n";
+
+/// True when `name` is one of the synthetic control-file leaves.
+#[must_use]
+pub(crate) fn is_control_name(name: &str) -> bool {
+    name == CTRL_NEXT || name == CTRL_ALL
+}
+
+/// True when a provider listing must not use this leaf name (`@` is reserved
+/// for host-synthesized control entries and mount-root ignore patterns).
+#[must_use]
+pub fn is_reserved_provider_leaf(name: &str) -> bool {
+    name.starts_with(CTRL_PREFIX)
+}
+
+/// True when `name` is one of the mount-root ignore files.
+#[must_use]
+fn is_ignore_name(name: &str) -> bool {
+    IGNORE_FILES.contains(&name)
+}
+
+/// The cached dirent records for pagination controls a paged directory carries.
+pub(crate) fn control_entries() -> [DirentRecord; 2] {
+    [
+        DirentRecord {
+            name: CTRL_NEXT.to_string(),
+            meta: control_entry_meta(),
+        },
+        DirentRecord {
+            name: CTRL_ALL.to_string(),
+            meta: control_entry_meta(),
+        },
+    ]
+}
+
+/// Attrs for a control file once its status content has been generated at open.
+/// The lookup-time [`control_entry_meta`] reports `Unknown` (the message length
+/// is not known until the action runs); promoting to an exact size at open lets
+/// `cat` (which sizes its reads against `st_size`) read the whole status instead
+/// of the `Unknown` placeholder's single byte. Mirrors the learned-size
+/// promotion the regular full-read path applies.
+pub(crate) fn control_read_attrs(len: u64) -> FileAttrsCache {
+    FileAttrsCache::deferred(
+        FileSize::Exact(len),
+        ReadMode::Full,
+        Stability::Dynamic,
+        None,
+    )
+    .expect("control read attrs are valid")
+}
+
+/// A small dynamic file: each `cat` re-fires the control action and directory
+/// recursion never descends through it.
+fn control_entry_meta() -> EntryMeta {
+    EntryMeta::file(
+        FileAttrsCache::deferred(FileSize::Unknown, ReadMode::Full, Stability::Dynamic, None)
+            .expect("control attrs are valid"),
+    )
+}
 
 impl PaginationControl {
     /// Map a control name to its pagination action. `None` for any other name.
@@ -34,11 +105,11 @@ impl PaginationControl {
     }
 
     /// The two pagination-control `Entry`s a paged directory's listing carries.
-    /// Reuses the host `Runtime::control_entries` dirent records (the same
-    /// `@next`/`@all` names and `control_entry_meta`) so the control surface is
-    /// identical to what the host accumulates into cached dirents.
+    /// Reuses the cached dirent records (the same `@next`/`@all` names and
+    /// `control_entry_meta`) so the renderer-facing surface is identical to
+    /// what pagination accumulates into cached dirents.
     pub(crate) fn entries() -> Vec<Entry> {
-        Runtime::control_entries()
+        control_entries()
             .into_iter()
             .filter_map(|record| {
                 Self::from_name(&record.name).map(|action| {
@@ -160,7 +231,3 @@ fn cached_control_dirent(
     };
     dirents.entries.into_iter().find(|e| e.name == name)
 }
-
-// Re-export the reserved-prefix predicate so `list` can drop a provider entry
-// that collides with the `@` namespace without importing `pagination` directly.
-pub(crate) use pagination::is_reserved_provider_leaf;

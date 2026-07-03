@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::clock::DYNAMIC_TTL_MILLIS;
 use crate::object_id::ObjectId;
-use crate::pagination;
+use crate::tree::synthetic;
 use crate::wit_protocol::{
     cached_cursor_from_wit, entry_meta_from_kind, file_attrs_from_file_out, stability_from_wit,
 };
@@ -134,7 +134,7 @@ impl<'a> EffectApplier<'a> {
             };
 
             if let Some((_, name)) = split_projected_path(&write_path)
-                && pagination::is_reserved_provider_leaf(&name)
+                && synthetic::is_reserved_provider_leaf(&name)
             {
                 warn!(
                     path = write.path.as_str(),
@@ -550,7 +550,7 @@ fn cache_projection_batch<'a, I>(
     let entries: Vec<&wit_types::DirEntry> = entries
         .into_iter()
         .filter(|entry| {
-            if pagination::is_reserved_provider_leaf(&entry.name) {
+            if synthetic::is_reserved_provider_leaf(&entry.name) {
                 warn!(
                     name = entry.name.as_str(),
                     parent = parent_path.as_str(),

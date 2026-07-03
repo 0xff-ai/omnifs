@@ -253,7 +253,7 @@ fn snapshot_from_provider_listing(
     // renderer-facing synthetic entries.
     let mut persisted = dirent_records.clone();
     if paginated {
-        persisted.extend(Runtime::control_entries());
+        persisted.extend(synthetic::control_entries());
     }
     let dirents_payload = DirentsPayload {
         entries: persisted,
