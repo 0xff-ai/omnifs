@@ -54,9 +54,12 @@ impl Filesystem for Frontend {
         let parent_backing_path = parent_entry.body.backing_path().cloned();
         drop(parent_entry);
 
-        let child_path = parent_path
-            .join(name_str)
-            .expect("lookup name must be a valid path segment");
+        // A name the path grammar rejects can never exist; panicking here would
+        // kill the fuser event loop (and with it the daemon) on one bad lookup.
+        let Ok(child_path) = parent_path.join(name_str) else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
         let live_scope = inspector::global().map(|sink| {
             InspectorFuseScope::begin(sink, "lookup", &mount_name, child_path.as_str())
         });
