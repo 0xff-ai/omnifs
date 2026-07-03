@@ -1,6 +1,6 @@
 # omnifs unified execution plan
 
-Status: the single execution document for the omnifs rework and strategy build-out. It unifies `docs/future/bluesky-rewrite.md` (architecture), `docs/future/bluesky-tree.md` (target layout), `docs/future/cli-experience.md` (CLI UX), and `docs/internal/strategy/15-status-2026-07.md` (strategy gaps). Those documents carry design rationale; **this document carries the execution truth**. If this document and a companion disagree on sequencing or acceptance, this document wins. Every step below is self-contained: it names its files, its exact changes, its verification commands, and its expected outcomes.
+Status: the single execution document for the omnifs rework and strategy build-out. It unifies `docs/future/bluesky-rewrite.md` (architecture), `docs/future/bluesky-tree.md` (target layout), `docs/future/cli-experience.md` (CLI UX), and the internal 2026-07 strategy status review (private, untracked). Those documents carry design rationale; **this document carries the execution truth**. If this document and a companion disagree on sequencing or acceptance, this document wins. Every step below is self-contained: it names its files, its exact changes, its verification commands, and its expected outcomes.
 
 ---
 
