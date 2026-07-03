@@ -76,7 +76,7 @@ impl<S> Shape<'_, S> {
     /// 1. a file route (`r.file`);
     /// 2. a file-object anchor (the abs path itself is the single-file object);
     /// 3. a leaf one level under a dir-object anchor, where the leaf resolves to
-    ///    a canonical / representation / derived / direct / stream face.
+    ///    a canonical / representation / computed / direct / stream face.
     pub(super) fn read_route(&self, abs: &Path) -> Option<ReadRoute<'_, S>> {
         if let Some(route) = self.file_route(abs) {
             return Some(ReadRoute::File(route));

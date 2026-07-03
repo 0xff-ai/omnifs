@@ -1,7 +1,7 @@
 //! Test-provider: host guest-loader fixture on the object-shaped SDK surface.
 //!
 //! Synthetic canned data exercises the object SDK end to end: object canonical,
-//! representation, and derive faces; a child-object `comments` collection with a
+//! representation, and computed faces; a child-object `comments` collection with a
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
 //! and live files; paged and partial listings with validators; rate limits; and
@@ -68,7 +68,7 @@ struct Item {
 }
 
 impl Item {
-    /// Object SDK derive signature: `fn(&Item, &ItemKey) -> Result<FileProjection>`.
+    /// Object SDK computed signature: `fn(&Item, &ItemKey) -> Result<FileProjection>`.
     fn title(&self, _key: &ItemKey) -> Result<FileProjection> {
         Ok(FileProjection::text(self.title.as_bytes(), TextFormat::Raw).build())
     }
@@ -161,7 +161,7 @@ struct ItemListKey {
 
 /// The `/items/{filter}` listing. `items` is a synthetic dir with no parent
 /// object, so this is a raw handler (not a typed object-dir collection): it
-/// lists items 7 and 8 and stores each item's canonical plus its eager derived
+/// lists items 7 and 8 and stores each item's canonical plus its eager computed
 /// leaves at listing time, so a later read of any item leaf serves warm
 /// (collection preload). The typed `Collection`/`Cursor` surface is exercised by
 /// the object-dir `comments` collection.
@@ -183,7 +183,7 @@ async fn item_list(_cx: DirCx<State>, key: ItemListKey) -> Result<DirProjection>
             number,
         };
         let base = format!("items/{filter}/{number}");
-        // The canonical-view leaves are the canonical/representation/derived
+        // The canonical-view leaves are the canonical/representation/computed
         // file leaves only. `comments` is a collection DIR, not a view of the
         // item canonical, so it must not appear here.
         let leaves = ["item.json", "item.md", "title", "state", "body"]
@@ -325,16 +325,16 @@ impl TestProvider {
         }
 
         // Object family `Item`: facet collapse, canonical + representation +
-        // derive faces, and a paged child-object `comments` collection.
+        // computed faces, and a paged child-object `comments` collection.
         r.dir("/items").handler(items_root)?;
         r.dir("/items/{filter}").handler(item_list)?;
         r.object::<Item>("/items/{filter}/{number}", |o| {
             o.stable();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").derive(Item::title)?;
-            o.file("state").derive(Item::state)?;
-            o.file("body").lazy().derive(Item::body)?;
+            o.file("title").computed(Item::title)?;
+            o.file("state").computed(Item::state)?;
+            o.file("body").lazy().computed(Item::body)?;
             // Object-level stream face (R6): a live ranged leaf opened through
             // open-file -> object Stream dispatch.
             o.file("log").stream(Item::log)?;
@@ -348,7 +348,7 @@ impl TestProvider {
             o.stable();
             o.file("comment.json").canonical::<Json>()?;
             o.file("comment.md").representation::<Markdown>()?;
-            o.file("author").derive(Comment::author)?;
+            o.file("author").computed(Comment::author)?;
             Ok(())
         })?;
         r.alias("/items/{filter}/{number}/replies/{idx}", &comment)?;

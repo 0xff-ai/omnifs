@@ -46,7 +46,7 @@
 //!
 //! - **Object-oriented** (`r.object::<O>(template, |o| ..)`): use when a path
 //!   family has one canonical upstream payload (a GitHub issue, a Linear
-//!   ticket) and several derived leaves (`title`, `body`, `item.json`). You
+//!   ticket) and several computed leaves (`title`, `body`, `item.json`). You
 //!   implement [`object::Key::load`] once; the SDK emits the canonical-store
 //!   effect, the host caches the verbatim upstream bytes, and later reads
 //!   re-render from cache without refetching. Identity comes from the key's
