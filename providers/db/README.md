@@ -70,9 +70,7 @@ token, so a sample of any size is served through one ranged session.
   "mount": "db",
   "capabilities": {
     "max_memory_mb": 128,
-    "preopened_paths": [
-      { "host": "/data", "guest": "/data", "mode": "ro" }
-    ]
+    "preopened_paths": { "dynamic": true }
   },
   "config": {
     "path": "/data/test.db",
