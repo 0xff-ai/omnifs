@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::registry::MountRuntimes;
 use crate::view as view_types;
 use crate::view::FileAttrsCache;
-use crate::{Error, Runtime};
+use crate::{EngineError, Runtime};
 use omnifs_core::path::Path;
 use tokio::runtime::Handle;
 
@@ -71,8 +71,8 @@ impl RangedHandle {
             .await
         {
             Ok(chunk) => chunk,
-            Err(Error::ProviderError(error)) => {
-                return Err(Error::ProviderError(error).into());
+            Err(EngineError::ProviderError(error)) => {
+                return Err(EngineError::ProviderError(error).into());
             },
             Err(error) => return Err(error.into()),
         };

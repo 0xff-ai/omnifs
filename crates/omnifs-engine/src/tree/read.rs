@@ -14,7 +14,7 @@ use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::{self, NextPageOutcome};
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
-use crate::{Error, Runtime};
+use crate::{EngineError, Runtime};
 use tracing::warn;
 
 use super::error::{Result, TreeError};
@@ -232,7 +232,7 @@ impl Tree {
             .await
         {
             Ok(result) => result,
-            Err(Error::ProviderError(error)) => {
+            Err(EngineError::ProviderError(error)) => {
                 warn!(
                     path = %path,
                     kind = ?error.kind,
@@ -240,7 +240,7 @@ impl Tree {
                     message = error.message,
                     "provider returned typed error for read_file"
                 );
-                return Err(Error::ProviderError(error).into());
+                return Err(EngineError::ProviderError(error).into());
             },
             Err(error) => {
                 warn!(path = %path, error = %error, "read_file runtime error");

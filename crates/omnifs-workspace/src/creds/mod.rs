@@ -289,18 +289,18 @@ impl<'de> Deserialize<'de> for CredentialEntry {
 /// Trait every credential store implements. Errors are typed so callers can
 /// decide how to handle each variant.
 pub trait CredentialStore: Send + Sync {
-    fn put(&self, key: &CredentialId, entry: &CredentialEntry) -> Result<(), StoreError>;
-    fn get(&self, key: &CredentialId) -> Result<Option<CredentialEntry>, StoreError>;
-    fn delete(&self, key: &CredentialId) -> Result<(), StoreError>;
+    fn put(&self, key: &CredentialId, entry: &CredentialEntry) -> Result<(), CredStoreError>;
+    fn get(&self, key: &CredentialId) -> Result<Option<CredentialEntry>, CredStoreError>;
+    fn delete(&self, key: &CredentialId) -> Result<(), CredStoreError>;
     /// Lists known credential ids. Backends that cannot enumerate return
     /// `Ok(None)`.
-    fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError>;
+    fn list(&self) -> Result<Option<Vec<CredentialId>>, CredStoreError>;
     /// Human-readable backend name shown in UX.
     fn backend_label(&self) -> String;
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StoreError {
+pub enum CredStoreError {
     #[error("backend unavailable: {0}")]
     Unavailable(String),
     #[error("io error: {0}")]

@@ -9,7 +9,7 @@ use crate::Runtime;
 use crate::clock;
 use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
 use crate::op::Op;
-use crate::runtime::{Error, Result};
+use crate::runtime::{EngineError, Result};
 use omnifs_api::events::{InspectorOutcome, OutcomeFields, TraceId};
 use omnifs_wit::provider::types as wit_types;
 
@@ -43,7 +43,7 @@ impl Runtime {
         if let Some(live) = live_op {
             let outcome = match &result {
                 Ok(_) => OutcomeFields::ok(),
-                Err(Error::ProviderError(error)) => {
+                Err(EngineError::ProviderError(error)) => {
                     OutcomeFields::with_outcome(WitProviderErrorView(error).outcome())
                 },
                 Err(_) => OutcomeFields::with_outcome(InspectorOutcome::Internal),
@@ -63,7 +63,7 @@ impl Runtime {
         op_gen: u64,
     ) -> Result<wit_types::OpResult> {
         crate::op_validate::validate_return(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
-            .map_err(Error::ProviderProtocol)?;
+            .map_err(EngineError::ProviderProtocol)?;
         let now = clock::now_millis();
         let (prefixes, paths) =
             crate::effect_apply::EffectApplier::new(&self.cache).apply(&ret.effects, op_gen, now);

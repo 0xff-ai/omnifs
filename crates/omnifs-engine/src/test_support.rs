@@ -20,7 +20,7 @@ pub use crate::ops::namespace::{
 pub use crate::ops::op::Op;
 pub use crate::runtime::wasm::{component_engine, provider_compiler_strategy};
 pub use crate::tree::{PaginationControl, Synthetic, SyntheticContent, probe_live_growth};
-pub use crate::{Cursor, Engine, Error, GitCloner, HostContext};
+pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
 
 pub mod auth {
     pub use crate::auth::{AuthManager, RefreshOutcome};
@@ -83,7 +83,7 @@ enum TestOpState {
     WaitingForCallouts {
         callouts: Vec<wit_types::Callout>,
         replies: Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
-        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, Error>>,
+        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, EngineError>>,
     },
     Returned {
         result: Box<wit_types::OpResult>,
@@ -170,7 +170,7 @@ impl<'a> TestOp<'a> {
                 let result = futures::executor::block_on(instance.start_op(op_for_task, id));
                 let _ = result_tx.send(result);
             })
-            .map_err(|error| Error::ProviderProtocol(format!("spawn test op: {error}")))?;
+            .map_err(|error| EngineError::ProviderProtocol(format!("spawn test op: {error}")))?;
 
         let state = Self::wait_for_progress(runtime, &op, id, op_gen, result_rx)?;
         Ok(Self {
@@ -209,10 +209,10 @@ impl<'a> TestOp<'a> {
         op: &Op,
         id: u64,
         op_gen: u64,
-        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, Error>>,
+        result_rx: mpsc::Receiver<std::result::Result<wit_types::ProviderReturn, EngineError>>,
     ) -> crate::runtime::Result<TestOpState> {
         let inbox = runtime.test_callouts.as_ref().ok_or_else(|| {
-            Error::ProviderProtocol("test callout inbox is not configured".to_string())
+            EngineError::ProviderProtocol("test callout inbox is not configured".to_string())
         })?;
         let recv_signal = |timeout| {
             inbox
@@ -224,7 +224,7 @@ impl<'a> TestOp<'a> {
             match result_rx.try_recv() {
                 Ok(ret) => return Self::returned_state(runtime, op, op_gen, ret?),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(Error::ProviderProtocol(
+                    return Err(EngineError::ProviderProtocol(
                         "provider operation result channel closed".to_string(),
                     ));
                 },
@@ -246,7 +246,7 @@ impl<'a> TestOp<'a> {
                             },
                             Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => break,
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                return Err(Error::ProviderProtocol(
+                                return Err(EngineError::ProviderProtocol(
                                     "test callout receiver closed".to_string(),
                                 ));
                             },
@@ -262,7 +262,7 @@ impl<'a> TestOp<'a> {
                 // re-check the result channel.
                 Ok(TestSignal::Parked) | Err(mpsc::RecvTimeoutError::Timeout) => {},
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::ProviderProtocol(
+                    return Err(EngineError::ProviderProtocol(
                         "test callout receiver closed".to_string(),
                     ));
                 },
@@ -277,7 +277,7 @@ impl<'a> TestOp<'a> {
         replies: &mut Vec<tokio::sync::oneshot::Sender<wit_types::CalloutResult>>,
     ) -> crate::runtime::Result<()> {
         if test_callout.op_id != id {
-            return Err(Error::ProviderProtocol(format!(
+            return Err(EngineError::ProviderProtocol(format!(
                 "test callout for operation {} received while driving operation {id}",
                 test_callout.op_id
             )));
@@ -327,12 +327,12 @@ impl<'a> TestOp<'a> {
             replies, result_rx, ..
         } = state
         else {
-            return Err(Error::ProviderProtocol(
+            return Err(EngineError::ProviderProtocol(
                 "provider operation is not waiting on test callouts".to_string(),
             ));
         };
         if results.len() != replies.len() {
-            return Err(Error::ProviderProtocol(format!(
+            return Err(EngineError::ProviderProtocol(format!(
                 "expected {} test callout results, got {}",
                 replies.len(),
                 results.len()
@@ -350,7 +350,7 @@ impl<'a> TestOp<'a> {
         match self.state {
             TestOpState::Returned { result, .. } => Ok(*result),
             TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
-                Error::ProviderProtocol("provider operation has not returned".to_string()),
+                EngineError::ProviderProtocol("provider operation has not returned".to_string()),
             ),
         }
     }
@@ -375,7 +375,7 @@ impl<'a> TestOp<'a> {
         match self.state {
             TestOpState::Returned { result, effects } => Ok((*result, *effects)),
             TestOpState::WaitingForCallouts { .. } | TestOpState::InProgress => Err(
-                Error::ProviderProtocol("provider operation has not returned".to_string()),
+                EngineError::ProviderProtocol("provider operation has not returned".to_string()),
             ),
         }
     }

@@ -5,7 +5,7 @@
 //! committed into place. On Unix the file is mode 0600 after every write.
 
 use crate::authn::CredentialId;
-use crate::creds::{CredentialEntry, CredentialStore, StoreError};
+use crate::creds::{CredStoreError, CredentialEntry, CredentialStore};
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ impl FileStore {
         }
     }
 
-    fn load(&self) -> Result<FileStoreData, StoreError> {
+    fn load(&self) -> Result<FileStoreData, CredStoreError> {
         let raw = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -68,7 +68,7 @@ impl FileStore {
         };
         let data: FileStoreData = serde_json::from_slice(&raw)?;
         if data.version != 1 {
-            return Err(StoreError::Backend(format!(
+            return Err(CredStoreError::Backend(format!(
                 "unsupported file store version: {}",
                 data.version
             )));
@@ -76,7 +76,7 @@ impl FileStore {
         Ok(data)
     }
 
-    fn save(&self, data: &FileStoreData) -> Result<(), StoreError> {
+    fn save(&self, data: &FileStoreData) -> Result<(), CredStoreError> {
         if let Some(parent) = self.path.parent() {
             ensure_private_dir(parent)?;
         }
@@ -89,7 +89,7 @@ impl FileStore {
         Ok(())
     }
 
-    fn lock(&self) -> Result<File, StoreError> {
+    fn lock(&self) -> Result<File, CredStoreError> {
         if let Some(parent) = self.lock_path.parent() {
             ensure_private_dir(parent)?;
         }
@@ -105,8 +105,8 @@ impl FileStore {
 
     fn update(
         &self,
-        update: impl FnOnce(&mut FileStoreData) -> Result<(), StoreError>,
-    ) -> Result<(), StoreError> {
+        update: impl FnOnce(&mut FileStoreData) -> Result<(), CredStoreError>,
+    ) -> Result<(), CredStoreError> {
         let lock = self.lock()?;
         let mut data = self.load()?;
         let result = update(&mut data).and_then(|()| self.save(&data));
@@ -118,7 +118,7 @@ impl FileStore {
     }
 }
 
-fn ensure_private_dir(path: &Path) -> Result<(), StoreError> {
+fn ensure_private_dir(path: &Path) -> Result<(), CredStoreError> {
     std::fs::create_dir_all(path)?;
     set_private_dir(path)
 }
@@ -136,7 +136,7 @@ fn configure_private_file(options: &mut AtomicOpenOptions) {
 
 /// Sets directory permissions to 0700 on Unix. No-op on other platforms.
 #[cfg_attr(not(unix), allow(unused_variables))]
-fn set_private_dir(path: &Path) -> Result<(), StoreError> {
+fn set_private_dir(path: &Path) -> Result<(), CredStoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -147,33 +147,33 @@ fn set_private_dir(path: &Path) -> Result<(), StoreError> {
 }
 
 impl CredentialStore for FileStore {
-    fn put(&self, key: &CredentialId, entry: &CredentialEntry) -> Result<(), StoreError> {
+    fn put(&self, key: &CredentialId, entry: &CredentialEntry) -> Result<(), CredStoreError> {
         self.update(|data| {
             data.entries.insert(key.storage_key(), entry.clone());
             Ok(())
         })
     }
 
-    fn get(&self, key: &CredentialId) -> Result<Option<CredentialEntry>, StoreError> {
+    fn get(&self, key: &CredentialId) -> Result<Option<CredentialEntry>, CredStoreError> {
         let data = self.load()?;
         Ok(data.entries.get(&key.storage_key()).cloned())
     }
 
-    fn delete(&self, key: &CredentialId) -> Result<(), StoreError> {
+    fn delete(&self, key: &CredentialId) -> Result<(), CredStoreError> {
         self.update(|data| {
             data.entries.remove(&key.storage_key());
             Ok(())
         })
     }
 
-    fn list(&self) -> Result<Option<Vec<CredentialId>>, StoreError> {
+    fn list(&self) -> Result<Option<Vec<CredentialId>>, CredStoreError> {
         let data = self.load()?;
         let keys = data
             .entries
             .keys()
             .map(|storage_key| storage_key.parse())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)?;
+            .map_err(CredStoreError::from)?;
         Ok(Some(keys))
     }
 
@@ -208,7 +208,7 @@ mod tests {
         std::fs::write(&path, r#"{"version":99,"entries":{}}"#).unwrap();
         let store = FileStore::new(&path);
         match store.get(&CredentialId::new("x", "static-token", "default").unwrap()) {
-            Err(StoreError::Backend(msg)) => {
+            Err(CredStoreError::Backend(msg)) => {
                 assert!(msg.contains("unsupported file store version: 99"), "{msg}");
             },
             other => panic!("expected Backend error, got {other:?}"),

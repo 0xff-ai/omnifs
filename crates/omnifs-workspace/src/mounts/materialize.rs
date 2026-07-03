@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::provider::{Catalog, ConfigMetadata};
 use omnifs_caps::{Grant, PreopenMode};
 
-use crate::mounts::{Error as MountError, Spec, pinned_manifest};
+use crate::mounts::{Spec, SpecError, pinned_manifest};
 
 /// Guest directory each container preopen is rewritten under, as
 /// `<GUEST_PREOPENS_DIR>/<mount>/<index>`.
@@ -115,7 +115,7 @@ impl MaterializationMode {
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
     #[error("apply provider metadata: {0}")]
-    Metadata(#[source] MountError),
+    Metadata(#[source] SpecError),
     #[error("canonicalize preopen `{path}`: {source}")]
     PreopenPath {
         path: String,

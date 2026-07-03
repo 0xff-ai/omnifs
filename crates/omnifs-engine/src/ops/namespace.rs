@@ -8,7 +8,7 @@ use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
-use crate::{Error, Namespace, Op};
+use crate::{EngineError, Namespace, Op};
 use omnifs_api::events::TraceId;
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
@@ -67,8 +67,8 @@ impl Namespace<'_> {
         name: &str,
         fuse_trace: Option<TraceId>,
     ) -> Result<LookupOutcome> {
-        let name =
-            Segment::try_from(name).map_err(|error| Error::ProviderProtocol(error.to_string()))?;
+        let name = Segment::try_from(name)
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
         let now = now_millis();
         if self.runtime.cache.negative_for(&child_path, now).is_some() {
@@ -223,8 +223,8 @@ impl Namespace<'_> {
     ) -> Result<T> {
         match expect(result) {
             Expected::Match(result) => Ok(result),
-            Expected::ProviderError(error) => Err(Error::ProviderError(error)),
-            Expected::Unexpected(result) => Err(Error::unexpected_op_result(op, *result)),
+            Expected::ProviderError(error) => Err(EngineError::ProviderError(error)),
+            Expected::Unexpected(result) => Err(EngineError::unexpected_op_result(op, *result)),
         }
     }
 
@@ -240,7 +240,7 @@ impl Namespace<'_> {
                 share_outcome(&op().await)
             })
             .await;
-        unshare_outcome((*shared).clone(), Error::ProviderProtocol)
+        unshare_outcome((*shared).clone(), EngineError::ProviderProtocol)
     }
 }
 
@@ -380,8 +380,8 @@ fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
         .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
 }
 
-fn enoent(path: &str) -> Error {
-    Error::ProviderError(wit_types::ProviderError {
+fn enoent(path: &str) -> EngineError {
+    EngineError::ProviderError(wit_types::ProviderError {
         kind: wit_types::ErrorKind::NotFound,
         message: format!("no such file: {path}"),
         retryable: false,

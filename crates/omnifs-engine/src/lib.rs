@@ -28,7 +28,7 @@ pub use inspect::{
     init_global_from_env,
 };
 pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};
-pub use runtime::{BuildError, Error, HostContext, Runtime as Engine};
+pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 pub use tree::{
     Chunk, Cursor, Entry, EntryOrigin, InvalidationReport, ListOutcome, Listing, Node, NodeBody,
     PaginationControl, RangedHandle, ReadResult, RequestCtx, Synthetic, SyntheticContent, Tree,
