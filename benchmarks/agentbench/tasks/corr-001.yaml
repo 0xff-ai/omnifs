@@ -1,0 +1,7 @@
+id: corr-001
+family: correlation
+prompt: "You are exploring a dataset with a github-like tree under github/ and a linear-like tree under linear/. GitHub issue acme-api#3 (github/repos/acme-api/issues/3/body.md) references a Linear issue by its key. Find that Linear issue and report the full name of its assignee."
+success:
+  type: contains
+  value: "Priya Rao"
+max_turns: 30

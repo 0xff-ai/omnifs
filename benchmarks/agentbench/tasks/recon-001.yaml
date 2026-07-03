@@ -1,0 +1,7 @@
+id: recon-001
+family: reconstruction
+prompt: "In the linear-like tree under linear/, read the activity log for issue ENG-115 (linear/issues/ENG-115/activity.md). Reconstruct the sequence of status changes and report the status that came immediately before the issue became 'Done'."
+success:
+  type: contains
+  value: "In Review"
+max_turns: 25
