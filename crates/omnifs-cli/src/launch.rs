@@ -123,18 +123,18 @@ pub(crate) struct LaunchSpec<'a> {
     pub telemetry_enabled: bool,
 }
 
-/// Docker-specific mount materialization for launch-time container binds.
+/// Docker-specific mount spec builder for launch-time container binds.
 ///
 /// The daemon still reads specs from `mounts/` and reconciles them itself. This
-/// materializer exists only for the container invariant Docker imposes: host
+/// builder exists only for the container invariant Docker imposes: host
 /// preopen directories must be known before `docker create`, while credential
 /// failures should still surface before the daemon starts.
-pub(crate) struct DockerMountMaterializer<'a> {
+pub(crate) struct DockerMountSpecBuilder<'a> {
     catalog: &'a Catalog,
     store: &'a dyn CredentialStore,
 }
 
-impl<'a> DockerMountMaterializer<'a> {
+impl<'a> DockerMountSpecBuilder<'a> {
     pub(crate) fn new(catalog: &'a Catalog, store: &'a dyn CredentialStore) -> Self {
         Self { catalog, store }
     }
@@ -200,7 +200,7 @@ pub(crate) async fn launch_runtime(
 
     anstream::println!("Computing container binds for {} mount(s)", configs.len());
     let preopen_binds =
-        DockerMountMaterializer::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
+        DockerMountSpecBuilder::new(catalog, store.as_ref()).materialize_bind_specs(&configs)?;
     let all_binds: Vec<String> = preopen_binds.into_iter().chain(extra_binds).collect();
 
     let rt = Runtime::connect_ready(&target, verb).await?;
