@@ -79,14 +79,14 @@ struct NodeEntry {
 #[derive(Debug, Clone)]
 enum EntryBody {
     Provider,
-    Backing(PathBuf),
+    Subtree(PathBuf),
     Synthetic(Synthetic),
 }
 
 impl EntryBody {
     fn backing_path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Backing(path) => Some(path),
+            Self::Subtree(path) => Some(path),
             Self::Provider | Self::Synthetic(_) => None,
         }
     }
@@ -94,7 +94,7 @@ impl EntryBody {
     fn synthetic(&self) -> Option<&Synthetic> {
         match self {
             Self::Synthetic(synthetic) => Some(synthetic),
-            Self::Provider | Self::Backing(_) => None,
+            Self::Provider | Self::Subtree(_) => None,
         }
     }
 
@@ -151,7 +151,7 @@ impl FollowSizes {
 }
 
 #[derive(Debug, Clone)]
-struct BackingOpen {
+struct SubtreeOpen {
     id: u64,
     mount_name: String,
     path: Path,
@@ -161,7 +161,7 @@ struct BackingOpen {
 enum OpenBody {
     Materialized(Vec<u8>),
     Ranged(RangedOpen),
-    Backing(BackingOpen),
+    Subtree(SubtreeOpen),
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -317,7 +317,7 @@ impl Export {
         for body in self.opens.remove_where(|state| match &state.body {
             OpenBody::Materialized(_) => false,
             OpenBody::Ranged(ranged) => ranged.mount_name == mount_name && matches(&ranged.path),
-            OpenBody::Backing(backing) => {
+            OpenBody::Subtree(backing) => {
                 backing.mount_name == mount_name && matches(&backing.path)
             },
         }) {
@@ -366,12 +366,12 @@ impl Export {
                             matches!(merged_attrs.size(), view_types::FileSize::Exact(_));
                         entry.attrs = Some(merged_attrs);
                     }
-                    if !(matches!(entry.body, EntryBody::Backing(_))
+                    if !(matches!(entry.body, EntryBody::Subtree(_))
                         && matches!(body_for_update, EntryBody::Provider))
                     {
                         entry.body.clone_from(&body_for_update);
                     }
-                    if matches!(entry.body, EntryBody::Backing(_)) {
+                    if matches!(entry.body, EntryBody::Subtree(_)) {
                         entry.size_exact = true;
                         entry.attrs = None;
                     }
@@ -403,7 +403,7 @@ impl Export {
         }
         if let Some(mut entry) = self.inodes.get_mut(&id)
             && entry.kind == NodeKind::File
-            && !matches!(entry.body, EntryBody::Backing(_))
+            && !matches!(entry.body, EntryBody::Subtree(_))
         {
             entry.size = attrs.st_size();
             entry.size_exact = matches!(attrs.size(), view_types::FileSize::Exact(_));
@@ -656,7 +656,7 @@ impl Export {
                 size: 0,
                 size_exact: true,
                 attrs: None,
-                body: EntryBody::Backing(dir.clone()),
+                body: EntryBody::Subtree(dir.clone()),
             });
         }
 
@@ -704,7 +704,7 @@ impl Export {
             size: metadata.len(),
             size_exact: true,
             attrs: None,
-            body: EntryBody::Backing(child),
+            body: EntryBody::Subtree(child),
         }))
     }
 
@@ -820,7 +820,7 @@ impl Export {
                 size: metadata.len(),
                 size_exact: true,
                 attrs: None,
-                body: EntryBody::Backing(backing_path),
+                body: EntryBody::Subtree(backing_path),
             });
             entries.push(DirEntry {
                 id,
@@ -867,7 +867,7 @@ impl Export {
                 }
                 Ok(data)
             },
-            Ok(ReadResult::Backing(backing_path)) => {
+            Ok(ReadResult::Subtree(backing_path)) => {
                 std::fs::read(backing_path).map_err(|_| Status::Io)
             },
             Err(error) => {
@@ -933,7 +933,7 @@ impl Export {
     }
 
     fn read_backing_state(
-        backing: &BackingOpen,
+        backing: &SubtreeOpen,
         offset: u64,
         count: u32,
     ) -> StatusResult<OpenRead> {
@@ -1314,9 +1314,9 @@ impl ReadOnlyExport for Export {
                 )),
                 Ok(ListOutcome::Subtree(dir)) => {
                     if let Some(mut entry) = self.inodes.get_mut(&id)
-                        && !matches!(entry.body, EntryBody::Backing(_))
+                        && !matches!(entry.body, EntryBody::Subtree(_))
                     {
-                        entry.body = EntryBody::Backing(dir.clone());
+                        entry.body = EntryBody::Subtree(dir.clone());
                     }
                     self.readdir_backing(scope, &mount_name, &path, id, dir.as_path())
                 },
@@ -1448,7 +1448,7 @@ impl ReadOnlyExport for Export {
                 inode: id,
                 clientid,
                 access,
-                body: OpenBody::Backing(BackingOpen {
+                body: OpenBody::Subtree(SubtreeOpen {
                     id,
                     mount_name,
                     path,
@@ -1503,7 +1503,7 @@ impl ReadOnlyExport for Export {
                 .map(|entry| entry.mount_name.clone())
                 .ok_or(Status::Stale),
             OpenBody::Ranged(ranged) => Ok(ranged.mount_name.clone()),
-            OpenBody::Backing(backing) => Ok(backing.mount_name.clone()),
+            OpenBody::Subtree(backing) => Ok(backing.mount_name.clone()),
         }) {
             Ok(Ok(mount_name)) => mount_name,
             Err(Status::Expired) => {
@@ -1528,7 +1528,7 @@ impl ReadOnlyExport for Export {
                 OpenBody::Ranged(ranged) => {
                     self.read_ranged_state(state.inode, ranged, offset, count)
                 },
-                OpenBody::Backing(backing) => Self::read_backing_state(backing, offset, count),
+                OpenBody::Subtree(backing) => Self::read_backing_state(backing, offset, count),
             }
         }) {
             Ok(result) => result,
@@ -1665,7 +1665,7 @@ mod tests {
                 size,
                 size_exact: true,
                 attrs: None,
-                body: EntryBody::Backing(backing),
+                body: EntryBody::Subtree(backing),
             },
         );
     }
@@ -1762,7 +1762,7 @@ mod tests {
             size: 0,
             size_exact: true,
             attrs: None,
-            body: EntryBody::Backing(temp.path().to_path_buf()),
+            body: EntryBody::Subtree(temp.path().to_path_buf()),
         });
 
         let rebound = harness.export.get_or_alloc(EntrySeed {

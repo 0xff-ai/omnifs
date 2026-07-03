@@ -84,7 +84,7 @@ impl Frontend {
                 if let Some(mut entry) = self.inodes.get_mut(&ino)
                     && !entry.body.is_backing()
                 {
-                    entry.body = InodeBody::Backing(dir.clone());
+                    entry.body = InodeBody::Subtree(dir.clone());
                 }
                 self.snapshot_from_fs(mount_name, path, &dir)
             },

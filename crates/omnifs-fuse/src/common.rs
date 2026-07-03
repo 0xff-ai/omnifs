@@ -21,20 +21,20 @@ pub(crate) type DirSnapshot = Vec<(u64, String, EntryKind)>;
 #[derive(Debug, Clone)]
 pub(crate) enum InodeBody {
     Provider,
-    Backing(PathBuf),
+    Subtree(PathBuf),
     Synthetic,
 }
 
 impl InodeBody {
     pub(crate) fn backing_path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Backing(path) => Some(path),
+            Self::Subtree(path) => Some(path),
             Self::Provider | Self::Synthetic => None,
         }
     }
 
     pub(crate) fn is_backing(&self) -> bool {
-        matches!(self, Self::Backing(_))
+        matches!(self, Self::Subtree(_))
     }
 
     pub(crate) fn is_synthetic(&self) -> bool {

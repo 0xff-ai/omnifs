@@ -82,7 +82,7 @@ impl NodeEntry {
             },
             // A refresh that carries no attributes (a listing entry with only a
             // kind) is silent about size, so keep the attrs (and learned size)
-            // we already hold for a file. Backing-FS files re-`stat` at getattr,
+            // we already hold for a file. Subtree files re-`stat` at getattr,
             // so a stale value here never reaches them.
             (Some(existing), None)
                 if matches!(
@@ -112,7 +112,7 @@ pub(crate) enum NodeOrigin {
     /// A genuine provider resolution proved a real node at this path.
     Provider,
     /// Passthrough to a real backing-filesystem file.
-    Backing(PathBuf),
+    Subtree(PathBuf),
     /// Host-synthesized node (a mount-root ignore file).
     Synthetic,
 }
@@ -130,7 +130,7 @@ impl NodeOrigin {
             #[cfg(test)]
             NodeOrigin::Refresh => InodeBody::Provider,
             NodeOrigin::Provider => InodeBody::Provider,
-            NodeOrigin::Backing(path) => InodeBody::Backing(path.clone()),
+            NodeOrigin::Subtree(path) => InodeBody::Subtree(path.clone()),
             NodeOrigin::Synthetic => InodeBody::Synthetic,
         }
     }
@@ -140,7 +140,7 @@ impl NodeOrigin {
             #[cfg(test)]
             NodeOrigin::Refresh => BodyUpdate::Keep,
             NodeOrigin::Provider => BodyUpdate::Set(InodeBody::Provider),
-            NodeOrigin::Backing(path) => BodyUpdate::Set(InodeBody::Backing(path.clone())),
+            NodeOrigin::Subtree(path) => BodyUpdate::Set(InodeBody::Subtree(path.clone())),
             NodeOrigin::Synthetic => BodyUpdate::Set(InodeBody::Synthetic),
         }
     }
@@ -219,7 +219,7 @@ impl Frontend {
             kind,
             None,
             size,
-            &NodeOrigin::Backing(backing_path),
+            &NodeOrigin::Subtree(backing_path),
         )
     }
 

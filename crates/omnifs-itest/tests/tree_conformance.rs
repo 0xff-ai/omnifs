@@ -171,9 +171,9 @@ impl ConformanceTree {
             ReadResult::Bytes { data, .. } => {
                 assert_eq!(data, expected, "{path_str} bytes mismatch");
             },
-            ReadResult::Backing(dir) => {
+            ReadResult::Subtree(dir) => {
                 panic!(
-                    "expected provider bytes for {path_str}, got a backing dir {}",
+                    "expected provider bytes for {path_str}, got a subtree {}",
                     dir.display()
                 )
             },
