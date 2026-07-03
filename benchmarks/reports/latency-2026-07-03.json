@@ -1,0 +1,140 @@
+{
+  "date": "2026-07-03",
+  "target": "/omnifs",
+  "git_sha": "fb701076a588ee3bb73c275f4c7e7ec741037002",
+  "host": "Linux aarch64 (container)",
+  "iterations": 50,
+  "concurrencies": [
+    1,
+    4,
+    8
+  ],
+  "discovery": {
+    "subdir": "/omnifs/k8s/cluster/apiservices",
+    "file": "/omnifs/k8s/cluster/apiservices/v1.apps/manifest.json",
+    "grep_literal": "apiVersion",
+    "from_overrides": true
+  },
+  "scenarios": [
+    {
+      "name": "ls",
+      "concurrency": 1,
+      "warm": {
+        "p50_ms": 1.053,
+        "p95_ms": 1.51,
+        "n": 50
+      },
+      "cold_first_ms": 2.888
+    },
+    {
+      "name": "ls",
+      "concurrency": 4,
+      "warm": {
+        "p50_ms": 1.301,
+        "p95_ms": 1.623,
+        "n": 200
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "ls",
+      "concurrency": 8,
+      "warm": {
+        "p50_ms": 1.594,
+        "p95_ms": 2.208,
+        "n": 400
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "ls_subdir",
+      "concurrency": 1,
+      "warm": {
+        "p50_ms": 1.068,
+        "p95_ms": 1.305,
+        "n": 50
+      },
+      "cold_first_ms": 26.856
+    },
+    {
+      "name": "ls_subdir",
+      "concurrency": 4,
+      "warm": {
+        "p50_ms": 1.4,
+        "p95_ms": 1.807,
+        "n": 200
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "ls_subdir",
+      "concurrency": 8,
+      "warm": {
+        "p50_ms": 1.808,
+        "p95_ms": 2.491,
+        "n": 400
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "cat",
+      "concurrency": 1,
+      "warm": {
+        "p50_ms": 1.019,
+        "p95_ms": 1.21,
+        "n": 50
+      },
+      "cold_first_ms": 1.258
+    },
+    {
+      "name": "cat",
+      "concurrency": 4,
+      "warm": {
+        "p50_ms": 1.437,
+        "p95_ms": 1.817,
+        "n": 200
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "cat",
+      "concurrency": 8,
+      "warm": {
+        "p50_ms": 1.87,
+        "p95_ms": 2.642,
+        "n": 400
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "grep_r",
+      "concurrency": 1,
+      "warm": {
+        "p50_ms": 21.135,
+        "p95_ms": 29.121,
+        "n": 50
+      },
+      "cold_first_ms": 63.759
+    },
+    {
+      "name": "grep_r",
+      "concurrency": 4,
+      "warm": {
+        "p50_ms": 43.172,
+        "p95_ms": 52.073,
+        "n": 200
+      },
+      "cold_first_ms": null
+    },
+    {
+      "name": "grep_r",
+      "concurrency": 8,
+      "warm": {
+        "p50_ms": 83.525,
+        "p95_ms": 224.565,
+        "n": 400
+      },
+      "cold_first_ms": null
+    }
+  ]
+}
