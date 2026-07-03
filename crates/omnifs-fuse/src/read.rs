@@ -8,10 +8,10 @@ use super::common::{FullReadTarget, RangedSlot};
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
 use omnifs_api::events::TraceId;
-use omnifs_core::view as view_types;
-use omnifs_core::view::FileAttrsCache;
-use omnifs_host::inspector::InspectorFuseScope;
-use omnifs_tree::{Node, ReadResult, RequestCtx};
+use omnifs_engine::InspectorFuseScope;
+use omnifs_engine::view as view_types;
+use omnifs_engine::view::FileAttrsCache;
+use omnifs_engine::{Node, ReadResult, RequestCtx};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tracing::warn;
@@ -109,7 +109,7 @@ impl Frontend {
             return;
         }
 
-        let node = Node::new(mount_name, path, meta, omnifs_tree::NodeBody::Provider);
+        let node = Node::new(mount_name, path, meta, omnifs_engine::NodeBody::Provider);
         let ctx = RequestCtx {
             trace: live_scope.as_ref().map(InspectorFuseScope::trace_id),
         };
@@ -354,7 +354,7 @@ impl Frontend {
         observed_end: Arc<AtomicU64>,
     ) {
         let follow_sizes = self.follow_sizes.clone();
-        let pump = omnifs_tree::spawn_live_follow_pump(
+        let pump = omnifs_engine::spawn_live_follow_pump(
             &self.rt,
             self.registry.clone(),
             mount_name,

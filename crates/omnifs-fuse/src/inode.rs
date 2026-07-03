@@ -7,8 +7,8 @@ use crate::Frontend;
 use crate::common::InodeBody;
 use fuser::{FileAttr, FileType, INodeNo};
 use omnifs_core::path::Path;
-use omnifs_core::view::{EntryKind, EntryMeta, FileAttrsCache};
-use omnifs_host::path_key::PathKey;
+use omnifs_engine::render::PathKey;
+use omnifs_engine::view::{EntryKind, EntryMeta, FileAttrsCache};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -369,7 +369,7 @@ impl Frontend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::view as view_types;
+    use omnifs_engine::view as view_types;
 
     fn attrs(size: view_types::FileSize, version_token: Option<&str>) -> FileAttrsCache {
         attrs_with(size, view_types::Stability::Dynamic, version_token)

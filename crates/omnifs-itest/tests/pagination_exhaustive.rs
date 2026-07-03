@@ -1,6 +1,6 @@
 //! Characterization: the Tree-level `@next`/`@all` pagination controls.
 //!
-//! N2 freezes CURRENT behavior. `crates/omnifs-host/tests/pagination_test.rs`
+//! N2 freezes CURRENT behavior. `crates/omnifs-engine/tests/pagination_test.rs`
 //! already drives `Runtime::paginate_{next,all}` directly and inspects the cache;
 //! this file characterizes the SAME feed through the kernel-free `Tree` surface a
 //! frontend sees: a first-page browse listing carries the synthetic `@next`/`@all`
@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use omnifs_core::path::Path;
+use omnifs_engine::{Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, Tree};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, Tree};
 use tempfile::TempDir;
 
 /// A wasm test-provider loaded into a `Runtime`, wrapped in a `Tree` under mount

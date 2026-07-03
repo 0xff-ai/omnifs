@@ -33,7 +33,7 @@ If a rule here and a contract disagree, follow current code plus the relevant co
 - The host knows paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays SDK/provider-side.
 - All object reasoning lives SDK-side: identity, canonical assembly via render, versioning, preload, and revalidation.
 - No provider-specific behavior belongs in the host, tree, or frontends.
-- `omnifs-tree` owns projection semantics shared by FUSE, NFS, and future frontends.
+- `omnifs-engine` owns projection semantics shared by FUSE, NFS, and future frontends.
 - Frontends translate tree answers into protocol state. They do not decide projection semantics.
 - Host caching is opaque byte storage. Providers do not add private LRUs or time-based expiration policy.
 - Declarations must bind behavior. A permission, capability, schema rule, routing rule, cache contract, or validation guarantee must feed an enforced runtime or build-time decision.
@@ -76,13 +76,11 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
 - `crates/omnifs-workspace`: every byte under `OMNIFS_HOME`: the directory layout, provider/credential identity types, the auth-scheme wire model, provider manifests and the content-addressed provider index, the mount-spec registry (sole owner of on-disk specs) with creation-time inheritance and materialization, and credential stores.
-- `crates/omnifs-host`: trusted runtime, callouts, auth, namespace, cache access, pagination, and archive execution.
-- `crates/omnifs-tree`: shared projection semantics consumed by every frontend.
+- `crates/omnifs-engine`: trusted runtime, callouts, auth, namespace, cache access, pagination, archive execution, shared projection semantics, and opaque cache storage.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
 - `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
 - `crates/omnifs-daemon`: control server, app context, frontend startup, and daemon runtime.
 - `crates/omnifs-cli`: setup, lifecycle, auth commands, dev sessions, and control-plane UX.
-- `crates/omnifs-cache`: opaque byte and record storage owned by the host.
 - `crates/omnifs-itest`: host-driven provider and tree conformance tests.
 - `scripts/ci/*` and `just/*.just`: maintainer command surface, CI orchestration, runtime image assembly, and generated-artifact checks.
 - `providers/*`: product providers. Read `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md` before changing provider shape.
@@ -193,7 +191,7 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 
 - **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just providers build` and `just providers check`.
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
-- **Provider rebuild contention under nextest.** Some `omnifs-host` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
+- **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just providers build`. Reliable flow: `just providers wasi-sdk`, `just providers build`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just host test`, which sets that flag for you).
 - **Host checks may need generated provider artifacts.** If a host check fails because provider WASM is missing, build providers first or point the check at an existing artifact directory.
 - **Provider metadata is injected at build time, not compiled into the Wasm.** The `#[provider]` macro emits the typed `Provider::METADATA` const plus a native `provider_metadata()` accessor (non-wasm only); `omnifs-embed-metadata` (run by `just providers build`) links the provider crates, converts each const into the host `ProviderManifest`, and injects the JSON as the `omnifs.provider-metadata.v1` custom section. Missing metadata means the harvester did not run, build providers with `just providers build`. The host reads the section pre-instantiation; it never instantiates a component to read it.
 - **Host resource bindings must stay per-field.** `HostFile` and `HostSocket` are string config fields with host-resource bindings. Keep the binding on the field metadata; hiding it in the type shape makes host resource lookup miss it.

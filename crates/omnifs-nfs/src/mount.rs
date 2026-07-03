@@ -1,7 +1,7 @@
 use crate::adapter::Export;
 use crate::error::NfsFrontendError;
 use crate::server::start_server;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::MountRuntimes;
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_mtab::{NfsMountState, Platform, StateError, StateFile, UnmountCommand};
@@ -39,7 +39,7 @@ impl NfsMountOptions {
 
 pub fn mount_blocking(
     mount_point: &Path,
-    registry: &Arc<ProviderRegistry>,
+    registry: &Arc<MountRuntimes>,
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFrontendError> {

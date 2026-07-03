@@ -8,9 +8,8 @@ homepage.workspace = true
 description = "Centralized integration tests and harnesses for omnifs providers"
 
 [dependencies]
-omnifs-host = { path = "../omnifs-host" }
+omnifs-engine = { workspace = true }
 omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
-omnifs-cache = { path = "../omnifs-cache" }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-workspace = { workspace = true }
 wasmtime = { workspace = true }
@@ -22,12 +21,6 @@ serde_json = { workspace = true }
 rusqlite = { version = "0.36", features = ["bundled"] }
 base64 = "0.22"
 hickory-proto = "0.26"
-
-[dev-dependencies]
-# Tree conformance harness only. omnifs-tree dev-depends on omnifs-itest for the
-# provider-loading harness; keeping omnifs-tree a dev-dependency here keeps that
-# back-edge out of the normal build graph (dev-dependency cycles are permitted).
-omnifs-tree = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,7 +1,8 @@
-use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
+use omnifs_engine::GitCloner;
+use omnifs_engine::test_support::cache::{Caches, Record as CacheRecord, RecordKind};
+use omnifs_engine::test_support::{Op, TestOp};
+use omnifs_engine::{BuildError, Engine, Error, HostContext};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
@@ -18,7 +19,7 @@ use tempfile::TempDir;
 ///
 /// The harness owns the temporary directories that must outlive the mounted
 /// provider runtime. Provider execution itself is always delegated to
-/// `omnifs-host`: tests do not build linkers, stores, or provider bindings.
+/// `omnifs-engine`: tests do not build linkers, stores, or provider bindings.
 pub struct RuntimeHarness {
     pub engine: wasmtime::Engine,
     pub clone_dir: TempDir,
@@ -26,7 +27,7 @@ pub struct RuntimeHarness {
     pub config_dir: TempDir,
     /// Per-harness content-addressed provider store the runtime resolves from.
     pub providers_dir: TempDir,
-    pub runtime: Runtime,
+    pub runtime: Engine,
 }
 
 impl RuntimeHarness {
@@ -80,7 +81,7 @@ impl RuntimeHarness {
             path: cache_dir.path().to_path_buf(),
             source: std::io::Error::other(error.to_string()),
         })?;
-        let runtime = Runtime::new_for_callout_tests(
+        let runtime = Engine::new_for_callout_tests(
             engine,
             &wasm_path,
             &spec,
@@ -155,7 +156,10 @@ impl RuntimeHarness {
         self.runtime.cache().cache_get(&parse_path(path), kind, aux)
     }
 
-    pub fn cached_canonical_for(&self, path: &str) -> Option<omnifs_cache::CachedCanonical> {
+    pub fn cached_canonical_for(
+        &self,
+        path: &str,
+    ) -> Option<omnifs_engine::test_support::cache::CachedCanonical> {
         self.runtime.cache().cached_canonical_for(&parse_path(path))
     }
 
@@ -314,7 +318,7 @@ pub fn make_engine() -> wasmtime::Engine {
     static ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
     ENGINE
         .get_or_init(|| {
-            omnifs_host::component_engine(Some(&itest_wasm_cache_dir()), |_| {})
+            omnifs_engine::test_support::component_engine(Some(&itest_wasm_cache_dir()), |_| {})
                 .expect("build provider engine")
         })
         .clone()
@@ -329,7 +333,7 @@ pub fn make_runtime(engine: &wasmtime::Engine) -> RuntimeHarness {
 
 pub fn try_make_runtime_from_config(
     config_json: &str,
-) -> Result<RuntimeHarness, omnifs_host::BuildError> {
+) -> Result<RuntimeHarness, omnifs_engine::BuildError> {
     RuntimeHarness::new(config_json)
 }
 

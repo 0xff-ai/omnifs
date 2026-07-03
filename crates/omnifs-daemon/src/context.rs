@@ -5,7 +5,7 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_host::HostContext;
+use omnifs_engine::HostContext;
 use omnifs_nfs::NfsMountOptions;
 use omnifs_workspace::layout::{Daemon, OMNIFS_MOUNT_POINT_ENV, Workspace, WorkspaceLayout};
 use omnifs_workspace::mounts::materialize::MaterializationMode;

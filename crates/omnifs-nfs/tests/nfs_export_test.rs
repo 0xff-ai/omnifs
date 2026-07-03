@@ -1,8 +1,8 @@
 mod support;
 
-use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
-use omnifs_core::view::{
+use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
+use omnifs_engine::view::{
     self as view_types, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache,
 };
 use omnifs_nfs::{Export, NodeKind, ReadOnlyExport, Status};

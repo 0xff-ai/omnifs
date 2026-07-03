@@ -318,7 +318,7 @@ mod tests {
         }
     }
 
-    /// Parity with the host derivation (`omnifs-host/src/auth.rs`): account
+    /// Parity with the host derivation (`omnifs-engine/src/auth_inject.rs`): account
     /// from the mount auth config or the literal "default", then
     /// `CredentialId::new(provider_name, scheme_key, account)` where the
     /// scheme key was resolved from the spec value or the manifest default.

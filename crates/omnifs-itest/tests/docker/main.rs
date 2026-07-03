@@ -2,7 +2,7 @@
 
 mod support;
 
-use omnifs_host::TestOp;
+use omnifs_engine::test_support::TestOp;
 use omnifs_wit::provider::types::Effects;
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, FsKind, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,

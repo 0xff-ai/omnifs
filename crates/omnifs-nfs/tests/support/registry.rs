@@ -1,6 +1,6 @@
-use omnifs_host::HostContext;
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::GitCloner;
+use omnifs_engine::HostContext;
+use omnifs_engine::MountRuntimes;
 use omnifs_workspace::mounts::Spec;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,11 +14,10 @@ pub fn load_registry_from_mount_dir(
     clone_dir: &Path,
     mounts_dir: &Path,
     handle: &tokio::runtime::Handle,
-) -> ProviderRegistry {
+) -> MountRuntimes {
     let cloner = Arc::new(GitCloner::new(clone_dir.to_path_buf()));
     let context = HostContext::new(cache_dir, config_dir, providers_dir, credentials_file);
-    let registry =
-        ProviderRegistry::new(context, Arc::clone(&cloner)).expect("registry should load");
+    let registry = MountRuntimes::new(context, Arc::clone(&cloner)).expect("registry should load");
 
     let mut mount_files = std::fs::read_dir(mounts_dir)
         .expect("mounts dir")

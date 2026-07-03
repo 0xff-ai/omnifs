@@ -37,7 +37,7 @@ OAuth client ids in provider declarations are public application identifiers, no
 
 ## Must not
 
-- Put provider-specific behavior in `omnifs-host`, `omnifs-tree`, `omnifs-fuse`, or `omnifs-nfs`.
+- Put provider-specific behavior in `omnifs-engine`, `omnifs-fuse`, or `omnifs-nfs`.
 - Claim the sandbox prevents all exfiltration. Allowed network destinations can still be abused by a hostile provider.
 - Add provider authority as a side effect of a convenience change.
 - Hide a new capability behind a macro argument, manifest field, or config field that is not enforced.
@@ -49,9 +49,9 @@ OAuth client ids in provider declarations are public application identifiers, no
 ## Code
 
 - `crates/omnifs-wit/wit/provider.wit`
-- `crates/omnifs-host`
-- `crates/omnifs-host/src/callouts.rs`
-- `crates/omnifs-host/src/http.rs`
+- `crates/omnifs-engine`
+- `crates/omnifs-engine/src/callouts/mod.rs`
+- `crates/omnifs-engine/src/callouts/http.rs`
 - `crates/omnifs-auth`
 - `crates/omnifs-workspace/src/creds`
 - `crates/omnifs-caps`
