@@ -140,14 +140,14 @@ r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
     o.dynamic();                                  // stability is mandatory
     o.file("item.json").canonical::<Json>()?;     // verbatim stored bytes (== Object::Canonical)
     o.file("item.md").representation::<Markdown>()?; // render from canonical
-    o.file("title").derive(Issue::title)?;        // eager leaf from the loaded object
-    o.file("body").lazy().derive(Issue::body)?;   // listed, but not eager-preloaded
+    o.file("title").computed(Issue::title)?;        // eager leaf from the loaded object
+    o.file("body").lazy().computed(Issue::body)?;   // listed, but not eager-preloaded
     o.dir("comments").collection(Issue::comments)?; // child Comment objects
     Ok(())
 })?;
 ```
 
-What the faces are: `canonical::<F>()` is the verbatim stored bytes (exactly one per object; `F` must equal `Object::Canonical`); `representation::<F>()` renders the whole object via `Representable<F>`; `derive(method)` is a field leaf (eager by default, `.lazy()` to skip listing-time preload); `direct`/`blob`/`stream` declare their own read contract; `o.dir(name).collection::<C>(method)` lists child `C` objects, `.choices(names)` a fixed finite name set, `.tree(method)` a subtree handoff. An object with no canonical face (Docker `Container`: only `direct` faces) emits no object-cache entry; a representation/derive face requires a canonical to render from (seal-time error otherwise).
+What the faces are: `canonical::<F>()` is the verbatim stored bytes (exactly one per object; `F` must equal `Object::Canonical`); `representation::<F>()` renders the whole object via `Representable<F>`; `computed(method)` is a field leaf (eager by default, `.lazy()` to skip listing-time preload); `direct`/`blob`/`stream` declare their own read contract; `o.dir(name).collection::<C>(method)` lists child `C` objects, `.choices(names)` a fixed finite name set, `.tree(method)` a subtree handoff. An object with no canonical face (Docker `Container`: only `direct` faces) emits no object-cache entry; a representation/derive face requires a canonical to render from (seal-time error otherwise).
 
 The contract that makes caching work: `Load::Fresh` must carry the **verbatim** upstream bytes plus the validator (ETag). The SDK emits the canonical-store effect; the host stores bytes keyed by the logical id and pushes them back into later `read-file` calls so re-rendering costs no upstream fetch. Because `filter` is a `Facet`, `/issues/open/7` and `/issues/all/7` resolve to one cached object, and finite facet choices expand view leaves across all aliases.
 
@@ -219,7 +219,7 @@ For any path-surface change, test whole-shell traversal in the live container, n
 8. Expecting webhook/file-changed events to fire handlers: only `timer` is dispatched today.
 9. A finite `choices()` list for a dynamic universe: it silently hides new upstream values; reserve choices for truly static sets.
 10. Provider-local caching "to be safe": it fights the host's invalidation and fence machinery; delete it.
-11. Face modifiers go before the terminal face call: `o.file("body").lazy().derive(f)` marks `body` lazy; `.derive()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or seal fails to resolve it.
+11. Face modifiers go before the terminal face call: `o.file("body").lazy().computed(f)` marks `body` lazy; `.computed()`/`.canonical()`/`.direct()`/etc. is the terminal registration call. A collection child object (`o.dir(..).collection::<C>(..)`) must have its own `r.object::<C>` route or seal fails to resolve it.
 
 ## Where to look
 
