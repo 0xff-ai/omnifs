@@ -80,8 +80,8 @@ impl PagedTree {
         }
     }
 
-    /// Read a node's bytes, asserting provider/synthetic bytes (never a backing
-    /// dir). Returns the produced bytes (a control read returns a status line).
+    /// Read a node's bytes, asserting provider/synthetic bytes (never a subtree
+    /// handoff). Returns the produced bytes (a control read returns a status line).
     async fn read(&self, node: &Node) -> Vec<u8> {
         match self
             .tree
@@ -90,9 +90,7 @@ impl PagedTree {
             .unwrap_or_else(|e| panic!("read {}: {e}", node.path().as_str()))
         {
             ReadResult::Bytes { data, .. } => data,
-            ReadResult::Backing(dir) => {
-                panic!("expected bytes, got backing dir {}", dir.display())
-            },
+            ReadResult::Subtree(dir) => panic!("expected bytes, got subtree {}", dir.display()),
         }
     }
 }
