@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use omnifs_core::path::Path;
-use omnifs_engine::{Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, Tree};
+use omnifs_engine::{
+    Cursor, Entry, ListOutcome, Node, ReadResult, RequestCtx, ServingContext, Tree,
+};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use tempfile::TempDir;
 
@@ -41,7 +43,10 @@ fn paged_tree() -> PagedTree {
         runtime,
         ..
     } = make_runtime(&engine);
-    let tree = Tree::for_runtime(Arc::new(runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::new(runtime),
+    ));
     PagedTree {
         tree,
         ctx: RequestCtx::default(),

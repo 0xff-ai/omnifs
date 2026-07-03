@@ -83,8 +83,12 @@ impl Tree {
             return Ok(ListOutcome::Subtree(dir.clone()));
         }
 
-        if self.is_mount_enumeration_root(node.mount(), node.path()) {
+        if self
+            .ctx
+            .is_mount_enumeration_root(node.mount(), node.path())
+        {
             let entries = self
+                .ctx
                 .mount_names()
                 .unwrap_or_default()
                 .into_iter()
@@ -97,7 +101,7 @@ impl Tree {
             }));
         }
 
-        let runtime = self.runtime_for(node.mount())?;
+        let runtime = self.ctx.runtime_for(node.mount())?;
         let path = node.path();
 
         // An explicit-cursor continuation is a raw page drain: no cache consult,

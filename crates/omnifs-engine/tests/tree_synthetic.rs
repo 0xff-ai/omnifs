@@ -11,7 +11,7 @@
 //! Reuses the omnifs-itest provider-loading harness (`make_runtime`), keeps an
 //! `Arc<Engine>` clone so a test can inspect the negative index and the cached
 //! dirents directly, and wraps the same `Engine` in a `Tree` via
-//! `Tree::for_runtime`.
+//! `ServingContext::single`.
 //!
 //! Precondition: `just providers build` has produced
 //! `target/wasm32-wasip2/release/test_provider.wasm` (`provider_wasm_path`
@@ -29,7 +29,8 @@ use omnifs_engine::test_support::clock::now_millis;
 use omnifs_engine::test_support::{PaginationControl, Synthetic, SyntheticContent};
 use omnifs_engine::view::{CachedCursor, DirentsPayload};
 use omnifs_engine::{
-    Cursor, Engine, ListOutcome, Listing, Node, ReadResult, RequestCtx, Tree, TreeErrorKind,
+    Cursor, Engine, ListOutcome, Listing, Node, ReadResult, RequestCtx, ServingContext, Tree,
+    TreeErrorKind,
 };
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use tempfile::TempDir;
@@ -52,7 +53,10 @@ fn test_tree() -> TestTree {
         ..
     } = make_runtime(&engine);
     let runtime = Arc::new(runtime);
-    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
     TestTree {
         tree,
         runtime,

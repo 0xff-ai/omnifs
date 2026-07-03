@@ -31,7 +31,7 @@ impl Tree {
     /// renderers call this at the top of each op. This is the first-phase
     /// pull-based invalidation API.
     pub fn drain_invalidations(&self, mount: &str) -> InvalidationReport {
-        let Some(runtime) = self.registry_runtime(mount) else {
+        let Some(runtime) = self.ctx.registry_runtime(mount) else {
             return InvalidationReport::default();
         };
 

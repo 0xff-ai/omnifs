@@ -3,7 +3,7 @@
 //!
 //! Reuses the existing omnifs-itest provider-loading harness (`RuntimeHarness`
 //! via `make_runtime`), wraps the bare `Engine` in a `Tree` via
-//! `Tree::for_runtime`, and drives `Tree::resolve` / `Tree::list`. This is the
+//! `ServingContext::single`, and drives `Tree::resolve` / `Tree::list`. This is the
 //! third consumer (after FUSE and NFS) proving the neutral surface, passing
 //! before either kernel adapter is rewired.
 //!
@@ -21,7 +21,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::Engine;
 use omnifs_engine::test_support::cache::{Record as CacheRecord, RecordKind};
 use omnifs_engine::view::{DirentRecord, DirentsPayload, EntryMeta};
-use omnifs_engine::{ListOutcome, RequestCtx, Tree, TreeErrorKind};
+use omnifs_engine::{ListOutcome, RequestCtx, ServingContext, Tree, TreeErrorKind};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use tempfile::TempDir;
 
@@ -47,7 +47,10 @@ fn test_tree() -> TestTree {
         ..
     } = make_runtime(&engine);
     let runtime = Arc::new(runtime);
-    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
     TestTree {
         tree,
         runtime,

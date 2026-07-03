@@ -6,7 +6,7 @@
 //! Reuses the omnifs-itest provider-loading harness (`RuntimeHarness` via
 //! `make_runtime`), keeps an `Arc<Engine>` clone so the test can inspect the
 //! durable view cache and drive object invalidations directly, and wraps the
-//! same `Engine` in a `Tree` via `Tree::for_runtime`. This is the kernel-free
+//! same `Engine` in a `Tree` via `ServingContext::single`. This is the kernel-free
 //! proof of the read-path DECISION logic FUSE otherwise carries in
 //! `read.rs`/`read_helpers.rs`.
 //!
@@ -32,7 +32,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::Engine;
 use omnifs_engine::test_support::cache::RecordKind;
 use omnifs_engine::view::{EntryMeta, FileAttrsCache, FilePayload, FileSize, ReadMode, Stability};
-use omnifs_engine::{Node, NodeBody, ReadResult, RequestCtx, Tree};
+use omnifs_engine::{Node, NodeBody, ReadResult, RequestCtx, ServingContext, Tree};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
@@ -59,7 +59,10 @@ fn test_tree() -> TestTree {
         ..
     } = make_runtime(&engine);
     let runtime = Arc::new(runtime);
-    let tree = Tree::for_runtime(Arc::clone(&runtime), "test");
+    let tree = Tree::new(ServingContext::single(
+        "test".to_string(),
+        Arc::clone(&runtime),
+    ));
     TestTree {
         tree,
         runtime,
