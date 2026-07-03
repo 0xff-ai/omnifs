@@ -4,7 +4,7 @@
 //! for command-scoped handles derived from that layout: config, provider
 //! catalog, daemon client, and configured mounts.
 
-use omnifs_home::{Cli as CliRole, Workspace as HomeWorkspace, WorkspaceLayout};
+use omnifs_home::{Workspace as HomeWorkspace, WorkspaceLayout};
 use omnifs_mount::mounts::Registry;
 use omnifs_provider::Catalog;
 use std::cell::OnceCell;
@@ -17,7 +17,7 @@ use crate::session::MountConfig;
 
 /// Resolved local omnifs home for one CLI command.
 pub(crate) struct Workspace {
-    home: HomeWorkspace<CliRole>,
+    home: HomeWorkspace,
     catalog: Catalog,
     daemon: DaemonClient,
     /// The mount-spec registry, loaded once per command and reused. Disk is still
@@ -43,7 +43,7 @@ impl Workspace {
         Self::from_home(HomeWorkspace::from_layout(layout))
     }
 
-    pub(crate) fn from_home(home: HomeWorkspace<CliRole>) -> Self {
+    pub(crate) fn from_home(home: HomeWorkspace) -> Self {
         let catalog = Catalog::open(home.providers_dir());
         let daemon = DaemonClient::new();
         Self {
