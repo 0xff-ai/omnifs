@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use super::descriptor::{RouteDescriptor, RouteKind};
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
 use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
-use super::pattern::{Pattern, parse_pattern};
+use super::pattern::Pattern;
 
 // ===========================================================================
 // Router
@@ -207,7 +207,7 @@ impl<S> Router<S> {
                 "object template must be absolute: {template}"
             )));
         }
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let mounted = mount_object::<O>(&pattern, handle.spec.as_ref(), template, route_kind)?;
         self.object_registry.push(RegisteredObject {
             kind: O::kind(),
@@ -249,7 +249,7 @@ impl<S> Router<S> {
         let mount = template.trim_end_matches('/');
         for face in handle.tree_faces() {
             let tree_path = format!("{mount}/{}", face.name);
-            let pattern = parse_pattern(&tree_path)?;
+            let pattern = Pattern::parse(&tree_path)?;
             self.treerefs.push(super::handlers::TreeRefEntry {
                 pattern: pattern.clone(),
                 handler: face.handler.clone(),
@@ -263,7 +263,7 @@ impl<S> Router<S> {
         // route claims the path (the choices face does not).
         for face in handle.choices_faces() {
             let choices_path = format!("{mount}/{}", face.name);
-            let pattern = parse_pattern(&choices_path)?;
+            let pattern = Pattern::parse(&choices_path)?;
             let names = face.names;
             let handler: super::handlers::BoxedDirHandler<S> =
                 std::sync::Arc::new(move |_dir_cx, _caps| {
@@ -289,7 +289,7 @@ impl<S> Router<S> {
     }
 
     fn dir_at<Marker, H: IntoDirHandler<S, Marker>>(&mut self, template: &str, h: H) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_dir_handler();
         self.dirs.push(super::handlers::DirEntry {
             pattern: pattern.clone(),
@@ -306,7 +306,7 @@ impl<S> Router<S> {
         ranged: bool,
         h: H,
     ) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_file_handler();
         self.files.push(super::handlers::FileEntry {
             pattern: pattern.clone(),
@@ -323,7 +323,7 @@ impl<S> Router<S> {
         template: &str,
         h: H,
     ) -> Result<()> {
-        let pattern = parse_pattern(template)?;
+        let pattern = Pattern::parse(template)?;
         let (handler, validator) = h.into_treeref_handler();
         self.treerefs.push(super::handlers::TreeRefEntry {
             pattern: pattern.clone(),
@@ -454,7 +454,7 @@ impl<S> Router<S> {
                 )));
             }
 
-            let child_pattern = parse_pattern(&child.template)?;
+            let child_pattern = Pattern::parse(&child.template)?;
             // The child key must be derivable from the child template captures
             // (Part 8): every facet axis must name a capture in the template.
             for axis in child.facet_axes {
@@ -471,7 +471,7 @@ impl<S> Router<S> {
             let facet_expansion =
                 super::object::FacetExpansion::for_axes(&child_pattern, child.facet_axes)?;
 
-            let dir_pattern = parse_pattern(&collection.dir_path)?;
+            let dir_pattern = Pattern::parse(&collection.dir_path)?;
             let dir_depth = dir_pattern.pattern_len();
             descriptors.push(RouteDescriptor::new(
                 &dir_pattern,
@@ -521,7 +521,7 @@ impl<S> Router<S> {
                 super::object::CollectionTopology::Anchor => {
                     // Attach to the parent object's anchor: its listing/lookup
                     // runs this collection and merges the child-name entries.
-                    let parent_pattern = parse_pattern(&collection.parent_template)?;
+                    let parent_pattern = Pattern::parse(&collection.parent_template)?;
                     let Some(parent) = self
                         .objects
                         .iter_mut()

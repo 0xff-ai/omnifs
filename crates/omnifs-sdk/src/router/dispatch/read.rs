@@ -5,9 +5,9 @@ use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::handler::OpenedFile;
 use crate::projection::FileSource;
+use omnifs_core::path::Path;
 
 use super::super::object::ObjectReadTarget;
-use super::super::pattern::parse_provider_path;
 use super::super::register::Router;
 use super::route_shape::ReadRoute;
 
@@ -35,7 +35,8 @@ impl<S> Router<S> {
         cached: Option<CachedCanonical>,
     ) -> Result<ReadOutcome> {
         debug_assert!(path.starts_with('/'), "read_file expects an absolute path");
-        let abs = parse_provider_path(path)?;
+        let abs =
+            Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
 
         let _ = content_type;
@@ -87,7 +88,8 @@ impl<S> Router<S> {
     /// The returned reader serves subsequent `read_chunk` calls.
     pub async fn open_file(&self, cx: &Cx<S>, path: &str) -> Result<OpenedFile> {
         debug_assert!(path.starts_with('/'), "open_file expects an absolute path");
-        let abs = parse_provider_path(path)?;
+        let abs =
+            Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
 
         if let Some(route) = shape.file_route(&abs) {

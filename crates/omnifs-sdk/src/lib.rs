@@ -183,7 +183,6 @@ pub mod error;
 pub mod file_attrs;
 pub mod git;
 pub mod handler;
-pub mod helpers;
 pub mod http;
 pub mod identity;
 pub mod invalidation;

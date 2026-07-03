@@ -2,10 +2,10 @@
 
 use crate::browse::Lookup;
 use crate::cx::Cx;
-use crate::error::Result;
+use crate::error::{ProviderError, Result};
 use crate::handler::{DirCx, DirIntent};
+use omnifs_core::path::{Path, Segment};
 
-use super::super::pattern::{parse_child_segment, parse_provider_path};
 use super::super::register::Router;
 
 impl<S> Router<S> {
@@ -40,8 +40,10 @@ impl<S> Router<S> {
             parent.starts_with('/'),
             "lookup_child expects an absolute parent path"
         );
-        let parent_abs = parse_provider_path(parent)?;
-        let child = parse_child_segment(name)?;
+        let parent_abs =
+            Path::parse(parent).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
+        let child = Segment::try_from(name)
+            .map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let name = child.as_str();
         let child_abs = parent_abs.join_segment(&child);
         let shape = self.shape();

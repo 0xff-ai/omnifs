@@ -56,6 +56,15 @@ pub trait Representable<F: Format> {
     fn represent(&self) -> Vec<u8>;
 }
 
+/// Render a value as pretty-printed JSON with a trailing newline, so the
+/// projected file behaves like ordinary text under shell tools.
+pub fn pretty_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| ProviderError::internal(format!("JSON encode: {e}")))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// Erased render function: canonical bytes in, rendered bytes out
 /// (parse the canonical, then [`Representable::represent`]).
 pub type RenderFn = fn(&[u8]) -> Result<Vec<u8>>;
