@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::cache::{Record as CacheRecord, RecordKind};
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
-use crate::pagination::{self, NextPageOutcome};
+use crate::pagination::NextPageOutcome;
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
 use crate::{EngineError, Runtime};
@@ -301,7 +301,7 @@ impl Tree {
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 Ok(ReadResult::Bytes {
                     data: bytes,
-                    attrs: Some(pagination::control_read_attrs(len)),
+                    attrs: Some(super::synthetic::control_read_attrs(len)),
                     content_type: None,
                 })
             },

@@ -35,7 +35,7 @@ mod list;
 mod node;
 mod read;
 mod resolve;
-mod synthetic;
+pub(crate) mod synthetic;
 
 use std::sync::Arc;
 

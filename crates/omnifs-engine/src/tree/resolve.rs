@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::Runtime;
 use crate::cache::{Record, RecordKind};
 use crate::effect_apply::LookupOutcome;
-use crate::pagination::is_control_name;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_core::path::Path;
 
@@ -105,7 +104,7 @@ impl Tree {
         // cached dirents (a resume cursor remains). A reserved control name is
         // never a real provider entry, so once the control is gone (feed
         // exhausted) the lookup is NotFound; we never consult the provider for it.
-        if is_control_name(name) {
+        if synthetic::is_control_name(name) {
             return match synthetic::resolve_synthetic_child(runtime, parent, name, false) {
                 Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                 None => Err(TreeError::not_found(rel.as_str())),
