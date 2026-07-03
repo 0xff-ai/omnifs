@@ -5,7 +5,7 @@ use omnifs_api::{
     API_MAJOR, API_MINOR, DaemonBackend, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo,
     HealthState, MountFailure, MountInfo, SubsystemHealth,
 };
-use omnifs_home::{Daemon as DaemonRole, Workspace, WorkspaceLayout};
+use omnifs_home::{Workspace, WorkspaceLayout};
 use omnifs_host::HostContext;
 use omnifs_mount::materialize::MaterializationMode;
 use omnifs_nfs::NfsMountOptions;
@@ -39,7 +39,7 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: DaemonArgs) -> anyhow::Result<Self> {
-        let workspace = Workspace::<DaemonRole>::resolve()?;
+        let workspace = Workspace::resolve()?;
         let layout = workspace.into_layout();
         let frontend = FrontendKind::platform_default();
         let mount_point = resolve_mount_point()?;

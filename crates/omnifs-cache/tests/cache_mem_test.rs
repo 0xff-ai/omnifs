@@ -17,7 +17,7 @@ fn mem_invalidate_exact() {
     assert!(cache.get(&key).is_some());
     assert!(cache.get(&key_same_path_other_kind).is_none());
 
-    cache.invalidate(&key);
+    cache.mem_invalidate(&key);
     assert!(cache.get(&key).is_none());
     assert!(cache.get(&key_same_path_other_kind).is_none());
 }
@@ -38,7 +38,7 @@ fn mem_invalidate_prefix() {
         cache.put(key, &Record::new(key.kind, vec![8, 8, 8]));
     }
 
-    cache.invalidate_entries_if(move |k, _| k.path.has_prefix(&matching_prefix));
+    cache.mem_invalidate_entries_if(move |k, _| k.path.has_prefix(&matching_prefix));
 
     assert!(cache.get(&paths[0]).is_none());
     assert!(cache.get(&paths[1]).is_none());

@@ -2,9 +2,6 @@
 
 use std::fmt::{self, Write as _};
 
-/// Inspector summaries strip the entire query string unless the name is allowlisted.
-const ALLOWLISTED_QUERY_KEYS: &[&str] = &[];
-
 pub fn is_sensitive_header(name: &str) -> bool {
     const SENSITIVE: &[&str] = &[
         "authorization",
@@ -25,12 +22,6 @@ pub fn is_sensitive_header(name: &str) -> bool {
 }
 
 pub fn is_sensitive_query_param(name: &str) -> bool {
-    if ALLOWLISTED_QUERY_KEYS
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(name))
-    {
-        return false;
-    }
     let name = name.to_ascii_lowercase();
     name.contains("token")
         || name.contains("secret")
@@ -40,7 +31,7 @@ pub fn is_sensitive_query_param(name: &str) -> bool {
         || name == "access_token"
 }
 
-/// Redact a URL for the inspector stream: no credentials, no query unless allowlisted.
+/// Redact a URL for the inspector stream: no credentials, no query string.
 pub fn redact_url_for_live(raw: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(raw) else {
         return raw.to_string();
@@ -48,25 +39,7 @@ pub fn redact_url_for_live(raw: &str) -> String {
 
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
-
-    if parsed.query().is_some() {
-        let allowlisted = parsed
-            .query_pairs()
-            .filter(|(name, _)| {
-                ALLOWLISTED_QUERY_KEYS
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(name))
-            })
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect::<Vec<_>>();
-        parsed.set_query(None);
-        if !allowlisted.is_empty() {
-            let mut pairs = parsed.query_pairs_mut();
-            for (name, value) in allowlisted {
-                pairs.append_pair(&name, &value);
-            }
-        }
-    }
+    parsed.set_query(None);
 
     parsed.to_string()
 }
