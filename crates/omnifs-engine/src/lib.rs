@@ -24,7 +24,7 @@ pub mod view;
 
 pub use callouts::cloner::{CloneError, GitCloner};
 pub use inspect::{
-    InspectorConfig, InspectorFuseScope, InspectorSink, Subscription, current_trace_id, global,
+    InspectorConfig, InspectorRequestScope, InspectorSink, Subscription, current_trace_id, global,
     init_global_from_env,
 };
 pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};

@@ -12,7 +12,7 @@ use fuser::{
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 use omnifs_engine::view::EntryKind;
-use omnifs_engine::{InspectorFuseScope, ListOutcome, RequestCtx, global as inspector_global};
+use omnifs_engine::{InspectorRequestScope, ListOutcome, RequestCtx, global as inspector_global};
 use std::ffi::OsStr;
 use std::time::Duration;
 use tracing::{Instrument, debug, debug_span, warn};
@@ -67,7 +67,12 @@ impl Filesystem for Frontend {
                         return;
                     };
                     let live_scope = inspector_global().map(|sink| {
-                        InspectorFuseScope::begin(sink, "lookup", &mount_name, child_path.as_str())
+                        InspectorRequestScope::begin(
+                            sink,
+                            "lookup",
+                            &mount_name,
+                            child_path.as_str(),
+                        )
                     });
 
                     // If the parent has a backing path, resolve the child from the filesystem.
@@ -109,7 +114,7 @@ impl Filesystem for Frontend {
                             &mount_name,
                             &parent_path,
                             name_str,
-                            live_scope.as_ref().map(InspectorFuseScope::trace_id),
+                            live_scope.as_ref().map(InspectorRequestScope::trace_id),
                         )
                         .await
                     {
@@ -213,7 +218,7 @@ impl Filesystem for Frontend {
                     drop(inode_entry);
 
                     let live_scope = inspector_global().map(|sink| {
-                        InspectorFuseScope::begin(sink, "opendir", &mount_name, path.to_string())
+                        InspectorRequestScope::begin(sink, "opendir", &mount_name, path.to_string())
                     });
 
                     // Passthrough for inodes with backing_path.
@@ -241,7 +246,7 @@ impl Filesystem for Frontend {
                             &mount_name,
                             ino.0,
                             &path,
-                            live_scope.as_ref().map(InspectorFuseScope::trace_id),
+                            live_scope.as_ref().map(InspectorRequestScope::trace_id),
                         )
                         .await
                     {
@@ -341,7 +346,7 @@ impl Filesystem for Frontend {
                     drop(inode_entry);
 
                     let live_scope = inspector_global().map(|sink| {
-                        InspectorFuseScope::begin(sink, "read", &mount_name, path.to_string())
+                        InspectorRequestScope::begin(sink, "read", &mount_name, path.to_string())
                     });
 
                     // Host-synthetic control (`@next`/`@all`) and mount-root ignore files
@@ -398,9 +403,14 @@ impl Filesystem for Frontend {
             };
 
             let live_scope = inspector_global().map(|sink| {
-                InspectorFuseScope::begin(sink, "open", &target.mount_name, target.path.to_string())
+                InspectorRequestScope::begin(
+                    sink,
+                    "open",
+                    &target.mount_name,
+                    target.path.to_string(),
+                )
             });
-            let fuse_trace = live_scope.as_ref().map(InspectorFuseScope::trace_id);
+            let fuse_trace = live_scope.as_ref().map(InspectorRequestScope::trace_id);
 
             // `open_op` dispatches the synthetic / ranged / full-prefetch / lazy
             // cases on the inode's projection, binding a `Tree` `RangedHandle` or
