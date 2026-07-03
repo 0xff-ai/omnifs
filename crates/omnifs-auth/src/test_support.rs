@@ -1,4 +1,6 @@
-use super::{AuthError, BoxFuture, ManualCode, UrlOpener, parse_callback_url};
+use crate::callback::LoopbackCallback;
+use crate::client::BoxFuture;
+use crate::{AuthError, ManualCode, UrlOpener};
 use omnifs_workspace::authn::{
     ClientSideTokenConfig, DeviceCodeConfig, KeyValue, OAuthFlow, OauthScheme, PkceLoopbackConfig,
     PkceManualCodeConfig, TokenEndpointAuthMethod,
@@ -182,7 +184,7 @@ impl FakeAuthServer {
             .to_str()
             .unwrap();
         let redirect = Url::parse(redirect).unwrap();
-        let parsed = parse_callback_url(&redirect)?;
+        let parsed = LoopbackCallback::parse(&redirect)?;
         Ok(ManualCode {
             code: parsed.code,
             state: parsed.state,

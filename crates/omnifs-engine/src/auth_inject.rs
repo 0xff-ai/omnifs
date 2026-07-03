@@ -6,7 +6,7 @@
 
 use crate::singleflight::Group;
 use arc_swap::ArcSwapOption;
-use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
+use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::authn::{AuthManifest, SchemeResolveError};
 use omnifs_workspace::creds::{CredStoreError, CredentialEntry, CredentialStore, FileStore};
@@ -347,7 +347,7 @@ impl OAuth2PkceStrategy {
         let credential_id = CredentialId::new(provider_name, &scheme.key, account)
             .map_err(|e| InjectError::CredentialId(e.to_string()))?;
         let current = store.get(&credential_id)?;
-        let request = oauth_request_from_config(Some(config), scheme)?;
+        let request = OAuthRequest::from_mount_config(Some(config), scheme)?;
         Ok(Self {
             request,
             credential_id,

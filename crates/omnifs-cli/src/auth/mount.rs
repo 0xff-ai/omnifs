@@ -2,7 +2,6 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
-use omnifs_auth::oauth_request_from_config;
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
@@ -142,7 +141,7 @@ impl MountAuth {
             .oauth_scheme(auth.and_then(Auth::scheme))?
             .clone();
         let target = self.target_for_scheme(auth, &scheme.key, account)?;
-        let mut request = oauth_request_from_config(auth.and_then(Auth::as_oauth), scheme)?;
+        let mut request = OAuthRequest::from_mount_config(auth.and_then(Auth::as_oauth), scheme)?;
         if !scopes.is_empty() {
             request.override_default_scopes(scopes.to_vec());
         }
