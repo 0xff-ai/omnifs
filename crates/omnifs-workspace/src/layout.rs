@@ -122,10 +122,6 @@ impl WorkspaceLayout {
         }
     }
 
-    pub fn wasm_cache_dir(&self) -> PathBuf {
-        self.cache_dir.join("wasm")
-    }
-
     /// Home-relativize a path for display (e.g. `~/.omnifs/config.toml`).
     /// Falls back to the full path if HOME is unset or stripping fails.
     pub fn display(path: &Path) -> String {
@@ -137,6 +133,14 @@ impl WorkspaceLayout {
         }
         path.display().to_string()
     }
+}
+
+/// Compiled provider-component artifacts live under `<cache_dir>/wasm`, with
+/// the rest of the host's state, rather than a global per-user wasmtime cache.
+/// The single owner of this path: both the resolved workspace layout and the
+/// host runtime derive it from their cache dir through here.
+pub fn wasm_cache_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("wasm")
 }
 
 impl<Role> Workspace<Role> {
