@@ -28,6 +28,7 @@ pub const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding NFS loopback mount-state files.
 pub const NFS_STATE_SUBDIR: &str = "nfs";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
+/// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
 /// Role marker for code that only needs the shared workspace layout.
@@ -141,6 +142,21 @@ impl WorkspaceLayout {
 /// host runtime derive it from their cache dir through here.
 pub fn wasm_cache_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("wasm")
+}
+
+/// Resolve the host-visible mount point the daemon serves at:
+/// `OMNIFS_MOUNT_POINT` when set (the container entrypoint exports it),
+/// otherwise `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted
+/// tree lives at a normal user-owned location. `None` only when neither is
+/// available.
+///
+/// Single owner of this path: the daemon serves here and `omnifs setup`
+/// previews it, so the served location and the preview cannot drift.
+pub fn resolve_mount_point() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(OMNIFS_MOUNT_POINT_ENV) {
+        return Some(PathBuf::from(explicit));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("omnifs"))
 }
 
 impl<Role> Workspace<Role> {
