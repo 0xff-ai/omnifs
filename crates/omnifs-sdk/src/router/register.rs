@@ -5,7 +5,7 @@
 //! `dispatch` submodule) reads it on every host browse call.
 
 use crate::error::{ProviderError, Result};
-use crate::object::{FacetMetadata, Key, Object};
+use crate::object::{FacetMetadata, Key, Object, ObjectKind};
 use std::collections::BTreeSet;
 
 use super::descriptor::{RouteDescriptor, RouteKind};
@@ -57,7 +57,7 @@ pub struct Router<S = ()> {
 /// resolve the child object's anchor template, view leaves, and facet axes at
 /// seal time.
 pub(super) struct RegisteredObject {
-    pub kind_str: &'static str,
+    pub kind: ObjectKind,
     pub template: String,
     pub has_canonical: bool,
     /// The object's canonical-view leaf names (canonical/representation/derived).
@@ -75,7 +75,7 @@ pub(super) struct CollectionRef<S> {
     pub dir_path: String,
     /// The parent object's template (`dir_path` minus the face name).
     pub parent_template: String,
-    pub child_kind_str: &'static str,
+    pub child_kind: ObjectKind,
     /// Whether the collection can emit `fresh` entries (always true for the
     /// typed `collection::<C>` form).
     pub requires_canonical: bool,
@@ -210,7 +210,7 @@ impl<S> Router<S> {
         let pattern = parse_pattern(template)?;
         let mounted = mount_object::<O>(&pattern, handle.spec.as_ref(), template, route_kind)?;
         self.object_registry.push(RegisteredObject {
-            kind_str: O::kind().as_str(),
+            kind: O::kind(),
             template: template.to_string(),
             has_canonical: handle.has_canonical(),
             canonical_view_leaf_names: handle.canonical_view_leaf_names(),
@@ -235,7 +235,7 @@ impl<S> Router<S> {
             self.collections.push(CollectionRef {
                 dir_path: decl.dir_path.clone(),
                 parent_template: decl.parent_template.clone(),
-                child_kind_str: decl.child_kind_str,
+                child_kind: decl.child_kind,
                 requires_canonical: decl.requires_canonical,
                 late_view: entry.late_view.clone(),
                 handler: entry.handler.clone(),
@@ -418,7 +418,7 @@ impl<S> Router<S> {
             RouteDescriptor::new(
                 &entry.pattern,
                 entry.route_kind,
-                Some(entry.kind_str.to_string()),
+                Some(entry.kind.as_str().to_string()),
                 entry.validator.capture_descriptors(),
             )
         }));
@@ -440,17 +440,17 @@ impl<S> Router<S> {
             let Some(child) = self
                 .object_registry
                 .iter()
-                .find(|object| object.kind_str == collection.child_kind_str)
+                .find(|object| object.kind == collection.child_kind)
             else {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {} references object kind {:?}, which is not registered as an r.object route",
-                    collection.dir_path, collection.child_kind_str
+                    collection.dir_path, collection.child_kind
                 )));
             };
             if collection.requires_canonical && !child.has_canonical {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {} emits fresh entries but child object {:?} ({}) has no canonical face",
-                    collection.dir_path, collection.child_kind_str, child.template
+                    collection.dir_path, collection.child_kind, child.template
                 )));
             }
 
@@ -462,7 +462,7 @@ impl<S> Router<S> {
                     return Err(ProviderError::invalid_input(format!(
                         "collection at {}: child object {:?} facet {:?} is not a capture in its template {}",
                         collection.dir_path,
-                        collection.child_kind_str,
+                        collection.child_kind,
                         axis.capture_name,
                         child.template
                     )));
@@ -476,7 +476,7 @@ impl<S> Router<S> {
             descriptors.push(RouteDescriptor::new(
                 &dir_pattern,
                 RouteKind::Collection,
-                Some(collection.child_kind_str.to_string()),
+                Some(collection.child_kind.as_str().to_string()),
                 collection.validator.capture_descriptors(),
             ));
             // ANCHOR when the collection dir path equals the child template;
@@ -488,13 +488,13 @@ impl<S> Router<S> {
             } else {
                 return Err(ProviderError::invalid_input(format!(
                     "collection at {}: child object {:?} template {} is not the collection path nor strictly deeper",
-                    collection.dir_path, collection.child_kind_str, child.template
+                    collection.dir_path, collection.child_kind, child.template
                 )));
             };
 
             let child_view = std::rc::Rc::new(super::object::ResolvedChildView::new(
                 child.template.clone(),
-                crate::object::ObjectKind(child.kind_str),
+                child.kind,
                 child.canonical_view_leaf_names.clone(),
                 facet_expansion,
                 dir_depth,
