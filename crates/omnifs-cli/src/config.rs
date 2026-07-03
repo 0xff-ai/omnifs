@@ -102,7 +102,7 @@ impl ConfigFile {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let rendered = toml::to_string_pretty(&self.doc).context("serialize config TOML")?;
-        std::fs::write(&self.path, rendered)
+        omnifs_workspace::io::write_atomic(&self.path, rendered.as_bytes(), 0o644)
             .with_context(|| format!("write {}", self.path.display()))?;
         Ok(())
     }
