@@ -1,3 +1,3 @@
-//! Host-shipped Wasm tools with semantic adapters.
+//! Host-shipped tools with semantic adapters.
 
 pub mod archive;

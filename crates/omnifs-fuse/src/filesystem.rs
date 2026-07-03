@@ -12,7 +12,7 @@ use fuser::{
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 use omnifs_engine::view::EntryKind;
-use omnifs_engine::{InspectorFuseScope, ListOutcome, RequestCtx, global as inspector_global};
+use omnifs_engine::{InspectorRequestScope, ListOutcome, RequestCtx, global as inspector_global};
 use std::ffi::OsStr;
 use std::time::Duration;
 use tracing::{debug, debug_span, warn};
@@ -57,7 +57,7 @@ impl Filesystem for Frontend {
             .join(name_str)
             .expect("lookup name must be a valid path segment");
         let live_scope = inspector_global().map(|sink| {
-            InspectorFuseScope::begin(sink, "lookup", &mount_name, child_path.as_str())
+            InspectorRequestScope::begin(sink, "lookup", &mount_name, child_path.as_str())
         });
         let live = live_scope.as_ref();
 
@@ -95,7 +95,7 @@ impl Filesystem for Frontend {
             &mount_name,
             &parent_path,
             name_str,
-            live.map(InspectorFuseScope::trace_id),
+            live.map(InspectorRequestScope::trace_id),
         ) {
             Ok((attr, ttl)) => reply.entry(&ttl, &attr, Generation(0)),
             Err(errno) => {
@@ -181,8 +181,9 @@ impl Filesystem for Frontend {
         let backing_path = inode_entry.body.backing_path().cloned();
         drop(inode_entry);
 
-        let live_scope = inspector_global()
-            .map(|sink| InspectorFuseScope::begin(sink, "opendir", &mount_name, path.to_string()));
+        let live_scope = inspector_global().map(|sink| {
+            InspectorRequestScope::begin(sink, "opendir", &mount_name, path.to_string())
+        });
         let live = live_scope.as_ref();
 
         // Passthrough for inodes with backing_path.
@@ -209,7 +210,7 @@ impl Filesystem for Frontend {
             &mount_name,
             ino.0,
             &path,
-            live.map(InspectorFuseScope::trace_id),
+            live.map(InspectorRequestScope::trace_id),
         ) {
             Ok(snapshot) => {
                 self.dir_snapshots.insert(fh, snapshot);
@@ -292,7 +293,7 @@ impl Filesystem for Frontend {
         drop(inode_entry);
 
         let live_scope = inspector_global()
-            .map(|sink| InspectorFuseScope::begin(sink, "read", &mount_name, path.to_string()));
+            .map(|sink| InspectorRequestScope::begin(sink, "read", &mount_name, path.to_string()));
         let live = live_scope.as_ref();
 
         // Host-synthetic control (`@next`/`@all`) and mount-root ignore files
@@ -341,10 +342,10 @@ impl Filesystem for Frontend {
         };
 
         let live_scope = inspector_global().map(|sink| {
-            InspectorFuseScope::begin(sink, "open", &target.mount_name, target.path.to_string())
+            InspectorRequestScope::begin(sink, "open", &target.mount_name, target.path.to_string())
         });
         let live = live_scope.as_ref();
-        let fuse_trace = live.map(InspectorFuseScope::trace_id);
+        let fuse_trace = live.map(InspectorRequestScope::trace_id);
 
         // Enter the async runtime once: `open_op` dispatches the synthetic /
         // ranged / full-prefetch / lazy cases on the inode's projection, binding

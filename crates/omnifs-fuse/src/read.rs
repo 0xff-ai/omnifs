@@ -8,7 +8,7 @@ use super::common::{FullReadTarget, RangedSlot};
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
 use omnifs_api::events::TraceId;
-use omnifs_engine::InspectorFuseScope;
+use omnifs_engine::InspectorRequestScope;
 use omnifs_engine::view as view_types;
 use omnifs_engine::view::FileAttrsCache;
 use omnifs_engine::{Node, ReadResult, RequestCtx};
@@ -67,7 +67,7 @@ impl Frontend {
         fh: FuseFileHandle,
         offset: u64,
         size: u32,
-        live: Option<&InspectorFuseScope>,
+        live: Option<&InspectorRequestScope>,
         reply: ReplyData,
     ) {
         let Some(inode_entry) = self.inodes.get(&ino.0) else {
@@ -108,7 +108,7 @@ impl Frontend {
 
         let node = Node::new(mount_name, path, meta, omnifs_engine::NodeBody::Provider);
         let ctx = RequestCtx {
-            trace: live.map(InspectorFuseScope::trace_id),
+            trace: live.map(InspectorRequestScope::trace_id),
         };
         match self.rt.block_on(self.tree.read(&node, &ctx)) {
             Ok(ReadResult::Bytes { data, attrs, .. }) => {
