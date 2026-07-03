@@ -23,6 +23,22 @@ Specs are one file per mount, and a spec file's stem is its mount name: `mounts:
 
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 
+### Replica snapshots
+
+`omnifs snapshot <mount> --out <dir>` exports a configured mount's canonical
+object store as a plain directory tree plus `index.json`. When a compatible
+daemon is running, the CLI reads the snapshot from `GET
+/v1/mounts/{name}/export` as an `application/x-tar` stream. When no compatible
+daemon answers, the CLI reads `<cache>/object` directly and writes the same
+directory layout. Both paths export canonical bytes and metadata only; no
+credentials are transmitted.
+
+The snapshot tree is the audit surface for replicas. Compare rendered canonical
+files with `diff -r --exclude=index.json <before> <after>`; `index.json` records
+logical id, path, blake3, and size for each file and therefore changes whenever
+file bytes change. Use `scripts/demo/snapshot-diff.sh` for the supported demo
+flow.
+
 ### Runtime modes
 
 The daemon runs host-native or in Docker. Docker is one launch mechanism, not the architecture. Host-native frontend defaults are FUSE on Linux and NFSv4 loopback on non-Linux.
@@ -44,6 +60,8 @@ Keep Docker-specific bind/materialization policy in Docker launch paths. Keep na
 - Claim mount specs are POSTed over the control API today.
 - Add a second spec read or write path that bypasses `mount::Registry`, or write a spec to a file whose stem is not its mount name.
 - Add more direct workspace coupling when a REST API extension fits.
+- Put credentials or provider secrets in snapshot export routes or snapshot
+  indexes.
 - Infer launch backend only from config when daemon status or launch records identify the running backend.
 - Hand-edit `crates/omnifs-api/openapi/daemon.json`.
 - Add API routes without keeping client/status behavior and schema generation in step.

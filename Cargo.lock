@@ -2885,6 +2885,7 @@ dependencies = [
  "omnifs-caps",
  "omnifs-core",
  "omnifs-daemon",
+ "omnifs-engine",
  "omnifs-mtab",
  "omnifs-nfs",
  "omnifs-workspace",

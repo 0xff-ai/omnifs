@@ -13,6 +13,8 @@ use std::time::Duration;
 use crate::error::WithHint;
 use crate::inspector::daemon_addr;
 
+const EXPORT_API_MINOR: u16 = 2;
+
 pub(crate) struct DaemonClient {
     base: String,
     http: reqwest::Client,
@@ -206,6 +208,30 @@ impl DaemonClient {
             return Ok(None);
         }
         self.reconcile().await.map(Some)
+    }
+
+    /// Export a mount snapshot tar only when a compatible daemon is running.
+    pub(crate) async fn export_mount_if_running(&self, mount: &str) -> Result<Option<Vec<u8>>> {
+        let Some(status) = self.compatible_status_optional().await? else {
+            return Ok(None);
+        };
+        if status.api_minor < EXPORT_API_MINOR {
+            return Ok(None);
+        }
+        let response = self
+            .http
+            .get(format!("{}/v1/mounts/{mount}/export", self.base))
+            .timeout(Duration::from_mins(1))
+            .send()
+            .await
+            .with_context(|| format!("export mount `{mount}` from daemon at {}", self.base))?
+            .error_for_status()
+            .context("daemon snapshot export request failed")?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("read snapshot tar response")?;
+        Ok(Some(bytes.to_vec()))
     }
 
     /// Ask the daemon to unmount its frontend and exit, returning what it tore

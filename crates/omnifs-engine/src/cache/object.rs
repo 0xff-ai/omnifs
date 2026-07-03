@@ -58,6 +58,13 @@ pub struct StoreBatchEntry {
     pub new_leaves: Vec<String>,
 }
 
+/// Read-only view of one canonical object row for replica snapshots.
+pub struct CanonicalEntry {
+    pub id: Vec<u8>,
+    pub canonical: StoredObject,
+    pub leaves: Vec<String>,
+}
+
 /// Global, durable object database. One instance per process; per-mount
 /// keyspaces are obtained via [`Cache::mount`].
 pub struct Cache {
@@ -197,6 +204,30 @@ impl MountObjects {
     /// Alias set for `id` (unscoped view-leaf paths). Empty when absent.
     pub fn leaves_of(&self, id: &[u8]) -> Vec<String> {
         self.get(id).map(|obj| obj.leaves).unwrap_or_default()
+    }
+
+    /// Enumerate canonical rows currently present for this mount.
+    ///
+    /// Index-only rows and rows from incompatible schema versions are ignored,
+    /// matching warm-read behavior. This is read-only: callers receive cloned
+    /// bytes and paths, and no view index or object row is mutated.
+    pub fn canonical_entries(&self) -> Result<Vec<CanonicalEntry>> {
+        let mut entries = Vec::new();
+        for row in self.objects.iter() {
+            let (_key, value) = row.into_inner()?;
+            let Some(obj) = decode_object(&value) else {
+                continue;
+            };
+            let Some(canonical) = obj.canonical else {
+                continue;
+            };
+            entries.push(CanonicalEntry {
+                id: obj.id,
+                canonical,
+                leaves: obj.leaves,
+            });
+        }
+        Ok(entries)
     }
 
     /// Full eviction: OBJECTS row, every VIEW row in the alias set, and view leaves.
@@ -414,6 +445,31 @@ mod tests {
         assert_eq!(cache.id_of(p1.as_bytes()).as_deref(), Some(OBJ));
         assert_eq!(cache.id_of(p2.as_bytes()).as_deref(), Some(OBJ));
         assert!(cache.id_of("/issues/42/other".as_bytes()).is_none());
+    }
+
+    #[test]
+    fn canonical_entries_skip_index_only_rows() {
+        let (_dir, cache) = open_cache();
+        let canonical_leaf = "/issues/42/item.json".to_string();
+        let index_only_leaf = "/issues/99/item.json".to_string();
+
+        cache.store(
+            OBJ,
+            StoredObject {
+                bytes: b"data".to_vec(),
+                validator: Some("etag".to_string()),
+            },
+            std::slice::from_ref(&canonical_leaf),
+            |_| {},
+        );
+        cache.store_index_only(b"issue:99", std::slice::from_ref(&index_only_leaf));
+
+        let entries = cache.canonical_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, OBJ);
+        assert_eq!(entries[0].canonical.bytes, b"data");
+        assert_eq!(entries[0].canonical.validator.as_deref(), Some("etag"));
+        assert_eq!(entries[0].leaves, vec![canonical_leaf]);
     }
 
     /// Batch-put of N objects yields identical observable state (`get`/`id_of`/`leaves_of`)

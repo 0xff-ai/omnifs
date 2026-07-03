@@ -16,6 +16,7 @@ pub mod render;
 pub(crate) mod runtime;
 pub(crate) mod sandbox;
 pub mod singleflight;
+pub mod snapshot;
 pub mod test_support;
 pub(crate) mod tools;
 pub(crate) mod tree;

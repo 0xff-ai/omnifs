@@ -6,6 +6,7 @@
 
 use crate::cache::Caches;
 use crate::cloner::GitCloner;
+use crate::snapshot::MountSnapshot;
 use crate::{BuildError, HostContext, Runtime, component_engine};
 use omnifs_workspace::mounts::materialize::{MaterializationMode, materialize};
 use omnifs_workspace::mounts::{Registry, Spec};
@@ -288,6 +289,14 @@ impl MountRuntimes {
             .iter()
             .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
             .collect()
+    }
+
+    /// Build a read-only canonical-store snapshot for a loaded mount.
+    pub fn snapshot_mount(&self, mount: &str) -> anyhow::Result<Option<MountSnapshot>> {
+        if !self.is_running(mount) {
+            return Ok(None);
+        }
+        MountSnapshot::from_caches(&self.caches, mount).map(Some)
     }
 
     /// Returns the mount name of the root-mounted provider, if any.

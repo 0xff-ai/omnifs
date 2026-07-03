@@ -10,6 +10,7 @@ pub mod providers;
 pub mod reset;
 pub mod setup;
 pub mod shell;
+pub mod snapshot;
 pub mod status;
 pub mod up;
 pub mod version;
