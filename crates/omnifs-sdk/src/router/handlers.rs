@@ -6,7 +6,7 @@
 //! parse removes the route from dispatch instead of erroring the request.
 
 use super::pattern::Pattern;
-use crate::captures::{Captures, FromCaptures};
+use crate::captures::{CaptureDescriptor, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::handler::{DirCx, TreeRef};
@@ -41,6 +41,7 @@ pub(super) type BoxedTreeRefHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerF
 pub struct RouteValidator {
     full: Arc<dyn Fn(&Captures) -> bool>,
     present: Arc<dyn Fn(&Captures) -> bool>,
+    capture_descriptors: Vec<CaptureDescriptor>,
 }
 
 impl RouteValidator {
@@ -50,6 +51,10 @@ impl RouteValidator {
 
     pub(super) fn accepts_present(&self, caps: &Captures) -> bool {
         (self.present)(caps)
+    }
+
+    pub(super) fn capture_descriptors(&self) -> &[CaptureDescriptor] {
+        &self.capture_descriptors
     }
 }
 
@@ -96,6 +101,7 @@ pub(super) fn captures_validator<C: FromCaptures>() -> RouteValidator {
     RouteValidator {
         full: Arc::new(|caps: &Captures| C::from_captures(caps).is_ok()),
         present: Arc::new(|caps: &Captures| C::validate_present_captures(caps)),
+        capture_descriptors: C::capture_descriptors(),
     }
 }
 
@@ -105,6 +111,7 @@ pub(super) fn accept_validator() -> RouteValidator {
     RouteValidator {
         full: Arc::new(|_caps: &Captures| true),
         present: Arc::new(|_caps: &Captures| true),
+        capture_descriptors: Vec::new(),
     }
 }
 

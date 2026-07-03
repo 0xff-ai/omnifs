@@ -47,7 +47,12 @@ impl<S> Router<S> {
         let shape = self.shape();
 
         if let Some(route) = shape.treeref_route(&child_abs) {
-            let tree_ref = (route.entry.handler)(cx.clone(), route.captures).await?;
+            let tree_ref = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.handler)(cx.clone(), route.captures),
+            )
+            .await
+            .map_err(|error| error.with_context("lookup-child", &child_abs))?;
             return Ok(Lookup::subtree(tree_ref.tree_ref));
         }
 
@@ -85,7 +90,12 @@ impl<S> Router<S> {
                     child: name.to_string(),
                 },
             );
-            let projection = (route.entry.handler)(dir_cx, route.captures).await?;
+            let projection = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.handler)(dir_cx, route.captures),
+            )
+            .await
+            .map_err(|error| error.with_context("lookup-child", &child_abs))?;
             return shape.projection_lookup(&parent_abs, name, &projection);
         }
 

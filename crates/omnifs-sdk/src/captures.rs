@@ -9,6 +9,7 @@
 use crate::error::{ProviderError, Result};
 use core::fmt::Display;
 use core::str::FromStr;
+use serde::Serialize;
 
 /// A capture type: validates one path segment (`FromStr`), renders back
 /// (`Display`), and optionally declares a finite value set.
@@ -43,6 +44,15 @@ pub trait PathSegment: FromStr + Display + 'static {
 pub trait FromCaptures: Sized {
     fn from_captures(caps: &Captures) -> Result<Self>;
 
+    /// Static description of the capture fields this key parses.
+    ///
+    /// The route table uses this for introspection only; dispatch remains
+    /// governed by [`Self::from_captures`] and
+    /// [`Self::validate_present_captures`].
+    fn capture_descriptors() -> Vec<CaptureDescriptor> {
+        Vec::new()
+    }
+
     /// Validate the captures already present in a path prefix.
     ///
     /// Static directory discovery walks route prefixes before every capture in
@@ -51,6 +61,25 @@ pub trait FromCaptures: Sized {
     /// capture from hiding a literal ancestor such as `/categories`.
     fn validate_present_captures(caps: &Captures) -> bool {
         Self::from_captures(caps).is_ok()
+    }
+}
+
+/// Author-facing metadata for one route capture.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CaptureDescriptor {
+    pub name: String,
+    pub type_name: String,
+    pub choices: Option<Vec<String>>,
+}
+
+impl CaptureDescriptor {
+    #[must_use]
+    pub fn untyped(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            type_name: "String".to_string(),
+            choices: None,
+        }
     }
 }
 

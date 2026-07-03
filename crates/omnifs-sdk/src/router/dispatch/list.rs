@@ -46,26 +46,43 @@ impl<S> Router<S> {
         let shape = self.shape();
 
         if let Some(route) = shape.treeref_route(&abs) {
-            let tree_ref = (route.entry.handler)(cx.clone(), route.captures).await?;
+            let tree_ref = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.handler)(cx.clone(), route.captures),
+            )
+            .await
+            .map_err(|error| error.with_context("list-children", &abs))?;
             return Ok(List::subtree(tree_ref.tree_ref));
         }
 
         if let Some(route) = shape.dir_route(&abs) {
             let dir_cx = DirCx::new(cx.clone(), DirIntent::List { cursor });
-            let projection = (route.entry.handler)(dir_cx, route.captures).await?;
+            let projection = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.handler)(dir_cx, route.captures),
+            )
+            .await
+            .map_err(|error| error.with_context("list-children", &abs))?;
             return shape.dir_projection_into_list(&abs, &projection);
         }
 
         if let Some(route) = shape.object_route(&abs) {
-            let out = (route.entry.list)(cx, route.captures.clone(), path.to_string()).await?;
+            let out = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.list)(cx, route.captures.clone(), path.to_string()),
+            )
+            .await
+            .map_err(|error| error.with_context("list-children", &abs))?;
             let mut listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);
             if route.entry.has_anchor_collections() {
-                let projections = route
-                    .entry
-                    .run_anchor_collections(cx, &route.captures)
-                    .await?;
+                let projections = super::route_future(
+                    route.entry.pattern.template(),
+                    Box::pin(route.entry.run_anchor_collections(cx, &route.captures)),
+                )
+                .await
+                .map_err(|error| error.with_context("list-children", &abs))?;
                 listing = super::route_shape::merge_anchor_collections(&listing, &projections)?;
             }
             return Ok(List::entries(listing));

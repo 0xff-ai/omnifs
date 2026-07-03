@@ -653,3 +653,22 @@ impl RangeReader for LargeRangedReader {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_snapshot_matches() {
+        let mut router = Router::<State>::new();
+        TestProvider::start(Config { root_ignore: false }, &mut router).unwrap();
+        router.seal().unwrap();
+
+        let actual = omnifs_sdk::serde_json::to_string_pretty(&router.routes()).unwrap();
+        let expected = include_str!("../tests/routes.snapshot.json").trim_end();
+        if actual != expected {
+            eprintln!("{actual}");
+        }
+        assert_eq!(actual, expected);
+    }
+}

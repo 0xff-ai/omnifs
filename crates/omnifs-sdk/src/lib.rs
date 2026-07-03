@@ -165,6 +165,12 @@ macro_rules! export {
 
 extern crate self as omnifs_sdk;
 
+/// Version of the SDK crate used by generated provider metadata.
+pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// WIT package declaration the SDK-generated exports target.
+pub const PROVIDER_WIT_PACKAGE: &str = omnifs_wit::PROVIDER_WIT_PACKAGE;
+
 pub mod archives;
 pub mod blob;
 pub mod browse;

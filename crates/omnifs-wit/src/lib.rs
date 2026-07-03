@@ -4,9 +4,24 @@ use std::path::Path;
 
 const PROVIDER_WORLD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
 
+/// Package declaration from `wit/provider.wit`.
+pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.4.0;";
+
 /// Return the directory containing the `omnifs:provider` WIT package.
 pub fn provider_world_path() -> &'static Path {
     Path::new(PROVIDER_WORLD_DIR)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn provider_wit_package_constant_matches_wit_file() {
+        let package_line = include_str!("../wit/provider.wit")
+            .lines()
+            .next()
+            .expect("provider.wit has a package line");
+        assert_eq!(super::PROVIDER_WIT_PACKAGE, package_line);
+    }
 }
 
 /// Generated bindings for the `omnifs:provider` package.

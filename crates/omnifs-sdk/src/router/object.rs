@@ -34,6 +34,7 @@ use omnifs_core::ContentType;
 use std::future::Future;
 use std::pin::Pin;
 
+use super::descriptor::RouteKind;
 use super::handlers::{RouteValidator, captures_validator};
 use super::pattern::parse_pattern;
 
@@ -984,6 +985,8 @@ pub(super) fn file_object<O: Object>(
 /// The mounted, type-erased object route the dispatch tables hold.
 pub(super) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
+    pub kind_str: &'static str,
+    pub route_kind: RouteKind,
     pub shape: AnchorShape,
     pub leaves: Vec<ListingLeaf>,
     pub read: BoxedObjectRead<S>,
@@ -1560,6 +1563,7 @@ pub(super) fn mount_object<O>(
     pattern: &Pattern,
     spec: &ObjectSpec<O>,
     combined_template: &str,
+    route_kind: RouteKind,
 ) -> Result<MountedObject<O::State>>
 where
     O: Object + 'static,
@@ -1582,6 +1586,8 @@ where
 
     let entry = ObjectRouteEntry {
         pattern: pattern.clone(),
+        kind_str: O::kind().as_str(),
+        route_kind,
         shape: spec.shape,
         leaves: listing_leaves,
         read: route.clone().read_handler(),
