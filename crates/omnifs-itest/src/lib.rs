@@ -72,8 +72,11 @@ impl RuntimeHarness {
             let manifest = provider
                 .manifest()
                 .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-            spec.apply_provider_metadata(&manifest)
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            spec.apply_provider_metadata(
+                &manifest,
+                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
+            )
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         }
         let wasm_path = catalog.provider_path_by_id(&spec.provider.id);
         let cloner = Arc::new(GitCloner::new(clone_dir.path().to_path_buf()));

@@ -1,0 +1,25 @@
+{
+  "provider": {
+    "id": "<PROVIDER_ID>",
+    "meta": {
+      "name": "dns",
+      "version": "0.2.1"
+    }
+  },
+  "mount": "dns",
+  "capabilities": {
+    "domains": [
+      "cloudflare-dns.com",
+      "dns.google"
+    ],
+    "git_repos": null,
+    "unix_sockets": null,
+    "preopened_paths": null,
+    "max_memory_mb": 32,
+    "max_fetch_blob_bytes": null,
+    "max_read_blob_bytes": null
+  },
+  "config": {
+    "default_resolver": "cloudflare"
+  }
+}
