@@ -4,7 +4,7 @@ use crate::cache::RecordKind;
 use crate::clock::now_millis;
 use crate::coalesce::RunConfig;
 use crate::coalesce::ns::{Key as NsKey, SharedOutcome, share_outcome, unshare_outcome};
-use crate::materialize::{LookupOutcome, Materializer};
+use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
@@ -86,7 +86,7 @@ impl Namespace<'_> {
             .await?;
 
         let result = Self::run_op_expect(op, result, expect_lookup_child)?;
-        Ok(Materializer::new(&self.runtime.cache).lookup(
+        Ok(EffectApplier::new(&self.runtime.cache).lookup(
             parent_path,
             &child_path,
             result,
@@ -121,7 +121,7 @@ impl Namespace<'_> {
         let result = Self::run_op_expect(op, result, expect_list_children)?;
 
         if let wit_types::ListChildrenResult::Entries(ref listing) = result {
-            let m = Materializer::new(&self.runtime.cache);
+            let m = EffectApplier::new(&self.runtime.cache);
             if is_continuation {
                 m.apply_continuation_projection(path, &listing.entries, op_gen);
             } else {

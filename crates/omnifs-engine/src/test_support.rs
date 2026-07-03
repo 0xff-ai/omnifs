@@ -12,7 +12,7 @@ use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHe
 use omnifs_wit::provider::types as wit_types;
 
 pub use crate::BuildError;
-pub use crate::materialize::{LookupEntry, LookupOutcome};
+pub use crate::effect_apply::{LookupEntry, LookupOutcome};
 pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
