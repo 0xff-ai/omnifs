@@ -16,7 +16,7 @@ This is the shape to preserve:
 - the same route API also describes structural directories, direct files,
   streams, and tree handoffs without pretending they are cached canonicals;
 - file and dir are the filesystem nouns. Stream, tree, canonical,
-  representation, derived, and direct are behaviors under those nouns;
+  representation, computed, and direct are behaviors under those nouns;
 - route topology remains visible in `start()`. Object implementations provide
   behavior only and do not register hidden paths;
 - relative route faces compose the tree. They let an object directory list child
@@ -29,7 +29,7 @@ This is the shape to preserve:
   providers receive typed cursors back on the next list call;
 - canonical bytes can be raw upstream bytes or deterministic logical-object
   bytes in any format. JSON is just one format;
-- provider-local caches, compatibility bridges, and repeated derived-file
+- provider-local caches, compatibility bridges, and repeated computed-file
   helpers disappear unless they own a real domain rule;
 - raw path handlers remain the low-level escape hatch for routes that are not
   honestly anchored in object identity.
@@ -56,7 +56,7 @@ changes:
   the route API must allow that shape at the top level as well as under a parent
   object;
 - large host-resident artifacts with validators are not automatically objects.
-  Use object shape when the provider needs identity, decode, derived faces, or
+  Use object shape when the provider needs identity, decode, computed faces, or
   child relationships; use blob shape when the important property is that bytes
   stay host-side;
 - an object owns identity, load, decode, and canonical bytes. Identity is a named
@@ -76,7 +76,7 @@ changes:
 - collections carry typed cursors and validators. The host stores cursor and
   validator bytes opaquely and feeds them back to the provider;
 - lazy and eager describe materialization from bytes already in hand. They never
-  authorize an extra upstream fetch just to populate a derived field;
+  authorize an extra upstream fetch just to populate a computed field;
 - providers describe file and directory characteristics: size, content type,
   stability, read mode, byte source, version or validator evidence. Providers do
   not declare TTLs, retention windows, or host cache policy;
@@ -129,10 +129,10 @@ impl Provider for GitHub {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title.txt").derive(Issue::title)?;
-            o.file("body.md").lazy().derive(Issue::body_markdown)?;
-            o.file("state.txt").derive(Issue::state)?;
-            o.file("user.txt").derive(Issue::user)?;
+            o.file("title.txt").computed(Issue::title)?;
+            o.file("body.md").lazy().computed(Issue::body_markdown)?;
+            o.file("state.txt").computed(Issue::state)?;
+            o.file("user.txt").computed(Issue::user)?;
             o.dir("comments").collection::<Comment>(Issue::comments)?;
             Ok(())
         })?;
@@ -141,10 +141,10 @@ impl Provider for GitHub {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title.txt").derive(PullRequest::title)?;
-            o.file("body.md").lazy().derive(PullRequest::body_markdown)?;
-            o.file("state.txt").derive(PullRequest::state)?;
-            o.file("user.txt").derive(PullRequest::user)?;
+            o.file("title.txt").computed(PullRequest::title)?;
+            o.file("body.md").lazy().computed(PullRequest::body_markdown)?;
+            o.file("state.txt").computed(PullRequest::state)?;
+            o.file("user.txt").computed(PullRequest::user)?;
             o.file("diff")
                 .blob(PullRequest::diff)
                 .content_type("text/x-diff")?;
@@ -158,8 +158,8 @@ impl Provider for GitHub {
                 o.dynamic();
                 o.file("comment.json").canonical::<Json>()?;
                 o.file("comment.md").representation::<Markdown>()?;
-                o.file("body.md").derive(Comment::body_markdown)?;
-                o.file("author.txt").derive(Comment::author)?;
+                o.file("body.md").computed(Comment::body_markdown)?;
+                o.file("author.txt").computed(Comment::author)?;
                 Ok(())
             },
         )?;
@@ -167,8 +167,8 @@ impl Provider for GitHub {
         r.object::<WorkflowRun>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
             o.dynamic();
             o.file("run.json").canonical::<Json>()?;
-            o.file("status.txt").derive(WorkflowRun::status)?;
-            o.file("conclusion.txt").derive(WorkflowRun::conclusion)?;
+            o.file("status.txt").computed(WorkflowRun::status)?;
+            o.file("conclusion.txt").computed(WorkflowRun::conclusion)?;
             o.file("log")
                 .direct(WorkflowRun::log)
                 .content_type("text/plain")?;
@@ -265,7 +265,7 @@ an incoming request into:
 ```rust
 object = Issue
 key = IssueKey { owner, repo, filter, number }
-target = Derived("body.md")
+target = Computed("body.md")
 ```
 
 or:
@@ -282,14 +282,14 @@ serves without upstream:
 - a canonical face returns the cached canonical bytes or a host-owned canonical
   byte source;
 - a representation face renders from the cached canonical bytes;
-- a derived face parses the cached canonical bytes and runs the registered field
+- a computed face parses the cached canonical bytes and runs the registered field
   function;
 - an object-backed file or directory face resolves through the child object's
   own canonical cache, load, and decode contract;
 - a direct, stream, blob, or tree face uses its registered behavior, because it
   is not necessarily derivable from the canonical object.
 
-Lazy derived leaves remain routable. Lazy only means "do not preload this leaf
+Lazy computed leaves remain routable. Lazy only means "do not preload this leaf
 while listing"; it does not mean "reload upstream on read." A lazy leaf read can
 still render from cached canonical bytes.
 
@@ -300,8 +300,8 @@ An object can expose one or more filesystem faces:
 ```rust
 o.file("x.json").canonical::<Json>()           // cacheable object bytes
 o.file("x.md").representation::<Markdown>()    // whole-object render
-o.file("x.txt").derive(Object::field)          // derived file from object data
-o.file("x.txt").lazy().derive(Object::field)   // visible but not preloaded
+o.file("x.txt").computed(Object::field)          // computed file from object data
+o.file("x.txt").lazy().computed(Object::field)   // visible but not preloaded
 o.file("x.patch").object::<PatchObject>()      // child object as a file
 o.file("x.bin").direct(Object::read)           // provider/upstream on read
 o.file("x.tar").blob(Object::asset)            // host-resident bytes
@@ -331,7 +331,7 @@ The main face categories are:
 - **Canonical.** The object's replayable stored bytes in their declared format.
 - **Representation.** A whole-object render from canonical bytes, selected by
   format/content type.
-- **Derived.** A named file projected from the parsed object and route key,
+- **Computed.** A named file projected from the parsed object and route key,
   selected by leaf path.
 - **Object face.** A file or directory backed by a child object with its own
   identity, load, decode, canonical bytes, and validator.
@@ -412,44 +412,44 @@ o.file("item.md").representation::<Markdown>()?;
 o.file("item.json").canonical::<Json>()?;
 ```
 
-Derived fields are selected by path and carry content type as metadata:
+Computed fields are selected by path and carry content type as metadata:
 
 ```rust
-o.file("title.txt").derive(Issue::title)?;
-o.file("state.txt").derive(Issue::state)?;
-o.file("body.md").lazy().derive(Issue::body_markdown)?;
+o.file("title.txt").computed(Issue::title)?;
+o.file("state.txt").computed(Issue::state)?;
+o.file("body.md").lazy().computed(Issue::body_markdown)?;
 ```
 
 `title.txt`, `state.txt`, and `author.txt` can all be `text/plain`, so content
 type cannot identify the field. The path identifies the field; content type
 describes the bytes.
 
-## Eager and lazy derived leaves
+## Eager and lazy computed leaves
 
-`derive` is eager by default:
+`computed` is eager by default:
 
 ```rust
-o.file("title.txt").derive(Issue::title)?;
+o.file("title.txt").computed(Issue::title)?;
 ```
 
 Eager means: when the object value is already in hand while listing an object
-anchor or a collection entry, the SDK preloads that derived file into the view
+anchor or a collection entry, the SDK preloads that computed file into the view
 cache. Eager does not mean: fetch upstream solely to populate a field.
 
 Use `lazy()` when the leaf is large, expensive, rarely read, or would blow the
 preload budget:
 
 ```rust
-o.file("body.md").lazy().derive(Issue::body_markdown)?;
+o.file("body.md").lazy().computed(Issue::body_markdown)?;
 ```
 
 Lazy leaves are still visible in directory listings and still route through the
 object leaf table. When read, they can render from host-pushed cached canonical
 bytes. If no matching canonical is cached, the SDK calls `Object::load` and then
-derives the requested leaf.
+computes the requested leaf.
 
-Eager derived leaves must produce inline bytes and must respect eager response
-budgets. Large bytes should be represented as lazy derived leaves, object-backed
+Eager computed leaves must produce inline bytes and must respect eager response
+budgets. Large bytes should be represented as lazy computed leaves, object-backed
 file faces, blob faces, or ranged stream faces.
 
 ## Byte sources
@@ -477,7 +477,7 @@ o.file("logs/{container}.log")
 ```
 
 A whole object should normally be `Stable` or `Dynamic`; `Live` is a property of
-one file face, not a property of every representation and derived leaf under the
+one file face, not a property of every representation and computed leaf under the
 object.
 
 ## Collections
@@ -571,7 +571,7 @@ CollectionEntry::key(key)
 ```
 
 Use `fresh` only when the list payload satisfies the child object's canonical
-contract. Use `derived` for shallow list fields that can populate derived
+contract. Use `derived` for shallow list fields that can populate computed
 leaves but not the canonical object. Use `key` for discovery only.
 
 Collection outcomes:
@@ -702,7 +702,7 @@ Reject:
 - path captures unused by the key or by route facets;
 - an object implementation that tries to register hidden paths;
 - `Live` on a non-stream face;
-- eager derived leaves that cannot be represented as inline bytes;
+- eager computed leaves that cannot be represented as inline bytes;
 - a canonical or representation face without a content type;
 - a direct, blob, or stream face that lies about size or stability.
 
@@ -725,11 +725,11 @@ repository object declares relative collection directories for issues, pulls,
 and workflow runs, plus the `repo` tree handoff.
 
 A collection stores child canonical bytes only when the list payload satisfies
-the child object's canonical contract. Shallow fields can be eager derived
+the child object's canonical contract. Shallow fields can be eager computed
 preloads. Large bodies should be lazy. Pull diffs should be blob-backed file
 faces because the important property is host-resident bytes with exact size,
 content type, and optional ETag/version evidence. Use a file-shaped object for a
-diff only if the provider needs to decode the diff and expose derived faces. Use
+diff only if the provider needs to decode the diff and expose computed faces. Use
 direct only when every access really should call the upstream/provider again.
 Comments are `Comment` objects projected as `comments/{comment_id}` directories
 (one object keyed by the comment id, listed by the issue/PR comment collection),
@@ -829,7 +829,7 @@ declared by config/manifest, not something route declarations can grant.
 Kubernetes uses object semantics for API resources. Namespaces, resource types,
 namespaced resources, cluster resources, pods, containers, and log streams are
 all visible in the route API. Resource manifests are canonical JSON objects with
-YAML representations and derived status leaves. `resourceVersion` is validator
+YAML representations and computed status leaves. `resourceVersion` is validator
 evidence when present.
 
 Events are direct sidecar file faces on resources. Pod logs are stream faces
@@ -849,7 +849,7 @@ routing state backed by Kubernetes discovery.
 Linear is object-shaped around teams, filters, and issues. Team and filter
 directories compose with typed cursor issue collections. Issue identity is the
 Linear identifier; team and filter captures are route facets that validate alias
-context. List payloads may attach shallow derived files eagerly when they carry
+context. List payloads may attach shallow computed files eagerly when they carry
 those fields.
 
 Linear GraphQL issue loads can produce validators from issue version fields even
@@ -898,7 +898,7 @@ should not be rewritten to match product provider aesthetics.
   serialization of whatever Rust struct is easiest to persist.
 - Mutability, stability, and authority are separate axes. Do not use one to
   smuggle another.
-- Prefer object methods over one-caller derived-file helpers.
+- Prefer object methods over one-caller computed-file helpers.
 - Keep raw path calls only while the object API cannot express a shape. Delete
   them when the object face exists.
 - Do not add macro attributes, builder fields, or generic parameters for values

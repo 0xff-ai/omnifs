@@ -90,7 +90,7 @@ impl<C, S> Deref for ListCx<C, S> {
 ///
 /// - `Fresh`: the list payload satisfies the child object's canonical contract;
 ///   the child canonical is stored at listing time.
-/// - `Derived`: shallow list fields populate eager derived leaves but not the
+/// - `Derived`: shallow list fields populate eager computed leaves but not the
 ///   canonical object.
 /// - `Key`: discovery only (name; bytes load on the child's own read).
 pub enum CollectionEntry<T: Object> {
@@ -119,7 +119,7 @@ impl<T: Object> CollectionEntry<T> {
         }
     }
 
-    /// Shallow list fields that can populate derived leaves but not the
+    /// Shallow list fields that can populate computed leaves but not the
     /// canonical object.
     pub fn derived(key: T::Key, files: Vec<(String, FileProjection)>) -> Self {
         Self::Derived { key, files }
@@ -232,7 +232,7 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
 /// segment(s) beyond the collection dir, computed from the entry key against
 /// the CHILD's registered template (not the parent's captures). A `Fresh`
 /// entry also stores the child canonical against its own logical id with the
-/// child's canonical-view leaf paths (canonical/representation/derived,
+/// child's canonical-view leaf paths (canonical/representation/computed,
 /// facet-expanded) as view leaves, so a later read of any child leaf serves
 /// warm. A `Derived` entry projects its shallow leaves under the child anchor.
 /// The completeness variant selects exhaustive / open / paged.
@@ -261,7 +261,7 @@ where
     };
 
     // The child view resolution plus the canonical bytes a fresh entry stores,
-    // and the shallow derived leaves a derived entry projects.
+    // and the shallow computed leaves a derived entry projects.
     let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
     let mut derived_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
     let mut dir_entries = Vec::with_capacity(entries.len());

@@ -57,7 +57,7 @@ pub(super) struct RegisteredObject {
     pub kind_str: &'static str,
     pub template: String,
     pub has_canonical: bool,
-    /// The object's canonical-view leaf names (canonical/representation/derived).
+    /// The object's canonical-view leaf names (canonical/representation/computed).
     pub canonical_view_leaf_names: Vec<String>,
     /// The object key's facet axes, for child view-leaf expansion.
     pub facet_axes: &'static [crate::object::FacetAxis],

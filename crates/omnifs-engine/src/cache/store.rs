@@ -398,7 +398,7 @@ impl Store {
         }
 
         let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
-        let canonical = object::Canonical { bytes, validator };
+        let canonical = object::StoredObject { bytes, validator };
         let view = &self.caches.view;
         self.object.store(id, canonical, &leaves, |leaf| {
             view.delete_exact(&self.scope_unscoped(leaf));
@@ -432,7 +432,7 @@ impl Store {
                     .collect();
                 Some(object::StoreBatchEntry {
                     id: entry.id,
-                    canonical: object::Canonical {
+                    canonical: object::StoredObject {
                         bytes: entry.bytes,
                         validator: entry.validator,
                     },

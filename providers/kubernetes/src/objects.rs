@@ -59,7 +59,7 @@ impl NamespacedResource {
         self.0.uid()
     }
 
-    /// Derive: `status.yaml` leaf from the manifest's status stanza.
+    /// Computed: `status.yaml` leaf from the manifest's status stanza.
     pub(crate) fn status_yaml(
         &self,
         _key: &crate::NamespacedResourceKey,
@@ -148,7 +148,7 @@ impl ClusterResource {
         Self(manifest)
     }
 
-    /// Derive: `status.yaml` leaf from the manifest's status stanza.
+    /// Computed: `status.yaml` leaf from the manifest's status stanza.
     pub(crate) fn status_yaml(&self, _key: &crate::ClusterResourceKey) -> Result<FileProjection> {
         Ok(FileProjection::inline(self.0.status_yaml_bytes()?)
             .content_type(ContentType::Custom("application/yaml"))

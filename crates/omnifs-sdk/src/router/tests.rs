@@ -111,7 +111,7 @@ impl crate::object::FacetMetadata for DemoKey {
 
 impl Key for DemoKey {}
 
-/// A demo object block: canonical JSON + markdown representation + a derived
+/// A demo object block: canonical JSON + markdown representation + a computed
 /// title leaf, declared via the new face surface.
 fn demo_handle() -> Result<ObjectHandle<DemoObj>> {
     object("/items/{id}", |o| {
@@ -249,12 +249,12 @@ fn seal_rejects_overlapping_routes() {
 }
 
 #[test]
-fn object_mount_lists_canonical_render_and_derived_leaves() {
+fn object_mount_lists_canonical_render_and_computed_leaves() {
     let handle = object("/items/{id}", |o| {
         o.dynamic();
         o.file("item.json").canonical::<Json>()?;
         o.file("item.md").representation::<Markdown>()?;
-        o.file("summary").derive(DemoObj::title)?;
+        o.file("summary").computed(DemoObj::title)?;
         Ok(())
     })
     .unwrap();
@@ -277,9 +277,9 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
     let handle = object("/items/{id}", |o| {
         o.dynamic();
         o.file("item.json").canonical::<Json>()?;
-        o.file("title").derive(DemoObj::title)?;
-        o.file("body").lazy().derive(DemoObj::body)?;
-        o.file("state").derive(DemoObj::state)?;
+        o.file("title").computed(DemoObj::title)?;
+        o.file("body").lazy().computed(DemoObj::body)?;
+        o.file("state").computed(DemoObj::state)?;
         Ok(())
     })
     .unwrap();
@@ -474,9 +474,9 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").derive(DemoObj::title)?;
-            o.file("body").lazy().derive(DemoObj::body)?;
-            o.file("state").derive(DemoObj::state)?;
+            o.file("title").computed(DemoObj::title)?;
+            o.file("body").lazy().computed(DemoObj::body)?;
+            o.file("state").computed(DemoObj::state)?;
             Ok(())
         })
         .unwrap();
