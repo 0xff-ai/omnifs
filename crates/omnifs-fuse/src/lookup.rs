@@ -1,6 +1,6 @@
-//! FUSE `lookup` op boundary: enter the async runtime once, delegate the
-//! name-resolution DECISION to `Tree::resolve_child`, then mint the kernel
-//! inode + `FileAttr` on the neutral `Node` it returns.
+//! FUSE `lookup` op boundary: delegate the name-resolution DECISION to
+//! `Tree::resolve_child`, then mint the kernel inode + `FileAttr` on the neutral
+//! `Node` it returns.
 
 use super::Frontend;
 use fuser::{Errno, FileAttr};
@@ -14,7 +14,6 @@ impl Frontend {
     /// Resolve `name` under the provider directory `parent_path` and allocate
     /// (or refresh) the child's inode, returning the kernel `FileAttr` + TTL.
     ///
-    /// Enters the async runtime exactly once (`block_on(Tree::resolve_child)`).
     /// `Tree` owns the cache-first lookup, the `@next`/`@all` control resolution
     /// (cache-only, `NotFound` once the feed exhausts), the mount-root
     /// ignore-file synthesis after a negative provider result, and the subtree
@@ -22,13 +21,15 @@ impl Frontend {
     /// state: a subtree node binds a backing dir, a synthetic node sets the
     /// `synthetic` marker (so `open` serves it from a per-`fh` buffer), and a
     /// provider node clears any prior synthetic marker (a real `.gitignore` wins).
-    pub(super) fn lookup_op(
+    pub(super) async fn lookup_op(
         &self,
         mount_name: &str,
         parent_path: &Path,
         name: &str,
         trace: Option<TraceId>,
     ) -> Result<(FileAttr, Duration), Errno> {
+        let _permit = self.acquire_op_permit().await;
+
         // Drive the kernel-side invalidation fan-out (notify + prune) before the
         // resolve. The renderer-neutral mem eviction happens inside
         // `Tree::drain_invalidations`; `Tree::resolve_child`'s own consult then
@@ -38,8 +39,9 @@ impl Frontend {
         let parent = Node::provider_dir(mount_name.to_string(), parent_path.clone());
         let ctx = RequestCtx { trace };
         let node = self
-            .rt
-            .block_on(self.tree.resolve_child(&parent, name, &ctx))
+            .tree
+            .resolve_child(&parent, name, &ctx)
+            .await
             .map_err(|e| super::errno::tree_error_errno(&e))?;
         Ok(self.inode_attr_for_node(mount_name, &node))
     }

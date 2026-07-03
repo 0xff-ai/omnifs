@@ -1,7 +1,7 @@
-//! FUSE file open/read op boundary: enter the async runtime once per callback,
-//! delegate the read/open DECISION to `Tree::read` / `Tree::open`, and keep the
-//! kernel-side handle tables (the per-`fh` whole-file buffer, the ranged handle,
-//! inode size promotion) plus the kernel offset/size slicing.
+//! FUSE file open/read op boundary: delegate the read/open DECISION to
+//! `Tree::read` / `Tree::open`, and keep the kernel-side handle tables (the
+//! per-`fh` whole-file buffer, the ranged handle, inode size promotion) plus the
+//! kernel offset/size slicing.
 
 use super::Frontend;
 use super::common::{FullReadTarget, RangedSlot};
@@ -21,7 +21,7 @@ impl Frontend {
     /// `fh`. `Tree` drives `read_chunk`, validates the chunk, and learns the
     /// exact size on an EOF-short read; the adapter promotes the learned size to
     /// the inode and replies with the chunk bytes.
-    pub(super) fn read_ranged_handle(
+    pub(super) async fn read_ranged_handle(
         &self,
         ino: u64,
         fh: u64,
@@ -33,7 +33,8 @@ impl Frontend {
             reply.error(Errno::EBADF);
             return;
         };
-        match self.rt.block_on(slot.handle.read(offset, size)) {
+        let _permit = self.acquire_op_permit().await;
+        match slot.handle.read(offset, size).await {
             Ok(chunk) => {
                 if let Some(attrs) = chunk.learned_attrs {
                     if matches!(attrs.stability(), view_types::Stability::Live) {
@@ -61,17 +62,17 @@ impl Frontend {
     /// cascade, the write fence, and learned-size promotion). The rendered bytes
     /// populate the per-`fh` buffer so later reads of the same handle serve
     /// every offset from one buffer.
-    pub(super) fn read_full_handle(
+    pub(super) async fn read_full_handle(
         &self,
         ino: INodeNo,
         fh: FuseFileHandle,
         offset: u64,
         size: u32,
-        live: Option<&InspectorFuseScope>,
+        live_scope: Option<InspectorFuseScope>,
         reply: ReplyData,
     ) {
         let Some(inode_entry) = self.inodes.get(&ino.0) else {
-            if let Some(scope) = live {
+            if let Some(scope) = live_scope.as_ref() {
                 scope.set_outcome(super::errno::inspector_outcome(Errno::ENOENT));
             }
             reply.error(Errno::ENOENT);
@@ -82,6 +83,8 @@ impl Frontend {
         let backing_path = inode_entry.body.backing_path().cloned();
         let meta = inode_entry.meta();
         drop(inode_entry);
+
+        let _permit = self.acquire_op_permit().await;
 
         // Drive the kernel-side invalidation fan-out before the read; `Tree::read`
         // owns the mem/durable cache cascade and the write fence.
@@ -97,7 +100,7 @@ impl Frontend {
                 },
                 Err(e) => {
                     warn!(path = ?rp, err = %e, "backing fs error");
-                    if let Some(scope) = live {
+                    if let Some(scope) = live_scope.as_ref() {
                         scope.set_outcome(super::errno::inspector_outcome(Errno::EIO));
                     }
                     reply.error(Errno::EIO);
@@ -108,9 +111,9 @@ impl Frontend {
 
         let node = Node::new(mount_name, path, meta, omnifs_tree::NodeBody::Provider);
         let ctx = RequestCtx {
-            trace: live.map(InspectorFuseScope::trace_id),
+            trace: live_scope.as_ref().map(InspectorFuseScope::trace_id),
         };
-        match self.rt.block_on(self.tree.read(&node, &ctx)) {
+        match self.tree.read(&node, &ctx).await {
             Ok(ReadResult::Bytes { data, attrs, .. }) => {
                 if let Some(attrs) = attrs {
                     self.promote_inode_attrs(ino.0, attrs);
@@ -125,14 +128,14 @@ impl Frontend {
                 },
                 Err(e) => {
                     warn!(path = ?dir, err = %e, "backing fs error");
-                    if let Some(scope) = live {
+                    if let Some(scope) = live_scope.as_ref() {
                         scope.set_outcome(super::errno::inspector_outcome(Errno::EIO));
                     }
                     reply.error(Errno::EIO);
                 },
             },
             Err(error) => {
-                if let Some(scope) = live {
+                if let Some(scope) = live_scope.as_ref() {
                     scope.set_outcome(super::errno::inspector_outcome(
                         super::errno::tree_error_errno(&error),
                     ));
@@ -149,11 +152,12 @@ impl Frontend {
     /// prefetched whole into the buffer. A backing-fs file and an exact-size full
     /// file open lazily (read on demand). Returns the kernel open flags, or an
     /// `Errno` for a resolution/render failure (e.g. an exhausted control).
-    pub(super) fn open_op(
+    pub(super) async fn open_op(
         &self,
         target: &FullReadTarget,
         trace: Option<TraceId>,
     ) -> Result<FopenFlags, Errno> {
+        let _permit = self.acquire_op_permit().await;
         self.drain_and_evict_pending(&target.mount_name);
 
         // Host-synthesized control / ignore files: re-resolve through `Tree`
@@ -162,7 +166,7 @@ impl Frontend {
         // resolves (ENOENT); a real provider file of the same name is not
         // synthetic and falls through to the normal open path below.
         if target.is_synthetic_candidate()
-            && let Some(flags) = self.open_synthetic(target, trace)?
+            && let Some(flags) = self.open_synthetic_inner(target, trace).await?
         {
             return Ok(flags);
         }
@@ -182,7 +186,7 @@ impl Frontend {
         // returning `None` means the route declared `ranged` but the handler
         // answered full (a provider bug): fall through and serve it as full.
         if target.is_ranged()
-            && let Some(flags) = self.open_ranged_handle(target, &node, trace)?
+            && let Some(flags) = self.open_ranged_handle(target, &node, trace).await?
         {
             return Ok(flags);
         }
@@ -191,7 +195,7 @@ impl Frontend {
         // see a learned size; an exact-size full file opens lazily.
         if target.should_prefetch_full() {
             let ctx = RequestCtx { trace };
-            match self.rt.block_on(self.tree.read(&node, &ctx)) {
+            match self.tree.read(&node, &ctx).await {
                 Ok(ReadResult::Bytes { data, attrs, .. }) => {
                     if let Some(attrs) = attrs {
                         self.promote_inode_attrs(target.ino, attrs);
@@ -216,7 +220,17 @@ impl Frontend {
     /// `Ok(None)` when `Tree` resolves a real provider file of the same name
     /// (caller continues the normal open path), `Err(ENOENT)` when an exhausted
     /// control no longer resolves.
-    pub(super) fn open_synthetic(
+    #[cfg(test)]
+    pub(crate) async fn open_synthetic(
+        &self,
+        target: &FullReadTarget,
+        trace: Option<TraceId>,
+    ) -> Result<Option<FopenFlags>, Errno> {
+        let _permit = self.acquire_op_permit().await;
+        self.open_synthetic_inner(target, trace).await
+    }
+
+    async fn open_synthetic_inner(
         &self,
         target: &FullReadTarget,
         trace: Option<TraceId>,
@@ -229,13 +243,14 @@ impl Frontend {
         // Resolve and render in one runtime entry: a `None` short-circuits when
         // the leaf is a real provider file (the caller falls through), so the
         // read only runs for a genuine synthetic node.
-        let outcome = self.rt.block_on(async {
+        let outcome = async {
             let node = self.tree.resolve_child(&parent, &leaf, &ctx).await?;
             if !node.is_synthetic() {
                 return Ok(None);
             }
             self.tree.read(&node, &ctx).await.map(Some)
-        });
+        }
+        .await;
         match outcome {
             // A real provider file (e.g. a provider-projected `.gitignore`) wins;
             // the caller serves it through the normal read path.
@@ -256,7 +271,7 @@ impl Frontend {
     /// `fh` when the source is ranged, spawning a follow pump for a live file.
     /// `Ok(Some(flags))` => ranged, opened; `Ok(None)` => not a ranged source,
     /// the caller falls through to the full read path.
-    fn open_ranged_handle(
+    async fn open_ranged_handle(
         &self,
         target: &FullReadTarget,
         node: &Node,
@@ -264,8 +279,9 @@ impl Frontend {
     ) -> Result<Option<FopenFlags>, Errno> {
         let ctx = RequestCtx { trace };
         let Some(handle) = self
-            .rt
-            .block_on(self.tree.open(node, &ctx))
+            .tree
+            .open(node, &ctx)
+            .await
             .map_err(|e| super::errno::tree_error_errno(&e))?
         else {
             return Ok(None);

@@ -1,8 +1,8 @@
-//! FUSE `opendir` op boundary: enter the async runtime once, delegate the
-//! listing DECISION to `Tree::list`, then mint the kernel directory snapshot
-//! (inode-allocated) on the neutral `Listing` it returns. Also owns the
-//! backing-filesystem snapshot for resolved treeref/clone/archive directories,
-//! which the renderer reads directly with no provider round trip.
+//! FUSE `opendir` op boundary: delegate the listing DECISION to `Tree::list`,
+//! then mint the kernel directory snapshot (inode-allocated) on the neutral
+//! `Listing` it returns. Also owns the backing-filesystem snapshot for resolved
+//! treeref/clone/archive directories, which the renderer reads directly with no
+//! provider round trip.
 
 use super::Frontend;
 use super::common::{DirSnapshot, InodeBody};
@@ -51,20 +51,22 @@ impl Frontend {
     /// List the provider directory at `(mount, path)` and build its kernel
     /// directory snapshot.
     ///
-    /// Enters the async runtime exactly once (`block_on(Tree::list)`). `Tree`
-    /// owns the cache consult+populate, the serve-cached/`unchanged`/serve-stale
-    /// paths, the reserved-`@` drop, and the host-synthesized `@next`/`@all`
-    /// controls + mount-root ignore files (returned as synthetic entry origins).
+    /// `Tree` owns the cache consult+populate, the
+    /// serve-cached/`unchanged`/serve-stale paths, the reserved-`@` drop, and the
+    /// host-synthesized `@next`/`@all` controls + mount-root ignore files
+    /// (returned as synthetic entry origins).
     /// The adapter only allocates inodes: provider entries clear any prior
     /// synthetic marker, synthetic entries set it. A `Subtree` outcome binds the
     /// backing dir on `ino` and snapshots it from the real filesystem.
-    pub(super) fn opendir_op(
+    pub(super) async fn opendir_op(
         &self,
         mount_name: &str,
         ino: u64,
         path: &Path,
         trace: Option<TraceId>,
     ) -> Result<DirSnapshot, Errno> {
+        let _permit = self.acquire_op_permit().await;
+
         // Drive the kernel-side invalidation fan-out (notify + prune) before the
         // list. The mem eviction happens inside `Tree::drain_invalidations`;
         // `Tree::list`'s own cache consult then sees the post-eviction state.
@@ -73,8 +75,9 @@ impl Frontend {
         let node = Node::provider_dir(mount_name.to_string(), path.clone());
         let ctx = RequestCtx { trace };
         match self
-            .rt
-            .block_on(self.tree.list(&node, None, &ctx))
+            .tree
+            .list(&node, None, &ctx)
+            .await
             .map_err(|e| super::errno::tree_error_errno(&e))?
         {
             ListOutcome::Listing(listing) => {
