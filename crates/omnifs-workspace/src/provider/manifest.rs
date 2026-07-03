@@ -5,7 +5,7 @@ use crate::provider::config::ConfigMetadata;
 use crate::provider::sections::{
     ProviderMetadataError, is_hostname_only, validate_provider_manifest,
 };
-use omnifs_caps::{Grants, Need, domain_matches};
+use omnifs_caps::{AccessNeed, Grants, LimitDeclarations, Limits, domain_matches};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -29,7 +29,9 @@ pub struct ProviderManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<Need>,
+    pub capabilities: Vec<AccessNeed>,
+    #[serde(default, skip_serializing_if = "LimitDeclarations::is_empty")]
+    pub limits: LimitDeclarations,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<ProviderAuthManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,7 +179,10 @@ impl ProviderManifest {
             // allowlist, denying the provider at its first callout. Reject
             // those at the manifest boundary.
             if entry.is_dynamic()
-                && !matches!(entry, Need::UnixSocket { .. } | Need::PreopenedPath { .. })
+                && !matches!(
+                    entry,
+                    AccessNeed::UnixSocket { .. } | AccessNeed::PreopenedPath { .. }
+                )
             {
                 return Err(ProviderMetadataError::Validation(
                     "only unixSocket and preopenedPath capabilities may declare \
@@ -187,6 +192,15 @@ impl ProviderManifest {
                 ));
             }
         }
+        validate_limit_why("limits.maxMemoryMb.why", self.limits.max_memory_mb.as_ref())?;
+        validate_limit_why(
+            "limits.maxFetchBlobBytes.why",
+            self.limits.max_fetch_blob_bytes.as_ref(),
+        )?;
+        validate_limit_why(
+            "limits.maxReadBlobBytes.why",
+            self.limits.max_read_blob_bytes.as_ref(),
+        )?;
         if let Some(auth) = &self.auth {
             auth.validate()?;
             self.validate_auth_inject_domain_coverage(auth)?;
@@ -209,7 +223,7 @@ impl ProviderManifest {
                 let covered = self.capabilities.iter().any(|need| {
                     matches!(
                         need,
-                        Need::Domain {
+                        AccessNeed::Domain {
                             value,
                             dynamic: false,
                             ..
@@ -233,6 +247,24 @@ impl ProviderManifest {
     pub fn provider_capabilities(&self) -> Grants {
         Grants::from_needs(&self.capabilities)
     }
+
+    /// The scalar limits this provider declares, lowered into mount-owned
+    /// runtime values. Used by `omnifs init` to seed a mount's explicit limits;
+    /// never read at serve time as provider defaults.
+    #[must_use]
+    pub fn provider_limits(&self) -> Limits {
+        Limits::from_declarations(&self.limits)
+    }
+}
+
+fn validate_limit_why<T>(
+    field: &str,
+    limit: Option<&omnifs_caps::ResourceLimit<T>>,
+) -> Result<(), ProviderMetadataError> {
+    if let Some(limit) = limit {
+        validate_non_empty(field, &limit.why)?;
+    }
+    Ok(())
 }
 
 fn validate_scheme(key: &str, scheme: &AuthScheme) -> Result<(), ProviderMetadataError> {
@@ -420,24 +452,34 @@ mod tests {
         "defaultMount": "bad"
     }"#;
 
-    const INVALID_MANIFEST_FRACTIONAL_MEMORY: &[u8] = br#"{
+    const INVALID_MANIFEST_MEMORY_CAPABILITY: &[u8] = br#"{
         "id": "bad",
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
         "capabilities": [
-            { "kind": "memoryMb", "value": 1.5, "why": "bad" }
+            { "kind": "memoryMb", "value": 1, "why": "bad" }
         ]
     }"#;
 
-    const INVALID_MANIFEST_OUT_OF_RANGE_MEMORY: &[u8] = br#"{
+    const INVALID_MANIFEST_FRACTIONAL_MEMORY_LIMIT: &[u8] = br#"{
         "id": "bad",
         "displayName": "Bad",
         "provider": "bad.wasm",
         "defaultMount": "bad",
-        "capabilities": [
-            { "kind": "memoryMb", "value": 4294967296, "why": "bad" }
-        ]
+        "limits": {
+            "maxMemoryMb": { "value": 1.5, "why": "bad" }
+        }
+    }"#;
+
+    const INVALID_MANIFEST_OUT_OF_RANGE_MEMORY_LIMIT: &[u8] = br#"{
+        "id": "bad",
+        "displayName": "Bad",
+        "provider": "bad.wasm",
+        "defaultMount": "bad",
+        "limits": {
+            "maxMemoryMb": { "value": 4294967296, "why": "bad" }
+        }
     }"#;
 
     const INVALID_MANIFEST_CONFIG: &[u8] = br#"{
@@ -586,8 +628,8 @@ mod tests {
                 }
             ),
             (
-                "fractional memory capability",
-                INVALID_MANIFEST_FRACTIONAL_MEMORY,
+                "memory capability under capabilities",
+                INVALID_MANIFEST_MEMORY_CAPABILITY,
                 |error: &ProviderMetadataError| {
                     matches!(
                         error,
@@ -596,8 +638,18 @@ mod tests {
                 }
             ),
             (
-                "out-of-range memory capability",
-                INVALID_MANIFEST_OUT_OF_RANGE_MEMORY,
+                "fractional memory limit",
+                INVALID_MANIFEST_FRACTIONAL_MEMORY_LIMIT,
+                |error: &ProviderMetadataError| {
+                    matches!(
+                        error,
+                        ProviderMetadataError::Schema(_) | ProviderMetadataError::Json(_)
+                    )
+                }
+            ),
+            (
+                "out-of-range memory limit",
+                INVALID_MANIFEST_OUT_OF_RANGE_MEMORY_LIMIT,
                 |error: &ProviderMetadataError| {
                     matches!(
                         error,
@@ -679,7 +731,7 @@ mod tests {
         );
 
         let mut wildcard = oauth_provider_manifest();
-        let Need::Domain { value, .. } = &mut wildcard.capabilities[0] else {
+        let AccessNeed::Domain { value, .. } = &mut wildcard.capabilities[0] else {
             panic!("oauth fixture starts with a domain need");
         };
         *value = "*".to_string();

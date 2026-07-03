@@ -308,7 +308,8 @@ fn option_line(manifest: &ProviderManifest) -> String {
 
 /// A compact one-line capability summary for the multi-select row.
 fn capability_summary(manifest: &ProviderManifest) -> Option<String> {
-    if manifest.capabilities.is_empty() {
+    let limits = crate::capability::limit_lines(&manifest.limits);
+    if manifest.capabilities.is_empty() && limits.is_empty() {
         return None;
     }
     let mut parts: Vec<String> = manifest
@@ -323,7 +324,14 @@ fn capability_summary(manifest: &ProviderManifest) -> Option<String> {
             )
         })
         .collect();
-    if manifest.capabilities.len() > 3 {
+    let limit_slots = 3usize.saturating_sub(parts.len());
+    parts.extend(
+        limits
+            .into_iter()
+            .take(limit_slots)
+            .map(|line| format!("limit: {} {}", line.label.to_lowercase(), line.value)),
+    );
+    if manifest.capabilities.len() + crate::capability::limit_lines(&manifest.limits).len() > 3 {
         parts.push("…".into());
     }
     Some(parts.join("; "))

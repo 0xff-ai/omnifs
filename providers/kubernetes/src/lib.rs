@@ -159,16 +159,14 @@ struct PodLogKey {
     id = "kubernetes",
     display_name = "Kubernetes",
     mount = "k8s",
-    capabilities(
-        unix_socket(
-            dynamic,
-            "Talk to the Kubernetes API server through a local `kubectl proxy --unix-socket` endpoint. kubectl terminates TLS and injects the active-context credentials, so the provider issues plain HTTP over the socket and never handles a token."
-        ),
-        memory_mb(
-            256,
-            "Leave room for API discovery across all groups plus large list and manifest payloads."
-        ),
-    )
+    capabilities(unix_socket(
+        dynamic,
+        "Talk to the Kubernetes API server through a local `kubectl proxy --unix-socket` endpoint. kubectl terminates TLS and injects the active-context credentials, so the provider issues plain HTTP over the socket and never handles a token."
+    ),),
+    limits(memory_mb(
+        256,
+        "Leave room for API discovery across all groups plus large list and manifest payloads."
+    ),)
 )]
 impl KubernetesProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {

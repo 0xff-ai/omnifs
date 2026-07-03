@@ -288,20 +288,33 @@ impl InitArgs {
 }
 
 pub(crate) fn print_capability_justifications(manifest: &ProviderManifest) {
-    if manifest.capabilities.is_empty() {
+    let limits = crate::capability::limit_lines(&manifest.limits);
+    if manifest.capabilities.is_empty() && limits.is_empty() {
         return;
     }
 
-    anstream::println!();
-    anstream::println!("{}", crate::style::bold("Provider capabilities"));
-    anstream::println!("{} requires:", manifest.display_name);
-    for entry in &manifest.capabilities {
-        anstream::println!(
-            "  • {}: {}",
-            crate::capability::capability_label(entry),
-            crate::capability::capability_value(entry)
-        );
-        anstream::println!("    {}", crate::style::dim(entry.why()));
+    if !manifest.capabilities.is_empty() {
+        anstream::println!();
+        anstream::println!("{}", crate::style::bold("Provider capabilities"));
+        anstream::println!("{} requires:", manifest.display_name);
+        for entry in &manifest.capabilities {
+            anstream::println!(
+                "  • {}: {}",
+                crate::capability::capability_label(entry),
+                crate::capability::capability_value(entry)
+            );
+            anstream::println!("    {}", crate::style::dim(entry.why()));
+        }
+    }
+
+    if !limits.is_empty() {
+        anstream::println!();
+        anstream::println!("{}", crate::style::bold("Provider limits"));
+        anstream::println!("{} requests:", manifest.display_name);
+        for line in limits {
+            anstream::println!("  • {}: {}", line.label, line.value);
+            anstream::println!("    {}", crate::style::dim(line.why));
+        }
     }
 }
 
@@ -373,7 +386,10 @@ mod tests {
     use super::{AuthImportDecision, InitArgs, MountFile};
     use crate::auth::AuthSelection;
     use crate::workspace::Workspace;
-    use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
+    use omnifs_caps::{
+        Grant, Grants as ProviderCapabilities, LimitDeclarations, Limits as ProviderLimits,
+        PreopenMode, PreopenedPath, ResourceLimit,
+    };
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Name as MountName;
@@ -415,7 +431,13 @@ mod tests {
             capabilities.domains,
             Some(Grant::Literal(vec!["api.linear.app".to_string()])),
         );
-        assert_eq!(capabilities.max_memory_mb, Some(128));
+        assert_eq!(
+            created.limits.expect("limits seeded from manifest"),
+            ProviderLimits {
+                max_memory_mb: Some(128),
+                ..ProviderLimits::default()
+            }
+        );
     }
 
     #[test]
@@ -459,6 +481,10 @@ mod tests {
                     }])),
                     ..ProviderCapabilities::default()
                 }),
+                limits: Some(ProviderLimits {
+                    max_memory_mb: Some(128),
+                    ..ProviderLimits::default()
+                }),
             },
         )
         .into_spec();
@@ -473,6 +499,7 @@ mod tests {
             written["capabilities"]["preopened_paths"][0]["host"],
             "/host/db"
         );
+        assert_eq!(written["limits"]["max_memory_mb"], 128);
     }
 
     #[test]
@@ -661,18 +688,18 @@ mod tests {
             version: None,
             wit_package: None,
             sdk_version: None,
-            capabilities: vec![
-                omnifs_caps::Need::Domain {
-                    value: "api.linear.app".to_string(),
-                    why: "api calls".to_string(),
-                    dynamic: false,
-                },
-                omnifs_caps::Need::MemoryMb {
+            capabilities: vec![omnifs_caps::AccessNeed::Domain {
+                value: "api.linear.app".to_string(),
+                why: "api calls".to_string(),
+                dynamic: false,
+            }],
+            limits: LimitDeclarations {
+                max_memory_mb: Some(ResourceLimit {
                     value: 128,
                     why: "in-memory caching".to_string(),
-                    dynamic: false,
-                },
-            ],
+                }),
+                ..LimitDeclarations::default()
+            },
             auth: Some(ProviderAuthManifest {
                 default: "oauth".to_string(),
                 guidance: BTreeMap::new(),

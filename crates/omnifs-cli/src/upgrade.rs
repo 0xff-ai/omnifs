@@ -10,7 +10,7 @@
 //! | Identical / no newer artifact | Nothing. |
 //! | Additive optional config | Auto-migrate: fill defaults, repin, rewrite the spec file. |
 //! | Breaking config | Hard error: re-init with the new schema. |
-//! | Capability or auth change | Warn and keep the pinned artifact; re-consent via `omnifs init`. |
+//! | Capability, limit, or auth change | Warn and keep the pinned artifact; re-consent via `omnifs init`. |
 //!
 //! Problems are per-mount, never fatal to the whole command: a blocking upgrade
 //! keeps the mount on its known-good pinned artifact (warn, skip), and a pinned
@@ -96,9 +96,13 @@ pub(crate) fn run_upgrade_check(
                     config.source.display(),
                 );
             },
-            UpgradePlan::CapabilityOrAuth { caps, auth } => {
+            UpgradePlan::CapabilityLimitOrAuth {
+                capabilities,
+                limits,
+                auth,
+            } => {
                 let mut parts = Vec::new();
-                for change in &caps {
+                for change in &capabilities {
                     let direction = match change.direction {
                         omnifs_workspace::mounts::CapabilityDirection::Added => "added",
                         omnifs_workspace::mounts::CapabilityDirection::Removed => "removed",
@@ -106,6 +110,16 @@ pub(crate) fn run_upgrade_check(
                     parts.push(format!(
                         "{direction} capability `{}` = `{}`",
                         change.kind, change.value
+                    ));
+                }
+                for change in &limits {
+                    let direction = match change.direction {
+                        omnifs_workspace::mounts::LimitDirection::Added => "added",
+                        omnifs_workspace::mounts::LimitDirection::Removed => "removed",
+                    };
+                    parts.push(format!(
+                        "{direction} limit `{}` = `{}`",
+                        change.name, change.value
                     ));
                 }
                 if let Some(auth) = auth {
@@ -117,7 +131,7 @@ pub(crate) fn run_upgrade_check(
                 }
                 anstream::eprintln!(
                     "warning: mount `{mount}` keeps its pinned `{name}`: a newer artifact changed \
-                     its security surface and needs re-consent.\nChanges: {}\n\
+                     its access or runtime surface and needs re-consent.\nChanges: {}\n\
                      Run `omnifs init {name} --as {mount}` to review and accept the new surface.",
                     parts.join("; "),
                 );

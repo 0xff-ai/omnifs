@@ -6,7 +6,9 @@
     "scheme": "pat"
   },
   "capabilities": {
-    "domains": ["api.linear.app"],
+    "domains": ["api.linear.app"]
+  },
+  "limits": {
     "max_memory_mb": 128
   }
 }

@@ -1,27 +1,22 @@
 //! Human-readable formatting for provider capability manifest entries.
 
-use omnifs_caps::{Need, PreopenMode, PreopenedPath};
+use omnifs_caps::{AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath};
 
-pub(crate) fn capability_label(entry: &Need) -> &'static str {
+pub(crate) fn capability_label(entry: &AccessNeed) -> &'static str {
     match entry {
-        Need::Domain { .. } => "Network domains",
-        Need::GitRepo { .. } => "Git remotes",
-        Need::UnixSocket { .. } => "Unix sockets",
-        Need::PreopenedPath { .. } => "Filesystem preopens",
-        Need::MemoryMb { .. } => "Memory limit",
-        Need::FetchBlobBytes { .. } => "Fetch body limit",
-        Need::ReadBlobBytes { .. } => "Blob read limit",
+        AccessNeed::Domain { .. } => "Network domains",
+        AccessNeed::GitRepo { .. } => "Git remotes",
+        AccessNeed::UnixSocket { .. } => "Unix sockets",
+        AccessNeed::PreopenedPath { .. } => "Filesystem preopens",
     }
 }
 
-pub(crate) fn capability_value(entry: &Need) -> String {
+pub(crate) fn capability_value(entry: &AccessNeed) -> String {
     let value = match entry {
-        Need::Domain { value, .. }
-        | Need::GitRepo { value, .. }
-        | Need::UnixSocket { value, .. } => value.clone(),
-        Need::PreopenedPath { value, .. } => preopen_summary(value),
-        Need::MemoryMb { value, .. } => format!("{value} MiB"),
-        Need::FetchBlobBytes { value, .. } | Need::ReadBlobBytes { value, .. } => value.to_string(),
+        AccessNeed::Domain { value, .. }
+        | AccessNeed::GitRepo { value, .. }
+        | AccessNeed::UnixSocket { value, .. } => value.clone(),
+        AccessNeed::PreopenedPath { value, .. } => preopen_summary(value),
     };
     if entry.is_dynamic() {
         format!("{value} (config-dependent)")
@@ -36,4 +31,36 @@ fn preopen_summary(entry: &PreopenedPath) -> String {
         PreopenMode::Rw => "rw",
     };
     format!("{} -> {} ({mode})", entry.host, entry.guest)
+}
+
+pub(crate) struct LimitLine<'a> {
+    pub(crate) label: &'static str,
+    pub(crate) value: String,
+    pub(crate) why: &'a str,
+}
+
+pub(crate) fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine<'_>> {
+    let mut lines = Vec::new();
+    if let Some(limit) = &limits.max_memory_mb {
+        lines.push(LimitLine {
+            label: "Memory limit",
+            value: format!("{} MiB", limit.value),
+            why: &limit.why,
+        });
+    }
+    if let Some(limit) = &limits.max_fetch_blob_bytes {
+        lines.push(LimitLine {
+            label: "Fetch body limit",
+            value: limit.value.to_string(),
+            why: &limit.why,
+        });
+    }
+    if let Some(limit) = &limits.max_read_blob_bytes {
+        lines.push(LimitLine {
+            label: "Blob read limit",
+            value: limit.value.to_string(),
+            why: &limit.why,
+        });
+    }
+    lines
 }

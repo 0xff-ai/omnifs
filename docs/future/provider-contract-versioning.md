@@ -113,18 +113,18 @@ new provider candidate. The flow is:
 3. Choose a new provider candidate from the catalog, usually through
    `latest_by_name(old.meta.name)`.
 4. Load the new candidate's `ProviderManifest`.
-5. Compare the manifest surfaces directly: config metadata, capabilities, auth
-   declaration, and any future declarative migration hints.
+5. Compare the manifest surfaces directly: config metadata, capabilities,
+   limits, auth declaration, and any future declarative migration hints.
 6. Ask the user to approve what is changing and to provide any missing values.
 7. Rewrite the mount with migrated config, the chosen credential binding, and
    the new `ProviderRef`.
 
 The comparison is best effort and host-driven. Additive config with defaults can
 be migrated mechanically. Required or renamed config needs user input.
-Capability or auth changes require explicit user approval because they change
-the provider authority the mount was initialized with. Provider-supplied
-imperative migration code remains out of scope unless separately approved as a
-new provider authority.
+Capability, scalar limit, or auth changes require explicit user approval
+because they change the provider authority or runtime ceiling the mount was
+initialized with. Provider-supplied imperative migration code remains out of
+scope unless separately approved as a new provider authority.
 
 ## What dies
 
@@ -149,13 +149,14 @@ deleted contract model.
 
 ## Required capabilities and over-grant
 
-The manifest declares only what a provider *needs* (`caps::Need`); it is never a
-runtime grant source. A mount spec's `capabilities` block carries the explicit
-*grants* (`caps::Grants`), seeded from the manifest's needs at `omnifs init`
-(`Grants::from_needs`) and owned by the spec thereafter. The host resolves those
-grants into the enforcement allowlist (`CapabilityChecker::from_config`,
-resolving dynamic markers such as a unix socket from the mount endpoint). So the
-spec, not the provider's own declaration, bounds the grant.
+The manifest declares only what provider access *needs*
+(`caps::AccessNeed`); it is never a runtime grant source. A mount spec's
+`capabilities` block carries the explicit *grants* (`caps::Grants`), seeded from
+the manifest's needs at `omnifs init` (`Grants::from_needs`) and owned by the
+spec thereafter. The host resolves those grants into the enforcement allowlist
+(`CapabilityChecker::from_config`, resolving dynamic markers such as a unix
+socket from the mount endpoint). So the spec, not the provider's own
+declaration, bounds the grant.
 
 **Required capabilities (enforced).** At provider start `materialize` rejects a
 spec whose grants do not satisfy every capability the manifest declares the
@@ -166,9 +167,14 @@ missing grant would otherwise surface as a denied callout at the provider's
 first request, so the mount fails fast at start instead. Narrowing a glob
 (`git@github.com:*` to a concrete repo) still satisfies; a dynamic need is met
 only by a dynamic grant of the same kind. Scalar resource limits (memory, blob
-bytes) are out of scope: they carry host defaults and fail as resource
-exhaustion, not access denial. The check never weakens the trust boundary, it
-only guarantees a provider is not under-provisioned, so it is not a gated change.
+bytes) live in manifest `limits` and mount-spec `limits`; they are not inputs to
+`Grants::satisfies` and fail as resource exhaustion, not access denial. The
+check never weakens the trust boundary, it only guarantees a provider is not
+under-provisioned, so it is not a gated change.
+
+Limit changes still require explicit re-consent during upgrade because they
+change runtime ceilings, but they are reported separately from capability
+changes.
 
 **Over-grant (deferred).** Nothing enforces `spec grants ⊆ manifest needs`, so a
 hand-authored or hand-edited spec can grant a provider more reach (extra HTTP

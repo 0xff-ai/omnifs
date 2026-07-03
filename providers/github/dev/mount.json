@@ -7,7 +7,9 @@
   },
   "capabilities": {
     "domains": ["api.github.com"],
-    "git_repos": ["git@github.com:*"],
+    "git_repos": ["git@github.com:*"]
+  },
+  "limits": {
     "max_memory_mb": 256
   }
 }

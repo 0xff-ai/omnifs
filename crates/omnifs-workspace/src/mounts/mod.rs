@@ -16,7 +16,8 @@ pub mod upgrade;
 pub use auth::{Auth, AuthKind, OAuth, StaticToken};
 pub use name::{Name, NameError};
 pub use upgrade::{
-    AddedField, AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, UpgradePlan,
+    AddedField, AuthDelta, CapabilityChange, CapabilityDirection, FieldChange, LimitChange,
+    LimitDirection, UpgradePlan,
 };
 
 use std::collections::BTreeMap;
@@ -28,7 +29,7 @@ use crate::ids::{ProviderName, ProviderRef};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Catalog, CatalogError, ProviderManifest};
-use omnifs_caps::Grants;
+use omnifs_caps::{Grants, Limits};
 
 /// Raw user-authored mount JSON.
 ///
@@ -48,6 +49,8 @@ pub struct Spec {
     pub auth: Option<Auth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Grants>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
     /// Opaque provider config. The provider owns its meaning, so the host keeps
     /// it as a free-form value and never parses it.
     #[serde(rename = "config", skip_serializing_if = "Option::is_none")]
@@ -159,10 +162,10 @@ impl Spec {
     }
 
     /// Fill manifest-declared auth-scheme and config defaults into any field the
-    /// user left unset. Capabilities are never filled here: the manifest
-    /// declares needs, never grants; `omnifs init` writes explicit grants and
-    /// the spec owns them. Identity is never touched: the provider name lives in
-    /// `self.provider.meta.name`, not here.
+    /// user left unset. Capabilities and limits are never filled here: the
+    /// manifest declares needs and scalar defaults; `omnifs init` writes
+    /// explicit grants and limits, and the spec owns them. Identity is never
+    /// touched: the provider name lives in `self.provider.meta.name`, not here.
     pub fn apply_provider_metadata(
         &mut self,
         manifest: &crate::provider::ProviderManifest,
@@ -779,6 +782,10 @@ mod tests {
         assert!(
             !written.contains("capabilities"),
             "absent capabilities omitted: {written}"
+        );
+        assert!(
+            !written.contains("limits"),
+            "absent limits omitted: {written}"
         );
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert!(

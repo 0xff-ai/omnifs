@@ -16,7 +16,7 @@
     "capabilities": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/Need"
+        "$ref": "#/$defs/AccessNeed"
       }
     },
     "config": {
@@ -37,6 +37,9 @@
     },
     "id": {
       "type": "string"
+    },
+    "limits": {
+      "$ref": "#/$defs/LimitDeclarations"
     },
     "provider": {
       "description": "Filename of the provider WASM component.",
@@ -72,6 +75,111 @@
     "defaultMount"
   ],
   "$defs": {
+    "AccessNeed": {
+      "description": "One access capability a provider *needs*, declared via `capabilities(..)` in\n`#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`\nsection. A need is never a grant: the host checks a mount's [`Grants`]\nagainst these, it never grants from them at runtime.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "domain"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "gitRepo"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "unixSocket"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "preopenedPath"
+            },
+            "value": {
+              "$ref": "#/$defs/PreopenedPath"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        }
+      ]
+    },
     "AuthScheme": {
       "oneOf": [
         {
@@ -328,191 +436,42 @@
         "value"
       ]
     },
-    "Need": {
-      "description": "One capability a provider *needs*, declared via `capabilities(..)` in\n`#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`\nsection. A need is never a grant: the host checks a mount's [`Grants`]\nagainst these, it never grants from them at runtime.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
+    "LimitDeclarations": {
+      "description": "Scalar resource limits declared by a provider manifest.",
+      "type": "object",
+      "properties": {
+        "maxFetchBlobBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceLimit2"
             },
-            "kind": {
-              "type": "string",
-              "const": "domain"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
+            {
+              "type": "null"
             }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
           ]
         },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
+        "maxMemoryMb": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceLimit"
             },
-            "kind": {
-              "type": "string",
-              "const": "gitRepo"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
+            {
+              "type": "null"
             }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
           ]
         },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
+        "maxReadBlobBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceLimit2"
             },
-            "kind": {
-              "type": "string",
-              "const": "unixSocket"
-            },
-            "value": {
-              "type": "string"
-            },
-            "why": {
-              "type": "string"
+            {
+              "type": "null"
             }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "preopenedPath"
-            },
-            "value": {
-              "$ref": "#/$defs/PreopenedPath"
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "memoryMb"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "fetchBlobBytes"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "dynamic": {
-              "type": "boolean",
-              "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "readBlobBytes"
-            },
-            "value": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 0
-            },
-            "why": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "value",
-            "why"
           ]
         }
-      ]
+      },
+      "additionalProperties": false
     },
     "OAuthFlow": {
       "oneOf": [
@@ -727,6 +686,44 @@
       "required": [
         "default",
         "schemes"
+      ]
+    },
+    "ResourceLimit": {
+      "description": "A scalar resource ceiling a provider declares in its manifest.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "why": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "why"
+      ]
+    },
+    "ResourceLimit2": {
+      "description": "A scalar resource ceiling a provider declares in its manifest.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "why": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "why"
       ]
     },
     "SchemeGuidance": {

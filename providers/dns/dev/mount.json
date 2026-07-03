@@ -2,7 +2,9 @@
   "provider": "dns",
   "mount": "dns",
   "capabilities": {
-    "domains": ["cloudflare-dns.com", "dns.google"],
+    "domains": ["cloudflare-dns.com", "dns.google"]
+  },
+  "limits": {
     "max_memory_mb": 32
   }
 }

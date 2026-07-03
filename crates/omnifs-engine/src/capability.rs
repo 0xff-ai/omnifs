@@ -13,9 +13,6 @@ use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::ConfigMetadata;
 
-/// Default sandbox memory budget when a mount grants no explicit limit.
-const DEFAULT_MAX_MEMORY_MB: u32 = 64;
-
 /// Wraps the resolved [`Allowlist`] and gates provider callouts against it. The
 /// decision logic is `omnifs-caps`; this type is where the host enforces it.
 pub struct CapabilityChecker {
@@ -81,9 +78,6 @@ fn allowlist_from_config(
     Allowlist {
         domains: literal(grants.and_then(|g| g.domains.as_ref())),
         git_repos: literal(grants.and_then(|g| g.git_repos.as_ref())),
-        max_memory_mb: grants
-            .and_then(|g| g.max_memory_mb)
-            .unwrap_or(DEFAULT_MAX_MEMORY_MB),
         needs_git: provider_caps.needs_git,
         unix_sockets,
     }

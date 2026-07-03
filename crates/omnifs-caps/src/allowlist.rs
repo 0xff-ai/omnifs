@@ -18,7 +18,6 @@ use crate::matching::{domain_matches, glob_covers};
 pub struct Allowlist {
     pub domains: Vec<String>,
     pub git_repos: Vec<String>,
-    pub max_memory_mb: u32,
     pub needs_git: bool,
     /// Absolute unix socket paths the provider may open via `unix:` URLs. Empty
     /// means no socket is allowed.
@@ -179,7 +178,6 @@ mod tests {
         Allowlist {
             domains: domains.into_iter().map(String::from).collect(),
             git_repos: Vec::new(),
-            max_memory_mb: 64,
             needs_git: false,
             unix_sockets: sockets.into_iter().map(PathBuf::from).collect(),
         }

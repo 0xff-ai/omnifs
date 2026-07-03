@@ -2,7 +2,9 @@
   "provider": "oura",
   "mount": "oura",
   "capabilities": {
-    "domains": ["api.ouraring.com"],
+    "domains": ["api.ouraring.com"]
+  },
+  "limits": {
     "max_memory_mb": 128
   }
 }

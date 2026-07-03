@@ -416,19 +416,14 @@ interface types {
         description: string,
     }
 
-    /// A capability the provider declares it needs (the manifest "needs" side;
-    /// the mount spec grants the matching capability and the host enforces the
-    /// grant). Mirrors `omnifs-caps` `Need`. String-valued kinds (domain, git
-    /// repo, unix socket, preopened path) carry `value`; scalar kinds (memory,
-    /// blob byte budgets) carry `amount`.
-    variant capability-need {
+    /// An authority-bearing capability the provider declares it needs (the
+    /// manifest "needs" side; the mount spec grants the matching capability
+    /// and the host enforces the grant). Mirrors `omnifs-caps` `AccessNeed`.
+    variant access-need {
         domain(string-need),
         git-repo(string-need),
         unix-socket(string-need),
         preopened-path(string-need),
-        memory-mb(scalar-need),
-        fetch-blob-bytes(scalar-need),
-        read-blob-bytes(scalar-need),
     }
 
     record string-need {
@@ -439,10 +434,15 @@ interface types {
         dynamic: bool,
     }
 
-    record scalar-need {
+    record scalar-limit {
         amount: u64,
         why: string,
-        dynamic: bool,
+    }
+
+    record provider-limits {
+        max-memory-mb: option<scalar-limit>,
+        max-fetch-blob-bytes: option<scalar-limit>,
+        max-read-blob-bytes: option<scalar-limit>,
     }
 
     /// The provider manifest: the versioned provider/host contract describing
@@ -460,7 +460,8 @@ interface types {
         /// Provider crate version (`CARGO_PKG_VERSION`); catalog/UI context,
         /// never identity.
         version: string,
-        capabilities: list<capability-need>,
+        capabilities: list<access-need>,
+        limits: provider-limits,
         /// Serialized JSON Schema of the provider config, derived at build time
         /// via schemars. `none` for a provider with no config.
         config-schema: option<string>,

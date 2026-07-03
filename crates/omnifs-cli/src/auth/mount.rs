@@ -31,8 +31,10 @@ impl AuthSelection {
             provider: reference.clone(),
             mount: mount_name.to_string(),
             root_mount: false,
+            revalidate: true,
             auth: None,
             capabilities: None,
+            limits: None,
             config_raw: None,
         };
         spec.apply_provider_metadata(manifest, ProviderMetadataInheritance::auth())

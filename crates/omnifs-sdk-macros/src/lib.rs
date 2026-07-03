@@ -32,11 +32,12 @@ mod util;
 /// `(&mut Router<State>)` and returns `Result<State>`. `Config` and `State`
 /// are inferred from the `start` signature.
 ///
-/// The manifest (identity, capabilities, config metadata, auth) is authored from
-/// these arguments, the config type's static metadata, and static auth metadata.
-/// The macro lowers it into `Provider::METADATA` and emits the JSON bytes into
-/// the `omnifs.provider-metadata.v1` custom section. There is no hand-written
-/// `omnifs.provider.json` and no host-side metadata postprocessor.
+/// The manifest (identity, access capabilities, scalar limits, config metadata,
+/// auth) is authored from these arguments, the config type's static metadata,
+/// and static auth metadata. The macro lowers it into `Provider::METADATA` and
+/// emits the JSON bytes into the `omnifs.provider-metadata.v1` custom section.
+/// There is no hand-written `omnifs.provider.json` and no host-side metadata
+/// postprocessor.
 ///
 /// Arguments:
 ///
@@ -45,11 +46,13 @@ mod util;
 ///   wasm filename comes from `CARGO_PKG_NAME` and the version from
 ///   `CARGO_PKG_VERSION`.
 /// - `capabilities(domain("v", "why"), git_repo("v", "why"),
-///   unix_socket(dynamic, "why"), preopened_path(dynamic, "why"),
-///   memory_mb(<int>, "why"))`: the declared capability needs. `unix_socket` and
-///   `preopened_path` are dynamic, resolved at mount-start from the
+///   unix_socket(dynamic, "why"), preopened_path(dynamic, "why"))`: the declared
+///   authority needs. `unix_socket` and `preopened_path` are dynamic, resolved
+///   at mount-start from the
 ///   [`HostSocket`](../omnifs_sdk/struct.HostSocket.html) /
 ///   [`HostFile`](../omnifs_sdk/struct.HostFile.html) config field binding.
+/// - `limits(memory_mb(<int>, "why"))`: scalar runtime ceilings seeded into new
+///   mount specs separately from access grants.
 /// - `auth = <expr>`: a typed static [`omnifs_sdk::auth::Auth`](../omnifs_sdk/auth/struct.Auth.html)
 ///   value included in `Provider::METADATA`.
 /// - The config metadata is derived from the inferred or explicit config type's
