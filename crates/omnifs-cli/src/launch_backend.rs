@@ -18,8 +18,8 @@ use anyhow::Result;
 #[cfg(feature = "daemon")]
 use omnifs_daemon::DaemonArgs;
 
-use crate::config::{Config, ConfiguredBackend};
-use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE, env_string};
+use crate::config::{Config, ConfiguredBackend, resolve_setting};
+use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContainerName(String);
@@ -123,10 +123,13 @@ impl DockerTarget {
         container_name: Option<String>,
         config: &Config,
     ) -> anyhow::Result<ContainerName> {
-        match container_name.or_else(|| env_string(ENV_CONTAINER_NAME)) {
-            Some(name) => ContainerName::new(name),
-            None => Self::container_name_from_config(config),
-        }
+        let name = resolve_setting(
+            container_name,
+            ENV_CONTAINER_NAME,
+            || config.system.container_name.clone(),
+            CONTAINER_NAME.to_string(),
+        );
+        ContainerName::new(name)
     }
 
     pub(crate) fn container_name(&self) -> &ContainerName {
@@ -138,10 +141,13 @@ impl DockerTarget {
     }
 
     fn resolve_image(image: Option<String>, config: &Config) -> anyhow::Result<ImageRef> {
-        match image.or_else(|| env_string(ENV_IMAGE)) {
-            Some(image) => ImageRef::new(image),
-            None => Self::image_from_config(config),
-        }
+        let image = resolve_setting(
+            image,
+            ENV_IMAGE,
+            || config.system.image.clone(),
+            IMAGE.to_string(),
+        );
+        ImageRef::new(image)
     }
 
     fn container_name_from_config(config: &Config) -> anyhow::Result<ContainerName> {
