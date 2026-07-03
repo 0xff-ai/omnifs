@@ -6,16 +6,14 @@ use omnifs_auth::oauth_request_from_config;
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::Auth;
-use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::ids::ProviderRef;
+use omnifs_workspace::mounts::{Auth, Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
 use crate::credential_target::CredentialTarget;
 use crate::session::MountConfig;
-use omnifs_workspace::mounts::Name as MountName;
-
 /// Auth mode chosen during `omnifs init` before a mount config exists on disk.
 #[derive(Clone, Debug)]
 pub(crate) struct AuthSelection {
@@ -25,17 +23,26 @@ pub(crate) struct AuthSelection {
 }
 
 impl AuthSelection {
-    pub(crate) fn from_provider_default(manifest: &ProviderManifest) -> Option<Self> {
-        let auth = manifest.auth.as_ref()?;
-        let (key, scheme) = auth.default_scheme()?;
-        let auth_type = match scheme {
-            AuthScheme::StaticToken(_) => AuthKind::StaticToken,
-            _ => AuthKind::OAuth,
+    pub(crate) fn from_provider_default(
+        reference: &ProviderRef,
+        mount_name: &MountName,
+        manifest: &ProviderManifest,
+    ) -> Option<Self> {
+        let mut spec = Spec {
+            provider: reference.clone(),
+            mount: mount_name.to_string(),
+            root_mount: false,
+            auth: None,
+            capabilities: None,
+            config_raw: None,
         };
+        spec.apply_provider_metadata(manifest, ProviderMetadataInheritance::auth())
+            .ok()?;
+        let auth = spec.auth.as_ref()?;
         Some(Self {
-            auth_type,
-            scheme: Some(key.to_owned()),
-            account: None,
+            auth_type: auth.kind(),
+            scheme: auth.scheme().map(str::to_owned),
+            account: auth.account().map(str::to_owned),
         })
     }
 

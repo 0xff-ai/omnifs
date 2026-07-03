@@ -109,7 +109,7 @@ impl InitArgs {
             ))?;
         let reference = provider.reference();
         let auth_manifest = manifest.wasm_auth_manifest();
-        let default_auth = AuthSelection::from_provider_default(manifest);
+        let default_auth = AuthSelection::from_provider_default(&reference, &mount_name, manifest);
         if interactive {
             print_capability_justifications(manifest);
         }
@@ -118,7 +118,7 @@ impl InitArgs {
                 "`omnifs init --no-input` cannot complete OAuth. Run `omnifs init {provider_name}` interactively."
             );
         }
-        let creator = MountSpecCreator::new(manifest);
+        let creator = MountSpecCreator::new(&reference, &mount_name, manifest);
         if self.no_input && creator.requires_prompt() {
             anyhow::bail!(
                 "`omnifs init --no-input` cannot complete provider config prompts for `{provider_name}`. Run `omnifs init {provider_name}` interactively."
@@ -370,8 +370,9 @@ pub(crate) async fn run_static_token_init(
 #[cfg(test)]
 mod tests {
     use super::spec_creation::{CreatedMountSpec, MountSpecCreator};
-    use super::{AuthImportDecision, MountFile};
+    use super::{AuthImportDecision, InitArgs, MountFile};
     use crate::auth::AuthSelection;
+    use crate::workspace::Workspace;
     use omnifs_caps::{Grant, Grants as ProviderCapabilities, PreopenMode, PreopenedPath};
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
     use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
@@ -397,7 +398,11 @@ mod tests {
             }],
         });
 
-        let created = MountSpecCreator::new(&manifest).create(false).unwrap();
+        let reference = provider_ref("linear");
+        let mount_name = MountName::try_from("linear").unwrap();
+        let created = MountSpecCreator::new(&reference, &mount_name, &manifest)
+            .create(false)
+            .unwrap();
 
         assert_eq!(
             created.config,
@@ -429,7 +434,9 @@ mod tests {
             }],
         });
 
-        assert!(MountSpecCreator::new(&manifest).requires_prompt());
+        let reference = provider_ref("linear");
+        let mount_name = MountName::try_from("linear").unwrap();
+        assert!(MountSpecCreator::new(&reference, &mount_name, &manifest).requires_prompt());
     }
 
     #[test]
@@ -466,6 +473,42 @@ mod tests {
             written["capabilities"]["preopened_paths"][0]["host"],
             "/host/db"
         );
+    }
+
+    #[test]
+    fn init_dns_writes_snapshot_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::from_layout(
+            omnifs_workspace::layout::WorkspaceLayout::under_root(dir.path()),
+        );
+        let args = InitArgs {
+            provider: Some("dns".to_string()),
+            as_name: None,
+            no_input: true,
+            reauth: false,
+            yes: true,
+            no_browser: true,
+            token: None,
+            token_env: None,
+            scopes: Vec::new(),
+        };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(args.run_in_workspace(&workspace))
+            .unwrap();
+
+        let spec = std::fs::read_to_string(workspace.layout().mounts_dir.join("dns.json")).unwrap();
+        // The provider content id hashes the built wasm, which differs across
+        // build environments; normalize it before the byte comparison.
+        let parsed: serde_json::Value = serde_json::from_str(&spec).unwrap();
+        let id = parsed["provider"]["id"].as_str().unwrap();
+        assert_eq!(id.len(), 64, "content id must be 64 hex chars: {id}");
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        let normalized = spec.replace(id, "<PROVIDER_ID>");
+        assert_eq!(normalized, include_str!("snapshots/init_dns_spec.json"));
     }
 
     #[test]

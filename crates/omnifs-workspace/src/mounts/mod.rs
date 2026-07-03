@@ -52,6 +52,55 @@ pub struct Spec {
     pub config_raw: Option<serde_json::Value>,
 }
 
+/// Selects which manifest-declared defaults [`Spec::apply_provider_metadata`]
+/// folds into a spec.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderMetadataInheritance<'a> {
+    auth: bool,
+    config: ConfigInheritance<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfigInheritance<'a> {
+    None,
+    All,
+    Additive(&'a [AddedField]),
+}
+
+impl<'a> ProviderMetadataInheritance<'a> {
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            auth: true,
+            config: ConfigInheritance::All,
+        }
+    }
+
+    #[must_use]
+    pub const fn auth() -> Self {
+        Self {
+            auth: true,
+            config: ConfigInheritance::None,
+        }
+    }
+
+    #[must_use]
+    pub const fn config() -> Self {
+        Self {
+            auth: false,
+            config: ConfigInheritance::All,
+        }
+    }
+
+    #[must_use]
+    pub const fn additive_config(added: &'a [AddedField]) -> Self {
+        Self {
+            auth: false,
+            config: ConfigInheritance::Additive(added),
+        }
+    }
+}
+
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false`, so a
 /// `Registry`-written spec matches the compact authored form (no `root_mount`
 /// key unless the mount is a root mount).
@@ -103,8 +152,10 @@ impl Spec {
     pub fn apply_provider_metadata(
         &mut self,
         manifest: &crate::provider::ProviderManifest,
+        inheritance: ProviderMetadataInheritance<'_>,
     ) -> Result<(), serde_json::Error> {
-        if self.auth.is_none()
+        if inheritance.auth
+            && self.auth.is_none()
             && let Some(auth) = &manifest.auth
             && let Some(default_scheme) = auth.scheme(&auth.default)
         {
@@ -122,10 +173,32 @@ impl Spec {
                 crate::authn::AuthScheme::None => None,
             };
         }
-        if let Some(config) = manifest.config.as_ref()
-            && self.config_raw.is_none()
-        {
-            self.config_raw = Some(config.defaults());
+        match inheritance.config {
+            ConfigInheritance::None => {},
+            ConfigInheritance::All => {
+                if let Some(config) = manifest.config.as_ref()
+                    && self.config_raw.is_none()
+                {
+                    self.config_raw = Some(config.defaults());
+                }
+            },
+            ConfigInheritance::Additive(added) => {
+                // Fill additive upgrade defaults without overwriting user values.
+                // Existing non-object config is replaced by the additive object,
+                // matching the former upgrade path.
+                let mut config = match self.config_raw.take() {
+                    Some(serde_json::Value::Object(map)) => map,
+                    _ => serde_json::Map::new(),
+                };
+                for field in added {
+                    if !config.contains_key(&field.name)
+                        && let Some(default) = &field.default
+                    {
+                        config.insert(field.name.clone(), default.clone());
+                    }
+                }
+                self.config_raw = (!config.is_empty()).then_some(serde_json::Value::Object(config));
+            },
         }
         Ok(())
     }
@@ -497,7 +570,8 @@ mod tests {
         let manifest = linear_manifest();
         let mut cfg = spec_with_provider("linear", r#"{ "mount": "linear" }"#);
 
-        cfg.apply_provider_metadata(&manifest).unwrap();
+        cfg.apply_provider_metadata(&manifest, ProviderMetadataInheritance::all())
+            .unwrap();
 
         assert_eq!(cfg.provider_name().as_str(), "linear");
         let auth = cfg
