@@ -753,4 +753,42 @@ mod tests {
             "every emit should have advanced the sequence counter"
         );
     }
+
+    /// A fetch callout carrying an Authorization header and a query string emits
+    /// a redacted summary: the query is stripped, and no header material can
+    /// appear because the emitted record is built only from the method and the
+    /// redacted host + path. Freezes the inspector-stream redaction guarantee.
+    #[test]
+    fn fetch_callout_summary_strips_query_and_authorization() {
+        let callout = wit_types::Callout::Fetch(wit_types::HttpRequest {
+            method: "GET".to_string(),
+            url: "https://api.github.com/repos/o/r?access_token=secret-token&page=2".to_string(),
+            headers: vec![wit_types::Header {
+                name: "Authorization".to_string(),
+                value: "Bearer super-secret".to_string(),
+            }],
+            body: None,
+        });
+
+        let summary = WitCalloutView(&callout).summary();
+
+        assert_eq!(
+            summary, "GET api.github.com/repos/o/r",
+            "the emitted summary is method + host + path only"
+        );
+        assert!(
+            !summary.contains('?'),
+            "no query string survives: {summary}"
+        );
+        assert!(
+            !summary.contains("access_token") && !summary.contains("secret-token"),
+            "no query secret survives: {summary}"
+        );
+        assert!(
+            !summary.contains("Authorization")
+                && !summary.contains("super-secret")
+                && !summary.contains("Bearer"),
+            "no Authorization header material appears: {summary}"
+        );
+    }
 }

@@ -959,6 +959,40 @@ mod tests {
         assert!(matches!(missing_state, AuthError::MissingState));
     }
 
+    /// The loopback callback listener accepts only GET (a browser redirect never
+    /// issues anything else): a POST is answered 405 and surfaces as
+    /// `InvalidCallback`, so a stray non-GET request never completes the flow.
+    #[tokio::test]
+    async fn loopback_callback_rejects_non_get_method() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"POST /callback?code=c&state=s HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+
+        let result = accept_callback_request(&listener).await;
+        assert!(
+            matches!(result, Err(AuthError::InvalidCallback)),
+            "a non-GET callback is rejected as InvalidCallback"
+        );
+
+        let response = client.await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 405"),
+            "the client receives 405 Method Not Allowed, got: {response}"
+        );
+    }
+
     #[tokio::test]
     async fn csrf_state_mismatch_is_rejected() {
         let fake = FakeAuthServer::start(FakeBehavior {
