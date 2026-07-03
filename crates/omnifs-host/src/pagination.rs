@@ -23,12 +23,12 @@
 //!   limit; the worst case is one extra page (or the cap) per control read.
 
 use super::{Error, Runtime};
+use omnifs_api::events::TraceId;
 use omnifs_cache::{Record as CacheRecord, RecordKind};
 use omnifs_core::path::Path;
 use omnifs_core::view::{
     DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability,
 };
-use omnifs_inspector::TraceId;
 use omnifs_wit::provider::types as wit_types;
 use tracing::warn;
 

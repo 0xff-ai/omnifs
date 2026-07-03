@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
+/// JSONL activity-event schema and redaction for the inspector observability
+/// subsystem: the daemon emits [`events::InspectorRecord`] lines and the CLI
+/// `inspect` command reads them. This is the events half of the same control-plane
+/// wire contract the REST DTOs below describe.
+pub mod events;
+
 /// Control API major version. The CLI refuses to talk to a daemon with a
 /// different major. Bump when routes or payloads change incompatibly.
 pub const API_MAJOR: u16 = 1;

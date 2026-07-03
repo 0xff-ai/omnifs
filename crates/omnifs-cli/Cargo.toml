@@ -23,7 +23,6 @@ omnifs-mount = { workspace = true }
 omnifs-provider = { workspace = true }
 omnifs-creds = { workspace = true }
 omnifs-auth = { workspace = true }
-omnifs-inspector = { workspace = true }
 omnifs-core = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"

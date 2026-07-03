@@ -105,13 +105,13 @@ pub fn run_plain(source: SourceKind) -> anyhow::Result<()> {
 
 fn emit_plain_line(line: &str) {
     use super::format_record;
-    use omnifs_inspector::parse_record_line;
+    use omnifs_api::events::InspectorRecord;
 
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
     }
-    match parse_record_line(trimmed) {
+    match InspectorRecord::parse_line(trimmed) {
         Ok(record) => anstream::println!("{}", format_record(&record)),
         Err(_) => anstream::println!("{trimmed}"),
     }

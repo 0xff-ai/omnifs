@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
-use omnifs_inspector::{
+use omnifs_api::events::{
     CacheKind, CalloutKind, InspectorEvent, InspectorLineWriter, InspectorOutcome, InspectorRecord,
     OpEnd, OutcomeFields, TraceId,
 };
@@ -563,10 +563,10 @@ impl WitCalloutView<'_> {
     fn summary(&self) -> String {
         match self.0 {
             wit_types::Callout::Fetch(req) => {
-                omnifs_inspector::redact_http_url_for_summary(req.method.as_str(), &req.url)
+                omnifs_api::events::redact_http_url_for_summary(req.method.as_str(), &req.url)
             },
             wit_types::Callout::FetchBlob(req) => {
-                let key = if omnifs_inspector::summary_is_cache_key_shaped(&req.cache_key) {
+                let key = if omnifs_api::events::summary_is_cache_key_shaped(&req.cache_key) {
                     req.cache_key.as_str()
                 } else {
                     "redacted"
@@ -576,7 +576,7 @@ impl WitCalloutView<'_> {
             wit_types::Callout::GitOpenRepo(req) => {
                 format!(
                     "git.open_repo {}",
-                    omnifs_inspector::redact_git_remote(&req.clone_url)
+                    omnifs_api::events::redact_git_remote(&req.clone_url)
                 )
             },
             wit_types::Callout::OpenArchive(req) => {

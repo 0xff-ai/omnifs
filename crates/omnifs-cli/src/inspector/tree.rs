@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use omnifs_inspector::TraceId;
+use omnifs_api::events::TraceId;
 
 /// How recent a node's last touch has to be to stay in the visible
 /// tree under active-focus pruning. Tunable: small enough to keep

@@ -1,6 +1,6 @@
 //! Format [`InspectorEvent`] records for terminal output.
 
-use omnifs_inspector::{CacheKind, InspectorEvent, InspectorRecord, TraceId};
+use omnifs_api::events::{CacheKind, InspectorEvent, InspectorRecord, TraceId};
 
 /// Map a wire `CacheKind` to the user-facing display label. The wire
 /// schema distinguishes browse/file/blob tiers so a debugger can see

@@ -7,9 +7,9 @@
 use super::Frontend;
 use super::common::{DirSnapshot, InodeBody};
 use fuser::Errno;
+use omnifs_api::events::TraceId;
 use omnifs_core::path::Path;
 use omnifs_core::view::EntryKind;
-use omnifs_inspector::TraceId;
 use omnifs_tree::{EntryOrigin, ListOutcome, Listing, Node, RequestCtx};
 use std::path::Path as StdPath;
 

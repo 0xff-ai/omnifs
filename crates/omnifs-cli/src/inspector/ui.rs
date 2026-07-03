@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use omnifs_inspector::InspectorOutcome;
+use omnifs_api::events::InspectorOutcome;
 
 use super::app::{App, ConnectionMode, PaneFocus};
 use super::filter::FilterMode;
@@ -295,7 +295,7 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let trace_ids = app.visible_trace_ids();
-    let blocks: Vec<(omnifs_inspector::TraceId, Vec<Line<'static>>)> = trace_ids
+    let blocks: Vec<(omnifs_api::events::TraceId, Vec<Line<'static>>)> = trace_ids
         .iter()
         .filter_map(|&tid| {
             let op = app.operation(tid)?;
@@ -337,8 +337,8 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
 /// Pick the starting block index so the selected trace's block fits in
 /// `capacity` rows. Returns 0 when nothing is selected or already in view.
 fn scroll_start_for_selected(
-    blocks: &[(omnifs_inspector::TraceId, Vec<Line<'static>>)],
-    selected: Option<omnifs_inspector::TraceId>,
+    blocks: &[(omnifs_api::events::TraceId, Vec<Line<'static>>)],
+    selected: Option<omnifs_api::events::TraceId>,
     capacity: usize,
 ) -> usize {
     let Some(sel) = selected else { return 0 };
