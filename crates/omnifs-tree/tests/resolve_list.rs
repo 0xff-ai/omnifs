@@ -163,15 +163,15 @@ async fn list_root_yields_known_children() {
         .collect();
     // Verified against providers/test/src/lib.rs route registrations on this
     // branch: the root projects items, hello, scoped, the /dynamic capture
-    // prefix, and the checkout treeref. (The blueprint cited 4 from a stale
-    // runtime_test.rs:47 that predates the /dynamic route; the host's own
-    // test_list_root is failing the same way on feat/omnifs-nfs.)
-    assert_eq!(names.len(), 5, "got {names:?}");
+    // prefix, the checkout treeref, and the slow delay route the concurrency
+    // net added.
+    assert_eq!(names.len(), 6, "got {names:?}");
     assert!(names.contains(&"items"));
     assert!(names.contains(&"hello"));
     assert!(names.contains(&"scoped"));
     assert!(names.contains(&"checkout"));
     assert!(names.contains(&"dynamic"));
+    assert!(names.contains(&"slow"));
     assert_eq!(
         synthetic_names,
         [".gitignore", ".ignore", ".rgignore"],
