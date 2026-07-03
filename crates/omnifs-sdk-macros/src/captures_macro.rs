@@ -1,7 +1,9 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Fields, GenericArgument, ItemStruct, LitStr, PathArguments, Type, TypePath};
+use syn::{Fields, ItemStruct, LitStr, Type, TypePath};
+
+use crate::util::generic_type_arg;
 
 fn option_inner_type(ty: &Type) -> Option<&Type> {
     let Type::Path(type_path) = ty else {
@@ -11,12 +13,7 @@ fn option_inner_type(ty: &Type) -> Option<&Type> {
         return None;
     }
     let segment = type_path.path.segments.last()?;
-    let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
-    };
-    let Some(GenericArgument::Type(inner)) = args.args.first() else {
-        return None;
-    };
+    let inner = generic_type_arg(segment, 0)?;
     let idents: Vec<String> = type_path
         .path
         .segments
@@ -39,13 +36,7 @@ fn facet_inner_type(ty: &Type) -> Option<&Type> {
     if segment.ident != "Facet" {
         return None;
     }
-    let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
-    };
-    let Some(GenericArgument::Type(inner)) = args.args.first() else {
-        return None;
-    };
-    Some(inner)
+    generic_type_arg(segment, 0)
 }
 
 struct FieldSpec {

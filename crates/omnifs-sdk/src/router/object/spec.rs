@@ -1,7 +1,7 @@
 //! Object route specification and face registration.
 
 use super::super::handlers::{RouteValidator, captures_validator};
-use super::super::pattern::{Pattern, parse_pattern};
+use super::super::pattern::Pattern;
 use super::dispatch::{
     BoxedFaceOpen, BoxedFaceRead, FaceHandler, LiveFaceKind, ObjectLeaf, ResolvedChildView,
 };
@@ -246,7 +246,7 @@ pub(in crate::router) struct CollectionDecl {
 
 impl<O: Object> ObjectBlock<O> {
     fn new(template: &'static str, shape: AnchorShape) -> Result<Self> {
-        parse_pattern(template)?;
+        Pattern::parse(template)?;
         Ok(Self {
             template,
             shape,
@@ -377,7 +377,7 @@ impl<O: Object> ObjectBlock<O> {
         if self.shape == AnchorShape::File {
             return Ok(());
         }
-        let pattern = parse_pattern(&format!("{}/{}", self.template.trim_end_matches('/'), name))?;
+        let pattern = Pattern::parse(&format!("{}/{}", self.template.trim_end_matches('/'), name))?;
         self.leaf_claims.push(pattern);
         Ok(())
     }

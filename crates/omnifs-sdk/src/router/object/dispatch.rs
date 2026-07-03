@@ -2,7 +2,7 @@
 
 use super::super::descriptor::RouteKind;
 use super::super::handlers::{RouteValidator, captures_validator};
-use super::super::pattern::{CaptureLocation, Pattern, parse_pattern};
+use super::super::pattern::{CaptureLocation, Pattern};
 use super::serve::ObjectRoute;
 use super::spec::{AnchorShape, CollectionHandler, DeriveFn, ObjectSpec};
 use crate::browse::{CachedCanonical, Effects, ReadOutcome};
@@ -283,7 +283,7 @@ fn mounted_leaf_claims<O: Object>(
         return Ok(claims);
     }
     for leaf in &spec.leaves {
-        claims.push(parse_pattern(&format!("{mount}/{}", leaf.leaf_name()))?);
+        claims.push(Pattern::parse(&format!("{mount}/{}", leaf.leaf_name()))?);
     }
     Ok(claims)
 }

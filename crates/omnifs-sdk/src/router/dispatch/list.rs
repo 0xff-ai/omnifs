@@ -4,8 +4,8 @@ use crate::browse::List;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::handler::{Cursor, DirCx, DirIntent};
+use omnifs_core::path::Path;
 
-use super::super::pattern::parse_provider_path;
 use super::super::register::Router;
 
 impl<S> Router<S> {
@@ -42,7 +42,8 @@ impl<S> Router<S> {
             "list_children expects an absolute path"
         );
         let _ = cached_validator;
-        let abs = parse_provider_path(path)?;
+        let abs =
+            Path::parse(path).map_err(|error| ProviderError::invalid_input(error.to_string()))?;
         let shape = self.shape();
 
         if let Some(route) = shape.treeref_route(&abs) {
