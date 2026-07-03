@@ -2,10 +2,10 @@ use crate::adapter::Export;
 use crate::error::NfsFrontendError;
 use crate::server::start_server;
 use omnifs_host::registry::ProviderRegistry;
-use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use omnifs_mtab::proc_mounts;
+use omnifs_mtab::{NfsMountState, Platform, StateError, StateFile, UnmountCommand};
 use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,9 +20,6 @@ const UNMOUNT_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
 const STATE_DIR_MODE: u32 = 0o700;
-#[cfg(unix)]
-const STATE_FILE_MODE: u32 = 0o600;
-
 #[derive(Debug, Clone)]
 pub struct NfsMountOptions {
     pub bind: SocketAddr,
@@ -40,27 +37,6 @@ impl NfsMountOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NfsMountState {
-    pub version: u8,
-    pub mount_point: PathBuf,
-    pub addr: String,
-    pub pid: u32,
-}
-
-impl NfsMountState {
-    const VERSION: u8 = 1;
-
-    fn current(mount_point: &Path, addr: SocketAddr) -> Self {
-        Self {
-            version: Self::VERSION,
-            mount_point: mount_point.to_path_buf(),
-            addr: addr.to_string(),
-            pid: std::process::id(),
-        }
-    }
-}
-
 pub fn mount_blocking(
     mount_point: &Path,
     registry: &Arc<ProviderRegistry>,
@@ -73,7 +49,8 @@ pub fn mount_blocking(
     let signal_rx = ctrl_c_receiver(&rt);
     let export = Arc::new(Export::new(rt, Arc::clone(registry)));
     let server = start_server(export, options.bind, options.trace_path.clone())?;
-    let _state_file = write_state(mount_point, server.addr(), options)?;
+    let _state_file =
+        StateFile::write(mount_point, server.addr(), &options.state_dir).map_err(state_error)?;
     mount_client(mount_point, server.addr())?;
 
     tracing::info!(
@@ -96,51 +73,15 @@ pub fn mount_blocking(
 }
 
 pub fn unmount(mount_point: &Path) -> Result<(), NfsFrontendError> {
-    UnmountCommand::for_platform(mount_point).run()
+    UnmountCommand::graceful(Platform::current(), mount_point)
+        .run()
+        .map_err(|error| NfsFrontendError::Unmount(error.to_string()))
 }
 
-pub fn read_mount_states(state_dir: &Path) -> Result<Vec<NfsMountState>, NfsFrontendError> {
-    let entries = match std::fs::read_dir(state_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-
-    let mut states = Vec::new();
-    for path in paths {
-        match read_mount_state_file(&path) {
-            Ok(Some(state)) => states.push(state),
-            Ok(None) => {},
-            Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "failed to read NFS mount state file"
-                );
-            },
-        }
-    }
-    Ok(states)
-}
-
-fn read_mount_state_file(path: &Path) -> Result<Option<NfsMountState>, NfsFrontendError> {
-    let file = std::fs::File::open(path)?;
-    let state = serde_json::from_reader::<_, NfsMountState>(file)
-        .map_err(|error| NfsFrontendError::State(error.to_string()))?;
-    if state.version == NfsMountState::VERSION {
-        Ok(Some(state))
-    } else {
-        Ok(None)
+fn state_error(error: StateError) -> NfsFrontendError {
+    match error {
+        StateError::Io(error) => error.into(),
+        StateError::Json(error) => NfsFrontendError::State(error.to_string()),
     }
 }
 
@@ -156,71 +97,6 @@ fn mount_client(mount_point: &Path, addr: SocketAddr) -> Result<(), NfsFrontendE
         Err(NfsFrontendError::Mount(
             "automatic NFSv4 mount is not implemented on this platform".to_string(),
         ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UnmountCommand {
-    program: &'static str,
-    args: Vec<OsString>,
-    failure_context: &'static str,
-}
-
-impl UnmountCommand {
-    #[cfg(target_os = "macos")]
-    fn for_platform(mount_point: &Path) -> Self {
-        Self::macos(mount_point)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn for_platform(mount_point: &Path) -> Self {
-        Self::linux(mount_point)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    fn for_platform(mount_point: &Path) -> Self {
-        let _ = mount_point;
-        Self {
-            program: "false",
-            args: Vec::new(),
-            failure_context: "automatic NFS unmount is not implemented on this platform",
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn macos(mount_point: &Path) -> Self {
-        Self {
-            program: "diskutil",
-            args: vec![
-                OsString::from("unmount"),
-                mount_point.as_os_str().to_owned(),
-            ],
-            failure_context: "diskutil unmount",
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn linux(mount_point: &Path) -> Self {
-        Self {
-            program: "umount",
-            args: vec![mount_point.as_os_str().to_owned()],
-            failure_context: "umount",
-        }
-    }
-
-    fn run(&self) -> Result<(), NfsFrontendError> {
-        let status = Command::new(self.program)
-            .args(&self.args)
-            .status()
-            .map_err(|error| NfsFrontendError::Unmount(error.to_string()))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(NfsFrontendError::Unmount(format!(
-                "{} exited with {status}",
-                self.failure_context
-            )))
-        }
     }
 }
 
@@ -410,7 +286,14 @@ fn mount_table_entries() -> std::io::Result<Vec<MountTableEntry>> {
 
 #[cfg(target_os = "linux")]
 fn mount_table_entries() -> std::io::Result<Vec<MountTableEntry>> {
-    std::fs::read_to_string("/proc/mounts").map(|mounts| parse_proc_mounts(&mounts))
+    std::fs::read_to_string("/proc/mounts").map(|mounts| {
+        proc_mounts::parse(&mounts)
+            .into_iter()
+            .map(|entry| MountTableEntry {
+                mount_point: PathBuf::from(entry.mount_point),
+            })
+            .collect()
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -421,47 +304,6 @@ fn mount_table_entries() -> std::io::Result<Vec<MountTableEntry>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MountTableEntry {
     mount_point: PathBuf,
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_mounts(contents: &str) -> Vec<MountTableEntry> {
-    contents
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let _source = fields.next()?;
-            let mount_point = fields.next()?;
-            Some(MountTableEntry {
-                mount_point: PathBuf::from(decode_proc_mount_field(mount_point)),
-            })
-        })
-        .collect()
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn decode_proc_mount_field(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut out = String::with_capacity(field.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && bytes[i + 1].is_ascii_digit()
-            && bytes[i + 2].is_ascii_digit()
-            && bytes[i + 3].is_ascii_digit()
-        {
-            let octal = &field[i + 1..i + 4];
-            if let Ok(value) = u8::from_str_radix(octal, 8) {
-                out.push(char::from(value));
-                i += 4;
-                continue;
-            }
-        }
-
-        out.push(char::from(bytes[i]));
-        i += 1;
-    }
-    out
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -610,53 +452,6 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFrontendError> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct StateFile {
-    path: PathBuf,
-}
-
-impl Drop for StateFile {
-    fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %error,
-                "failed to remove NFS mount state file"
-            );
-        }
-    }
-}
-
-fn write_state(
-    mount_point: &Path,
-    addr: SocketAddr,
-    mount_options: &NfsMountOptions,
-) -> Result<StateFile, NfsFrontendError> {
-    let state_dir = &mount_options.state_dir;
-    let name = format!("mount-{}-{}.json", std::process::id(), addr.port());
-    let path = state_dir.join(name);
-    let mut file_options = OpenOptions::new();
-    file_options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        file_options.mode(STATE_FILE_MODE);
-    }
-    let mut file = file_options.open(&path)?;
-    let state = NfsMountState::current(mount_point, addr);
-    serde_json::to_writer_pretty(&mut file, &state)
-        .map_err(|error| NfsFrontendError::State(error.to_string()))?;
-    writeln!(file)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(STATE_FILE_MODE))?;
-    }
-    Ok(StateFile { path })
-}
-
 fn sweep_stale_states(state_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(state_dir) else {
         return;
@@ -666,9 +461,12 @@ fn sweep_stale_states(state_dir: &Path) {
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let Ok(Some(state)) = read_mount_state_file(&path) else {
+        let Ok(state) = NfsMountState::read_file(&path) else {
             continue;
         };
+        if state.version != NfsMountState::VERSION {
+            continue;
+        }
         if !pid_alive(state.pid) {
             let _ = std::fs::remove_file(path);
         }
@@ -688,10 +486,10 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, ensure_private_state_dir,
-        mount_table_contains, parse_macos_mounts, parse_proc_mounts, read_mount_states,
-        write_state,
+        MountCommand, MountOptions, MountTableEntry, ensure_private_state_dir,
+        mount_table_contains, parse_macos_mounts,
     };
+    use omnifs_mtab::{NfsMountState, StateFile};
     use serde_json::Value;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
@@ -755,22 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn proc_mounts_decode_exact_mount_points() {
-        let mounts = parse_proc_mounts("127.0.0.1:/omnifs /tmp/omnifs\\040mount nfs4 rw 0 0\n");
-        assert_eq!(
-            mounts,
-            vec![MountTableEntry {
-                mount_point: PathBuf::from("/tmp/omnifs mount"),
-            }]
-        );
-        assert!(mount_table_contains(
-            &mounts,
-            Path::new("/tmp/omnifs mount")
-        ));
-        assert!(!mount_table_contains(&mounts, Path::new("/tmp/omnifs")));
-    }
-
-    #[test]
     fn macos_mount_parser_extracts_exact_mount_points() {
         let mounts =
             parse_macos_mounts("127.0.0.1:/omnifs on /Volumes/omnifs mount (nfs, nodev, noexec)\n");
@@ -791,14 +573,13 @@ mod tests {
     fn state_file_is_json_and_removed_on_drop() {
         let temp = tempfile::tempdir().expect("tempdir");
         ensure_private_state_dir(temp.path()).expect("state dir");
-        let options = NfsMountOptions::loopback(temp.path().to_path_buf());
-        let guard = write_state(
+        let guard = StateFile::write(
             Path::new("/mnt/omnifs"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2049),
-            &options,
+            temp.path(),
         )
         .expect("state file");
-        let path = guard.path.clone();
+        let path = guard.path().to_path_buf();
         let state: Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read state")).expect("json");
 
@@ -806,7 +587,7 @@ mod tests {
         assert_eq!(state["mount_point"], "/mnt/omnifs");
         assert_eq!(state["addr"], "127.0.0.1:2049");
         assert!(state["pid"].as_u64().is_some());
-        let states = read_mount_states(temp.path()).expect("mount states");
+        let states = NfsMountState::read_all(temp.path()).expect("mount states");
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].mount_point, PathBuf::from("/mnt/omnifs"));
 

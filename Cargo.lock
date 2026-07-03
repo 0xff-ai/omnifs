@@ -2906,6 +2906,7 @@ dependencies = [
  "omnifs-daemon",
  "omnifs-home",
  "omnifs-mount",
+ "omnifs-mtab",
  "omnifs-nfs",
  "omnifs-provider",
  "owo-colors",
@@ -2969,6 +2970,7 @@ dependencies = [
  "omnifs-home",
  "omnifs-host",
  "omnifs-mount",
+ "omnifs-mtab",
  "omnifs-nfs",
  "serde_json",
  "tokio",
@@ -3118,6 +3120,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-mtab"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "omnifs-nfs"
 version = "0.2.1"
 dependencies = [
@@ -3127,6 +3138,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-host",
  "omnifs-mount",
+ "omnifs-mtab",
  "omnifs-provider",
  "omnifs-tree",
  "omnifs-wit",

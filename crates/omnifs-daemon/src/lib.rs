@@ -8,8 +8,6 @@
 mod app;
 mod context;
 mod frontends;
-#[cfg(target_os = "linux")]
-mod proc_mounts;
 mod server;
 
 pub use app::{DaemonArgs, FrontendKind, run};
