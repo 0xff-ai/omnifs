@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -56,6 +57,26 @@ impl Config {
     pub fn backend(&self) -> ConfiguredBackend {
         self.system.runtime.unwrap_or(ConfiguredBackend::Native)
     }
+}
+
+/// Resolve one setting through the single CLI precedence chain:
+/// CLI flag > env var > config file > built-in default.
+///
+/// The env var is read through [`crate::session::env_string`] (an empty value
+/// counts as unset) and parsed into `T`; an unset, empty, or unparseable value
+/// falls through to the config source and finally the default. Every CLI
+/// setting resolves through this one chain so precedence lives in a single
+/// place. `from_config` is a thunk rather than a `Fn(&Config)` so callers with
+/// no config source (e.g. the daemon control address) can pass `|| None`.
+pub(crate) fn resolve_setting<T: FromStr>(
+    flag: Option<T>,
+    env: &str,
+    from_config: impl FnOnce() -> Option<T>,
+    default: T,
+) -> T {
+    flag.or_else(|| crate::session::env_string(env).and_then(|value| value.parse().ok()))
+        .or_else(from_config)
+        .unwrap_or(default)
 }
 
 pub struct ConfigFile {
