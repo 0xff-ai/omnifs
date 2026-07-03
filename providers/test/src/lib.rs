@@ -41,6 +41,11 @@ struct DynamicCaptures {
     name: String,
 }
 
+#[omnifs_sdk::path_captures]
+struct SlowCaptures {
+    ms: u64,
+}
+
 // ===========================================================================
 // Object family: `Item`
 // ===========================================================================
@@ -360,6 +365,10 @@ impl TestProvider {
         // to prove independent ops interleave on one instance.
         r.file("/hello/remote-a").handler(remote)?;
         r.file("/hello/remote-b").handler(remote)?;
+        // A read parked on a slow upstream: the frontend concurrency net holds
+        // the callout answer for `{ms}` to prove one slow op cannot block the
+        // mount.
+        r.file("/slow/{ms}").ranged().handler(slow)?;
         r.file("/hello/ranged").ranged().handler(ranged)?;
         r.file("/hello/unknown-ranged")
             .ranged()
@@ -475,6 +484,56 @@ async fn fresh_full(cx: Cx<State>) -> Result<FileProjection> {
 async fn remote(cx: Cx<State>) -> Result<FileProjection> {
     let resp = cx.http().get("https://httpbin.org/get").send().await?;
     Ok(FileProjection::body(resp.into_body()).dynamic().build())
+}
+
+/// A file whose read stays in flight for `{ms}` milliseconds (capped at 10s).
+///
+/// The file is ranged so the slowness lands on the read op itself: opening it
+/// is cheap, and the first chunk read suspends on an HTTP callout that the
+/// frontend concurrency tests hold open for the requested delay, with the
+/// host's callout-capture harness playing the slow upstream. Keeping the open
+/// fast matters on macOS NFS, whose client serializes OPENs mount-wide, so a
+/// file that is slow to open would measure client protocol behavior instead of
+/// frontend dispatch. Against a real network the URL is httpbin's delay
+/// endpoint, whose 10-second ceiling matches the cap (it takes whole seconds,
+/// so the requested delay rounds up).
+async fn slow(_cx: Cx<State>, captures: SlowCaptures) -> Result<FileProjection> {
+    let ms = captures.ms.min(10_000);
+    Ok(FileProjection::ranged(SlowReader { ms })
+        .size(Size::Unknown)
+        .dynamic()
+        .build())
+}
+
+/// Range reader for `slow/{ms}`: the first chunk performs the delayed HTTP
+/// callout and serves the response body as the whole file.
+#[derive(Clone, Debug)]
+struct SlowReader {
+    ms: u64,
+}
+
+impl RangeReader for SlowReader {
+    fn read_chunk<'a>(
+        &'a self,
+        cx: &'a Cx<()>,
+        offset: u64,
+        length: u32,
+    ) -> BoxFuture<'a, FileChunk> {
+        Box::pin(async move {
+            let secs = self.ms.div_ceil(1000);
+            let resp = cx
+                .http()
+                .get(format!("https://httpbin.org/delay/{secs}"))
+                .send()
+                .await?;
+            let body = resp.into_body();
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(body.len());
+            let end = start.saturating_add(length as usize).min(body.len());
+            Ok(FileChunk::new(body[start..end].to_vec(), end >= body.len()))
+        })
+    }
 }
 
 // ===========================================================================

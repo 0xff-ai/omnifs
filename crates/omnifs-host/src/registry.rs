@@ -86,11 +86,34 @@ impl ProviderRegistry {
         if self.instances.read().contains_key(&mount) {
             return Err(RegistryError::DuplicateMount(mount));
         }
-        let built = self.build_mount(spec)?;
+        let built = self.build_mount(spec, false)?;
         self.publish_new_mount(built, handle)
     }
 
-    fn build_mount(&self, spec: &Spec) -> Result<BuiltMount, RegistryError> {
+    /// Test-support twin of [`ProviderRegistry::add_mount`]: the mount's
+    /// runtime is built with [`Runtime::new_for_callout_tests`], so HTTP and
+    /// blob-fetch callouts suspend until the test answers them through
+    /// [`Runtime::try_recv_test_callout`]. Lets a live frontend test park a
+    /// provider read on a slow upstream the test itself controls.
+    #[doc(hidden)]
+    pub fn add_mount_for_callout_tests(
+        &self,
+        spec: &Spec,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Arc<Runtime>, RegistryError> {
+        let mount = spec.mount.clone();
+        if self.instances.read().contains_key(&mount) {
+            return Err(RegistryError::DuplicateMount(mount));
+        }
+        let built = self.build_mount(spec, true)?;
+        self.publish_new_mount(built, handle)
+    }
+
+    fn build_mount(
+        &self,
+        spec: &Spec,
+        capture_test_callouts: bool,
+    ) -> Result<BuiltMount, RegistryError> {
         omnifs_core::mount::Name::new(spec.mount.clone())
             .map_err(|error| RegistryError::ConfigError(format!("invalid mount name: {error}")))?;
         let mount = spec.mount.clone();
@@ -103,14 +126,25 @@ impl ProviderRegistry {
         let is_root = spec.root_mount;
 
         // Instantiation compiles WASM; keep it outside the instances lock.
-        let runtime = Runtime::new(
-            &self.engine,
-            &wasm_path,
-            spec,
-            self.cloner.clone(),
-            &self.context,
-            &self.caches,
-        )
+        let runtime = if capture_test_callouts {
+            Runtime::new_for_callout_tests(
+                &self.engine,
+                &wasm_path,
+                spec,
+                self.cloner.clone(),
+                &self.context,
+                &self.caches,
+            )
+        } else {
+            Runtime::new(
+                &self.engine,
+                &wasm_path,
+                spec,
+                self.cloner.clone(),
+                &self.context,
+                &self.caches,
+            )
+        }
         .map_err(|error| registry_error(&mount, error))?;
         Ok(BuiltMount {
             mount,
@@ -301,7 +335,7 @@ impl ProviderRegistry {
             reason,
         } = work;
         let started = Instant::now();
-        match self.build_mount(&spec) {
+        match self.build_mount(&spec, false) {
             Ok(built) => LoadResult::Ready {
                 mount,
                 wasm_path,

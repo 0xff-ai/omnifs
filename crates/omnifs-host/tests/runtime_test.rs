@@ -71,7 +71,7 @@ async fn test_list_root() {
         .unwrap();
     match result {
         ListChildrenResult::Entries(listing) => {
-            assert_eq!(listing.entries.len(), 5);
+            assert_eq!(listing.entries.len(), 6);
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -82,7 +82,7 @@ async fn test_list_root() {
             assert!(names.contains(&"scoped"));
             assert!(names.contains(&"dynamic"));
             assert!(names.contains(&"checkout"));
-            assert!(names.contains(&"dynamic"));
+            assert!(names.contains(&"slow"));
             assert!(
                 listing
                     .entries
