@@ -1,6 +1,6 @@
 # CLI experience masterplan
 
-Status: companion to `docs/future/bluesky-rewrite.md`. That plan fixes the CLI's structure (module ownership, backend identity, command hygiene); this one defines the experience the structure serves. Items marked (WS3)/(WS4)/(WS5) ride those workstreams; items marked (P2) are the post-rework phase and must not be scaffolded early.
+Status: companion to the bluesky CLI rework plan, which is no longer tracked in the repo. That plan fixes the CLI's structure (module ownership, backend identity, command hygiene); this one defines the experience the structure serves. Items marked (WS3)/(WS4)/(WS5) ride those workstreams; items marked (P2) are the post-rework phase and must not be scaffolded early.
 
 ## North star
 
