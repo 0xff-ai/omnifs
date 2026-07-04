@@ -91,6 +91,8 @@ fn auth() -> ProviderAuthManifest {
             "git@github.com:*",
             "Clone repository contents over SSH when browsing repo paths."
         ),
+    ),
+    limits(
         memory_mb(
             256,
             "Leave room for larger GitHub API payloads and repository tree projections."

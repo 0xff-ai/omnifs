@@ -104,10 +104,7 @@ pub(crate) fn scan_provider_configs(
                 .as_ref()
                 .and_then(|caps| caps.git_repos.as_ref())
                 .map_or(0, |grant| grant.literal().len()),
-            max_memory_mb: spec
-                .capabilities
-                .as_ref()
-                .and_then(|caps| caps.max_memory_mb),
+            max_memory_mb: spec.limits.as_ref().and_then(|limits| limits.max_memory_mb),
         }));
     }
     providers

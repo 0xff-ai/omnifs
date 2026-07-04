@@ -1,5 +1,6 @@
-//! The capability data model: what a provider needs, what a mount grants, and
-//! the literal-or-dynamic grant shape they share.
+//! The capability and limit data model: what provider access a mount grants,
+//! what scalar resource ceilings a mount applies, and the literal-or-dynamic
+//! grant shape access declarations share.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,10 +87,9 @@ pub struct PreopenedPath {
     pub mode: PreopenMode,
 }
 
-/// The capabilities a mount spec grants a provider. The spec, not the manifest,
-/// is the runtime grant authority; the manifest declares [`Need`]s only. Each
-/// list-valued field is a [`Grant`] (literal or dynamic); scalar resource
-/// limits are plain values.
+/// The access capabilities a mount spec grants a provider. The spec, not the
+/// manifest, is the runtime grant authority; the manifest declares
+/// [`AccessNeed`]s only. Each field is a [`Grant`] (literal or dynamic).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
 pub struct Grants {
     #[serde(default)]
@@ -100,21 +100,79 @@ pub struct Grants {
     pub unix_sockets: Option<Grant<String>>,
     #[serde(default)]
     pub preopened_paths: Option<Grant<PreopenedPath>>,
-    #[serde(default)]
+}
+
+/// A scalar resource ceiling a provider declares in its manifest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLimit<T> {
+    pub value: T,
+    pub why: String,
+}
+
+/// Scalar resource limits declared by a provider manifest.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LimitDeclarations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<ResourceLimit<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fetch_blob_bytes: Option<ResourceLimit<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_read_blob_bytes: Option<ResourceLimit<u64>>,
+}
+
+impl LimitDeclarations {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.max_memory_mb.is_none()
+            && self.max_fetch_blob_bytes.is_none()
+            && self.max_read_blob_bytes.is_none()
+    }
+}
+
+/// Runtime scalar resource ceilings owned by a mount spec.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ToSchema)]
+pub struct Limits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_mb: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fetch_blob_bytes: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_read_blob_bytes: Option<u64>,
 }
 
-/// One capability a provider *needs*, declared via `capabilities(..)` in
+impl Limits {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.max_memory_mb.is_none()
+            && self.max_fetch_blob_bytes.is_none()
+            && self.max_read_blob_bytes.is_none()
+    }
+
+    #[must_use]
+    pub fn from_declarations(declarations: &LimitDeclarations) -> Self {
+        Self {
+            max_memory_mb: declarations.max_memory_mb.as_ref().map(|limit| limit.value),
+            max_fetch_blob_bytes: declarations
+                .max_fetch_blob_bytes
+                .as_ref()
+                .map(|limit| limit.value),
+            max_read_blob_bytes: declarations
+                .max_read_blob_bytes
+                .as_ref()
+                .map(|limit| limit.value),
+        }
+    }
+}
+
+/// One access capability a provider *needs*, declared via `capabilities(..)` in
 /// `#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`
 /// section. A need is never a grant: the host checks a mount's [`Grants`]
 /// against these, it never grants from them at runtime.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum Need {
+pub enum AccessNeed {
     Domain {
         value: String,
         why: String,
@@ -139,27 +197,9 @@ pub enum Need {
         #[serde(default)]
         dynamic: bool,
     },
-    MemoryMb {
-        value: u32,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    FetchBlobBytes {
-        value: u64,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
-    ReadBlobBytes {
-        value: u64,
-        why: String,
-        #[serde(default)]
-        dynamic: bool,
-    },
 }
 
-impl Need {
+impl AccessNeed {
     /// The provider's justification for needing this capability.
     #[must_use]
     pub fn why(&self) -> &str {
@@ -167,10 +207,7 @@ impl Need {
             Self::Domain { why, .. }
             | Self::GitRepo { why, .. }
             | Self::UnixSocket { why, .. }
-            | Self::PreopenedPath { why, .. }
-            | Self::MemoryMb { why, .. }
-            | Self::FetchBlobBytes { why, .. }
-            | Self::ReadBlobBytes { why, .. } => why,
+            | Self::PreopenedPath { why, .. } => why,
         }
     }
 
@@ -182,10 +219,7 @@ impl Need {
             Self::Domain { dynamic, .. }
             | Self::GitRepo { dynamic, .. }
             | Self::UnixSocket { dynamic, .. }
-            | Self::PreopenedPath { dynamic, .. }
-            | Self::MemoryMb { dynamic, .. }
-            | Self::FetchBlobBytes { dynamic, .. }
-            | Self::ReadBlobBytes { dynamic, .. } => *dynamic,
+            | Self::PreopenedPath { dynamic, .. } => *dynamic,
         }
     }
 
@@ -200,17 +234,13 @@ impl Need {
             Self::GitRepo { .. } => "gitRepo",
             Self::UnixSocket { .. } => "unixSocket",
             Self::PreopenedPath { .. } => "preopenedPath",
-            Self::MemoryMb { .. } => "memoryMb",
-            Self::FetchBlobBytes { .. } => "fetchBlobBytes",
-            Self::ReadBlobBytes { .. } => "readBlobBytes",
         }
     }
 
     /// The capability value rendered for display: the literal value for access
-    /// kinds, `host -> guest` for a preopen, the number for a scalar limit. The
-    /// dynamic marker is not included; callers that surface dynamic-ness append
-    /// it. Shared so a preopen renders the same way in every host-facing
-    /// message.
+    /// kinds and `host -> guest` for a preopen. The dynamic marker is not
+    /// included; callers that surface dynamic-ness append it. Shared so a
+    /// preopen renders the same way in every host-facing message.
     #[must_use]
     pub fn value(&self) -> String {
         match self {
@@ -218,16 +248,13 @@ impl Need {
             | Self::GitRepo { value, .. }
             | Self::UnixSocket { value, .. } => value.clone(),
             Self::PreopenedPath { value, .. } => format!("{} -> {}", value.host, value.guest),
-            Self::MemoryMb { value, .. } => value.to_string(),
-            Self::FetchBlobBytes { value, .. } | Self::ReadBlobBytes { value, .. } => {
-                value.to_string()
-            },
         }
     }
 }
 
-/// A capability a provider's manifest needs that a mount's [`Grants`] do not
-/// satisfy, surfaced when an under-granted mount is rejected at provider start.
+/// An access capability a provider's manifest needs that a mount's [`Grants`]
+/// do not satisfy, surfaced when an under-granted mount is rejected at provider
+/// start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub kind: &'static str,
@@ -252,13 +279,13 @@ mod tests {
         assert!(dynamic.is_dynamic());
         assert!(dynamic.literal().is_empty());
 
-        let omitted: Need = serde_json::from_str(
+        let omitted: AccessNeed = serde_json::from_str(
             r#"{"kind":"domain","value":"api.example.com","why":"fetch data"}"#,
         )
         .unwrap();
         assert!(!omitted.is_dynamic());
 
-        let explicit: Need = serde_json::from_str(
+        let explicit: AccessNeed = serde_json::from_str(
             r#"{"kind":"unixSocket","value":"configured socket","dynamic":true,"why":"connect"}"#,
         )
         .unwrap();

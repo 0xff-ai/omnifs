@@ -91,8 +91,8 @@ struct ResolverReverseKey {
 }
 
 // ===========================================================================
-// Provider. Capabilities (resolver domains, memory) are declared via
-// `capabilities(..)` in `#[omnifs_sdk::provider]`; no `events(..)` needed.
+// Provider. Capabilities and limits are declared in `#[omnifs_sdk::provider]`;
+// no `events(..)` needed.
 // ===========================================================================
 
 #[omnifs_sdk::provider(
@@ -108,11 +108,11 @@ struct ResolverReverseKey {
             "dns.google",
             "Send DNS-over-HTTPS queries to the bundled public resolver endpoints."
         ),
-        memory_mb(
-            32,
-            "Keep resolver execution small; DNS responses are compact and do not need a large heap."
-        ),
-    )
+    ),
+    limits(memory_mb(
+        32,
+        "Keep resolver execution small; DNS responses are compact and do not need a large heap."
+    ),)
 )]
 impl DnsProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {

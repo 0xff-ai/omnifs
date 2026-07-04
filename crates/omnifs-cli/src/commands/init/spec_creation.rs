@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use omnifs_caps::Grants;
+use omnifs_caps::{Grants, Limits};
 use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::{Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{
@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub(super) struct CreatedMountSpec {
     pub(super) config: Option<Value>,
     pub(super) capabilities: Option<Grants>,
+    pub(super) limits: Option<Limits>,
 }
 
 pub(super) struct MountSpecCreator<'a> {
@@ -38,12 +39,15 @@ impl<'a> MountSpecCreator<'a> {
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
             (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
+        let limits = (!self.manifest.limits.is_empty()).then(|| self.manifest.provider_limits());
         let mut spec = Spec {
             provider: self.reference.clone(),
             mount: self.mount_name.to_string(),
             root_mount: false,
+            revalidate: true,
             auth: None,
             capabilities: None,
+            limits: None,
             config_raw: None,
         };
         spec.apply_provider_metadata(self.manifest, ProviderMetadataInheritance::config())
@@ -52,6 +56,7 @@ impl<'a> MountSpecCreator<'a> {
             return Ok(CreatedMountSpec {
                 config: None,
                 capabilities,
+                limits,
             });
         };
 
@@ -62,6 +67,7 @@ impl<'a> MountSpecCreator<'a> {
         Ok(CreatedMountSpec {
             config: Some(config),
             capabilities,
+            limits,
         })
     }
 

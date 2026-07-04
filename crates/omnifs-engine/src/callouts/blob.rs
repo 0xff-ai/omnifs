@@ -56,13 +56,13 @@ impl Default for BlobLimits {
 impl BlobLimits {
     pub fn from_config(config: &Spec) -> Self {
         let defaults = Self::default();
-        let caps = config.capabilities.as_ref();
+        let limits = config.limits.as_ref();
         Self {
-            max_fetch_blob_bytes: caps
-                .and_then(|c| c.max_fetch_blob_bytes)
+            max_fetch_blob_bytes: limits
+                .and_then(|limits| limits.max_fetch_blob_bytes)
                 .unwrap_or(defaults.max_fetch_blob_bytes),
-            max_read_blob_bytes: caps
-                .and_then(|c| c.max_read_blob_bytes)
+            max_read_blob_bytes: limits
+                .and_then(|limits| limits.max_read_blob_bytes)
                 .unwrap_or(defaults.max_read_blob_bytes),
         }
     }
@@ -466,7 +466,6 @@ mod tests {
         let capability = CapabilityChecker::new(Allowlist {
             domains: Vec::new(),
             git_repos: Vec::new(),
-            max_memory_mb: 16,
             needs_git: false,
             unix_sockets: Vec::new(),
         });

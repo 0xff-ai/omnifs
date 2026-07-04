@@ -235,7 +235,6 @@ async fn test_execute_fetch_returns_denied_when_auth_is_required_but_missing() {
     let capability = Arc::new(CapabilityChecker::new(Allowlist {
         domains: vec!["api.github.com".to_string()],
         git_repos: Vec::new(),
-        max_memory_mb: 64,
         needs_git: false,
         unix_sockets: Vec::new(),
     }));
@@ -270,7 +269,6 @@ async fn oauth_401_refreshes_and_retries_once() {
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
-            max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
         })),
@@ -341,7 +339,6 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
-            max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
         })),
@@ -388,7 +385,6 @@ async fn oauth_refresh_failure_surfaces_denied_and_clears_store() {
         Arc::new(CapabilityChecker::new(Allowlist {
             domains: vec![FakeHttpsApiServer::domain()],
             git_repos: Vec::new(),
-            max_memory_mb: 64,
             needs_git: false,
             unix_sockets: Vec::new(),
         })),

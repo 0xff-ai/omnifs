@@ -67,6 +67,8 @@ fn auth() -> ProviderAuthManifest {
             "api.ouraring.com",
             "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
         ),
+    ),
+    limits(
         memory_mb(128, "Leave room for date-range and time-series JSON responses."),
     ),
     auth = auth()

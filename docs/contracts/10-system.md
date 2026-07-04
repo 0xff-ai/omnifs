@@ -27,6 +27,8 @@ New provider authority is a gated decision. Gate new callout families, new preop
 
 Async host imports do not reduce this gate. A provider may suspend on a host import, but the host still owns execution, auth injection, capability checks, timeout behavior, and error mapping. Adding or widening an import is an authority change even when the SDK call site looks like ordinary async Rust.
 
+Provider manifest `capabilities` declare authority needs only: domains, git repos, unix sockets, and preopened paths. Scalar resource ceilings such as memory and blob byte budgets are manifest `limits` and mount-spec `limits`; they must not be described as provider authority or callout grants.
+
 ### Auth and credentials
 
 Credentials live host-side. Providers declare auth needs; the host resolves, stores, refreshes, and injects credentials after a callout crosses the WASM boundary.

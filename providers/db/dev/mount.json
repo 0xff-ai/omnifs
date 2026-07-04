@@ -7,9 +7,15 @@
     "sample_limit": 20
   },
   "capabilities": {
-    "preopened_paths": {
-      "dynamic": true
-    },
+    "preopened_paths": [
+      {
+        "host": "/data",
+        "guest": "/data",
+        "mode": "ro"
+      }
+    ]
+  },
+  "limits": {
     "max_memory_mb": 128
   }
 }

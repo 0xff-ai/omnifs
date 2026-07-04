@@ -145,7 +145,9 @@ pub use config_resource::{HostFile, HostSocket};
 // host-side, so they are re-exported only for non-wasm targets. The wasm guest
 // never references them.
 #[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_caps::{Need, PreopenMode, PreopenedPath};
+pub use omnifs_caps::{AccessNeed, PreopenMode, PreopenedPath};
+#[cfg(not(target_arch = "wasm32"))]
+pub use omnifs_caps::{LimitDeclarations, ResourceLimit};
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_workspace::authn::{
     OauthScheme, SchemeGuidance, StaticTokenScheme, TokenValidation,

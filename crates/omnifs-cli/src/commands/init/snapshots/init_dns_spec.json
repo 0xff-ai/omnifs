@@ -14,10 +14,10 @@
     ],
     "git_repos": null,
     "unix_sockets": null,
-    "preopened_paths": null,
-    "max_memory_mb": 32,
-    "max_fetch_blob_bytes": null,
-    "max_read_blob_bytes": null
+    "preopened_paths": null
+  },
+  "limits": {
+    "max_memory_mb": 32
   },
   "config": {
     "default_resolver": "cloudflare"

@@ -189,6 +189,8 @@ fn auth() -> ProviderAuthManifest {
             "api.linear.app",
             "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."
         ),
+    ),
+    limits(
         memory_mb(
             128,
             "Leave room for GraphQL response decoding and issue tree projections."

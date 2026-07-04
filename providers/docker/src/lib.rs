@@ -205,16 +205,14 @@ struct ProjectServiceKey {
     id = "docker",
     display_name = "Docker",
     mount = "docker",
-    capabilities(
-        unix_socket(
-            dynamic,
-            "Talk to the configured Docker daemon socket for container, image, and compose reads."
-        ),
-        memory_mb(
-            64,
-            "Keep Docker metadata browsing bounded; responses are streamed from the daemon."
-        ),
-    )
+    capabilities(unix_socket(
+        dynamic,
+        "Talk to the configured Docker daemon socket for container, image, and compose reads."
+    ),),
+    limits(memory_mb(
+        64,
+        "Keep Docker metadata browsing bounded; responses are streamed from the daemon."
+    ),)
 )]
 impl DockerProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {

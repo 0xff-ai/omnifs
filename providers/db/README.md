@@ -69,8 +69,12 @@ token, so a sample of any size is served through one ranged session.
   "provider": "omnifs_provider_db.wasm",
   "mount": "db",
   "capabilities": {
-    "max_memory_mb": 128,
-    "preopened_paths": { "dynamic": true }
+    "preopened_paths": [
+      { "host": "/data", "guest": "/data", "mode": "ro" }
+    ]
+  },
+  "limits": {
+    "max_memory_mb": 128
   },
   "config": {
     "path": "/data/test.db",

@@ -106,16 +106,14 @@ pub(crate) struct TableDoc {
     id = "db",
     display_name = "Database",
     mount = "db",
-    capabilities(
-        memory_mb(
-            128,
-            "Leave room for SQLite schema inspection and bounded sample result encoding."
-        ),
-        preopened_path(
-            dynamic,
-            "Expose the configured database file to the sandbox as a read-only WASI preopen, resolved from the `path` config field at mount-start."
-        ),
-    )
+    capabilities(preopened_path(
+        dynamic,
+        "Expose the configured database file to the sandbox as a read-only WASI preopen, resolved from the `path` config field at mount-start."
+    ),),
+    limits(memory_mb(
+        128,
+        "Leave room for SQLite schema inspection and bounded sample result encoding."
+    ),)
 )]
 impl DbProvider {
     fn start(config: Config, r: &mut Router<State>) -> Result<State> {

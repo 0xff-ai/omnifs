@@ -185,10 +185,11 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## Manifest (provider metadata)
 
-The manifest (identity, capabilities, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers build`. There is no hand-written `omnifs.provider.json`.
+The manifest (identity, access capabilities, scalar limits, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section at build time by `just providers build`. There is no hand-written `omnifs.provider.json`.
 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
-- `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"), memory_mb(<int>,"why"))` declare capability needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
+- `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"))` declare authority needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
+- `limits(memory_mb(<int>,"why"))` declares scalar runtime ceilings seeded into new mount specs separately from access grants.
 - `auth = <expr>` splices a typed `omnifs_sdk::auth::Auth` builder value (covering `StaticToken`, `OAuth` device-code/PKCE/client-side-token flows, and `Validation`) into the manifest auth block.
 - The config metadata is derived automatically from the `start` config type (via `#[omnifs_sdk::config]`, which emits the SDK's static config dialect); no manifest argument is needed.
 - Host-resource config fields are typed: `omnifs_sdk::HostFile` (host file -> read-only WASI preopen) and `omnifs_sdk::HostSocket` (`unix://` socket). The manifest records them as string fields with a host-resource binding.

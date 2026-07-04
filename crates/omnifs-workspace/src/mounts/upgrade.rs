@@ -23,9 +23,11 @@ pub enum UpgradePlan {
     /// Config changed in a breaking way (removed field, new required field,
     /// became-required, rename); the user must re-init.
     BreakingConfig { changes: Vec<FieldChange> },
-    /// A capability or auth scheme changed; requires explicit re-consent.
-    CapabilityOrAuth {
-        caps: Vec<CapabilityChange>,
+    /// A capability, scalar limit, or auth scheme changed; requires explicit
+    /// re-consent.
+    CapabilityLimitOrAuth {
+        capabilities: Vec<CapabilityChange>,
+        limits: Vec<LimitChange>,
         auth: Option<AuthDelta>,
     },
 }
@@ -38,15 +40,23 @@ impl UpgradePlan {
     pub fn diff(old: &ProviderManifest, new: &ProviderManifest) -> Self {
         let old_caps = extract_capabilities(old);
         let new_caps = extract_capabilities(new);
+        let old_limits = extract_limits(old);
+        let new_limits = extract_limits(new);
         let old_auth = old.auth.as_ref().map(|auth| auth.default.clone());
         let new_auth = new.auth.as_ref().map(|auth| auth.default.clone());
 
         let caps_changed = normalize_caps(&old_caps) != normalize_caps(&new_caps);
+        let limits_changed = normalize_limits(&old_limits) != normalize_limits(&new_limits);
         let auth_changed = old_auth != new_auth;
-        if caps_changed || auth_changed {
-            return Self::CapabilityOrAuth {
-                caps: if caps_changed {
+        if caps_changed || limits_changed || auth_changed {
+            return Self::CapabilityLimitOrAuth {
+                capabilities: if caps_changed {
                     diff_capabilities(&old_caps, &new_caps)
+                } else {
+                    Vec::new()
+                },
+                limits: if limits_changed {
+                    diff_limits(&old_limits, &new_limits)
                 } else {
                     Vec::new()
                 },
@@ -141,6 +151,20 @@ pub enum CapabilityDirection {
     Removed,
 }
 
+/// A scalar runtime-limit change between two manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitChange {
+    pub name: String,
+    pub value: String,
+    pub direction: LimitDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitDirection {
+    Added,
+    Removed,
+}
+
 /// An auth-scheme change between two manifests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthDelta {
@@ -176,6 +200,7 @@ fn extract_config_fields(manifest: &ProviderManifest) -> Vec<Field> {
 /// need between static and dynamic changes how its value is resolved, so it must
 /// route to re-consent like any other capability change.
 type FlatCapability = (String, String, bool);
+type FlatLimit = (String, String);
 
 fn extract_capabilities(manifest: &ProviderManifest) -> Vec<FlatCapability> {
     manifest
@@ -185,10 +210,30 @@ fn extract_capabilities(manifest: &ProviderManifest) -> Vec<FlatCapability> {
         .collect()
 }
 
+fn extract_limits(manifest: &ProviderManifest) -> Vec<FlatLimit> {
+    let mut limits = Vec::new();
+    if let Some(limit) = &manifest.limits.max_memory_mb {
+        limits.push(("maxMemoryMb".to_string(), format!("{} MiB", limit.value)));
+    }
+    if let Some(limit) = &manifest.limits.max_fetch_blob_bytes {
+        limits.push(("maxFetchBlobBytes".to_string(), limit.value.to_string()));
+    }
+    if let Some(limit) = &manifest.limits.max_read_blob_bytes {
+        limits.push(("maxReadBlobBytes".to_string(), limit.value.to_string()));
+    }
+    limits
+}
+
 // ── Diff helpers ────────────────────────────────────────────────────────────
 
 fn normalize_caps(caps: &[FlatCapability]) -> Vec<FlatCapability> {
     let mut sorted = caps.to_vec();
+    sorted.sort();
+    sorted
+}
+
+fn normalize_limits(limits: &[FlatLimit]) -> Vec<FlatLimit> {
+    let mut sorted = limits.to_vec();
     sorted.sort();
     sorted
 }
@@ -210,6 +255,23 @@ fn diff_capabilities(old: &[FlatCapability], new: &[FlatCapability]) -> Vec<Capa
     changes
 }
 
+fn diff_limits(old: &[FlatLimit], new: &[FlatLimit]) -> Vec<LimitChange> {
+    let old_set: HashSet<&FlatLimit> = old.iter().collect();
+    let new_set: HashSet<&FlatLimit> = new.iter().collect();
+    let mut changes: Vec<LimitChange> = old
+        .iter()
+        .filter(|limit| !new_set.contains(limit))
+        .map(|limit| limit_change(limit, LimitDirection::Removed))
+        .chain(
+            new.iter()
+                .filter(|limit| !old_set.contains(limit))
+                .map(|limit| limit_change(limit, LimitDirection::Added)),
+        )
+        .collect();
+    changes.sort_by(|a, b| a.name.cmp(&b.name).then(a.value.cmp(&b.value)));
+    changes
+}
+
 fn change(cap: &FlatCapability, direction: CapabilityDirection) -> CapabilityChange {
     let (kind, value, dynamic) = cap;
     CapabilityChange {
@@ -222,6 +284,15 @@ fn change(cap: &FlatCapability, direction: CapabilityDirection) -> CapabilityCha
         } else {
             value.clone()
         },
+        direction,
+    }
+}
+
+fn limit_change(limit: &FlatLimit, direction: LimitDirection) -> LimitChange {
+    let (name, value) = limit;
+    LimitChange {
+        name: name.clone(),
+        value: value.clone(),
         direction,
     }
 }
@@ -285,6 +356,17 @@ mod tests {
         ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
     }
 
+    fn manifest_with_limits(limits: &serde_json::Value) -> ProviderManifest {
+        let json = serde_json::json!({
+            "id": "demo",
+            "displayName": "Demo",
+            "provider": "omnifs_provider_demo.wasm",
+            "defaultMount": "demo",
+            "limits": limits,
+        });
+        ProviderManifest::from_bytes(json.to_string().as_bytes()).expect("manifest parses")
+    }
+
     #[test]
     fn capability_upgrade_diff() {
         let docker_sock = serde_json::json!([
@@ -303,10 +385,47 @@ mod tests {
             assert!(
                 matches!(
                     UpgradePlan::diff(&old, &new),
-                    UpgradePlan::CapabilityOrAuth { .. }
+                    UpgradePlan::CapabilityLimitOrAuth { .. }
                 ),
                 "{label}"
             );
+        }
+    }
+
+    #[test]
+    fn limit_upgrade_diff() {
+        let old = manifest_with_limits(&serde_json::json!({
+            "maxMemoryMb": { "value": 64, "why": "memory" }
+        }));
+        let new = manifest_with_limits(&serde_json::json!({
+            "maxMemoryMb": { "value": 128, "why": "memory" }
+        }));
+
+        match UpgradePlan::diff(&old, &new) {
+            UpgradePlan::CapabilityLimitOrAuth {
+                capabilities,
+                limits,
+                auth,
+            } => {
+                assert!(capabilities.is_empty());
+                assert_eq!(
+                    limits,
+                    vec![
+                        LimitChange {
+                            name: "maxMemoryMb".to_string(),
+                            value: "128 MiB".to_string(),
+                            direction: LimitDirection::Added,
+                        },
+                        LimitChange {
+                            name: "maxMemoryMb".to_string(),
+                            value: "64 MiB".to_string(),
+                            direction: LimitDirection::Removed,
+                        },
+                    ]
+                );
+                assert_eq!(auth, None);
+            },
+            other => panic!("expected CapabilityLimitOrAuth, got {other:?}"),
         }
     }
 

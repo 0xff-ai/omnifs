@@ -185,11 +185,11 @@ pub struct CategoryKey {
             "arxiv.org",
             "Fetch arXiv API metadata and paper resources from arXiv-owned domains."
         ),
-        memory_mb(
-            64,
-            "Bound provider memory while leaving enough room for Atom feeds and paper metadata."
-        ),
-    )
+    ),
+    limits(memory_mb(
+        64,
+        "Bound provider memory while leaving enough room for Atom feeds and paper metadata."
+    ),)
 )]
 impl ArxivProvider {
     fn start(r: &mut Router) -> Result<()> {
