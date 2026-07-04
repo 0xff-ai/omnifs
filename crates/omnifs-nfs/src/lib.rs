@@ -1,7 +1,7 @@
 //! Read-only NFSv4.0 loopback frontend for `omnifs`.
 //!
 //! This crate owns the NFS frontend and adapts it to the existing
-//! `omnifs-host` provider runtime without replacing the Linux FUSE path.
+//! `omnifs-engine` provider runtime without replacing the Linux FUSE path.
 //! The `Export` adapter intentionally depends on host runtime/cache
 //! types; the wire protocol code remains isolated behind `ReadOnlyExport`.
 

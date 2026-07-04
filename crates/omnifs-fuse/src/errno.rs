@@ -2,7 +2,7 @@
 
 use fuser::Errno;
 use omnifs_api::events::InspectorOutcome;
-use omnifs_tree::{TreeError, TreeErrorKind};
+use omnifs_engine::{TreeError, TreeErrorKind};
 
 /// Map a FUSE errno to a stable inspector outcome.
 pub(super) fn inspector_outcome(errno: Errno) -> InspectorOutcome {

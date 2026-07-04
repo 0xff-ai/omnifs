@@ -3,9 +3,10 @@
 mod db_fixture;
 
 use omnifs_core::path::Path;
-use omnifs_host::{Error, LookupOutcome};
+use omnifs_engine::Error;
+use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
-use omnifs_wit::provider::types::{ByteSource, EntryKind, ErrorKind, ListChildrenResult};
+use omnifs_wit::provider::types::ErrorKind;
 use serde::Deserialize;
 
 fn parse_path(s: &str) -> Path {
@@ -58,9 +59,11 @@ async fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
         .await
         .unwrap();
     match &result.bytes {
-        ByteSource::Inline(bytes) => bytes.clone(),
-        ByteSource::Canonical => panic!("db provider must not use canonical cache for {path}"),
-        other => panic!("expected inline file content for {path}, got {other:?}"),
+        ReadBytes::Inline(bytes) => bytes.clone(),
+        ReadBytes::Canonical => panic!("db provider must not use canonical cache for {path}"),
+        other @ ReadBytes::Blob(_) => {
+            panic!("expected inline file content for {path}, got {other:?}")
+        },
     }
 }
 
@@ -92,7 +95,7 @@ async fn db_tables_listing_exhaustive_names() {
         .await
         .unwrap();
     match root {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"meta"));
             assert!(names.contains(&"tables"));
@@ -108,18 +111,13 @@ async fn db_tables_listing_exhaustive_names() {
         .await
         .unwrap();
     match tables {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             assert!(listing.exhaustive);
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"Album"));
             assert!(names.contains(&"Artist"));
             assert!(names.contains(&"Wide"));
-            assert!(
-                listing
-                    .entries
-                    .iter()
-                    .all(|e| matches!(e.kind, EntryKind::Directory))
-            );
+            assert!(listing.entries.iter().all(|e| e.meta.is_directory()));
         },
         other => panic!("expected tables listing, got {other:?}"),
     }
@@ -145,7 +143,7 @@ async fn db_meta_listing_is_direct_path_surface() {
         .unwrap();
 
     match meta {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             assert!(listing.exhaustive);
             let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"info.json"));

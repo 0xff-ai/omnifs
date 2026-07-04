@@ -41,7 +41,7 @@ fn oura_harness() -> RuntimeHarness {
     )
 }
 
-fn resume_json(op: &mut omnifs_host::TestOp<'_>, body: &'static [u8]) {
+fn resume_json(op: &mut omnifs_engine::test_support::TestOp<'_>, body: &'static [u8]) {
     op.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
         status: 200,
         headers: vec![Header {
@@ -53,7 +53,7 @@ fn resume_json(op: &mut omnifs_host::TestOp<'_>, body: &'static [u8]) {
     .unwrap();
 }
 
-fn read_query_body(op: &omnifs_host::TestOp<'_>) -> Vec<u8> {
+fn read_query_body(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<u8> {
     match op.result().unwrap() {
         OpResult::ReadFile(ReadFileOutcome::Found(file)) => {
             assert_eq!(file.attrs.stability, Stability::Dynamic);
@@ -68,11 +68,11 @@ fn read_query_body(op: &omnifs_host::TestOp<'_>) -> Vec<u8> {
     }
 }
 
-fn read_json(op: &omnifs_host::TestOp<'_>) -> Value {
+fn read_json(op: &omnifs_engine::test_support::TestOp<'_>) -> Value {
     serde_json::from_slice(&read_query_body(op)).unwrap()
 }
 
-fn canonical_paths(op: &omnifs_host::TestOp<'_>) -> Vec<String> {
+fn canonical_paths(op: &omnifs_engine::test_support::TestOp<'_>) -> Vec<String> {
     let effects = op.effects().unwrap();
     effects
         .canonical
@@ -81,7 +81,7 @@ fn canonical_paths(op: &omnifs_host::TestOp<'_>) -> Vec<String> {
         .collect()
 }
 
-fn canonical_json(op: &omnifs_host::TestOp<'_>, path: &str) -> Value {
+fn canonical_json(op: &omnifs_engine::test_support::TestOp<'_>, path: &str) -> Value {
     let effects = op.effects().unwrap();
     let store = effects
         .canonical
@@ -91,7 +91,7 @@ fn canonical_json(op: &omnifs_host::TestOp<'_>, path: &str) -> Value {
     serde_json::from_slice(&store.bytes).unwrap()
 }
 
-fn assert_projected_dir(op: &omnifs_host::TestOp<'_>, path: &str) {
+fn assert_projected_dir(op: &omnifs_engine::test_support::TestOp<'_>, path: &str) {
     let write = op
         .effects()
         .unwrap()
@@ -110,7 +110,10 @@ fn assert_projected_dir(op: &omnifs_host::TestOp<'_>, path: &str) {
     );
 }
 
-fn assert_projected_deferred_file_with_exact_size(op: &omnifs_host::TestOp<'_>, path: &str) {
+fn assert_projected_deferred_file_with_exact_size(
+    op: &omnifs_engine::test_support::TestOp<'_>,
+    path: &str,
+) {
     let write = op
         .effects()
         .unwrap()

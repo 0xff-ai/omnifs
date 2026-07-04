@@ -207,7 +207,7 @@ jobs:
       - name: Isolate host test archive inputs
         run: |
           set -euo pipefail
-          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-engine-test-inputs"
           rm -rf "$keep"
           mkdir -p "$keep/dist/host-tests" "$keep/wasm" "$keep/target-preserve"
           cp dist/host-tests/host-tests.tar.zst "$keep/dist/host-tests/"
@@ -246,7 +246,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          keep="${RUNNER_TEMP:-/tmp}/omnifs-host-test-inputs"
+          keep="${RUNNER_TEMP:-/tmp}/omnifs-engine-test-inputs"
           if [[ -d "$keep/target-preserve/host-build" ]]; then
             rm -rf target/host-build
             mkdir -p target

@@ -26,12 +26,12 @@ use crate::protocol::consts::{
 };
 use dashmap::DashMap;
 use omnifs_core::path::{Path, Segment};
-use omnifs_core::view as view_types;
-use omnifs_core::view::{EntryMeta, FileAttrsCache};
-use omnifs_host::Runtime;
-use omnifs_host::path_key::PathKey;
-use omnifs_host::registry::ProviderRegistry;
-use omnifs_tree::{
+use omnifs_engine::Engine;
+use omnifs_engine::MountRuntimes;
+use omnifs_engine::render::PathKey;
+use omnifs_engine::view as view_types;
+use omnifs_engine::view::{EntryMeta, FileAttrsCache};
+use omnifs_engine::{
     Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult, RequestCtx,
     Synthetic, Tree, TreeErrorKind,
 };
@@ -51,7 +51,7 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 /// task keeps running in the background. Short enough that a cold listing never
 /// holds the reply; long enough that a warm listing still answers in one round
 /// trip. Distinct from reactive `DELAY` in [`Status::from`](crate::export::Status)
-/// for [`TreeError`](omnifs_tree::TreeError), which maps transient upstream
+/// for [`TreeError`](omnifs_engine::TreeError), which maps transient upstream
 /// errors on any op without background continuation. Only
 /// `READDIR` uses proactive deferral; `LOOKUP` resolves inline (see
 /// `lookup_via_tree`).
@@ -116,7 +116,7 @@ struct EntrySeed<'a> {
 }
 
 /// A live ranged open bound to a stateid. Holds the `Tree`-owned `RangedHandle`
-/// (which owns its `Arc<Runtime>` + provider handle), so chunk reads and the
+/// (which owns its `Arc<Engine>` + provider handle), so chunk reads and the
 /// provider-handle release stay inside `Tree`. Not `Clone`: it owns the handle.
 struct RangedOpen {
     ino: u64,
@@ -186,7 +186,7 @@ pub struct Export {
     /// The provider registry both the adapter and `Tree` hold. The adapter uses
     /// it only to recover the runtime for protocol-local state; mount
     /// enumeration and provider round trips go through `tree`.
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<MountRuntimes>,
     /// The renderer-neutral projection core. Owns resolve/list/read decision
     /// logic; the NFS adapter enters the async runtime to call it and turns the
     /// neutral `Node`/`Listing`/`ReadResult` into NFS identity + `fattr4`.
@@ -214,7 +214,7 @@ pub struct Export {
 }
 
 impl Export {
-    pub fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
+    pub fn new(rt: Handle, registry: Arc<MountRuntimes>) -> Self {
         let tree = Arc::new(Tree::new(Arc::clone(&registry)));
         assert!(
             !matches!(rt.runtime_flavor(), RuntimeFlavor::CurrentThread),
@@ -258,7 +258,7 @@ impl Export {
         }
     }
 
-    fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Runtime>> {
+    fn runtime_for_mount(&self, mount: &str) -> Option<Arc<Engine>> {
         self.registry.get(mount)
     }
 
@@ -606,7 +606,7 @@ impl Export {
         parent_path: &Path,
         parent: u64,
         name: &Segment,
-        runtime: &Arc<Runtime>,
+        runtime: &Arc<Engine>,
     ) -> StatusResult<u64> {
         // Inline (not deferred): a cold child lookup is not cached by `Tree` the
         // way a listing is, so deferring it would re-run provider work on every
@@ -643,7 +643,7 @@ impl Export {
         mount_name: &str,
         parent: u64,
         node: &Node,
-        runtime: Option<&Arc<Runtime>>,
+        runtime: Option<&Arc<Engine>>,
     ) -> u64 {
         let child_path = node.path().clone();
         if let Some(dir) = node.subtree_path() {
@@ -716,7 +716,7 @@ impl Export {
         path: &Path,
         parent: u64,
         listing: &Listing,
-        runtime: &Arc<Runtime>,
+        runtime: &Arc<Engine>,
     ) -> DirListing {
         let mut entries = Vec::with_capacity(listing.entries.len());
         for entry in &listing.entries {
@@ -749,7 +749,7 @@ impl Export {
         path: &Path,
         parent: u64,
         entry: &TreeEntry,
-        runtime: Option<&Arc<Runtime>>,
+        runtime: Option<&Arc<Engine>>,
     ) -> Option<DirEntry> {
         let name = Segment::try_from(entry.name.as_str()).ok()?;
         let child_path = path.join_segment(&name);
@@ -1127,7 +1127,7 @@ impl Export {
         observed_end: Arc<AtomicU64>,
     ) -> tokio::task::AbortHandle {
         let follow_sizes = Arc::clone(&self.follow_sizes);
-        omnifs_tree::spawn_live_follow_pump(
+        omnifs_engine::spawn_live_follow_pump(
             &self.rt,
             Arc::clone(&self.registry),
             mount_name,
@@ -1563,8 +1563,8 @@ impl ReadOnlyExport for Export {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_host::HostContext;
-    use omnifs_host::cloner::GitCloner;
+    use omnifs_engine::GitCloner;
+    use omnifs_engine::HostContext;
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -1576,7 +1576,7 @@ mod tests {
         _providers_dir: TempDir,
     }
 
-    /// Build an `Export` over a `ProviderRegistry` with no mounts. Provider round
+    /// Build an `Export` over a `MountRuntimes` with no mounts. Provider round
     /// trips therefore short-circuit on a missing mount (`runtime_for_mount`
     /// returns `None`), so these tests drive only the renderer-side budget /
     /// backing / learned-size logic. Mirrors the FUSE in-crate harness.
@@ -1586,7 +1586,7 @@ mod tests {
         let providers_dir = tempfile::tempdir().expect("providers dir");
         let credentials_file = config_dir.path().join("credentials.json");
         let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
-        let registry = ProviderRegistry::new(
+        let registry = MountRuntimes::new(
             HostContext::new(
                 cache_dir.path(),
                 config_dir.path(),

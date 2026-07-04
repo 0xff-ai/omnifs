@@ -37,7 +37,7 @@ pub fn first_canonical_id(effects: &Effects) -> Option<String> {
         .map(|store| canonical_id_string(&store.id))
 }
 
-pub fn count_fetch_callouts(ops: &[&omnifs_host::TestOp<'_>]) -> usize {
+pub fn count_fetch_callouts(ops: &[&omnifs_engine::test_support::TestOp<'_>]) -> usize {
     ops.iter()
         .flat_map(|op| op.callouts().iter())
         .filter(|callout| matches!(callout, Callout::Fetch(_)))

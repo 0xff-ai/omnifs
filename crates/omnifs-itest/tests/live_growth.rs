@@ -18,15 +18,16 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use omnifs_core::path::Path;
-use omnifs_core::view::{FileAttrsCache, FileSize, ReadMode, Stability};
-use omnifs_host::Runtime;
+use omnifs_engine::Engine;
+use omnifs_engine::test_support::probe_live_growth;
+use omnifs_engine::view::{FileAttrsCache, FileSize, ReadMode, Stability};
+use omnifs_engine::{Node, RequestCtx, Tree};
 use omnifs_itest::{RuntimeHarness, make_engine, make_runtime};
-use omnifs_tree::{Node, RequestCtx, Tree, probe_live_growth};
 use tempfile::TempDir;
 
 struct LiveTree {
     tree: Tree,
-    runtime: Arc<Runtime>,
+    runtime: Arc<Engine>,
     ctx: RequestCtx,
     _clone_dir: TempDir,
     _cache_dir: TempDir,

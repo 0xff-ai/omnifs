@@ -4,7 +4,7 @@
 //! `list`/`lookup`/`read` ops whose HTTP callouts are answered with canned
 //! Kubernetes API responses. No live cluster is needed.
 
-use omnifs_host::TestOp;
+use omnifs_engine::test_support::TestOp;
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
 use omnifs_wit::provider::types::{
     ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,

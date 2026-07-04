@@ -6,8 +6,8 @@
 use crate::{Frontend, NotifierHandle};
 use dashmap::DashMap;
 use fuser::Session;
-use omnifs_host::path_key::PathToInode;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::MountRuntimes;
+use omnifs_engine::render::PathToInode;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use tracing::info;
 /// invalidation; it is filled once the session is up and cleared on exit.
 pub fn run_blocking(
     mount_point: &Path,
-    registry: &Arc<ProviderRegistry>,
+    registry: &Arc<MountRuntimes>,
     rt: &Handle,
     notifier: &NotifierHandle,
 ) -> Result<(), Error> {

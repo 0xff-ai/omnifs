@@ -10,11 +10,9 @@ categories = ["filesystem"]
 keywords = ["omnifs", "nfs", "filesystem"]
 
 [dependencies]
-omnifs-cache = { workspace = true }
 omnifs-core = { workspace = true }
-omnifs-host = { workspace = true }
 omnifs-mtab = { workspace = true }
-omnifs-tree = { workspace = true }
+omnifs-engine = { workspace = true }
 omnifs-workspace = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

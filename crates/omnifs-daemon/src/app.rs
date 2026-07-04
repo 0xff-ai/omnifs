@@ -7,9 +7,9 @@
 //! `docs/contracts/50-control-plane.md`).
 
 use clap::{Args, ValueEnum};
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::inspector;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::GitCloner;
+use omnifs_engine::MountRuntimes;
+use omnifs_engine::init_global_from_env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,11 +139,11 @@ pub fn run(args: DaemonArgs) -> anyhow::Result<()> {
             providers = %host_context.providers_dir().display(),
             "starting daemon"
         );
-        Arc::new(ProviderRegistry::new(host_context, Arc::clone(&cloner))?)
+        Arc::new(MountRuntimes::new(host_context, Arc::clone(&cloner))?)
     };
 
     let rt = Handle::current();
-    let sink = inspector::init_global_from_env();
+    let sink = init_global_from_env();
     if let Some(sink) = &sink {
         if let Some(path) = sink.tee_path() {
             info!(path = %path.display(), "inspector stream enabled (in-memory ring + file tee)");

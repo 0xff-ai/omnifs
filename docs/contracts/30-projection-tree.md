@@ -5,13 +5,13 @@ Owns: shared projection semantics, file attributes, cache ownership, listing, lo
 
 ## Read when
 
-Read this before touching `omnifs-tree`, projected node resolution, cache access, attrs, listing, lookup, traversal, learned sizes, negative lookup behavior, live growth, or behavior shared by FUSE and NFS.
+Read this before touching `omnifs-engine/src/tree`, projected node resolution, cache access, attrs, listing, lookup, traversal, learned sizes, negative lookup behavior, live growth, or behavior shared by FUSE and NFS.
 
 ## Rules
 
 ### Tree owns projection semantics
 
-`omnifs-tree` owns answers to what projected node exists, what bytes or attrs it has, what cache entry should be published, what root children exist, and what provider probe is needed.
+`omnifs-engine/src/tree` owns answers to what projected node exists, what bytes or attrs it has, what cache entry should be published, what root children exist, and what provider probe is needed.
 
 Put shared projection semantics behind `Tree`. Move behavior out of FUSE and NFS when it becomes frontend-neutral. Keep root enumeration as a tree operation.
 
@@ -51,9 +51,9 @@ Follow-mode reads, growing sizes, EOF discovery, and invalidation for live files
 
 ## Code
 
-- `crates/omnifs-tree/src`
-- `crates/omnifs-host/src`
-- `crates/omnifs-cache/src`
+- `crates/omnifs-engine/src/tree`
+- `crates/omnifs-engine/src/runtime`
+- `crates/omnifs-engine/src/cache`
 - `crates/omnifs-sdk/src/router`
 - `crates/omnifs-fuse/src`
 - `crates/omnifs-nfs/src`

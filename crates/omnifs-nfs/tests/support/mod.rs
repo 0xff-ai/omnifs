@@ -1,4 +1,4 @@
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::MountRuntimes;
 use omnifs_nfs::Export;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub struct TestExport {
     #[allow(dead_code)]
     pub runtime: Runtime,
     #[allow(dead_code)]
-    pub registry: Arc<ProviderRegistry>,
+    pub registry: Arc<MountRuntimes>,
     _config_dir: TempDir,
     _cache_dir: TempDir,
     _clone_dir: TempDir,

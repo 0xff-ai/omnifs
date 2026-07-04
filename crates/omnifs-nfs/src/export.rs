@@ -8,7 +8,7 @@ use crate::protocol::consts::{
     NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
-use omnifs_tree::{TreeError, TreeErrorKind};
+use omnifs_engine::{TreeError, TreeErrorKind};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -81,7 +81,7 @@ impl Status {
 ///
 /// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
 /// retries. This path does not spawn background work; proactive `READDIR` deferral
-/// is separate (`omnifs_host::singleflight::Deferred`).
+/// is separate (`omnifs_engine::singleflight::Deferred`).
 impl From<&TreeError> for Status {
     fn from(error: &TreeError) -> Self {
         match error.kind {
@@ -437,7 +437,7 @@ pub trait ReadOnlyExport: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_tree::TreeErrorKind;
+    use omnifs_engine::TreeErrorKind;
 
     #[test]
     fn transient_tree_errors_map_to_delay() {

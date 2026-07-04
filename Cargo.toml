@@ -12,7 +12,7 @@ members = [
     "providers/oura",
     "providers/test",
 ]
-default-members = ["crates/omnifs-cli", "crates/omnifs-host", "crates/omnifs-daemon"]
+default-members = ["crates/omnifs-cli", "crates/omnifs-engine", "crates/omnifs-daemon"]
 
 [workspace.package]
 version = "0.2.1"
@@ -27,16 +27,14 @@ omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-caps = { version = "0.2.1", path = "crates/omnifs-caps" }
 omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
+omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse" }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
-omnifs-host = { version = "0.2.1", path = "crates/omnifs-host" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
 omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs" }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
-omnifs-tree = { version = "0.2.1", path = "crates/omnifs-tree" }
-omnifs-cache = { version = "0.2.1", path = "crates/omnifs-cache" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "winch", "runtime"] }
 tokio = { version = "1", features = ["full"] }

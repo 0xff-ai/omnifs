@@ -3,11 +3,11 @@
 mod support;
 
 use omnifs_core::path::Path;
-use omnifs_host::{Error, LookupOutcome};
+use omnifs_engine::Error;
+use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_itest::{make_initialized_runtime, try_make_runtime_from_config};
 use omnifs_wit::provider::types::{
-    CalloutResult, ErrorKind, HttpResponse, ListChildrenResult, OpResult, ReadFileOutcome,
-    Stability,
+    CalloutResult, ErrorKind, HttpResponse, OpResult, ReadFileOutcome, Stability,
 };
 use support::{canned_a_response, dns_harness, expect_fetch as dns_expect_fetch, expect_fetches};
 
@@ -105,8 +105,10 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         )
         .await
         .unwrap();
-    let body =
-        String::from_utf8(omnifs_itest::into_inline(resolvers_file)).expect("utf8 resolvers file");
+    let ReadBytes::Inline(bytes) = resolvers_file.bytes else {
+        panic!("expected inline resolvers file, got {resolvers_file:?}");
+    };
+    let body = String::from_utf8(bytes).expect("utf8 resolvers file");
     assert!(
         body.contains("cloudflare"),
         "unexpected resolvers file: {body}"
@@ -213,7 +215,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match listing {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             let names: Vec<&str> = listing
                 .entries
                 .iter()
@@ -235,7 +237,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match reverse_listing {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "reverse dir should not eagerly list dynamic children: {listing:?}"
@@ -253,7 +255,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         .await
         .unwrap();
     match resolver_reverse_listing {
-        ListChildrenResult::Entries(listing) => {
+        NamespaceListOutcome::Entries(listing) => {
             assert!(
                 listing.entries.is_empty(),
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"

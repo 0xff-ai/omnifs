@@ -3,7 +3,7 @@
 mod support;
 
 use omnifs_core::path::Path;
-use omnifs_host::LookupOutcome;
+use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_wit::provider::types::{
     CalloutResult, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     OpResult, ReadFileOutcome, Stability,
@@ -777,7 +777,7 @@ async fn github_repo_tree_lists_looks_up_and_reads_from_git_cache() {
         .await
         .unwrap();
     match repo_listing {
-        ListChildrenResult::Subtree(tree_ref) => {
+        NamespaceListOutcome::Subtree(tree_ref) => {
             let real_root = harness
                 .runtime
                 .resolve_tree_ref(tree_ref)
@@ -1803,7 +1803,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
         })]
     }
 
-    fn expect_denied(response: &omnifs_host::TestOp<'_>) {
+    fn expect_denied(response: &omnifs_engine::test_support::TestOp<'_>) {
         match response.result().unwrap() {
             OpResult::Error(error) => assert_eq!(error.kind, ErrorKind::Denied),
             other => panic!("expected provider error result, got {other:?}"),
@@ -1845,9 +1845,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
 /// Invariant #1: `issues/open/42` and `issues/all/42` share one object load.
 #[tokio::test]
 async fn open_then_all_one_load() {
-    use omnifs_wit::provider::types::{
-        ByteSource, Callout, CalloutResult, HttpResponse, ReadFileOutcome,
-    };
+    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse, ReadFileOutcome};
 
     let issue_json = br#"{
         "number": 42,
@@ -1925,7 +1923,7 @@ async fn open_then_all_one_load() {
         .await
         .unwrap();
     match warm.bytes {
-        ByteSource::Inline(bytes) => assert_eq!(bytes, b"Issue forty-two"),
+        ReadBytes::Inline(bytes) => assert_eq!(bytes, b"Issue forty-two"),
         other => panic!("expected inline title on warm read, got {other:?}"),
     }
 }
