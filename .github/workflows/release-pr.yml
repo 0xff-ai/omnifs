@@ -9,8 +9,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release-pr
@@ -20,8 +19,20 @@ jobs:
   release-pr:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v3
+        id: release-bot-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: omnifs
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
       - uses: actions/checkout@v6
         with:
+          token: ${{ steps.release-bot-token.outputs.token }}
           fetch-depth: 0 # full history + tags for git-cliff and the version compare
 
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -36,17 +47,25 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - name: Maintain release PR, or tag a merged release
+      - name: Prepare release changes, or tag a merged release
+        id: release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.release-bot-token.outputs.token }}
         run: |
           set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          app_slug="${{ steps.release-bot-token.outputs.app-slug }}"
+          app_user="${app_slug}[bot]"
+          app_user_id="$(gh api "/users/${app_user}" --jq .id)"
+          app_email="${app_user_id}+${app_user}@users.noreply.github.com"
+          git config user.name "${app_user}"
+          git config user.email "${app_email}"
+          echo "app-user=${app_user}" >> "$GITHUB_OUTPUT"
+          echo "app-email=${app_email}" >> "$GITHUB_OUTPUT"
 
           # Already tagged this commit? Nothing to do.
           if [ -n "$(git tag --points-at HEAD --list 'v[0-9]*')" ]; then
             echo "commit already tagged; nothing to do"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -55,6 +74,7 @@ jobs:
           [ -n "$last_tag" ] && range=("${last_tag}..HEAD")
 
           next="$(git-cliff --config cliff.toml "${range[@]}" --bumped-version)" # e.g. v0.3.0
+          echo "next=$next" >> "$GITHUB_OUTPUT"
           cur="$(cargo metadata --no-deps --format-version 1 \
                  | jq -r '.packages[] | select(.name=="omnifs-cli") | .version')"
 
@@ -64,17 +84,18 @@ jobs:
             echo "tagging merged release v$cur"
             git tag "v$cur"
             git push origin "v$cur"
+            echo "mode=tagged" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # Nothing releasable since the last tag -> leave any open PR as-is.
           if [ "${next#v}" = "${last_tag#v}" ]; then
             echo "no releasable commits since ${last_tag:-the beginning}"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # Accumulating: rebuild the standing release PR for $next.
-          git checkout -B release-pr
           cargo set-version "${next#v}"
           cargo update --workspace
           just npm sync
@@ -86,12 +107,19 @@ jobs:
           cat pending.md released.md > CHANGELOG.md
           rm -f pending.md released.md
 
-          git commit -aqm "chore(release): prepare $next"
-          git push --force origin release-pr
+          echo "mode=pr" >> "$GITHUB_OUTPUT"
 
-          if [ -z "$(gh pr list --head release-pr --base main --state open --json number --jq '.[0].number')" ]; then
-            gh pr create --base main --head release-pr \
-              --title "chore(release): $next" \
-              --label release \
-              --body "Automated release PR. Merging bumps the workspace to **$next**, syncs npm package versions, and finalizes the changelog below; the Release workflow then tags \`$next\` and ships after CI. Edit the changelog here before merging to polish it."
-          fi
+      - name: Create or update release PR
+        if: steps.release.outputs.mode == 'pr'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.release-bot-token.outputs.token }}
+          branch: release-pr
+          base: main
+          title: "chore(release): ${{ steps.release.outputs.next }}"
+          commit-message: "chore(release): prepare ${{ steps.release.outputs.next }}"
+          committer: "${{ steps.release.outputs.app-user }} <${{ steps.release.outputs.app-email }}>"
+          author: "${{ steps.release.outputs.app-user }} <${{ steps.release.outputs.app-email }}>"
+          labels: release
+          body: |
+            Automated release PR. Merging bumps the workspace to **${{ steps.release.outputs.next }}**, syncs npm package versions, and finalizes the changelog below; the Release workflow then tags `${{ steps.release.outputs.next }}` and ships after CI. Edit the changelog here before merging to polish it.
