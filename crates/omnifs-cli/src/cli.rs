@@ -39,6 +39,9 @@ pub enum Commands {
     /// mode and mount point come from the run-state file `omnifs up` wrote.
     Shell(commands::shell::ShellArgs),
 
+    /// Export a mount's canonical cache as a snapshot directory.
+    Snapshot(commands::snapshot::SnapshotArgs),
+
     /// First-run wizard: detect OS, explain Docker, pick several providers,
     /// authenticate each, and launch the container in one pass.
     ///
@@ -110,6 +113,7 @@ impl Commands {
             Self::Logs(_) => "logs",
             Self::Inspect(_) => "inspect",
             Self::Shell(_) => "shell",
+            Self::Snapshot(_) => "snapshot",
             Self::Setup(_) => "setup",
             Self::Init(_) => "init",
             Self::Mounts(_) => "mounts",
@@ -138,6 +142,7 @@ impl Commands {
             Self::Logs(args) => args.run().await,
             Self::Inspect(args) => args.run().await,
             Self::Shell(args) => args.run().await,
+            Self::Snapshot(args) => args.run().await,
             Self::Mounts(args) => args.run().await,
             Self::Providers(args) => args.run(),
             Self::Reset(args) => args.run().await,

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 omnifs-caps = { workspace = true }
 omnifs-api = { workspace = true }
+omnifs-engine = { workspace = true }
 omnifs-daemon = { workspace = true, optional = true }
 omnifs-nfs = { workspace = true, optional = true }
 omnifs-mtab = { workspace = true }

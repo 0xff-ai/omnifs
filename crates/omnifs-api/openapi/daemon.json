@@ -96,6 +96,54 @@
         }
       }
     },
+    "/v1/mounts/{name}/export": {
+      "get": {
+        "operationId": "mount_export",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "mount name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "canonical-store snapshot tar",
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "mount not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "snapshot export failed",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/ready": {
       "get": {
         "operationId": "ready",

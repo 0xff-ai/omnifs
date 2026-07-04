@@ -20,7 +20,7 @@ pub const API_MAJOR: u16 = 2;
 
 /// Control API minor version. The CLI warns but proceeds when the daemon's
 /// minor differs. Bump for additive, backward-compatible additions.
-pub const API_MINOR: u16 = 0;
+pub const API_MINOR: u16 = 2;
 
 /// Default control port. The container publishes it on the host loopback;
 /// both binaries default to it so `omnifs` finds the daemon with zero config.

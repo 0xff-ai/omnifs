@@ -265,6 +265,7 @@ impl Daemon {
             .routes(routes!(status))
             .routes(routes!(mounts_list))
             .routes(routes!(mount_inspect))
+            .routes(routes!(mount_export))
             .routes(routes!(reconcile))
             .routes(routes!(shutdown))
             .routes(routes!(events))
@@ -359,6 +360,55 @@ async fn mount_inspect(
             ErrorCode::MountNotFound,
             format!("mount `{name}` not found"),
         ),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/mounts/{name}/export",
+    operation_id = "mount_export",
+    params(("name" = String, Path, description = "mount name")),
+    responses(
+        (status = 200, description = "canonical-store snapshot tar", content_type = "application/x-tar", body = String),
+        (status = 404, description = "mount not found", content_type = "text/plain", body = String),
+        (status = 500, description = "snapshot export failed", content_type = "text/plain", body = String),
+    ),
+)]
+async fn mount_export(
+    State(daemon): State<Arc<Daemon>>,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let registry = Arc::clone(&daemon.registry);
+    let task_name = name.clone();
+    match tokio::task::spawn_blocking(move || {
+        registry
+            .snapshot_mount(&task_name)
+            .and_then(|snapshot| snapshot.map(|snapshot| snapshot.to_tar_vec()).transpose())
+    })
+    .await
+    {
+        Ok(Ok(Some(bytes))) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/x-tar")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}-snapshot.tar\""),
+            )
+            .body(Body::from(bytes))
+            .expect("static response parts are valid"),
+        Ok(Ok(None)) => {
+            (StatusCode::NOT_FOUND, format!("mount `{name}` not found\n")).into_response()
+        },
+        Ok(Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("snapshot export failed for mount `{name}`: {error:#}\n"),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("snapshot export task failed for mount `{name}`: {error}\n"),
+        )
+            .into_response(),
     }
 }
 
