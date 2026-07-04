@@ -17,8 +17,8 @@ use crate::commands::mounts::delete_credentials;
 use crate::credential_target::CredentialTarget;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::workspace::{MountRemovalTarget, Workspace};
-use omnifs_creds::FileStore;
-use omnifs_home::WorkspaceLayout;
+use omnifs_workspace::creds::FileStore;
+use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ResetArgs {

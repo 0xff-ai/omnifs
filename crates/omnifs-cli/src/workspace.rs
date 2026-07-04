@@ -4,9 +4,9 @@
 //! for command-scoped handles derived from that layout: config, provider
 //! catalog, daemon client, and configured mounts.
 
-use omnifs_home::{Workspace as HomeWorkspace, WorkspaceLayout};
-use omnifs_mount::mounts::Registry;
-use omnifs_provider::Catalog;
+use omnifs_workspace::layout::{Workspace as HomeWorkspace, WorkspaceLayout};
+use omnifs_workspace::mounts::Registry;
+use omnifs_workspace::provider::Catalog;
 use std::cell::OnceCell;
 use std::path::PathBuf;
 

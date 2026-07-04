@@ -1,6 +1,6 @@
 use super::detect;
 use crate::auth::AuthSelection;
-use omnifs_provider::AuthManifest;
+use omnifs_workspace::authn::AuthManifest;
 use secrecy::SecretString;
 
 pub(crate) struct ImportOutcome {

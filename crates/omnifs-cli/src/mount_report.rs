@@ -1,12 +1,12 @@
 //! Mount and provider scan results shared by status, doctor, and the catalog.
 
-use omnifs_core::MountName;
-use omnifs_creds::CredentialStore;
+use omnifs_workspace::creds::CredentialStore;
+use omnifs_workspace::mounts::Name as MountName;
 use serde::Serialize;
 use std::path::PathBuf;
 
-use omnifs_mount::mounts::Spec;
-use omnifs_provider::Catalog;
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::provider::Catalog;
 
 use crate::auth::AuthReadiness;
 use crate::session::MountConfig;

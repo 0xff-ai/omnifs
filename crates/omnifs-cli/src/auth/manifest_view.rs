@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use omnifs_provider::{AuthManifest, OauthScheme};
+use omnifs_workspace::authn::{AuthManifest, OauthScheme};
 
 const DEFAULT_STATIC_SCHEME: &str = "static-token";
 

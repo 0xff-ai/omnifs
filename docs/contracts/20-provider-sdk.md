@@ -88,8 +88,8 @@ Changing the `Object` trait, route faces, dispatch, provider macro surface, or W
 - `crates/omnifs-sdk/tests/wit_boundary.rs`
 - `crates/omnifs-sdk/src/metadata.rs`
 - `crates/omnifs-embed-metadata/src/main.rs`
-- `crates/omnifs-provider/src/sections.rs`
-- `crates/omnifs-mount/src/materialize.rs`
+- `crates/omnifs-workspace/src/provider/sections.rs`
+- `crates/omnifs-workspace/src/mounts/materialize.rs`
 - `providers/*/src/lib.rs`
 - `providers/DESIGN.md`
 - `skills/omnifs-provider-sdk/SKILL.md`

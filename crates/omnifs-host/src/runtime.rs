@@ -23,11 +23,11 @@ use crate::tree_refs::TreeRefs;
 use dashmap::DashMap;
 use omnifs_cache::{Caches, Store};
 use omnifs_caps::{Grant, PreopenedPath};
-use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
-use omnifs_mount::mounts::Spec;
-use omnifs_provider::{ConfigMetadata, HostResourceBinding, ProviderStore};
 use omnifs_wit::provider::types as wit_types;
+use omnifs_workspace::ids::ProviderId;
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::provider::{ConfigMetadata, HostResourceBinding, ProviderStore};
 
 use std::io;
 use std::path::{Path as StdPath, PathBuf};
@@ -91,7 +91,8 @@ impl HostContext {
     }
 
     pub(crate) fn mounts_dir(&self) -> PathBuf {
-        self.config_dir.join(omnifs_home::MOUNTS_SUBDIR)
+        self.config_dir
+            .join(omnifs_workspace::layout::MOUNTS_SUBDIR)
     }
 
     pub(crate) fn wasm_cache_dir(&self) -> PathBuf {
@@ -340,7 +341,7 @@ impl Runtime {
 
         let auth_manifest = manifest
             .as_ref()
-            .and_then(omnifs_provider::ProviderManifest::wasm_auth_manifest);
+            .and_then(omnifs_workspace::provider::ProviderManifest::wasm_auth_manifest);
         let auth = if config.auth.is_none() {
             Arc::new(AuthManager::none())
         } else {

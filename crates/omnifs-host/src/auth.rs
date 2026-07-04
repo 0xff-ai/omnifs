@@ -7,10 +7,10 @@
 use crate::singleflight::Group;
 use arc_swap::ArcSwapOption;
 use omnifs_auth::{AuthError as OAuthError, OAuthClient, OAuthRequest, oauth_request_from_config};
-use omnifs_core::CredentialId;
-use omnifs_creds::{CredentialEntry, CredentialStore, FileStore, StoreError};
-use omnifs_mount::{Auth, AuthKind, OAuth, StaticToken};
-use omnifs_provider::{AuthManifest, SchemeResolveError};
+use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::authn::{AuthManifest, SchemeResolveError};
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore, StoreError};
+use omnifs_workspace::mounts::{Auth, AuthKind, OAuth, StaticToken};
 use secrecy::ExposeSecret;
 use std::path::Path;
 use std::sync::Arc;

@@ -1,0 +1,871 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProviderManifest",
+  "type": "object",
+  "properties": {
+    "auth": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProviderAuthManifest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Need"
+      }
+    },
+    "config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfigMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "defaultMount": {
+      "type": "string"
+    },
+    "displayName": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "provider": {
+      "description": "Filename of the provider WASM component.",
+      "type": "string"
+    },
+    "sdkVersion": {
+      "description": "`omnifs-sdk` crate version used to generate the provider component.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "description": "Provider crate version (`CARGO_PKG_VERSION`), stamped by the `#[provider]`\nmacro. Informational catalog/UI context, never identity.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "witPackage": {
+      "description": "WIT package declaration the provider component was generated against.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "displayName",
+    "provider",
+    "defaultMount"
+  ],
+  "$defs": {
+    "AuthScheme": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "staticToken": {
+              "$ref": "#/$defs/StaticTokenScheme"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "staticToken"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "oauth": {
+              "$ref": "#/$defs/OauthScheme"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "oauth"
+          ]
+        }
+      ]
+    },
+    "ClientSideTokenConfig": {
+      "type": "object",
+      "properties": {
+        "redirectUriTemplate": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "redirectUriTemplate"
+      ]
+    },
+    "ConfigField": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostResourceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/ConfigType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "ConfigMetadata": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigField"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "$ref": "#/$defs/ConfigType"
+            },
+            "kind": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "map"
+            },
+            "values": {
+              "$ref": "#/$defs/ConfigType"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConfigField"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fields"
+          ]
+        }
+      ]
+    },
+    "DeviceCodeConfig": {
+      "type": "object",
+      "properties": {
+        "deviceAuthorizationEndpoint": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "deviceAuthorizationEndpoint"
+      ]
+    },
+    "HostResourceBinding": {
+      "description": "Binds a config field's string value to a host resource the sandbox must be\ngranted. The provider also declares the matching capability as a `dynamic`\nneed; the host resolves the concrete grant from this field's value at\nmount-start.",
+      "oneOf": [
+        {
+          "description": "A host file the provider opens through a preopened WASI directory. The\nhost preopens the file's parent directory at the same path (guest ==\nhost) with `mode`, so the provider opens the configured path unchanged.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "mode": {
+              "$ref": "#/$defs/PreopenMode",
+              "default": "ro"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A host unix socket the host issues provider callouts over. The value is a\n`unix://` endpoint resolved into the socket allowlist.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "socket"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "KeyValue": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value"
+      ]
+    },
+    "Need": {
+      "description": "One capability a provider *needs*, declared via `capabilities(..)` in\n`#[omnifs_sdk::provider]` and embedded in the `omnifs.provider-metadata.v1`\nsection. A need is never a grant: the host checks a mount's [`Grants`]\nagainst these, it never grants from them at runtime.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "domain"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "gitRepo"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "unixSocket"
+            },
+            "value": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "preopenedPath"
+            },
+            "value": {
+              "$ref": "#/$defs/PreopenedPath"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "memoryMb"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "fetchBlobBytes"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dynamic": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "readBlobBytes"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value",
+            "why"
+          ]
+        }
+      ]
+    },
+    "OAuthFlow": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "pkceLoopback": {
+              "$ref": "#/$defs/PkceLoopbackConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pkceLoopback"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "pkceManualCode": {
+              "$ref": "#/$defs/PkceManualCodeConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pkceManualCode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "clientSideToken": {
+              "$ref": "#/$defs/ClientSideTokenConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "clientSideToken"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "deviceCode": {
+              "$ref": "#/$defs/DeviceCodeConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "deviceCode"
+          ]
+        }
+      ]
+    },
+    "OauthScheme": {
+      "type": "object",
+      "properties": {
+        "authorizationEndpoint": {
+          "type": "string"
+        },
+        "defaultClientId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultScopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "extraAuthorizeParams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          }
+        },
+        "extraTokenParams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          }
+        },
+        "flow": {
+          "$ref": "#/$defs/OAuthFlow"
+        },
+        "injectDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "injectHeaderName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "injectValuePrefix": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "refreshTokenRotates": {
+          "type": "boolean",
+          "default": false
+        },
+        "revocationEndpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenEndpoint": {
+          "type": "string"
+        },
+        "tokenEndpointAuth": {
+          "$ref": "#/$defs/TokenEndpointAuthMethod"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "displayName",
+        "authorizationEndpoint",
+        "tokenEndpoint",
+        "flow",
+        "injectDomains",
+        "injectValuePrefix"
+      ]
+    },
+    "PkceLoopbackConfig": {
+      "type": "object",
+      "properties": {
+        "redirectUriTemplate": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "redirectUriTemplate"
+      ]
+    },
+    "PkceManualCodeConfig": {
+      "type": "object",
+      "properties": {
+        "redirectUri": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "redirectUri"
+      ]
+    },
+    "PreopenMode": {
+      "description": "Access mode for a preopened directory grant.",
+      "type": "string",
+      "enum": [
+        "ro",
+        "rw"
+      ]
+    },
+    "PreopenedPath": {
+      "description": "A host directory exposed into the provider sandbox at a guest path.",
+      "type": "object",
+      "properties": {
+        "guest": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/PreopenMode",
+          "default": "ro"
+        }
+      },
+      "required": [
+        "host",
+        "guest"
+      ]
+    },
+    "ProviderAuthManifest": {
+      "description": "Provider auth block from the `omnifs.provider-metadata.v1` embedded section.\n\nEach scheme is self-contained: it carries its own injection domains, header,\nand prefix, so the embedded wire form is exactly what the host and\n`omnifs-auth` consume. There is no compact-vs-expanded encoding and no\ntransform on read, the provider serializes [`AuthScheme`] directly.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Key of the scheme `omnifs init` defaults to when the user makes no choice.",
+          "type": "string"
+        },
+        "guidance": {
+          "description": "Per-scheme setup guidance, keyed by scheme key. Display metadata only;\nnever affects header injection, so it rides here rather than on the\ninjection-facing [`AuthScheme`].",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SchemeGuidance"
+          }
+        },
+        "schemes": {
+          "description": "The schemes a user can pick, each self-contained with its own injection\ndomains, header, and prefix.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuthScheme"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "default",
+        "schemes"
+      ]
+    },
+    "SchemeGuidance": {
+      "description": "Human-facing setup guidance for a single auth scheme.\n\nDisplay metadata only: it never affects header injection, so it rides on the\nmanifest [`ProviderAuthManifest`](crate::ProviderAuthManifest) rather than on\nthe injection-facing [`AuthScheme`]. The host pairs it with its own canned\nper-flow-kind explanation; a provider supplies only what is specific to it\n(e.g. \"create an OAuth app\", \"enable the Calendar API\").",
+      "type": "object",
+      "properties": {
+        "docsUrl": {
+          "description": "Link to provider documentation for this auth path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setupSteps": {
+          "description": "Ordered provider-specific prerequisite steps, rendered after the host's\ncanned flow-kind explanation. Required for an OAuth scheme that ships no\nclient id (the user must create their own app).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "description": "One-line summary shown in scheme pickers during `omnifs init`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "StaticTokenScheme": {
+      "type": "object",
+      "properties": {
+        "creationUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "headerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "injectDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valuePrefix": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "valuePrefix",
+        "description",
+        "injectDomains"
+      ]
+    },
+    "TokenEndpointAuthMethod": {
+      "oneOf": [
+        {
+          "description": "Public client: no secret presented at the token endpoint (PKCE).",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Confidential client: secret sent in the token request body.",
+          "type": "string",
+          "const": "clientSecretPost"
+        },
+        {
+          "description": "Confidential client: secret sent via HTTP Basic auth.",
+          "type": "string",
+          "const": "clientSecretBasic"
+        }
+      ]
+    },
+    "TokenValidation": {
+      "description": "Token self-validation probe, carried by a provider's static-token scheme.\n\nThe host uses this to verify a newly-entered token before storing it.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectStatus": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "extract": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "jsonPointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "url",
+        "expectStatus"
+      ]
+    }
+  }
+}

@@ -284,7 +284,7 @@ pub(crate) async fn launch_native(
     // Carry the telemetry off-switch into the daemon child. Only set it when
     // disabled: an unset `OMNIFS_TELEMETRY` reads as enabled.
     if !telemetry_enabled {
-        command.env(omnifs_home::telemetry::ENV_SWITCH, "0");
+        command.env(omnifs_workspace::telemetry::ENV_SWITCH, "0");
     }
 
     // Own process group so the daemon is not signalled when the CLI or its

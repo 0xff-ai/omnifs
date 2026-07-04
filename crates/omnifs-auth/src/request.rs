@@ -4,11 +4,11 @@ use oauth2::{
     AuthType, AuthUrl, ClientId, ClientSecret, DeviceAuthorizationUrl, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, RedirectUrl, RevocationUrl, TokenUrl,
 };
-use omnifs_mount::OAuth;
-use omnifs_provider::{
+use omnifs_workspace::authn::{
     ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig,
     PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
+use omnifs_workspace::mounts::OAuth;
 use secrecy::{ExposeSecret, SecretString};
 
 pub(crate) type ConfiguredClient =

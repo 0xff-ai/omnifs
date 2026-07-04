@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
-use omnifs_home::WorkspaceLayout;
+use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitResult {

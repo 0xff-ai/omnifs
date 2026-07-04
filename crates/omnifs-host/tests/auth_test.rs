@@ -1,18 +1,18 @@
 use omnifs_caps::Allowlist;
-use omnifs_core::CredentialId;
-use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
 use omnifs_host::auth::{AuthManager, RefreshOutcome};
 use omnifs_host::blob::{BlobCache, BlobExecutor, BlobLimits};
 use omnifs_host::capability::CapabilityChecker;
 use omnifs_host::http::HttpStack;
-use omnifs_mount::{
-    Auth as AuthConfig, OAuth as OAuthMountConfig, StaticToken as StaticTokenConfig,
-};
-use omnifs_provider::{
+use omnifs_wit::provider::types as wit_types;
+use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::authn::{
     AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, StaticTokenScheme,
     TokenEndpointAuthMethod,
 };
-use omnifs_wit::provider::types as wit_types;
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore};
+use omnifs_workspace::mounts::{
+    Auth as AuthConfig, OAuth as OAuthMountConfig, StaticToken as StaticTokenConfig,
+};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

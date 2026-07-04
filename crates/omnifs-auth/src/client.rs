@@ -7,8 +7,8 @@ use oauth2::{
     AccessToken, AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
     RefreshToken, Scope, StandardRevocableToken, TokenResponse,
 };
-use omnifs_creds::CredentialEntry;
-use omnifs_provider::{OauthScheme, PkceManualCodeConfig};
+use omnifs_workspace::authn::{OauthScheme, PkceManualCodeConfig};
+use omnifs_workspace::creds::CredentialEntry;
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
 use std::pin::Pin;
@@ -766,8 +766,8 @@ impl From<oauth2::HttpClientError<reqwest::Error>> for AuthError {
 mod tests {
     use super::*;
     use crate::LoginRequest;
-    use omnifs_creds::Refreshability;
-    use omnifs_provider::OauthScheme;
+    use omnifs_workspace::authn::OauthScheme;
+    use omnifs_workspace::creds::Refreshability;
     use test_support::{FakeAuthServer, FakeBehavior, FakeOpener, FakeRevocationServer};
 
     #[tokio::test]

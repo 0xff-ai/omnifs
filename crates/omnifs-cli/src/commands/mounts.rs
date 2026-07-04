@@ -3,16 +3,16 @@
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
-use omnifs_core::MountName;
-use omnifs_creds::{CredentialStore, FileStore};
-use omnifs_mount::mounts::Registry;
+use omnifs_workspace::creds::{CredentialStore, FileStore};
+use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::mounts::Registry;
 use std::io::Write as _;
 use std::path::Path;
 
 use crate::credential_target::CredentialTarget;
 use crate::session::MountConfig;
 use crate::workspace::Workspace;
-use omnifs_home::WorkspaceLayout;
+use omnifs_workspace::layout::WorkspaceLayout;
 
 #[derive(Args, Debug, Clone)]
 pub struct MountsArgs {
@@ -194,8 +194,8 @@ fn missing_mount_error(
 mod tests {
     use super::*;
     use crate::test_support::fixture_paths as base_fixture_paths;
-    use omnifs_core::CredentialId;
-    use omnifs_creds::{CredentialEntry, MemoryStore};
+    use omnifs_workspace::authn::CredentialId;
+    use omnifs_workspace::creds::{CredentialEntry, MemoryStore};
     use secrecy::SecretString;
     use tempfile::TempDir;
     use time::OffsetDateTime;

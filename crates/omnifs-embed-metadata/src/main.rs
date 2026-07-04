@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use omnifs_provider::{
+use omnifs_workspace::provider::{
     ProviderManifest, embed_provider_metadata_section, read_provider_metadata_section,
 };
 
@@ -130,8 +130,8 @@ mod tests {
         for (file, metadata) in PROVIDERS {
             let manifest = metadata();
             let json = serde_json::to_vec(&manifest).expect("serialize manifest");
-            let parsed =
-                omnifs_provider::ProviderManifest::from_bytes(&json).unwrap_or_else(|err| {
+            let parsed = omnifs_workspace::provider::ProviderManifest::from_bytes(&json)
+                .unwrap_or_else(|err| {
                     panic!(
                         "{file}: host rejected metadata: {err}\njson: {}",
                         String::from_utf8_lossy(&json)

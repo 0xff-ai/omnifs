@@ -4,15 +4,15 @@ use clap::Args;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use omnifs_creds::FileStore;
+use omnifs_workspace::creds::FileStore;
 
 use crate::auth::{AuthProbeSeverity, AuthProbeSummary};
 use crate::launch_backend::{DockerTarget, ImageRef};
 use crate::runtime::Runtime;
 use crate::status::UserMountStatus;
 use crate::workspace::Workspace;
-use omnifs_home::WorkspaceLayout;
-use omnifs_provider::{Catalog, DirStatus};
+use omnifs_workspace::layout::WorkspaceLayout;
+use omnifs_workspace::provider::{Catalog, DirStatus};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {}

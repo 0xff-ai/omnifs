@@ -140,16 +140,20 @@
 pub use config_resource::ProvidesConfigMetadata;
 pub use config_resource::{HostFile, HostSocket};
 
-// The provider metadata block. These wire types live in omnifs-provider and
+// The provider metadata block. These wire types live in omnifs-workspace and
 // omnifs-caps; a provider constructs and the harvester serializes them entirely
 // host-side, so they are re-exported only for non-wasm targets. The wasm guest
 // never references them.
 #[cfg(not(target_arch = "wasm32"))]
 pub use omnifs_caps::{Need, PreopenMode, PreopenedPath};
 #[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_provider::{
-    ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, OauthScheme,
-    ProviderAuthManifest, ProviderManifest, SchemeGuidance, StaticTokenScheme, TokenValidation,
+pub use omnifs_workspace::authn::{
+    OauthScheme, SchemeGuidance, StaticTokenScheme, TokenValidation,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use omnifs_workspace::provider::{
+    ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderAuthManifest,
+    ProviderManifest,
 };
 
 #[doc(hidden)]

@@ -24,13 +24,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use omnifs_core::CredentialId;
-use omnifs_creds::{CredentialEntry, CredentialStore, MemoryStore};
 use omnifs_host::auth::{AuthManager, RefreshOutcome};
-use omnifs_mount::{Auth as AuthConfig, OAuth as OAuthMountConfig};
-use omnifs_provider::{
+use omnifs_workspace::authn::CredentialId;
+use omnifs_workspace::authn::{
     AuthManifest, AuthScheme, OAuthFlow, OauthScheme, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };
+use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore};
+use omnifs_workspace::mounts::{Auth as AuthConfig, OAuth as OAuthMountConfig};
 use secrecy::{ExposeSecret, SecretString};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

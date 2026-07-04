@@ -1,18 +1,8 @@
 //! Core omnifs protocol types.
 
-pub mod auth;
 mod content_type;
-pub mod mount;
 pub mod path;
-pub mod provider;
 pub mod view;
 
-pub use auth::{
-    AccountId, AuthKind, CredentialId, CredentialIdError, IdError, SchemeId as AuthSchemeId,
-};
 pub use content_type::ContentType;
-pub use mount::{Name as MountName, NameError as MountNameError};
 pub use path::{ParseError, Path, Segment};
-pub use provider::{
-    ProviderId, ProviderIdHexError, ProviderMeta, ProviderName, ProviderRef, ProviderVersion,
-};

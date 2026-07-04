@@ -25,7 +25,6 @@ use crate::protocol::consts::{
     EXPORT_ROOT_ID, MAX_NFS_READ_BYTES, NFS_EXPORT_NAME, OPEN_MATERIALIZE_MAX_BYTES, ROOT_ID,
 };
 use dashmap::DashMap;
-use omnifs_core::MountName;
 use omnifs_core::path::{Path, Segment};
 use omnifs_core::view as view_types;
 use omnifs_core::view::{EntryMeta, FileAttrsCache};
@@ -36,6 +35,7 @@ use omnifs_tree::{
     Chunk, Entry as TreeEntry, ListOutcome, Listing, Node, RangedHandle, ReadResult, RequestCtx,
     Synthetic, Tree, TreeErrorKind,
 };
+use omnifs_workspace::mounts::Name as MountName;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};

@@ -108,17 +108,17 @@ pub fn nfs_serial_lock() -> TcpListener {
 
 /// Install the test provider into the provider store under `providers_dir` and
 /// return its content id.
-pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
+pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::ProviderId {
     let bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
         .expect("read test provider wasm");
-    let id = omnifs_core::ProviderId::from_wasm_bytes(&bytes);
-    let store = omnifs_provider::ProviderStore::new(providers_dir);
+    let id = omnifs_workspace::ids::ProviderId::from_wasm_bytes(&bytes);
+    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
     store.put_if_absent(&id, &bytes).expect("put test provider");
     store
         .install(
             id,
-            omnifs_core::ProviderMeta {
-                name: omnifs_core::ProviderName::new("test-provider").unwrap(),
+            omnifs_workspace::ids::ProviderMeta {
+                name: omnifs_workspace::ids::ProviderName::new("test-provider").unwrap(),
                 version: None,
             },
             "test_provider.wasm".into(),
@@ -129,7 +129,7 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
 
 /// No-auth mount spec for the test provider, pinning `id`. Serves
 /// `test/hello/message`.
-pub fn test_mount_spec(id: &omnifs_core::ProviderId) -> String {
+pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
     format!(
         r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test","capabilities":{{"domains":["httpbin.org"]}}}}"#
     )

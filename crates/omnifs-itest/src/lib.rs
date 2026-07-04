@@ -1,14 +1,14 @@
 use omnifs_cache::{Caches, Record as CacheRecord, RecordKind};
 use omnifs_core::path::{Path, Segment};
-use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::{BuildError, Error, HostContext, Op, Runtime, TestOp};
-use omnifs_mount::mounts::Spec;
-use omnifs_provider::{Artifact, Catalog, ProviderStore};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult, OpResult,
     ReadFileOutcome, ReadFileResult,
 };
+use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+use omnifs_workspace::mounts::Spec;
+use omnifs_workspace::provider::{Artifact, Catalog, ProviderStore};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
@@ -52,7 +52,7 @@ impl RuntimeHarness {
             path: std::env::temp_dir(),
             source,
         })?;
-        let paths = omnifs_home::WorkspaceLayout::under_root(config_dir.path());
+        let paths = omnifs_workspace::layout::WorkspaceLayout::under_root(config_dir.path());
 
         // Pin the named provider into this harness's provider store and rewrite
         // the test config's `provider` field to the resulting `ProviderRef`, so

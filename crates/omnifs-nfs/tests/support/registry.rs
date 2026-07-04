@@ -1,7 +1,7 @@
 use omnifs_host::HostContext;
 use omnifs_host::cloner::GitCloner;
 use omnifs_host::registry::ProviderRegistry;
-use omnifs_mount::mounts::Spec;
+use omnifs_workspace::mounts::Spec;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

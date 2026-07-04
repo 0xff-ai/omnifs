@@ -19,7 +19,7 @@ The daemon exposes a REST API whose schema lives in `omnifs-api` and whose check
 
 Current mount delivery is disk reconcile. The CLI writes specs under `mounts/`; the daemon loads them from disk on startup and converges the running set through `/v1/reconcile`.
 
-Specs are one file per mount, and a spec file's stem is its mount name: `mount::Registry` (in `omnifs-mount`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
+Specs are one file per mount, and a spec file's stem is its mount name: `mounts::Registry` (in `omnifs-workspace`) rejects any file whose stem does not match the spec's `mount`. The Registry is the sole spec owner. The CLI is the only author and writes through it atomically (same-dir temp plus rename); the daemon reads through the same Registry on reconcile. A spec inherits its provider-manifest defaults (the auth scheme and config defaults) at creation time, so serving reads it as-is, with no read-time resolution step. Materialization still reads the pinned manifest, but only to check the spec's capability grants against the provider's declared needs, never to fill defaults.
 
 Prefer REST API extensions for new non-secret interactions. Keep credentials off the REST API.
 
@@ -60,11 +60,11 @@ Keep Docker-specific bind/materialization policy in Docker launch paths. Keep na
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/server.rs`
 - `crates/omnifs-cli/src/live.rs`
-- `crates/omnifs-mount/src/mounts/mod.rs`
+- `crates/omnifs-workspace/src/mounts/mod.rs`
 - `crates/omnifs-cli/src/launch.rs`
 - `crates/omnifs-cli/src/runtime.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
-- `crates/omnifs-home/src/lib.rs`
+- `crates/omnifs-workspace/src/layout.rs`
 - `scripts/dev.ts`
 - `Dockerfile`
 - `crates/omnifs-daemon/src/bin/openapi.rs`
