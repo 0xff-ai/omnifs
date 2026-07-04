@@ -13,8 +13,12 @@ use anyhow::{Context, Result};
 /// when set, else the loopback port the container publishes on the host.
 /// Single source of truth for every consumer of the control API.
 pub fn daemon_addr() -> String {
-    std::env::var("OMNIFS_DAEMON_ADDR")
-        .unwrap_or_else(|_| format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT))
+    crate::config::resolve_setting(
+        None,
+        "OMNIFS_DAEMON_ADDR",
+        || None,
+        format!("127.0.0.1:{}", omnifs_api::DEFAULT_PORT),
+    )
 }
 
 /// Outcome of one [`EventsClient::attach`] call.

@@ -22,9 +22,9 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::UpgradePlan;
+use omnifs_workspace::mounts::{ProviderMetadataInheritance, UpgradePlan};
 use omnifs_workspace::mounts::{Registry, Spec};
-use omnifs_workspace::provider::Catalog;
+use omnifs_workspace::provider::{Catalog, ProviderManifest};
 
 use crate::session::MountConfig;
 
@@ -60,10 +60,17 @@ pub(crate) fn run_upgrade_check(
             continue;
         }
 
-        match UpgradePlan::diff(&pinned.manifest()?, &candidate.manifest()?) {
+        let pinned_manifest = pinned.manifest()?;
+        let candidate_manifest = candidate.manifest()?;
+        match UpgradePlan::diff(&pinned_manifest, &candidate_manifest) {
             UpgradePlan::Identical => {},
             UpgradePlan::AdditiveConfig { added } => {
-                apply_additive_upgrade(&config.source, &candidate.reference(), &added)?;
+                apply_additive_upgrade(
+                    &config.source,
+                    &candidate.reference(),
+                    &candidate_manifest,
+                    &added,
+                )?;
                 migrated.push(mount.to_owned());
                 anstream::println!(
                     "✓ Mount `{mount}`: upgraded `{name}` and filled {} new optional field(s): {}",
@@ -126,26 +133,16 @@ pub(crate) fn run_upgrade_check(
 fn apply_additive_upgrade(
     spec_path: &Path,
     reference: &ProviderRef,
+    manifest: &ProviderManifest,
     added: &[omnifs_workspace::mounts::AddedField],
 ) -> anyhow::Result<()> {
     let mut spec =
         Spec::from_file(spec_path).with_context(|| format!("read spec {}", spec_path.display()))?;
 
-    // Fill new optional fields with their defaults, never overwriting an existing
-    // key. A config object survives even when nothing was added; it is dropped
-    // only when it was absent and no default applied.
-    let mut config = match spec.config_raw.take() {
-        Some(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-    for field in added {
-        if !config.contains_key(&field.name)
-            && let Some(default) = &field.default
-        {
-            config.insert(field.name.clone(), default.clone());
-        }
-    }
-    spec.config_raw = (!config.is_empty()).then_some(serde_json::Value::Object(config));
+    spec.apply_provider_metadata(
+        manifest,
+        ProviderMetadataInheritance::additive_config(added),
+    )?;
     spec.provider = reference.clone();
 
     let mounts_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));

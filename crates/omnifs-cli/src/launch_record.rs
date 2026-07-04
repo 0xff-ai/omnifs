@@ -68,18 +68,15 @@ impl LaunchRecord {
         })
     }
 
-    /// Atomically write to `<config_dir>/launch.json` (temp + rename).
+    /// Atomically write to `<config_dir>/launch.json` through the workspace's
+    /// one atomic writer (temp + rename).
     pub(crate) fn write(&self, config_dir: &Path) -> Result<()> {
         let target = record_path(config_dir);
-        let tmp = target.with_extension("json.tmp");
-
         let json = serde_json::to_string_pretty(self).context("serialize launch record")?;
         std::fs::create_dir_all(config_dir)
             .with_context(|| format!("create config dir {}", config_dir.display()))?;
-        std::fs::write(&tmp, &json)
-            .with_context(|| format!("write launch record to {}", tmp.display()))?;
-        std::fs::rename(&tmp, &target)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
+        omnifs_workspace::io::write_atomic(&target, json.as_bytes(), 0o644)
+            .with_context(|| format!("write launch record to {}", target.display()))?;
         Ok(())
     }
 

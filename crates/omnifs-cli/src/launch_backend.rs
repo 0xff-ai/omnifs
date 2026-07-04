@@ -18,8 +18,30 @@ use anyhow::Result;
 #[cfg(feature = "daemon")]
 use omnifs_daemon::DaemonArgs;
 
-use crate::config::{Config, ConfiguredBackend};
-use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE, env_string};
+use crate::config::{Config, ConfiguredBackend, resolve_setting};
+use crate::session::{CONTAINER_NAME, ENV_CONTAINER_NAME, ENV_IMAGE, IMAGE};
+
+/// How the omnifs process is running, which sets its default tracing level.
+#[derive(Clone, Copy)]
+pub(crate) enum RunMode {
+    /// A foreground CLI invocation: stays quiet so ordinary commands are not
+    /// noisy.
+    Foreground,
+    /// A background daemon the CLI spawned: defaults louder so its startup
+    /// diagnostics are captured in daemon.log rather than hidden.
+    Spawned,
+}
+
+/// The default `RUST_LOG` level for each run mode, and the one place the level
+/// strings live. Every default-level site (the CLI's own tracing filter and the
+/// spawned daemon's `RUST_LOG`) selects through here instead of spelling a
+/// literal.
+pub(crate) const fn default_daemon_log_level(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::Foreground => "warn",
+        RunMode::Spawned => "info",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContainerName(String);
@@ -123,10 +145,13 @@ impl DockerTarget {
         container_name: Option<String>,
         config: &Config,
     ) -> anyhow::Result<ContainerName> {
-        match container_name.or_else(|| env_string(ENV_CONTAINER_NAME)) {
-            Some(name) => ContainerName::new(name),
-            None => Self::container_name_from_config(config),
-        }
+        let name = resolve_setting(
+            container_name,
+            ENV_CONTAINER_NAME,
+            || config.system.container_name.clone(),
+            CONTAINER_NAME.to_string(),
+        );
+        ContainerName::new(name)
     }
 
     pub(crate) fn container_name(&self) -> &ContainerName {
@@ -138,10 +163,13 @@ impl DockerTarget {
     }
 
     fn resolve_image(image: Option<String>, config: &Config) -> anyhow::Result<ImageRef> {
-        match image.or_else(|| env_string(ENV_IMAGE)) {
-            Some(image) => ImageRef::new(image),
-            None => Self::image_from_config(config),
-        }
+        let image = resolve_setting(
+            image,
+            ENV_IMAGE,
+            || config.system.image.clone(),
+            IMAGE.to_string(),
+        );
+        ImageRef::new(image)
     }
 
     fn container_name_from_config(config: &Config) -> anyhow::Result<ContainerName> {
@@ -274,11 +302,11 @@ pub(crate) async fn launch_native(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
 
-    // Default the daemon to info-level logging when the user has not set
-    // RUST_LOG. The CLI's own tracing defaults to warn, which would hide
-    // the daemon's startup diagnostics in daemon.log.
+    // Default the spawned daemon's log level when the user has not set
+    // RUST_LOG. The CLI's own foreground tracing is quieter, which would
+    // otherwise hide the daemon's startup diagnostics in daemon.log.
     if std::env::var_os("RUST_LOG").is_none() {
-        command.env("RUST_LOG", "info");
+        command.env("RUST_LOG", default_daemon_log_level(RunMode::Spawned));
     }
 
     // Carry the telemetry off-switch into the daemon child. Only set it when

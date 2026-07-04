@@ -1,5 +1,7 @@
 use anyhow::{Context, anyhow};
 use omnifs_caps::Grants;
+use omnifs_workspace::ids::ProviderRef;
+use omnifs_workspace::mounts::{Name as MountName, ProviderMetadataInheritance, Spec};
 use omnifs_workspace::provider::{
     ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest,
 };
@@ -13,12 +15,22 @@ pub(super) struct CreatedMountSpec {
 }
 
 pub(super) struct MountSpecCreator<'a> {
+    reference: &'a ProviderRef,
+    mount_name: &'a MountName,
     manifest: &'a ProviderManifest,
 }
 
 impl<'a> MountSpecCreator<'a> {
-    pub(super) fn new(manifest: &'a ProviderManifest) -> Self {
-        Self { manifest }
+    pub(super) fn new(
+        reference: &'a ProviderRef,
+        mount_name: &'a MountName,
+        manifest: &'a ProviderManifest,
+    ) -> Self {
+        Self {
+            reference,
+            mount_name,
+            manifest,
+        }
     }
 
     pub(super) fn create(&self, interactive: bool) -> anyhow::Result<CreatedMountSpec> {
@@ -26,14 +38,24 @@ impl<'a> MountSpecCreator<'a> {
         // never grants at runtime; the spec owns these grants from here on.
         let capabilities =
             (!self.manifest.capabilities.is_empty()).then(|| self.manifest.provider_capabilities());
-        let Some(config_metadata) = self.manifest.config.as_ref() else {
+        let mut spec = Spec {
+            provider: self.reference.clone(),
+            mount: self.mount_name.to_string(),
+            root_mount: false,
+            auth: None,
+            capabilities: None,
+            config_raw: None,
+        };
+        spec.apply_provider_metadata(self.manifest, ProviderMetadataInheritance::config())
+            .context("apply provider config defaults")?;
+        let Some(mut config) = spec.config_raw else {
             return Ok(CreatedMountSpec {
                 config: None,
                 capabilities,
             });
         };
-        let mut config = config_metadata.defaults();
-        if interactive {
+
+        if interactive && let Some(config_metadata) = self.manifest.config.as_ref() {
             prompt_host_files(config_metadata, &mut config)?;
         }
         self.validate(&config)?;

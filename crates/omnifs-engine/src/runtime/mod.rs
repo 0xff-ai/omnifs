@@ -100,7 +100,7 @@ impl HostContext {
     }
 
     pub(crate) fn wasm_cache_dir(&self) -> PathBuf {
-        self.cache_dir.join("wasm")
+        omnifs_workspace::layout::wasm_cache_dir(&self.cache_dir)
     }
 
     /// `<hex>.wasm` for a pinned provider id: the serving path the
