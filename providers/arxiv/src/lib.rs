@@ -202,7 +202,7 @@ impl ArxivProvider {
                 }
             });
             o.file("paper.atom").canonical::<Atom>()?;
-            o.file("paper.json").derive(Paper::metadata_json)?;
+            o.file("paper.json").computed(Paper::metadata_json)?;
             o.file("paper.pdf").blob(Paper::pdf)?;
             o.file("source.tar.gz").blob(Paper::source)?;
             Ok(())

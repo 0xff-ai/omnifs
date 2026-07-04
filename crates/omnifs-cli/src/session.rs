@@ -100,7 +100,7 @@ mod tests {
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
-    use crate::launch::DockerMountMaterializer;
+    use crate::launch::DockerMountSpecBuilder;
     use crate::test_support::{install_fixture_provider, spec_with_provider, spec_with_reference};
     use omnifs_workspace::provider::Catalog;
 
@@ -150,7 +150,7 @@ mod tests {
         let catalog = test_catalog(tmp.path());
         // Validation accepts the present host-managed token; no preopens, so no
         // container binds.
-        let mount = DockerMountMaterializer::new(&catalog, &store)
+        let mount = DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&config)
             .unwrap();
         assert!(mount.preopen_binds().is_empty());
@@ -177,7 +177,7 @@ mod tests {
             ),
             source: PathBuf::from("/dev/null"),
         };
-        DockerMountMaterializer::new(&catalog, &store)
+        DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&with_scheme)
             .unwrap();
 
@@ -186,7 +186,7 @@ mod tests {
             config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
             source: PathBuf::from("/dev/null"),
         };
-        DockerMountMaterializer::new(&catalog, &store)
+        DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&metadata_only)
             .unwrap();
     }
@@ -220,7 +220,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let binds = DockerMountMaterializer::new(&catalog, &store)
+        let binds = DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&config)
             .unwrap()
             .into_preopen_binds()
@@ -259,7 +259,7 @@ mod tests {
         };
 
         let catalog = test_catalog(tmp.path());
-        let mount = DockerMountMaterializer::new(&catalog, &store)
+        let mount = DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&config)
             .unwrap();
         let spec = mount.spec();
@@ -302,7 +302,7 @@ mod tests {
             source: PathBuf::from("/dev/null"),
         };
         let catalog = test_catalog(tmp.path());
-        let err = DockerMountMaterializer::new(&catalog, &store)
+        let err = DockerMountSpecBuilder::new(&catalog, &store)
             .materialize(&config)
             .unwrap_err();
         let chain = format!("{err:#}");

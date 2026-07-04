@@ -5,7 +5,7 @@
 //! gracefully: no running daemon means config-only, exactly as before.
 
 use crate::client::DaemonClient;
-use crate::launch::DockerMountMaterializer;
+use crate::launch::DockerMountSpecBuilder;
 use crate::launch_backend::LaunchBackend;
 use crate::session::MountConfig;
 use omnifs_workspace::creds::CredentialStore;
@@ -37,7 +37,7 @@ pub(crate) async fn add_mount(
         return Ok(LiveApply::NotRunning);
     }
     if backend.is_docker() {
-        let mount = DockerMountMaterializer::new(catalog, store).materialize(&config)?;
+        let mount = DockerMountSpecBuilder::new(catalog, store).materialize(&config)?;
         if !mount.preopen_binds().is_empty() {
             return Ok(LiveApply::RestartRequired("it needs new host binds"));
         }

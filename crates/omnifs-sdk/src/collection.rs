@@ -90,7 +90,7 @@ impl<C, S> Deref for ListCx<C, S> {
 ///
 /// - `Fresh`: the list payload satisfies the child object's canonical contract;
 ///   the child canonical is stored at listing time.
-/// - `Derived`: shallow list fields populate eager derived leaves but not the
+/// - `Computed`: shallow list fields populate eager computed leaves but not the
 ///   canonical object.
 /// - `Key`: discovery only (name; bytes load on the child's own read).
 pub enum CollectionEntry<T: Object> {
@@ -99,7 +99,7 @@ pub enum CollectionEntry<T: Object> {
         value: T,
         canonical: Canonical,
     },
-    Derived {
+    Computed {
         key: T::Key,
         files: Vec<(String, FileProjection)>,
     },
@@ -119,10 +119,10 @@ impl<T: Object> CollectionEntry<T> {
         }
     }
 
-    /// Shallow list fields that can populate derived leaves but not the
+    /// Shallow list fields that can populate computed leaves but not the
     /// canonical object.
-    pub fn derived(key: T::Key, files: Vec<(String, FileProjection)>) -> Self {
-        Self::Derived { key, files }
+    pub fn computed(key: T::Key, files: Vec<(String, FileProjection)>) -> Self {
+        Self::Computed { key, files }
     }
 
     /// Discovery only: the child name, no bytes.
@@ -132,7 +132,7 @@ impl<T: Object> CollectionEntry<T> {
 
     pub(crate) fn entry_key(&self) -> &T::Key {
         match self {
-            Self::Fresh { key, .. } | Self::Derived { key, .. } | Self::Key { key } => key,
+            Self::Fresh { key, .. } | Self::Computed { key, .. } | Self::Key { key } => key,
         }
     }
 }
@@ -232,9 +232,9 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
 /// segment(s) beyond the collection dir, computed from the entry key against
 /// the CHILD's registered template (not the parent's captures). A `Fresh`
 /// entry also stores the child canonical against its own logical id with the
-/// child's canonical-view leaf paths (canonical/representation/derived,
+/// child's canonical-view leaf paths (canonical/representation/computed,
 /// facet-expanded) as view leaves, so a later read of any child leaf serves
-/// warm. A `Derived` entry projects its shallow leaves under the child anchor.
+/// warm. A `Computed` entry projects its shallow leaves under the child anchor.
 /// The completeness variant selects exhaustive / open / paged.
 pub(crate) fn collection_to_dir_projection<T, C>(
     child_view: &crate::router::ResolvedChildView,
@@ -261,9 +261,9 @@ where
     };
 
     // The child view resolution plus the canonical bytes a fresh entry stores,
-    // and the shallow derived leaves a derived entry projects.
+    // and the shallow computed leaves a computed entry projects.
     let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
-    let mut derived_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
+    let mut computed_files: Vec<(String, crate::projection::FileProjection)> = Vec::new();
     let mut dir_entries = Vec::with_capacity(entries.len());
 
     for entry in entries {
@@ -273,9 +273,9 @@ where
 
         match entry {
             CollectionEntry::Fresh { canonical, .. } => fresh_stores.push((view, canonical)),
-            CollectionEntry::Derived { files, .. } => {
+            CollectionEntry::Computed { files, .. } => {
                 for (leaf, file) in files {
-                    derived_files.push((format!("{}/{leaf}", view.anchor_base), file));
+                    computed_files.push((format!("{}/{leaf}", view.anchor_base), file));
                 }
             },
             CollectionEntry::Key { .. } => {},
@@ -300,7 +300,7 @@ where
             view.view_leaves,
         );
     }
-    for (path, file) in derived_files {
+    for (path, file) in computed_files {
         projection = projection.preload_file(path, file);
     }
     Ok(projection)

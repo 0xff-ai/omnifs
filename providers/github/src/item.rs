@@ -267,7 +267,7 @@ impl Repo {
             .iter()
             .filter(|item| !item.is_pull_request())
             .map(|item| {
-                CollectionEntry::derived(
+                CollectionEntry::computed(
                     IssueKey {
                         owner: key.owner.clone(),
                         repo: key.repo.clone(),
@@ -291,7 +291,7 @@ impl Repo {
             .items
             .iter()
             .map(|item| {
-                CollectionEntry::derived(
+                CollectionEntry::computed(
                     PullKey {
                         owner: key.owner.clone(),
                         repo: key.repo.clone(),
@@ -323,7 +323,7 @@ impl Repo {
                     inline_text(run.conclusion.as_deref().unwrap_or("")),
                 ),
             ];
-            CollectionEntry::derived(
+            CollectionEntry::computed(
                 RunKey {
                     owner: key.owner.clone(),
                     repo: key.repo.clone(),
@@ -435,7 +435,7 @@ fn inline_text(s: &str) -> FileProjection {
 
 /// The shallow eager leaves an issue/PR listing row can fill without the
 /// single-item canonical: the tiny `title`/`state`/`user` fields. `body`,
-/// `item.md`, and `item.json` derive from the canonical, which the lossy row
+/// `item.md`, and `item.json` come from the canonical, which the lossy row
 /// cannot reproduce, so they load on first read.
 fn eager_item_leaves(item: &ItemData) -> Vec<(String, FileProjection)> {
     let login = item.user.as_ref().map_or("", |u| u.login.as_str());
@@ -448,7 +448,7 @@ fn eager_item_leaves(item: &ItemData) -> Vec<(String, FileProjection)> {
 
 /// The shallow eager leaves a comment listing row can fill from the lossy list
 /// payload: `author` and `body.md` render the same bytes from any source, so
-/// they preload at listing time. `comment.json`/`comment.md` derive from the
+/// they preload at listing time. `comment.json`/`comment.md` come from the
 /// verbatim standalone GET, which the list response cannot reproduce, so they
 /// load on first read.
 fn eager_comment_leaves(
@@ -507,7 +507,7 @@ async fn comments_collection(
             comment_id: comment.id,
         };
         let files = eager_comment_leaves(&comment, &key)?;
-        entries.push(CollectionEntry::derived(key, files));
+        entries.push(CollectionEntry::computed(key, files));
     }
     if len < COMMENT_PAGE_SIZE {
         Ok(Collection::complete(entries))

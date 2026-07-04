@@ -8,7 +8,7 @@ use super::common::{FullReadTarget, RangedSlot};
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileHandle as FuseFileHandle, FopenFlags, INodeNo, ReplyData};
 use omnifs_api::events::TraceId;
-use omnifs_engine::InspectorFuseScope;
+use omnifs_engine::InspectorRequestScope;
 use omnifs_engine::view as view_types;
 use omnifs_engine::view::FileAttrsCache;
 use omnifs_engine::{Node, ReadResult, RequestCtx};
@@ -56,7 +56,7 @@ impl Frontend {
         }
     }
 
-    /// Whole-file read for a provider or backing-fs file. A backing-fs file is
+    /// Whole-file read for a provider or subtree file. A subtree file is
     /// read directly from the real filesystem (no provider round trip); a
     /// provider file is rendered through `Tree::read` (which owns the cache
     /// cascade, the write fence, and learned-size promotion). The rendered bytes
@@ -68,7 +68,7 @@ impl Frontend {
         fh: FuseFileHandle,
         offset: u64,
         size: u32,
-        live_scope: Option<InspectorFuseScope>,
+        live_scope: Option<InspectorRequestScope>,
         reply: ReplyData,
     ) {
         let Some(inode_entry) = self.inodes.get(&ino.0) else {
@@ -111,7 +111,7 @@ impl Frontend {
 
         let node = Node::new(mount_name, path, meta, omnifs_engine::NodeBody::Provider);
         let ctx = RequestCtx {
-            trace: live_scope.as_ref().map(InspectorFuseScope::trace_id),
+            trace: live_scope.as_ref().map(InspectorRequestScope::trace_id),
         };
         match self.tree.read(&node, &ctx).await {
             Ok(ReadResult::Bytes { data, attrs, .. }) => {
@@ -121,7 +121,7 @@ impl Frontend {
                 reply.data(data_slice(&data, offset, size));
                 self.file_cache.insert(fh.0, data);
             },
-            Ok(ReadResult::Backing(dir)) => match std::fs::read(&dir) {
+            Ok(ReadResult::Subtree(dir)) => match std::fs::read(&dir) {
                 Ok(data) => {
                     reply.data(data_slice(&data, offset, size));
                     self.file_cache.insert(fh.0, data);
@@ -149,7 +149,7 @@ impl Frontend {
     /// served once into the per-`fh` buffer (its bytes come from `Tree::read`,
     /// which runs the mutating pagination action exactly once); a ranged file
     /// opens a `Tree` `RangedHandle` bound to `fh`; an unknown-size full file is
-    /// prefetched whole into the buffer. A backing-fs file and an exact-size full
+    /// prefetched whole into the buffer. A subtree file and an exact-size full
     /// file open lazily (read on demand). Returns the kernel open flags, or an
     /// `Errno` for a resolution/render failure (e.g. an exhausted control).
     pub(super) async fn open_op(
@@ -171,7 +171,7 @@ impl Frontend {
             return Ok(flags);
         }
 
-        // Backing-fs files open lazily: `read` serves them from the real
+        // Subtree files open lazily: `read` serves them from the real
         // filesystem.
         if target.body.is_backing() {
             return Ok(target.lazy_open_flags());
@@ -203,7 +203,7 @@ impl Frontend {
                     self.file_cache.insert(target.fh, data);
                     return Ok(FopenFlags::FOPEN_DIRECT_IO);
                 },
-                Ok(ReadResult::Backing(_)) => {
+                Ok(ReadResult::Subtree(_)) => {
                     // A full-deferred provider file never resolves to a backing
                     // dir; fall through to a lazy open.
                     return Ok(target.lazy_open_flags());
@@ -262,7 +262,7 @@ impl Frontend {
                 self.file_cache.insert(target.fh, data);
                 Ok(Some(FopenFlags::FOPEN_DIRECT_IO))
             },
-            Ok(Some(ReadResult::Backing(_))) => Err(Errno::EIO),
+            Ok(Some(ReadResult::Subtree(_))) => Err(Errno::EIO),
             Err(error) => Err(super::errno::tree_error_errno(&error)),
         }
     }

@@ -15,9 +15,9 @@
 //! the real thing. Never interrupt a running live NFS test: an orphaned kernel
 //! mount wedges later runs.
 
-use omnifs_host::HostContext;
-use omnifs_host::cloner::GitCloner;
-use omnifs_host::registry::ProviderRegistry;
+use omnifs_engine::GitCloner;
+use omnifs_engine::HostContext;
+use omnifs_engine::MountRuntimes;
 use omnifs_nfs::{NfsMountOptions, mount_blocking, mount_is_active, unmount};
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 use std::net::TcpListener;
@@ -246,8 +246,8 @@ fn nfs_live_mount_serves_fast_ops_while_provider_read_is_parked() {
 /// The registry, tokio runtime, and on-disk layout backing one live mount of
 /// the test provider with captured callouts.
 struct MountFixture {
-    registry: Arc<ProviderRegistry>,
-    runtime: Arc<omnifs_host::Runtime>,
+    registry: Arc<MountRuntimes>,
+    runtime: Arc<omnifs_engine::Engine>,
     rt: tokio::runtime::Runtime,
     mount_point: PathBuf,
     options: NfsMountOptions,
@@ -290,7 +290,7 @@ impl MountFixture {
 
         let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")));
         let registry = Arc::new(
-            ProviderRegistry::new(
+            MountRuntimes::new(
                 HostContext::new(
                     &cache_dir,
                     &config_dir,

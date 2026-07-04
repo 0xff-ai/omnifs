@@ -4,7 +4,7 @@ use super::super::descriptor::RouteKind;
 use super::super::handlers::{RouteValidator, captures_validator};
 use super::super::pattern::{CaptureLocation, Pattern};
 use super::serve::ObjectRoute;
-use super::spec::{AnchorShape, CollectionHandler, DeriveFn, ObjectSpec};
+use super::spec::{AnchorShape, CollectionHandler, ComputedFn, ObjectSpec};
 use crate::browse::{CachedCanonical, Effects, ReadOutcome};
 use crate::captures::Captures;
 use crate::cx::Cx;
@@ -31,7 +31,7 @@ pub(super) enum LiveFaceKind {
 
 /// One declared face of an object anchor.
 ///
-/// `Canonical`/`Representation`/`Derived` serve from the object's canonical
+/// `Canonical`/`Representation`/`Computed` serve from the object's canonical
 /// bytes (verbatim, rendered, or projected) and contribute view leaves to the
 /// canonical-store effect. `Live` faces (direct/blob/stream/object) invoke a
 /// boxed handler stored on the mounted entry and are NOT view leaves of the
@@ -43,9 +43,9 @@ pub(super) enum ObjectLeaf<O: Object> {
     Representation { leaf_name: String, ct: ContentType },
     /// A field leaf computed from the parsed object value. `lazy` excludes it
     /// from listing-time eager preloads; reads still serve it.
-    Derived {
+    Computed {
         leaf_name: String,
-        derive: DeriveFn<O>,
+        computed: ComputedFn<O>,
         lazy: bool,
     },
     /// A live face served by a boxed handler keyed by `leaf_name` on the
@@ -67,13 +67,13 @@ impl<O: Object> Clone for ObjectLeaf<O> {
                 leaf_name: leaf_name.clone(),
                 ct: *ct,
             },
-            Self::Derived {
+            Self::Computed {
                 leaf_name,
-                derive,
+                computed,
                 lazy,
-            } => Self::Derived {
+            } => Self::Computed {
                 leaf_name: leaf_name.clone(),
-                derive: *derive,
+                computed: *computed,
                 lazy: *lazy,
             },
             Self::Live { leaf_name, kind } => Self::Live {
@@ -89,17 +89,17 @@ impl<O: Object> ObjectLeaf<O> {
         match self {
             Self::Canonical { leaf_name, .. }
             | Self::Representation { leaf_name, .. }
-            | Self::Derived { leaf_name, .. }
+            | Self::Computed { leaf_name, .. }
             | Self::Live { leaf_name, .. } => leaf_name,
         }
     }
 
     /// Whether this leaf is a view of the canonical bytes (canonical,
-    /// representation, derived) versus an independently served face.
+    /// representation, computed) versus an independently served face.
     pub(super) fn is_canonical_view(&self) -> bool {
         matches!(
             self,
-            Self::Canonical { .. } | Self::Representation { .. } | Self::Derived { .. }
+            Self::Canonical { .. } | Self::Representation { .. } | Self::Computed { .. }
         )
     }
 
@@ -108,7 +108,7 @@ impl<O: Object> ObjectLeaf<O> {
         match self {
             Self::Canonical { .. } => LeafKind::Canonical,
             Self::Representation { ct, .. } => LeafKind::Representation(*ct),
-            Self::Derived { .. } => LeafKind::Derived,
+            Self::Computed { .. } => LeafKind::Computed,
             Self::Live { kind, .. } => match kind {
                 // Blob faces serve through the same boxed direct handler as a
                 // direct face (the blob lowers to a `FileProjection::blob`).
@@ -195,13 +195,13 @@ pub(in crate::router) type BoxedFaceOpen<S> = Box<
 >;
 
 /// What kind of face a listed leaf is, resolved by exact leaf-name match (not
-/// by extension): this is how a derive leaf named `notes.md` routes to its
-/// derive fn rather than the Markdown representation render.
+/// by extension): this is how a computed leaf named `notes.md` routes to its
+/// computed fn rather than the Markdown representation render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::router) enum LeafKind {
     Canonical,
     Representation(ContentType),
-    Derived,
+    Computed,
     Direct,
     Stream,
     Object,
@@ -264,8 +264,8 @@ pub(in crate::router) enum ObjectReadTarget {
     Canonical,
     /// A rendered representation by content type.
     Representation(ContentType),
-    /// A derived field by leaf name.
-    Derived(String),
+    /// A computed field by leaf name.
+    Computed(String),
     /// A direct face by leaf name (served through `read_file`).
     Direct(String),
     /// A stream face by leaf name (served through `open_file`).
@@ -438,7 +438,7 @@ pub(crate) struct ResolvedChildView {
     child_template: String,
     /// The child object kind, for the child's logical id.
     child_kind: ObjectKind,
-    /// The child's canonical-view leaf names (canonical/representation/derived).
+    /// The child's canonical-view leaf names (canonical/representation/computed).
     child_leaf_names: Vec<String>,
     /// The child's facet expansion against its own template.
     facet_expansion: FacetExpansion,
@@ -567,8 +567,8 @@ fn render_template_segment(raw: &str, value: &str) -> String {
 impl<S> ObjectRouteEntry<S> {
     /// Resolve a leaf name under this anchor to its read target by exact
     /// leaf-name match against its registered kind, or `None` if no such leaf
-    /// exists. Resolution is by KIND, never by extension: a derived leaf named
-    /// `notes.md` routes to its derive fn, not to a Markdown representation
+    /// exists. Resolution is by KIND, never by extension: a computed leaf named
+    /// `notes.md` routes to its computed fn, not to a Markdown representation
     /// render that happens to share the extension. `Stream` faces resolve here
     /// too; the caller routes them to `open_file`.
     pub(in crate::router) fn read_target_for_leaf(&self, name: &str) -> Option<ObjectReadTarget> {
@@ -576,7 +576,7 @@ impl<S> ObjectRouteEntry<S> {
         Some(match kind {
             LeafKind::Canonical => ObjectReadTarget::Canonical,
             LeafKind::Representation(ct) => ObjectReadTarget::Representation(ct),
-            LeafKind::Derived => ObjectReadTarget::Derived(name.to_string()),
+            LeafKind::Computed => ObjectReadTarget::Computed(name.to_string()),
             // Object faces serve their child canonical through the same boxed
             // direct handler as a direct face.
             LeafKind::Direct | LeafKind::Object => ObjectReadTarget::Direct(name.to_string()),

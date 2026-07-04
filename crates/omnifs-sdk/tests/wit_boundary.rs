@@ -7,8 +7,8 @@
 //! These assertions encode the CORRECT behavior the SDK must exhibit at the
 //! host boundary; they are the contract the three fixes restore.
 
-// Fixture shapes are dictated by SDK trait signatures: a derive fn must return
-// `Result<FileProjection>` (the `DeriveFn` contract) even when infallible, and
+// Fixture shapes are dictated by SDK trait signatures: a computed fn must return
+// `Result<FileProjection>` (the `ComputedFn` contract) even when infallible, and
 // `Object::load` returns an `impl Future` written as a manual async block.
 #![allow(clippy::unnecessary_wraps, clippy::manual_async_fn)]
 
@@ -95,7 +95,7 @@ fn canonical_with_leaf<'a>(
 }
 
 // ===========================================================================
-// Item object: canonical JSON + markdown representation + a derive leaf
+// Item object: canonical JSON + markdown representation + a computed leaf
 // ===========================================================================
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -173,9 +173,9 @@ fn item_router() -> Router<()> {
         o.dynamic();
         o.file("item.json").canonical::<Json>()?;
         o.file("item.md").representation::<Markdown>()?;
-        // A DERIVE leaf whose name shares the `.md` extension with the
-        // representation: it must route to the derive fn, not the render.
-        o.file("notes.md").derive(Item::notes)?;
+        // A computed leaf whose name shares the `.md` extension with the
+        // representation: it must route to the computed fn, not the render.
+        o.file("notes.md").computed(Item::notes)?;
         Ok(())
     })
     .unwrap();
@@ -243,18 +243,18 @@ fn warm_read_renders_from_pushed_bytes_no_canonical_effect() {
 }
 
 #[test]
-fn derive_leaf_sharing_md_extension_runs_derive_not_representation() {
+fn computed_leaf_sharing_md_extension_runs_computed_not_representation() {
     let r = item_router();
     let cx = cx();
     let outcome = drive(&cx, r.read_file(&cx, "/items/x/notes.md", "", None));
     let (out, _effects) = read_wit(outcome);
     let result = found(&out);
     let wit_types::ByteSource::Inline(bytes) = &result.bytes else {
-        panic!("derive leaf serves inline bytes, got {:?}", result.bytes);
+        panic!("computed leaf serves inline bytes, got {:?}", result.bytes);
     };
     assert_eq!(
         bytes, b"NOTES for x",
-        "notes.md must run the derive fn, not the markdown render (#3, MAJOR fix)"
+        "notes.md must run the computed fn, not the markdown render (#3, MAJOR fix)"
     );
 }
 
@@ -609,7 +609,7 @@ fn nested_collection_router() -> Router<()> {
         o.dynamic();
         o.file("item.json").canonical::<Json>()?;
         o.file("item.md").representation::<Markdown>()?;
-        o.file("title.txt").derive(Issue::title)?;
+        o.file("title.txt").computed(Issue::title)?;
         Ok(())
     })
     .unwrap();

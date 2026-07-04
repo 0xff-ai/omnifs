@@ -31,10 +31,10 @@ pub const VIEW_BULK_THRESHOLD: usize = 64 * 1024;
 const METADATA_KEYSPACE: &str = "metadata";
 const CONTENT_KEYSPACE: &str = "content";
 const BULK_KEYSPACE: &str = "bulk";
-const FRESHNESS_KEYSPACE: &str = "freshness";
+const EXPIRY_KEYSPACE: &str = "expiry";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
-pub struct Freshness {
+pub struct Expiry {
     pub expires_at: Option<u64>,
     pub generation: u64,
 }
@@ -46,7 +46,7 @@ struct Disk {
     metadata: OptimisticTxKeyspace,
     content: OptimisticTxKeyspace,
     bulk: OptimisticTxKeyspace,
-    freshness: OptimisticTxKeyspace,
+    expiry: OptimisticTxKeyspace,
 }
 
 impl Disk {
@@ -210,7 +210,7 @@ impl Cache {
             metadata: db.keyspace(METADATA_KEYSPACE, KeyspaceCreateOptions::default)?,
             content: db.keyspace(CONTENT_KEYSPACE, KeyspaceCreateOptions::default)?,
             bulk: db.keyspace(BULK_KEYSPACE, KeyspaceCreateOptions::default)?,
-            freshness: db.keyspace(FRESHNESS_KEYSPACE, KeyspaceCreateOptions::default)?,
+            expiry: db.keyspace(EXPIRY_KEYSPACE, KeyspaceCreateOptions::default)?,
         };
         Ok(Self {
             mem: Self::build_mem(),
@@ -365,34 +365,32 @@ impl Cache {
         {
             tracing::debug!(path = %path, error = %e, "view cache disk exact delete failed");
         }
-        self.delete_freshness(path.as_str());
+        self.delete_expiry(path.as_str());
     }
 
-    pub fn put_freshness(&self, scoped_path: &str, freshness: Freshness) {
+    pub fn put_expiry(&self, scoped_path: &str, expiry: Expiry) {
         let Some(ref disk) = self.disk else {
             return;
         };
-        if let Ok(bytes) = postcard::to_allocvec(&freshness)
-            && let Err(error) = disk
-                .freshness
-                .insert(scoped_path.as_bytes(), bytes.as_slice())
+        if let Ok(bytes) = postcard::to_allocvec(&expiry)
+            && let Err(error) = disk.expiry.insert(scoped_path.as_bytes(), bytes.as_slice())
         {
-            tracing::debug!(path = scoped_path, error = %error, "view freshness put failed");
+            tracing::debug!(path = scoped_path, error = %error, "view expiry put failed");
         }
     }
 
-    pub fn get_freshness(&self, scoped_path: &str) -> Option<Freshness> {
+    pub fn get_expiry(&self, scoped_path: &str) -> Option<Expiry> {
         let disk = self.disk.as_ref()?;
-        let value = disk.freshness.get(scoped_path.as_bytes()).ok()??;
+        let value = disk.expiry.get(scoped_path.as_bytes()).ok()??;
         postcard::from_bytes(&value).ok()
     }
 
-    fn delete_freshness(&self, scoped_path: &str) {
+    fn delete_expiry(&self, scoped_path: &str) {
         let Some(ref disk) = self.disk else {
             return;
         };
-        if let Err(error) = disk.freshness.remove(scoped_path.as_bytes()) {
-            tracing::debug!(path = scoped_path, error = %error, "view freshness delete failed");
+        if let Err(error) = disk.expiry.remove(scoped_path.as_bytes()) {
+            tracing::debug!(path = scoped_path, error = %error, "view expiry delete failed");
         }
     }
 }

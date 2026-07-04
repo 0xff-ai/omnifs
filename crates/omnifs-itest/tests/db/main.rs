@@ -3,7 +3,7 @@
 mod db_fixture;
 
 use omnifs_core::path::Path;
-use omnifs_engine::Error;
+use omnifs_engine::EngineError;
 use omnifs_engine::test_support::{LookupOutcome, NamespaceListOutcome, ReadBytes};
 use omnifs_itest::{RuntimeHarness, make_runtime_from_config};
 use omnifs_wit::provider::types::ErrorKind;
@@ -260,7 +260,7 @@ async fn db_missing_table_negative_record() {
         .await
         .unwrap_err();
     match read_err {
-        Error::ProviderError(error) => assert_eq!(error.kind, ErrorKind::NotFound),
+        EngineError::ProviderError(error) => assert_eq!(error.kind, ErrorKind::NotFound),
         other => panic!("expected NotFound read, got {other:?}"),
     }
 

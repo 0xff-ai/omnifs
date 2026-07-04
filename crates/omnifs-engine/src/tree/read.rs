@@ -14,7 +14,7 @@ use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::{self, NextPageOutcome};
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
-use crate::{Error, Runtime};
+use crate::{EngineError, Runtime};
 use tracing::warn;
 
 use super::error::{Result, TreeError};
@@ -35,7 +35,7 @@ pub enum ReadResult {
         attrs: Option<FileAttrsCache>,
         content_type: Option<String>,
     },
-    Backing(PathBuf),
+    Subtree(PathBuf),
 }
 
 /// One ranged chunk from a `RangedHandle`. `learned_attrs` is `Some` on an
@@ -149,10 +149,10 @@ impl Tree {
             return self.read_synthetic(node, &synthetic.content, ctx).await;
         }
 
-        // A treeref-backed node is served by the renderer from the real backing
+        // A subtree node is served by the renderer from the real backing
         // dir; `Tree` hands the path back without a provider round trip.
         if let Some(dir) = node.subtree_path() {
-            return Ok(ReadResult::Backing(dir.clone()));
+            return Ok(ReadResult::Subtree(dir.clone()));
         }
 
         let runtime = self.runtime_for(node.mount())?;
@@ -232,7 +232,7 @@ impl Tree {
             .await
         {
             Ok(result) => result,
-            Err(Error::ProviderError(error)) => {
+            Err(EngineError::ProviderError(error)) => {
                 warn!(
                     path = %path,
                     kind = ?error.kind,
@@ -240,7 +240,7 @@ impl Tree {
                     message = error.message,
                     "provider returned typed error for read_file"
                 );
-                return Err(Error::ProviderError(error).into());
+                return Err(EngineError::ProviderError(error).into());
             },
             Err(error) => {
                 warn!(path = %path, error = %error, "read_file runtime error");

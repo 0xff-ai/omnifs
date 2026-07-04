@@ -2,7 +2,7 @@
 //!
 //! Backed by a fjall [`Database`]. Each mount owns its own pair of keyspaces,
 //! so keys carry no mount prefix:
-//! - `objects.{mount}`: `{id}` → postcard of [`StoredObject`]
+//! - `objects.{mount}`: `{id}` → postcard of [`ObjectRecord`]
 //! - `view.{mount}`:    `{full-path}` → `ObjectId` bytes (objects by view path)
 //!
 //! Mount isolation is structural (separate LSM-trees), not a key-prefix
@@ -18,12 +18,12 @@ use anyhow::Result;
 use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path as StdPath;
 
-/// On-disk schema version for `StoredObject`. Bump on layout change.
+/// On-disk schema version for `ObjectRecord`. Bump on layout change.
 pub const SCHEMA: u8 = 1;
 
-/// Canonical bytes for one object.
+/// Stored canonical bytes for one object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Canonical {
+pub struct StoredObject {
     pub bytes: Vec<u8>,
     pub validator: Option<String>,
 }
@@ -31,15 +31,15 @@ pub struct Canonical {
 /// One object row stored in the database. `leaves` are this mount's unscoped
 /// view-leaf paths; the caller re-scopes them for view-cache eviction.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StoredObject {
+pub struct ObjectRecord {
     pub schema: u8,
     pub id: Vec<u8>,
-    pub canonical: Option<Canonical>,
+    pub canonical: Option<StoredObject>,
     pub leaves: Vec<String>,
 }
 
-impl StoredObject {
-    fn new(id: &[u8], canonical: Option<Canonical>, leaves: Vec<String>) -> Self {
+impl ObjectRecord {
+    fn new(id: &[u8], canonical: Option<StoredObject>, leaves: Vec<String>) -> Self {
         Self {
             schema: SCHEMA,
             id: id.to_vec(),
@@ -54,7 +54,7 @@ impl StoredObject {
 /// data with a raw (unscoped) object id.
 pub struct StoreBatchEntry {
     pub id: Vec<u8>,
-    pub canonical: Canonical,
+    pub canonical: StoredObject,
     pub new_leaves: Vec<String>,
 }
 
@@ -108,7 +108,7 @@ impl MountObjects {
     pub fn store(
         &self,
         id: &[u8],
-        canonical: Canonical,
+        canonical: StoredObject,
         new_leaves: &[String],
         mut view_evict: impl FnMut(&str),
     ) -> bool {
@@ -118,12 +118,12 @@ impl MountObjects {
         }
 
         let merged_leaves = merge_leaves(&prior_leaves, new_leaves);
-        let stored = StoredObject::new(id, Some(canonical), merged_leaves);
+        let stored = ObjectRecord::new(id, Some(canonical), merged_leaves);
 
         self.commit_object(id, &stored, new_leaves)
     }
 
-    /// Index-only upsert for preload fs-writes. Canonical-beats-preload: an
+    /// Index-only upsert for preload fs-writes. Stored bytes beat preload: an
     /// existing `Some` canonical is never clobbered to `None`.
     pub fn store_index_only(&self, id: &[u8], new_leaves: &[String]) -> bool {
         let existing = self.get(id);
@@ -132,7 +132,7 @@ impl MountObjects {
             None => (None, Vec::new()),
         };
         let merged_leaves = merge_leaves(&base_leaves, new_leaves);
-        let stored = StoredObject::new(id, canonical, merged_leaves);
+        let stored = ObjectRecord::new(id, canonical, merged_leaves);
         self.commit_object(id, &stored, new_leaves)
     }
 
@@ -147,13 +147,13 @@ impl MountObjects {
             return;
         }
 
-        // Read phase: collect prior leaves + build StoredObject for each entry.
+        // Read phase: collect prior leaves + build ObjectRecord for each entry.
         let prepared: Vec<(&StoreBatchEntry, Vec<u8>)> = entries
             .iter()
             .filter_map(|e| {
                 let prior_leaves = self.leaves_of(&e.id);
                 let merged_leaves = merge_leaves(&prior_leaves, &e.new_leaves);
-                let stored = StoredObject::new(&e.id, Some(e.canonical.clone()), merged_leaves);
+                let stored = ObjectRecord::new(&e.id, Some(e.canonical.clone()), merged_leaves);
                 match postcard::to_allocvec(&stored) {
                     Ok(payload) => Some((e, payload)),
                     Err(err) => {
@@ -183,7 +183,7 @@ impl MountObjects {
         }
     }
 
-    pub fn get(&self, id: &[u8]) -> Option<StoredObject> {
+    pub fn get(&self, id: &[u8]) -> Option<ObjectRecord> {
         let value = self.objects.get(id).ok()??;
         decode_object(&value)
     }
@@ -239,7 +239,7 @@ impl MountObjects {
         }
     }
 
-    fn commit_object(&self, id: &[u8], stored: &StoredObject, new_leaves: &[String]) -> bool {
+    fn commit_object(&self, id: &[u8], stored: &ObjectRecord, new_leaves: &[String]) -> bool {
         let payload = match postcard::to_allocvec(stored) {
             Ok(p) => p,
             Err(e) => {
@@ -263,8 +263,8 @@ impl MountObjects {
     }
 }
 
-fn decode_object(bytes: &[u8]) -> Option<StoredObject> {
-    let obj: StoredObject = postcard::from_bytes(bytes).ok()?;
+fn decode_object(bytes: &[u8]) -> Option<ObjectRecord> {
+    let obj: ObjectRecord = postcard::from_bytes(bytes).ok()?;
     if obj.schema != SCHEMA {
         return None;
     }
@@ -301,7 +301,7 @@ mod tests {
     fn canonical_beats_preload() {
         let (_dir, cache) = open_cache();
         let l1 = "/issues/open/42/item.json".to_string();
-        let c = Canonical {
+        let c = StoredObject {
             bytes: b"data".to_vec(),
             validator: Some("v1".to_string()),
         };
@@ -325,7 +325,7 @@ mod tests {
 
         cache.store(
             OBJ,
-            Canonical {
+            StoredObject {
                 bytes: b"v1".to_vec(),
                 validator: None,
             },
@@ -336,7 +336,7 @@ mod tests {
         let mut evicted = Vec::new();
         cache.store(
             OBJ,
-            Canonical {
+            StoredObject {
                 bytes: b"v2".to_vec(),
                 validator: None,
             },
@@ -361,7 +361,7 @@ mod tests {
         let leaf = "/a/leaf".to_string();
         cache.store(
             OBJ,
-            Canonical {
+            StoredObject {
                 bytes: b"data".to_vec(),
                 validator: Some("etag".to_string()),
             },
@@ -382,7 +382,7 @@ mod tests {
         let leaf = "/a/leaf".to_string();
         cache.store(
             OBJ,
-            Canonical {
+            StoredObject {
                 bytes: b"data".to_vec(),
                 validator: None,
             },
@@ -403,7 +403,7 @@ mod tests {
         let p2 = "/issues/42/title";
         cache.store(
             OBJ,
-            Canonical {
+            StoredObject {
                 bytes: b"data".to_vec(),
                 validator: None,
             },
@@ -434,7 +434,7 @@ mod tests {
         // Single-put baseline: obj:3 is intentionally omitted (simulates rejection).
         cache_a.store(
             id1,
-            Canonical {
+            StoredObject {
                 bytes: b"payload1".to_vec(),
                 validator: Some("v1".to_string()),
             },
@@ -443,7 +443,7 @@ mod tests {
         );
         cache_a.store(
             id2,
-            Canonical {
+            StoredObject {
                 bytes: b"payload2".to_vec(),
                 validator: None,
             },
@@ -455,7 +455,7 @@ mod tests {
         cache_b.store_batch(&[
             StoreBatchEntry {
                 id: id1.to_vec(),
-                canonical: Canonical {
+                canonical: StoredObject {
                     bytes: b"payload1".to_vec(),
                     validator: Some("v1".to_string()),
                 },
@@ -463,7 +463,7 @@ mod tests {
             },
             StoreBatchEntry {
                 id: id2.to_vec(),
-                canonical: Canonical {
+                canonical: StoredObject {
                     bytes: b"payload2".to_vec(),
                     validator: None,
                 },

@@ -4,11 +4,11 @@ use crate::cache::RecordKind;
 use crate::clock::now_millis;
 use crate::coalesce::RunConfig;
 use crate::coalesce::ns::{Key as NsKey, SharedOutcome, share_outcome, unshare_outcome};
-use crate::materialize::{LookupOutcome, Materializer};
+use crate::effect_apply::{EffectApplier, LookupOutcome};
 use crate::object_id::ObjectId;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, CachedCursor, EntryMeta, FileAttrsCache, Stability};
-use crate::{Error, Namespace, Op};
+use crate::{EngineError, Namespace, Op};
 use omnifs_api::events::TraceId;
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::provider::types as wit_types;
@@ -67,8 +67,8 @@ impl Namespace<'_> {
         name: &str,
         fuse_trace: Option<TraceId>,
     ) -> Result<LookupOutcome> {
-        let name =
-            Segment::try_from(name).map_err(|error| Error::ProviderProtocol(error.to_string()))?;
+        let name = Segment::try_from(name)
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         let child_path = parent_path.join_segment(&name);
         let now = now_millis();
         if self.runtime.cache.negative_for(&child_path, now).is_some() {
@@ -86,7 +86,7 @@ impl Namespace<'_> {
             .await?;
 
         let result = Self::run_op_expect(op, result, expect_lookup_child)?;
-        Ok(Materializer::new(&self.runtime.cache).lookup(
+        Ok(EffectApplier::new(&self.runtime.cache).lookup(
             parent_path,
             &child_path,
             result,
@@ -121,7 +121,7 @@ impl Namespace<'_> {
         let result = Self::run_op_expect(op, result, expect_list_children)?;
 
         if let wit_types::ListChildrenResult::Entries(ref listing) = result {
-            let m = Materializer::new(&self.runtime.cache);
+            let m = EffectApplier::new(&self.runtime.cache);
             if is_continuation {
                 m.apply_continuation_projection(path, &listing.entries, op_gen);
             } else {
@@ -223,8 +223,8 @@ impl Namespace<'_> {
     ) -> Result<T> {
         match expect(result) {
             Expected::Match(result) => Ok(result),
-            Expected::ProviderError(error) => Err(Error::ProviderError(error)),
-            Expected::Unexpected(result) => Err(Error::unexpected_op_result(op, *result)),
+            Expected::ProviderError(error) => Err(EngineError::ProviderError(error)),
+            Expected::Unexpected(result) => Err(EngineError::unexpected_op_result(op, *result)),
         }
     }
 
@@ -240,7 +240,7 @@ impl Namespace<'_> {
                 share_outcome(&op().await)
             })
             .await;
-        unshare_outcome((*shared).clone(), Error::ProviderProtocol)
+        unshare_outcome((*shared).clone(), EngineError::ProviderProtocol)
     }
 }
 
@@ -380,8 +380,8 @@ fn leaf_stability(ns: &Namespace<'_>, path: &Path) -> Option<Stability> {
         .and_then(|attr| attr.meta.attrs().map(FileAttrsCache::stability))
 }
 
-fn enoent(path: &str) -> Error {
-    Error::ProviderError(wit_types::ProviderError {
+fn enoent(path: &str) -> EngineError {
+    EngineError::ProviderError(wit_types::ProviderError {
         kind: wit_types::ErrorKind::NotFound,
         message: format!("no such file: {path}"),
         retryable: false,

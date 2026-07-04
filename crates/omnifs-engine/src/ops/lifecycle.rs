@@ -1,7 +1,7 @@
 //! Op execution loop: start async provider call → apply effects → return.
 //!
 //! Everything from the first `instance.start_op` call to the final
-//! `Materializer::apply` lives here so a read-file round trip is traceable
+//! `EffectApplier::apply` lives here so a read-file round trip is traceable
 //! through one seam. `Runtime` retains engine/instance/mount lifecycle and
 //! delegates here for all op execution.
 
@@ -9,7 +9,7 @@ use crate::Runtime;
 use crate::clock;
 use crate::inspector::{self, InspectorProviderOp, WitProviderErrorView};
 use crate::op::Op;
-use crate::runtime::{Error, Result};
+use crate::runtime::{EngineError, Result};
 use omnifs_api::events::{InspectorOutcome, OutcomeFields, TraceId};
 use omnifs_wit::provider::types as wit_types;
 
@@ -43,7 +43,7 @@ impl Runtime {
         if let Some(live) = live_op {
             let outcome = match &result {
                 Ok(_) => OutcomeFields::ok(),
-                Err(Error::ProviderError(error)) => {
+                Err(EngineError::ProviderError(error)) => {
                     OutcomeFields::with_outcome(WitProviderErrorView(error).outcome())
                 },
                 Err(_) => OutcomeFields::with_outcome(InspectorOutcome::Internal),
@@ -63,10 +63,10 @@ impl Runtime {
         op_gen: u64,
     ) -> Result<wit_types::OpResult> {
         crate::op_validate::validate_return(op, &ret, |tree| self.resolve_tree_ref(tree).is_some())
-            .map_err(Error::ProviderProtocol)?;
+            .map_err(EngineError::ProviderProtocol)?;
         let now = clock::now_millis();
         let (prefixes, paths) =
-            crate::materialize::Materializer::new(&self.cache).apply(&ret.effects, op_gen, now);
+            crate::effect_apply::EffectApplier::new(&self.cache).apply(&ret.effects, op_gen, now);
         self.record_view_invalidations(prefixes, paths);
         self.store_read_not_found_negative(op, &ret.result, op_gen, now);
         Ok(ret.result)

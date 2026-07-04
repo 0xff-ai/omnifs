@@ -96,7 +96,7 @@ pub(in crate::router) struct CollectionHandlerEntry<S> {
     pub dir_path: String,
     pub handler: CollectionHandler<S>,
     pub late_view: LateChildView,
-    /// Capture validator for the deferred NESTED dir route, derived from the
+    /// Capture validator for the deferred NESTED dir route, computed from the
     /// list method's key type `K` (the collection dir path captures), not the
     /// parent anchor's `O::Key`.
     pub validator: RouteValidator,
@@ -175,7 +175,7 @@ impl<O: Object> ObjectHandle<O> {
     }
 
     /// The object spec's declared canonical-view leaf names (canonical,
-    /// representation, derived), for collection child-view resolution.
+    /// representation, computed), for collection child-view resolution.
     pub(in crate::router) fn canonical_view_leaf_names(&self) -> Vec<String> {
         self.spec
             .leaves
@@ -192,7 +192,7 @@ impl<O: Object> ObjectHandle<O> {
 
 /// Project a field leaf from a loaded object value and the route key: a pure
 /// function, no callouts.
-pub type DeriveFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileProjection>;
+pub type ComputedFn<O> = fn(&O, &<O as Object>::Key) -> Result<FileProjection>;
 // ===========================================================================
 // Block builder
 // ===========================================================================
@@ -345,7 +345,7 @@ impl<O: Object> ObjectBlock<O> {
     }
 
     /// Declare the object's [`Stability`] as a function of its key, shared by
-    /// the canonical and every leaf derived from it (a rendering inherits the
+    /// the canonical and every leaf computed from it (a rendering inherits the
     /// canonical's). Mandatory, once per block; the block fails to finish
     /// otherwise. For a stability that is the same for every key, prefer the
     /// [`Self::stable`] / [`Self::dynamic`] / [`Self::live`] shorthands.
@@ -401,16 +401,16 @@ impl<O: Object> ObjectBlock<O> {
         let source_ct = self.canonical_ct.unwrap_or(<O::Canonical as Format>::CT);
         let render_table = RenderTable::build(source_ct, self.renders)?;
 
-        // A representation or derive face needs a canonical to render from.
+        // A representation or computed face needs a canonical to render from.
         let has_render_or_derive = self.leaves.iter().any(|leaf| {
             matches!(
                 leaf,
-                ObjectLeaf::Representation { .. } | ObjectLeaf::Derived { .. }
+                ObjectLeaf::Representation { .. } | ObjectLeaf::Computed { .. }
             )
         });
         if has_render_or_derive && !has_canonical {
             return Err(ProviderError::invalid_input(format!(
-                "object route {}: a representation/derive face requires a canonical face",
+                "object route {}: a representation/computed face requires a canonical face",
                 self.template
             )));
         }
@@ -432,7 +432,7 @@ impl<O: Object> ObjectBlock<O> {
 }
 
 /// A pending file face named in [`ObjectBlock::file`]; finish with one of the
-/// face methods (`canonical`/`representation`/`derive`/`object`/`direct`/
+/// face methods (`canonical`/`representation`/`computed`/`object`/`direct`/
 /// `blob`/`stream`).
 pub struct FileFace<'a, O: Object> {
     block: &'a mut ObjectBlock<O>,
@@ -441,7 +441,7 @@ pub struct FileFace<'a, O: Object> {
 }
 
 impl<'a, O: Object> FileFace<'a, O> {
-    /// Exclude a derived leaf from listing-time eager preloads; reads still
+    /// Exclude a computed leaf from listing-time eager preloads; reads still
     /// serve it from canonical bytes. Use for large fields (an issue body).
     #[must_use]
     pub fn lazy(mut self) -> Self {
@@ -507,17 +507,17 @@ impl<'a, O: Object> FileFace<'a, O> {
         Ok(self.block)
     }
 
-    /// A derived field leaf computed from the loaded object value. Eager by
+    /// A computed field leaf computed from the loaded object value. Eager by
     /// default (preloaded when the anchor or collection entry is listed; must
     /// be inline bytes); [`Self::lazy`] excludes it from preload.
-    pub fn derive(mut self, method: DeriveFn<O>) -> Result<&'a mut ObjectBlock<O>> {
+    pub fn computed(mut self, method: ComputedFn<O>) -> Result<&'a mut ObjectBlock<O>> {
         self.file_shape_guard()?;
         self.block.claim_leaf(self.name)?;
         let leaf_name = self.leaf_name();
         let lazy = self.lazy;
-        self.block.leaves.push(ObjectLeaf::Derived {
+        self.block.leaves.push(ObjectLeaf::Computed {
             leaf_name,
-            derive: method,
+            computed: method,
             lazy,
         });
         Ok(self.block)
@@ -621,7 +621,7 @@ impl<'a, O: Object> FileFace<'a, O> {
     }
 
     /// An object face: the leaf is backed by a CHILD object `C` with its own
-    /// load/decode/canonical contract. The child's key is derived from the
+    /// load/decode/canonical contract. The child's key is computed from the
     /// parent route captures.
     pub fn object<C>(mut self) -> Result<&'a mut ObjectBlock<O>>
     where

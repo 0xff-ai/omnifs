@@ -207,11 +207,13 @@ impl LinearProvider {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").derive(Issue::title)?;
-            o.file("state").derive(Issue::state)?;
-            o.file("priority").derive(Issue::priority)?;
-            o.file("assignee").derive(Issue::assignee)?;
-            o.file("description.md").lazy().derive(Issue::description)?;
+            o.file("title").computed(Issue::title)?;
+            o.file("state").computed(Issue::state)?;
+            o.file("priority").computed(Issue::priority)?;
+            o.file("assignee").computed(Issue::assignee)?;
+            o.file("description.md")
+                .lazy()
+                .computed(Issue::description)?;
             Ok(())
         })?;
         Ok(())

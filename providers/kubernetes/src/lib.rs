@@ -181,7 +181,7 @@ impl KubernetesProvider {
             o.file("manifest.json").canonical::<Json>()?;
             o.file("manifest.yaml").representation::<Yaml>()?;
             o.file("status.yaml")
-                .derive(NamespacedResource::status_yaml)?;
+                .computed(NamespacedResource::status_yaml)?;
             o.file("events.txt")
                 .direct(NamespacedResource::events_txt)?;
             Ok(())
@@ -202,7 +202,8 @@ impl KubernetesProvider {
             o.dynamic();
             o.file("manifest.json").canonical::<Json>()?;
             o.file("manifest.yaml").representation::<Yaml>()?;
-            o.file("status.yaml").derive(ClusterResource::status_yaml)?;
+            o.file("status.yaml")
+                .computed(ClusterResource::status_yaml)?;
             Ok(())
         })?;
 

@@ -1,7 +1,7 @@
 //! Host + object-cache coherence tests (spec §14 invariants #7–#16).
 
 use omnifs_core::path::Path;
-use omnifs_engine::Error;
+use omnifs_engine::EngineError;
 use omnifs_engine::test_support::cache::{BatchRecord, RecordKind};
 use omnifs_engine::test_support::clock::DYNAMIC_TTL_MILLIS;
 use omnifs_engine::test_support::wit_protocol;
@@ -479,7 +479,7 @@ async fn negative_short_circuits_read_without_provider_dispatch() {
         .expect_err("negative must surface as ENOENT");
 
     match error {
-        Error::ProviderError(e) => assert_eq!(e.kind, ErrorKind::NotFound),
+        EngineError::ProviderError(e) => assert_eq!(e.kind, ErrorKind::NotFound),
         other => panic!("expected provider NotFound, got {other:?}"),
     }
 }

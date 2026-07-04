@@ -1,7 +1,7 @@
 //! JSONL inspector stream for the `omnifs inspect` TUI.
 //!
-//! The host emits structured records at three call-graph boundaries: FUSE
-//! requests ([`InspectorFuseScope`]), provider operations ([`InspectorProviderOp`]),
+//! The host emits structured records at three call-graph boundaries: frontend
+//! requests ([`InspectorRequestScope`]), provider operations ([`InspectorProviderOp`]),
 //! and individual callouts ([`InspectorCallout`]). Each is an RAII span: the
 //! `start` event is emitted at construction, the `end` event on drop, and
 //! the trace id flows through a thread-local so nested work correlates
@@ -273,9 +273,9 @@ impl InspectorSink {
     }
 }
 
-/// FUSE-bound trace scope; binds the thread-local trace id for nested
+/// Frontend request trace scope; binds the thread-local trace id for nested
 /// provider work and emits the `fuse.start`/`fuse.end` pair.
-pub struct InspectorFuseScope {
+pub struct InspectorRequestScope {
     sink: Arc<InspectorSink>,
     trace_id: TraceId,
     op: &'static str,
@@ -285,7 +285,7 @@ pub struct InspectorFuseScope {
     outcome: Cell<Option<OutcomeFields>>,
 }
 
-impl InspectorFuseScope {
+impl InspectorRequestScope {
     pub fn begin(
         sink: Arc<InspectorSink>,
         op: &'static str,
@@ -337,7 +337,7 @@ impl InspectorFuseScope {
     }
 }
 
-impl Drop for InspectorFuseScope {
+impl Drop for InspectorRequestScope {
     fn drop(&mut self) {
         CURRENT_TRACE.set(None);
         let result = self

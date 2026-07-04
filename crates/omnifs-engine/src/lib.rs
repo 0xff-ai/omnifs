@@ -24,11 +24,11 @@ pub mod view;
 
 pub use callouts::cloner::{CloneError, GitCloner};
 pub use inspect::{
-    InspectorConfig, InspectorFuseScope, InspectorSink, Subscription, current_trace_id, global,
+    InspectorConfig, InspectorRequestScope, InspectorSink, Subscription, current_trace_id, global,
     init_global_from_env,
 };
 pub use runtime::registry::{MountFailure, MountRuntimes, ReconcileOutcome, RegistryError};
-pub use runtime::{BuildError, Error, HostContext, Runtime as Engine};
+pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
 pub use tree::{
     Chunk, Cursor, Entry, EntryOrigin, InvalidationReport, ListOutcome, Listing, Node, NodeBody,
     PaginationControl, RangedHandle, ReadResult, RequestCtx, Synthetic, SyntheticContent, Tree,
@@ -39,7 +39,7 @@ pub(crate) use auth_inject as auth;
 pub(crate) use cache::blob as blob_cache;
 pub(crate) use callouts::wit_convert as wit_protocol;
 pub(crate) use callouts::{archive, blob, cloner, git, http};
-pub(crate) use effects::apply as materialize;
+pub(crate) use effects::apply as effect_apply;
 pub(crate) use effects::invalidation;
 pub(crate) use inspect as inspector;
 pub(crate) use omnifs_wit::provider::Provider;

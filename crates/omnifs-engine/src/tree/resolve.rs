@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::Runtime;
 use crate::cache::{Record, RecordKind};
-use crate::materialize::LookupOutcome;
+use crate::effect_apply::LookupOutcome;
 use crate::pagination::is_control_name;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_core::path::Path;

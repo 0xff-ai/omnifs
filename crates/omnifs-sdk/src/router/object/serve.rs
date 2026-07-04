@@ -88,7 +88,7 @@ where
     }
 
     /// The anchor-listing side effects: load the object and emit the
-    /// canonical-store effect plus eager derived preloads.
+    /// canonical-store effect plus eager computed preloads.
     async fn list(
         &self,
         cx: &Cx<O::State>,
@@ -285,9 +285,9 @@ where
         stability: Stability,
     ) -> Result<()> {
         for leaf in &self.leaves {
-            let ObjectLeaf::Derived {
+            let ObjectLeaf::Computed {
                 leaf_name,
-                derive,
+                computed,
                 lazy,
             } = leaf
             else {
@@ -296,13 +296,13 @@ where
             if *lazy {
                 continue;
             }
-            let projection = derive(value, key)?;
+            let projection = computed(value, key)?;
             let Some(mut file) = projection
                 .as_file_proj()
                 .filter(|f| matches!(f.bytes, ProjBytes::Inline(_)))
             else {
                 return Err(ProviderError::internal(format!(
-                    "derived object leaf {leaf_name:?} cannot preload non-inline bytes"
+                    "computed object leaf {leaf_name:?} cannot preload non-inline bytes"
                 )));
             };
             file.attrs = FileAttrs::new(file.attrs.size, stability);
@@ -449,7 +449,7 @@ impl<O: Object> ServeCtx<'_, O> {
         effects: Effects,
     ) -> Result<ReadOutcome> {
         match target {
-            ObjectReadTarget::Derived(name) => self.serve_derived(value, key, &name, effects),
+            ObjectReadTarget::Computed(name) => self.serve_computed(value, key, &name, effects),
             other => self.serve_from_canonical(key, other, bytes, validator, effects),
         }
     }
@@ -488,9 +488,9 @@ impl<O: Object> ServeCtx<'_, O> {
                         .with_effects(effects),
                 ))
             },
-            ObjectReadTarget::Derived(name) => {
+            ObjectReadTarget::Computed(name) => {
                 let value = O::decode(bytes)?;
-                self.serve_derived(&value, key, &name, effects)
+                self.serve_computed(&value, key, &name, effects)
             },
             ObjectReadTarget::Direct(name) | ObjectReadTarget::Stream(name) => {
                 Err(ProviderError::internal(format!(
@@ -500,7 +500,7 @@ impl<O: Object> ServeCtx<'_, O> {
         }
     }
 
-    fn serve_derived(
+    fn serve_computed(
         self,
         value: &O,
         key: &O::Key,
@@ -508,12 +508,14 @@ impl<O: Object> ServeCtx<'_, O> {
         effects: Effects,
     ) -> Result<ReadOutcome> {
         for leaf in self.leaves {
-            if let ObjectLeaf::Derived {
-                leaf_name, derive, ..
+            if let ObjectLeaf::Computed {
+                leaf_name,
+                computed,
+                ..
             } = leaf
                 && leaf_name == name
             {
-                let content = derive(value, key)?.to_browse_content()?;
+                let content = computed(value, key)?.to_browse_content()?;
                 let size = content_size(&content);
                 let content = content.with_attrs(FileAttrs::new(Size::Exact(size), self.stability));
                 return Ok(ReadOutcome::Found(content.with_effects(effects)));

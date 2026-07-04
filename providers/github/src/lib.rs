@@ -126,10 +126,10 @@ impl GithubProvider {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").derive(Issue::title)?;
-            o.file("state").derive(Issue::state)?;
-            o.file("user").derive(Issue::user)?;
-            o.file("body").lazy().derive(Issue::body)?;
+            o.file("title").computed(Issue::title)?;
+            o.file("state").computed(Issue::state)?;
+            o.file("user").computed(Issue::user)?;
+            o.file("body").lazy().computed(Issue::body)?;
             o.dir("comments").collection(Issue::comments)?;
             Ok(())
         })?;
@@ -138,10 +138,10 @@ impl GithubProvider {
             o.dynamic();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").derive(PullRequest::title)?;
-            o.file("state").derive(PullRequest::state)?;
-            o.file("user").derive(PullRequest::user)?;
-            o.file("body").lazy().derive(PullRequest::body)?;
+            o.file("title").computed(PullRequest::title)?;
+            o.file("state").computed(PullRequest::state)?;
+            o.file("user").computed(PullRequest::user)?;
+            o.file("body").lazy().computed(PullRequest::body)?;
             o.file("diff").blob(PullRequest::diff)?;
             o.dir("comments").collection(PullRequest::comments)?;
             Ok(())
@@ -150,8 +150,8 @@ impl GithubProvider {
         r.object::<WorkflowRun>("/{owner}/{repo}/actions/runs/{run_id}", |o| {
             o.dynamic();
             o.file("run.json").canonical::<Json>()?;
-            o.file("status").derive(WorkflowRun::status)?;
-            o.file("conclusion").derive(WorkflowRun::conclusion)?;
+            o.file("status").computed(WorkflowRun::status)?;
+            o.file("conclusion").computed(WorkflowRun::conclusion)?;
             o.file("log").direct(WorkflowRun::log)?;
             Ok(())
         })?;
@@ -162,8 +162,8 @@ impl GithubProvider {
                 o.dynamic();
                 o.file("comment.json").canonical::<Json>()?;
                 o.file("comment.md").representation::<Markdown>()?;
-                o.file("body.md").lazy().derive(Comment::body_md)?;
-                o.file("author").derive(Comment::author)?;
+                o.file("body.md").lazy().computed(Comment::body_md)?;
+                o.file("author").computed(Comment::author)?;
                 Ok(())
             },
         )?;

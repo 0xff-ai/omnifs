@@ -398,7 +398,7 @@ impl Store {
         }
 
         let leaves: Vec<String> = view_leaves.iter().map(|p| p.as_str().to_string()).collect();
-        let canonical = object::Canonical { bytes, validator };
+        let canonical = object::StoredObject { bytes, validator };
         let view = &self.caches.view;
         self.object.store(id, canonical, &leaves, |leaf| {
             view.delete_exact(&self.scope_unscoped(leaf));
@@ -432,7 +432,7 @@ impl Store {
                     .collect();
                 Some(object::StoreBatchEntry {
                     id: entry.id,
-                    canonical: object::Canonical {
+                    canonical: object::StoredObject {
                         bytes: entry.bytes,
                         validator: entry.validator,
                     },
@@ -502,7 +502,7 @@ impl Store {
             .collect()
     }
 
-    /// Write a view leaf's records and its shared freshness stamp.
+    /// Write a view leaf's records and its shared expiry stamp.
     pub fn cache_view_leaf(
         &self,
         path: &Path,
@@ -514,9 +514,9 @@ impl Store {
             return false;
         }
         self.cache_put_batch(records);
-        self.caches.view.put_freshness(
+        self.caches.view.put_expiry(
             self.scoped(path).as_str(),
-            view::Freshness {
+            view::Expiry {
                 expires_at,
                 generation: op_gen,
             },
@@ -524,7 +524,7 @@ impl Store {
         true
     }
 
-    /// Freshness-aware view read: returns `None` when the leaf is past its deadline.
+    /// Expiry-aware view read: returns `None` when the leaf is past its deadline.
     pub fn view_get(
         &self,
         path: &Path,
@@ -533,7 +533,7 @@ impl Store {
         now_millis: u64,
     ) -> Option<Record> {
         let scoped = self.scoped(path);
-        if let Some(f) = self.caches.view.get_freshness(scoped.as_str())
+        if let Some(f) = self.caches.view.get_expiry(scoped.as_str())
             && f.expires_at.is_some_and(|exp| now_millis >= exp)
         {
             return None;

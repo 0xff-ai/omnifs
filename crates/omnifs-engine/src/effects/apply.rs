@@ -1,6 +1,6 @@
 //! Host-owned cache materialization.
 //!
-//! `Materializer` owns the translation from provider wire types (`wit_types`)
+//! `EffectApplier` owns the translation from provider wire types (`wit_types`)
 //! into cache storage primitives. The cache (`crate::cache::Store`) is pure
 //! byte storage; it knows nothing about the wire protocol. All
 //! wire→storage translation lives here.
@@ -52,11 +52,11 @@ impl LookupEntry {
 /// Translates provider wire effects and browse results into cache storage
 /// calls. Holds a reference to the per-mount `Store` for the duration of
 /// one materialization call.
-pub struct Materializer<'a> {
+pub struct EffectApplier<'a> {
     store: &'a Store,
 }
 
-impl<'a> Materializer<'a> {
+impl<'a> EffectApplier<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self { store }
     }
@@ -65,13 +65,28 @@ impl<'a> Materializer<'a> {
     ///
     /// Returns `(invalidated_prefixes, invalidated_paths)`. FUSE adapters
     /// translate those into kernel cache-invalidation notifications.
-    #[allow(clippy::too_many_lines)]
     pub fn apply(
         &self,
         effects: &wit_types::Effects,
         op_gen: u64,
         now_millis: u64,
     ) -> (Vec<Path>, Vec<Path>) {
+        self.apply_canonical_batch(effects, op_gen);
+        let mut fs_effects = self.apply_fs_effects(effects, op_gen, now_millis);
+        self.merge_dirents(fs_effects.dirs, &mut fs_effects.children);
+        if !fs_effects.batch.is_empty() {
+            debug!(
+                target: "omnifs_engine_cache",
+                kind = "project",
+                count = fs_effects.batch.len(),
+                "applying fs-write effects"
+            );
+            self.store.cache_put_batch(&fs_effects.batch);
+        }
+        self.apply_invalidations(effects)
+    }
+
+    fn apply_canonical_batch(&self, effects: &wit_types::Effects, op_gen: u64) {
         // Collect canonical-store effects that pass conflict detection, then
         // write them all in one batch via put_canonical_batch.
         let canonical_batch: Vec<CanonicalBatchEntry> = effects
@@ -100,11 +115,15 @@ impl<'a> Materializer<'a> {
         if !canonical_batch.is_empty() {
             self.store.put_canonical_batch(canonical_batch, op_gen);
         }
+    }
 
-        let mut batch: Vec<BatchRecord> = Vec::new();
-        let mut dirs: BTreeMap<Path, bool> = BTreeMap::new();
-        let mut children: BTreeMap<Path, BTreeMap<String, DirentRecord>> = BTreeMap::new();
-
+    fn apply_fs_effects(
+        &self,
+        effects: &wit_types::Effects,
+        op_gen: u64,
+        now_millis: u64,
+    ) -> FsEffectRecords {
+        let mut records = FsEffectRecords::default();
         for write in &effects.fs {
             let Ok(write_path) = Path::parse(&write.path) else {
                 warn!(
@@ -141,7 +160,7 @@ impl<'a> Materializer<'a> {
             }
 
             if let wit_types::FsKind::Directory(listing_exhaustive) = &write.kind {
-                let existing = dirs.entry(write_path.clone()).or_insert(false);
+                let existing = records.dirs.entry(write_path.clone()).or_insert(false);
                 *existing = *existing || *listing_exhaustive;
             }
 
@@ -153,7 +172,8 @@ impl<'a> Materializer<'a> {
                             EntryMeta::file(file_attrs_from_file_out(file))
                         },
                     };
-                    children
+                    records
+                        .children
                         .entry(parent)
                         .or_default()
                         .insert(name.clone(), DirentRecord { name, meta });
@@ -184,14 +204,21 @@ impl<'a> Materializer<'a> {
                         self.store
                             .cache_view_leaf(&write_path, &leaf_records, expires_at, op_gen);
                     } else {
-                        batch.extend(leaf_records);
+                        records.batch.extend(leaf_records);
                     }
                 } else {
-                    batch.extend(leaf_records);
+                    records.batch.extend(leaf_records);
                 }
             }
         }
+        records
+    }
 
+    fn merge_dirents(
+        &self,
+        dirs: BTreeMap<Path, bool>,
+        children: &mut BTreeMap<Path, BTreeMap<String, DirentRecord>>,
+    ) {
         for (dir, listing_exhaustive) in dirs {
             if let Some(new_children) = children.remove(&dir) {
                 self.store
@@ -211,17 +238,9 @@ impl<'a> Materializer<'a> {
                     });
             }
         }
+    }
 
-        if !batch.is_empty() {
-            debug!(
-                target: "omnifs_engine_cache",
-                kind = "project",
-                count = batch.len(),
-                "applying fs-write effects"
-            );
-            self.store.cache_put_batch(&batch);
-        }
-
+    fn apply_invalidations(&self, effects: &wit_types::Effects) -> (Vec<Path>, Vec<Path>) {
         let mut invalidated_prefixes = Vec::new();
         let mut invalidated_paths = Vec::new();
         for invalidation in &effects.invalidations {
@@ -405,6 +424,13 @@ impl<'a> Materializer<'a> {
             })
         })
     }
+}
+
+#[derive(Default)]
+struct FsEffectRecords {
+    batch: Vec<BatchRecord>,
+    dirs: BTreeMap<Path, bool>,
+    children: BTreeMap<Path, BTreeMap<String, DirentRecord>>,
 }
 
 fn split_projected_path(path: &Path) -> Option<(Path, String)> {
@@ -659,7 +685,7 @@ mod tests {
             exhaustive: false,
         };
 
-        Materializer::new(&store).apply_lookup_projection(&p("/hello/feed"), &lookup, 1);
+        EffectApplier::new(&store).apply_lookup_projection(&p("/hello/feed"), &lookup, 1);
 
         let dirents = cached_dirents(&store, "/hello/feed");
         assert!(
@@ -684,7 +710,7 @@ mod tests {
             next_cursor: None,
         };
 
-        Materializer::new(&store).apply_listing_projection(&p("/hello/feed"), &listing, 1);
+        EffectApplier::new(&store).apply_listing_projection(&p("/hello/feed"), &listing, 1);
 
         let dirents = cached_dirents(&store, "/hello/feed");
         assert_eq!(dirents.entries.len(), 1);
@@ -699,7 +725,7 @@ mod tests {
         let (_dir, _caches, store) = open_store("test");
         put_paged_dirents(&store, "/hello/feed");
 
-        Materializer::new(&store).apply_continuation_projection(
+        EffectApplier::new(&store).apply_continuation_projection(
             &p("/hello/feed"),
             &[dir_entry("page-two")],
             1,

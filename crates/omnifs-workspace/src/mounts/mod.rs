@@ -76,12 +76,12 @@ impl Spec {
         &self.provider.meta.name
     }
 
-    pub fn from_file(path: &std::path::Path) -> Result<Self, Error> {
-        let content = std::fs::read_to_string(path).map_err(|source| Error::ReadSpec {
+    pub fn from_file(path: &std::path::Path) -> Result<Self, SpecError> {
+        let content = std::fs::read_to_string(path).map_err(|source| SpecError::ReadSpec {
             path: path.to_path_buf(),
             source,
         })?;
-        Self::parse(&content).map_err(|source| Error::ParseSpec {
+        Self::parse(&content).map_err(|source| SpecError::ParseSpec {
             path: path.to_path_buf(),
             source,
         })
@@ -132,7 +132,7 @@ impl Spec {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum SpecError {
     #[error("failed to read mount spec {}: {source}", path.display())]
     ReadSpec {
         path: PathBuf,
@@ -188,7 +188,10 @@ pub enum Error {
 /// once and never mutates the spec: defaults are baked in at creation time, not
 /// here. Callers pluck what they need (`capabilities`, `config`,
 /// `wasm_auth_manifest()`, the full `auth` block) from the returned manifest.
-pub fn pinned_manifest(catalog: &Catalog, spec: &Spec) -> Result<Option<ProviderManifest>, Error> {
+pub fn pinned_manifest(
+    catalog: &Catalog,
+    spec: &Spec,
+) -> Result<Option<ProviderManifest>, SpecError> {
     let Some(provider) = catalog.get(&spec.provider.id)? else {
         return Ok(None);
     };
@@ -222,14 +225,14 @@ pub struct Registry {
 #[derive(Debug)]
 pub struct SpecLoadFailure {
     pub path: PathBuf,
-    pub error: Error,
+    pub error: SpecError,
 }
 
 impl Registry {
     /// Read and parse every `*.json` under `mounts_dir`. Errors only on a
     /// directory-scan I/O failure; per-file parse and mount-name errors land in
     /// [`failures`](Self::failures).
-    pub fn load(mounts_dir: impl AsRef<Path>) -> Result<Self, Error> {
+    pub fn load(mounts_dir: impl AsRef<Path>) -> Result<Self, SpecError> {
         let mut registry = Self {
             mounts_dir: mounts_dir.as_ref().to_path_buf(),
             specs: BTreeMap::new(),
@@ -239,10 +242,10 @@ impl Registry {
         Ok(registry)
     }
 
-    fn scan(&mut self) -> Result<(), Error> {
+    fn scan(&mut self) -> Result<(), SpecError> {
         self.specs.clear();
         self.failures.clear();
-        let paths = spec_paths_in(&self.mounts_dir).map_err(|source| Error::ScanMounts {
+        let paths = spec_paths_in(&self.mounts_dir).map_err(|source| SpecError::ScanMounts {
             path: self.mounts_dir.clone(),
             source,
         })?;
@@ -258,7 +261,7 @@ impl Registry {
                 Ok(name) => name,
                 Err(source) => {
                     self.failures.push(SpecLoadFailure {
-                        error: Error::MountName {
+                        error: SpecError::MountName {
                             path: path.clone(),
                             mount: spec.mount,
                             source,
@@ -281,7 +284,7 @@ impl Registry {
                 .is_some_and(|stem| spec.mount == stem);
             if !stem_matches {
                 self.failures.push(SpecLoadFailure {
-                    error: Error::FilenameMismatch {
+                    error: SpecError::FilenameMismatch {
                         path: path.clone(),
                         mount: spec.mount,
                     },
@@ -295,7 +298,7 @@ impl Registry {
     }
 
     /// Re-read the directory from disk (daemon reconcile, post-write refresh).
-    pub fn reload(&mut self) -> Result<(), Error> {
+    pub fn reload(&mut self) -> Result<(), SpecError> {
         self.scan()
     }
 
@@ -336,15 +339,15 @@ impl Registry {
     /// Specs are one file per mount with no shared mutable index, so atomic
     /// per-file rename is sufficient; unlike the provider store's `index.json`
     /// read-modify-write, no advisory lock is needed.
-    pub fn put(&mut self, spec: &Spec) -> Result<(), Error> {
-        let name = name::Name::new(spec.mount.clone()).map_err(|source| Error::MountName {
+    pub fn put(&mut self, spec: &Spec) -> Result<(), SpecError> {
+        let name = name::Name::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
             path: self.mounts_dir.clone(),
             mount: spec.mount.clone(),
             source,
         })?;
         let path = self.spec_path(&name);
         let mut json =
-            serde_json::to_string_pretty(spec).map_err(|source| Error::SerializeSpec {
+            serde_json::to_string_pretty(spec).map_err(|source| SpecError::SerializeSpec {
                 path: path.clone(),
                 source,
             })?;
@@ -356,13 +359,13 @@ impl Registry {
 
     /// Remove a mount's spec file and drop it from the mirror. Returns whether a
     /// file was present (a missing file is not an error).
-    pub fn remove(&mut self, name: &name::Name) -> Result<bool, Error> {
+    pub fn remove(&mut self, name: &name::Name) -> Result<bool, SpecError> {
         self.specs.remove(name);
         let path = self.spec_path(name);
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(Error::RemoveSpec { path, source }),
+            Err(source) => Err(SpecError::RemoveSpec { path, source }),
         }
     }
 }
@@ -372,8 +375,8 @@ impl Registry {
 /// a concurrent reader never observes a partial spec. The temp name is dot-hidden
 /// and lacks a `.json` extension, so [`spec_paths_in`] skips it even if a crash
 /// leaves it behind.
-fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    fs::create_dir_all(mounts_dir).map_err(|source| Error::WriteSpec {
+fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), SpecError> {
+    fs::create_dir_all(mounts_dir).map_err(|source| SpecError::WriteSpec {
         path: mounts_dir.to_path_buf(),
         source,
     })?;
@@ -382,11 +385,11 @@ fn write_spec_atomic(mounts_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(),
         .and_then(|name| name.to_str())
         .unwrap_or("spec.json");
     let tmp = mounts_dir.join(format!(".{file}.tmp-{}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|source| Error::WriteSpec {
+    fs::write(&tmp, bytes).map_err(|source| SpecError::WriteSpec {
         path: tmp.clone(),
         source,
     })?;
-    fs::rename(&tmp, path).map_err(|source| Error::WriteSpec {
+    fs::rename(&tmp, path).map_err(|source| SpecError::WriteSpec {
         path: path.to_path_buf(),
         source,
     })
@@ -524,7 +527,7 @@ mod tests {
         );
         assert!(matches!(
             registry.failures().first().map(|failure| &failure.error),
-            Some(Error::MountName { .. })
+            Some(SpecError::MountName { .. })
         ));
     }
 
@@ -573,13 +576,13 @@ mod tests {
             registry
                 .failures()
                 .iter()
-                .any(|f| matches!(f.error, Error::ParseSpec { .. }))
+                .any(|f| matches!(f.error, SpecError::ParseSpec { .. }))
         );
         assert!(
             registry
                 .failures()
                 .iter()
-                .any(|f| matches!(f.error, Error::MountName { .. }))
+                .any(|f| matches!(f.error, SpecError::MountName { .. }))
         );
     }
 
@@ -614,7 +617,7 @@ mod tests {
             registry
                 .failures()
                 .iter()
-                .any(|failure| matches!(failure.error, Error::FilenameMismatch { .. })),
+                .any(|failure| matches!(failure.error, SpecError::FilenameMismatch { .. })),
             "the misnamed duplicate surfaces as a FilenameMismatch failure"
         );
     }
