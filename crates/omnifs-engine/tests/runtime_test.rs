@@ -973,6 +973,8 @@ async fn test_cache_isolated_by_mount_name() {
         config_dir.path(),
         &paths.credentials_file,
     );
+    let credential_service =
+        omnifs_engine::test_support::auth::credential_service_for_file(&paths.credentials_file);
     let runtime_a = Engine::new(
         &engine,
         &wasm_path,
@@ -980,10 +982,19 @@ async fn test_cache_isolated_by_mount_name() {
         cloner.clone(),
         &context_a,
         &caches,
+        &credential_service,
     )
     .unwrap();
-    let runtime_b =
-        Engine::new(&engine, &wasm_path, &config_b, cloner, &context_b, &caches).unwrap();
+    let runtime_b = Engine::new(
+        &engine,
+        &wasm_path,
+        &config_b,
+        cloner,
+        &context_b,
+        &caches,
+        &credential_service,
+    )
+    .unwrap();
 
     let result = runtime_a
         .namespace()

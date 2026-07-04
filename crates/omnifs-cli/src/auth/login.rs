@@ -3,7 +3,8 @@
 use crate::error::WithHint;
 use anyhow::anyhow;
 use omnifs_auth::{
-    DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest, UrlOpener,
+    CredentialService, DeviceCodePrompt, LoginRequest, ManualCode, OAuthClient, OAuthRequest,
+    UrlOpener,
 };
 use omnifs_workspace::creds::{CredentialStore, FileStore};
 use std::collections::BTreeMap;
@@ -91,8 +92,10 @@ async fn login(
             result.with_hint(format!("Re-run `omnifs init --reauth {mount}` to retry"))?
         },
     };
+    // Write through the credential service so the single store owner records it.
+    let service = CredentialService::new(Arc::from(store), OAuthClient::new()?);
     for key in target.keys() {
-        store.put(key, &entry)?;
+        service.store_entry(key, entry.clone())?;
     }
     anstream::println!(
         "Stored OAuth credential for `{mount}` with scopes: {}",

@@ -24,6 +24,17 @@ pub use crate::{Cursor, Engine, EngineError, GitCloner, HostContext};
 
 pub mod auth {
     pub use crate::auth::{AuthManager, RefreshOutcome};
+    pub use omnifs_auth::CredentialService;
+
+    /// A credential service over an on-disk store, matching the production
+    /// wiring in `MountRuntimes::new`. For harnesses that build a `Runtime`
+    /// directly.
+    pub fn credential_service_for_file(
+        credentials_file: &std::path::Path,
+    ) -> std::sync::Arc<CredentialService> {
+        crate::auth::credential_service_for_file(credentials_file)
+            .expect("build test credential service")
+    }
 }
 
 pub mod blob {

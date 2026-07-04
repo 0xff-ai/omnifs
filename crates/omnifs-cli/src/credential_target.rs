@@ -18,7 +18,24 @@ impl CredentialTarget {
         scheme: &str,
         account: Option<&str>,
     ) -> anyhow::Result<Self> {
-        Self::internal_from_parts(config, auth, scheme, account)
+        // The account-defaulting derivation lives solely in `CredentialId::for_mount`.
+        // An explicit account (e.g. `--account`) or an authless scheme uses the
+        // shared explicit-parts constructor instead.
+        match (account, auth) {
+            (Some(account), _) => {
+                let id = CredentialId::new(config.provider_name().as_str(), scheme, account)?;
+                Ok(Self::Internal(id))
+            },
+            (None, Some(auth)) => Self::for_configured_auth(config, auth, Some(scheme)),
+            (None, None) => {
+                let id = CredentialId::new(
+                    config.provider_name().as_str(),
+                    scheme,
+                    AccountId::default_account().as_str(),
+                )?;
+                Ok(Self::Internal(id))
+            },
+        }
     }
 
     pub(crate) fn for_static_import(
@@ -89,27 +106,7 @@ impl CredentialTarget {
         scheme: Option<&str>,
     ) -> anyhow::Result<Self> {
         let scheme = scheme.ok_or_else(|| anyhow!("missing auth.scheme"))?;
-        // `account` is derived from `auth` inside `internal_from_parts`.
-        Self::internal_from_parts(config, Some(auth), scheme, None)
-    }
-
-    fn internal_from_parts(
-        config: &Spec,
-        auth: Option<&Auth>,
-        scheme: &str,
-        account: Option<&str>,
-    ) -> anyhow::Result<Self> {
-        let provider_id = config.provider_name().clone();
-        let account = account
-            .or_else(|| auth.and_then(Auth::account))
-            .map(AccountId::new)
-            .transpose()?
-            .unwrap_or_else(AccountId::default_account);
-        let scheme = AuthSchemeId::new(scheme)?;
-        Ok(CredentialTarget::Internal(CredentialId::from_parts(
-            provider_id,
-            scheme,
-            account,
-        )))
+        let id = CredentialId::for_mount(config.provider_name(), auth, scheme)?;
+        Ok(Self::Internal(id))
     }
 }
