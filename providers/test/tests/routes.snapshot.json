@@ -1,0 +1,251 @@
+[
+  {
+    "template": "/items",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/items/{filter}",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      }
+    ]
+  },
+  {
+    "template": "/hello",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/bundle",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/feed",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/unbounded",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/throttled",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/snapshot",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/snapshot/comments",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/scoped",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/dynamic/{name}",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "name",
+        "type_name": "String",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/hello/message",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/greeting",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/projected",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/lazy",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/fresh-full",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/remote-a",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/remote-b",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/ranged",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/unknown-ranged",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/large-ranged",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/volatile-tail",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/scoped/item",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/checkout",
+    "kind": "Treeref",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/items/{filter}/{number}",
+    "kind": "Object",
+    "object_kind": "test.item",
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      },
+      {
+        "name": "number",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/items/{filter}/{number}/comments/{idx}",
+    "kind": "Object",
+    "object_kind": "test.comment",
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      },
+      {
+        "name": "number",
+        "type_name": "u64",
+        "choices": null
+      },
+      {
+        "name": "idx",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/items/{filter}/{number}/replies/{idx}",
+    "kind": "Alias",
+    "object_kind": "test.comment",
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      },
+      {
+        "name": "number",
+        "type_name": "u64",
+        "choices": null
+      },
+      {
+        "name": "idx",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/items/{filter}/{number}/comments",
+    "kind": "Collection",
+    "object_kind": "test.comment",
+    "captures": [
+      {
+        "name": "filter",
+        "type_name": "StateFilter",
+        "choices": [
+          "open",
+          "all"
+        ]
+      },
+      {
+        "name": "number",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  }
+]

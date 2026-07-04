@@ -9,6 +9,7 @@
 //! does this mapping for plain HTTP status codes.
 
 use core::time::Duration;
+use omnifs_core::path::Path;
 use omnifs_wit::provider::types::{
     CalloutError, ErrorKind, OpResult, ProviderError as WitProviderError, ProviderReturn,
 };
@@ -208,6 +209,14 @@ impl ProviderError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Attach the operation and provider path that produced this error without
+    /// changing its kind, retryability, or retry-after metadata.
+    #[must_use]
+    pub fn with_context(mut self, op: &str, path: &Path) -> Self {
+        self.message = format!("{} [operation={op}; path={}]", self.message, path.as_str());
+        self
     }
 }
 

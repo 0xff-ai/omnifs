@@ -260,8 +260,13 @@ fn object_mount_lists_canonical_render_and_derived_leaves() {
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
 
-    let mounted =
-        super::object::mount_object::<DemoObj>(&pattern, &handle.spec, "/items/{id}").unwrap();
+    let mounted = super::object::mount_object::<DemoObj>(
+        &pattern,
+        &handle.spec,
+        "/items/{id}",
+        RouteKind::Object,
+    )
+    .unwrap();
     let leaf_names: Vec<&str> = mounted
         .entry
         .leaves
@@ -284,8 +289,13 @@ fn lazy_excluded_eager_leaves_inherit_object_stability() {
     })
     .unwrap();
     let pattern = super::pattern::Pattern::parse("/items/{id}").unwrap();
-    let mounted =
-        super::object::mount_object::<DemoObj>(&pattern, &handle.spec, "/items/{id}").unwrap();
+    let mounted = super::object::mount_object::<DemoObj>(
+        &pattern,
+        &handle.spec,
+        "/items/{id}",
+        RouteKind::Object,
+    )
+    .unwrap();
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
     let caps = Captures::new(vec![Capture {
         name: "id".into(),

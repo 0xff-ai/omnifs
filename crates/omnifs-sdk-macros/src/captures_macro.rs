@@ -52,6 +52,7 @@ struct FieldSpec {
     ident: syn::Ident,
     name_lit: LitStr,
     ty: Type,
+    descriptor_ty: Type,
     is_option: bool,
     facet_inner_ty: Option<Type>,
 }
@@ -71,10 +72,15 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
             let ident = field.ident.as_ref().expect("named field has ident").clone();
             let name_lit = LitStr::new(&ident.to_string(), ident.span());
             let facet_inner_ty = facet_inner_type(&field.ty).cloned();
+            let descriptor_ty = facet_inner_ty
+                .clone()
+                .or_else(|| option_inner_type(&field.ty).cloned())
+                .unwrap_or_else(|| field.ty.clone());
             Ok(FieldSpec {
                 ident,
                 name_lit,
                 ty: field.ty.clone(),
+                descriptor_ty,
                 is_option: option_inner_type(&field.ty).is_some(),
                 facet_inner_ty,
             })
@@ -96,6 +102,30 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
         quote! {
             if caps.get(#name_lit).is_some() {
                 let _: #ty = #value;
+            }
+        }
+    });
+    let capture_descriptors = fields.iter().map(|field| {
+        let name_lit = &field.name_lit;
+        let descriptor_ty = &field.descriptor_ty;
+        let choices = field.facet_inner_ty.as_ref().map_or_else(
+            || quote! { None },
+            |inner_ty| {
+                quote! {
+                    <#inner_ty as omnifs_sdk::captures::PathSegment>::choices().map(|choices| {
+                        choices
+                            .iter()
+                            .map(|choice| (*choice).to_string())
+                            .collect::<::std::vec::Vec<_>>()
+                    })
+                }
+            },
+        );
+        quote! {
+            omnifs_sdk::captures::CaptureDescriptor {
+                name: #name_lit.to_string(),
+                type_name: stringify!(#descriptor_ty).to_string(),
+                choices: #choices,
             }
         }
     });
@@ -177,6 +207,10 @@ pub(crate) fn path_captures_impl(item: &ItemStruct) -> syn::Result<TokenStream2>
                 Ok(Self {
                     #(#field_inits)*
                 })
+            }
+
+            fn capture_descriptors() -> ::std::vec::Vec<omnifs_sdk::captures::CaptureDescriptor> {
+                ::std::vec![#(#capture_descriptors),*]
             }
 
             fn validate_present_captures(caps: &omnifs_sdk::captures::Captures) -> bool {

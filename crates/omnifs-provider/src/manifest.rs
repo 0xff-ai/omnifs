@@ -20,6 +20,12 @@ pub struct ProviderManifest {
     /// macro. Informational catalog/UI context, never identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// WIT package declaration the provider component was generated against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wit_package: Option<String>,
+    /// `omnifs-sdk` crate version used to generate the provider component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<Need>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +160,12 @@ impl ProviderManifest {
         validate_non_empty("displayName", &self.display_name)?;
         validate_non_empty("provider", &self.provider)?;
         validate_non_empty("defaultMount", &self.default_mount)?;
+        if let Some(wit_package) = &self.wit_package {
+            validate_non_empty("witPackage", wit_package)?;
+        }
+        if let Some(sdk_version) = &self.sdk_version {
+            validate_non_empty("sdkVersion", sdk_version)?;
+        }
         for entry in &self.capabilities {
             validate_non_empty("capabilities.why", entry.why())?;
             // A dynamic grant is resolved at mount-start from a config field
@@ -359,6 +371,16 @@ mod tests {
         "version": "0.3.1"
     }"#;
 
+    const DEMO_MANIFEST_CONTRACT_EVIDENCE: &[u8] = br#"{
+        "id": "demo",
+        "displayName": "Demo",
+        "provider": "demo.wasm",
+        "defaultMount": "demo",
+        "version": "0.3.1",
+        "witPackage": "package omnifs:provider@0.4.0;",
+        "sdkVersion": "0.2.1"
+    }"#;
+
     const INVALID_MANIFEST_BAD_ID: &[u8] = br#"{
         "id": "bad id!",
         "displayName": "Bad",
@@ -500,6 +522,16 @@ mod tests {
         assert_eq!(stamped.version.as_deref(), Some("0.3.1"));
         let reencoded = serde_json::to_value(&stamped).unwrap();
         assert_eq!(reencoded["version"], "0.3.1");
+
+        let contract = ProviderManifest::from_bytes(DEMO_MANIFEST_CONTRACT_EVIDENCE).unwrap();
+        assert_eq!(
+            contract.wit_package.as_deref(),
+            Some("package omnifs:provider@0.4.0;")
+        );
+        assert_eq!(contract.sdk_version.as_deref(), Some("0.2.1"));
+        let reencoded = serde_json::to_value(&contract).unwrap();
+        assert_eq!(reencoded["witPackage"], "package omnifs:provider@0.4.0;");
+        assert_eq!(reencoded["sdkVersion"], "0.2.1");
     }
 
     #[test]

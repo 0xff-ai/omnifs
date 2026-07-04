@@ -413,6 +413,8 @@ fn metadata_tokens(
             provider: #provider_file.to_string(),
             default_mount: #default_mount.to_string(),
             version: #version,
+            wit_package: Some(omnifs_sdk::PROVIDER_WIT_PACKAGE.to_string()),
+            sdk_version: Some(omnifs_sdk::SDK_VERSION.to_string()),
             capabilities: ::std::vec![#(#capability_entries),*],
             auth: #auth,
             config: <#config_type as omnifs_sdk::ProvidesConfigMetadata>::metadata(),

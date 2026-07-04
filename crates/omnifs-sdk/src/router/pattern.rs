@@ -37,7 +37,7 @@
 //! are a startup error rather than silent runtime behavior.
 
 use super::handlers::{DirEntry, FileEntry, RouteValidator, TreeRefEntry};
-use crate::captures::{Capture, Captures};
+use crate::captures::{Capture, CaptureDescriptor, Captures};
 use crate::error::{ProviderError, Result};
 use omnifs_core::path::{Path, Segment};
 use std::cmp::Reverse;
@@ -299,6 +299,39 @@ impl Pattern {
         self.segments.len()
     }
 
+    /// Render the canonical template represented by this compiled pattern.
+    #[must_use]
+    pub fn template(&self) -> String {
+        if self.segments.is_empty() {
+            return "/".to_string();
+        }
+        format!(
+            "/{}",
+            self.segments
+                .iter()
+                .map(PatternSegment::template_segment)
+                .collect::<Vec<_>>()
+                .join("/")
+        )
+    }
+
+    #[must_use]
+    pub(super) fn capture_descriptors(
+        &self,
+        typed_captures: &[CaptureDescriptor],
+    ) -> Vec<CaptureDescriptor> {
+        self.capture_names()
+            .into_iter()
+            .map(|name| {
+                typed_captures
+                    .iter()
+                    .find(|capture| capture.name == name)
+                    .cloned()
+                    .unwrap_or_else(|| CaptureDescriptor::untyped(name))
+            })
+            .collect()
+    }
+
     /// Locate a named single-segment capture. Rest captures have no location:
     /// they span a variable number of segments and cannot be substituted.
     #[must_use]
@@ -418,6 +451,31 @@ impl Pattern {
                     .is_some_and(|rest| !rest.is_empty()),
                 PatternSegment::Rest { .. } => true,
             })
+    }
+
+    fn capture_names(&self) -> Vec<String> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                PatternSegment::Capture { name, .. } | PatternSegment::Rest { name } => {
+                    Some(name.clone())
+                },
+                PatternSegment::Literal(_) => None,
+            })
+            .collect()
+    }
+}
+
+impl PatternSegment {
+    fn template_segment(&self) -> String {
+        match self {
+            Self::Literal(value) => value.clone(),
+            Self::Capture { name, prefix } => match prefix {
+                Some(prefix) => format!("{prefix}{{{name}}}"),
+                None => format!("{{{name}}}"),
+            },
+            Self::Rest { name } => format!("{{*{name}}}"),
+        }
     }
 }
 

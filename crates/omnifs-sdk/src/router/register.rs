@@ -6,7 +6,9 @@
 
 use crate::error::{ProviderError, Result};
 use crate::object::{FacetMetadata, Key, Object};
+use std::collections::BTreeSet;
 
+use super::descriptor::{RouteDescriptor, RouteKind};
 use super::handlers::{IntoDirHandler, IntoFileHandler, IntoTreeRefHandler};
 use super::object::{ObjectBlock, ObjectHandle, mount_object, object};
 use super::pattern::{Pattern, parse_pattern};
@@ -44,6 +46,7 @@ pub struct Router<S = ()> {
     pub(super) objects: Vec<super::object::ObjectRouteEntry<S>>,
     pub(super) leaf_claims: Vec<Pattern>,
     pub(super) object_registry: Vec<RegisteredObject>,
+    pub(super) route_descriptors: Vec<RouteDescriptor>,
     /// Collection faces declared on object dir faces, resolved against the
     /// registry at seal time (which registers the dir route for NESTED
     /// collections and attaches ANCHOR collections to the parent object).
@@ -93,6 +96,7 @@ impl<S> Default for Router<S> {
             objects: Vec::new(),
             leaf_claims: Vec::new(),
             object_registry: Vec::new(),
+            route_descriptors: Vec::new(),
             collections: Vec::new(),
         }
     }
@@ -146,7 +150,7 @@ impl<S> Router<S> {
         O: Object<State = S> + 'static,
     {
         let handle = object(template, block)?;
-        self.mount_handle(template, &handle)?;
+        self.mount_handle(template, &handle, RouteKind::Object)?;
         Ok(handle)
     }
 
@@ -165,7 +169,7 @@ impl<S> Router<S> {
         O: Object<State = S> + 'static,
     {
         let handle = super::object::file_object(template, block)?;
-        self.mount_handle(template, &handle)?;
+        self.mount_handle(template, &handle, RouteKind::FileObject)?;
         Ok(handle)
     }
 
@@ -182,11 +186,16 @@ impl<S> Router<S> {
         S: 'static,
         O: Object<State = S> + 'static,
     {
-        self.mount_handle(template, handle)?;
+        self.mount_handle(template, handle, RouteKind::Alias)?;
         Ok(self)
     }
 
-    fn mount_handle<O>(&mut self, template: &'static str, handle: &ObjectHandle<O>) -> Result<()>
+    fn mount_handle<O>(
+        &mut self,
+        template: &'static str,
+        handle: &ObjectHandle<O>,
+        route_kind: RouteKind,
+    ) -> Result<()>
     where
         O::Key: Key + FacetMetadata + 'static,
         O::State: 'static,
@@ -199,7 +208,7 @@ impl<S> Router<S> {
             )));
         }
         let pattern = parse_pattern(template)?;
-        let mounted = mount_object::<O>(&pattern, handle.spec.as_ref(), template)?;
+        let mounted = mount_object::<O>(&pattern, handle.spec.as_ref(), template, route_kind)?;
         self.object_registry.push(RegisteredObject {
             kind_str: O::kind().as_str(),
             template: template.to_string(),
@@ -343,7 +352,7 @@ impl<S> Router<S> {
     where
         S: 'static,
     {
-        self.resolve_collections()?;
+        let collection_descriptors = self.resolve_collections()?;
 
         for (i, left) in self.leaf_claims.iter().enumerate() {
             for right in self.leaf_claims.iter().skip(i + 1) {
@@ -357,18 +366,76 @@ impl<S> Router<S> {
             }
         }
 
+        self.route_descriptors = self.describe_routes(collection_descriptors);
         Ok(())
+    }
+
+    /// Return the route descriptors captured when this router was sealed.
+    #[must_use]
+    pub fn routes(&self) -> Vec<RouteDescriptor> {
+        self.route_descriptors.clone()
+    }
+
+    fn describe_routes(
+        &self,
+        collection_descriptors: Vec<RouteDescriptor>,
+    ) -> Vec<RouteDescriptor> {
+        let collection_templates = collection_descriptors
+            .iter()
+            .map(|descriptor| descriptor.template.clone())
+            .collect::<BTreeSet<_>>();
+        let mut routes = Vec::new();
+        routes.extend(
+            self.dirs
+                .iter()
+                .filter(|entry| !collection_templates.contains(&entry.pattern.template()))
+                .map(|entry| {
+                    RouteDescriptor::new(
+                        &entry.pattern,
+                        RouteKind::Dir,
+                        None,
+                        entry.validator.capture_descriptors(),
+                    )
+                }),
+        );
+        routes.extend(self.files.iter().map(|entry| {
+            RouteDescriptor::new(
+                &entry.pattern,
+                RouteKind::File,
+                None,
+                entry.validator.capture_descriptors(),
+            )
+        }));
+        routes.extend(self.treerefs.iter().map(|entry| {
+            RouteDescriptor::new(
+                &entry.pattern,
+                RouteKind::Treeref,
+                None,
+                entry.validator.capture_descriptors(),
+            )
+        }));
+        routes.extend(self.objects.iter().map(|entry| {
+            RouteDescriptor::new(
+                &entry.pattern,
+                entry.route_kind,
+                Some(entry.kind_str.to_string()),
+                entry.validator.capture_descriptors(),
+            )
+        }));
+        routes.extend(collection_descriptors);
+        routes
     }
 
     /// Resolve every declared collection against the object registry, fill its
     /// late-bound child view, discriminate topology, and wire it: a NESTED
     /// collection becomes a dir route at the collection path; an ANCHOR
     /// collection attaches to the parent object's anchor listing.
-    fn resolve_collections(&mut self) -> Result<()>
+    fn resolve_collections(&mut self) -> Result<Vec<RouteDescriptor>>
     where
         S: 'static,
     {
         let collections = std::mem::take(&mut self.collections);
+        let mut descriptors = Vec::new();
         for collection in collections {
             let Some(child) = self
                 .object_registry
@@ -406,6 +473,12 @@ impl<S> Router<S> {
 
             let dir_pattern = parse_pattern(&collection.dir_path)?;
             let dir_depth = dir_pattern.pattern_len();
+            descriptors.push(RouteDescriptor::new(
+                &dir_pattern,
+                RouteKind::Collection,
+                Some(collection.child_kind_str.to_string()),
+                collection.validator.capture_descriptors(),
+            ));
             // ANCHOR when the collection dir path equals the child template;
             // NESTED when the child template is strictly deeper.
             let topology = if collection.dir_path == child.template {
@@ -468,7 +541,7 @@ impl<S> Router<S> {
                 },
             }
         }
-        Ok(())
+        Ok(descriptors)
     }
 }
 

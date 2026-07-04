@@ -38,6 +38,7 @@
 //!   routes registered at that depth, and report `exhaustive = false`
 //!   whenever a capture sibling exists at the next depth.
 
+mod descriptor;
 mod dispatch;
 mod handlers;
 mod object;
@@ -48,6 +49,7 @@ mod register;
 #[cfg(test)]
 mod tests;
 
+pub use descriptor::{RouteDescriptor, RouteKind};
 pub use handlers::{
     IntoDirHandler, IntoFileHandler, IntoTreeRefHandler, NoCaptures, WithCaptures, WithKeyMethod,
     WithSyncKeyMethod,

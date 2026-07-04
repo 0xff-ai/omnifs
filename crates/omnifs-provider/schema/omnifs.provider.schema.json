@@ -42,8 +42,22 @@
       "description": "Filename of the provider WASM component.",
       "type": "string"
     },
+    "sdkVersion": {
+      "description": "`omnifs-sdk` crate version used to generate the provider component.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "version": {
       "description": "Provider crate version (`CARGO_PKG_VERSION`), stamped by the `#[provider]`\nmacro. Informational catalog/UI context, never identity.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "witPackage": {
+      "description": "WIT package declaration the provider component was generated against.",
       "type": [
         "string",
         "null"

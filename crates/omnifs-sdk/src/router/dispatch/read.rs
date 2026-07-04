@@ -41,27 +41,39 @@ impl<S> Router<S> {
         let _ = content_type;
         match shape.read_route(&abs) {
             Some(ReadRoute::File(route)) => {
-                let proj = (route.entry.handler)(cx.clone(), route.captures).await?;
+                let proj = super::route_future(
+                    route.entry.pattern.template(),
+                    (route.entry.handler)(cx.clone(), route.captures),
+                )
+                .await
+                .map_err(|error| error.with_context("read-file", &abs))?;
                 proj.to_browse_content().map(ReadOutcome::Found)
             },
             Some(ReadRoute::Object { route, target }) => match target {
                 ObjectReadTarget::Direct(name) => {
-                    let proj = route.entry.read_face(cx, &name, route.captures).await?;
+                    let proj = super::route_future(
+                        route.entry.pattern.template(),
+                        Box::pin(route.entry.read_face(cx, &name, route.captures)),
+                    )
+                    .await
+                    .map_err(|error| error.with_context("read-file", &abs))?;
                     proj.to_browse_content().map(ReadOutcome::Found)
                 },
                 ObjectReadTarget::Stream(_) => Err(ProviderError::invalid_input(format!(
                     "stream face at {path:?} must be read through open-file, not read-file"
                 ))),
-                canonical_target => {
+                canonical_target => super::route_future(
+                    route.entry.pattern.template(),
                     (route.entry.read)(
                         cx,
                         route.captures,
                         canonical_target,
                         cached,
                         path.to_string(),
-                    )
-                    .await
-                },
+                    ),
+                )
+                .await
+                .map_err(|error| error.with_context("read-file", &abs)),
             },
             None => Err(ProviderError::not_found(format!("path not found: {path}"))),
         }
@@ -79,7 +91,12 @@ impl<S> Router<S> {
         let shape = self.shape();
 
         if let Some(route) = shape.file_route(&abs) {
-            let proj = (route.entry.handler)(cx.clone(), route.captures).await?;
+            let proj = super::route_future(
+                route.entry.pattern.template(),
+                (route.entry.handler)(cx.clone(), route.captures),
+            )
+            .await
+            .map_err(|error| error.with_context("open-file", &abs))?;
             return match proj.source() {
                 FileSource::Ranged(reader) => {
                     Ok(OpenedFile::new(proj.attrs().clone(), reader.clone()))
@@ -98,7 +115,12 @@ impl<S> Router<S> {
                 Some(ObjectReadTarget::Stream(_))
             )
         {
-            return route.entry.open_face(cx, leaf, route.captures).await;
+            return super::route_future(
+                route.entry.pattern.template(),
+                Box::pin(route.entry.open_face(cx, leaf, route.captures)),
+            )
+            .await
+            .map_err(|error| error.with_context("open-file", &abs));
         }
 
         Err(ProviderError::not_found(format!("path not found: {path}")))

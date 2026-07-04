@@ -220,6 +220,43 @@ async fn lists_root_and_nested_directories() {
     }
 }
 
+/// Regression for the chained file-face builder path:
+/// `o.file("body").lazy().derive(f)` marks `body` lazy, without leaking the
+/// lazy flag to neighboring leaves. Listing the object anchor should preload
+/// eager derived leaves only.
+#[tokio::test(flavor = "multi_thread")]
+async fn lazy_derived_face_applies_to_the_declared_leaf_only() {
+    let t = tree_harness();
+
+    let item = t.assert_dir("/items/open/7").await;
+    let listing = t.list(&item, None).await;
+    let names = provider_entry_names(&listing);
+    for expected in ["body", "state", "title"] {
+        assert!(
+            names.contains(&expected),
+            "object listing missing {expected}: {names:?}"
+        );
+    }
+
+    for eager in ["/items/open/7/state", "/items/open/7/title"] {
+        assert!(
+            t.runtime
+                .cache()
+                .cache_get(&path(eager), RecordKind::File, None)
+                .is_some(),
+            "eager derived leaf {eager} must be projected during anchor listing"
+        );
+    }
+
+    assert!(
+        t.runtime
+            .cache()
+            .cache_get(&path("/items/open/7/body"), RecordKind::File, None)
+            .is_none(),
+        "lazy body leaf must remain visible but not be preloaded"
+    );
+}
+
 /// A whole-file read returns the provider's exact bytes and learns the exact
 /// size from the returned buffer (the size promotion a renderer applies to
 /// st_size / the NFSv4 change attribute).
